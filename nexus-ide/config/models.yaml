@@ -1,0 +1,181 @@
+# NEXUS / LUSO AI IDE — Multi-Model Configuration
+# 5 tiers especializados, com fallback automático para qwen3.6:latest se algum
+# modelo não estiver instalado.
+
+models:
+  # MICRO — perguntas triviais (1+1, classificação rápida)
+  micro:
+    id: "qwen2.5:0.5b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: false
+    max_tokens: 512
+    temperature: 0.3
+    use_cases: [trivial_qa, routing, classification]
+
+  # FAST — respostas rápidas, formatação leve
+  fast:
+    id: "qwen2.5:3b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: false
+    max_tokens: 2048
+    temperature: 0.7
+    use_cases: [simple_qa, formatting, summarization]
+
+  # CODER — geração e análise de código
+  coder:
+    id: "qwen2.5-coder:7b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: false
+    max_tokens: 8192
+    temperature: 0.2
+    use_cases: [code_generation, refactor, debug]
+
+  # REASONING — raciocínio multi-step com thinking
+  reasoning:
+    id: "deepseek-r1:14b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: true
+    max_tokens: 8192
+    temperature: 0.5
+    use_cases: [planning, multi_step_reasoning, problem_solving]
+
+  # DEEP — análises complexas, arquitetura
+  deep:
+    id: "qwen2.5:32b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: true
+    max_tokens: 16384
+    temperature: 0.4
+    use_cases: [architecture, complex_analysis, large_codebases]
+
+  # Aliases retro-compatibilidade (legacy registry)
+  nano:
+    id: "qwen2.5:0.5b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: false
+    max_tokens: 512
+    temperature: 0.1
+    use_cases: [routing]
+  small:
+    id: "qwen2.5:3b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: false
+    max_tokens: 4096
+    temperature: 0.7
+    use_cases: [general_tasks]
+  medium:
+    id: "qwen2.5-coder:7b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: false
+    max_tokens: 8192
+    temperature: 0.3
+    use_cases: [code_generation]
+  large:
+    id: "deepseek-r1:14b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: true
+    max_tokens: 8192
+    temperature: 0.7
+    use_cases: [reasoning]
+  expert:
+    id: "qwen2.5:32b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: true
+    max_tokens: 16384
+    temperature: 0.3
+    use_cases: [architecture]
+  vision:
+    id: "qwen3.6:latest"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: false
+    max_tokens: 2048
+    temperature: 0.7
+    use_cases: [image_analysis]
+  embed:
+    id: "qwen2.5:0.5b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: false
+    max_tokens: 512
+    temperature: 0.0
+    use_cases: [retrieval]
+  dashboard:
+    id: "qwen2.5:3b"
+    fallback_id: "qwen3.6:latest"
+    ollama_host: "http://localhost:11434"
+    thinking_mode: false
+    max_tokens: 2048
+    temperature: 0.5
+    use_cases: [metrics_interpretation]
+
+concurrency:
+  NANO: 5
+  MICRO: 5
+  FAST: 4
+  SMALL: 3
+  CODER: 2
+  MEDIUM: 2
+  REASONING: 1
+  LARGE: 1
+  DEEP: 1
+  EXPERT: 1
+  VISION: 1
+  DASHBOARD: 2
+
+routing:
+  fast_threshold_words: 20
+  trivial_threshold_words: 6      # "1+1", "que horas são"
+  complexity_thresholds:
+    deep_thinking: 7
+    iterative_react: 6
+  max_react_iterations: 7
+  fallback_timeout_seconds: 45
+  queue_timeout_seconds: 30
+
+# Smart Router — keywords que forçam tier
+smart_router:
+  trivial_keywords: ["+", "-", "*", "/", "=", "what is", "quanto é", "quanto e"]
+  code_keywords: ["function", "class", "def ", "import ", "const ", "implement", "refactor", "bug"]
+  reasoning_keywords: ["plan", "step by step", "explain why", "compare", "analyze"]
+  deep_keywords: ["architecture", "design system", "scalable", "trade-off"]
+
+fallback:
+  ARCHITECT:  [ANALYZER, CODER, MICRO]
+  CODER:      [DEBUGGER, MICRO]
+  ANALYZER:   [CODER, MICRO]
+  DEBUGGER:   [CODER, MICRO]
+  RESEARCHER: [MICRO]
+  OPTIMIZER:  [CODER, MICRO]
+  DOCUMENTER: [MICRO]
+  MICRO:      []
+
+web_search:
+  provider: "duckduckgo"
+  max_results_per_query: 10
+  max_queries_per_task: 5
+  max_page_fetches: 3
+  relevance_threshold: 0.7
+
+code_execution:
+  timeout_seconds: 30
+  max_memory_mb: 512
+  allowed_languages: [python, javascript, typescript, bash, rust, go]
+
+rate_limits:
+  requests_per_minute: 60
+  tokens_per_minute: 100000
+  web_searches_per_minute: 20
+  code_executions_per_minute: 10
+  max_input_length: 50000
+  max_file_size: 5000000

@@ -1,0 +1,71 @@
+version: "3.9"
+
+services:
+  ollama-main:
+    image: ollama/ollama:latest
+    container_name: nexus-ollama-main
+    ports: ["11434:11434"]
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
+  ollama-dashboard:
+    image: ollama/ollama:latest
+    container_name: nexus-ollama-dashboard
+    # Dedicated Ollama instance for the Dashboard Agent.
+    # Exposed on 11435 so it never competes with user traffic.
+    ports: ["11435:11434"]
+    volumes:
+      - ollama-dashboard-data:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=1
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/backend/Dockerfile
+    container_name: nexus-backend
+    ports: ["8000:8000"]
+    depends_on: [ollama-main, ollama-dashboard, redis]
+    environment:
+      - OLLAMA_HOST=http://ollama-main:11434
+      - OLLAMA_DASHBOARD_HOST=http://ollama-dashboard:11434
+      - REDIS_URL=redis://redis:6379
+      - BRAVE_API_KEY=${BRAVE_API_KEY:-}
+    volumes:
+      - ../backend:/app/backend
+      - ../config:/app/config
+      # NOTE: Docker-socket mount intentionally omitted. Mounting the host
+      # daemon socket into the backend container is a container-escape vector
+      # (equivalent to root on the host). Code execution sandbox (§11.2) will
+      # be reintroduced later via an isolated DinD sidecar or remote runner.
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../docker/frontend.Dockerfile
+    container_name: nexus-frontend
+    ports: ["3000:3000"]
+    depends_on: [backend]
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+
+  redis:
+    image: redis:7-alpine
+    container_name: nexus-redis
+    ports: ["6379:6379"]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: nexus-prometheus
+    ports: ["9090:9090"]
+    volumes:
+      - ../config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+volumes:
+  ollama-data:
+  ollama-dashboard-data:

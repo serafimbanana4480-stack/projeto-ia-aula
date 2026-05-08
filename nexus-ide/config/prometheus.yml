@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: "nexus-backend"
+    static_configs:
+      - targets: ["backend:8000"]
+
+  - job_name: "ollama-main"
+    static_configs:
+      - targets: ["ollama-main:11434"]
+
+  - job_name: "ollama-dashboard"
+    static_configs:
+      - targets: ["ollama-dashboard:11434"]
+
+# Alert rules live in a separate file mounted at /etc/prometheus/alerts.yml
+# rule_files:
+#   - "alerts.yml"

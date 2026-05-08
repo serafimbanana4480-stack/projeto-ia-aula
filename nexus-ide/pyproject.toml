@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexus-ide-backend"
+version = "0.1.0"
+description = "NEXUS IDE orchestrator"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers --strict-config -p no:cacheprovider"
+testpaths = ["backend/tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["."]
+markers = [
+  "integration: end-to-end tests requiring a live Ollama instance (skipped by default)",
+]
+filterwarnings = [
+  "error",
+  # httpx deprecation we cannot control in FastAPI TestClient
+  "ignore::DeprecationWarning:httpx",
+  "ignore::PendingDeprecationWarning",
+  # Sockets reclaimed during GC are cosmetic; not a real leak for the test
+  # since the TestClient/lifespan always close the AsyncClient deterministically.
+  "ignore::ResourceWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]  # line length is handled by formatter
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["backend"]
+exclude = ["backend/tests"]

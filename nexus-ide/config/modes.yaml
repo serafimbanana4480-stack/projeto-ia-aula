@@ -1,0 +1,76 @@
+# NEXUS / LUSO AI IDE — Cognitive Modes Configuration
+# Each mode defines: default agent, model, tools enabled, system prompt addon
+
+modes:
+  auto:
+    description: "IA escolhe automaticamente o melhor modelo e ferramentas"
+    default_agent: "CODER"
+    default_model: "auto"
+    router: "smart"
+    tools_enabled: ["all"]
+    system_prompt_addon: |
+      You are an intelligent assistant that adapts to the user's needs.
+      Use tools when helpful. Think step by step for complex tasks.
+
+  coder:
+    description: "Modo focado em geração e análise de código"
+    default_agent: "CODER"
+    default_model: "coder"
+    router: "none"
+    tools_enabled: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code"]
+    system_prompt_addon: |
+      Focus on clean, idiomatic code.
+      Always use the write_file tool to create/modify files - do NOT output code in the chat.
+      Explain changes briefly before applying them.
+      Follow project conventions and best practices.
+
+  analyst:
+    description: "Modo para análise de dados, scraping e relatórios"
+    default_agent: "ANALYZER"
+    default_model: "coder"
+    router: "none"
+    tools_enabled: ["execute_code", "web_search", "web_scraper", "sql_query"]
+    system_prompt_addon: |
+      Focus on data analysis, web scraping, and generating reports.
+      Use code execution for data processing.
+      Present results in tables or structured formats when possible.
+
+  planner:
+    description: "Divide tarefas complexas em subtarefas e cria planos estruturados"
+    default_agent: "ARCHITECT"
+    default_model: "reasoning"
+    router: "none"
+    tools_enabled: ["read_file", "list_dir", "search_in_files"]
+    system_prompt_addon: |
+      Break down complex tasks into clear, actionable steps.
+      Create structured plans with dependencies.
+      Think deeply about trade-offs and alternatives.
+
+  fast:
+    description: "Respostas rápidas com modelos leves"
+    default_agent: "MICRO"
+    default_model: "fast"
+    router: "none"
+    tools_enabled: []
+    system_prompt_addon: |
+      Provide quick, concise answers.
+      Do not use tools unless explicitly requested.
+      Keep responses under 200 words when possible.
+
+  deep:
+    description: "Raciocínio avançado com modelos grandes e thinking blocks"
+    default_agent: "ARCHITECT"
+    default_model: "deep"
+    router: "none"
+    tools_enabled: ["all"]
+    enable_thinking: true
+    max_iterations: 10
+    system_prompt_addon: |
+      Think deeply about the problem.
+      Show your reasoning in thinking blocks.
+      Consider multiple perspectives and edge cases.
+      Provide comprehensive, well-structured answers.
+
+# Tool aliases for mode configuration
+tool_aliases:
+  all: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code", "web_search", "web_scraper", "sql_query"]
