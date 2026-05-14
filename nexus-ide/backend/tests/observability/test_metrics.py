@@ -1,4 +1,5 @@
 """Tests for backend.observability.metrics — Prometheus metrics existence."""
+
 from __future__ import annotations
 
 from prometheus_client import Counter, Gauge, Histogram

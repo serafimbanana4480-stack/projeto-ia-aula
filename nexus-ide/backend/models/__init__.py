@@ -1,4 +1,5 @@
 """Pydantic models for the NEXUS API (P0 rule: never use raw dicts on the wire)."""
+
 from .api import (
     AgentName,
     ChatRequest,

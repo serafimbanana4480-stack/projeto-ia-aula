@@ -26,7 +26,10 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   setCurrentProject: (project) => {
     if (typeof window !== "undefined") {
       if (project) {
-        window.localStorage.setItem("nexus.currentProject", JSON.stringify(project));
+        window.localStorage.setItem(
+          "nexus.currentProject",
+          JSON.stringify(project),
+        );
       } else {
         window.localStorage.removeItem("nexus.currentProject");
       }
@@ -34,5 +37,6 @@ export const useProjectStore = create<ProjectStore>((set) => ({
     set({ currentProject: project });
   },
   setProjects: (projects) => set({ projects }),
-  addProject: (project) => set((state) => ({ projects: [project, ...state.projects] })),
+  addProject: (project) =>
+    set((state) => ({ projects: [project, ...state.projects] })),
 }));

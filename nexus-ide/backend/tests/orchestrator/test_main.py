@@ -1,4 +1,5 @@
 """Tests for backend.orchestrator.main — FastAPI app lifecycle and /health."""
+
 from __future__ import annotations
 
 import pytest

@@ -1,7 +1,15 @@
 "use client";
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  CartesianGrid,
+} from "recharts";
 import { apiUrl } from "../../lib/api";
 
 interface TimelineDataPoint {
@@ -18,15 +26,19 @@ export default function TokenTimeline() {
     const fetchTimeline = async () => {
       try {
         setLoading(true);
-        const response = await fetch(apiUrl(`/api/metrics/history?seconds=${timeRange}&metric=tokens_per_second`));
+        const response = await fetch(
+          apiUrl(
+            `/api/metrics/history?seconds=${timeRange}&metric=tokens_per_second`,
+          ),
+        );
         const timelineData = await response.json();
-        
+
         // Format data for Recharts
         const formattedData = timelineData.map((point: TimelineDataPoint) => ({
           time: new Date(point.timestamp * 1000).toLocaleTimeString(),
           value: point.value,
         }));
-        
+
         setData(formattedData);
       } catch (error) {
         console.error("Failed to fetch timeline data:", error);
@@ -36,10 +48,10 @@ export default function TokenTimeline() {
     };
 
     fetchTimeline();
-    
+
     // Refresh every 30 seconds
     const interval = setInterval(fetchTimeline, 30000);
-    
+
     return () => clearInterval(interval);
   }, [timeRange]);
 
@@ -128,9 +140,13 @@ export default function TokenTimeline() {
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="flex h-full items-center justify-center text-xs text-gray-500"
+            className="flex h-full flex-col items-center justify-center gap-2 text-xs text-gray-500"
           >
-            Sem dados disponíveis
+            <svg className="h-8 w-8 text-nexus-border" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M3 20L7 12L11 16L15 8L21 4" />
+            </svg>
+            <div>Sem dados disponíveis</div>
+            <div className="text-gray-600">Inicia o backend para ver o gráfico</div>
           </motion.div>
         )}
       </div>

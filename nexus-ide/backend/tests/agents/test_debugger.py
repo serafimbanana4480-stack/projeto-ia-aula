@@ -1,4 +1,5 @@
 """Tests for backend.agents.debugger."""
+
 from __future__ import annotations
 
 from backend.agents.base import AgentAction

@@ -1,4 +1,5 @@
 """Tests for config/models.yaml — structural validation against architecture spec."""
+
 from __future__ import annotations
 
 import pytest
@@ -15,11 +16,29 @@ class TestModelsYamlStructure:
             return yaml.safe_load(fh)
 
     def test_top_level_keys(self, models_yaml: dict) -> None:
-        required = {"models", "concurrency", "routing", "fallback", "web_search", "code_execution", "rate_limits"}
+        required = {
+            "models",
+            "concurrency",
+            "routing",
+            "fallback",
+            "web_search",
+            "code_execution",
+            "rate_limits",
+        }
         assert required.issubset(models_yaml.keys())
 
     def test_all_agents_have_models(self, models_yaml: dict) -> None:
-        expected_models = {"nano", "micro", "small", "medium", "large", "expert", "vision", "embed", "dashboard"}
+        expected_models = {
+            "nano",
+            "micro",
+            "small",
+            "medium",
+            "large",
+            "expert",
+            "vision",
+            "embed",
+            "dashboard",
+        }
         assert expected_models.issubset(models_yaml["models"].keys())
 
     def test_model_fields(self, models_yaml: dict) -> None:

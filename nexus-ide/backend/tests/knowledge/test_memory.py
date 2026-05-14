@@ -8,11 +8,8 @@ Covers:
 - Memory eviction
 - Session-scoped memories
 """
-from __future__ import annotations
 
-import asyncio
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from __future__ import annotations
 
 import pytest
 
@@ -142,8 +139,12 @@ class TestMemoryStore:
 
     @pytest.mark.asyncio
     async def test_get_context(self, store: MemoryStore) -> None:
-        await store.store("Authentication uses JWT tokens for security", memory_type=MemoryType.GLOBAL)
-        await store.store("Database uses PostgreSQL with SQLAlchemy ORM", memory_type=MemoryType.GLOBAL)
+        await store.store(
+            "Authentication uses JWT tokens for security", memory_type=MemoryType.GLOBAL
+        )
+        await store.store(
+            "Database uses PostgreSQL with SQLAlchemy ORM", memory_type=MemoryType.GLOBAL
+        )
 
         context = await store.get_context("JWT authentication", top_k=2)
         assert "JWT" in context or "authentication" in context.lower()

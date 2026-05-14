@@ -17,7 +17,11 @@ interface DiffViewerProps {
   onReject: (changeId: string) => void;
 }
 
-export default function DiffViewer({ changes, onApply, onReject }: DiffViewerProps) {
+export default function DiffViewer({
+  changes,
+  onApply,
+  onReject,
+}: DiffViewerProps) {
   const [selectedChange, setSelectedChange] = useState<DiffChange | null>(null);
 
   const getOperationColor = (op: string) => {
@@ -52,7 +56,9 @@ export default function DiffViewer({ changes, onApply, onReject }: DiffViewerPro
         <div className="flex items-center gap-2">
           <FileText className="h-4 w-4 text-nexus-accent" />
           <span className="text-sm font-semibold">Proposed Changes</span>
-          <span className="text-xs text-gray-500">({changes.length} files)</span>
+          <span className="text-xs text-gray-500">
+            ({changes.length} files)
+          </span>
         </div>
       </div>
 
@@ -66,10 +72,14 @@ export default function DiffViewer({ changes, onApply, onReject }: DiffViewerPro
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className={`rounded px-2 py-0.5 text-xs font-medium ${getOperationColor(change.operation)}`}>
+                <span
+                  className={`rounded px-2 py-0.5 text-xs font-medium ${getOperationColor(change.operation)}`}
+                >
                   {getOperationIcon(change.operation)} {change.operation}
                 </span>
-                <span className="text-sm text-gray-300">{change.file_path}</span>
+                <span className="text-sm text-gray-300">
+                  {change.file_path}
+                </span>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -115,7 +125,9 @@ export default function DiffViewer({ changes, onApply, onReject }: DiffViewerPro
               <div className="mb-3 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <FileText className="h-4 w-4 text-nexus-accent" />
-                  <span className="text-sm font-semibold">{selectedChange.file_path}</span>
+                  <span className="text-sm font-semibold">
+                    {selectedChange.file_path}
+                  </span>
                 </div>
                 <button
                   onClick={() => setSelectedChange(null)}
@@ -124,7 +136,7 @@ export default function DiffViewer({ changes, onApply, onReject }: DiffViewerPro
                   <X className="h-4 w-4" />
                 </button>
               </div>
-              
+
               <div className="overflow-auto rounded bg-black/30 p-4">
                 <pre className="text-xs text-gray-400 whitespace-pre-wrap">
                   {selectedChange.diff || selectedChange.new_content}

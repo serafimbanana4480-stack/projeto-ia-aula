@@ -3,9 +3,10 @@
 Prompt: config/prompts/router.md
 See ARCHITECTURE.md §3.1. Implementation detail: emits strict JSON only.
 """
+
 from __future__ import annotations
 
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from .base import AgentBase, AgentRequest
 

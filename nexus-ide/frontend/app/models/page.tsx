@@ -12,11 +12,13 @@ interface Model {
   size_bytes: number;
   size_gb?: number;
   status: "available" | "loading" | "error";
+  details?: Record<string, unknown>;
 }
 
 export default function ModelsPage() {
   const [models, setModels] = useState<Model[]>([]);
   const [installing, setInstalling] = useState<string | null>(null);
+  const [installProgress, setInstallProgress] = useState<string>("");
 
   useEffect(() => {
     const fetchModels = async () => {
@@ -28,6 +30,8 @@ export default function ModelsPage() {
       }
     };
     fetchModels();
+    const interval = setInterval(fetchModels, 10000);
+    return () => clearInterval(interval);
   }, []);
 
   const formatSize = (bytes: number) => {
@@ -37,21 +41,77 @@ export default function ModelsPage() {
 
   const handleInstall = async (modelId: string) => {
     setInstalling(modelId);
-    // TODO: Implement real Ollama install API
-    // For now, simulate installation
-    setTimeout(() => {
-      setInstalling(null);
-      alert(`Installation of ${modelId} would require Ollama API integration.`);
-    }, 3000);
+    setInstallProgress("Starting download...");
+
+    try {
+      // Use Ollama's pull API to download the model
+      const response = await fetch("http://localhost:11434/api/pull", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: modelId, stream: true }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to start download: ${response.statusText}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("No response body");
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const data = JSON.parse(line);
+            if (data.status) {
+              setInstallProgress(data.status);
+            }
+            if (data.completed && data.total) {
+              const pct = ((data.completed / data.total) * 100).toFixed(0);
+              setInstallProgress(`Downloading: ${pct}%`);
+            }
+          } catch {
+            // Skip malformed JSON
+          }
+        }
+      }
+
+      setInstallProgress("Installation complete!");
+      // Refresh model list
+      const data = await getModelStatus();
+      setModels(data || []);
+    } catch (error) {
+      console.error("Failed to install model:", error);
+      setInstallProgress(
+        `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    } finally {
+      setTimeout(() => {
+        setInstalling(null);
+        setInstallProgress("");
+      }, 2000);
+    }
   };
 
   return (
     <div className="flex h-screen flex-col bg-nexus-bg">
       <TopBar />
-      
+
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        
+
         <main className="flex-1 overflow-auto p-6">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -61,6 +121,21 @@ export default function ModelsPage() {
               <Cpu className="h-6 w-6 text-nexus-accent" />
               <h1 className="text-2xl font-bold">Models</h1>
             </div>
+
+            {installing && installProgress && (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mb-4 rounded border border-nexus-accent/30 bg-nexus-accent/10 p-3 text-sm"
+              >
+                <div className="flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin text-nexus-accent" />
+                  <span>
+                    Installing <strong>{installing}</strong>: {installProgress}
+                  </span>
+                </div>
+              </motion.div>
+            )}
 
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
               {models.map((model, index) => (
@@ -74,7 +149,14 @@ export default function ModelsPage() {
                   <div className="mb-3 flex items-start justify-between">
                     <div>
                       <h3 className="text-sm font-semibold">{model.id}</h3>
-                      <p className="text-xs text-gray-500">{formatSize(model.size_bytes)}</p>
+                      <p className="text-xs text-gray-500">
+                        {formatSize(model.size_bytes)}
+                      </p>
+                      {model.details?.parameter_size ? (
+                        <p className="text-xs text-gray-500">
+                          {String(model.details.parameter_size)}B parameters
+                        </p>
+                      ) : null}
                     </div>
                     {model.status === "available" && (
                       <CheckCircle className="h-4 w-4 text-green-500" />
@@ -86,7 +168,7 @@ export default function ModelsPage() {
                       <XCircle className="h-4 w-4 text-red-500" />
                     )}
                   </div>
-                  
+
                   <div className="flex items-center justify-between">
                     <div className="rounded bg-nexus-border px-2 py-0.5 text-xs">
                       {model.status}
@@ -119,14 +201,16 @@ export default function ModelsPage() {
                 <div className="text-center">
                   <Cpu className="mx-auto mb-3 h-12 w-12 text-nexus-border" />
                   <p className="text-sm">No models available</p>
-                  <p className="text-xs">Install models to get started</p>
+                  <p className="text-xs">
+                    Make sure Ollama is running to see and install models
+                  </p>
                 </div>
               </motion.div>
             )}
           </motion.div>
         </main>
       </div>
-      
+
       <BottomHUD />
     </div>
   );

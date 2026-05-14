@@ -1,4 +1,5 @@
 """Tests for backend.tools.file_manager — schema only (stubs)."""
+
 from __future__ import annotations
 
 from backend.tools.file_manager import read_file, write_file

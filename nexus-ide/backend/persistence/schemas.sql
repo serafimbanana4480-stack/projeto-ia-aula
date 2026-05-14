@@ -5,6 +5,18 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    email         TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    full_name     TEXT,
+    is_active     INTEGER DEFAULT 1,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
 CREATE TABLE IF NOT EXISTS projects (
     id            TEXT PRIMARY KEY,
     name          TEXT NOT NULL,
@@ -16,6 +28,9 @@ CREATE TABLE IF NOT EXISTS projects (
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_projects_updated ON projects(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
 
 CREATE TABLE IF NOT EXISTS sessions (
     id            TEXT PRIMARY KEY,
@@ -47,6 +62,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS tool_executions (
     id            TEXT PRIMARY KEY,
@@ -62,6 +79,8 @@ CREATE TABLE IF NOT EXISTS tool_executions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_session ON tool_executions(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tool_name ON tool_executions(tool_name);
+CREATE INDEX IF NOT EXISTS idx_tool_success ON tool_executions(success);
 
 CREATE TABLE IF NOT EXISTS routing_decisions (
     id            TEXT PRIMARY KEY,
@@ -77,6 +96,8 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_routing_session ON routing_decisions(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_routing_tier ON routing_decisions(tier_chosen);
+CREATE INDEX IF NOT EXISTS idx_routing_created ON routing_decisions(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS proposed_changes (
     id            TEXT PRIMARY KEY,
@@ -95,3 +116,5 @@ CREATE TABLE IF NOT EXISTS proposed_changes (
 
 CREATE INDEX IF NOT EXISTS idx_changes_session ON proposed_changes(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_changes_pending ON proposed_changes(applied) WHERE applied = 0;
+CREATE INDEX IF NOT EXISTS idx_changes_project ON proposed_changes(project_id);
+CREATE INDEX IF NOT EXISTS idx_changes_operation ON proposed_changes(operation);

@@ -19,17 +19,20 @@ Key features:
 - Conflict detection and resolution
 - Resource-aware scheduling
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, AsyncIterator, Callable, Optional
+from enum import StrEnum
+from typing import Any
 
-from backend.agents.base import AgentBase, AgentRequest, AgentResponse
+from backend.agents.base import AgentBase, AgentRequest
+from backend.config.settings import get_model_config, load_prompt
 from backend.orchestrator.dependency_graph import (
     DependencyGraph,
     ExecutionPlan,
@@ -43,13 +46,26 @@ from backend.orchestrator.events import (
     EventType,
     OrchestratorEvent,
 )
-from backend.orchestrator.fallback import invoke_with_fallback
 from backend.tools.ollama_client import ChatMessage, OllamaClient, OllamaError
 
 logger = logging.getLogger(__name__)
 
 
-class OrchestrationState(str, Enum):
+async def _iterate_agent_output(output: Any) -> AsyncIterator[str]:
+    """Yield tokens from async iterables, coroutines, or plain iterables."""
+    if asyncio.iscoroutine(output):
+        output = await output
+
+    if hasattr(output, "__aiter__"):
+        async for token in output:
+            yield token
+        return
+
+    for token in output:
+        yield token
+
+
+class OrchestrationState(StrEnum):
     IDLE = "idle"
     PLANNING = "planning"
     AWAITING_APPROVAL = "awaiting_approval"
@@ -77,7 +93,7 @@ class OrchestrationResult:
 
     run_id: str
     state: OrchestrationState
-    plan: Optional[ExecutionPlan] = None
+    plan: ExecutionPlan | None = None
     completed_tasks: int = 0
     failed_tasks: int = 0
     total_duration_ms: int = 0
@@ -118,6 +134,10 @@ class OrchestrationEngine:
         self._cancellation_events: dict[str, asyncio.Event] = {}
         self._state: dict[str, OrchestrationState] = {}
 
+        # Plan storage (in-memory; persists across requests within a process)
+        self._plans: dict[str, ExecutionPlan] = {}
+        self._session_plans: dict[str, str] = {}  # session_id -> plan_id
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -130,35 +150,48 @@ class OrchestrationEngine:
         context: str = "",
         history: list[ChatMessage] | None = None,
     ) -> ExecutionPlan:
-        """Use the Architect agent to create a structured execution plan."""
+        """Create a structured execution plan using the coder model for clean JSON.
+
+        Uses the coder model (qwen2.5-coder:7b) directly for planning because
+        it follows structured output instructions much better than reasoning models.
+        The ARCHITECT agent (reasoning model) is still used during plan execution
+        for deep design tasks.
+        """
         self._state[session_id] = OrchestrationState.PLANNING
 
-        await self._events.publish(OrchestratorEvent(
-            event_type=EventType.ORCHESTRATOR_STARTED,
-            source="ORCHESTRATOR",
-            session_id=session_id,
-            data={"objective": objective, "phase": "planning"},
-        ))
-
-        architect = self._registry.get("ARCHITECT")
-        if not architect:
-            raise ValueError("ARCHITECT agent not found in registry")
+        await self._events.publish(
+            OrchestratorEvent(
+                event_type=EventType.ORCHESTRATOR_STARTED,
+                source="ORCHESTRATOR",
+                session_id=session_id,
+                data={"objective": objective, "phase": "planning"},
+            )
+        )
 
         # Build planning prompt
         planning_prompt = self._build_planning_prompt(objective, context)
-        request = AgentRequest(
-            session_id=session_id,
-            query=planning_prompt,
-            client=self._ollama,
-            history=history or [],
-            enable_thinking=True,
-            max_iterations=5,
-        )
 
-        # Stream planning
+        # Use coder model directly for clean JSON output (not the architect agent)
+        planner_cfg = get_model_config("coder")
+        planner_model = planner_cfg["id"]
+        system_prompt = load_prompt("architect")
+
+        messages = [
+            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="user", content=planning_prompt),
+        ]
+
+        # Stream planning directly from Ollama
         plan_content = ""
-        async with EventEmitter(self._events, "ARCHITECT", session_id) as emit:
-            async for token in architect.run(request):
+        async with EventEmitter(self._events, "PLANNER", session_id) as emit:
+            async for token in self._ollama.chat_stream(
+                model=planner_model,
+                messages=messages,
+                options={
+                    "temperature": planner_cfg.get("temperature", 0.2),
+                    "num_predict": 16384,  # Large plans need more tokens
+                },
+            ):
                 plan_content += token
                 await emit.emit(EventType.TOKEN, content=token)
 
@@ -166,14 +199,21 @@ class OrchestrationEngine:
         plan = self._parse_plan(plan_content, objective, session_id)
         plan.created_at = time.time()
 
-        await self._events.publish(OrchestratorEvent(
-            event_type=EventType.PLAN_CREATED,
-            source="ARCHITECT",
-            session_id=session_id,
-            data=plan.to_dict(),
-        ))
+        await self._events.publish(
+            OrchestratorEvent(
+                event_type=EventType.PLAN_CREATED,
+                source="ARCHITECT",
+                session_id=session_id,
+                data=plan.to_dict(),
+            )
+        )
 
         self._state[session_id] = OrchestrationState.AWAITING_APPROVAL
+
+        # Store plan for later retrieval
+        self._plans[plan.plan_id] = plan
+        self._session_plans[session_id] = plan.plan_id
+
         return plan
 
     async def execute_plan(
@@ -204,15 +244,21 @@ class OrchestrationEngine:
         graph = plan.dependency_graph
         layers = graph.topological_layers()
 
-        await self._events.publish(OrchestratorEvent(
-            event_type=EventType.ORCHESTRATOR_STARTED,
-            source="ORCHESTRATOR",
-            session_id=session_id,
-            data={"run_id": run_id, "layers": len(layers), "total_tasks": len(graph.get_all_tasks())},
-        ))
+        await self._events.publish(
+            OrchestratorEvent(
+                event_type=EventType.ORCHESTRATOR_STARTED,
+                source="ORCHESTRATOR",
+                session_id=session_id,
+                data={
+                    "run_id": run_id,
+                    "layers": len(layers),
+                    "total_tasks": len(graph.get_all_tasks()),
+                },
+            )
+        )
 
         try:
-            for layer_idx, layer in enumerate(layers):
+            for _layer_idx, layer in enumerate(layers):
                 if self._cancellation_events[session_id].is_set():
                     break
 
@@ -223,9 +269,7 @@ class OrchestrationEngine:
                     if task is None:
                         continue
                     task.status = TaskStatus.READY
-                    layer_tasks.append(self._execute_task(
-                        task, ctx, graph, session_id, run_id
-                    ))
+                    layer_tasks.append(self._execute_task(task, ctx, graph, session_id, run_id))
 
                 if layer_tasks:
                     results = await asyncio.gather(*layer_tasks, return_exceptions=True)
@@ -233,16 +277,20 @@ class OrchestrationEngine:
                         if isinstance(result, Exception):
                             errors.append(str(result))
                         elif isinstance(result, dict):
+                            if "error" in result and result["error"]:
+                                errors.append(str(result["error"]))
                             total_tokens += result.get("tokens", 0)
 
         except asyncio.CancelledError:
             self._state[session_id] = OrchestrationState.CANCELLED
-            await self._events.publish(OrchestratorEvent(
-                event_type=EventType.ORCHESTRATOR_FINISHED,
-                source="ORCHESTRATOR",
-                session_id=session_id,
-                data={"run_id": run_id, "cancelled": True},
-            ))
+            await self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.ORCHESTRATOR_FINISHED,
+                    source="ORCHESTRATOR",
+                    session_id=session_id,
+                    data={"run_id": run_id, "cancelled": True},
+                )
+            )
             raise
 
         duration_ms = int((time.time() - start_time) * 1000)
@@ -264,25 +312,39 @@ class OrchestrationEngine:
             task_results=dict(ctx.artifacts),
         )
 
-        await self._events.publish(OrchestratorEvent(
-            event_type=EventType.ORCHESTRATOR_FINISHED,
-            source="ORCHESTRATOR",
-            session_id=session_id,
-            data=result.__dict__,
-        ))
+        await self._events.publish(
+            OrchestratorEvent(
+                event_type=EventType.ORCHESTRATOR_FINISHED,
+                source="ORCHESTRATOR",
+                session_id=session_id,
+                data=result.__dict__,
+            )
+        )
 
         return result
 
     async def cancel(self, session_id: str) -> None:
         """Cancel an active orchestration run."""
-        if session_id in self._cancellation_events:
-            self._cancellation_events[session_id].set()
-            self._state[session_id] = OrchestrationState.CANCELLED
-            logger.info("Cancelled orchestration for session %s", session_id)
+        if session_id not in self._cancellation_events:
+            self._cancellation_events[session_id] = asyncio.Event()
+        self._cancellation_events[session_id].set()
+        self._state[session_id] = OrchestrationState.CANCELLED
+        logger.info("Cancelled orchestration for session %s", session_id)
 
     def get_state(self, session_id: str) -> OrchestrationState:
         """Get the current state of an orchestration run."""
         return self._state.get(session_id, OrchestrationState.IDLE)
+
+    def get_plan(self, plan_id: str) -> ExecutionPlan | None:
+        """Retrieve a stored plan by its ID."""
+        return self._plans.get(plan_id)
+
+    def get_plan_by_session(self, session_id: str) -> ExecutionPlan | None:
+        """Retrieve the plan associated with a session."""
+        plan_id = self._session_plans.get(session_id)
+        if plan_id:
+            return self._plans.get(plan_id)
+        return None
 
     # ------------------------------------------------------------------
     # Internal: Task Execution
@@ -300,25 +362,29 @@ class OrchestrationEngine:
         task.status = TaskStatus.RUNNING
         task.started_at = time.time()
 
-        await self._events.publish(OrchestratorEvent(
-            event_type=EventType.TASK_STARTED,
-            source=task.agent,
-            session_id=session_id,
-            task_id=task.task_id,
-            data={"task_name": task.name},
-        ))
+        await self._events.publish(
+            OrchestratorEvent(
+                event_type=EventType.TASK_STARTED,
+                source=task.agent,
+                session_id=session_id,
+                task_id=task.task_id,
+                data={"task_name": task.name},
+            )
+        )
 
         agent = self._registry.get(task.agent)
         if not agent:
             task.status = TaskStatus.FAILED
             task.error_message = f"Agent {task.agent} not found"
-            await self._events.publish(OrchestratorEvent(
-                event_type=EventType.TASK_FAILED,
-                source=task.agent,
-                session_id=session_id,
-                task_id=task.task_id,
-                data={"error": task.error_message},
-            ))
+            await self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.TASK_FAILED,
+                    source=task.agent,
+                    session_id=session_id,
+                    task_id=task.task_id,
+                    data={"error": task.error_message},
+                )
+            )
             return {"error": task.error_message}
 
         # Build context from dependencies
@@ -332,16 +398,16 @@ class OrchestrationEngine:
 
                 request = AgentRequest(
                     session_id=session_id,
-                    query=self._build_task_prompt(task, dep_context),
+                    query=self._build_task_prompt(task, dep_context, ctx.project_path),
                     client=self._ollama,
-                    context={"task": task.to_dict(), "shared_memory": ctx.shared_memory},
+                    context={"task": task.to_dict(), "shared_memory": ctx.shared_memory, "project_path": ctx.project_path},
                     max_iterations=5,
                 )
 
                 # Stream execution
                 output_parts: list[str] = []
                 async with EventEmitter(self._events, task.agent, session_id, task.task_id) as emit:
-                    async for token in agent.run(request):
+                    async for token in _iterate_agent_output(agent.run(request)):
                         output_parts.append(token)
                         await emit.emit(EventType.TOKEN, content=token)
 
@@ -359,13 +425,15 @@ class OrchestrationEngine:
                 }
                 ctx.global_context += f"\n[{task.name}]: {output[:500]}"
 
-                await self._events.publish(OrchestratorEvent(
-                    event_type=EventType.TASK_COMPLETED,
-                    source=task.agent,
-                    session_id=session_id,
-                    task_id=task.task_id,
-                    data={"output_length": len(output)},
-                ))
+                await self._events.publish(
+                    OrchestratorEvent(
+                        event_type=EventType.TASK_COMPLETED,
+                        source=task.agent,
+                        session_id=session_id,
+                        task_id=task.task_id,
+                        data={"output_length": len(output)},
+                    )
+                )
 
                 return {"success": True, "output": output, "tokens": len(output_parts)}
 
@@ -373,30 +441,37 @@ class OrchestrationEngine:
                 task.retry_count = attempt + 1
                 logger.warning(
                     "Task %s failed (attempt %d/%d): %s",
-                    task.task_id, attempt + 1, task.max_retries + 1, exc,
+                    task.task_id,
+                    attempt + 1,
+                    task.max_retries + 1,
+                    exc,
                 )
 
                 if attempt < task.max_retries:
-                    await self._events.publish(OrchestratorEvent(
-                        event_type=EventType.AGENT_RETRY,
-                        source=task.agent,
-                        session_id=session_id,
-                        task_id=task.task_id,
-                        data={"attempt": attempt + 1, "max_retries": task.max_retries},
-                    ))
-                    await asyncio.sleep(2 ** attempt)  # exponential backoff
+                    await self._events.publish(
+                        OrchestratorEvent(
+                            event_type=EventType.AGENT_RETRY,
+                            source=task.agent,
+                            session_id=session_id,
+                            task_id=task.task_id,
+                            data={"attempt": attempt + 1, "max_retries": task.max_retries},
+                        )
+                    )
+                    await asyncio.sleep(2**attempt)  # exponential backoff
                 else:
                     task.status = TaskStatus.FAILED
                     task.error_message = str(exc)
                     task.completed_at = time.time()
 
-                    await self._events.publish(OrchestratorEvent(
-                        event_type=EventType.TASK_FAILED,
-                        source=task.agent,
-                        session_id=session_id,
-                        task_id=task.task_id,
-                        data={"error": str(exc), "attempts": attempt + 1},
-                    ))
+                    await self._events.publish(
+                        OrchestratorEvent(
+                            event_type=EventType.TASK_FAILED,
+                            source=task.agent,
+                            session_id=session_id,
+                            task_id=task.task_id,
+                            data={"error": str(exc), "attempts": attempt + 1},
+                        )
+                    )
 
                     return {"error": str(exc), "attempts": attempt + 1}
 
@@ -407,42 +482,73 @@ class OrchestrationEngine:
     # ------------------------------------------------------------------
 
     def _build_planning_prompt(self, objective: str, context: str) -> str:
-        """Build the prompt for the Architect to create a plan."""
-        return f"""Create a detailed, structured execution plan for the following objective:
+        """Build the prompt for creating a professional multi-phase execution plan."""
+        return f"""You are a senior software architect and project manager. Create a COMPREHENSIVE, PROFESSIONAL execution plan for:
 
 OBJECTIVE: {objective}
 
 ADDITIONAL CONTEXT: {context or "None"}
 
-Your plan MUST be structured as a JSON array of steps. Each step must have:
-- "name": short descriptive name
-- "description": what this step accomplishes
-- "agent": which agent should execute it (ARCHITECT, CODER, ANALYZER, DEBUGGER, RESEARCHER, DOCUMENTER, OPTIMIZER, MICRO)
-- "depends_on": list of step indices (0-based) this step depends on
-- "priority": "high", "medium", or "low"
-- "sandboxed": true if this step needs sandboxed execution
+IMPORTANT: Create a DETAILED plan with 10-25 steps organized into phases. Each phase builds on the previous one.
+Think like a real project manager: setup -> implementation -> testing -> documentation -> review.
 
-Output ONLY valid JSON array. No other text.
+Available agents and their specialties:
+- ARCHITECT: system design, architecture decisions, code review, final approval
+- CODER: writing code, implementing features, creating files, scaffolding, refactoring
+- ANALYZER: reviewing code quality, security audit, finding issues, code smells
+- DEBUGGER: fixing bugs, troubleshooting, running tests, verifying fixes
+- RESEARCHER: searching web, reading docs, gathering info, API documentation
+- DOCUMENTER: writing docs, README, API docs, inline comments, changelogs
+- OPTIMIZER: performance tuning, benchmarking, profiling, optimization
 
-Example:
+PHASE GUIDELINES:
+1. SETUP: Project initialization, directory structure, dependencies, configuration
+2. CORE IMPLEMENTATION: Main features, data models, business logic, API endpoints
+3. TESTING: Unit tests, integration tests, edge cases, error handling
+4. QUALITY ASSURANCE: Code review, security audit, performance check
+5. DOCUMENTATION: README, API docs, inline comments, usage examples
+6. FINAL REVIEW: Architecture review, integration verification, polish
+
+Respond with ONLY a JSON array. No markdown, no explanation, just the JSON:
 [
-  {{"name": "Analyze codebase", "description": "Understand current auth state", "agent": "ANALYZER", "depends_on": [], "priority": "high", "sandboxed": false}},
-  {{"name": "Implement JWT", "description": "Add JWT auth middleware", "agent": "CODER", "depends_on": [0], "priority": "high", "sandboxed": false}}
-]"""
+  {{"name": "Phase 1: Setup - Initialize project structure", "description": "Create directory structure, setup configuration files, install dependencies", "agent": "CODER", "depends_on": [], "priority": "high", "sandboxed": false}},
+  {{"name": "Phase 1: Setup - Configure development environment", "description": "Set up linting, formatting, and build configuration", "agent": "CODER", "depends_on": [0], "priority": "high", "sandboxed": false}},
+  {{"name": "Phase 2: Core - Implement data models", "description": "Define core data structures and types", "agent": "CODER", "depends_on": [0], "priority": "high", "sandboxed": false}},
+  {{"name": "Phase 2: Core - Implement business logic", "description": "Write main application logic and algorithms", "agent": "CODER", "depends_on": [2], "priority": "high", "sandboxed": false}},
+  {{"name": "Phase 3: Testing - Write unit tests", "description": "Create comprehensive unit tests for all modules", "agent": "DEBUGGER", "depends_on": [3], "priority": "high", "sandboxed": false}},
+  {{"name": "Phase 4: QA - Code review and security audit", "description": "Review code quality, identify issues, check for security vulnerabilities", "agent": "ANALYZER", "depends_on": [3], "priority": "medium", "sandboxed": false}},
+  {{"name": "Phase 4: QA - Fix issues from review", "description": "Address all issues found during code review and security audit", "agent": "DEBUGGER", "depends_on": [5], "priority": "high", "sandboxed": false}},
+  {{"name": "Phase 5: Docs - Write documentation", "description": "Create README, API documentation, and usage examples", "agent": "DOCUMENTER", "depends_on": [6], "priority": "medium", "sandboxed": false}},
+  {{"name": "Phase 6: Review - Final architecture review", "description": "Verify all components work together, review final code quality", "agent": "ARCHITECT", "depends_on": [7], "priority": "medium", "sandboxed": false}}
+]
 
-    def _build_task_prompt(self, task: TaskNode, dep_context: str) -> str:
+The depends_on field uses 0-based index of the step this depends on.
+Priority values: "high", "medium", "low".
+Make steps SPECIFIC and ACTIONABLE. Each step must produce a concrete deliverable.
+Include at least 10 steps. More complex objectives should have 15-25 steps.
+Use phase prefixes in step names: "Phase N: Name - Description"."""
+
+    def _build_task_prompt(self, task: TaskNode, dep_context: str, project_path: str = ".") -> str:
         """Build the prompt for a specific task execution."""
         return f"""Execute the following task:
 
 TASK: {task.name}
 DESCRIPTION: {task.description}
 AGENT: {task.agent}
+PROJECT PATH: {project_path}
 
 CONTEXT FROM PREVIOUS STEPS:
 {dep_context or "None (this is the first step)"}
 
 ADDITIONAL CONTEXT:
 {task.context or "None"}
+
+IMPORTANT: You are working in the project at: {project_path}
+- When creating or modifying files, write them to this project path.
+- Use the write_file tool to create files.
+- Use the read_file tool to read existing files.
+- Use the list_dir tool to explore the project structure.
+- Use the execute_code tool to run code and tests.
 
 Complete this task thoroughly. If you need to create or modify files, use the appropriate tools.
 Provide a clear summary of what you accomplished."""
@@ -470,8 +576,14 @@ Provide a clear summary of what you accomplished."""
         import json
         import re
 
-        # Extract JSON array from content
-        json_match = re.search(r'\[.*\]', plan_content, re.DOTALL)
+        # Remove thinking blocks first (common with reasoning models)
+        cleaned = re.sub(r"<thinking>.*?</thinking>", "", plan_content, flags=re.DOTALL)
+        # Remove markdown code fences
+        cleaned = re.sub(r"```json\s*", "", cleaned)
+        cleaned = re.sub(r"```\s*", "", cleaned)
+        # Remove any text before the first [ and after the last ]
+        json_match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+
         if not json_match:
             logger.warning("No JSON array found in plan content, creating single-step plan")
             task = TaskNode(
@@ -489,7 +601,28 @@ Provide a clear summary of what you accomplished."""
         try:
             raw_steps = json.loads(json_match.group(0))
         except json.JSONDecodeError:
-            logger.warning("Failed to parse plan JSON, creating single-step plan")
+            # Try to fix common JSON issues (trailing commas, etc.)
+            raw_text = json_match.group(0)
+            # Remove trailing commas before ] or }
+            raw_text = re.sub(r",\s*([}\]])", r"\1", raw_text)
+            try:
+                raw_steps = json.loads(raw_text)
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse plan JSON, creating single-step plan")
+                task = TaskNode(
+                    name="Execute Objective",
+                    description=objective,
+                    agent="CODER",
+                )
+                return ExecutionPlan.from_steps(
+                    title=objective[:100],
+                    description=objective,
+                    steps=[task],
+                    session_id=session_id,
+                )
+
+        if not isinstance(raw_steps, list) or len(raw_steps) == 0:
+            logger.warning("Plan JSON is not a valid list, creating single-step plan")
             task = TaskNode(
                 name="Execute Objective",
                 description=objective,
@@ -504,17 +637,27 @@ Provide a clear summary of what you accomplished."""
 
         steps: list[TaskNode] = []
         for i, raw in enumerate(raw_steps):
+            if not isinstance(raw, dict):
+                continue
             task = TaskNode(
-                name=raw.get("name", f"Step {i+1}"),
+                name=raw.get("name", f"Step {i + 1}"),
                 description=raw.get("description", ""),
                 agent=raw.get("agent", "CODER").upper(),
-                priority=TaskPriority[raw.get("priority", "medium").upper()] if raw.get("priority", "medium").upper() in TaskPriority.__members__ else TaskPriority.MEDIUM,
+                priority=TaskPriority[raw.get("priority", "medium").upper()]
+                if raw.get("priority", "medium").upper() in TaskPriority.__members__
+                else TaskPriority.MEDIUM,
                 sandboxed=raw.get("sandboxed", False),
             )
             steps.append(task)
 
+        if not steps:
+            task = TaskNode(name="Execute Objective", description=objective, agent="CODER")
+            steps.append(task)
+
         # Resolve dependencies (convert indices to task_ids)
         for i, raw in enumerate(raw_steps):
+            if not isinstance(raw, dict):
+                continue
             for dep_idx in raw.get("depends_on", []):
                 if 0 <= dep_idx < len(steps) and dep_idx != i:
                     steps[i].depends_on.append(steps[dep_idx].task_id)

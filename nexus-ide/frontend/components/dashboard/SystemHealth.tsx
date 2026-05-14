@@ -26,7 +26,7 @@ export default function SystemHealth() {
           signal: AbortSignal.timeout(5000),
         });
         const latency = Date.now() - start;
-        
+
         if (response.ok) {
           healthChecks.push({
             name: "Ollama",
@@ -58,7 +58,7 @@ export default function SystemHealth() {
           signal: AbortSignal.timeout(5000),
         });
         const latency = Date.now() - start;
-        
+
         if (response.ok) {
           healthChecks.push({
             name: "Backend",
@@ -90,7 +90,7 @@ export default function SystemHealth() {
           signal: AbortSignal.timeout(5000),
         });
         const latency = Date.now() - start;
-        
+
         if (response.ok) {
           healthChecks.push({
             name: "Metrics",
@@ -120,10 +120,10 @@ export default function SystemHealth() {
     };
 
     performHealthChecks();
-    
+
     // Refresh every 30 seconds
     const interval = setInterval(performHealthChecks, 30000);
-    
+
     return () => clearInterval(interval);
   }, []);
 
@@ -153,10 +153,14 @@ export default function SystemHealth() {
     }
   };
 
-  const overallStatus = checks.length > 0 
-    ? (checks.every(c => c.status === "healthy") ? "healthy" : 
-       checks.some(c => c.status === "unhealthy") ? "unhealthy" : "degraded")
-    : "unknown";
+  const overallStatus =
+    checks.length > 0
+      ? checks.every((c) => c.status === "healthy")
+        ? "healthy"
+        : checks.some((c) => c.status === "unhealthy")
+          ? "unhealthy"
+          : "degraded"
+      : "unknown";
 
   return (
     <motion.div
@@ -176,7 +180,7 @@ export default function SystemHealth() {
           <span className="capitalize">{overallStatus}</span>
         </motion.div>
       </div>
-      
+
       {loading ? (
         <motion.div
           initial={{ opacity: 0 }}

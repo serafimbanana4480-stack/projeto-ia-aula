@@ -67,10 +67,10 @@ export default function ProjectsPage() {
   return (
     <div className="flex h-screen flex-col bg-nexus-bg">
       <TopBar />
-      
+
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        
+
         <main className="flex-1 overflow-auto p-6">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -113,15 +113,19 @@ export default function ProjectsPage() {
                       </button>
                     </div>
                   </div>
-                  
+
                   {project.description && (
-                    <p className="mb-3 text-xs text-gray-400">{project.description}</p>
+                    <p className="mb-3 text-xs text-gray-400">
+                      {project.description}
+                    </p>
                   )}
-                  
+
                   <div className="flex items-center gap-4 text-xs text-gray-500">
                     <div className="flex items-center gap-1">
                       <Clock className="h-3 w-3" />
-                      <span>{new Date(project.updated_at).toLocaleDateString()}</span>
+                      <span>
+                        {new Date(project.updated_at).toLocaleDateString()}
+                      </span>
                     </div>
                     <div className="rounded bg-nexus-border px-2 py-0.5">
                       {project.mode}
@@ -140,14 +144,16 @@ export default function ProjectsPage() {
                 <div className="text-center">
                   <FolderKanban className="mx-auto mb-3 h-12 w-12 text-nexus-border" />
                   <p className="text-sm">No projects yet</p>
-                  <p className="text-xs">Create your first project to get started</p>
+                  <p className="text-xs">
+                    Create your first project to get started
+                  </p>
                 </div>
               </motion.div>
             )}
           </motion.div>
         </main>
       </div>
-      
+
       <BottomHUD />
 
       {showCreateModal && (
@@ -157,19 +163,25 @@ export default function ProjectsPage() {
             <div className="space-y-3">
               <input
                 value={form.name}
-                onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, name: e.target.value }))
+                }
                 placeholder="Project name"
                 className="w-full rounded bg-nexus-border px-3 py-2 text-sm"
               />
               <input
                 value={form.path}
-                onChange={(e) => setForm((prev) => ({ ...prev, path: e.target.value }))}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, path: e.target.value }))
+                }
                 placeholder="/absolute/path/to/project"
                 className="w-full rounded bg-nexus-border px-3 py-2 text-sm"
               />
               <textarea
                 value={form.description}
-                onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, description: e.target.value }))
+                }
                 placeholder="Description"
                 className="min-h-24 w-full rounded bg-nexus-border px-3 py-2 text-sm"
               />

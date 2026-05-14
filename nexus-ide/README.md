@@ -1,17 +1,124 @@
 # NEXUS IDE
 
 <p align="center">
-  <strong>Uma IDE assistida por IA para desenvolvimento local, orquestração multiagente e observabilidade de nível profissional.</strong><br>
-  Construída para unir chat inteligente, editor de código, pesquisa web, dashboard e automação numa única experiência fluida.
+  <strong>An AI-assisted IDE for local development, multi-agent orchestration, and professional-grade observability.</strong><br>
+  Built to unite intelligent chat, code editor, web search, dashboard, and automation in a single fluid experience.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Stack-FastAPI%20%7C%20Next.js%20%7C%20Ollama-0ea5e9?style=for-the-badge" alt="Stack" />
-  <img src="https://img.shields.io/badge/Privacidade-Local%20First-22c55e?style=for-the-badge" alt="Privacidade" />
-  <img src="https://img.shields.io/badge/Observabilidade-OpenTelemetry%20%7C%20Prometheus-f59e0b?style=for-the-badge" alt="Observabilidade" />
+  <img src="https://img.shields.io/badge/Privacy-Local%20First-22c55e?style=for-the-badge" alt="Privacy" />
+  <img src="https://img.shields.io/badge/Observability-OpenTelemetry%20%7C%20Prometheus-f59e0b?style=for-the-badge" alt="Observability" />
 </p>
 
-> Para a especificação técnica completa, consulta [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+> For the complete technical specification, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+
+---
+
+**[🇺🇸 English Documentation](#english-documentation) | [🇵🇹 Documentação em Português](#documentação-em-português)**
+
+---
+
+## English Documentation
+
+### What is NEXUS IDE?
+
+**NEXUS IDE** is a modern development environment with AI designed to enhance productivity, clarity, and technical control. Instead of relying on a single generic model, the system distributes responsibilities across **specialized agents**, each focused on a specific task.
+
+In practice, this enables:
+
+- **More accurate responses** for each type of request
+- **Better separation of concerns** between analysis, code, and documentation
+- **More context and less noise** during complex tasks
+- **Local execution** with focus on privacy and autonomy
+
+### Quick Start
+
+```bash
+# Clone and setup
+git clone <repository-url>
+cd nexus-ide
+cp .env.example .env
+
+# Run initial setup (downloads models, starts services)
+./scripts/setup.sh
+
+# Start all services
+./start-all.sh
+```
+
+Then open [http://localhost:3000](http://localhost:3000) in your browser.
+
+### Documentation
+
+- **[User Guide](./docs/user-guide.md)** - Comprehensive user instructions and features
+- **[Developer Setup Guide](./docs/developer-setup.md)** - Development environment setup
+- **[Troubleshooting Guide](./docs/troubleshooting.md)** - Common issues and solutions
+- **[FAQ](./docs/FAQ.md)** - Frequently asked questions
+- **[CONTRIBUTING.md](./CONTRIBUTING.md)** - Contribution guidelines
+- **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Technical architecture
+
+### Key Features
+
+| Area | Capability |
+|------|------------|
+| Chat | Technical assistant with conversational flow support |
+| Code | Monaco-based editor with IDE experience |
+| Orchestration | Router + specialized agents for different tasks |
+| Search | Web search and local context integration |
+| Observability | Metrics, logs, and tracing with OpenTelemetry/Prometheus |
+| Dashboard | Real-time operational system view |
+| Execution | Local environment with Docker and isolated components |
+
+### System Requirements
+
+- **Python 3.12+**
+- **Node.js 18+**
+- **Ollama** (runs via Docker)
+- **Docker & Docker Compose**
+- **RAM:** Minimum 16GB (32GB recommended)
+- **VRAM:** Minimum 8GB (16GB+ recommended)
+
+### Main Agents
+
+1. **ROUTER** — Classifies intents and chooses the right path
+2. **ARCHITECT** — Structures systems, flows, and technical decisions
+3. **RESEARCHER** — Searches for current information and validates sources
+4. **CODER** — Generates or adjusts code with production focus
+5. **ANALYZER** — Evaluates quality, risks, and consistency
+6. **DEBUGGER** — Finds root causes of errors and failures
+7. **DOCUMENTER** — Creates clear and useful documentation
+8. **OPTIMIZER** — Suggests performance improvements
+9. **DASHBOARD AGENT** — Monitors the system continuously
+
+### Tech Stack
+
+**Backend:**
+- Python 3.12, FastAPI, Uvicorn, Redis
+
+**Frontend:**
+- Next.js 15, React, TypeScript, Tailwind CSS, Monaco Editor
+
+**Infrastructure:**
+- Ollama, Docker, OpenTelemetry, Prometheus
+
+### Project Structure
+
+```
+nexus-ide/
+├── backend/         # FastAPI API, agents, orchestration, tools, tests
+├── frontend/        # Next.js IDE interface, chat, dashboard, editor
+├── desktop/         # Electron shell with native filesystem bridge
+├── config/          # Prompts, models, operational configuration
+├── docker/          # Dockerfiles and docker-compose
+├── docs/            # Documentation (user guide, troubleshooting, FAQ)
+├── scripts/         # Setup and automation scripts
+└── planeamento/     # Architecture and roadmap documentation
+```
+
+---
+
+## Documentação em Português
 
 ## O que é o NEXUS IDE?
 
@@ -168,6 +275,22 @@ npm install
 npm run dev
 ```
 
+### Desktop app com acesso nativo a qualquer pasta
+
+Para abrir a IDE como aplicação desktop e escolher qualquer pasta do Mac com o seletor nativo:
+
+```bash
+cd desktop
+npm install
+npm start
+```
+
+Depois, o Electron abre o frontend existente e ativa o bridge local para:
+
+- Selecionar uma pasta do sistema com um diálogo nativo.
+- Ler e gravar ficheiros dentro da pasta escolhida.
+- Executar comandos com `cwd` nessa pasta.
+
 ### Parar os serviços
 
 ```bash
@@ -179,6 +302,7 @@ npm run dev
 ```text
 nexus-ide/
 ├── backend/         # API FastAPI, agentes, orquestração, ferramentas e testes
+├── desktop/         # Shell Electron e bridge nativa para acesso ao sistema de ficheiros
 ├── frontend/        # Interface web da IDE, chat, dashboard e editor
 ├── config/          # Prompts, modelos e configuração operacional
 ├── docker/          # Dockerfiles e docker-compose
@@ -189,6 +313,10 @@ nexus-ide/
 
 ## Documentação útil
 
+- **[User Guide](./docs/user-guide.md)** — Guia completo do utilizador (Inglês)
+- **[Developer Setup Guide](./docs/developer-setup.md)** — Configuração do ambiente de desenvolvimento (Inglês)
+- **[Troubleshooting Guide](./docs/troubleshooting.md)** — Problemas comuns e soluções (Inglês)
+- **[FAQ](./docs/FAQ.md)** — Perguntas frequentes (Inglês)
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — referência oficial da arquitetura
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — guia para contribuir
 - [`PLANO_MELHORIAS.md`](./PLANO_MELHORIAS.md) — evolução futura do projeto

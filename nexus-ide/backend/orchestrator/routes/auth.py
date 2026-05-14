@@ -1,0 +1,155 @@
+"""Authentication routes for NEXUS IDE."""
+
+from __future__ import annotations
+
+import logging
+from datetime import timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from backend.config.settings import get_settings
+from backend.middleware.auth import create_access_token, require_auth
+from backend.models.auth import (
+    TokenResponse,
+    UserLogin,
+    UserRegister,
+    UserResponse,
+)
+from backend.persistence.db import (
+    create_user,
+    get_user_by_email,
+    get_user_with_password,
+    update_user_password,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/auth", tags=["authentication"])
+
+
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def register(user_data: UserRegister):
+    """Register a new user.
+    
+    Rate limited to 5 requests per minute to prevent abuse.
+    """
+    # Check if user already exists
+    existing_user = get_user_by_email(user_data.email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User with this email already exists",
+        )
+    
+    # Hash password using bcrypt
+    from passlib.context import CryptContext
+    
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    password_hash = pwd_context.hash(user_data.password)
+    
+    # Create user
+    user = create_user(
+        username=user_data.email.split("@")[0],
+        email=user_data.email,
+        password_hash=password_hash,
+        full_name=user_data.full_name,
+    )
+    
+    # Create access token
+    settings = get_settings()
+    access_token_expires = timedelta(minutes=settings.jwt_expiration_minutes)
+    access_token = create_access_token(
+        data={"sub": user["id"], "email": user["email"]},
+        expires_delta=access_token_expires,
+    )
+    
+    logger.info(f"New user registered: {user_data.email}")
+    
+    return TokenResponse(
+        access_token=access_token,
+        user=UserResponse(**user),
+    )
+
+
+@router.post("/login", response_model=TokenResponse)
+async def login(user_data: UserLogin):
+    """Login with email and password.
+    
+    Rate limited to 10 requests per minute to prevent brute force attacks.
+    """
+    # Get user with password hash
+    user = get_user_with_password(user_data.email)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Verify password
+    from passlib.context import CryptContext
+    
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    if not pwd_context.verify(user_data.password, user["password_hash"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Check if user is active
+    if not user.get("is_active", 1):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is disabled",
+        )
+    
+    # Create access token
+    settings = get_settings()
+    access_token_expires = timedelta(minutes=settings.jwt_expiration_minutes)
+    access_token = create_access_token(
+        data={"sub": user["id"], "email": user["email"]},
+        expires_delta=access_token_expires,
+    )
+    
+    logger.info(f"User logged in: {user_data.email}")
+    
+    # Remove password hash before returning
+    user_dict = dict(user)
+    user_dict.pop("password_hash", None)
+    
+    return TokenResponse(
+        access_token=access_token,
+        user=UserResponse(**user_dict),
+    )
+
+
+@router.get("/me", response_model=UserResponse)
+async def get_current_user(current_user: dict = Depends(require_auth)):
+    """Get the current authenticated user profile.
+    
+    Requires valid JWT token.
+    """
+    user_id = current_user["user_id"]
+    user = get_user_by_email(current_user["email"])
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+    
+    return UserResponse(**user)
+
+
+@router.post("/logout")
+async def logout(current_user: dict = Depends(require_auth)):
+    """Logout the current user.
+    
+    Since we use stateless JWT tokens, the actual logout is handled
+    on the client side by discarding the token. This endpoint
+    primarily serves as a formal logout point and can be extended
+    to add token blacklisting if needed.
+    """
+    logger.info(f"User logged out: {current_user['email']}")
+    return {"message": "Successfully logged out"}

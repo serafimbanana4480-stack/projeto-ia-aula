@@ -19,7 +19,7 @@ export const useToolsStore = create<ToolsStore>((set) => ({
   toggleTool: (name) =>
     set((state) => ({
       tools: state.tools.map((t) =>
-        t.name === name ? { ...t, enabled: !t.enabled } : t
+        t.name === name ? { ...t, enabled: !t.enabled } : t,
       ),
     })),
 }));

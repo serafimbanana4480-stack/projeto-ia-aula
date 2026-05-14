@@ -12,88 +12,100 @@ export function useAgentStream(sessionId: string) {
   const abortRef = useRef<AbortController | null>(null);
   const activeRequestId = useRef(0);
 
-  const send = useCallback(async (message: string, mode = "agent") => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    const requestId = ++activeRequestId.current;
+  const send = useCallback(
+    async (message: string, mode = "agent") => {
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const requestId = ++activeRequestId.current;
 
-    setStreaming(true);
-    setEvents([]); // Clear previous events for new message
-    
-    try {
-      const res = await postChat(message, sessionId, mode, controller.signal);
-      
-      // Check if response is ok
-      if (!res.ok) {
-        const errorText = await res.text();
-        if (requestId !== activeRequestId.current) return;
-        console.error("Chat request failed:", res.status, errorText);
-        setEvents([{
-          type: "error",
-          content: `Request failed: ${res.status} ${errorText}`,
-          timestamp: new Date().toISOString(),
-        }]);
-        setStreaming(false);
-        return;
-      }
+      setStreaming(true);
+      setEvents([]); // Clear previous events for new message
 
-      const reader = res.body?.getReader();
-      if (!reader) {
-        if (requestId !== activeRequestId.current) return;
-        setEvents([{
-          type: "error",
-          content: "No response body received",
-          timestamp: new Date().toISOString(),
-        }]);
-        setStreaming(false);
-        return;
-      }
+      try {
+        const res = await postChat(message, sessionId, mode, controller.signal);
 
-      const decoder = new TextDecoder();
-      let buffer = "";
+        // Check if response is ok
+        if (!res.ok) {
+          const errorText = await res.text();
+          if (requestId !== activeRequestId.current) return;
+          console.error("Chat request failed:", res.status, errorText);
+          setEvents([
+            {
+              type: "error",
+              content: `Request failed: ${res.status} ${errorText}`,
+              timestamp: new Date().toISOString(),
+            },
+          ]);
+          setStreaming(false);
+          return;
+        }
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (requestId !== activeRequestId.current) return;
-        
-        buffer += decoder.decode(value, { stream: true });
-        
-        const chunks = buffer.split("\n\n");
-        buffer = chunks.pop() || "";
+        const reader = res.body?.getReader();
+        if (!reader) {
+          if (requestId !== activeRequestId.current) return;
+          setEvents([
+            {
+              type: "error",
+              content: "No response body received",
+              timestamp: new Date().toISOString(),
+            },
+          ]);
+          setStreaming(false);
+          return;
+        }
 
-        for (const chunk of chunks) {
-          const line = chunk.split("\n").find((part) => part.startsWith("data:"));
-          if (!line) continue;
-          try {
-            const jsonStr = line.slice(5).trim();
-            const evt = JSON.parse(jsonStr) as StreamEvent;
-            if (requestId !== activeRequestId.current) return;
-            setEvents((prev) => [...prev, evt]);
+        const decoder = new TextDecoder();
+        let buffer = "";
 
-            if (evt.type === "done" || evt.type === "agent_finished") {
-              return;
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (requestId !== activeRequestId.current) return;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          const chunks = buffer.split("\n\n");
+          buffer = chunks.pop() || "";
+
+          for (const chunk of chunks) {
+            const line = chunk
+              .split("\n")
+              .find((part) => part.startsWith("data:"));
+            if (!line) continue;
+            try {
+              const jsonStr = line.slice(5).trim();
+              const evt = JSON.parse(jsonStr) as StreamEvent;
+              if (requestId !== activeRequestId.current) return;
+              setEvents((prev) => [...prev, evt]);
+
+              if (evt.type === "done" || evt.type === "agent_finished") {
+                return;
+              }
+            } catch (e) {
+              console.error("Failed to parse SSE event:", chunk, e);
             }
-          } catch (e) {
-            console.error("Failed to parse SSE event:", chunk, e);
           }
         }
+      } catch (error) {
+        if (controller.signal.aborted || requestId !== activeRequestId.current)
+          return;
+        console.error("Chat stream error:", error);
+        setEvents([
+          {
+            type: "error",
+            content: error instanceof Error ? error.message : "Unknown error",
+            timestamp: new Date().toISOString(),
+          },
+        ]);
+      } finally {
+        if (requestId === activeRequestId.current) {
+          setStreaming(false);
+        }
       }
-    } catch (error) {
-      if (controller.signal.aborted || requestId !== activeRequestId.current) return;
-      console.error("Chat stream error:", error);
-      setEvents([{
-        type: "error",
-        content: error instanceof Error ? error.message : "Unknown error",
-        timestamp: new Date().toISOString(),
-      }]);
-    } finally {
-      if (requestId === activeRequestId.current) {
-        setStreaming(false);
-      }
-    }
-  }, [sessionId]);
+    },
+    [sessionId],
+  );
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();

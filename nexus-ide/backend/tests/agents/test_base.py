@@ -1,4 +1,5 @@
 """Tests for backend.agents.base — dataclasses, enums, and AgentBase contract."""
+
 from __future__ import annotations
 
 import pytest
@@ -38,7 +39,9 @@ class TestAgentRequest:
 
     def test_history_defaults_to_empty_but_can_be_set(self, ollama_client) -> None:
         req = AgentRequest(
-            session_id="s1", query="q", client=ollama_client,
+            session_id="s1",
+            query="q",
+            client=ollama_client,
             history=[],
             context={"custom": 1},
         )

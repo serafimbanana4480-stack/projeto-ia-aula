@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import ThemeProvider from "./ThemeProvider";
+import ErrorBoundary from "../components/ErrorBoundary";
 
 export const metadata: Metadata = {
-  title: "NEXUS IDE",
-  description: "Browser-native AI IDE for macOS",
+  title: "LUSO AI - Inteligência que constrói futuro",
+  description: "NEXUS IDE powered by LUSO AI",
 };
 
 export default function RootLayout({
@@ -15,7 +16,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="h-screen overflow-hidden">
-        <ThemeProvider>{children}</ThemeProvider>
+        <ErrorBoundary>
+          <ThemeProvider>{children}</ThemeProvider>
+        </ErrorBoundary>
       </body>
     </html>
   );

@@ -2,14 +2,16 @@
 
 See ARCHITECTURE.md §7 (Backend stack) and `config/models.yaml` for the schema.
 """
+
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -17,11 +19,16 @@ CONFIG_DIR = REPO_ROOT / "config"
 PROMPTS_DIR = CONFIG_DIR / "prompts"
 MODELS_YAML = CONFIG_DIR / "models.yaml"
 
+logger = logging.getLogger(__name__)
+
 
 class Settings(BaseSettings):
     """Environment-driven settings. See `.env.example` for defaults."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # Environment
+    environment: str = Field(default="development")
 
     # Ollama
     ollama_host: str = Field(default="http://localhost:11434")
@@ -29,6 +36,8 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str = Field(default="redis://localhost:6379")
+    redis_db: int = Field(default=0)
+    redis_password: str = Field(default="")
 
     # Web search
     brave_api_key: str = Field(default="")
@@ -37,15 +46,97 @@ class Settings(BaseSettings):
     backend_host: str = Field(default="0.0.0.0")
     backend_port: int = Field(default=8000)
     log_level: str = Field(default="INFO")
+    debug: bool = Field(default=True)
 
     # Observability
     otel_exporter_otlp_endpoint: str = Field(default="http://localhost:4317")
     prometheus_port: int = Field(default=9090)
 
+    # Observability
+    enable_tracing: bool = Field(default=False)
+    enable_metrics: bool = Field(default=True)
+
+    # Security
+    secret_key: str = Field(default="development-secret-key-change-in-production")
+    
+    # CORS - Comma-separated string for environment variable
+    allowed_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000")
+    
+    # JWT Authentication
+    jwt_secret: str = Field(default="development-jwt-secret-change-in-production")
+    jwt_algorithm: str = Field(default="HS256")
+    jwt_expiration_minutes: int = Field(default=30)
+
+    # Database
+    database_url: str = Field(default="sqlite:///./data/nexus.db")
+
+    # Rate limiting
+    rate_limit_enabled: bool = Field(default=True)
+    rate_limit_requests_per_minute: int = Field(default=60)
+
+    @field_validator("environment")
+    @classmethod
+    def validate_environment(cls, v: str) -> str:
+        """Validate that environment is one of the allowed values."""
+        allowed = ["development", "staging", "production"]
+        if v not in allowed:
+            raise ValueError(f"environment must be one of {allowed}, got: {v}")
+        return v
+
+    @field_validator("log_level")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
+        """Validate that log_level is a valid logging level."""
+        allowed = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        if v.upper() not in allowed:
+            raise ValueError(f"log_level must be one of {allowed}, got: {v}")
+        return v.upper()
+
+    def get_allowed_origins_list(self) -> list[str]:
+        """Convert comma-separated allowed_origins to list."""
+        return [origin.strip() for origin in self.allowed_origins.split(",")]
+
 
 @lru_cache
 def get_settings() -> Settings:
+    """Get cached settings instance."""
     return Settings()
+
+
+def load_environment_config() -> dict[str, Any]:
+    """Load environment-specific configuration from YAML files.
+
+    Returns the configuration for the current environment, or an empty dict
+    if no environment-specific config exists.
+    """
+    settings = get_settings()
+    env = settings.environment
+
+    # Map environment names to config file names
+    env_config_map = {
+        "development": "dev.yaml",
+        "staging": "staging.yaml",
+        "production": "prod.yaml",
+    }
+
+    config_file = env_config_map.get(env)
+    if not config_file:
+        logger.warning(f"No config file mapping for environment: {env}")
+        return {}
+
+    config_path = CONFIG_DIR / config_file
+    if not config_path.exists():
+        logger.info(f"No environment-specific config found at {config_path}")
+        return {}
+
+    try:
+        with config_path.open("r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        logger.info(f"Loaded environment-specific config from {config_file}")
+        return config
+    except yaml.YAMLError as e:
+        logger.error(f"Failed to load environment config from {config_path}: {e}")
+        return {}
 
 
 @lru_cache
@@ -80,3 +171,70 @@ def get_model_config(model_key: str) -> dict[str, Any]:
     if model_key not in models:
         raise KeyError(f"Unknown model key: {model_key!r}. Available: {sorted(models)}")
     return models[model_key]
+
+
+def validate_configuration() -> list[str]:
+    """Validate the application configuration.
+
+    Returns a list of error messages. Empty list means validation passed.
+    This function can be called at application startup to ensure configuration
+    is valid before the application starts.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    try:
+        settings = get_settings()
+
+        # Validate secret key
+        if settings.environment == "production":
+            if settings.secret_key == "development-secret-key-change-in-production":
+                errors.append(
+                    "SECRET_KEY is set to default value in production. "
+                    "This is a security risk."
+                )
+            elif len(settings.secret_key) < 32:
+                warnings.append(
+                    "SECRET_KEY is shorter than 32 characters. "
+                    "Consider using a longer, more secure key."
+                )
+            
+            # Validate JWT secret
+            if settings.jwt_secret == "development-jwt-secret-change-in-production":
+                errors.append(
+                    "JWT_SECRET is set to default value in production. "
+                    "This is a security risk."
+                )
+            elif len(settings.jwt_secret) < 32:
+                warnings.append(
+                    "JWT_SECRET is shorter than 32 characters. "
+                    "Consider using a longer, more secure key."
+                )
+        else:
+            if settings.secret_key == "development-secret-key-change-in-production":
+                warnings.append(
+                    "SECRET_KEY is set to default value. "
+                    "Change this before deploying to production."
+                )
+            if settings.jwt_secret == "development-jwt-secret-change-in-production":
+                warnings.append(
+                    "JWT_SECRET is set to default value. "
+                    "Change this before deploying to production."
+                )
+
+        # Validate required files
+        if not MODELS_YAML.exists():
+            errors.append(f"Required config file not found: {MODELS_YAML}")
+
+        prompts_dir = CONFIG_DIR / "prompts"
+        if not prompts_dir.exists():
+            errors.append(f"Required prompts directory not found: {prompts_dir}")
+
+        # Log warnings
+        for warning in warnings:
+            logger.warning(f"Configuration warning: {warning}")
+
+    except Exception as e:
+        errors.append(f"Failed to validate configuration: {e}")
+
+    return errors

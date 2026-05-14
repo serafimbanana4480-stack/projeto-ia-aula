@@ -9,15 +9,24 @@ Uses ``httpx`` directly against the Ollama ``/api/chat`` endpoint instead of the
 
 Ollama server reference: https://github.com/ollama/ollama/blob/main/docs/api.md
 """
+
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)
+
+# Connection pooling limits for better performance
+DEFAULT_LIMITS = httpx.Limits(
+    max_keepalive_connections=20,  # Maximum number of keepalive connections
+    max_connections=100,  # Maximum number of total connections
+    keepalive_expiry=30.0,  # Expire keepalive connections after 30 seconds
+)
 
 
 @dataclass(frozen=True)
@@ -49,11 +58,13 @@ class OllamaClient:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: httpx.Timeout = DEFAULT_TIMEOUT,
+        limits: httpx.Limits = DEFAULT_LIMITS,
     ) -> None:
         self._client = httpx.AsyncClient(
             base_url=host.rstrip("/"),
             transport=transport,
             timeout=timeout,
+            limits=limits,
         )
 
     async def aclose(self) -> None:
@@ -65,6 +76,7 @@ class OllamaClient:
         messages: list[ChatMessage],
         *,
         options: dict[str, Any] | None = None,
+        on_final_chunk: Callable[[dict[str, Any]], None] | None = None,
     ) -> AsyncIterator[str]:
         """Stream chat completion tokens from Ollama.
 
@@ -94,6 +106,8 @@ class OllamaClient:
                 if chunk is None:
                     continue
                 if chunk.get("done"):
+                    if on_final_chunk is not None:
+                        on_final_chunk(chunk)
                     return
                 content = chunk.get("message", {}).get("content", "")
                 if content:

@@ -24,7 +24,8 @@ export default function ChatStream() {
     {
       id: "1",
       role: "assistant",
-      content: "Olá! Sou o NEXUS AI Assistant. Posso ajudar com código, análise de dados, web scraping e muito mais. Escolha um modo cognitivo acima para começar.",
+      content:
+        "Olá! Sou o NEXUS AI Assistant. Posso ajudar com código, análise de dados, web scraping e muito mais. Escolha um modo cognitivo acima para começar.",
     },
   ]);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -35,7 +36,11 @@ export default function ChatStream() {
   }, [messages]);
 
   const handleSend = async (message: string) => {
-    const userMsg: Message = { id: Date.now().toString(), role: "user", content: message };
+    const userMsg: Message = {
+      id: Date.now().toString(),
+      role: "user",
+      content: message,
+    };
     setMessages((prev) => [...prev, userMsg]);
     setIsStreaming(true);
 
@@ -53,7 +58,8 @@ export default function ChatStream() {
         const assistantMsg: Message = {
           id: (Date.now() + 2).toString(),
           role: "assistant",
-          content: "Entendi sua solicitação. Vou processar isso usando o modo Coder para gerar código de alta qualidade.",
+          content:
+            "Entendi sua solicitação. Vou processar isso usando o modo Coder para gerar código de alta qualidade.",
         };
         setMessages((prev) => [...prev, assistantMsg]);
         setIsStreaming(false);
@@ -83,7 +89,10 @@ export default function ChatStream() {
                   </div>
                 </div>
               ) : msg.role === "thinking" ? (
-                <ThinkingBlock content={msg.content} iteration={msg.iteration} />
+                <ThinkingBlock
+                  content={msg.content}
+                  iteration={msg.iteration}
+                />
               ) : msg.role === "tool_call" ? (
                 <ToolCallCard
                   toolName={msg.toolName!}
@@ -113,13 +122,19 @@ export default function ChatStream() {
             className="flex items-center gap-2 text-xs text-gray-500"
           >
             <div className="h-2 w-2 animate-bounce rounded-full bg-nexus-accent" />
-            <div className="h-2 w-2 animate-bounce rounded-full bg-nexus-accent" style={{ animationDelay: "0.1s" }} />
-            <div className="h-2 w-2 animate-bounce rounded-full bg-nexus-accent" style={{ animationDelay: "0.2s" }} />
+            <div
+              className="h-2 w-2 animate-bounce rounded-full bg-nexus-accent"
+              style={{ animationDelay: "0.1s" }}
+            />
+            <div
+              className="h-2 w-2 animate-bounce rounded-full bg-nexus-accent"
+              style={{ animationDelay: "0.2s" }}
+            />
           </motion.div>
         )}
         <div ref={messagesEndRef} />
       </div>
-      
+
       <CommandBar onSend={handleSend} disabled={isStreaming} />
     </div>
   );

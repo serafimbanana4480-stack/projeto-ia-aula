@@ -12,25 +12,30 @@ Every chunk sent to the client is a Pydantic :class:`StreamEvent` serialised
 as a single SSE ``data:`` line terminated by two newlines. The client reads
 until a ``{"type": "done"}`` event.
 """
-from __future__ import annotations
 
 import json
 import logging
-from typing import AsyncIterator
+import time
+from collections.abc import AsyncIterator
+from datetime import UTC
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from backend.agents.base import AgentRequest
 from backend.models.api import ChatRequest, RoutingDecision, StreamEvent
 from backend.orchestrator.fallback import invoke_with_fallback
 from backend.orchestrator.registry import resolve
 from backend.orchestrator.router import fast_route, route_with_model
+from backend.persistence.db import add_message, create_session, get_session
 from backend.tools.ollama_client import ChatMessage, OllamaError
 from backend.tools.sanitizer import detect_injection
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
 
 
 def _sse(event: StreamEvent) -> str:
@@ -39,6 +44,7 @@ def _sse(event: StreamEvent) -> str:
 
 
 @router.post("/chat")
+@limiter.limit("60/minute")
 async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
     """Stream the agent response as Server-Sent Events.
 
@@ -68,28 +74,65 @@ async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
 
 async def _run_pipeline(req, ollama, registry, context) -> AsyncIterator[str]:
     """The core chat pipeline, extracted for testability (keeps the route tiny)."""
+    started_at = time.time()
+
     # 1. Sanitize.
     injection = detect_injection(req.message)
     if injection.detected:
         logger.info("Blocked potential prompt injection: %s", injection.pattern)
-        yield _sse(StreamEvent(
-            type="error",
-            content=f"Request blocked: potential prompt injection ({injection.pattern}).",
-        ))
+        yield _sse(
+            StreamEvent(
+                type="error",
+                content=f"Request blocked: potential prompt injection ({injection.pattern}).",
+            )
+        )
         yield _sse(StreamEvent(type="done"))
         return
 
     # 2. Route.
     mode = (getattr(req, "mode", "agent") or "agent").lower()
     if mode == "plan":
-        decision = RoutingDecision(
-            primary_agent="ARCHITECT",
-            routing_confidence=1.0,
-            routing_reason="explicit-mode:plan",
-            thinking_mode="deep",
-            context_needed="high",
-            task_type="planning",
-        )
+        # Plan mode: use orchestration engine for structured planning
+        try:
+            from backend.orchestrator.engine import OrchestrationEngine
+            event_bus = request.app.state.event_bus
+            engine = OrchestrationEngine(
+                ollama=ollama,
+                registry=registry,
+                event_bus=event_bus,
+            )
+            plan = await engine.create_plan(
+                objective=req.message,
+                session_id=req.session_id,
+                history=history,
+            )
+            # Stream the plan as structured output
+            yield _sse(StreamEvent(type="agent_started", agent="ARCHITECT"))
+            plan_text = f"# Execution Plan\n\n"
+            plan_text += f"**Objective:** {plan.objective}\n\n"
+            for i, step in enumerate(plan.steps, 1):
+                plan_text += f"## Step {i}: {step.name}\n"
+                plan_text += f"- **Agent:** {step.agent}\n"
+                plan_text += f"- **Description:** {step.description}\n"
+                if step.depends_on:
+                    plan_text += f"- **Depends on:** {', '.join(step.depends_on)}\n"
+                plan_text += "\n"
+            for token in plan_text:
+                yield _sse(StreamEvent(type="token", agent="ARCHITECT", content=token))
+            yield _sse(StreamEvent(type="agent_finished", agent="ARCHITECT"))
+            yield _sse(StreamEvent(type="done"))
+            return
+        except Exception as exc:
+            logger.warning("Plan engine failed, falling back to ARCHITECT: %s", exc)
+            # Fall through to normal routing
+            decision = RoutingDecision(
+                primary_agent="ARCHITECT",
+                routing_confidence=1.0,
+                routing_reason="explicit-mode:plan-fallback",
+                thinking_mode="deep",
+                context_needed="high",
+                task_type="planning",
+            )
     elif mode == "debug":
         decision = RoutingDecision(
             primary_agent="DEBUGGER",
@@ -125,6 +168,7 @@ async def _run_pipeline(req, ollama, registry, context) -> AsyncIterator[str]:
                 history=history,
             )
             return agent.run(agent_req)
+
         return invoke
 
     # 4. Invoke with fallback.
@@ -146,11 +190,13 @@ async def _run_pipeline(req, ollama, registry, context) -> AsyncIterator[str]:
     try:
         async for token in token_stream:
             parts.append(token)
-            yield _sse(StreamEvent(
-                type="token",
-                agent=outcome.used_agent,  # type: ignore[arg-type]
-                content=token,
-            ))
+            yield _sse(
+                StreamEvent(
+                    type="token",
+                    agent=outcome.used_agent,  # type: ignore[arg-type]
+                    content=token,
+                )
+            )
     except OllamaError as exc:
         logger.exception("Stream interrupted: %s", exc)
         yield _sse(StreamEvent(type="error", content=f"Stream interrupted: {exc}"))
@@ -159,10 +205,39 @@ async def _run_pipeline(req, ollama, registry, context) -> AsyncIterator[str]:
 
     # 6. Persist exchange.
     full = "".join(parts)
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat()
-    await context.append_message(req.session_id, ChatMessage(role="user", content=req.message, timestamp=now))
-    await context.append_message(req.session_id, ChatMessage(role="assistant", content=full, timestamp=now))
+    from datetime import datetime
+
+    now = datetime.now(UTC).isoformat()
+    await context.append_message(
+        req.session_id, ChatMessage(role="user", content=req.message, timestamp=now)
+    )
+    await context.append_message(
+        req.session_id, ChatMessage(role="assistant", content=full, timestamp=now)
+    )
+    latency_ms = int((time.time() - started_at) * 1000)
+
+    # Ensure session exists in relational DB before writing messages (FK guard).
+    if get_session(req.session_id) is None:
+        create_session(
+            title=req.message[:60] or "Nova sessão",
+            mode=req.mode or "auto",
+            session_id=req.session_id,
+        )
+
+    add_message(
+        req.session_id,
+        "user",
+        req.message,
+        tier_used=decision.primary_agent,
+        latency_ms=latency_ms,
+    )
+    add_message(
+        req.session_id,
+        "assistant",
+        full,
+        tier_used=decision.primary_agent,
+        latency_ms=latency_ms,
+    )
 
     yield _sse(StreamEvent(type="agent_finished", agent=outcome.used_agent))  # type: ignore[arg-type]
     yield _sse(StreamEvent(type="done"))

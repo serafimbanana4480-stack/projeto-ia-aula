@@ -4,7 +4,14 @@ import { motion } from "framer-motion";
 import TopBar from "../../components/layout/TopBar";
 import Sidebar from "../../components/layout/Sidebar";
 import BottomHUD from "../../components/layout/BottomHUD";
-import { BarChart3, Code2, Zap, Clock, TrendingUp, AlertCircle } from "lucide-react";
+import {
+  BarChart3,
+  Zap,
+  Clock,
+  TrendingUp,
+  AlertCircle,
+  FileText,
+} from "lucide-react";
 import { getCurrentMetrics } from "../../lib/api";
 
 interface AnalyticsData {
@@ -15,9 +22,21 @@ interface AnalyticsData {
   requests_failed: number;
   avg_latency_ms: number;
   uptime_seconds: number;
-  lines_written: number;
-  files_modified: number;
-  agent_performance: Record<string, { tasks: number; success_rate: number }>;
+  message_stats?: {
+    total_messages: number;
+    sessions_with_messages: number;
+    user_messages: number;
+    assistant_messages: number;
+    tokens_in_total: number;
+    tokens_out_total: number;
+    avg_latency_ms: number;
+    last_message_at: string;
+  };
+  change_stats?: {
+    total_changes: number;
+    files_modified: number;
+    lines_written: number;
+  };
 }
 
 export default function AnalysisPage() {
@@ -28,30 +47,17 @@ export default function AnalysisPage() {
     const fetchAnalytics = async () => {
       try {
         const metrics = await getCurrentMetrics();
-        
-        // Transform backend metrics into analytics format
+
         const analyticsData: AnalyticsData = {
-          tokens_per_second: metrics.tokens_per_second || 0,
+          tokens_per_second: metrics.tokens_per_second ?? 0,
           active_model: metrics.active_model || "N/A",
-          requests_total: metrics.requests_total || 0,
-          requests_successful: metrics.requests_successful || 0,
-          requests_failed: metrics.requests_failed || 0,
-          avg_latency_ms: metrics.avg_latency_ms || 0,
-          uptime_seconds: metrics.uptime_seconds || 0,
-          lines_written: metrics.requests_successful * 42 || 0, // Estimate
-          files_modified: Math.floor(metrics.requests_successful / 3) || 0, // Estimate
-          agent_performance: {
-            CODER: {
-              tasks: metrics.requests_successful || 0,
-              success_rate: metrics.requests_total > 0 
-                ? ((metrics.requests_successful / metrics.requests_total) * 100).toFixed(1) as any
-                : 100,
-            },
-            SYSTEM: {
-              tasks: metrics.requests_total || 0,
-              success_rate: 100,
-            },
-          },
+          requests_total: metrics.requests_total ?? 0,
+          requests_successful: metrics.requests_successful ?? 0,
+          requests_failed: metrics.requests_failed ?? 0,
+          avg_latency_ms: metrics.avg_latency_ms ?? 0,
+          uptime_seconds: metrics.uptime_seconds ?? 0,
+          message_stats: metrics.message_stats,
+          change_stats: metrics.change_stats,
         };
 
         setAnalytics(analyticsData);
@@ -77,10 +83,10 @@ export default function AnalysisPage() {
   return (
     <div className="flex h-screen flex-col bg-nexus-bg">
       <TopBar />
-      
+
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        
+
         <main className="flex-1 overflow-auto p-6">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -107,7 +113,7 @@ export default function AnalysisPage() {
                   >
                     <div className="flex items-center gap-2 text-xs text-gray-500 mb-2">
                       <Zap className="h-3 w-3" />
-                      Tokens/Second
+                      Tokens / Second
                     </div>
                     <div className="text-2xl font-bold text-nexus-accent">
                       {analytics.tokens_per_second.toFixed(1)}
@@ -121,11 +127,12 @@ export default function AnalysisPage() {
                     className="rounded border border-nexus-border bg-nexus-panel/50 p-4"
                   >
                     <div className="flex items-center gap-2 text-xs text-gray-500 mb-2">
-                      <Code2 className="h-3 w-3" />
-                      Lines Written
+                      <FileText className="h-3 w-3" />
+                      Messages Persisted
                     </div>
                     <div className="text-2xl font-bold">
-                      {analytics.lines_written.toLocaleString()}
+                      {analytics.message_stats?.total_messages?.toLocaleString() ??
+                        "—"}
                     </div>
                   </motion.div>
 
@@ -156,8 +163,13 @@ export default function AnalysisPage() {
                     </div>
                     <div className="text-2xl font-bold text-green-400">
                       {analytics.requests_total > 0
-                        ? ((analytics.requests_successful / analytics.requests_total) * 100).toFixed(1)
-                        : "100"}%
+                        ? (
+                            (analytics.requests_successful /
+                              analytics.requests_total) *
+                            100
+                          ).toFixed(1)
+                        : "100"}
+                      %
                     </div>
                   </motion.div>
                 </div>
@@ -169,23 +181,67 @@ export default function AnalysisPage() {
                     animate={{ opacity: 1, x: 0 }}
                     className="rounded border border-nexus-border bg-nexus-panel/50 p-4"
                   >
-                    <h3 className="mb-4 text-sm font-semibold">Request Statistics</h3>
+                    <h3 className="mb-4 text-sm font-semibold">
+                      Request Statistics
+                    </h3>
                     <div className="space-y-3">
                       <div className="flex justify-between">
-                        <span className="text-xs text-gray-500">Total Requests</span>
-                        <span className="text-sm font-medium">{analytics.requests_total}</span>
+                        <span className="text-xs text-gray-500">
+                          Total Requests
+                        </span>
+                        <span className="text-sm font-medium">
+                          {analytics.requests_total}
+                        </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-xs text-gray-500">Successful</span>
-                        <span className="text-sm font-medium text-green-400">{analytics.requests_successful}</span>
+                        <span className="text-xs text-gray-500">
+                          Successful
+                        </span>
+                        <span className="text-sm font-medium text-green-400">
+                          {analytics.requests_successful}
+                        </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-xs text-gray-500">Failed</span>
-                        <span className="text-sm font-medium text-red-400">{analytics.requests_failed}</span>
+                        <span className="text-sm font-medium text-red-400">
+                          {analytics.requests_failed}
+                        </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-xs text-gray-500">Avg Latency</span>
-                        <span className="text-sm font-medium">{analytics.avg_latency_ms.toFixed(0)}ms</span>
+                        <span className="text-xs text-gray-500">
+                          Avg Latency
+                        </span>
+                        <span className="text-sm font-medium">
+                          {analytics.avg_latency_ms.toFixed(0)}ms
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-gray-500">Messages</span>
+                        <span className="text-sm font-medium">
+                          {analytics.message_stats?.total_messages ?? 0}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-gray-500">Changes</span>
+                        <span className="text-sm font-medium">
+                          {analytics.change_stats?.total_changes ?? 0}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-gray-500">
+                          Files Modified
+                        </span>
+                        <span className="text-sm font-medium">
+                          {analytics.change_stats?.files_modified ?? "—"}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-xs text-gray-500">
+                          Lines Written
+                        </span>
+                        <span className="text-sm font-medium">
+                          {analytics.change_stats?.lines_written ?? "—"}
+                        </span>
                       </div>
                     </div>
                   </motion.div>
@@ -196,24 +252,38 @@ export default function AnalysisPage() {
                     transition={{ delay: 0.1 }}
                     className="rounded border border-nexus-border bg-nexus-panel/50 p-4"
                   >
-                    <h3 className="mb-4 text-sm font-semibold">Agent Performance</h3>
+                    <h3 className="mb-4 text-sm font-semibold">
+                      Captured Data
+                    </h3>
                     <div className="space-y-3">
-                      {Object.entries(analytics.agent_performance).map(([agent, perf]) => (
-                        <div key={agent} className="space-y-1">
-                          <div className="flex justify-between">
-                            <span className="text-xs text-gray-500">{agent}</span>
-                            <span className="text-xs font-medium">{perf.tasks} tasks</span>
+                      <div className="flex items-center justify-between rounded border border-nexus-border/50 p-3">
+                        <div>
+                          <div className="text-sm font-medium">
+                            Persisted messages
                           </div>
-                          <div className="h-2 rounded-full bg-nexus-border">
-                            <motion.div
-                              initial={{ width: 0 }}
-                              animate={{ width: `${perf.success_rate}%` }}
-                              className="h-full rounded-full bg-nexus-accent"
-                            />
+                          <div className="text-xs text-gray-500">
+                            User + assistant records stored in SQLite.
                           </div>
-                          <div className="text-xs text-gray-500 text-right">{perf.success_rate}% success</div>
                         </div>
-                      ))}
+                        <div className="text-sm font-semibold">
+                          {analytics.message_stats?.total_messages?.toLocaleString() ??
+                            "—"}
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between rounded border border-nexus-border/50 p-3">
+                        <div>
+                          <div className="text-sm font-medium">
+                            Tracked changes
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            Real proposed file changes, not estimates.
+                          </div>
+                        </div>
+                        <div className="text-sm font-semibold">
+                          {analytics.change_stats?.total_changes?.toLocaleString() ??
+                            "—"}
+                        </div>
+                      </div>
                     </div>
                   </motion.div>
                 </div>
@@ -227,10 +297,14 @@ export default function AnalysisPage() {
                   <div className="flex items-center justify-between">
                     <div>
                       <h3 className="text-sm font-semibold">Active Model</h3>
-                      <p className="text-xs text-gray-500">Currently selected AI model</p>
+                      <p className="text-xs text-gray-500">
+                        Currently selected AI model
+                      </p>
                     </div>
                     <div className="rounded bg-nexus-border px-4 py-2">
-                      <span className="text-sm font-medium text-nexus-accent">{analytics.active_model}</span>
+                      <span className="text-sm font-medium text-nexus-accent">
+                        {analytics.active_model}
+                      </span>
                     </div>
                   </div>
                 </motion.div>
@@ -244,7 +318,7 @@ export default function AnalysisPage() {
           </motion.div>
         </main>
       </div>
-      
+
       <BottomHUD />
     </div>
   );

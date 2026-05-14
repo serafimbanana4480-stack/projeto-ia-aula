@@ -20,6 +20,7 @@ Security features:
 - Dangerous command detection
 - Audit logging
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -29,14 +30,13 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class RiskLevel(str, Enum):
+class RiskLevel(StrEnum):
     SAFE = "safe"  # read-only, no side effects
     LOW = "low"  # file writes within project
     MEDIUM = "medium"  # network access, package install
@@ -93,7 +93,7 @@ class DangerousCommandDetector:
         (r"shutdown|reboot|halt", "System shutdown"),
         (r"docker\s+(rm|kill|stop)", "Docker container manipulation"),
         (r"kubectl\s+delete", "Kubernetes resource deletion"),
-        (r"pip\s+install|npm\s+install\s+-g", "Global package installation"),
+        (r"npm\s+install\s+-g", "Global package installation"),
         (r"curl.*\|.*(bash|sh)", "Pipe to shell"),
         (r"eval\s+", "Eval execution"),
         (r"__import__\s*\(\s*['\"]os['\"]", "Python os import escape"),
@@ -151,7 +151,8 @@ class SandboxExecutor:
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "docker", "info",
+                "docker",
+                "info",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -181,7 +182,8 @@ class SandboxExecutor:
         if risk == RiskLevel.CRITICAL:
             logger.warning(
                 "CRITICAL risk command blocked for session %s: %s",
-                session_id, reasons,
+                session_id,
+                reasons,
             )
             return SandboxResult(
                 execution_id=execution_id,
@@ -229,7 +231,9 @@ class SandboxExecutor:
 
             # Build docker command
             cmd = [
-                "docker", "run", "--rm",
+                "docker",
+                "run",
+                "--rm",
                 f"--name=nexus-sandbox-{execution_id}",
                 "--network=none",
                 f"--memory={self._config.max_memory_mb}m",
@@ -264,7 +268,8 @@ class SandboxExecutor:
                     stderr=asyncio.subprocess.PIPE,
                 )
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout,
+                    proc.communicate(),
+                    timeout=timeout,
                 )
                 duration_ms = int((time.time() - start) * 1000)
 
@@ -277,11 +282,13 @@ class SandboxExecutor:
                     duration_ms=duration_ms,
                 )
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Kill container
                 try:
                     kill_proc = await asyncio.create_subprocess_exec(
-                        "docker", "kill", f"nexus-sandbox-{execution_id}",
+                        "docker",
+                        "kill",
+                        f"nexus-sandbox-{execution_id}",
                     )
                     await kill_proc.wait()
                 except Exception:
@@ -343,7 +350,8 @@ class SandboxExecutor:
 
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout,
+                    proc.communicate(),
+                    timeout=timeout,
                 )
                 duration_ms = int((time.time() - start) * 1000)
 
@@ -355,7 +363,7 @@ class SandboxExecutor:
                     timed_out=False,
                     duration_ms=duration_ms,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.wait()
                 duration_ms = int((time.time() - start) * 1000)
@@ -394,18 +402,45 @@ class SecurityPolicy:
 
     def __init__(self) -> None:
         self._blocked_paths: set[str] = {
-            "/etc/passwd", "/etc/shadow", "/etc/sudoers",
-            "/root/.ssh", "/home/*/.ssh",
-            "~/.aws", "~/.gcloud", "~/.config/gcloud",
+            "/etc/passwd",
+            "/etc/shadow",
+            "/etc/sudoers",
+            "/root/.ssh",
+            "/home/*/.ssh",
+            "~/.aws",
+            "~/.gcloud",
+            "~/.config/gcloud",
         }
         self._allowed_commands: set[str] = {
-            "ls", "cat", "head", "tail", "grep", "find", "wc",
-            "python3", "python", "node", "bash", "git",
-            "pip", "npm", "yarn", "cargo", "go",
+            "ls",
+            "cat",
+            "head",
+            "tail",
+            "grep",
+            "find",
+            "wc",
+            "python3",
+            "python",
+            "node",
+            "bash",
+            "git",
+            "pip",
+            "npm",
+            "yarn",
+            "cargo",
+            "go",
         }
         self._blocked_commands: set[str] = {
-            "sudo", "su", "chown", "chmod", "mount", "umount",
-            "mkfs", "dd", "fdisk", "parted",
+            "sudo",
+            "su",
+            "chown",
+            "chmod",
+            "mount",
+            "umount",
+            "mkfs",
+            "dd",
+            "fdisk",
+            "parted",
         }
 
     def is_path_allowed(self, path: str, project_root: str) -> bool:

@@ -8,10 +8,11 @@ Covers:
 - Plan creation and parsing
 - Cancellation
 """
+
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -19,8 +20,12 @@ from backend.orchestrator.dependency_graph import (
     DependencyGraph,
     ExecutionPlan,
     TaskNode,
-    TaskPriority,
     TaskStatus,
+)
+from backend.orchestrator.engine import (
+    ExecutionContext,
+    OrchestrationEngine,
+    OrchestrationState,
 )
 from backend.orchestrator.events import (
     EventBus,
@@ -28,16 +33,11 @@ from backend.orchestrator.events import (
     EventType,
     OrchestratorEvent,
 )
-from backend.orchestrator.engine import (
-    ExecutionContext,
-    OrchestrationEngine,
-    OrchestrationState,
-)
-
 
 # ---------------------------------------------------------------------------
 # Dependency Graph Tests
 # ---------------------------------------------------------------------------
+
 
 class TestDependencyGraph:
     def test_add_task(self) -> None:
@@ -167,6 +167,7 @@ class TestDependencyGraph:
 # Execution Plan Tests
 # ---------------------------------------------------------------------------
 
+
 class TestExecutionPlan:
     def test_from_steps(self) -> None:
         t1 = TaskNode(name="Analyze", agent="ANALYZER")
@@ -193,6 +194,7 @@ class TestExecutionPlan:
 # ---------------------------------------------------------------------------
 # Event Bus Tests
 # ---------------------------------------------------------------------------
+
 
 class TestEventBus:
     @pytest.mark.asyncio
@@ -258,12 +260,12 @@ class TestEventBus:
         # Publish events in background
         async def publish() -> None:
             await asyncio.sleep(0.01)
-            await bus.publish(OrchestratorEvent(
-                event_type=EventType.TOKEN, session_id="s1", content="hello"
-            ))
-            await bus.publish(OrchestratorEvent(
-                event_type=EventType.TOKEN, session_id="s1", content="world"
-            ))
+            await bus.publish(
+                OrchestratorEvent(event_type=EventType.TOKEN, session_id="s1", content="hello")
+            )
+            await bus.publish(
+                OrchestratorEvent(event_type=EventType.TOKEN, session_id="s1", content="world")
+            )
 
         await asyncio.gather(collect(), publish())
         assert len(events) == 2
@@ -274,9 +276,7 @@ class TestEventBus:
     async def test_get_recent_events(self) -> None:
         bus = EventBus()
         for i in range(5):
-            await bus.publish(OrchestratorEvent(
-                event_type=EventType.TOKEN, content=str(i)
-            ))
+            await bus.publish(OrchestratorEvent(event_type=EventType.TOKEN, content=str(i)))
         recent = bus.get_recent_events(limit=3)
         assert len(recent) == 3
         assert recent[-1].content == "4"
@@ -285,6 +285,7 @@ class TestEventBus:
 # ---------------------------------------------------------------------------
 # Event Emitter Tests
 # ---------------------------------------------------------------------------
+
 
 class TestEventEmitter:
     @pytest.mark.asyncio
@@ -311,6 +312,7 @@ class TestEventEmitter:
 # Orchestration Engine Tests
 # ---------------------------------------------------------------------------
 
+
 class TestOrchestrationEngine:
     @pytest.fixture
     def mock_ollama(self) -> MagicMock:
@@ -328,7 +330,9 @@ class TestOrchestrationEngine:
         return EventBus()
 
     @pytest.fixture
-    def engine(self, mock_ollama: MagicMock, mock_registry: dict, event_bus: EventBus) -> OrchestrationEngine:
+    def engine(
+        self, mock_ollama: MagicMock, mock_registry: dict, event_bus: EventBus
+    ) -> OrchestrationEngine:
         return OrchestrationEngine(
             ollama=mock_ollama,
             registry=mock_registry,
@@ -369,7 +373,9 @@ class TestOrchestrationEngine:
     async def test_execute_parallel_tasks(self, engine: OrchestrationEngine) -> None:
         t1 = TaskNode(name="Task 1", agent="CODER")
         t2 = TaskNode(name="Task 2", agent="CODER")
-        plan = ExecutionPlan.from_steps("Parallel", "Two independent tasks", [t1, t2], session_id="s1")
+        plan = ExecutionPlan.from_steps(
+            "Parallel", "Two independent tasks", [t1, t2], session_id="s1"
+        )
         plan.approved = True
 
         result = await engine.execute_plan(plan, "s1", auto_approve=True)
@@ -406,6 +412,7 @@ class TestOrchestrationEngine:
 # ---------------------------------------------------------------------------
 # Execution Context Tests
 # ---------------------------------------------------------------------------
+
 
 class TestExecutionContext:
     def test_initialization(self) -> None:

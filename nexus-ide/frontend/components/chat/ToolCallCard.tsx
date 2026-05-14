@@ -1,7 +1,13 @@
 "use client";
-import { useState } from "react";
+import { useState, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Loader2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  CheckCircle,
+  XCircle,
+  Loader2,
+} from "lucide-react";
 
 interface ToolCallCardProps {
   toolName: string;
@@ -12,7 +18,14 @@ interface ToolCallCardProps {
   durationMs?: number;
 }
 
-export default function ToolCallCard({ toolName, args, status, result, error, durationMs }: ToolCallCardProps) {
+function ToolCallCard({
+  toolName,
+  args,
+  status,
+  result,
+  error,
+  durationMs,
+}: ToolCallCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   const getStatusIcon = () => {
@@ -50,9 +63,15 @@ export default function ToolCallCard({ toolName, args, status, result, error, du
         <div className="flex items-center gap-2">
           {getStatusIcon()}
           <span className="text-xs font-medium">{toolName}</span>
-          {durationMs && <span className="text-xs text-gray-500">{durationMs}ms</span>}
+          {durationMs && (
+            <span className="text-xs text-gray-500">{durationMs}ms</span>
+          )}
         </div>
-        {expanded ? <ChevronUp className="h-3 w-3 text-gray-400" /> : <ChevronDown className="h-3 w-3 text-gray-400" />}
+        {expanded ? (
+          <ChevronUp className="h-3 w-3 text-gray-400" />
+        ) : (
+          <ChevronDown className="h-3 w-3 text-gray-400" />
+        )}
       </button>
 
       <AnimatePresence>
@@ -69,16 +88,18 @@ export default function ToolCallCard({ toolName, args, status, result, error, du
                 {JSON.stringify(args, null, 2)}
               </pre>
             </div>
-            
+
             {status === "success" && result && (
               <div>
                 <div className="text-xs text-gray-500">Result:</div>
                 <pre className="mt-1 rounded bg-black/20 p-2 text-xs text-gray-400 overflow-x-auto">
-                  {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
+                  {typeof result === "string"
+                    ? result
+                    : JSON.stringify(result, null, 2)}
                 </pre>
               </div>
             )}
-            
+
             {status === "error" && error && (
               <div className="text-xs text-red-400">{error}</div>
             )}
@@ -88,3 +109,5 @@ export default function ToolCallCard({ toolName, args, status, result, error, du
     </motion.div>
   );
 }
+
+export default memo(ToolCallCard);

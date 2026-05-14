@@ -2,15 +2,16 @@
 
 See ARCHITECTURE.md §4.
 """
-from backend.orchestrator.engine import OrchestrationEngine, OrchestrationResult, OrchestrationState
-from backend.orchestrator.events import EventBus, EventType, OrchestratorEvent, EventEmitter
+
 from backend.orchestrator.dependency_graph import (
     DependencyGraph,
     ExecutionPlan,
     TaskNode,
-    TaskStatus,
     TaskPriority,
+    TaskStatus,
 )
+from backend.orchestrator.engine import OrchestrationEngine, OrchestrationResult, OrchestrationState
+from backend.orchestrator.events import EventBus, EventEmitter, EventType, OrchestratorEvent
 
 __all__ = [
     "OrchestrationEngine",

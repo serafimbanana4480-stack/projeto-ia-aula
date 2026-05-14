@@ -1,6 +1,78 @@
 # Contributing to NEXUS IDE
 
+Welcome to NEXUS IDE! This document guides you through setting up the development environment, running tests, and contributing to the project.
+
+**[🇺🇸 English](#english) | [🇵🇹 Português](#português)**
+
+---
+
+## English
+
+For detailed development setup instructions, see the **[Developer Setup Guide](./docs/developer-setup.md)**.
+
+### Quick Start
+
+```bash
+# Clone and setup
+git clone <repository-url>
+cd nexus-ide
+cp .env.example .env
+
+# Run initial setup
+make setup
+
+# Start development environment
+make dev
+```
+
+### Development Documentation
+
+- **[Developer Setup Guide](./docs/developer-setup.md)** - Comprehensive development environment setup
+- **[User Guide](./docs/user-guide.md)** - Understanding the application features
+- **[Troubleshooting Guide](./docs/troubleshooting.md)** - Common development issues
+- **[FAQ](./docs/FAQ.md)** - Frequently asked questions
+- **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Technical architecture
+
+### Testing
+
+```bash
+# Run all tests
+make test
+
+# Run backend tests
+make test-backend
+
+# Run frontend tests
+make test-frontend
+```
+
+### Code Quality
+
+```bash
+# Lint all code
+make lint
+
+# Format all code
+make format
+```
+
+### Pull Request Process
+
+1. Create a feature branch: `git checkout -b feature/feature-name`
+2. Make your changes and commit with clear messages
+3. Run tests and lint locally: `make test && make lint`
+4. Push and create a pull request
+5. Wait for CI checks to pass
+6. Address code review feedback
+7. Merge after approval
+
+---
+
+## Português
+
 Bem-vindo ao NEXUS IDE! Este documento guia-te através de como configurar o ambiente de desenvolvimento, correr testes, e contribuir para o projeto.
+
+Para instruções detalhadas de configuração do ambiente de desenvolvimento, consulta o **[Developer Setup Guide](./docs/developer-setup.md)** (em inglês).
 
 ## Pré-requisitos
 
@@ -195,12 +267,16 @@ A: `make test-backend` ou `cd backend && pytest tests/`
 **Q: Como faço reset do ambiente?**  
 A: `make clean` limpa volumes Docker e artefactos de build.
 
-## Recursos
+## Resources / Recursos
 
-- **Arquitetura:** `ARCHITECTURE.md`
-- **Plano de Implementação:** `docs/IMPLEMENTATION_PLAN.md`
-- **Regras do Cascade:** `.windsurf/rules.md`
-- **Workflows do Cascade:** `.windsurf/workflows/`
+- **[Developer Setup Guide](./docs/developer-setup.md)** - Comprehensive development setup
+- **[User Guide](./docs/user-guide.md)** - User documentation and features
+- **[Troubleshooting Guide](./docs/troubleshooting.md)** - Common issues and solutions
+- **[FAQ](./docs/FAQ.md)** - Frequently asked questions
+- **Architecture:** `ARCHITECTURE.md`
+- **Implementation Plan:** `docs/IMPLEMENTATION_PLAN.md`
+- **Cascade Rules:** `.windsurf/rules.md`
+- **Cascade Workflows:** `.windsurf/workflows/`
 
 ## Licença
 

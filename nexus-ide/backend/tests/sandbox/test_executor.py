@@ -7,6 +7,7 @@ Covers:
 - Path validation
 - Sandbox execution (subprocess fallback)
 """
+
 from __future__ import annotations
 
 import pytest
@@ -59,7 +60,9 @@ class TestDangerousCommandDetector:
         assert risk == RiskLevel.LOW
 
     def test_critical_python_subprocess_escape(self) -> None:
-        risk, reasons = DangerousCommandDetector.assess_risk("import subprocess; subprocess.run(['rm', '-rf', '/'])")
+        risk, reasons = DangerousCommandDetector.assess_risk(
+            "import subprocess; subprocess.run(['rm', '-rf', '/'])"
+        )
         assert risk == RiskLevel.CRITICAL
 
 

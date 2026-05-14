@@ -40,12 +40,12 @@ export default function ToolsPanel() {
         <Wrench className="h-4 w-4 text-nexus-accent" />
         <span className="text-sm font-semibold">Active Tools</span>
       </div>
-      
+
       <div className="space-y-2">
         {TOOLS.map((tool) => {
           const toolState = tools.find((t) => t.name === tool.id);
           const enabled = toolState?.enabled ?? true;
-          
+
           return (
             <motion.button
               key={tool.id}

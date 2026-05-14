@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, ChevronUp, Brain } from "lucide-react";
 
@@ -8,7 +8,10 @@ interface ThinkingBlockProps {
   iteration?: number;
 }
 
-export default function ThinkingBlock({ content, iteration }: ThinkingBlockProps) {
+function ThinkingBlock({
+  content,
+  iteration,
+}: ThinkingBlockProps) {
   const [expanded, setExpanded] = useState(true);
 
   return (
@@ -23,10 +26,16 @@ export default function ThinkingBlock({ content, iteration }: ThinkingBlockProps
       >
         <Brain className="h-3 w-3 text-nexus-accent" />
         <span className="font-medium">Thinking</span>
-        {iteration && <span className="text-gray-500">Iteration {iteration}</span>}
-        {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+        {iteration && (
+          <span className="text-gray-500">Iteration {iteration}</span>
+        )}
+        {expanded ? (
+          <ChevronUp className="h-3 w-3" />
+        ) : (
+          <ChevronDown className="h-3 w-3" />
+        )}
       </button>
-      
+
       <AnimatePresence>
         {expanded && (
           <motion.div
@@ -35,10 +44,14 @@ export default function ThinkingBlock({ content, iteration }: ThinkingBlockProps
             exit={{ height: 0, opacity: 0 }}
             className="mt-2 overflow-hidden"
           >
-            <div className="text-xs text-gray-400 whitespace-pre-wrap">{content}</div>
+            <div className="text-xs text-gray-400 whitespace-pre-wrap">
+              {content}
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
     </motion.div>
   );
 }
+
+export default memo(ThinkingBlock);

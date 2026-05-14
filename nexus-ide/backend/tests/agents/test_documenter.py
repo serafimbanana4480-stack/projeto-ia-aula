@@ -1,4 +1,5 @@
 """Tests for backend.agents.documenter."""
+
 from __future__ import annotations
 
 from backend.agents.documenter import DocumenterAgent

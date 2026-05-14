@@ -1,0 +1,33 @@
+"""Terminal routes for local command execution in the editor workspace."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Request
+
+from backend.models.api import TerminalExecuteRequest, TerminalExecuteResponse
+from backend.sandbox.executor import get_sandbox_executor
+
+router = APIRouter()
+
+
+@router.post("/terminal/execute", response_model=TerminalExecuteResponse)
+async def execute_terminal_command(
+    req: TerminalExecuteRequest, request: Request
+) -> TerminalExecuteResponse:
+    executor = get_sandbox_executor()
+    result = await executor.execute(
+        req.command,
+        language="bash",
+        timeout=req.timeout_seconds,
+        session_id=req.session_id or request.headers.get("x-session-id", ""),
+    )
+    return TerminalExecuteResponse(
+        execution_id=result.execution_id,
+        command=req.command,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        exit_code=result.exit_code,
+        timed_out=result.timed_out,
+        duration_ms=result.duration_ms,
+        risk_level=result.risk_level.value,
+    )

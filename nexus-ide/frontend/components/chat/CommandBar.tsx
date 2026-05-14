@@ -8,7 +8,10 @@ interface CommandBarProps {
   disabled?: boolean;
 }
 
-export default function CommandBar({ onSend, disabled = false }: CommandBarProps) {
+export default function CommandBar({
+  onSend,
+  disabled = false,
+}: CommandBarProps) {
   const [input, setInput] = useState("");
 
   const handleSend = () => {
@@ -36,7 +39,7 @@ export default function CommandBar({ onSend, disabled = false }: CommandBarProps
           <Command className="h-3 w-3 text-gray-400" />
           <span className="text-xs text-gray-400">/</span>
         </div>
-        
+
         <input
           type="text"
           value={input}
@@ -46,7 +49,7 @@ export default function CommandBar({ onSend, disabled = false }: CommandBarProps
           disabled={disabled}
           className="flex-1 bg-transparent text-sm text-gray-300 placeholder:text-gray-500 focus:outline-none"
         />
-        
+
         <div className="flex items-center gap-2">
           <button className="rounded p-2 text-gray-400 hover:bg-nexus-border hover:text-gray-300">
             <Paperclip className="h-4 w-4" />
@@ -63,12 +66,20 @@ export default function CommandBar({ onSend, disabled = false }: CommandBarProps
           </button>
         </div>
       </div>
-      
+
       <div className="mt-2 flex gap-2 text-xs text-gray-500">
-        <button className="rounded bg-nexus-border px-2 py-1 hover:bg-nexus-border/50">/code</button>
-        <button className="rounded bg-nexus-border px-2 py-1 hover:bg-nexus-border/50">/plan</button>
-        <button className="rounded bg-nexus-border px-2 py-1 hover:bg-nexus-border/50">/analyze</button>
-        <button className="rounded bg-nexus-border px-2 py-1 hover:bg-nexus-border/50">/scrape</button>
+        <button className="rounded bg-nexus-border px-2 py-1 hover:bg-nexus-border/50">
+          /code
+        </button>
+        <button className="rounded bg-nexus-border px-2 py-1 hover:bg-nexus-border/50">
+          /plan
+        </button>
+        <button className="rounded bg-nexus-border px-2 py-1 hover:bg-nexus-border/50">
+          /analyze
+        </button>
+        <button className="rounded bg-nexus-border px-2 py-1 hover:bg-nexus-border/50">
+          /scrape
+        </button>
       </div>
     </motion.div>
   );

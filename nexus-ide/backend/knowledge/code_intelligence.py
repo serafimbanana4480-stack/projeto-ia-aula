@@ -11,14 +11,16 @@ Architecture:
 - ``SymbolGraph``: graph of symbols, imports, and dependencies
 - ``CodeSearch``: semantic + structural code search
 """
+
 from __future__ import annotations
 
 import ast
+import contextlib
 import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -93,77 +95,83 @@ class PythonIndexer:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     imports.append(alias.name)
-                    symbols.append(Symbol(
-                        name=alias.name,
-                        kind="import",
-                        file_path=str(path),
-                        line_start=node.lineno,
-                        line_end=node.end_lineno or node.lineno,
-                    ))
+                    symbols.append(
+                        Symbol(
+                            name=alias.name,
+                            kind="import",
+                            file_path=str(path),
+                            line_start=node.lineno,
+                            line_end=node.end_lineno or node.lineno,
+                        )
+                    )
 
             elif isinstance(node, ast.ImportFrom):
                 module = node.module or ""
                 for alias in node.names:
                     full = f"{module}.{alias.name}" if module else alias.name
                     imports.append(full)
-                    symbols.append(Symbol(
-                        name=full,
-                        kind="import",
-                        file_path=str(path),
-                        line_start=node.lineno,
-                        line_end=node.end_lineno or node.lineno,
-                    ))
+                    symbols.append(
+                        Symbol(
+                            name=full,
+                            kind="import",
+                            file_path=str(path),
+                            line_start=node.lineno,
+                            line_end=node.end_lineno or node.lineno,
+                        )
+                    )
 
             elif isinstance(node, ast.FunctionDef):
                 docstring = ast.get_docstring(node) or ""
-                decorators = [
-                    self._decorator_name(d) for d in node.decorator_list
-                ]
+                decorators = [self._decorator_name(d) for d in node.decorator_list]
                 is_private = node.name.startswith("_")
-                symbols.append(Symbol(
-                    name=node.name,
-                    kind="method" if self._is_method(node) else "function",
-                    file_path=str(path),
-                    line_start=node.lineno,
-                    line_end=node.end_lineno or node.lineno,
-                    docstring=docstring,
-                    signature=self._function_signature(node),
-                    decorators=decorators,
-                    visibility="private" if is_private else "public",
-                ))
+                symbols.append(
+                    Symbol(
+                        name=node.name,
+                        kind="method" if self._is_method(node) else "function",
+                        file_path=str(path),
+                        line_start=node.lineno,
+                        line_end=node.end_lineno or node.lineno,
+                        docstring=docstring,
+                        signature=self._function_signature(node),
+                        decorators=decorators,
+                        visibility="private" if is_private else "public",
+                    )
+                )
 
             elif isinstance(node, ast.ClassDef):
                 docstring = ast.get_docstring(node) or ""
-                decorators = [
-                    self._decorator_name(d) for d in node.decorator_list
-                ]
+                decorators = [self._decorator_name(d) for d in node.decorator_list]
                 is_private = node.name.startswith("_")
-                symbols.append(Symbol(
-                    name=node.name,
-                    kind="class",
-                    file_path=str(path),
-                    line_start=node.lineno,
-                    line_end=node.end_lineno or node.lineno,
-                    docstring=docstring,
-                    signature=f"class {node.name}",
-                    decorators=decorators,
-                    visibility="private" if is_private else "public",
-                ))
+                symbols.append(
+                    Symbol(
+                        name=node.name,
+                        kind="class",
+                        file_path=str(path),
+                        line_start=node.lineno,
+                        line_end=node.end_lineno or node.lineno,
+                        docstring=docstring,
+                        signature=f"class {node.name}",
+                        decorators=decorators,
+                        visibility="private" if is_private else "public",
+                    )
+                )
 
             elif isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         is_private = target.id.startswith("_")
                         is_export = target.id.isupper()  # UPPER_CASE = exported constant
-                        symbols.append(Symbol(
-                            name=target.id,
-                            kind="variable",
-                            file_path=str(path),
-                            line_start=node.lineno,
-                            line_end=node.end_lineno or node.lineno,
-                            visibility="private" if is_private else "public",
-                            exports=is_export,
-                        ))
+                        symbols.append(
+                            Symbol(
+                                name=target.id,
+                                kind="variable",
+                                file_path=str(path),
+                                line_start=node.lineno,
+                                line_end=node.end_lineno or node.lineno,
+                                visibility="private" if is_private else "public",
+                                exports=is_export,
+                            )
+                        )
 
         # Determine exports
         for sym in symbols:
@@ -171,7 +179,7 @@ class PythonIndexer:
                 exports.append(sym.name)
 
         lines = source.count("\n") + 1
-        stat = path.stat() if path.exists() else os.stat_result((0,)*10)
+        stat = path.stat() if path.exists() else os.stat_result((0,) * 10)
 
         return FileIndex(
             file_path=str(path),
@@ -188,7 +196,11 @@ class PythonIndexer:
         if isinstance(node, ast.Name):
             return node.id
         if isinstance(node, ast.Attribute):
-            return f"{ast.unparse(node.value)}.{node.attr}" if hasattr(ast, 'unparse') else str(node.attr)
+            return (
+                f"{ast.unparse(node.value)}.{node.attr}"
+                if hasattr(ast, "unparse")
+                else str(node.attr)
+            )
         if isinstance(node, ast.Call):
             return self._decorator_name(node.func)
         return ""
@@ -198,10 +210,10 @@ class PythonIndexer:
         for arg in node.args.args:
             annotation = ""
             if arg.annotation:
-                try:
-                    annotation = f": {ast.unparse(arg.annotation)}" if hasattr(ast, 'unparse') else ""
-                except Exception:
-                    pass
+                with contextlib.suppress(Exception):
+                    annotation = (
+                        f": {ast.unparse(arg.annotation)}" if hasattr(ast, "unparse") else ""
+                    )
             args.append(f"{arg.arg}{annotation}")
         return f"def {node.name}({', '.join(args)})"
 
@@ -221,7 +233,10 @@ class CodeIndexer:
 
     def index_directory(self, root_path: str, *, exclude_dirs: list[str] | None = None) -> int:
         """Index all source files in a directory tree."""
-        exclude = set(exclude_dirs or [".git", "__pycache__", "node_modules", ".venv", "venv", ".next", "dist", "build"])
+        exclude = set(
+            exclude_dirs
+            or [".git", "__pycache__", "node_modules", ".venv", "venv", ".next", "dist", "build"]
+        )
         count = 0
 
         root = Path(root_path)

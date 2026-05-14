@@ -1,4 +1,5 @@
 """Tests for backend.agents.coder."""
+
 from __future__ import annotations
 
 from backend.agents.base import AgentAction, AgentRequest

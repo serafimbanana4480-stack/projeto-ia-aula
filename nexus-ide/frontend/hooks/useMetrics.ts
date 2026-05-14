@@ -17,7 +17,11 @@ export function useMetrics() {
   useEffect(() => {
     const src = new EventSource("/api/dashboard/stream");
     src.onmessage = (e) => {
-      try { setMetrics(JSON.parse(e.data)); } catch { /* ignore */ }
+      try {
+        setMetrics(JSON.parse(e.data));
+      } catch {
+        /* ignore */
+      }
     };
     return () => src.close();
   }, []);

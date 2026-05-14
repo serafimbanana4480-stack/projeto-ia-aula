@@ -17,6 +17,7 @@ asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["."]
 markers = [
   "integration: end-to-end tests requiring a live Ollama instance (skipped by default)",
+  "contract: tests for API contracts and serialization",
 ]
 filterwarnings = [
   "error",

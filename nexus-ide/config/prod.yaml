@@ -1,0 +1,75 @@
+# Production Environment Configuration
+# This file overrides default settings for production environment
+
+# Application Settings
+app:
+  name: "NEXUS IDE"
+  debug: false
+  log_level: "INFO"
+  reload: false
+
+# CORS Settings
+cors:
+  allowed_origins:
+    - "https://your-production-domain.com"
+  allow_credentials: false
+  allow_methods: ["GET", "POST", "PUT", "DELETE"]
+  allow_headers: ["Content-Type", "Authorization"]
+
+# Database Settings
+database:
+  url: "postgresql://user:password@localhost:5432/nexus"
+  echo: false  # Do not log SQL queries in production
+  pool_size: 20
+  max_overflow: 10
+
+# Redis Settings
+redis:
+  url: "redis://localhost:6379"
+  db: 0
+  password: "${REDIS_PASSWORD}"  # Use environment variable
+
+# Ollama Settings
+ollama:
+  host: "http://localhost:11434"
+  dashboard_host: "http://localhost:11435"
+  timeout: 120
+  retry_attempts: 5
+
+# Observability Settings
+observability:
+  enable_tracing: true
+  enable_metrics: true
+  otel_exporter_otlp_endpoint: "http://localhost:4317"
+  prometheus_port: 9090
+
+# Rate Limiting
+rate_limiting:
+  enabled: true
+  requests_per_minute: 60
+
+# Security Settings
+security:
+  secret_key: "${SECRET_KEY}"  # Must be set via environment variable
+  session_expire_hours: 8
+  require_https: true
+
+# Feature Flags
+features:
+  enable_web_search: true
+  enable_code_execution: true
+  enable_file_operations: true
+  enable_terminal: true
+  max_file_size_mb: 10
+
+# Logging
+logging:
+  level: "INFO"
+  format: "json"
+  file: "logs/nexus_prod.log"
+
+# Performance Settings
+performance:
+  max_workers: 4
+  request_timeout: 300
+  max_concurrent_requests: 100

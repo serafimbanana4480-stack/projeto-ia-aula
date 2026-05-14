@@ -1,22 +1,44 @@
 "use client";
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useMemo, useState, useEffect, useRef, useCallback } from "react";
+import { motion } from "framer-motion";
 import { useAgentStream } from "../../hooks/useAgentStream";
-import { getSessionHistory } from "../../lib/api";
+import { getSessionHistory, createPlan, approvePlan, executePlan, getPlanStatus, cancelPlan } from "../../lib/api";
+import { apiUrl } from "../../lib/api";
+import type { PlanCreateResult, PlanStatus as PlanStatusType } from "../../lib/api";
 import { useModeStore } from "../../stores/modeStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import MessageBubble from "./MessageBubble";
+import VirtualMessageList from "./VirtualMessageList";
+import {
+  Sparkles,
+  Plus,
+  Share2,
+  PanelRightClose,
+  PanelRightOpen,
+  Wand2,
+  Globe,
+  Paperclip,
+  Mic,
+  Send,
+  StopCircle,
+  RotateCcw,
+  Check,
+  Play,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  Loader2,
+  ListChecks,
+} from "lucide-react";
 import type { AgentName, ChatMessage, StreamEvent } from "../../lib/types";
 
-/** Fold the raw SSE event stream into an ordered list of ChatMessages.
- *
- * Rules:
- *  - every user message the panel sent is already pushed via `pendingUser`.
- *  - `agent_started` opens a new assistant bubble we keep appending to.
- *  - each `token` event appends to that bubble's content.
- *  - `error` replaces the current assistant bubble with an error message.
- *  - `done` / `agent_finished` just close the current bubble.
- */
+interface ChatPanelProps {
+  rightOpen?: boolean;
+  setRightOpen?: (open: boolean) => void;
+}
+
+/** Fold the raw SSE event stream into an ordered list of ChatMessages. */
 function foldEvents(
   pendingUser: ChatMessage[],
   events: StreamEvent[],
@@ -57,28 +79,36 @@ function foldEvents(
         current = null;
         break;
       }
-      default: // routing, etc. — ignored in the message list.
+      default:
         break;
     }
   }
   return out;
 }
 
-export default function ChatPanel() {
-  const sessionId = "default";
+export default function ChatPanel({
+  rightOpen = true,
+  setRightOpen,
+}: ChatPanelProps) {
+  const [sessionId, setSessionId] = useState("default");
   const { currentMode } = useModeStore();
   const { events, streaming, send, cancel, reset } = useAgentStream(sessionId);
   const [input, setInput] = useState("");
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pendingUser, setPendingUser] = useState<ChatMessage[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [shared, setShared] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [activePlan, setActivePlan] = useState<PlanCreateResult | null>(null);
+  const [planStatus, setPlanStatus] = useState<PlanStatusType | null>(null);
+  const [planExecuting, setPlanExecuting] = useState(false);
+  const planPollRef = useRef<NodeJS.Timeout | null>(null);
 
   const loadHistory = async () => {
     try {
-      console.log("Loading chat history for session:", sessionId);
+      setHistoryError(null);
       const history = await getSessionHistory(sessionId);
-      console.log("Loaded history:", history);
       const normalized = history.map((msg, index) => ({
         ...msg,
         id: `${msg.role}-${index}-${msg.timestamp}`,
@@ -89,16 +119,17 @@ export default function ChatPanel() {
       setHistoryLoaded(true);
     } catch (error) {
       console.error("Failed to load chat history:", error);
+      setHistoryError(
+        error instanceof Error ? error.message : "Failed to load chat history",
+      );
       setHistoryLoaded(true);
     }
   };
 
-  // Load chat history from backend on mount
   useEffect(() => {
     loadHistory();
-  }, []); // Remove sessionId from deps to prevent re-renders
+  }, []);
 
-  // Keyboard shortcuts
   const { toggleTheme } = useThemeStore();
   useKeyboardShortcuts([
     {
@@ -123,12 +154,14 @@ export default function ChatPanel() {
     [historyMessages, pendingUser, events],
   );
 
-  // Auto-scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const lastUserMessage = [...historyMessages, ...pendingUser].reverse().find((message) => message.role === "user")?.content ?? "";
+  const lastUserMessage =
+    [...historyMessages, ...pendingUser]
+      .reverse()
+      .find((message) => message.role === "user")?.content ?? "";
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -143,11 +176,8 @@ export default function ChatPanel() {
         timestamp: new Date().toISOString(),
       },
     ]);
-    // Send the message and wait for streaming to complete
     await send(trimmed, currentMode);
-    // Wait a bit to ensure backend has persisted the message
-    await new Promise(resolve => setTimeout(resolve, 500));
-    // Then reload history
+    await new Promise((resolve) => setTimeout(resolve, 500));
     await loadHistory();
     setInput("");
   }
@@ -170,92 +200,450 @@ export default function ChatPanel() {
     void send(lastUserMessage, currentMode).then(() => loadHistory());
   }
 
+  async function handleNewChat() {
+    try {
+      const response = await fetch(
+        apiUrl(`/api/sessions?title=Novo Chat&mode=${currentMode}`),
+        { method: "POST" },
+      );
+      if (response.ok) {
+        const data = await response.json();
+        setSessionId(data.id);
+      } else {
+        // Fallback: generate a random session ID
+        setSessionId(`session-${Date.now()}`);
+      }
+    } catch {
+      setSessionId(`session-${Date.now()}`);
+    }
+    setHistoryMessages([]);
+    setPendingUser([]);
+    setHistoryLoaded(true);
+    setHistoryError(null);
+    reset();
+  }
+
+  function handleShare() {
+    const allMessages = [
+      ...historyMessages,
+      ...foldEvents(pendingUser, events),
+    ];
+    if (allMessages.length === 0) return;
+    const text = allMessages
+      .map((m) => `[${m.role}] ${m.content}`)
+      .join("\n\n");
+    navigator.clipboard.writeText(text);
+    setShared(true);
+    setTimeout(() => setShared(false), 2000);
+  }
+
+  // Plan execution handlers
+  const handlePlanCreate = useCallback(async (objective: string) => {
+    try {
+      const plan = await createPlan(objective, sessionId);
+      setActivePlan(plan);
+      // Immediately fetch status
+      const status = await getPlanStatus(plan.plan_id);
+      setPlanStatus(status);
+    } catch (err) {
+      console.error("Failed to create plan:", err);
+    }
+  }, [sessionId]);
+
+  const handlePlanApprove = useCallback(async () => {
+    if (!activePlan) return;
+    try {
+      await approvePlan(activePlan.plan_id, sessionId);
+      const status = await getPlanStatus(activePlan.plan_id);
+      setPlanStatus(status);
+    } catch (err) {
+      console.error("Failed to approve plan:", err);
+    }
+  }, [activePlan, sessionId]);
+
+  const handlePlanExecute = useCallback(async () => {
+    if (!activePlan) return;
+    try {
+      setPlanExecuting(true);
+      await executePlan(activePlan.plan_id, sessionId);
+      // Start polling for status
+      planPollRef.current = setInterval(async () => {
+        try {
+          const status = await getPlanStatus(activePlan.plan_id);
+          setPlanStatus(status);
+          if (["completed", "failed", "cancelled"].includes(status.status)) {
+            if (planPollRef.current) clearInterval(planPollRef.current);
+            setPlanExecuting(false);
+          }
+        } catch {
+          // Stop polling on error
+          if (planPollRef.current) clearInterval(planPollRef.current);
+          setPlanExecuting(false);
+        }
+      }, 2000);
+    } catch (err) {
+      console.error("Failed to execute plan:", err);
+      setPlanExecuting(false);
+    }
+  }, [activePlan, sessionId]);
+
+  const handlePlanCancel = useCallback(async () => {
+    try {
+      await cancelPlan(sessionId);
+      setActivePlan(null);
+      setPlanStatus(null);
+      setPlanExecuting(false);
+      if (planPollRef.current) clearInterval(planPollRef.current);
+    } catch (err) {
+      console.error("Failed to cancel plan:", err);
+    }
+  }, [sessionId]);
+
+  // Clean up polling on unmount
+  useEffect(() => {
+    return () => {
+      if (planPollRef.current) clearInterval(planPollRef.current);
+    };
+  }, []);
+
+  // When in plan mode and user sends a message, also create a plan
+  useEffect(() => {
+    if (currentMode === "plan" && activePlan === null && messages.length > 0) {
+      const lastUser = [...messages].reverse().find((m) => m.role === "user");
+      if (lastUser) {
+        handlePlanCreate(lastUser.content);
+      }
+    }
+  }, [currentMode, messages, activePlan, handlePlanCreate]);
+
+  const suggestions = [
+    "Análise de mercado",
+    "Comparar zonas",
+    "Gerar relatório",
+    "Encontrar leads",
+  ];
+
   return (
     <div className="flex h-full flex-col">
-      <div className="flex-1 space-y-1.5 overflow-y-auto px-2 pb-1.5 pt-0">
-        {!historyLoaded && (
-          <div className="flex h-full items-center justify-center">
-            <div className="flex items-center gap-3 text-sm text-gray-500">
-              <span className="animate-spin">⏳</span>
-              <span>Loading conversation...</span>
-            </div>
+      {/* Chat header */}
+      <div className="flex shrink-0 items-center justify-between border-b border-nexus-border px-5 py-2.5">
+        <div className="flex items-center gap-2">
+          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-nexus-accent/15 text-nexus-accent">
+            <Sparkles className="h-3.5 w-3.5" />
           </div>
-        )}
-        {messages.length === 0 && historyLoaded && (
-          <div className="flex h-full items-center justify-center text-center">
-            <div className="space-y-2">
-              <div className="text-3xl">💬</div>
-              <div className="text-sm text-gray-500">Start a conversation</div>
-              <div className="text-xs text-gray-600">Ask anything about your code</div>
-              <div className="flex flex-wrap justify-center gap-1.5 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setInput("Explain this code")}
-                  className="rounded-full bg-nexus-border/50 px-2.5 py-1 text-[10px] text-gray-400 hover:bg-nexus-border hover:text-gray-200 transition-colors"
-                >
-                  Explain code
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setInput("Find bugs in this code")}
-                  className="rounded-full bg-nexus-border/50 px-2.5 py-1 text-[10px] text-gray-400 hover:bg-nexus-border hover:text-gray-200 transition-colors"
-                >
-                  Find bugs
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setInput("Refactor this for better performance")}
-                  className="rounded-full bg-nexus-border/50 px-2.5 py-1 text-[10px] text-gray-400 hover:bg-nexus-border hover:text-gray-200 transition-colors"
-                >
-                  Refactor
-                </button>
-              </div>
+          <div className="leading-tight">
+            <div className="text-sm font-semibold">Chat com IA</div>
+            <div className="text-[11px] text-nexus-muted">
+              Pergunte, analise, crie. A sua IA, os seus dados.
             </div>
-          </div>
-        )}
-        {messages.map((m) => (
-          <MessageBubble key={m.id} message={m} />
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
-      <form className="border-t border-nexus-border bg-nexus-panel/50 p-1.5" onSubmit={handleSubmit}>
-        <div className="mb-0.5 flex items-center justify-between text-[10px] text-gray-500">
-          <span>{sessionId}</span>
-          <div className="flex gap-2">
-            <button type="button" onClick={handleRegenerate} className="hover:text-gray-300 disabled:opacity-50" disabled={!lastUserMessage || streaming}>
-              Regenerate
-            </button>
-            <button type="button" onClick={handleCancel} className="hover:text-gray-300 disabled:opacity-50" disabled={!streaming}>
-              Cancel
-            </button>
           </div>
         </div>
-        <div className="flex gap-2">
-          <textarea
-            className="flex-1 min-h-[34px] max-h-[72px] resize-none rounded-lg border border-nexus-border bg-black/30 px-3 py-1 text-sm text-gray-200 placeholder-gray-500 focus:border-nexus-accent focus:outline-none focus:ring-1 focus:ring-nexus-accent/50 transition-all"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask about your code... (Enter to send, Shift+Enter for newline)"
-            disabled={streaming}
-            rows={1}
-            style={{ fieldSizing: "content" }}
-          />
+
+        <div className="flex items-center gap-2">
           <button
-            className="rounded-lg bg-nexus-accent px-3 py-1 text-sm font-semibold text-black hover:bg-nexus-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-nexus-accent/20"
-            type="submit"
-            disabled={streaming || !input.trim()}
+            onClick={handleNewChat}
+            className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-3 py-1.5 text-xs text-nexus-muted hover:text-nexus-text transition-colors"
           >
-            {streaming ? (
-              <span className="flex items-center gap-1">
-                <span className="animate-spin">⏳</span>
-              </span>
+            <Plus className="h-3.5 w-3.5" />
+            Novo Chat
+          </button>
+          <button
+            onClick={handleShare}
+            className="rounded-lg border border-nexus-border bg-nexus-card p-1.5 text-nexus-muted hover:text-nexus-text transition-colors"
+            title="Copiar conversação"
+          >
+            {shared ? (
+              <Check className="h-3.5 w-3.5 text-green-400" />
             ) : (
-              "Send"
+              <Share2 className="h-3.5 w-3.5" />
+            )}
+          </button>
+          <button
+            onClick={() => setRightOpen?.(!rightOpen)}
+            className="rounded-lg border border-nexus-border bg-nexus-card p-1.5 text-nexus-muted hover:text-nexus-text transition-colors"
+            title="Toggle painel direito"
+          >
+            {rightOpen ? (
+              <PanelRightClose className="h-3.5 w-3.5" />
+            ) : (
+              <PanelRightOpen className="h-3.5 w-3.5" />
             )}
           </button>
         </div>
-      </form>
+      </div>
+
+      {/* Messages area */}
+      <div className="min-h-0 flex-1 overflow-y-auto thin-scrollbar px-5 py-3">
+        {!historyLoaded && (
+          <div className="flex h-full items-center justify-center">
+            <div className="flex items-center gap-3 text-sm text-nexus-muted">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-nexus-accent border-t-transparent" />
+              <span>A carregar conversação...</span>
+            </div>
+          </div>
+        )}
+
+        {historyError && historyLoaded && (
+          <div className="flex h-full items-center justify-center">
+            <div className="max-w-md rounded-lg border border-red-500/50 bg-red-500/10 p-4">
+              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-red-400">
+                <svg
+                  className="h-4 w-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                  />
+                </svg>
+                Error loading chat history
+              </div>
+              <p className="text-xs text-red-300">{historyError}</p>
+              <button
+                onClick={() => loadHistory()}
+                className="mt-3 rounded bg-red-500/20 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-500/30 transition-colors"
+              >
+                Try again
+              </button>
+            </div>
+          </div>
+        )}
+
+        {messages.length === 0 && historyLoaded && !historyError && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex h-full flex-col items-center justify-center text-center"
+          >
+            <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-nexus-accent/10 text-nexus-accent">
+              <Sparkles className="h-7 w-7" />
+            </div>
+            <h2 className="mb-1 text-lg font-semibold">LUSO AI</h2>
+            <p className="mb-6 max-w-sm text-sm text-nexus-muted">
+              Pergunte, analise, crie. A sua IA, os seus dados.
+            </p>
+            <div className="flex flex-wrap justify-center gap-2">
+              {suggestions.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setInput(s)}
+                  className="rounded-full border border-nexus-border bg-nexus-card px-3 py-1.5 text-xs text-nexus-muted hover:border-nexus-accent/30 hover:text-nexus-text transition-colors"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </motion.div>
+        )}
+
+        {/* Plan Execution Panel */}
+        {currentMode === "plan" && activePlan && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-4 rounded-xl border border-nexus-accent/30 bg-nexus-accent/5 p-4"
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ListChecks className="h-4 w-4 text-nexus-accent" />
+                <span className="text-sm font-semibold text-nexus-accent">
+                  Execution Plan
+                </span>
+                {planStatus && (
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                    planStatus.status === "completed" ? "bg-green-500/20 text-green-400" :
+                    planStatus.status === "failed" ? "bg-red-500/20 text-red-400" :
+                    planStatus.status === "executing" ? "bg-blue-500/20 text-blue-400" :
+                    planStatus.status === "awaiting_approval" ? "bg-yellow-500/20 text-yellow-400" :
+                    "bg-nexus-border text-nexus-muted"
+                  }`}>
+                    {planStatus.status.replace("_", " ")}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {planStatus?.status === "awaiting_approval" && (
+                  <button
+                    onClick={handlePlanApprove}
+                    className="flex items-center gap-1 rounded-lg bg-green-500/20 px-3 py-1.5 text-xs font-medium text-green-400 hover:bg-green-500/30 transition-colors"
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    Approve
+                  </button>
+                )}
+                {(planStatus?.status === "awaiting_approval" || planStatus?.approved) && !planExecuting && planStatus?.status !== "completed" && planStatus?.status !== "failed" && (
+                  <button
+                    onClick={handlePlanExecute}
+                    className="flex items-center gap-1 rounded-lg bg-nexus-accent/20 px-3 py-1.5 text-xs font-medium text-nexus-accent hover:bg-nexus-accent/30 transition-colors"
+                  >
+                    <Play className="h-3.5 w-3.5" />
+                    Execute
+                  </button>
+                )}
+                {planExecuting && (
+                  <button
+                    onClick={handlePlanCancel}
+                    className="flex items-center gap-1 rounded-lg bg-red-500/20 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/30 transition-colors"
+                  >
+                    <XCircle className="h-3.5 w-3.5" />
+                    Cancel
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              {activePlan.steps?.map((step, idx) => {
+                const stepStatus = planStatus?.steps?.find(s => s.task_id === step.task_id)?.status || "pending";
+                return (
+                  <div
+                    key={step.task_id || idx}
+                    className="flex items-start gap-3 rounded-lg border border-nexus-border/50 bg-nexus-card/50 p-2.5"
+                  >
+                    <div className="mt-0.5">
+                      {stepStatus === "completed" ? (
+                        <CheckCircle2 className="h-4 w-4 text-green-400" />
+                      ) : stepStatus === "running" ? (
+                        <Loader2 className="h-4 w-4 animate-spin text-blue-400" />
+                      ) : stepStatus === "failed" ? (
+                        <XCircle className="h-4 w-4 text-red-400" />
+                      ) : (
+                        <Clock className="h-4 w-4 text-nexus-muted" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium text-nexus-text">
+                          Step {idx + 1}: {step.name}
+                        </span>
+                        <span className="rounded bg-nexus-border/50 px-1.5 py-0.5 text-[10px] text-nexus-muted">
+                          {step.agent}
+                        </span>
+                      </div>
+                      {step.description && (
+                        <p className="mt-0.5 text-[11px] text-nexus-muted line-clamp-2">
+                          {step.description}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {planStatus && planStatus.total_steps > 0 && (
+              <div className="mt-3 flex items-center gap-4 text-[11px] text-nexus-muted">
+                <span>Total: {planStatus.total_steps} steps</span>
+                <span>Completed: {planStatus.steps?.filter(s => s.status === "completed").length || 0}</span>
+                <span>Failed: {planStatus.steps?.filter(s => s.status === "failed").length || 0}</span>
+              </div>
+            )}
+          </motion.div>
+        )}
+
+        <VirtualMessageList
+          messages={messages}
+          renderItem={(m) => <MessageBubble key={m.id} message={m} />}
+          initialLimit={50}
+          className="space-y-4"
+        />
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Input area — fixed at bottom */}
+      <div className="shrink-0 border-t border-nexus-border bg-nexus-panel px-5 pt-3 pb-2">
+        {/* Quick suggestion chips above input */}
+        <div className="mb-2 flex flex-wrap gap-2">
+          {suggestions.map((s) => (
+            <button
+              key={s}
+              onClick={() => setInput(s)}
+              className="flex items-center gap-1.5 rounded-full border border-nexus-border bg-nexus-bg px-3 py-1 text-[11px] text-nexus-muted hover:border-nexus-accent/30 hover:text-nexus-text transition-colors"
+            >
+              <Wand2 className="h-3 w-3" />
+              {s}
+            </button>
+          ))}
+        </div>
+
+        <form onSubmit={handleSubmit}>
+          <div className="flex items-end gap-1.5 rounded-xl border border-nexus-border bg-nexus-card p-2 focus-within:border-nexus-accent/50 transition-colors">
+            <button
+              type="button"
+              className="shrink-0 rounded-lg p-2 text-nexus-muted hover:text-nexus-text transition-colors"
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              className="shrink-0 rounded-lg p-2 text-nexus-muted hover:text-nexus-text transition-colors"
+            >
+              <Globe className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              className="shrink-0 rounded-lg p-2 text-nexus-muted hover:text-nexus-text transition-colors"
+            >
+              <Paperclip className="h-4 w-4" />
+            </button>
+
+            <textarea
+              className="min-h-[40px] max-h-[160px] flex-1 resize-none bg-transparent px-2 py-2 text-sm text-nexus-text placeholder-nexus-muted outline-none"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Pergunte qualquer coisa..."
+              disabled={streaming}
+              rows={1}
+              style={{ fieldSizing: "content" }}
+            />
+
+            <button
+              type="button"
+              className="shrink-0 rounded-lg p-2 text-nexus-muted hover:text-nexus-text transition-colors"
+            >
+              <Mic className="h-4 w-4" />
+            </button>
+
+            {streaming ? (
+              <button
+                type="button"
+                onClick={handleCancel}
+                className="shrink-0 rounded-lg bg-red-500/15 p-2 text-red-400 hover:bg-red-500/25 transition-colors"
+              >
+                <StopCircle className="h-4 w-4" />
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!input.trim()}
+                className="shrink-0 rounded-lg bg-nexus-accent p-2 text-white hover:bg-nexus-accent/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                <Send className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        </form>
+
+        <div className="mt-1.5 flex items-center justify-between text-[10px] text-nexus-muted">
+          <span>
+            NEXUS IDE — Modo {currentMode}
+          </span>
+          <button
+            type="button"
+            onClick={handleRegenerate}
+            disabled={!lastUserMessage || streaming}
+            className="flex items-center gap-1 hover:text-nexus-text disabled:opacity-40 transition-colors"
+          >
+            <RotateCcw className="h-3 w-3" />
+            Regenerar
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

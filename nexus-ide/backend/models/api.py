@@ -3,27 +3,41 @@
 Kept in a single module so both callers and tests can import without cycles.
 See ARCHITECTURE.md §7.3 for the API contracts.
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Literal, Optional
+from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 AgentName = Literal[
-    "ROUTER", "ARCHITECT", "RESEARCHER", "CODER",
-    "ANALYZER", "DEBUGGER", "DOCUMENTER", "OPTIMIZER", "DASHBOARD", "MICRO",
+    "ROUTER",
+    "ARCHITECT",
+    "RESEARCHER",
+    "CODER",
+    "ANALYZER",
+    "DEBUGGER",
+    "DOCUMENTER",
+    "OPTIMIZER",
+    "DASHBOARD",
+    "MICRO",
 ]
 ThinkingMode = Literal["fast", "deep", "iterative"]
 ContextNeed = Literal["low", "medium", "high"]
 EventType = Literal[
-    "routing", "agent_started", "token", "agent_finished", "error", "done",
+    "routing",
+    "agent_started",
+    "token",
+    "agent_finished",
+    "error",
+    "done",
 ]
 
 
 def _utcnow_iso() -> str:
     """ISO-8601 timestamp with explicit UTC marker."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class ChatRequest(BaseModel):
@@ -50,11 +64,11 @@ class ProjectCreateRequest(BaseModel):
 class ProjectUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: Optional[str] = None
-    description: Optional[str] = None
-    mode: Optional[str] = None
-    preferred_model: Optional[str] = None
-    trust: Optional[bool] = None
+    name: str | None = None
+    description: str | None = None
+    mode: str | None = None
+    preferred_model: str | None = None
+    trust: bool | None = None
 
 
 class FileReadRequest(BaseModel):
@@ -70,8 +84,48 @@ class FileWriteRequest(BaseModel):
     path: str = Field(min_length=1, max_length=2000)
     content: str
     project_path: str = Field(default=".", min_length=1, max_length=2000)
-    session_id: Optional[str] = None
-    project_id: Optional[str] = None
+    session_id: str | None = None
+    project_id: str | None = None
+
+
+class FileListRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(default=".", min_length=1, max_length=2000)
+    project_path: str = Field(default=".", min_length=1, max_length=2000)
+    recursive: bool = True
+
+
+class FileTreeEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    name: str
+    type: Literal["file", "directory"]
+    size: int = 0
+    children: list[FileTreeEntry] = Field(default_factory=list)
+
+
+class TerminalExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    command: str = Field(min_length=1, max_length=10_000)
+    project_path: str = Field(default=".", min_length=1, max_length=2000)
+    timeout_seconds: int = Field(default=30, ge=1, le=600)
+    session_id: str | None = None
+
+
+class TerminalExecuteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: str
+    command: str
+    stdout: str
+    stderr: str
+    exit_code: int
+    timed_out: bool
+    duration_ms: int
+    risk_level: str
 
 
 class RoutingDecision(BaseModel):
@@ -103,7 +157,7 @@ class StreamEvent(BaseModel):
     """
 
     type: EventType
-    agent: Optional[AgentName] = None
-    content: Optional[str] = None
-    routing: Optional[RoutingDecision] = None
+    agent: AgentName | None = None
+    content: str | None = None
+    routing: RoutingDecision | None = None
     timestamp: str = Field(default_factory=_utcnow_iso)

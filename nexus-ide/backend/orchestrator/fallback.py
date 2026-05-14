@@ -2,11 +2,12 @@
 
 Matrix defined in ARCHITECTURE.md §4.3 and `config/models.yaml` under `fallback:`.
 """
+
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import AsyncIterator, Awaitable, Callable
 
 from backend.config.settings import load_models_config
 from backend.tools.ollama_client import OllamaError
@@ -70,12 +71,8 @@ async def invoke_with_fallback(
             )
             return outcome, stream
         except (OllamaError, KeyError, FileNotFoundError) as exc:
-            logger.warning(
-                "Agent %r failed (attempt %d): %s", candidate, attempt, exc
-            )
+            logger.warning("Agent %r failed (attempt %d): %s", candidate, attempt, exc)
             last_error = exc
 
     # Entire chain exhausted.
-    raise last_error if last_error else OllamaError(
-        f"fallback chain exhausted for {primary_agent}"
-    )
+    raise last_error if last_error else OllamaError(f"fallback chain exhausted for {primary_agent}")

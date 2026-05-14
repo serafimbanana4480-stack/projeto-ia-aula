@@ -14,7 +14,9 @@ interface Alert {
 
 export default function AlertFeed() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [filter, setFilter] = useState<"all" | "warning" | "error" | "critical">("all");
+  const [filter, setFilter] = useState<
+    "all" | "warning" | "error" | "critical"
+  >("all");
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
@@ -39,11 +41,11 @@ export default function AlertFeed() {
       if (fallbackTimer) return;
       fallbackTimer = setInterval(fetchInitialAlerts, 5000);
     };
-    
+
     eventSource.onopen = () => {
       setConnected(true);
     };
-    
+
     eventSource.onmessage = (e) => {
       try {
         const alert = JSON.parse(e.data) as Alert;
@@ -73,9 +75,11 @@ export default function AlertFeed() {
   }, []);
 
   const dismissAlert = (id: string) => {
-    setAlerts((prev) => prev.map((alert) => 
-      alert.id === id ? { ...alert, dismissed: true } : alert
-    ));
+    setAlerts((prev) =>
+      prev.map((alert) =>
+        alert.id === id ? { ...alert, dismissed: true } : alert,
+      ),
+    );
   };
 
   const filteredAlerts = alerts.filter((alert) => {
@@ -121,7 +125,9 @@ export default function AlertFeed() {
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="text-sm font-semibold">Alertas</div>
-          <div className={`h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`} />
+          <div
+            className={`h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`}
+          />
         </div>
         <div className="flex gap-2">
           {[
@@ -144,7 +150,7 @@ export default function AlertFeed() {
           ))}
         </div>
       </div>
-      
+
       {filteredAlerts.length > 0 ? (
         <div className="max-h-64 space-y-2 overflow-y-auto">
           <AnimatePresence mode="popLayout">

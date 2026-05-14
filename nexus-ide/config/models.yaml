@@ -35,7 +35,7 @@ models:
 
   # REASONING — raciocínio multi-step com thinking
   reasoning:
-    id: "deepseek-r1:14b"
+    id: "deepseek-r1:8b"
     fallback_id: "qwen3.6:latest"
     ollama_host: "http://localhost:11434"
     thinking_mode: true
@@ -79,7 +79,7 @@ models:
     temperature: 0.3
     use_cases: [code_generation]
   large:
-    id: "deepseek-r1:14b"
+    id: "deepseek-r1:8b"
     fallback_id: "qwen3.6:latest"
     ollama_host: "http://localhost:11434"
     thinking_mode: true

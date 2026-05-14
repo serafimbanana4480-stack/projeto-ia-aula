@@ -5,7 +5,12 @@ import { motion } from "framer-motion";
 import { Bot, Compass, Bug, MessageCircle } from "lucide-react";
 
 const MODES = [
-  { id: "agent", label: "Agent", desc: "Autonomous tool-using workflow", icon: Bot },
+  {
+    id: "agent",
+    label: "Agent",
+    desc: "Autonomous tool-using workflow",
+    icon: Bot,
+  },
   { id: "plan", label: "Plan", desc: "Planning-only mode", icon: Compass },
   { id: "debug", label: "Debug", desc: "Root-cause investigation", icon: Bug },
   { id: "ask", label: "Ask", desc: "Direct answer mode", icon: MessageCircle },
@@ -25,7 +30,9 @@ export default function ModeSelector() {
       animate={{ opacity: 1, y: 0 }}
       className="flex items-center gap-1 rounded-full border border-nexus-border bg-nexus-panel/70 px-2 py-1 backdrop-blur"
     >
-      <span className="text-[10px] uppercase tracking-wide text-gray-500">Mode</span>
+      <span className="text-[10px] uppercase tracking-wide text-gray-500">
+        Mode
+      </span>
       {MODES.map((mode) => {
         const Icon = mode.icon;
         return (

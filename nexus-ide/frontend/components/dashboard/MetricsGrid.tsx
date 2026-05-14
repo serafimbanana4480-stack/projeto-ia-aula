@@ -34,16 +34,20 @@ interface MetricCell {
 
 export default function MetricsGrid() {
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
-  const [displayValues, setDisplayValues] = useState<Record<string, string>>({});
+  const [displayValues, setDisplayValues] = useState<Record<string, string>>(
+    {},
+  );
   const [history, setHistory] = useState<MetricsSnapshot[]>([]);
   const [baseline, setBaseline] = useState<MetricsSnapshot | null>(null);
-  const [selectedMetric, setSelectedMetric] = useState<keyof MetricsSnapshot>("tokens_per_second");
+  const [selectedMetric, setSelectedMetric] =
+    useState<keyof MetricsSnapshot>("tokens_per_second");
+  const [backendOnline, setBackendOnline] = useState(true);
 
   useEffect(() => {
     let mounted = true;
     let fallbackTimer: ReturnType<typeof setInterval> | null = null;
     // SSE connection to /api/metrics/dashboard/stream
-    const eventSource = new EventSource(apiUrl("/api/metrics/dashboard/stream"));
+    const eventSource = new EventSource(apiUrl("/api/dashboard/stream"));
 
     const applyMetrics = (data: MetricsSnapshot) => {
       if (!mounted) return;
@@ -54,27 +58,31 @@ export default function MetricsGrid() {
 
     const startPollingFallback = () => {
       if (fallbackTimer) return;
+      setBackendOnline(false);
       fallbackTimer = setInterval(async () => {
         try {
           const data = await getCurrentMetrics();
           applyMetrics(data as MetricsSnapshot);
+          setBackendOnline(true);
         } catch (error) {
           console.error("Polling fallback failed:", error);
+          setBackendOnline(false);
         }
       }, 2000);
     };
-    
+
     eventSource.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data) as MetricsSnapshot;
         applyMetrics(data);
+        setBackendOnline(true);
       } catch (error) {
         console.error("Failed to parse metrics:", error);
       }
     };
 
-    eventSource.onerror = (error) => {
-      console.error("SSE error:", error);
+    eventSource.onerror = () => {
+      setBackendOnline(false);
       eventSource.close();
       startPollingFallback();
     };
@@ -109,7 +117,9 @@ export default function MetricsGrid() {
     return () => clearInterval(interval);
   }, [metrics]);
 
-  const getTrend = (metric: keyof MetricsSnapshot): "up" | "down" | "neutral" => {
+  const getTrend = (
+    metric: keyof MetricsSnapshot,
+  ): "up" | "down" | "neutral" => {
     if (history.length < 2) return "neutral";
     const current = metrics?.[metric] as number;
     const previous = history[history.length - 2][metric] as number;
@@ -123,7 +133,12 @@ export default function MetricsGrid() {
   };
 
   const getBaselineComparison = (metric: keyof MetricsSnapshot): string => {
-    if (!baseline || typeof metrics?.[metric] !== "number" || typeof baseline[metric] !== "number") return "—";
+    if (
+      !baseline ||
+      typeof metrics?.[metric] !== "number" ||
+      typeof baseline[metric] !== "number"
+    )
+      return "—";
     const current = metrics[metric] as number;
     const base = baseline[metric] as number;
     const diff = current - base;
@@ -169,14 +184,20 @@ export default function MetricsGrid() {
       label: "CPU",
       value: displayValues.cpu_percent || "—",
       trend: getTrend("cpu_percent"),
-      color: metrics?.cpu_percent && metrics.cpu_percent > 80 ? "text-red-400" : undefined,
+      color:
+        metrics?.cpu_percent && metrics.cpu_percent > 80
+          ? "text-red-400"
+          : undefined,
     },
     {
       key: "ram_used_bytes",
       label: "RAM",
       value: displayValues.ram_used || "—",
       trend: getTrend("ram_used_bytes"),
-      color: metrics?.ram_percent && metrics.ram_percent > 80 ? "text-red-400" : undefined,
+      color:
+        metrics?.ram_percent && metrics.ram_percent > 80
+          ? "text-red-400"
+          : undefined,
     },
     {
       key: "queue_depth",
@@ -194,7 +215,10 @@ export default function MetricsGrid() {
       label: "Latência",
       value: displayValues.avg_latency || "—",
       trend: getTrend("avg_latency_ms"),
-      color: metrics?.avg_latency_ms && metrics.avg_latency_ms > 1000 ? "text-red-400" : undefined,
+      color:
+        metrics?.avg_latency_ms && metrics.avg_latency_ms > 1000
+          ? "text-red-400"
+          : undefined,
     },
     {
       key: "uptime_seconds",
@@ -205,7 +229,8 @@ export default function MetricsGrid() {
 
   const formatUptime = (seconds: number): string => {
     if (seconds < 60) return `${Math.floor(seconds)}s`;
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+    if (seconds < 3600)
+      return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
     if (seconds < 86400) return `${(seconds / 3600).toFixed(1)}h`;
     return `${(seconds / 86400).toFixed(1)}d`;
   };
@@ -215,15 +240,21 @@ export default function MetricsGrid() {
     const min = Math.min(...data);
     const max = Math.max(...data);
     const range = max - min || 1;
-    
-    const points = data.map((val, i) => {
-      const x = (i / (data.length - 1)) * 100;
-      const y = 100 - ((val - min) / range) * 100;
-      return `${x},${y}`;
-    }).join(" ");
+
+    const points = data
+      .map((val, i) => {
+        const x = (i / (data.length - 1)) * 100;
+        const y = 100 - ((val - min) / range) * 100;
+        return `${x},${y}`;
+      })
+      .join(" ");
 
     return (
-      <svg className="h-4 w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+      <svg
+        className="h-4 w-full"
+        viewBox="0 0 100 100"
+        preserveAspectRatio="none"
+      >
         <polyline
           points={points}
           fill="none"
@@ -237,7 +268,13 @@ export default function MetricsGrid() {
 
   return (
     <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-9">
+      {!backendOnline && (
+        <div className="flex items-center gap-2 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-400">
+          <span className="h-2 w-2 rounded-full bg-yellow-500 animate-pulse" />
+          Backend offline — a aguardar ligação
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
         {cells.map((cell, index) => (
           <motion.button
             key={cell.label}
@@ -282,8 +319,12 @@ export default function MetricsGrid() {
         <div className="rounded-xl border border-nexus-border bg-nexus-panel p-4">
           <div className="mb-2 flex items-center justify-between">
             <div>
-              <div className="text-xs uppercase tracking-wide text-gray-500">Metric drill-down</div>
-              <div className="text-sm font-semibold text-gray-100">{selectedMetric.replaceAll("_", " ")}</div>
+              <div className="text-xs uppercase tracking-wide text-gray-500">
+                Metric drill-down
+              </div>
+              <div className="text-sm font-semibold text-gray-100">
+                {selectedMetric.replaceAll("_", " ")}
+              </div>
             </div>
             <div className="text-xs text-gray-500">Live</div>
           </div>
@@ -295,10 +336,11 @@ export default function MetricsGrid() {
             >
               <div className="text-xs text-gray-500">Current value</div>
               <div className="mt-1 text-xl font-semibold text-nexus-accent">
-                {typeof metrics[selectedMetric] === "number" 
-                  ? (selectedMetric.includes("percent") || selectedMetric.includes("latency")
-                      ? `${(metrics[selectedMetric] as number).toFixed(selectedMetric.includes("latency") ? 0 : 1)}`
-                      : (metrics[selectedMetric] as number).toLocaleString())
+                {typeof metrics[selectedMetric] === "number"
+                  ? selectedMetric.includes("percent") ||
+                    selectedMetric.includes("latency")
+                    ? `${(metrics[selectedMetric] as number).toFixed(selectedMetric.includes("latency") ? 0 : 1)}`
+                    : (metrics[selectedMetric] as number).toLocaleString()
                   : String(metrics[selectedMetric] ?? "—")}
               </div>
             </motion.div>
@@ -309,7 +351,8 @@ export default function MetricsGrid() {
             >
               <div className="text-xs text-gray-500">Trend</div>
               <div className="mt-1 text-sm text-gray-200">
-                {history.length >= 2 && typeof metrics[selectedMetric] === "number"
+                {history.length >= 2 &&
+                typeof metrics[selectedMetric] === "number"
                   ? `${getTrend(selectedMetric)} vs previous sample`
                   : "Waiting for more samples"}
               </div>
@@ -328,22 +371,34 @@ export default function MetricsGrid() {
           <div className="mt-4 pt-4 border-t border-nexus-border">
             <div className="text-xs text-gray-500">Context</div>
             <div className="mt-1 text-sm text-gray-200">
-              {selectedMetric === "avg_latency_ms" && "Measures backend responsiveness."}
-              {selectedMetric === "tokens_per_second" && "Tracks generation throughput across the active model."}
-              {selectedMetric === "requests_total" && "Counts observed requests in this session."}
-              {selectedMetric === "cpu_percent" && "System load indicator for the host."}
-              {selectedMetric === "ram_used_bytes" && "Current memory pressure of the process host."}
-              {selectedMetric === "active_sessions" && "Live chat sessions currently known to the backend."}
-              {selectedMetric === "queue_depth" && "Requests waiting for orchestration or tools."}
-              {selectedMetric === "uptime_seconds" && "Backend process lifetime since the last restart."}
-              {selectedMetric === "active_model" && "Most active model observed by the collector."}
+              {selectedMetric === "avg_latency_ms" &&
+                "Measures backend responsiveness."}
+              {selectedMetric === "tokens_per_second" &&
+                "Tracks generation throughput across the active model."}
+              {selectedMetric === "requests_total" &&
+                "Counts observed requests in this session."}
+              {selectedMetric === "cpu_percent" &&
+                "System load indicator for the host."}
+              {selectedMetric === "ram_used_bytes" &&
+                "Current memory pressure of the process host."}
+              {selectedMetric === "active_sessions" &&
+                "Live chat sessions currently known to the backend."}
+              {selectedMetric === "queue_depth" &&
+                "Requests waiting for orchestration or tools."}
+              {selectedMetric === "uptime_seconds" &&
+                "Backend process lifetime since the last restart."}
+              {selectedMetric === "active_model" &&
+                "Most active model observed by the collector."}
             </div>
           </div>
-          {selectedMetric !== "active_model" && selectedMetric !== "active_sessions" && (
-            <div className="mt-4 text-nexus-accent">
-              {renderSparkline(getSparkline(selectedMetric as keyof MetricsSnapshot))}
-            </div>
-          )}
+          {selectedMetric !== "active_model" &&
+            selectedMetric !== "active_sessions" && (
+              <div className="mt-4 text-nexus-accent">
+                {renderSparkline(
+                  getSparkline(selectedMetric as keyof MetricsSnapshot),
+                )}
+              </div>
+            )}
         </div>
       )}
     </div>

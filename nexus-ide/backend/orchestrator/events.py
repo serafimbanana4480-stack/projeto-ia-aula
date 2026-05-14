@@ -8,20 +8,22 @@ Architecture:
 - ``EventBus``: async pub/sub with topic-based filtering
 - ``EventEmitter``: context manager for scoped event emission
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
 import uuid
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, AsyncIterator, Callable, Optional
+from enum import StrEnum
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """Canonical event types flowing through the orchestrator."""
 
     # Lifecycle
@@ -65,8 +67,8 @@ class EventType(str, Enum):
 class OrchestratorEvent:
     """A typed event with metadata flowing through the event bus."""
 
-    event_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     event_type: EventType
+    event_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     source: str = ""  # agent name or component
     session_id: str = ""
     task_id: str = ""
@@ -126,7 +128,7 @@ class EventBus:
         # Log event
         self._event_log.append(event)
         if len(self._event_log) > self._max_log_size:
-            self._event_log = self._event_log[-self._max_log_size:]
+            self._event_log = self._event_log[-self._max_log_size :]
 
         # Get matching subscribers
         async with self._lock:
@@ -160,9 +162,7 @@ class EventBus:
         Creates a temporary queue and subscribes to matching event types.
         Yields events until the queue is closed.
         """
-        queue: asyncio.Queue[OrchestratorEvent | None] = asyncio.Queue(
-            maxsize=self._max_queue_size
-        )
+        queue: asyncio.Queue[OrchestratorEvent | None] = asyncio.Queue(maxsize=self._max_queue_size)
 
         async def on_event(event: OrchestratorEvent) -> None:
             if session_id and event.session_id != session_id:
@@ -219,23 +219,27 @@ class EventEmitter:
         self._correlation_id = uuid.uuid4().hex[:12]
 
     async def __aenter__(self) -> EventEmitter:
-        await self.bus.publish(OrchestratorEvent(
-            event_type=EventType.AGENT_STARTED,
-            source=self.source,
-            session_id=self.session_id,
-            task_id=self.task_id,
-            correlation_id=self._correlation_id,
-        ))
+        await self.bus.publish(
+            OrchestratorEvent(
+                event_type=EventType.AGENT_STARTED,
+                source=self.source,
+                session_id=self.session_id,
+                task_id=self.task_id,
+                correlation_id=self._correlation_id,
+            )
+        )
         return self
 
     async def __aexit__(self, *args: Any) -> None:
-        await self.bus.publish(OrchestratorEvent(
-            event_type=EventType.AGENT_FINISHED,
-            source=self.source,
-            session_id=self.session_id,
-            task_id=self.task_id,
-            correlation_id=self._correlation_id,
-        ))
+        await self.bus.publish(
+            OrchestratorEvent(
+                event_type=EventType.AGENT_FINISHED,
+                source=self.source,
+                session_id=self.session_id,
+                task_id=self.task_id,
+                correlation_id=self._correlation_id,
+            )
+        )
 
     async def emit(
         self,
@@ -246,12 +250,14 @@ class EventEmitter:
     ) -> None:
         """Emit an event scoped to this emitter's context."""
         et = event_type if isinstance(event_type, EventType) else EventType(event_type)
-        await self.bus.publish(OrchestratorEvent(
-            event_type=et,
-            source=self.source,
-            session_id=self.session_id,
-            task_id=self.task_id,
-            content=content,
-            data=data or {},
-            correlation_id=self._correlation_id,
-        ))
+        await self.bus.publish(
+            OrchestratorEvent(
+                event_type=et,
+                source=self.source,
+                session_id=self.session_id,
+                task_id=self.task_id,
+                content=content,
+                data=data or {},
+                correlation_id=self._correlation_id,
+            )
+        )

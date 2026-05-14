@@ -1,0 +1,76 @@
+# Staging Environment Configuration
+# This file overrides default settings for staging environment
+
+# Application Settings
+app:
+  name: "NEXUS IDE (Staging)"
+  debug: false
+  log_level: "INFO"
+  reload: false
+
+# CORS Settings
+cors:
+  allowed_origins:
+    - "https://staging.your-domain.com"
+    - "http://localhost:3000"
+  allow_credentials: true
+  allow_methods: ["*"]
+  allow_headers: ["*"]
+
+# Database Settings
+database:
+  url: "postgresql://user:password@localhost:5432/nexus_staging"
+  echo: false
+  pool_size: 10
+  max_overflow: 5
+
+# Redis Settings
+redis:
+  url: "redis://localhost:6379"
+  db: 1
+  password: "${REDIS_PASSWORD}"
+
+# Ollama Settings
+ollama:
+  host: "http://localhost:11434"
+  dashboard_host: "http://localhost:11435"
+  timeout: 90
+  retry_attempts: 4
+
+# Observability Settings
+observability:
+  enable_tracing: true
+  enable_metrics: true
+  otel_exporter_otlp_endpoint: "http://localhost:4317"
+  prometheus_port: 9090
+
+# Rate Limiting
+rate_limiting:
+  enabled: true
+  requests_per_minute: 120
+
+# Security Settings
+security:
+  secret_key: "${SECRET_KEY}"
+  session_expire_hours: 12
+  require_https: false
+
+# Feature Flags
+features:
+  enable_web_search: true
+  enable_code_execution: true
+  enable_file_operations: true
+  enable_terminal: true
+  max_file_size_mb: 25
+
+# Logging
+logging:
+  level: "INFO"
+  format: "detailed"
+  file: "logs/nexus_staging.log"
+
+# Performance Settings
+performance:
+  max_workers: 4
+  request_timeout: 300
+  max_concurrent_requests: 50

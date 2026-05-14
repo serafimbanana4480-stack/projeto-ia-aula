@@ -1,10 +1,9 @@
 """Prompt-injection defences. See ARCHITECTURE.md §11.1."""
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional
-
 
 INJECTION_PATTERNS = [
     r"ignore (previous|all|prior) instructions",
@@ -20,7 +19,7 @@ INJECTION_PATTERNS = [
 @dataclass
 class InjectionResult:
     detected: bool
-    pattern: Optional[str] = None
+    pattern: str | None = None
 
 
 def wrap_external_content(content: str, source: str) -> str:

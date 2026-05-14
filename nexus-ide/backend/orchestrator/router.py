@@ -9,6 +9,7 @@ Three-level routing described in ARCHITECTURE.md §4.2:
 The public ``RoutingDecision`` type lives in :mod:`backend.models.api` and is
 re-exported here for backwards compatibility with existing imports.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -16,7 +17,7 @@ import json
 import logging
 import re
 from functools import lru_cache
-from typing import Final, Optional
+from typing import Final
 
 from pydantic import ValidationError
 
@@ -27,9 +28,11 @@ from backend.tools.sanitizer import detect_injection
 
 logger = logging.getLogger(__name__)
 
+
 def _query_hash(query: str) -> str:
     """Generate a hash for caching routing decisions based on query content."""
     return hashlib.md5(query.lower().strip().encode()).hexdigest()
+
 
 @lru_cache(maxsize=100)
 def _cached_route_with_model(query_hash: str, query: str) -> RoutingDecision:
@@ -38,6 +41,7 @@ def _cached_route_with_model(query_hash: str, query: str) -> RoutingDecision:
     # The actual implementation will be in route_with_model
     return _FALLBACK_DECISION
 
+
 __all__ = ["RoutingDecision", "fast_route", "route_with_model"]
 
 # ---------------------------------------------------------------------------
@@ -45,20 +49,33 @@ __all__ = ["RoutingDecision", "fast_route", "route_with_model"]
 # ---------------------------------------------------------------------------
 
 _DEBUGGER_MARKERS: Final = (
-    "traceback", "stacktrace", "stack trace", "error:", "exception",
-    "segfault", "segmentation fault", "runtime error",
+    "traceback",
+    "stacktrace",
+    "stack trace",
+    "error:",
+    "exception",
+    "segfault",
+    "segmentation fault",
+    "runtime error",
 )
 _DOCUMENTER_MARKERS: Final = (
-    "document", "documenta", "docstring", "readme", "comment the",
-    "add comments", "explain this code",
+    "document",
+    "documenta",
+    "docstring",
+    "readme",
+    "comment the",
+    "add comments",
+    "explain this code",
 )
 _RESEARCHER_MARKERS: Final = (
-    "latest version", "current version", "is x still", "benchmark",
-    "released in", "recent release",
+    "latest version",
+    "current version",
+    "is x still",
+    "benchmark",
+    "released in",
+    "recent release",
 )
-_TRIVIAL_QUESTION = re.compile(
-    r"^\s*(what|who|when|where|why|how)\s+is\b", re.IGNORECASE
-)
+_TRIVIAL_QUESTION = re.compile(r"^\s*(what|who|when|where|why|how)\s+is\b", re.IGNORECASE)
 
 
 def fast_route(query: str) -> AgentName | None:
@@ -126,11 +143,10 @@ async def route_with_model(query: str, client: OllamaClient) -> RoutingDecision:
     except Exception:
         # If cache fails, continue with normal routing
         pass
-    
+
     if detect_injection(query).detected:
         decision = _FALLBACK_DECISION.model_copy(
-            update={"routing_reason": "prompt-injection-detected",
-                    "primary_agent": "MICRO"}
+            update={"routing_reason": "prompt-injection-detected", "primary_agent": "MICRO"}
         )
         # Cache the decision
         _cached_route_with_model(hash_key, query)
@@ -174,7 +190,7 @@ def _parse_routing_decision(raw: str) -> RoutingDecision:
     except json.JSONDecodeError as exc:
         logger.warning("Router JSON malformed (%s): %r", exc, match.group(0)[:200])
         return _FALLBACK_DECISION
-    
+
     # Fix common model errors: convert string values to expected types
     if "routing_confidence" in payload and isinstance(payload["routing_confidence"], str):
         try:
@@ -190,7 +206,7 @@ def _parse_routing_decision(raw: str) -> RoutingDecision:
                 payload["routing_confidence"] = float(payload["routing_confidence"])
         except (ValueError, AttributeError):
             payload["routing_confidence"] = 0.5  # Default fallback
-    
+
     try:
         return RoutingDecision.model_validate(payload)
     except ValidationError as exc:

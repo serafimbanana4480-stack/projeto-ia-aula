@@ -15,45 +15,34 @@ interface AgentActivity {
 export default function AgentActivity() {
   const [activities, setActivities] = useState<AgentActivity[]>([]);
   const [loading, setLoading] = useState(true);
+  const [unavailableReason, setUnavailableReason] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     const fetchActivities = async () => {
       try {
-        // Fetch real metrics from backend
         const metrics = await getCurrentMetrics();
-        
-        // Transform backend metrics into agent activity format
-        // Since backend doesn't have per-agent metrics yet, we'll show system-level activity
-        const realActivities: AgentActivity[] = [
-          {
-            agent: "CODER",
-            status: metrics.requests_total > 0 ? "active" : "idle",
-            tasks_completed: metrics.requests_successful || 0,
-            tasks_failed: metrics.requests_failed || 0,
-            avg_latency_ms: metrics.avg_latency_ms || 0,
-            last_activity: new Date().toISOString(),
-          },
-          {
-            agent: "SYSTEM",
-            status: "active",
-            tasks_completed: metrics.requests_total || 0,
-            tasks_failed: 0,
-            avg_latency_ms: metrics.avg_latency_ms || 0,
-            last_activity: new Date().toISOString(),
-          },
-        ];
-
-        setActivities(realActivities);
+        const agentMetrics = Array.isArray(metrics.agent_activity)
+          ? metrics.agent_activity
+          : [];
+        setActivities(agentMetrics as AgentActivity[]);
+        setUnavailableReason(
+          agentMetrics.length === 0
+            ? "Per-agent runtime metrics are not instrumented yet."
+            : null,
+        );
       } catch (error) {
         console.error("Failed to fetch agent activities:", error);
         setActivities([]);
+        setUnavailableReason("Agent activity endpoint is unavailable.");
       } finally {
         setLoading(false);
       }
     };
 
     fetchActivities();
-    
+
     // Refresh every 30 seconds
     const interval = setInterval(fetchActivities, 30000);
     return () => clearInterval(interval);
@@ -101,7 +90,7 @@ export default function AgentActivity() {
       className="rounded border border-nexus-border bg-nexus-panel p-3"
     >
       <div className="mb-2 text-sm font-semibold">Atividade dos Agentes</div>
-      
+
       {loading ? (
         <motion.div
           initial={{ opacity: 0 }}
@@ -133,13 +122,15 @@ export default function AgentActivity() {
                 <div>
                   <div className="text-sm font-medium">{activity.agent}</div>
                   <div className="text-xs text-gray-500">
-                    {activity.tasks_completed} tasks, {activity.tasks_failed} failed
+                    {activity.tasks_completed} tasks, {activity.tasks_failed}{" "}
+                    failed
                   </div>
                 </div>
               </div>
               <div className="flex items-center gap-4 text-xs text-gray-400">
                 <div>
-                  <span className="text-gray-500">Lat:</span> {formatLatency(activity.avg_latency_ms)}
+                  <span className="text-gray-500">Lat:</span>{" "}
+                  {formatLatency(activity.avg_latency_ms)}
                 </div>
                 <div>{formatTimeAgo(activity.last_activity)}</div>
               </div>
@@ -150,9 +141,13 @@ export default function AgentActivity() {
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex h-40 items-center justify-center text-xs text-gray-500"
+          className="flex h-40 flex-col items-center justify-center gap-2 text-center text-xs text-gray-500"
         >
-          Sem atividades
+          <div>Agent telemetry unavailable</div>
+          <div className="max-w-sm text-gray-600">
+            {unavailableReason ??
+              "No real per-agent activity samples were returned by the backend."}
+          </div>
         </motion.div>
       )}
     </motion.div>

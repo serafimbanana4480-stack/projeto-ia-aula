@@ -19,6 +19,8 @@ interface FlowLink {
 }
 
 interface FlowData {
+  available?: boolean;
+  reason?: string;
   nodes: FlowNode[];
   links: FlowLink[];
   summary: {
@@ -49,14 +51,14 @@ export default function RequestFlow() {
     };
 
     fetchFlowData();
-    
+
     // Refresh every 30 seconds
     const interval = setInterval(fetchFlowData, 30000);
-    
+
     return () => clearInterval(interval);
   }, []);
 
-  const getNodePosition = (nodeId: string, index: number) => {
+  const getNodePosition = (nodeId: string) => {
     const positions: Record<string, { x: number; y: number }> = {
       user: { x: 50, y: 100 },
       router: { x: 200, y: 100 },
@@ -80,7 +82,7 @@ export default function RequestFlow() {
       className="rounded border border-nexus-border bg-nexus-panel p-3"
     >
       <div className="mb-3 text-sm font-semibold">Fluxo de Requisições</div>
-      
+
       {loading ? (
         <motion.div
           initial={{ opacity: 0 }}
@@ -88,6 +90,44 @@ export default function RequestFlow() {
           className="flex h-40 items-center justify-center text-xs text-gray-500"
         >
           Carregando...
+        </motion.div>
+      ) : flowData?.available === false ? (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex h-48 flex-col items-center justify-center gap-3 text-center text-xs text-gray-500"
+        >
+          <svg className="h-10 w-10 text-nexus-border" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <circle cx="5" cy="12" r="2" />
+            <circle cx="12" cy="12" r="2" />
+            <circle cx="19" cy="12" r="2" />
+            <path d="M7 12h3M14 12h3" />
+          </svg>
+          <div className="font-medium text-gray-400">Rastreamento de fluxo indisponível</div>
+          <div className="max-w-md text-gray-600">
+            {flowData.reason ??
+              "O backend ainda não instrumentou o rastreamento distribuído de requisições."}
+          </div>
+          {flowData.summary && (
+            <div className="mt-2 grid grid-cols-4 gap-3 rounded-lg border border-nexus-border/50 bg-nexus-border/20 px-4 py-2 text-gray-400">
+              <div className="text-center">
+                <div className="text-gray-600">Total</div>
+                <div className="font-semibold">{flowData.summary.total_requests}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-gray-600">OK</div>
+                <div className="font-semibold text-green-400">{flowData.summary.successful_requests}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-gray-600">Fail</div>
+                <div className="font-semibold text-red-400">{flowData.summary.failed_requests}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-gray-600">Latência</div>
+                <div className="font-semibold">{formatLatency(flowData.summary.avg_latency_ms)}</div>
+              </div>
+            </div>
+          )}
         </motion.div>
       ) : flowData ? (
         <div>
@@ -104,14 +144,14 @@ export default function RequestFlow() {
                 <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280" />
               </marker>
             </defs>
-            
+
             {/* Links */}
             {flowData.links.map((link, index) => {
-              const sourcePos = getNodePosition(link.source, 0);
-              const targetPos = getNodePosition(link.target, 0);
+              const sourcePos = getNodePosition(link.source);
+              const targetPos = getNodePosition(link.target);
               const midX = (sourcePos.x + targetPos.x) / 2;
               const midY = (sourcePos.y + targetPos.y) / 2;
-              
+
               return (
                 <g key={`${link.source}-${link.target}`}>
                   <motion.path
@@ -152,10 +192,10 @@ export default function RequestFlow() {
                 </g>
               );
             })}
-            
+
             {/* Nodes */}
             {flowData.nodes.map((node, index) => {
-              const pos = getNodePosition(node.id, index);
+              const pos = getNodePosition(node.id);
               return (
                 <g key={node.id}>
                   <motion.circle
@@ -207,24 +247,32 @@ export default function RequestFlow() {
               );
             })}
           </svg>
-          
+
           {/* Summary */}
           <div className="mt-3 grid grid-cols-4 gap-2 border-t border-nexus-border/50 pt-2">
             <div className="text-center">
               <div className="text-xs text-gray-500">Total</div>
-              <div className="text-sm font-semibold">{flowData.summary.total_requests}</div>
+              <div className="text-sm font-semibold">
+                {flowData.summary.total_requests}
+              </div>
             </div>
             <div className="text-center">
               <div className="text-xs text-gray-500">Sucesso</div>
-              <div className="text-sm font-semibold text-green-400">{flowData.summary.successful_requests}</div>
+              <div className="text-sm font-semibold text-green-400">
+                {flowData.summary.successful_requests}
+              </div>
             </div>
             <div className="text-center">
               <div className="text-xs text-gray-500">Falha</div>
-              <div className="text-sm font-semibold text-red-400">{flowData.summary.failed_requests}</div>
+              <div className="text-sm font-semibold text-red-400">
+                {flowData.summary.failed_requests}
+              </div>
             </div>
             <div className="text-center">
               <div className="text-xs text-gray-500">Latência</div>
-              <div className="text-sm font-semibold">{formatLatency(flowData.summary.avg_latency_ms)}</div>
+              <div className="text-sm font-semibold">
+                {formatLatency(flowData.summary.avg_latency_ms)}
+              </div>
             </div>
           </div>
         </div>
@@ -232,9 +280,16 @@ export default function RequestFlow() {
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex h-40 items-center justify-center text-xs text-gray-500"
+          className="flex h-40 flex-col items-center justify-center gap-2 text-xs text-gray-500"
         >
-          Sem dados de fluxo
+          <svg className="h-8 w-8 text-nexus-border" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <circle cx="5" cy="12" r="2" />
+            <circle cx="12" cy="12" r="2" />
+            <circle cx="19" cy="12" r="2" />
+            <path d="M7 12h3M14 12h3" />
+          </svg>
+          <div>Sem dados de fluxo</div>
+          <div className="text-gray-600">Inicia o backend para ver o fluxo</div>
         </motion.div>
       )}
     </motion.div>

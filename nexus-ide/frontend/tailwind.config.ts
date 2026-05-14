@@ -10,13 +10,16 @@ const config: Config = {
     extend: {
       colors: {
         nexus: {
-          bg: "#0a0a0f",
-          panel: "#12121a",
-          border: "#1a1a2e",
-          accent: "#a78bfa", // Purple neon
-          accent2: "#5eead4", // Cyan neon
-          accent3: "#fbbf24", // Amber neon
-          accent4: "#f87171", // Red neon
+          bg: "#0b0b14",
+          panel: "#13131f",
+          card: "#161622",
+          border: "#1e1e2d",
+          accent: "#7c6afb",
+          accent2: "#5eead4",
+          accent3: "#fbbf24",
+          accent4: "#f87171",
+          muted: "#8a8a9a",
+          text: "#e8e8ed",
         },
       },
       backdropBlur: {
@@ -24,7 +27,7 @@ const config: Config = {
       },
       animation: {
         "pulse-slow": "pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite",
-        "glow": "glow 2s ease-in-out infinite alternate",
+        glow: "glow 2s ease-in-out infinite alternate",
       },
       keyframes: {
         glow: {

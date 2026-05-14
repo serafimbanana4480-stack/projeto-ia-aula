@@ -1,4 +1,5 @@
 """Prometheus custom metrics. See ARCHITECTURE.md §10.2."""
+
 from __future__ import annotations
 
 from prometheus_client import Counter, Gauge, Histogram
@@ -15,9 +16,7 @@ tokens_generated_total = Counter(
 tokens_input_total = Counter(
     "nexus_tokens_input_total", "Input tokens consumed", ["agent", "model"]
 )
-web_searches_total = Counter(
-    "nexus_web_searches_total", "Web searches performed", ["agent"]
-)
+web_searches_total = Counter("nexus_web_searches_total", "Web searches performed", ["agent"])
 fallbacks_total = Counter(
     "nexus_fallbacks_total", "Fallback invocations", ["from_agent", "to_agent", "reason"]
 )
@@ -28,12 +27,8 @@ response_latency_seconds = Histogram(
     "End-to-end response latency",
     ["agent", "model", "task_type"],
 )
-ttft_seconds = Histogram(
-    "nexus_ttft_seconds", "Time to first token", ["agent", "model"]
-)
-react_iterations = Histogram(
-    "nexus_react_iterations", "ReAct iterations per request", ["agent"]
-)
+ttft_seconds = Histogram("nexus_ttft_seconds", "Time to first token", ["agent", "model"])
+react_iterations = Histogram("nexus_react_iterations", "ReAct iterations per request", ["agent"])
 
 # Gauges
 model_loaded = Gauge("nexus_model_loaded", "1 if model is loaded", ["model", "port"])

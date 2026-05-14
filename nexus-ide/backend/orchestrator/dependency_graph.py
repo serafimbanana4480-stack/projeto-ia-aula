@@ -9,19 +9,20 @@ Architecture:
 - ``DependencyGraph``: DAG with validation, topological sort, and parallel groups
 - ``ExecutionPlan``: serializable plan with steps and dependencies
 """
+
 from __future__ import annotations
 
 import logging
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Optional
+from enum import Enum, StrEnum
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     PENDING = "pending"
     READY = "ready"
     RUNNING = "running"
@@ -146,9 +147,7 @@ class DependencyGraph:
 
         # Detect cycles using Kahn's algorithm
         in_degree = dict(self._in_degree)
-        queue: deque[str] = deque(
-            tid for tid, deg in in_degree.items() if deg == 0
-        )
+        queue: deque[str] = deque(tid for tid, deg in in_degree.items() if deg == 0)
         visited = 0
 
         while queue:
@@ -171,9 +170,7 @@ class DependencyGraph:
         Tasks in layer N depend only on tasks in layers < N.
         """
         in_degree = dict(self._in_degree)
-        queue: deque[str] = deque(
-            tid for tid, deg in in_degree.items() if deg == 0
-        )
+        queue: deque[str] = deque(tid for tid, deg in in_degree.items() if deg == 0)
         layers: list[list[str]] = []
         processed = 0
 
@@ -203,14 +200,13 @@ class DependencyGraph:
             if task.status != TaskStatus.PENDING:
                 continue
             deps_satisfied = all(
-                self._nodes[dep_id].status == TaskStatus.COMPLETED
-                for dep_id in task.depends_on
+                self._nodes[dep_id].status == TaskStatus.COMPLETED for dep_id in task.depends_on
             )
             if deps_satisfied:
                 ready.append(task)
         return ready
 
-    def get_task(self, task_id: str) -> Optional[TaskNode]:
+    def get_task(self, task_id: str) -> TaskNode | None:
         return self._nodes.get(task_id)
 
     def get_all_tasks(self) -> list[TaskNode]:
@@ -225,7 +221,12 @@ class DependencyGraph:
 
     def is_complete(self) -> bool:
         """Check if all tasks have reached a terminal state."""
-        terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED}
+        terminal = {
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.SKIPPED,
+        }
         return all(t.status in terminal for t in self._nodes.values())
 
     def has_failures(self) -> bool:

@@ -1,7 +1,6 @@
 """Tests for backend.tools.web_search — dataclasses."""
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 from backend.tools.web_search import SearchHit, SearchResult
 

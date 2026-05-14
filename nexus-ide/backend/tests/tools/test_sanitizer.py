@@ -1,9 +1,10 @@
 """Tests for backend.tools.sanitizer — injection detection and content wrapping."""
+
 from __future__ import annotations
 
 import pytest
 
-from backend.tools.sanitizer import InjectionResult, detect_injection, wrap_external_content
+from backend.tools.sanitizer import detect_injection, wrap_external_content
 
 
 class TestDetectInjection:
@@ -37,8 +38,8 @@ class TestWrapExternalContent:
     def test_wraps_and_escapes(self) -> None:
         raw = "<script>alert('xss')</script>"
         wrapped = wrap_external_content(raw, source="brave")
-        assert "<external_content source=\"brave\"" in wrapped
-        assert "trust_level=\"untrusted\"" in wrapped
+        assert '<external_content source="brave"' in wrapped
+        assert 'trust_level="untrusted"' in wrapped
         assert raw in wrapped
         assert wrapped.endswith("</external_content>")
 

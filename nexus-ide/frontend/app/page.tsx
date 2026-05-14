@@ -1,80 +1,65 @@
 "use client";
-import { useState } from "react";
-import dynamic from "next/dynamic";
+import { useState, lazy, Suspense } from "react";
 import TopBar from "../components/layout/TopBar";
 import Sidebar from "../components/layout/Sidebar";
-import BottomHUD from "../components/layout/BottomHUD";
 import ChatPanel from "../components/chat/ChatPanel";
-import ModeSelector from "../components/chat/ModeSelector";
-import ModelPanel from "../components/chat/ModelPanel";
-import { PanelRightClose, PanelRightOpen } from "lucide-react";
+import { PanelRightOpen } from "lucide-react";
 
-// Monaco touches `window` on import → must be client-only.
-const MonacoEditor = dynamic(() => import("../components/editor/MonacoEditor"), {
-  ssr: false,
-  loading: () => <div className="h-full w-full animate-pulse bg-black/40" />,
-});
+// Lazy load non-critical components for better initial load performance
+const RightPanel = lazy(() => import("../components/layout/RightPanel"));
+const BottomHUD = lazy(() => import("../components/layout/BottomHUD"));
 
-// Main IDE view - Windsurf-style layout with right sidebar chat
+// Loading fallback component
+function LoadingFallback() {
+  return (
+    <div className="flex items-center justify-center h-full">
+      <div className="h-4 w-4 animate-spin rounded-full border-2 border-nexus-accent border-t-transparent" />
+    </div>
+  );
+}
+
+// LUSO AI style layout: sidebar + central chat + right panel
 export default function HomePage() {
-  const [chatOpen, setChatOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(true);
 
   return (
-    <div className="flex h-screen flex-col bg-nexus-bg">
+    <div className="flex h-screen flex-col bg-nexus-bg text-nexus-text">
       <TopBar />
-      
+
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        
-        <main className="flex flex-1 overflow-hidden">
-          <div className="flex-1 h-full">
-            <MonacoEditor />
-          </div>
-          
-          {/* Right sidebar chat panel - Windsurf style */}
-          {chatOpen && (
-            <div className="flex w-[760px] flex-col border-l border-nexus-border bg-nexus-panel/50 backdrop-blur-md">
-              {/* Chat header with mode and model selectors */}
-              <div className="grid grid-cols-[auto_1fr_auto] items-center gap-1.5 border-b border-nexus-border px-2 py-0.5">
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-nexus-accent animate-pulse" />
-                  <span className="text-[10px] font-semibold text-gray-200">Chat</span>
-                </div>
-                <div className="flex items-center justify-center gap-1.5">
-                  <ModeSelector />
-                  <div className="h-2.5 w-px bg-nexus-border" />
-                  <ModelPanel />
-                </div>
-                <button
-                  onClick={() => setChatOpen(false)}
-                  className="justify-self-end rounded p-0.5 hover:bg-nexus-border"
-                  title="Close chat"
-                >
-                  <PanelRightClose className="h-3 w-3 text-gray-400" />
-                </button>
-              </div>
 
-              {/* Chat panel - maximized space */}
-              <div className="min-h-0 flex-1 overflow-hidden">
-                <ChatPanel />
-              </div>
+        <main className="flex flex-1 overflow-hidden min-w-0 h-full">
+          {/* Central chat panel */}
+          <div className="flex flex-1 flex-col min-w-0 overflow-hidden h-full">
+            <ChatPanel rightOpen={rightOpen} setRightOpen={setRightOpen} />
+          </div>
+
+          {/* Right sidebar - model, performance, tools */}
+          {rightOpen && (
+            <div className="flex w-[360px] flex-col border-l border-nexus-border bg-nexus-panel overflow-hidden shrink-0">
+              <Suspense fallback={<LoadingFallback />}>
+                <RightPanel />
+              </Suspense>
             </div>
           )}
         </main>
       </div>
-      
-      {/* Floating chat toggle button when closed */}
-      {!chatOpen && (
+
+      {/* Floating toggle button when right panel closed */}
+      {!rightOpen && (
         <button
-          onClick={() => setChatOpen(true)}
-          className="fixed bottom-16 right-4 z-50 flex items-center gap-2 rounded-full bg-nexus-accent px-4 py-2 text-sm font-medium text-black shadow-lg hover:bg-nexus-accent/80"
+          onClick={() => setRightOpen(true)}
+          className="fixed bottom-14 right-4 z-50 flex items-center gap-2 rounded-full bg-nexus-accent px-4 py-2 text-sm font-medium text-white shadow-lg hover:bg-nexus-accent/90"
         >
           <PanelRightOpen className="h-4 w-4" />
-          Chat
+          Painel
         </button>
       )}
-      
-      <BottomHUD />
+
+      <Suspense fallback={<LoadingFallback />}>
+        <BottomHUD />
+      </Suspense>
     </div>
   );
 }

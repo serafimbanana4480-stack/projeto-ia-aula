@@ -1,10 +1,12 @@
 """Tool registry - canonical list of executable tools available to agents."""
+
 from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any
 
 from backend.persistence.db import log_tool_execution
 
@@ -20,7 +22,7 @@ class ToolSpec:
     enabled: bool = True
 
 
-_registry: Dict[str, ToolSpec] = {}
+_registry: dict[str, ToolSpec] = {}
 
 
 def register_tool(spec: ToolSpec) -> ToolSpec:
@@ -45,7 +47,7 @@ def set_tool_enabled(name: str, enabled: bool) -> None:
         _registry[name].enabled = enabled
 
 
-async def execute_tool(name: str, session_id: Optional[str], args: dict) -> dict:
+async def execute_tool(name: str, session_id: str | None, args: dict) -> dict:
     spec = get_tool(name)
     if not spec:
         return {"error": f"Tool '{name}' not found"}

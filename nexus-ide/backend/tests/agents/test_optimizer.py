@@ -1,4 +1,5 @@
 """Tests for backend.agents.optimizer."""
+
 from __future__ import annotations
 
 from backend.agents.optimizer import OptimizerAgent

@@ -2,11 +2,12 @@
 
 See ARCHITECTURE.md §5.4 (Gestão de Contexto entre Iterações).
 """
+
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from backend.tools.ollama_client import ChatMessage
 
@@ -34,7 +35,7 @@ class AgentScratchpad:
     tokens_used: int = 0
     web_searches: int = 0
     agent_consultations: int = 0
-    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    start_time: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class ContextStore:
@@ -59,6 +60,11 @@ class ContextStore:
     async def get_history(self, session_id: str) -> list[ChatMessage]:
         async with self._lock:
             return list(self._history.get(session_id, ()))
+
+    async def active_session_count(self) -> int:
+        """Return the number of sessions currently tracked in memory."""
+        async with self._lock:
+            return len(self._history)
 
     async def append_message(self, session_id: str, message: ChatMessage) -> None:
         async with self._lock:

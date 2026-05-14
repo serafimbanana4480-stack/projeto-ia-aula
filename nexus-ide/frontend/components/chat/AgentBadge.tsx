@@ -1,4 +1,5 @@
 "use client";
+import { memo } from "react";
 import type { AgentName } from "../../lib/types";
 
 const AGENT_COLORS: Record<AgentName, string> = {
@@ -13,10 +14,14 @@ const AGENT_COLORS: Record<AgentName, string> = {
   DASHBOARD: "bg-teal-600",
 };
 
-export default function AgentBadge({ agent }: { agent: AgentName }) {
+function AgentBadge({ agent }: { agent: AgentName }) {
   return (
-    <span className={`inline-block rounded px-2 py-0.5 text-xs font-semibold text-white ${AGENT_COLORS[agent]}`}>
+    <span
+      className={`inline-block rounded px-2 py-0.5 text-xs font-semibold text-white ${AGENT_COLORS[agent]}`}
+    >
       {agent}
     </span>
   );
 }
+
+export default memo(AgentBadge);

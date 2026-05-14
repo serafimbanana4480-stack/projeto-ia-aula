@@ -16,20 +16,20 @@ Key features:
 - Memory decay and relevance scoring
 - Hybrid search (semantic + keyword)
 """
+
 from __future__ import annotations
 
-import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Optional
+from enum import StrEnum
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-class MemoryType(str, Enum):
+class MemoryType(StrEnum):
     SESSION = "session"  # scoped to a single session
     PROJECT = "project"  # scoped to a project
     GLOBAL = "global"  # available across all sessions
@@ -87,7 +87,9 @@ class Memory:
 class EmbeddingService:
     """Generates vector embeddings using Ollama's embedding endpoint."""
 
-    def __init__(self, ollama_host: str = "http://localhost:11434", model: str = "nomic-embed-text") -> None:
+    def __init__(
+        self, ollama_host: str = "http://localhost:11434", model: str = "nomic-embed-text"
+    ) -> None:
         self._host = ollama_host.rstrip("/")
         self._model = model
         self._dimension = 768  # default for nomic-embed-text
@@ -115,22 +117,23 @@ class EmbeddingService:
     def _fallback_embed(self, text: str) -> list[float]:
         """Deterministic fallback embedding when Ollama is unavailable."""
         import hashlib
+
         hash_bytes = hashlib.sha256(text.encode()).digest()
         # Generate a pseudo-embedding from hash
         embedding = []
         for i in range(0, min(len(hash_bytes), self._dimension // 4)):
-            val = int.from_bytes(hash_bytes[i:i+4], 'big') / (2**32)
+            val = int.from_bytes(hash_bytes[i : i + 4], "big") / (2**32)
             embedding.append(val * 2 - 1)  # normalize to [-1, 1]
         # Pad to dimension
         while len(embedding) < self._dimension:
             embedding.append(0.0)
-        return embedding[:self._dimension]
+        return embedding[: self._dimension]
 
     def cosine_similarity(self, a: list[float], b: list[float]) -> float:
         """Compute cosine similarity between two vectors."""
         if not a or not b:
             return 0.0
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=False))
         norm_a = sum(x * x for x in a) ** 0.5
         norm_b = sum(x * x for x in b) ** 0.5
         if norm_a == 0 or norm_b == 0:
@@ -194,7 +197,10 @@ class MemoryStore:
 
         logger.debug(
             "Stored memory %s (type=%s, session=%s, importance=%.2f)",
-            memory.memory_id, memory_type.value, session_id, importance,
+            memory.memory_id,
+            memory_type.value,
+            session_id,
+            importance,
         )
         return memory
 
@@ -241,6 +247,28 @@ class MemoryStore:
         """Build a context string from relevant memories for an agent request."""
         results = await self.search(query, session_id=session_id, top_k=top_k)
 
+        query_terms = {
+            term
+            for term in __import__("re").findall(r"[A-Za-z0-9_]+", query.lower())
+            if len(term) > 2
+        }
+        seen_ids = {mem.memory_id for mem, _ in results}
+
+        if query_terms:
+            keyword_matches: list[tuple[Memory, float]] = []
+            for mem in self._memories.values():
+                if mem.memory_id in seen_ids:
+                    continue
+                if session_id and mem.session_id and mem.session_id != session_id:
+                    continue
+                content_terms = set(__import__("re").findall(r"[A-Za-z0-9_]+", mem.content.lower()))
+                overlap = len(query_terms & content_terms)
+                if overlap:
+                    keyword_matches.append((mem, min(1.0, 0.3 + overlap * 0.2)))
+
+            keyword_matches.sort(key=lambda item: item[1], reverse=True)
+            results.extend(keyword_matches[: max(0, top_k - len(results))])
+
         if not results:
             return ""
 
@@ -266,10 +294,7 @@ class MemoryStore:
 
     async def get_session_memories(self, session_id: str) -> list[Memory]:
         """Get all memories for a session."""
-        return [
-            m for m in self._memories.values()
-            if m.session_id == session_id
-        ]
+        return [m for m in self._memories.values() if m.session_id == session_id]
 
     async def delete(self, memory_id: str) -> bool:
         """Delete a memory by ID."""
@@ -281,10 +306,7 @@ class MemoryStore:
 
     async def clear_session(self, session_id: str) -> int:
         """Clear all memories for a session."""
-        to_delete = [
-            mid for mid, m in self._memories.items()
-            if m.session_id == session_id
-        ]
+        to_delete = [mid for mid, m in self._memories.items() if m.session_id == session_id]
         for mid in to_delete:
             del self._memories[mid]
             self._index.pop(mid, None)

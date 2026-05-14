@@ -1,4 +1,5 @@
 """Tests for backend.tools.embeddings — schema only (stubs)."""
+
 from __future__ import annotations
 
 from backend.tools.embeddings import embed

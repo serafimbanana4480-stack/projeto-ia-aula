@@ -8,11 +8,11 @@ Endpoints:
 - POST /api/plan/cancel — Cancel an active execution
 - GET /api/plan/stream — SSE stream of orchestration events
 """
+
 from __future__ import annotations
 
-import json
 import logging
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from backend.models.api import StreamEvent
 from backend.orchestrator.engine import OrchestrationEngine, OrchestrationState
-from backend.orchestrator.events import EventBus, EventType
+from backend.orchestrator.events import EventBus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -56,6 +56,7 @@ def _get_engine(request: Request) -> OrchestrationEngine:
     """Get or create the orchestration engine from app state."""
     if not hasattr(request.app.state, "orchestration_engine"):
         from backend.orchestrator.engine import OrchestrationEngine
+
         request.app.state.orchestration_engine = OrchestrationEngine(
             ollama=request.app.state.ollama,
             registry=request.app.state.registry,
@@ -89,6 +90,14 @@ async def approve_plan(req: PlanApproveRequest, request: Request) -> dict:
     state = engine.get_state(req.session_id)
     if state != OrchestrationState.AWAITING_APPROVAL:
         return {"error": f"Cannot approve plan in state: {state.value}"}
+
+    # Mark the plan as approved
+    plan = engine.get_plan(req.plan_id)
+    if plan is None:
+        plan = engine.get_plan_by_session(req.session_id)
+    if plan is not None:
+        plan.approved = True
+
     return {"status": "approved", "plan_id": req.plan_id}
 
 
@@ -96,9 +105,19 @@ async def approve_plan(req: PlanApproveRequest, request: Request) -> dict:
 async def execute_plan(req: PlanExecuteRequest, request: Request) -> dict:
     """Execute an approved plan."""
     engine = _get_engine(request)
-    # Reconstruct plan from stored state (in production, fetch from DB)
+
+    # Fetch plan from engine's in-memory store
+    plan = engine.get_plan(req.plan_id)
+    if plan is None:
+        # Fallback: try to find plan by session
+        plan = engine.get_plan_by_session(req.session_id)
+    if plan is None:
+        return {"error": f"Plan {req.plan_id} not found. Create a plan first via /api/plan/create"}
+
+    plan.approved = True  # Mark as approved for execution
+
     result = await engine.execute_plan(
-        plan=None,  # type: ignore — will be fetched from stored state
+        plan=plan,
         session_id=req.session_id,
         auto_approve=True,
         project_path=req.project_path,
@@ -118,8 +137,30 @@ async def execute_plan(req: PlanExecuteRequest, request: Request) -> dict:
 async def get_plan_status(plan_id: str, request: Request) -> dict:
     """Get the current status of a plan execution."""
     engine = _get_engine(request)
-    # In production, fetch plan from DB
-    return {"plan_id": plan_id, "status": "unknown"}
+    plan = engine.get_plan(plan_id)
+    if plan is None:
+        return {"plan_id": plan_id, "status": "not_found"}
+
+    state = engine.get_state(plan.session_id)
+    steps_info = []
+    for step in plan.steps:
+        steps_info.append({
+            "task_id": step.task_id,
+            "name": step.name,
+            "agent": step.agent,
+            "status": step.status.value,
+            "error_message": step.error_message,
+        })
+
+    return {
+        "plan_id": plan_id,
+        "status": state.value,
+        "title": plan.title,
+        "total_steps": len(plan.steps),
+        "steps": steps_info,
+        "requires_approval": plan.requires_approval,
+        "approved": plan.approved,
+    }
 
 
 @router.post("/plan/cancel")

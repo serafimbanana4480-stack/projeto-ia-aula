@@ -1,7 +1,8 @@
 """Tests for backend.orchestrator.fallback."""
+
 from __future__ import annotations
 
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -50,6 +51,7 @@ class TestInvokeWithFallback:
         async def make_stream() -> AsyncIterator[str]:
             async def gen() -> AsyncIterator[str]:
                 yield "ok"
+
             return gen()
 
         calls: list[str] = []
@@ -71,6 +73,7 @@ class TestInvokeWithFallback:
         async def good_stream() -> AsyncIterator[str]:
             async def gen() -> AsyncIterator[str]:
                 yield "recovered"
+
             return gen()
 
         async def invoke(name: str) -> AsyncIterator[str]:

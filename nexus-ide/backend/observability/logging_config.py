@@ -7,16 +7,16 @@ Provides:
 - Log levels with environment-based filtering
 - Automatic correlation IDs
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import sys
-import time
 import uuid
 from contextvars import ContextVar
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 # Context variables for request-scoped logging
 _correlation_id: ContextVar[str] = ContextVar("correlation_id", default="")
@@ -29,7 +29,7 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         log_entry: dict[str, Any] = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -82,17 +82,17 @@ def setup_logging(
     if json_format:
         console.setFormatter(JsonFormatter())
     else:
-        console.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-        ))
+        console.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     root.addHandler(console)
 
     # File handler (optional)
     if log_file:
         file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(JsonFormatter() if json_format else logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-        ))
+        file_handler.setFormatter(
+            JsonFormatter()
+            if json_format
+            else logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
         root.addHandler(file_handler)
 
     # Set levels for noisy libraries

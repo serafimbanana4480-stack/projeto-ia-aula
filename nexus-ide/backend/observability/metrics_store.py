@@ -3,14 +3,14 @@
 Stores metrics over time for dashboard charts and analysis.
 Uses in-memory storage for now (Redis for production).
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass, asdict
-from typing import Optional
+from dataclasses import dataclass
 
 from .metrics_collector import MetricsSnapshot
 
@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TimelineDataPoint:
     """Single data point for timeline charts."""
+
     timestamp: float
     tokens_per_second: float
     active_sessions: int
@@ -58,7 +59,7 @@ class MetricsStore:
         async with self._lock:
             cutoff = time.time() - seconds
             filtered = [p for p in self._timeline if p.timestamp >= cutoff]
-            
+
             # Return only the requested metric
             return [
                 {
@@ -71,16 +72,22 @@ class MetricsStore:
     async def get_timeline_multi(
         self,
         seconds: int = 3600,
-        metrics: Optional[list[str]] = None,
+        metrics: list[str] | None = None,
     ) -> dict[str, list[dict]]:
         """Get timeline data for multiple metrics."""
         if metrics is None:
-            metrics = ["tokens_per_second", "active_sessions", "cpu_percent", "ram_percent", "avg_latency_ms"]
-        
+            metrics = [
+                "tokens_per_second",
+                "active_sessions",
+                "cpu_percent",
+                "ram_percent",
+                "avg_latency_ms",
+            ]
+
         async with self._lock:
             cutoff = time.time() - seconds
             filtered = [p for p in self._timeline if p.timestamp >= cutoff]
-            
+
             result = {}
             for metric in metrics:
                 result[metric] = [
@@ -92,7 +99,7 @@ class MetricsStore:
                 ]
             return result
 
-    async def get_latest(self) -> Optional[TimelineDataPoint]:
+    async def get_latest(self) -> TimelineDataPoint | None:
         """Get the most recent data point."""
         async with self._lock:
             return self._timeline[-1] if self._timeline else None
@@ -104,7 +111,7 @@ class MetricsStore:
 
 
 # Global singleton
-_store: Optional[MetricsStore] = None
+_store: MetricsStore | None = None
 
 
 def get_metrics_store() -> MetricsStore:

@@ -1,4 +1,5 @@
 """Tests for backend.orchestrator.registry."""
+
 from __future__ import annotations
 
 from backend.agents.coder import CoderAgent
@@ -8,8 +9,16 @@ from backend.orchestrator.registry import build_default_registry, resolve
 class TestRegistry:
     def test_default_registry_contains_core_agents(self) -> None:
         r = build_default_registry()
-        for name in ("CODER", "ANALYZER", "DEBUGGER", "DOCUMENTER",
-                     "OPTIMIZER", "RESEARCHER", "ARCHITECT", "MICRO"):
+        for name in (
+            "CODER",
+            "ANALYZER",
+            "DEBUGGER",
+            "DOCUMENTER",
+            "OPTIMIZER",
+            "RESEARCHER",
+            "ARCHITECT",
+            "MICRO",
+        ):
             assert name in r, f"{name} missing from default registry"
 
     def test_resolve_returns_matching_agent(self) -> None:

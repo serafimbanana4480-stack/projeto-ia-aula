@@ -1,102 +1,351 @@
 "use client";
-import { useState } from "react";
+
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Activity, Cpu, HardDrive, Clock, LogOut, X } from "lucide-react";
+import {
+  Clock,
+  FileText,
+  X,
+  Zap,
+} from "lucide-react";
+import { AreaChart, Area, ResponsiveContainer } from "recharts";
+import { apiUrl } from "../../lib/api";
+
+interface SystemMetrics {
+  cpu_percent: number;
+  ram_percent: number;
+  ram_used_bytes: number;
+  ram_total_bytes: number;
+  disk_percent: number;
+  disk_used_bytes: number;
+  disk_total_bytes: number;
+  uptime_seconds: number;
+  tokens_per_second: number;
+  avg_latency_ms: number;
+}
+
+function MiniSpark({ data, color }: { data: { v: number }[]; color: string }) {
+  return (
+    <div className="h-6 w-16">
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data}>
+          <defs>
+            <linearGradient id={`bg-${color}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity={0.3} />
+              <stop offset="100%" stopColor={color} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <Area
+            type="monotone"
+            dataKey="v"
+            stroke={color}
+            strokeWidth={1.5}
+            fill={`url(#bg-${color})`}
+            isAnimationActive={false}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}m ${s}s`;
+  }
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h ${mins}m`;
+  return `${hours}h ${mins}m`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1e6) return `${(bytes / 1e3).toFixed(0)} KB`;
+  if (bytes < 1e9) return `${(bytes / 1e6).toFixed(1)} MB`;
+  return `${(bytes / 1e9).toFixed(1)} GB`;
+}
 
 export default function BottomHUD() {
   const [showLogs, setShowLogs] = useState(false);
+  const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
+  const [ollamaOnline, setOllamaOnline] = useState(false);
+  const [systemOnline, setSystemOnline] = useState(false);
+  const [cpuHistory, setCpuHistory] = useState<{ v: number }[]>([]);
+  const [ramHistory, setRamHistory] = useState<{ v: number }[]>([]);
+  const [diskHistory, setDiskHistory] = useState<{ v: number }[]>([]);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  // Poll metrics every 2 seconds
+  useEffect(() => {
+    const fetchMetrics = async () => {
+      try {
+        const response = await fetch(apiUrl("/api/metrics/current"));
+        if (response.ok) {
+          const data = await response.json();
+          setMetrics(data);
+          setSystemOnline(true);
+
+          // Update sparkline histories
+          setCpuHistory((prev) => [
+            ...prev.slice(-19),
+            { v: data.cpu_percent ?? 0 },
+          ]);
+          setRamHistory((prev) => [
+            ...prev.slice(-19),
+            { v: data.ram_percent ?? 0 },
+          ]);
+          setDiskHistory((prev) => [
+            ...prev.slice(-19),
+            { v: data.disk_percent ?? 0 },
+          ]);
+        } else {
+          setSystemOnline(false);
+        }
+      } catch (error) {
+        setSystemOnline(false);
+      }
+    };
+
+    // Check Ollama status
+    const checkOllama = async () => {
+      try {
+        const response = await fetch("http://localhost:11434/api/tags", {
+          signal: AbortSignal.timeout(3000),
+        });
+        setOllamaOnline(response.ok);
+      } catch {
+        setOllamaOnline(false);
+      }
+    };
+
+    fetchMetrics();
+    checkOllama();
+
+    const metricsInterval = setInterval(fetchMetrics, 2000);
+    const ollamaInterval = setInterval(checkOllama, 10000);
+
+    return () => {
+      clearInterval(metricsInterval);
+      clearInterval(ollamaInterval);
+    };
+  }, []);
+
+  // Fetch logs when modal opens
+  useEffect(() => {
+    if (!showLogs) return;
+
+    const fetchLogs = async () => {
+      try {
+        const response = await fetch(apiUrl("/api/metrics/current"));
+        await response.json(); // ensure endpoint is reachable
+        const logEntries: string[] = [];
+
+        // Build log entries from real system state
+        logEntries.push(
+          ollamaOnline
+            ? "✓ Ollama running on port 11434"
+            : "✗ Ollama not reachable on port 11434",
+        );
+        logEntries.push(
+          systemOnline
+            ? "✓ Backend running on port 8000"
+            : "✗ Backend not reachable on port 8000",
+        );
+        logEntries.push(
+          `CPU: ${metrics?.cpu_percent?.toFixed(1) ?? "—"}% | RAM: ${metrics?.ram_percent?.toFixed(1) ?? "—"}% | Disk: ${metrics?.disk_percent?.toFixed(1) ?? "—"}%`,
+        );
+        if (metrics?.tokens_per_second) {
+          logEntries.push(
+            `Throughput: ${metrics.tokens_per_second.toFixed(1)} tokens/s | Latency: ${metrics.avg_latency_ms?.toFixed(0) ?? "—"}ms`,
+          );
+        }
+
+        setLogs(logEntries);
+      } catch {
+        setLogs(["Failed to fetch system logs"]);
+      }
+    };
+
+    fetchLogs();
+  }, [showLogs, ollamaOnline, systemOnline, metrics]);
 
   return (
     <>
       <motion.div
-      initial={{ y: 20, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      className="flex items-center justify-between border-t border-nexus-border bg-nexus-panel/50 px-4 py-2 backdrop-blur-md text-xs"
-    >
-      <div className="flex items-center gap-6">
-        <div className="flex items-center gap-2">
-          <div className="h-2 w-2 rounded-full bg-green-500" />
-          <span className="text-gray-400">System</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="h-2 w-2 rounded-full bg-green-500" />
-          <span className="text-gray-400">Ollama</span>
-        </div>
-        <div className="flex items-center gap-2 text-gray-400">
-          <Cpu className="h-3 w-3" />
-          <span>CPU</span>
-          <span className="text-nexus-accent">📈</span>
-        </div>
-        <div className="flex items-center gap-2 text-gray-400">
-          <HardDrive className="h-3 w-3" />
-          <span>RAM</span>
-          <span className="text-nexus-accent">📈</span>
-        </div>
-        <div className="flex items-center gap-2 text-gray-400">
-          <Activity className="h-3 w-3" />
-          <span>GPU</span>
-          <span className="text-nexus-accent">📈</span>
-        </div>
-      </div>
+        initial={{ y: 12, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        className="flex h-10 items-center justify-between border-t border-nexus-border bg-nexus-panel px-5 text-[11px]"
+      >
+        <div className="flex items-center gap-5">
+          {/* System status */}
+          <div className="flex items-center gap-1.5">
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${systemOnline ? "bg-green-500" : "bg-red-500"}`}
+            />
+            <span
+              className={systemOnline ? "text-green-400" : "text-red-400"}
+            >
+              {systemOnline ? "Online" : "Offline"}
+            </span>
+            <span className="text-nexus-muted">Sistema</span>
+          </div>
 
-      <div className="flex items-center gap-4 text-gray-400">
-        <div className="flex items-center gap-2">
-          <Clock className="h-3 w-3" />
-          <span>Uptime: 2h 34m</span>
-        </div>
-        <div className="h-4 w-px bg-nexus-border" />
-        <button 
-          onClick={() => setShowLogs(true)}
-          className="flex items-center gap-2 hover:text-gray-300"
-        >
-          <LogOut className="h-3 w-3" />
-          <span>Logs</span>
-        </button>
-      </div>
-    </motion.div>
+          {/* Ollama status */}
+          <div className="flex items-center gap-1.5">
+            <Zap
+              className={`h-3 w-3 ${ollamaOnline ? "text-green-400" : "text-red-400"}`}
+            />
+            <span
+              className={ollamaOnline ? "text-green-400" : "text-red-400"}
+            >
+              {ollamaOnline ? "Conectado" : "Desconectado"}
+            </span>
+            <span className="text-nexus-muted">Ollama</span>
+          </div>
 
-    <AnimatePresence>
-      {showLogs && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-          onClick={() => setShowLogs(false)}
-        >
-          <motion.div
-            initial={{ scale: 0.95 }}
-            animate={{ scale: 1 }}
-            exit={{ scale: 0.95 }}
-            className="h-96 w-full max-w-4xl overflow-auto rounded border border-nexus-border bg-nexus-panel p-4"
-            onClick={(e) => e.stopPropagation()}
+          <div className="h-4 w-px bg-nexus-border" />
+
+          {/* CPU */}
+          <div className="flex items-center gap-2 text-nexus-muted">
+            <span>CPU</span>
+            <span className="font-medium text-nexus-text">
+              {metrics?.cpu_percent != null
+                ? `${metrics.cpu_percent.toFixed(0)}%`
+                : "—"}
+            </span>
+            {cpuHistory.length > 1 && (
+              <MiniSpark data={cpuHistory} color="#60a5fa" />
+            )}
+          </div>
+
+          {/* RAM */}
+          <div className="flex items-center gap-2 text-nexus-muted">
+            <span>RAM</span>
+            <span className="font-medium text-nexus-text">
+              {metrics?.ram_percent != null
+                ? `${metrics.ram_percent.toFixed(0)}%`
+                : "—"}
+            </span>
+            {ramHistory.length > 1 && (
+              <MiniSpark data={ramHistory} color="#a78bfa" />
+            )}
+          </div>
+
+          {/* Disk */}
+          <div className="flex items-center gap-2 text-nexus-muted">
+            <span>Disk</span>
+            <span className="font-medium text-nexus-text">
+              {metrics?.disk_percent != null
+                ? `${metrics.disk_percent.toFixed(0)}%`
+                : "—"}
+            </span>
+            {diskHistory.length > 1 && (
+              <MiniSpark data={diskHistory} color="#5eead4" />
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 text-nexus-muted">
+          <div className="flex items-center gap-1.5">
+            <Clock className="h-3 w-3" />
+            <span>
+              Uptime:{" "}
+              {metrics?.uptime_seconds
+                ? formatUptime(metrics.uptime_seconds)
+                : "—"}
+            </span>
+          </div>
+          <div className="h-4 w-px bg-nexus-border" />
+          <button
+            onClick={() => setShowLogs(true)}
+            className="flex items-center gap-1.5 hover:text-nexus-text transition-colors"
           >
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-lg font-semibold">System Logs</h2>
-              <button
-                onClick={() => setShowLogs(false)}
-                className="rounded hover:bg-nexus-border p-1"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="space-y-2 text-xs font-mono">
-              <div className="rounded bg-black/30 p-2">
-                <div className="text-green-400">✓ Ollama running on port 11434</div>
-                <div className="text-green-400">✓ Backend running on port 8000</div>
-                <div className="text-green-400">✓ Frontend running on port 3000</div>
+            <FileText className="h-3 w-3" />
+            Ver Logs
+          </button>
+        </div>
+      </motion.div>
+
+      <AnimatePresence>
+        {showLogs && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+            onClick={() => setShowLogs(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.95 }}
+              className="h-96 w-full max-w-4xl overflow-auto rounded-xl border border-nexus-border bg-nexus-panel p-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-sm font-semibold">System Logs</h2>
+                <button
+                  onClick={() => setShowLogs(false)}
+                  className="rounded-lg p-1 hover:bg-nexus-card transition-colors"
+                >
+                  <X className="h-4 w-4" />
+                </button>
               </div>
-              <div className="rounded bg-black/30 p-2 text-gray-400">
-                <div>Logs are available in the logs/ directory</div>
-                <div>• logs/ollama.log</div>
-                <div>• logs/backend.log</div>
-                <div>• logs/frontend.log</div>
+              <div className="space-y-2 text-xs font-mono">
+                <div className="rounded-lg bg-nexus-bg p-3">
+                  {logs.length > 0 ? (
+                    logs.map((log, i) => (
+                      <div
+                        key={i}
+                        className={
+                          log.startsWith("✓")
+                            ? "text-green-400"
+                            : log.startsWith("✗")
+                              ? "text-red-400"
+                              : "text-nexus-muted"
+                        }
+                      >
+                        {log}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-nexus-muted">
+                      A carregar logs do sistema...
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-lg bg-nexus-bg p-3 text-nexus-muted">
+                  <div>Detalhes do sistema</div>
+                  <div className="mt-1">
+                    • RAM:{" "}
+                    {metrics
+                      ? `${formatBytes(metrics.ram_used_bytes)} / ${formatBytes(metrics.ram_total_bytes)}`
+                      : "—"}
+                  </div>
+                  <div>
+                    • Disk:{" "}
+                    {metrics
+                      ? `${formatBytes(metrics.disk_used_bytes)} / ${formatBytes(metrics.disk_total_bytes)}`
+                      : "—"}
+                  </div>
+                  <div>
+                    • Tokens/s:{" "}
+                    {metrics?.tokens_per_second?.toFixed(1) ?? "—"}
+                  </div>
+                  <div>
+                    • Latência:{" "}
+                    {metrics?.avg_latency_ms?.toFixed(0) ?? "—"}ms
+                  </div>
+                </div>
               </div>
-            </div>
+            </motion.div>
           </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
+        )}
+      </AnimatePresence>
     </>
   );
 }

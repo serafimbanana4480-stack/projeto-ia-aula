@@ -1,9 +1,11 @@
 """Global pytest fixtures for the NEXUS IDE backend test suite."""
+
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
@@ -34,11 +36,14 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "LOG_LEVEL": "DEBUG",
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://test-otel:4317",
         "PROMETHEUS_PORT": "9099",
+        "JWT_SECRET": "test-jwt-secret-for-testing",
+        "JWT_ALGORITHM": "HS256",
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)
 
     from backend.config.settings import get_settings
+
     get_settings.cache_clear()
 
 
@@ -68,10 +73,14 @@ def make_stream_response(tokens: Iterable[str]) -> httpx.Response:
     """
     lines: list[str] = []
     for tok in tokens:
-        lines.append(json.dumps({
-            "message": {"role": "assistant", "content": tok},
-            "done": False,
-        }))
+        lines.append(
+            json.dumps(
+                {
+                    "message": {"role": "assistant", "content": tok},
+                    "done": False,
+                }
+            )
+        )
     lines.append(json.dumps({"done": True}))
     body = "\n".join(lines) + "\n"
     return httpx.Response(200, content=body.encode("utf-8"))
@@ -94,9 +103,69 @@ def ollama_client(ollama_tokens: list[str]) -> OllamaClient:
 
     No network calls; the transport always returns the canned tokens.
     """
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/chat"
         return make_stream_response(ollama_tokens)
 
     transport = httpx.MockTransport(handler)
     return OllamaClient("http://mock", transport=transport)
+
+
+# ---------------------------------------------------------------------------
+# Test utilities
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sample_chat_request() -> dict[str, Any]:
+    """Return a sample chat request for testing."""
+    return {
+        "message": "Hello, how are you?",
+        "session_id": "test-session-123",
+        "mode": "agent",
+    }
+
+
+@pytest.fixture
+def sample_routing_decision() -> dict[str, Any]:
+    """Return a sample routing decision for testing."""
+    return {
+        "primary_agent": "CODER",
+        "secondary_agents": [],
+        "requires_web_search": False,
+        "thinking_mode": "fast",
+        "estimated_complexity": 3,
+        "task_type": "general",
+        "context_needed": "low",
+        "routing_confidence": 0.8,
+        "routing_reason": "Test routing",
+    }
+
+
+@pytest.fixture
+def temp_project_dir(tmp_path: Path) -> Path:
+    """Create a temporary project directory with sample files.
+
+    Returns the path to the temporary directory.
+    """
+    project_dir = tmp_path / "test_project"
+    project_dir.mkdir()
+
+    # Create some sample files
+    (project_dir / "main.py").write_text(
+        "def main():\n    print('Hello, World!')\n", encoding="utf-8"
+    )
+    (project_dir / "README.md").write_text(
+        "# Test Project\n\nThis is a test project.\n", encoding="utf-8"
+    )
+
+    # Create a subdirectory
+    subdir = project_dir / "src"
+    subdir.mkdir()
+    (subdir / "utils.py").write_text(
+        "def greet(name: str) -> str:\n    return f'Hello, {name}!'\n",
+        encoding="utf-8",
+    )
+
+    return project_dir

@@ -1,4 +1,5 @@
 """Tests for backend.orchestrator.context_manager."""
+
 from __future__ import annotations
 
 from backend.orchestrator.context_manager import AgentScratchpad, ContextStore

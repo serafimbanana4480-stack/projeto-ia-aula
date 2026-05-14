@@ -3,9 +3,10 @@
 The registry is constructed once at process startup and reused across requests.
 Tests can inject a custom registry via :func:`set_registry`.
 """
+
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping
 
 from backend.agents.analyzer import AnalyzerAgent
 from backend.agents.architect import ArchitectAgent
@@ -24,14 +25,14 @@ AgentRegistry = Mapping[AgentName, AgentBase]
 def build_default_registry() -> dict[AgentName, AgentBase]:
     """Construct the standard set of agents. Call once at app startup."""
     return {
-        "ARCHITECT":  ArchitectAgent(),
+        "ARCHITECT": ArchitectAgent(),
         "RESEARCHER": ResearcherAgent(),
-        "CODER":      CoderAgent(),
-        "ANALYZER":   AnalyzerAgent(),
-        "DEBUGGER":   DebuggerAgent(),
+        "CODER": CoderAgent(),
+        "ANALYZER": AnalyzerAgent(),
+        "DEBUGGER": DebuggerAgent(),
         "DOCUMENTER": DocumenterAgent(),
-        "OPTIMIZER":  OptimizerAgent(),
-        "MICRO":      MicroAgent(),
+        "OPTIMIZER": OptimizerAgent(),
+        "MICRO": MicroAgent(),
     }
 
 

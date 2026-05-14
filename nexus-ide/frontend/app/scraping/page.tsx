@@ -4,7 +4,13 @@ import { motion } from "framer-motion";
 import TopBar from "../../components/layout/TopBar";
 import Sidebar from "../../components/layout/Sidebar";
 import BottomHUD from "../../components/layout/BottomHUD";
-import { Globe, Search, ExternalLink, Loader2, AlertCircle } from "lucide-react";
+import {
+  Globe,
+  Search,
+  ExternalLink,
+  Loader2,
+  AlertCircle,
+} from "lucide-react";
 import { apiUrl } from "../../lib/api";
 
 interface SearchResult {
@@ -21,20 +27,20 @@ export default function ScrapingPage() {
 
   const handleSearch = async () => {
     if (!query.trim()) return;
-    
+
     setLoading(true);
     setError("");
     setResults([]);
-    
+
     try {
       const response = await fetch(apiUrl("/api/web_search"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query, max_results: 10 }),
       });
-      
+
       const data = await response.json();
-      
+
       if (data.error) {
         setError(data.error);
       } else if (Array.isArray(data)) {
@@ -53,10 +59,10 @@ export default function ScrapingPage() {
   return (
     <div className="flex h-screen flex-col bg-nexus-bg">
       <TopBar />
-      
+
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        
+
         <main className="flex-1 overflow-auto p-6">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -93,7 +99,7 @@ export default function ScrapingPage() {
                   Search
                 </button>
               </div>
-              
+
               {error && (
                 <motion.div
                   initial={{ opacity: 0 }}
@@ -136,8 +142,12 @@ export default function ScrapingPage() {
                   >
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex-1 min-w-0">
-                        <h3 className="font-medium text-sm mb-1">{result.title}</h3>
-                        <p className="text-xs text-gray-400 mb-2">{result.snippet}</p>
+                        <h3 className="font-medium text-sm mb-1">
+                          {result.title}
+                        </h3>
+                        <p className="text-xs text-gray-400 mb-2">
+                          {result.snippet}
+                        </p>
                         <a
                           href={result.url}
                           target="_blank"
@@ -174,13 +184,15 @@ export default function ScrapingPage() {
               >
                 <Globe className="mx-auto mb-3 h-12 w-12 text-nexus-accent" />
                 <p className="text-sm">AI-Powered Web Scraping</p>
-                <p className="text-xs">Search the web using DuckDuckGo with AI analysis</p>
+                <p className="text-xs">
+                  Search the web using DuckDuckGo with AI analysis
+                </p>
               </motion.div>
             )}
           </motion.div>
         </main>
       </div>
-      
+
       <BottomHUD />
     </div>
   );
