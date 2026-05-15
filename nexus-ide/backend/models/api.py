@@ -22,6 +22,7 @@ AgentName = Literal[
     "OPTIMIZER",
     "DASHBOARD",
     "MICRO",
+    "ORCHESTRATOR",
 ]
 ThinkingMode = Literal["fast", "deep", "iterative"]
 ContextNeed = Literal["low", "medium", "high"]
@@ -48,6 +49,8 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=50_000)
     session_id: str = Field(min_length=1, max_length=128, default="default")
     mode: str = Field(default="agent", min_length=1, max_length=32)
+    model: str = Field(default="", max_length=128, description="Model tier key (e.g. 'coder','deep','reasoning') selected by the user in the UI. Empty string means auto-route.")
+    project_path: str = Field(default="", max_length=2000, description="Absolute path to the active project directory. Empty string means no project context.")
 
 
 class ProjectCreateRequest(BaseModel):

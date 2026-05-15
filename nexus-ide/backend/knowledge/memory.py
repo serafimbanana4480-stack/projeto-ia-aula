@@ -85,7 +85,11 @@ class Memory:
 
 
 class EmbeddingService:
-    """Generates vector embeddings using Ollama's embedding endpoint."""
+    """Generates vector embeddings using Ollama's embedding endpoint.
+
+    Delegates to backend.tools.embeddings.embed() for the actual API call,
+    with a deterministic fallback when Ollama is unavailable.
+    """
 
     def __init__(
         self, ollama_host: str = "http://localhost:11434", model: str = "nomic-embed-text"
@@ -95,18 +99,40 @@ class EmbeddingService:
         self._dimension = 768  # default for nomic-embed-text
 
     async def embed(self, text: str) -> list[float]:
-        """Generate embedding vector for text."""
+        """Generate embedding vector for text.
+
+        Tries the shared embedding function first, then falls back to
+        a deterministic hash-based embedding.
+        """
+        try:
+            from backend.tools.embeddings import embed as _shared_embed
+            result = await _shared_embed(text, model=self._model)
+            if result:
+                self._dimension = len(result)
+            return result
+        except (ImportError, RuntimeError):
+            pass
+
+        # Direct API call as secondary fallback
         import httpx
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
+                # Try new API format first
                 resp = await client.post(
-                    f"{self._host}/api/embeddings",
-                    json={"model": self._model, "prompt": text},
+                    f"{self._host}/api/embed",
+                    json={"model": self._model, "input": text},
                 )
+                if resp.status_code == 404:
+                    # Fall back to old API format
+                    resp = await client.post(
+                        f"{self._host}/api/embeddings",
+                        json={"model": self._model, "prompt": text},
+                    )
                 resp.raise_for_status()
                 data = resp.json()
-                embedding = data.get("embedding", [])
+                # New API returns "embeddings" (list of lists)
+                embedding = data.get("embeddings", [[]])[0] or data.get("embedding", [])
                 if embedding:
                     self._dimension = len(embedding)
                 return embedding

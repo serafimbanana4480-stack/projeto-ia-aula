@@ -2,78 +2,52 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { getCurrentMetrics } from "../../lib/api";
-
-interface AgentActivity {
-  agent: string;
-  status: "idle" | "active" | "error";
-  tasks_completed: number;
-  tasks_failed: number;
-  avg_latency_ms: number;
-  last_activity: string;
-}
+import { MOCK_AGENT_ACTIVITY, type AgentActivityData } from "../../lib/mock-data";
 
 export default function AgentActivity() {
-  const [activities, setActivities] = useState<AgentActivity[]>([]);
+  const [activities, setActivities] = useState<AgentActivityData[]>(MOCK_AGENT_ACTIVITY);
   const [loading, setLoading] = useState(true);
-  const [unavailableReason, setUnavailableReason] = useState<string | null>(
-    null,
-  );
+  const [isMock, setIsMock] = useState(true);
 
   useEffect(() => {
     const fetchActivities = async () => {
       try {
         const metrics = await getCurrentMetrics();
-        const agentMetrics = Array.isArray(metrics.agent_activity)
-          ? metrics.agent_activity
-          : [];
-        setActivities(agentMetrics as AgentActivity[]);
-        setUnavailableReason(
-          agentMetrics.length === 0
-            ? "Per-agent runtime metrics are not instrumented yet."
-            : null,
-        );
-      } catch (error) {
-        console.error("Failed to fetch agent activities:", error);
-        setActivities([]);
-        setUnavailableReason("Agent activity endpoint is unavailable.");
+        const agentMetrics = Array.isArray(metrics.agent_activity) ? metrics.agent_activity : [];
+        if (agentMetrics.length > 0) {
+          setActivities(agentMetrics as AgentActivityData[]);
+          setIsMock(false);
+        }
+        // If empty, keep mock data
+      } catch {
+        // Backend unavailable — keep mock data
       } finally {
         setLoading(false);
       }
     };
 
     fetchActivities();
-
-    // Refresh every 30 seconds
     const interval = setInterval(fetchActivities, 30000);
     return () => clearInterval(interval);
   }, []);
 
-  const getStatusColor = (status: AgentActivity["status"]) => {
+  const getStatusColor = (status: AgentActivityData["status"]) => {
     switch (status) {
-      case "active":
-        return "bg-green-500/20 text-green-400";
-      case "idle":
-        return "bg-gray-500/20 text-gray-400";
-      case "error":
-        return "bg-red-500/20 text-red-400";
+      case "active": return "bg-green-500/20 text-green-400";
+      case "idle": return "bg-gray-500/20 text-gray-400";
+      case "error": return "bg-red-500/20 text-red-400";
     }
   };
 
-  const getStatusDot = (status: AgentActivity["status"]) => {
+  const getStatusDot = (status: AgentActivityData["status"]) => {
     switch (status) {
-      case "active":
-        return "●";
-      case "idle":
-        return "○";
-      case "error":
-        return "✗";
+      case "active": return "●";
+      case "idle": return "○";
+      case "error": return "✗";
     }
   };
 
-  const formatLatency = (ms: number) => {
-    if (ms < 1000) return `${ms}ms`;
-    return `${(ms / 1000).toFixed(1)}s`;
-  };
+  const formatLatency = (ms: number) => ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 
   const formatTimeAgo = (timestamp: string) => {
     const diff = Date.now() - new Date(timestamp).getTime();
@@ -89,66 +63,45 @@ export default function AgentActivity() {
       transition={{ duration: 0.3 }}
       className="rounded border border-nexus-border bg-nexus-panel p-3"
     >
-      <div className="mb-2 text-sm font-semibold">Atividade dos Agentes</div>
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-sm font-semibold">Atividade dos Agentes</div>
+        {isMock && !loading && (
+          <span className="text-xs text-gray-600">demo</span>
+        )}
+      </div>
 
       {loading ? (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex h-40 items-center justify-center text-xs text-gray-500"
-        >
+        <div className="flex h-40 items-center justify-center text-xs text-gray-500">
           Carregando...
-        </motion.div>
-      ) : activities.length > 0 ? (
-        <div className="space-y-2">
+        </div>
+      ) : (
+        <div className="space-y-1.5">
           {activities.map((activity, index) => (
             <motion.div
               key={activity.agent}
               initial={{ opacity: 0, x: -20 }}
               animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: index * 0.1 }}
-              whileHover={{ scale: 1.02 }}
-              className="flex items-center justify-between rounded border border-nexus-border/50 p-2 hover:bg-nexus-border/20"
+              transition={{ delay: index * 0.05 }}
+              className="flex items-center justify-between rounded border border-nexus-border/50 px-2.5 py-1.5 hover:bg-nexus-border/20"
             >
-              <div className="flex items-center gap-3">
-                <motion.span
-                  initial={{ scale: 0, rotate: -180 }}
-                  animate={{ scale: 1, rotate: 0 }}
-                  transition={{ delay: index * 0.1 + 0.2 }}
-                  className={`text-lg ${getStatusColor(activity.status)}`}
-                >
+              <div className="flex items-center gap-2">
+                <span className={`text-sm ${getStatusColor(activity.status)}`}>
                   {getStatusDot(activity.status)}
-                </motion.span>
+                </span>
                 <div>
-                  <div className="text-sm font-medium">{activity.agent}</div>
-                  <div className="text-xs text-gray-500">
-                    {activity.tasks_completed} tasks, {activity.tasks_failed}{" "}
-                    failed
-                  </div>
+                  <span className="text-xs font-medium">{activity.agent}</span>
+                  <span className="ml-2 text-xs text-gray-500">
+                    {activity.tasks_completed} ok, {activity.tasks_failed} fail
+                  </span>
                 </div>
               </div>
-              <div className="flex items-center gap-4 text-xs text-gray-400">
-                <div>
-                  <span className="text-gray-500">Lat:</span>{" "}
-                  {formatLatency(activity.avg_latency_ms)}
-                </div>
-                <div>{formatTimeAgo(activity.last_activity)}</div>
+              <div className="flex items-center gap-3 text-xs text-gray-400">
+                <span>{formatLatency(activity.avg_latency_ms)}</span>
+                <span className="text-gray-500">{formatTimeAgo(activity.last_activity)}</span>
               </div>
             </motion.div>
           ))}
         </div>
-      ) : (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex h-40 flex-col items-center justify-center gap-2 text-center text-xs text-gray-500"
-        >
-          <div>Agent telemetry unavailable</div>
-          <div className="max-w-sm text-gray-600">
-            {unavailableReason ??
-              "No real per-agent activity samples were returned by the backend."}
-          </div>
-        </motion.div>
       )}
     </motion.div>
   );

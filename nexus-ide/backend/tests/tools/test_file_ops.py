@@ -99,7 +99,7 @@ class TestWriteFile:
         """Test writing a new file."""
         result = await write_file("new.txt", "New content", str(tmp_path))
         assert result["written"] is True
-        assert result["size"] == 10
+        assert result["size"] == 11
 
         # Verify file was written
         test_file = tmp_path / "new.txt"

@@ -1,30 +1,22 @@
 """Code executor - sandbox for running Python, JS, Bash, etc.
 
-Uses subprocess with timeout and resource limits. For production, use Docker.
+Uses SandboxExecutor which provides:
+- Docker container isolation when Docker is available
+- Dangerous command detection and blocking
+- Resource limits (memory, CPU, timeout)
+- Automatic fallback to subprocess when Docker is unavailable
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
-
-SANDBOX_CONFIG: dict[str, Any] = {
-    "network_mode": "none",
-    "mem_limit": "512m",
-    "read_only": True,
-    "user": "nobody",
-    "security_opt": ["no-new-privileges"],
-    "cap_drop": ["ALL"],
-    "tmpfs": ["/tmp"],
-}
 
 LANGUAGE_CONFIG: dict[str, dict[str, str]] = {
     "python": {
@@ -54,14 +46,27 @@ class ExecutionResult:
     timed_out: bool
 
 
+# Global SandboxExecutor instance (lazy-initialized)
+_executor = None
+
+
+def _get_executor():
+    """Get or create the global SandboxExecutor instance."""
+    global _executor
+    if _executor is None:
+        from backend.sandbox.executor import SandboxExecutor
+        _executor = SandboxExecutor()
+    return _executor
+
+
 async def execute_code(
     code: str, language: str = "python", timeout: int = 30
 ) -> ExecutionResult:
-    """Run code in subprocess with timeout.
+    """Run code in a sandboxed environment.
 
-    WARNING: This is NOT a true sandbox. Code runs with the same user
-    permissions as the server process. For production use, switch to
-    Docker-based execution with the SANDBOX_CONFIG settings.
+    Uses SandboxExecutor which provides Docker isolation when available,
+    dangerous command detection, and resource limits. Falls back to
+    subprocess with security checks when Docker is unavailable.
 
     Args:
         code: Source code to execute.
@@ -80,53 +85,29 @@ async def execute_code(
             f"Supported: {', '.join(LANGUAGE_CONFIG.keys())}"
         )
 
-    config = LANGUAGE_CONFIG[language]
-    started_at = asyncio.get_event_loop().time()
-
     try:
-        with tempfile.TemporaryDirectory(prefix="nexus_exec_") as tmpdir:
-            source_path = Path(tmpdir) / f"code{config['extension']}"
-            source_path.write_text(code, encoding="utf-8")
+        executor = _get_executor()
+        result = await executor.execute(
+            code=code,
+            language=language,
+            timeout=timeout,
+        )
 
-            cmd = [config["command"], *config["args"], str(source_path)]
-
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=tmpdir,
-            )
-
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
-                timed_out = False
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                stdout_bytes = b""
-                stderr_bytes = b"Execution timed out"
-                timed_out = True
-
-            elapsed = asyncio.get_event_loop().time() - started_at
-
-            return ExecutionResult(
-                stdout=stdout_bytes.decode("utf-8", errors="replace")[:100_000],
-                stderr=stderr_bytes.decode("utf-8", errors="replace")[:100_000],
-                exit_code=proc.returncode if proc.returncode is not None else -1,
-                execution_time=round(elapsed, 3),
-                timed_out=timed_out,
-            )
+        return ExecutionResult(
+            stdout=result.stdout[:100_000],
+            stderr=result.stderr[:100_000],
+            exit_code=result.exit_code,
+            execution_time=result.duration_ms / 1000.0,
+            timed_out=result.timed_out,
+        )
 
     except Exception as exc:
-        elapsed = asyncio.get_event_loop().time() - started_at
         logger.exception("Code execution failed: %s", exc)
         return ExecutionResult(
             stdout="",
             stderr=f"Execution error: {exc}",
             exit_code=-1,
-            execution_time=round(elapsed, 3),
+            execution_time=0.0,
             timed_out=False,
         )
 
@@ -134,7 +115,11 @@ async def execute_code(
 register_tool(
     ToolSpec(
         name="execute_code",
-        description="Execute code in a sandboxed environment (Python, JavaScript, Bash). WARNING: Not fully sandboxed - runs with server permissions.",
+        description=(
+            "Execute code in a sandboxed environment (Python, JavaScript, Bash). "
+            "Uses Docker isolation when available, with dangerous command detection. "
+            "CRITICAL risk commands (rm -rf /, etc.) are automatically blocked."
+        ),
         schema={
             "type": "object",
             "properties": {

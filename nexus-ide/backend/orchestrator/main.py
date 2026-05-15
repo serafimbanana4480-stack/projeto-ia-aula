@@ -39,6 +39,8 @@ from backend.orchestrator.routes.modes import router as modes_router
 from backend.orchestrator.routes.plan import router as plan_router
 from backend.orchestrator.routes.projects import router as projects_router
 from backend.orchestrator.routes.terminal import router as terminal_router
+from backend.orchestrator.routes.web_search import router as web_search_router
+from backend.orchestrator.routes.embeddings import router as embeddings_router
 from backend.persistence import init_db
 from backend.tools.ollama_client import OllamaClient
 
@@ -124,6 +126,8 @@ app.include_router(modes_router, prefix="/api")
 app.include_router(projects_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
 app.include_router(terminal_router, prefix="/api")
+app.include_router(web_search_router, prefix="/api")
+app.include_router(embeddings_router, prefix="/api")
 app.include_router(plan_router, prefix="/api")
 
 

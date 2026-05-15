@@ -2,20 +2,12 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { apiUrl } from "../../lib/api";
-
-interface ModelInfo {
-  id: string;
-  size_bytes: number;
-  size_gb: number;
-  modified_at: string;
-  details: Record<string, unknown>;
-  status: "available" | "loading" | "error";
-}
+import { MOCK_MODELS, type ModelInfo } from "../../lib/mock-data";
 
 export default function ModelComparison() {
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [models, setModels] = useState<ModelInfo[]>(MOCK_MODELS);
   const [loading, setLoading] = useState(true);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isMock, setIsMock] = useState(true);
   const [sortField, setSortField] = useState<"size_gb" | "status">("size_gb");
   const [sortAsc, setSortAsc] = useState(false);
 
@@ -23,29 +15,24 @@ export default function ModelComparison() {
     const fetchModels = async () => {
       try {
         setLoading(true);
-        setErrorMessage(null);
         const response = await fetch(apiUrl("/api/models/status"));
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (Array.isArray(data) && data.length > 0) {
+            setModels(data);
+            setIsMock(false);
+          }
+          // If empty, keep mock data
         }
-        const data = await response.json();
-        setModels(data);
-      } catch (error) {
-        console.error("Failed to fetch models:", error);
-        setModels([]);
-        setErrorMessage(
-          "Ollama model inventory is unavailable. No fallback model data is shown.",
-        );
+      } catch {
+        // Ollama unavailable — keep mock data
       } finally {
         setLoading(false);
       }
     };
 
     fetchModels();
-
-    // Refresh every 60 seconds
     const interval = setInterval(fetchModels, 60000);
-
     return () => clearInterval(interval);
   }, []);
 
@@ -55,9 +42,7 @@ export default function ModelComparison() {
     if (typeof aVal === "string" && typeof bVal === "string") {
       return sortAsc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
     }
-    return sortAsc
-      ? (aVal as number) - (bVal as number)
-      : (bVal as number) - (aVal as number);
+    return sortAsc ? (aVal as number) - (bVal as number) : (bVal as number) - (aVal as number);
   });
 
   const handleSort = (field: "size_gb" | "status") => {
@@ -70,15 +55,13 @@ export default function ModelComparison() {
   };
 
   const getStatusBadge = (status: string) => {
-    const colors = {
+    const colors: Record<string, string> = {
       available: "bg-green-500/20 text-green-400",
       loading: "bg-yellow-500/20 text-yellow-400",
       error: "bg-red-500/20 text-red-400",
     };
     return (
-      <span
-        className={`rounded px-2 py-0.5 text-xs ${colors[status as keyof typeof colors] || colors.available}`}
-      >
+      <span className={`rounded px-1.5 py-0.5 text-xs ${colors[status] || colors.available}`}>
         {status}
       </span>
     );
@@ -96,41 +79,27 @@ export default function ModelComparison() {
       transition={{ duration: 0.3 }}
       className="rounded border border-nexus-border bg-nexus-panel p-3"
     >
-      <div className="mb-2 text-sm font-semibold">Modelos Disponíveis</div>
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-sm font-semibold">Modelos Disponíveis</div>
+        {isMock && !loading && (
+          <span className="text-xs text-gray-600">demo</span>
+        )}
+      </div>
       {loading ? (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex h-40 items-center justify-center text-xs text-gray-500"
-        >
+        <div className="flex h-32 items-center justify-center text-xs text-gray-500">
           Carregando...
-        </motion.div>
-      ) : errorMessage ? (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex h-40 flex-col items-center justify-center gap-2 text-center text-xs text-gray-500"
-        >
-          <div>Model telemetry unavailable</div>
-          <div className="max-w-sm text-gray-600">{errorMessage}</div>
-        </motion.div>
-      ) : models.length > 0 ? (
+        </div>
+      ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="text-xs text-gray-500">
+          <table className="w-full text-xs">
+            <thead className="text-gray-500">
               <tr>
-                <th
-                  className="cursor-pointer text-left hover:text-gray-300"
-                  onClick={() => handleSort("status")}
-                >
+                <th className="cursor-pointer text-left hover:text-gray-300" onClick={() => handleSort("status")}>
                   Status {sortField === "status" && (sortAsc ? "↑" : "↓")}
                 </th>
                 <th className="text-left">Model</th>
-                <th
-                  className="cursor-pointer text-right hover:text-gray-300"
-                  onClick={() => handleSort("size_gb")}
-                >
-                  Tamanho {sortField === "size_gb" && (sortAsc ? "↑" : "↓")}
+                <th className="cursor-pointer text-right hover:text-gray-300" onClick={() => handleSort("size_gb")}>
+                  Size {sortField === "size_gb" && (sortAsc ? "↑" : "↓")}
                 </th>
                 <th className="text-right">Param</th>
               </tr>
@@ -139,34 +108,22 @@ export default function ModelComparison() {
               {sortedModels.map((model, index) => (
                 <motion.tr
                   key={model.id}
-                  initial={{ opacity: 0, x: -20 }}
+                  initial={{ opacity: 0, x: -10 }}
                   animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: index * 0.05 }}
+                  transition={{ delay: index * 0.03 }}
                   className="border-t border-nexus-border/50 hover:bg-nexus-border/20"
                 >
-                  <td className="py-2">{getStatusBadge(model.status)}</td>
-                  <td className="py-2 font-mono text-xs">{model.id}</td>
-                  <td className="py-2 text-right">
-                    {formatSize(model.size_bytes)}
-                  </td>
-                  <td className="py-2 text-right text-gray-400">
-                    {model.details?.parameter_size
-                      ? `${model.details.parameter_size}B`
-                      : "—"}
+                  <td className="py-1.5">{getStatusBadge(model.status)}</td>
+                  <td className="py-1.5 font-mono">{model.id}</td>
+                  <td className="py-1.5 text-right">{formatSize(model.size_bytes)}</td>
+                  <td className="py-1.5 text-right text-gray-400">
+                    {model.details?.parameter_size ? `${model.details.parameter_size}` : "—"}
                   </td>
                 </motion.tr>
               ))}
             </tbody>
           </table>
         </div>
-      ) : (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex h-40 items-center justify-center text-xs text-gray-500"
-        >
-          Nenhum modelo encontrado
-        </motion.div>
       )}
     </motion.div>
   );

@@ -9,5 +9,5 @@ class TestOptimizerAgent:
     def test_metadata(self) -> None:
         agent = OptimizerAgent()
         assert agent.name == "OPTIMIZER"
-        assert agent.model_key == "small"
+        assert agent.model_key == "coder"
         assert agent.prompt_file == "optimizer"

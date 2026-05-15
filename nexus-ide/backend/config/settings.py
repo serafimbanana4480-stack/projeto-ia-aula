@@ -109,7 +109,12 @@ def load_environment_config() -> dict[str, Any]:
     Returns the configuration for the current environment, or an empty dict
     if no environment-specific config exists.
     """
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except Exception:
+        # Invalid environment or other config error – return empty dict
+        return {}
+
     env = settings.environment
 
     # Map environment names to config file names

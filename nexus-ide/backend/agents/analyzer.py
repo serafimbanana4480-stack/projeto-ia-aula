@@ -1,6 +1,6 @@
 """ANALYZER — critical code/architecture reviewer.
 
-Model: qwen3.5:27b (LARGE) with thinking mode.
+Model: deepseek-r1:8b (REASONING tier) with thinking mode.
 Prompt: config/prompts/analyzer.md
 See ARCHITECTURE.md §3.5.
 
@@ -19,12 +19,13 @@ from .base import AgentAction, AgentBase, AgentRequest
 
 class AnalyzerAgent(AgentBase):
     name = "ANALYZER"
-    model_key = "large"
+    model_key = "reasoning"
     prompt_file = "analyzer"
     supported_actions = {
         AgentAction.READ_FILE,
         AgentAction.SEARCH_CODEBASE,
         AgentAction.READ_DOCS,
+        AgentAction.ANALYZE_DATA,
     }
 
     async def run(self, request: AgentRequest) -> AsyncIterator[str]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from backend.agents.coder import CoderAgent
+from backend.agents.dashboard_agent import DashboardAgent
 from backend.orchestrator.registry import build_default_registry, resolve
 
 
@@ -18,6 +19,7 @@ class TestRegistry:
             "RESEARCHER",
             "ARCHITECT",
             "MICRO",
+            "DASHBOARD",
         ):
             assert name in r, f"{name} missing from default registry"
 
@@ -27,6 +29,10 @@ class TestRegistry:
 
     def test_resolve_unknown_falls_back_to_coder(self) -> None:
         r = build_default_registry()
-        # ROUTER and DASHBOARD are not user-invocable; must fall back to CODER.
+        # ROUTER is not user-invocable; must fall back to CODER.
         assert isinstance(resolve(r, "ROUTER"), CoderAgent)  # type: ignore[arg-type]
-        assert isinstance(resolve(r, "DASHBOARD"), CoderAgent)
+
+    def test_resolve_dashboard_returns_dashboard_agent(self) -> None:
+        r = build_default_registry()
+        # DASHBOARD is now invocable for metrics queries
+        assert isinstance(resolve(r, "DASHBOARD"), DashboardAgent)

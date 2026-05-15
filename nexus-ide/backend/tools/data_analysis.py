@@ -9,10 +9,10 @@ Provides real data analysis capabilities:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -102,16 +102,18 @@ async def analyze_data(
             tmp_path = f.name
 
         try:
-            result = subprocess.run(
-                [venv_python, tmp_path],
-                capture_output=True,
-                text=True,
-                timeout=30,
+            result = await asyncio.create_subprocess_exec(
+                venv_python, tmp_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=str(Path(project_path).resolve()),
             )
-            output = result.stdout
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                result.communicate(), timeout=30
+            )
+            output = stdout_bytes.decode("utf-8", errors="replace")
             if result.returncode != 0:
-                error = result.stderr
+                error = stderr_bytes.decode("utf-8", errors="replace")
                 # If pandas not available, try basic analysis
                 if "No module named 'pandas'" in error or "HAS_PANDAS" in error:
                     return await _analyze_without_pandas(data_path, query, project_path)

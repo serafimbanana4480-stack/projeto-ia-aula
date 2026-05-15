@@ -60,7 +60,13 @@ async def generate_report(
         # Save to file if output_path specified
         saved_path = ""
         if output_path:
-            full_path = Path(project_path).resolve() / output_path
+            # Validate path is within project root (sandbox)
+            project = Path(project_path).resolve()
+            full_path = project / output_path
+            try:
+                full_path.resolve().relative_to(project)
+            except ValueError:
+                return {"error": f"Path {output_path} is outside project root {project}"}
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(report, encoding="utf-8")
             saved_path = str(full_path)

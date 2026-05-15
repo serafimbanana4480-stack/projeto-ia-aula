@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 
 from backend.config.settings import get_settings
+from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
 
@@ -230,3 +231,85 @@ def _keyword_search(query: str, k: int = 8) -> list[CodeChunk]:
 
     results.sort(key=lambda c: c.score, reverse=True)
     return results[:k]
+
+
+# ---------------------------------------------------------------------------
+# Tool registry integration
+# ---------------------------------------------------------------------------
+
+async def _search_codebase_tool(
+    query: str = "",
+    project_path: str = ".",
+    k: int = 8,
+) -> dict:
+    """Tool wrapper for search_codebase — used by the ReAct loop.
+
+    If the in-memory store is empty, falls back to keyword search via
+    ``search_in_files``. Returns a dict compatible with the tool registry.
+    """
+    if not query.strip():
+        return {"error": "Query cannot be empty."}
+
+    try:
+        results = await search_codebase(query, k=k)
+    except RuntimeError as exc:
+        return {"error": f"Semantic search unavailable: {exc}"}
+
+    if not results:
+        # Store is empty — suggest indexing first
+        return {
+            "query": query,
+            "results": [],
+            "message": (
+                "Codebase not indexed yet. Use the /api/embeddings/index endpoint "
+                "to index the project first, or use search_in_files for keyword search."
+            ),
+        }
+
+    return {
+        "query": query,
+        "results": [
+            {
+                "file": r.file,
+                "start_line": r.start_line,
+                "end_line": r.end_line,
+                "score": round(r.score, 3),
+                "content": r.content[:500],
+            }
+            for r in results
+        ],
+        "total_found": len(results),
+    }
+
+
+register_tool(
+    ToolSpec(
+        name="search_codebase",
+        description=(
+            "Semantic search over the indexed codebase using embeddings. "
+            "Returns the most relevant code chunks for a natural-language query. "
+            "The codebase must be indexed first via /api/embeddings/index."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language search query",
+                },
+                "project_path": {
+                    "type": "string",
+                    "default": ".",
+                    "description": "Project root path (used for context)",
+                },
+                "k": {
+                    "type": "integer",
+                    "default": 8,
+                    "description": "Maximum number of results",
+                },
+            },
+            "required": ["query"],
+        },
+        handler=_search_codebase_tool,
+    )
+)

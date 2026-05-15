@@ -52,7 +52,7 @@ const navItems: NavItem[] = [
     id: "tools",
     label: "Ferramentas",
     icon: <Wrench className="h-4 w-4" />,
-    path: "/scraping",
+    path: "/tools",
   },
   {
     id: "models",

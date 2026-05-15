@@ -1,11 +1,20 @@
 """Tests for security middleware."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
-from fastapi import Request, Response
 
 from backend.middleware.security import SecurityHeadersMiddleware
+
+
+def _make_middleware():
+    """Build a SecurityHeadersMiddleware wired to a mock ASGI app."""
+
+    async def mock_app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    return SecurityHeadersMiddleware(mock_app)
 
 
 class TestSecurityHeadersMiddleware:
@@ -14,44 +23,41 @@ class TestSecurityHeadersMiddleware:
     @pytest.mark.asyncio
     async def test_adds_security_headers(self) -> None:
         """Test that middleware adds all security headers."""
-        middleware = SecurityHeadersMiddleware()
+        middleware = _make_middleware()
 
-        # Create mock request and response
-        request = MagicMock(spec=Request)
-        response = MagicMock(spec=Response)
-        response.headers = {}
+        captured_headers = []
 
-        # Mock call_next
-        async def call_next(req: Request) -> Response:
-            return response
+        async def capture_send(message):
+            if message["type"] == "http.response.start":
+                captured_headers.extend(message["headers"])
+            # Do NOT forward to real send in tests
 
-        # Call middleware
-        result = await middleware(request, call_next)
+        scope = {"type": "http"}
+        await middleware(scope, None, capture_send)
 
-        # Verify headers were added
-        assert "Content-Security-Policy" in result.headers
-        assert "X-Frame-Options" in result.headers
-        assert "X-Content-Type-Options" in result.headers
-        assert "X-XSS-Protection" in result.headers
-        assert "Referrer-Policy" in result.headers
-        assert "Permissions-Policy" in result.headers
-        assert "Server" in result.headers
+        headers = dict(captured_headers)
+        assert b"content-security-policy" in headers
+        assert b"x-frame-options" in headers
+        assert b"x-content-type-options" in headers
+        assert b"x-xss-protection" in headers
+        assert b"referrer-policy" in headers
+        assert b"permissions-policy" in headers
+        assert b"server" in headers
 
     @pytest.mark.asyncio
     async def test_csp_header_value(self) -> None:
         """Test that CSP header has correct value."""
-        middleware = SecurityHeadersMiddleware()
+        middleware = _make_middleware()
 
-        request = MagicMock(spec=Request)
-        response = MagicMock(spec=Response)
-        response.headers = {}
+        captured_headers = []
 
-        async def call_next(req: Request) -> Response:
-            return response
+        async def capture_send(message):
+            if message["type"] == "http.response.start":
+                captured_headers.extend(message["headers"])
 
-        result = await middleware(request, call_next)
-
-        csp = result.headers["Content-Security-Policy"]
+        await middleware({"type": "http"}, None, capture_send)
+        headers = dict(captured_headers)
+        csp = headers[b"content-security-policy"].decode()
         assert "default-src 'self'" in csp
         assert "script-src 'self'" in csp
         assert "style-src 'self'" in csp
@@ -60,84 +66,77 @@ class TestSecurityHeadersMiddleware:
     @pytest.mark.asyncio
     async def test_x_frame_options_deny(self) -> None:
         """Test that X-Frame-Options is set to DENY."""
-        middleware = SecurityHeadersMiddleware()
+        middleware = _make_middleware()
 
-        request = MagicMock(spec=Request)
-        response = MagicMock(spec=Response)
-        response.headers = {}
+        captured_headers = []
 
-        async def call_next(req: Request) -> Response:
-            return response
+        async def capture_send(message):
+            if message["type"] == "http.response.start":
+                captured_headers.extend(message["headers"])
 
-        result = await middleware(request, call_next)
-
-        assert result.headers["X-Frame-Options"] == "DENY"
+        await middleware({"type": "http"}, None, capture_send)
+        headers = dict(captured_headers)
+        assert headers[b"x-frame-options"] == b"DENY"
 
     @pytest.mark.asyncio
     async def test_x_content_type_options_nosniff(self) -> None:
         """Test that X-Content-Type-Options is set to nosniff."""
-        middleware = SecurityHeadersMiddleware()
+        middleware = _make_middleware()
 
-        request = MagicMock(spec=Request)
-        response = MagicMock(spec=Response)
-        response.headers = {}
+        captured_headers = []
 
-        async def call_next(req: Request) -> Response:
-            return response
+        async def capture_send(message):
+            if message["type"] == "http.response.start":
+                captured_headers.extend(message["headers"])
 
-        result = await middleware(request, call_next)
-
-        assert result.headers["X-Content-Type-Options"] == "nosniff"
+        await middleware({"type": "http"}, None, capture_send)
+        headers = dict(captured_headers)
+        assert headers[b"x-content-type-options"] == b"nosniff"
 
     @pytest.mark.asyncio
     async def test_x_xss_protection(self) -> None:
         """Test that X-XSS-Protection is set correctly."""
-        middleware = SecurityHeadersMiddleware()
+        middleware = _make_middleware()
 
-        request = MagicMock(spec=Request)
-        response = MagicMock(spec=Response)
-        response.headers = {}
+        captured_headers = []
 
-        async def call_next(req: Request) -> Response:
-            return response
+        async def capture_send(message):
+            if message["type"] == "http.response.start":
+                captured_headers.extend(message["headers"])
 
-        result = await middleware(request, call_next)
-
-        assert result.headers["X-XSS-Protection"] == "1; mode=block"
+        await middleware({"type": "http"}, None, capture_send)
+        headers = dict(captured_headers)
+        assert headers[b"x-xss-protection"] == b"1; mode=block"
 
     @pytest.mark.asyncio
     async def test_referrer_policy(self) -> None:
         """Test that Referrer-Policy is set correctly."""
-        middleware = SecurityHeadersMiddleware()
+        middleware = _make_middleware()
 
-        request = MagicMock(spec=Request)
-        response = MagicMock(spec=Response)
-        response.headers = {}
+        captured_headers = []
 
-        async def call_next(req: Request) -> Response:
-            return response
+        async def capture_send(message):
+            if message["type"] == "http.response.start":
+                captured_headers.extend(message["headers"])
 
-        result = await middleware(request, call_next)
-
-        assert (
-            result.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
-        )
+        await middleware({"type": "http"}, None, capture_send)
+        headers = dict(captured_headers)
+        assert headers[b"referrer-policy"] == b"strict-origin-when-cross-origin"
 
     @pytest.mark.asyncio
     async def test_permissions_policy(self) -> None:
         """Test that Permissions-Policy restricts features."""
-        middleware = SecurityHeadersMiddleware()
+        middleware = _make_middleware()
 
-        request = MagicMock(spec=Request)
-        response = MagicMock(spec=Response)
-        response.headers = {}
+        captured_headers = []
 
-        async def call_next(req: Request) -> Response:
-            return response
+        async def capture_send(message):
+            if message["type"] == "http.response.start":
+                captured_headers.extend(message["headers"])
 
-        result = await middleware(request, call_next)
-
-        permissions = result.headers["Permissions-Policy"]
+        await middleware({"type": "http"}, None, capture_send)
+        headers = dict(captured_headers)
+        permissions = headers[b"permissions-policy"].decode()
         assert "geolocation=()" in permissions
         assert "microphone=()" in permissions
         assert "camera=()" in permissions
@@ -146,15 +145,14 @@ class TestSecurityHeadersMiddleware:
     @pytest.mark.asyncio
     async def test_server_header_customized(self) -> None:
         """Test that Server header is customized."""
-        middleware = SecurityHeadersMiddleware()
+        middleware = _make_middleware()
 
-        request = MagicMock(spec=Request)
-        response = MagicMock(spec=Response)
-        response.headers = {}
+        captured_headers = []
 
-        async def call_next(req: Request) -> Response:
-            return response
+        async def capture_send(message):
+            if message["type"] == "http.response.start":
+                captured_headers.extend(message["headers"])
 
-        result = await middleware(request, call_next)
-
-        assert result.headers["Server"] == "NEXUS-IDE"
+        await middleware({"type": "http"}, None, capture_send)
+        headers = dict(captured_headers)
+        assert headers[b"server"] == b"NEXUS-IDE"

@@ -20,8 +20,21 @@ interface ProjectStore {
   addProject: (project: Project) => void;
 }
 
+// Hydrate currentProject from localStorage on first load
+function _loadPersistedProject(): Project | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem("nexus.currentProject");
+    if (raw) return JSON.parse(raw) as Project;
+  } catch {
+    // Corrupted data — clear it
+    window.localStorage.removeItem("nexus.currentProject");
+  }
+  return null;
+}
+
 export const useProjectStore = create<ProjectStore>((set) => ({
-  currentProject: null,
+  currentProject: _loadPersistedProject(),
   projects: [],
   setCurrentProject: (project) => {
     if (typeof window !== "undefined") {

@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv312/
 venv/
 .pytest_cache/
 .mypy_cache/
@@ -35,6 +36,13 @@ Thumbs.db
 ollama-data/
 ollama-dashboard-data/
 
+# Application data
+data/
+*.db
+*.sqlite
+
 # Misc
 *.tmp
 *.bak
+.playwright-mcp/
+project_directory/

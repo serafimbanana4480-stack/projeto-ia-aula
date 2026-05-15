@@ -13,7 +13,7 @@ export function useAgentStream(sessionId: string) {
   const activeRequestId = useRef(0);
 
   const send = useCallback(
-    async (message: string, mode = "agent") => {
+    async (message: string, mode = "agent", model = "", projectPath = "") => {
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
@@ -23,7 +23,7 @@ export function useAgentStream(sessionId: string) {
       setEvents([]); // Clear previous events for new message
 
       try {
-        const res = await postChat(message, sessionId, mode, controller.signal);
+        const res = await postChat(message, sessionId, mode, controller.signal, model, projectPath);
 
         // Check if response is ok
         if (!res.ok) {

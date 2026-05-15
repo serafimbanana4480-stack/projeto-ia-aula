@@ -1,6 +1,6 @@
 """DOCUMENTER — technical writing agent.
 
-Model: qwen3.5:9b (SMALL).
+Model: qwen2.5:3b (FAST tier).
 Prompt: config/prompts/documenter.md
 See ARCHITECTURE.md §3.7.
 
@@ -19,12 +19,13 @@ from .base import AgentAction, AgentBase, AgentRequest
 
 class DocumenterAgent(AgentBase):
     name = "DOCUMENTER"
-    model_key = "small"
+    model_key = "fast"
     prompt_file = "documenter"
     supported_actions = {
         AgentAction.READ_FILE,
         AgentAction.WRITE_FILE,
         AgentAction.SEARCH_CODEBASE,
+        AgentAction.GENERATE_REPORT,
     }
 
     async def run(self, request: AgentRequest) -> AsyncIterator[str]:

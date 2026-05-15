@@ -15,11 +15,21 @@ async def execute_terminal_command(
     req: TerminalExecuteRequest, request: Request
 ) -> TerminalExecuteResponse:
     executor = get_sandbox_executor()
+
+    # Resolve working directory from project_path
+    cwd = None
+    if req.project_path and req.project_path != ".":
+        from pathlib import Path
+        project = Path(req.project_path).resolve()
+        if project.is_dir():
+            cwd = str(project)
+
     result = await executor.execute(
         req.command,
         language="bash",
         timeout=req.timeout_seconds,
         session_id=req.session_id or request.headers.get("x-session-id", ""),
+        cwd=cwd,
     )
     return TerminalExecuteResponse(
         execution_id=result.execution_id,

@@ -20,6 +20,8 @@ class TestAgentAction:
             "search_codebase",
             "read_docs",
             "recall_context",
+            "analyze_data",
+            "generate_report",
         }
         assert actions == expected
 
@@ -46,6 +48,19 @@ class TestAgentRequest:
             context={"custom": 1},
         )
         assert req.context["custom"] == 1
+
+    def test_project_path_defaults_empty(self, ollama_client) -> None:
+        req = AgentRequest(session_id="s1", query="q", client=ollama_client)
+        assert req.project_path == ""
+
+    def test_project_path_can_be_set(self, ollama_client) -> None:
+        req = AgentRequest(
+            session_id="s1",
+            query="q",
+            client=ollama_client,
+            project_path="/home/user/project",
+        )
+        assert req.project_path == "/home/user/project"
 
 
 class TestAgentResponse:
@@ -95,6 +110,43 @@ class TestAgentBaseContract:
         agent = T()
         assert agent.resolve_model_id().startswith("qwen")
         assert "ROUTER" in agent.system_prompt()
+
+    def test_action_tools_mapping_uses_registered_tool_names(self) -> None:
+        """Verify _ACTION_TOOLS maps to actual registered tool names, not stale names."""
+        from backend.agents.base import AgentBase
+
+        for action, (tool_name, _example) in AgentBase._ACTION_TOOLS.items():
+            assert tool_name == action.value or tool_name in {
+                "read_file", "write_file", "execute_code", "web_search",
+                "fetch_url", "consult_agent", "recall_context",
+                "search_codebase", "data_analysis", "report_generation",
+            }, f"Action {action.value} maps to unknown tool {tool_name}"
+
+    def test_search_codebase_maps_to_search_codebase_tool(self) -> None:
+        """Regression: SEARCH_CODEBASE must map to 'search_codebase', not 'search_in_files'."""
+        from backend.agents.base import AgentBase, AgentAction
+
+        tool_name, _ = AgentBase._ACTION_TOOLS[AgentAction.SEARCH_CODEBASE]
+        assert tool_name == "search_codebase"
+
+    def test_fetch_url_maps_to_fetch_url_tool(self) -> None:
+        """FETCH_URL must map to 'fetch_url', not 'web_search'."""
+        from backend.agents.base import AgentBase, AgentAction
+
+        tool_name, _ = AgentBase._ACTION_TOOLS[AgentAction.FETCH_URL]
+        assert tool_name == "fetch_url"
+
+    def test_analyze_data_maps_to_data_analysis_tool(self) -> None:
+        from backend.agents.base import AgentBase, AgentAction
+
+        tool_name, _ = AgentBase._ACTION_TOOLS[AgentAction.ANALYZE_DATA]
+        assert tool_name == "data_analysis"
+
+    def test_generate_report_maps_to_report_generation_tool(self) -> None:
+        from backend.agents.base import AgentBase, AgentAction
+
+        tool_name, _ = AgentBase._ACTION_TOOLS[AgentAction.GENERATE_REPORT]
+        assert tool_name == "report_generation"
 
     async def test_stream_llm_yields_all_tokens(self, ollama_client) -> None:
         class T(AgentBase):

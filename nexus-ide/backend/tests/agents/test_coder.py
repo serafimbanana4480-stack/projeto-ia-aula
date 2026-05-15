@@ -12,7 +12,7 @@ class TestCoderAgent:
         assert agent.name == "CODER"
         # Tier 1 uses the 7B coder ("medium") to keep RAM footprint reasonable.
         # Upgrade to "expert" (32B) once hardware is validated.
-        assert agent.model_key == "medium"
+        assert agent.model_key == "coder"
         assert agent.prompt_file == "coder"
 
     def test_supported_actions(self) -> None:

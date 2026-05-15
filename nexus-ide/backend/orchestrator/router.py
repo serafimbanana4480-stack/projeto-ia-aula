@@ -16,7 +16,7 @@ import hashlib
 import json
 import logging
 import re
-from functools import lru_cache
+import time
 from typing import Final
 
 from pydantic import ValidationError
@@ -34,12 +34,37 @@ def _query_hash(query: str) -> str:
     return hashlib.md5(query.lower().strip().encode()).hexdigest()
 
 
-@lru_cache(maxsize=100)
-def _cached_route_with_model(query_hash: str, query: str) -> RoutingDecision:
-    """Cached version of route_with_model using hash as key."""
-    # This is a wrapper that will be called with the hash
-    # The actual implementation will be in route_with_model
-    return _FALLBACK_DECISION
+# In-memory cache for routing decisions (keyed by query hash).
+# Each entry stores (decision, timestamp) for TTL-based expiry.
+_routing_cache: dict[str, tuple[RoutingDecision, float]] = {}
+_ROUTING_CACHE_TTL = 300.0  # 5 minutes
+
+
+def _get_cached_decision(query_hash: str) -> RoutingDecision | None:
+    """Return a cached routing decision if not expired, else None."""
+    entry = _routing_cache.get(query_hash)
+    if entry is None:
+        return None
+    decision, ts = entry
+    if time.time() - ts > _ROUTING_CACHE_TTL:
+        del _routing_cache[query_hash]
+        return None
+    return decision
+
+
+def _store_cached_decision(query_hash: str, decision: RoutingDecision) -> None:
+    """Store a routing decision in cache with TTL timestamp."""
+    if len(_routing_cache) >= 500:
+        # Evict oldest entries (FIFO) and expired entries
+        now = time.time()
+        expired = [k for k, (_, ts) in _routing_cache.items() if now - ts > _ROUTING_CACHE_TTL]
+        for k in expired:
+            del _routing_cache[k]
+        if len(_routing_cache) >= 500:
+            keys_to_remove = list(_routing_cache.keys())[:100]
+            for k in keys_to_remove:
+                del _routing_cache[k]
+    _routing_cache[query_hash] = (decision, time.time())
 
 
 __all__ = ["RoutingDecision", "fast_route", "route_with_model"]
@@ -53,10 +78,125 @@ _DEBUGGER_MARKERS: Final = (
     "stacktrace",
     "stack trace",
     "error:",
+    "error in",
+    "typeerror",
+    "valueerror",
+    "keyerror",
+    "indexerror",
+    "attributeerror",
+    "importerror",
+    "filenotfounderror",
+    "zerodivisionerror",
+    "overflowerror",
+    "syntaxerror",
+    "nameerror",
     "exception",
     "segfault",
     "segmentation fault",
     "runtime error",
+    "not working",
+    "broken",
+    "bug in",
+    "fix the",
+    "fix this",
+    "debug",
+    "crash",
+    "failing",
+    "depurar",
+    "corrigir o erro",
+    "erro no",
+    "falha no",
+)
+_CODER_MARKERS: Final = (
+    "write a function",
+    "write a class",
+    "create a function",
+    "create a class",
+    "implement",
+    "refactor",
+    "build a",
+    "add a feature",
+    "write code",
+    "write a script",
+    "write a test",
+    "code this",
+    "program a",
+    "develop a",
+    "scaffold",
+    "generate code",
+    "def ",
+    "function that",
+    "class that",
+    "api endpoint",
+    "rest api",
+    "login system",
+    "authentication",
+    "web scraper",
+    "cli tool",
+    "criar uma função",
+    "criar uma classe",
+    "implementar",
+    "construir",
+    "desenvolver",
+    "gerar código",
+    "escrever código",
+)
+_ARCHITECT_MARKERS: Final = (
+    "design the",
+    "design a",
+    "architect",
+    "architecture",
+    "plan the",
+    "plan a",
+    "structure the",
+    "structure a",
+    "how should i",
+    "what should i",
+    "system design",
+    "database schema",
+    "microservices",
+    "tech stack",
+    "project structure",
+    "api design",
+    "projetar",
+    "arquitetar",
+    "planejar",
+    "estruturar",
+    "esquema do banco",
+)
+_ANALYZER_MARKERS: Final = (
+    "analyze",
+    "analyse",
+    "review the",
+    "review this",
+    "audit",
+    "security check",
+    "code review",
+    "find vulnerabilities",
+    "assess",
+    "evaluate",
+    "is this secure",
+    "is this correct",
+    "analisar",
+    "revisar",
+    "auditar",
+    "avaliar",
+)
+_OPTIMIZER_MARKERS: Final = (
+    "optimize",
+    "optimise",
+    "improve performance",
+    "speed up",
+    "make faster",
+    "reduce memory",
+    "make more efficient",
+    "slow query",
+    "bottleneck",
+    "profiling",
+    "otimizar",
+    "melhorar performance",
+    "acelerar",
+    "reduzir memória",
 )
 _DOCUMENTER_MARKERS: Final = (
     "document",
@@ -66,6 +206,11 @@ _DOCUMENTER_MARKERS: Final = (
     "comment the",
     "add comments",
     "explain this code",
+    "write docs",
+    "api documentation",
+    "changelog",
+    "documentar",
+    "escrever documentação",
 )
 _RESEARCHER_MARKERS: Final = (
     "latest version",
@@ -75,6 +220,21 @@ _RESEARCHER_MARKERS: Final = (
     "released in",
     "recent release",
 )
+_WEB_SEARCH_MARKERS: Final = (
+    "search the web",
+    "search online",
+    "look up online",
+    "google",
+    "pesquisar na web",
+    "buscar online",
+    "latest news",
+    "current status of",
+    "find online",
+    "search for",
+    "look up",
+    "what is the latest",
+    "what are the latest",
+)
 _TRIVIAL_QUESTION = re.compile(r"^\s*(what|who|when|where|why|how)\s+is\b", re.IGNORECASE)
 
 
@@ -82,24 +242,49 @@ def fast_route(query: str) -> AgentName | None:
     """Level 1 — deterministic pre-routing.
 
     Returns an agent name when the query is trivially classifiable, otherwise
-    ``None`` so the caller falls through to :func:`route_with_model`. The rules
-    here are intentionally conservative: false negatives are cheap (we just
-    call the LLM router), false positives route to the wrong agent.
+    ``None`` so the caller falls through to :func:`route_with_model`.
+
+    Priority order matters: more specific markers are checked first to avoid
+    false positives. For example, "fix the error" should route to DEBUGGER,
+    not CODER, even though "fix" could imply coding.
     """
     if not query or not query.strip():
         return None
 
     lowered = query.lower()
 
+    # 1. DEBUGGER — error/debug patterns (most specific, check first)
     if any(marker in lowered for marker in _DEBUGGER_MARKERS):
         return "DEBUGGER"
+
+    # 2. ARCHITECT — design/planning patterns
+    if any(marker in lowered for marker in _ARCHITECT_MARKERS):
+        return "ARCHITECT"
+
+    # 3. ANALYZER — review/audit patterns
+    if any(marker in lowered for marker in _ANALYZER_MARKERS):
+        return "ANALYZER"
+
+    # 4. OPTIMIZER — performance patterns
+    if any(marker in lowered for marker in _OPTIMIZER_MARKERS):
+        return "OPTIMIZER"
+
+    # 5. CODER — code generation patterns
+    if any(marker in lowered for marker in _CODER_MARKERS):
+        return "CODER"
+
+    # 6. DOCUMENTER — documentation patterns
     if any(marker in lowered for marker in _DOCUMENTER_MARKERS):
         return "DOCUMENTER"
+
+    # 7. RESEARCHER — research/web search patterns
     if any(marker in lowered for marker in _RESEARCHER_MARKERS):
         return "RESEARCHER"
+    if any(marker in lowered for marker in _WEB_SEARCH_MARKERS):
+        return "RESEARCHER"
 
+    # 8. MICRO — trivial factoid lookup (very short, simple questions)
     words = lowered.split()
-    # Very short trivial factoid lookup.
     if len(words) <= 12 and _TRIVIAL_QUESTION.match(lowered):
         return "MICRO"
 
@@ -134,22 +319,16 @@ async def route_with_model(query: str, client: OllamaClient) -> RoutingDecision:
     """
     # Check cache first
     hash_key = _query_hash(query)
-    try:
-        # Try to get from cache
-        cached = _cached_route_with_model(hash_key, query)
-        if cached != _FALLBACK_DECISION:
-            logger.debug("Routing decision cache hit for query hash: %s", hash_key[:8])
-            return cached
-    except Exception:
-        # If cache fails, continue with normal routing
-        pass
+    cached = _get_cached_decision(hash_key)
+    if cached is not None:
+        logger.debug("Routing decision cache hit for query hash: %s", hash_key[:8])
+        return cached
 
     if detect_injection(query).detected:
         decision = _FALLBACK_DECISION.model_copy(
             update={"routing_reason": "prompt-injection-detected", "primary_agent": "MICRO"}
         )
-        # Cache the decision
-        _cached_route_with_model(hash_key, query)
+        _store_cached_decision(hash_key, decision)
         return decision
 
     try:
@@ -174,8 +353,7 @@ async def route_with_model(query: str, client: OllamaClient) -> RoutingDecision:
 
     decision = _parse_routing_decision(raw)
     # Cache the successful routing decision
-    if decision != _FALLBACK_DECISION:
-        _cached_route_with_model(hash_key, query)
+    _store_cached_decision(hash_key, decision)
     return decision
 
 

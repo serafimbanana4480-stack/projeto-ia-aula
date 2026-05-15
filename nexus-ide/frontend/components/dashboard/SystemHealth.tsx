@@ -26,27 +26,18 @@ export default function SystemHealth() {
           signal: AbortSignal.timeout(5000),
         });
         const latency = Date.now() - start;
-
-        if (response.ok) {
-          healthChecks.push({
-            name: "Ollama",
-            status: "healthy",
-            latency_ms: latency,
-            last_check: new Date().toISOString(),
-          });
-        } else {
-          healthChecks.push({
-            name: "Ollama",
-            status: "degraded",
-            message: `HTTP ${response.status}`,
-            last_check: new Date().toISOString(),
-          });
-        }
+        healthChecks.push({
+          name: "Ollama",
+          status: response.ok ? "healthy" : "degraded",
+          latency_ms: latency,
+          message: response.ok ? undefined : `HTTP ${response.status}`,
+          last_check: new Date().toISOString(),
+        });
       } catch (error) {
         healthChecks.push({
           name: "Ollama",
           status: "unhealthy",
-          message: error instanceof Error ? error.message : "Unknown error",
+          message: "Connection refused",
           last_check: new Date().toISOString(),
         });
       }
@@ -58,59 +49,41 @@ export default function SystemHealth() {
           signal: AbortSignal.timeout(5000),
         });
         const latency = Date.now() - start;
-
-        if (response.ok) {
-          healthChecks.push({
-            name: "Backend",
-            status: "healthy",
-            latency_ms: latency,
-            last_check: new Date().toISOString(),
-          });
-        } else {
-          healthChecks.push({
-            name: "Backend",
-            status: "degraded",
-            message: `HTTP ${response.status}`,
-            last_check: new Date().toISOString(),
-          });
-        }
-      } catch (error) {
+        healthChecks.push({
+          name: "Backend",
+          status: response.ok ? "healthy" : "degraded",
+          latency_ms: latency,
+          message: response.ok ? undefined : `HTTP ${response.status}`,
+          last_check: new Date().toISOString(),
+        });
+      } catch {
         healthChecks.push({
           name: "Backend",
           status: "unhealthy",
-          message: error instanceof Error ? error.message : "Unknown error",
+          message: "Connection refused",
           last_check: new Date().toISOString(),
         });
       }
 
-      // Check Metrics Stream
+      // Check Metrics
       try {
         const start = Date.now();
         const response = await fetch(apiUrl("/api/metrics/current"), {
           signal: AbortSignal.timeout(5000),
         });
         const latency = Date.now() - start;
-
-        if (response.ok) {
-          healthChecks.push({
-            name: "Metrics",
-            status: "healthy",
-            latency_ms: latency,
-            last_check: new Date().toISOString(),
-          });
-        } else {
-          healthChecks.push({
-            name: "Metrics",
-            status: "degraded",
-            message: `HTTP ${response.status}`,
-            last_check: new Date().toISOString(),
-          });
-        }
-      } catch (error) {
+        healthChecks.push({
+          name: "Metrics",
+          status: response.ok ? "healthy" : "degraded",
+          latency_ms: latency,
+          message: response.ok ? undefined : `HTTP ${response.status}`,
+          last_check: new Date().toISOString(),
+        });
+      } catch {
         healthChecks.push({
           name: "Metrics",
           status: "unhealthy",
-          message: error instanceof Error ? error.message : "Unknown error",
+          message: "Connection refused",
           last_check: new Date().toISOString(),
         });
       }
@@ -120,36 +93,25 @@ export default function SystemHealth() {
     };
 
     performHealthChecks();
-
-    // Refresh every 30 seconds
     const interval = setInterval(performHealthChecks, 30000);
-
     return () => clearInterval(interval);
   }, []);
 
   const getStatusColor = (status: HealthCheck["status"]) => {
     switch (status) {
-      case "healthy":
-        return "bg-green-500/20 text-green-400 border-green-500/30";
-      case "degraded":
-        return "bg-yellow-500/20 text-yellow-400 border-yellow-500/30";
-      case "unhealthy":
-        return "bg-red-500/20 text-red-400 border-red-500/30";
-      case "unknown":
-        return "bg-gray-500/20 text-gray-400 border-gray-500/30";
+      case "healthy": return "bg-green-500/20 text-green-400 border-green-500/30";
+      case "degraded": return "bg-yellow-500/20 text-yellow-400 border-yellow-500/30";
+      case "unhealthy": return "bg-red-500/20 text-red-400 border-red-500/30";
+      case "unknown": return "bg-gray-500/20 text-gray-400 border-gray-500/30";
     }
   };
 
   const getStatusIcon = (status: HealthCheck["status"]) => {
     switch (status) {
-      case "healthy":
-        return "✓";
-      case "degraded":
-        return "⚠";
-      case "unhealthy":
-        return "✗";
-      case "unknown":
-        return "?";
+      case "healthy": return "ok";
+      case "degraded": return "! ";
+      case "unhealthy": return "X";
+      case "unknown": return "?";
     }
   };
 
@@ -171,68 +133,38 @@ export default function SystemHealth() {
     >
       <div className="mb-3 flex items-center justify-between">
         <div className="text-sm font-semibold">Saúde do Sistema</div>
-        <motion.div
-          initial={{ scale: 0 }}
-          animate={{ scale: 1 }}
-          className={`flex items-center gap-2 rounded px-2 py-1 text-xs ${getStatusColor(overallStatus)}`}
-        >
-          <span>{getStatusIcon(overallStatus)}</span>
+        <div className={`flex items-center gap-1.5 rounded px-2 py-1 text-xs ${getStatusColor(overallStatus)}`}>
+          <span className="font-bold">{getStatusIcon(overallStatus)}</span>
           <span className="capitalize">{overallStatus}</span>
-        </motion.div>
+        </div>
       </div>
 
       {loading ? (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex h-32 items-center justify-center text-xs text-gray-500"
-        >
-          Verificando saúde...
-        </motion.div>
+        <div className="flex h-24 items-center justify-center text-xs text-gray-500">
+          Verificando...
+        </div>
       ) : checks.length > 0 ? (
-        <div className="space-y-2">
-          {checks.map((check, index) => (
-            <motion.div
+        <div className="space-y-1.5">
+          {checks.map((check) => (
+            <div
               key={check.name}
-              initial={{ opacity: 0, x: -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: index * 0.1 }}
-              whileHover={{ scale: 1.02 }}
-              className={`flex items-center justify-between rounded border p-2 ${getStatusColor(check.status)}`}
+              className={`flex items-center justify-between rounded border px-2.5 py-1.5 ${getStatusColor(check.status)}`}
             >
               <div className="flex items-center gap-2">
-                <motion.span
-                  initial={{ scale: 0, rotate: -180 }}
-                  animate={{ scale: 1, rotate: 0 }}
-                  transition={{ delay: index * 0.1 + 0.2 }}
-                  className="text-sm"
-                >
-                  {getStatusIcon(check.status)}
-                </motion.span>
-                <span className="text-sm font-medium">{check.name}</span>
+                <span className="text-xs font-bold">{getStatusIcon(check.status)}</span>
+                <span className="text-xs font-medium">{check.name}</span>
               </div>
-              <div className="flex items-center gap-3 text-xs">
-                {check.latency_ms && (
-                  <span className="text-gray-400">{check.latency_ms}ms</span>
-                )}
-                {check.message && (
-                  <span className="text-gray-400">{check.message}</span>
-                )}
-                <span className="text-gray-500">
-                  {new Date(check.last_check).toLocaleTimeString()}
-                </span>
+              <div className="flex items-center gap-2 text-xs">
+                {check.latency_ms && <span className="text-gray-400">{check.latency_ms}ms</span>}
+                {check.message && <span className="text-gray-500">{check.message}</span>}
               </div>
-            </motion.div>
+            </div>
           ))}
         </div>
       ) : (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex h-32 items-center justify-center text-xs text-gray-500"
-        >
+        <div className="flex h-24 items-center justify-center text-xs text-gray-500">
           Sem dados de saúde
-        </motion.div>
+        </div>
       )}
     </motion.div>
   );

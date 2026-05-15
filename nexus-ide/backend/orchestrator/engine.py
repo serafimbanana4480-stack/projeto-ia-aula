@@ -331,6 +331,235 @@ class OrchestrationEngine:
         self._state[session_id] = OrchestrationState.CANCELLED
         logger.info("Cancelled orchestration for session %s", session_id)
 
+    async def execute_autonomous(
+        self,
+        objective: str,
+        session_id: str,
+        *,
+        context: str = "",
+        history: list[ChatMessage] | None = None,
+        project_path: str = ".",
+        max_verify_iterations: int = 3,
+    ) -> OrchestrationResult:
+        """Full autonomous cycle: Plan → Execute → Verify → Iterate.
+
+        This is the core autonomy feature. After creating and executing a plan,
+        it automatically:
+        1. Runs DEBUGGER verification after each CODER step
+        2. If errors found, creates fix tasks and re-executes
+        3. Runs ANALYZER for final quality review
+        4. Iterates up to max_verify_iterations times
+
+        Returns the final OrchestrationResult with all verification data.
+        """
+        # Phase 1: PLAN
+        plan = await self.create_plan(
+            objective=objective,
+            session_id=session_id,
+            context=context,
+            history=history,
+        )
+        plan.approved = True  # Auto-approve in autonomous mode
+
+        await self._events.publish(
+            OrchestratorEvent(
+                event_type=EventType.ORCHESTRATOR_STARTED,
+                source="ORCHESTRATOR",
+                session_id=session_id,
+                data={"phase": "execute", "plan_id": plan.plan_id, "steps": len(plan.steps)},
+            )
+        )
+
+        # Phase 2: EXECUTE
+        result = await self.execute_plan(
+            plan, session_id, auto_approve=True, project_path=project_path,
+        )
+
+        # Phase 3: VERIFY & ITERATE
+        for verify_round in range(max_verify_iterations):
+            if result.state == OrchestrationState.CANCELLED:
+                break
+
+            # Find tasks that produced code (CODER steps) and verify them
+            verification_needed = self._find_tasks_needing_verification(result)
+            if not verification_needed:
+                logger.info("Autonomous: no verification needed (round %d)", verify_round + 1)
+                break
+
+            logger.info(
+                "Autonomous: verification round %d/%d — %d tasks to verify",
+                verify_round + 1, max_verify_iterations, len(verification_needed),
+            )
+
+            # Create verification tasks
+            verify_tasks = self._create_verification_tasks(verification_needed, result, session_id)
+
+            # Execute verification
+            verify_plan = ExecutionPlan.from_steps(
+                title=f"Verification Round {verify_round + 1}",
+                description=f"Verify outputs from round {verify_round}",
+                steps=verify_tasks,
+                session_id=session_id,
+            )
+
+            verify_result = await self.execute_plan(
+                verify_plan, session_id, auto_approve=True, project_path=project_path,
+            )
+
+            # Check if verification found issues
+            issues_found = self._extract_verification_issues(verify_result)
+            if not issues_found:
+                logger.info("Autonomous: verification passed (round %d)", verify_round + 1)
+                break
+
+            # Phase 4: ITERATE — create fix tasks for found issues
+            logger.info(
+                "Autonomous: %d issues found, creating fix tasks (round %d)",
+                len(issues_found), verify_round + 1,
+            )
+
+            fix_tasks = self._create_fix_tasks(issues_found, verify_tasks, session_id)
+            fix_plan = ExecutionPlan.from_steps(
+                title=f"Fix Round {verify_round + 1}",
+                description=f"Fix issues found in verification round {verify_round + 1}",
+                steps=fix_tasks,
+                session_id=session_id,
+            )
+
+            result = await self.execute_plan(
+                fix_plan, session_id, auto_approve=True, project_path=project_path,
+            )
+
+        # Phase 5: FINAL REVIEW with ANALYZER
+        final_review = self._create_final_review_task(objective, result, session_id)
+        review_plan = ExecutionPlan.from_steps(
+            title="Final Quality Review",
+            description="Comprehensive quality review of all changes",
+            steps=[final_review],
+            session_id=session_id,
+        )
+        await self.execute_plan(
+            review_plan, session_id, auto_approve=True, project_path=project_path,
+        )
+
+        self._state[session_id] = OrchestrationState.COMPLETED
+        return result
+
+    def _find_tasks_needing_verification(self, result: OrchestrationResult) -> list[dict]:
+        """Find completed CODER tasks that should be verified by DEBUGGER."""
+        tasks_needing_verify = []
+        for task_id, artifact in result.task_results.items():
+            if not isinstance(artifact, dict):
+                continue
+            agent = artifact.get("agent", "")
+            status = artifact.get("status", "")
+            if agent == "CODER" and status == "completed":
+                tasks_needing_verify.append({
+                    "task_id": task_id,
+                    "name": artifact.get("name", "Unknown"),
+                    "output": artifact.get("output", ""),
+                })
+        return tasks_needing_verify
+
+    def _create_verification_tasks(
+        self,
+        tasks_to_verify: list[dict],
+        result: OrchestrationResult,
+        session_id: str,
+    ) -> list[TaskNode]:
+        """Create DEBUGGER verification tasks for completed CODER work."""
+        verify_steps: list[TaskNode] = []
+        for task_info in tasks_to_verify:
+            verify_task = TaskNode(
+                name=f"Verify: {task_info['name']}",
+                description=(
+                    f"Verify the output of task '{task_info['name']}'. "
+                    f"Check for: bugs, syntax errors, missing imports, "
+                    f"logic errors, edge cases. "
+                    f"Run any tests if available. "
+                    f"Original output:\n{task_info['output'][:1000]}"
+                ),
+                agent="DEBUGGER",
+                priority=TaskPriority.HIGH,
+                context=task_info["output"][:2000],
+            )
+            verify_steps.append(verify_task)
+        return verify_steps
+
+    def _extract_verification_issues(self, verify_result: OrchestrationResult) -> list[dict]:
+        """Extract issues found by DEBUGGER from verification results."""
+        issues = []
+        for task_id, artifact in verify_result.task_results.items():
+            if not isinstance(artifact, dict):
+                continue
+            output = artifact.get("output", "")
+            agent = artifact.get("agent", "")
+            # Only check DEBUGGER outputs for issues
+            if agent != "DEBUGGER":
+                continue
+            # Heuristic: look for error indicators in DEBUGGER output
+            error_indicators = [
+                "error", "bug", "issue", "problem", "fix",
+                "failed", "incorrect", "missing", "broken",
+                "erro", "problema", "falha",  # Portuguese
+            ]
+            output_lower = output.lower()
+            if any(ind in output_lower for ind in error_indicators):
+                issues.append({
+                    "task_id": task_id,
+                    "name": artifact.get("name", "Unknown verification"),
+                    "output": output,
+                    "agent": agent,
+                })
+        return issues
+
+    def _create_fix_tasks(
+        self,
+        issues: list[dict],
+        verify_tasks: list[TaskNode],
+        session_id: str,
+    ) -> list[TaskNode]:
+        """Create CODER fix tasks based on DEBUGGER findings."""
+        fix_steps: list[TaskNode] = []
+        for issue in issues:
+            fix_task = TaskNode(
+                name=f"Fix: {issue['name']}",
+                description=(
+                    f"Fix the issues found during verification of '{issue['name']}'. "
+                    f"DEBUGGER findings:\n{issue['output'][:2000]}\n\n"
+                    f"Apply all necessary fixes and ensure the code works correctly."
+                ),
+                agent="CODER",
+                priority=TaskPriority.HIGH,
+                context=issue["output"][:2000],
+            )
+            fix_steps.append(fix_task)
+        return fix_steps
+
+    def _create_final_review_task(
+        self,
+        objective: str,
+        result: OrchestrationResult,
+        session_id: str,
+    ) -> TaskNode:
+        """Create a final ANALYZER review task."""
+        completed_summary = "\n".join(
+            f"- {a.get('name', 'Unknown')}: {a.get('status', '?')}"
+            for a in result.task_results.values()
+            if isinstance(a, dict)
+        )
+        return TaskNode(
+            name="Final Quality Review",
+            description=(
+                f"Perform a comprehensive quality review of all work done for: {objective}\n\n"
+                f"Completed tasks:\n{completed_summary}\n\n"
+                f"Check for: consistency, completeness, code quality, "
+                f"security issues, performance problems, missing documentation."
+            ),
+            agent="ANALYZER",
+            priority=TaskPriority.MEDIUM,
+        )
+
     def get_state(self, session_id: str) -> OrchestrationState:
         """Get the current state of an orchestration run."""
         return self._state.get(session_id, OrchestrationState.IDLE)
@@ -585,6 +814,11 @@ Provide a clear summary of what you accomplished."""
         json_match = re.search(r"\[.*\]", cleaned, re.DOTALL)
 
         if not json_match:
+            # Try to parse as natural text with numbered steps
+            text_plan = self._parse_text_plan(cleaned, objective)
+            if text_plan is not None and len(text_plan.steps) > 1:
+                return text_plan
+
             logger.warning("No JSON array found in plan content, creating single-step plan")
             task = TaskNode(
                 name="Execute Objective",
@@ -654,12 +888,28 @@ Provide a clear summary of what you accomplished."""
             task = TaskNode(name="Execute Objective", description=objective, agent="CODER")
             steps.append(task)
 
-        # Resolve dependencies (convert indices to task_ids)
+        # Resolve dependencies (convert indices OR names to task_ids)
+        # Build a name→index lookup for string-based depends_on
+        name_to_idx: dict[str, int] = {}
+        for idx, step in enumerate(steps):
+            name_to_idx[step.name.lower().strip()] = idx
+            # Also register shortened forms (e.g. "Phase 1: Setup" → "Setup")
+            if ":" in step.name:
+                short = step.name.split(":", 1)[-1].strip().lower()
+                name_to_idx[short] = idx
+            if "-" in step.name:
+                short = step.name.split("-", 1)[-1].strip().lower()
+                name_to_idx[short] = idx
+
         for i, raw in enumerate(raw_steps):
             if not isinstance(raw, dict):
                 continue
-            for dep_idx in raw.get("depends_on", []):
-                if 0 <= dep_idx < len(steps) and dep_idx != i:
+            raw_deps = raw.get("depends_on", [])
+            if not isinstance(raw_deps, list):
+                raw_deps = [raw_deps] if raw_deps else []
+            for dep_ref in raw_deps:
+                dep_idx = self._resolve_dep_ref(dep_ref, i, len(steps), name_to_idx)
+                if dep_idx is not None and dep_idx != i:
                     steps[i].depends_on.append(steps[dep_idx].task_id)
                     steps[dep_idx].required_by.append(steps[i].task_id)
 
@@ -668,4 +918,126 @@ Provide a clear summary of what you accomplished."""
             description=objective,
             steps=steps,
             session_id=session_id,
+        )
+
+    @staticmethod
+    def _resolve_dep_ref(
+        dep_ref: Any,
+        current_idx: int,
+        total_steps: int,
+        name_to_idx: dict[str, int],
+    ) -> int | None:
+        """Resolve a depends_on reference to a step index.
+
+        Handles:
+        - Integer indices (0-based): directly validated
+        - String names: fuzzy-matched against step names
+        - 1-based indices from LLMs that forget 0-based convention
+        """
+        # Integer index (0-based)
+        if isinstance(dep_ref, int):
+            if 0 <= dep_ref < total_steps:
+                return dep_ref
+            # Maybe 1-based? Convert and check
+            if 1 <= dep_ref <= total_steps:
+                return dep_ref - 1
+            return None
+
+        # String reference — try exact then fuzzy match
+        if isinstance(dep_ref, str):
+            lowered = dep_ref.lower().strip()
+            # Exact match
+            if lowered in name_to_idx:
+                return name_to_idx[lowered]
+            # Try removing common prefixes
+            for prefix in ("step ", "phase ", "task "):
+                if lowered.startswith(prefix):
+                    stripped = lowered[len(prefix):]
+                    if stripped in name_to_idx:
+                        return name_to_idx[stripped]
+            # Try numeric string (e.g. "1", "2")
+            try:
+                num = int(lowered)
+                if 0 <= num < total_steps:
+                    return num
+                if 1 <= num <= total_steps:
+                    return num - 1
+            except ValueError:
+                pass
+            # Fuzzy: check if any step name contains this reference
+            for name, idx in name_to_idx.items():
+                if lowered in name or name in lowered:
+                    return idx
+            logger.warning("Could not resolve depends_on reference: %r", dep_ref)
+            return None
+
+        logger.warning("Unexpected depends_on type: %r", type(dep_ref))
+        return None
+
+    def _parse_text_plan(
+        self,
+        text: str,
+        objective: str,
+    ) -> ExecutionPlan | None:
+        """Parse a natural-text plan into an ExecutionPlan.
+
+        Handles formats like:
+        - "1. Setup project\\n2. Implement feature\\n3. Write tests"
+        - "Step 1: Setup\\nStep 2: Implement"
+        - "- Setup project\\n- Implement feature"
+        """
+        import re
+
+        # Match numbered steps: "1.", "1)", "Step 1:", etc.
+        numbered_pattern = r"(?:^|\n)\s*(?:step\s*)?(\d+)[.)]\s*(.+?)(?=(?:\n\s*(?:step\s*)?\d+[.)])|$)"
+        matches = re.findall(numbered_pattern, text, re.IGNORECASE | re.DOTALL)
+
+        # If no numbered steps, try bullet points
+        if not matches:
+            bullet_pattern = r"(?:^|\n)\s*[-*]\s*(.+?)(?=(?:\n\s*[-*])|$)"
+            bullets = re.findall(bullet_pattern, text, re.DOTALL)
+            if len(bullets) >= 2:
+                matches = [(str(i + 1), b.strip()) for i, b in enumerate(bullets)]
+
+        if len(matches) < 2:
+            return None
+
+        steps: list[TaskNode] = []
+        for num_str, content in matches:
+            content = content.strip()
+            if not content:
+                continue
+
+            # Try to extract agent from content (e.g. "[CODER]", "(architect)")
+            agent_match = re.search(r"[\[(](\w+)[\])]", content)
+            agent = agent_match.group(1).upper() if agent_match else "CODER"
+            if agent not in (
+                "ARCHITECT", "CODER", "ANALYZER", "DEBUGGER",
+                "RESEARCHER", "DOCUMENTER", "OPTIMIZER", "DASHBOARD",
+            ):
+                agent = "CODER"
+
+            # Clean content of agent markers
+            description = re.sub(r"\s*[\[(]\w+[\])]", "", content).strip()
+
+            task = TaskNode(
+                name=description[:100],
+                description=description,
+                agent=agent,
+            )
+            steps.append(task)
+
+        if len(steps) < 2:
+            return None
+
+        # Sequential dependencies (each step depends on previous)
+        for i in range(1, len(steps)):
+            steps[i].depends_on.append(steps[i - 1].task_id)
+            steps[i - 1].required_by.append(steps[i].task_id)
+
+        return ExecutionPlan.from_steps(
+            title=objective[:100],
+            description=objective,
+            steps=steps,
+            session_id="",
         )

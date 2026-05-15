@@ -31,6 +31,24 @@ class TestChatRequest:
         assert request.message == "Hello"
         assert request.session_id == "test-session"
         assert request.mode == "agent"
+        assert request.model == ""
+        assert request.project_path == ""
+
+    def test_chat_request_with_model(self) -> None:
+        """Test creating a ChatRequest with explicit model selection."""
+        request = ChatRequest(
+            message="Hello", session_id="test-session", model="deep"
+        )
+        assert request.model == "deep"
+
+    def test_chat_request_with_project_path(self) -> None:
+        """Test creating a ChatRequest with project path."""
+        request = ChatRequest(
+            message="Hello",
+            session_id="test-session",
+            project_path="/home/user/project",
+        )
+        assert request.project_path == "/home/user/project"
 
     def test_message_too_short_raises_validation_error(self) -> None:
         """Test that empty message raises ValidationError."""

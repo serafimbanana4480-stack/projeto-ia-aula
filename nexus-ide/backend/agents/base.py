@@ -45,6 +45,8 @@ class AgentAction(StrEnum):
     SEARCH_CODEBASE = "search_codebase"
     READ_DOCS = "read_docs"
     RECALL_CONTEXT = "recall_context"
+    ANALYZE_DATA = "analyze_data"
+    GENERATE_REPORT = "generate_report"
 
 
 @dataclass
@@ -53,6 +55,7 @@ class AgentRequest:
 
     ``client`` is injected so agents are trivially mockable in unit tests.
     ``history`` holds prior turns in the same session (oldest first).
+    ``project_path`` is the active project directory for file operations.
     """
 
     session_id: str
@@ -62,6 +65,7 @@ class AgentRequest:
     context: dict[str, Any] = field(default_factory=dict)
     max_iterations: int = 7
     enable_thinking: bool = False
+    project_path: str = ""
 
 
 @dataclass
@@ -104,12 +108,14 @@ class AgentBase(ABC):
         AgentAction.READ_FILE: ("read_file", '{"path": "<file_path>"}'),
         AgentAction.WRITE_FILE: ("write_file", '{"path": "<file_path>", "content": "<file_content>"}'),
         AgentAction.EXECUTE_CODE: ("execute_code", '{"code": "<code_string>", "language": "python"}'),
-        AgentAction.SEARCH_CODEBASE: ("search_in_files", '{"pattern": "<search_pattern>", "path": "."}'),
+        AgentAction.SEARCH_CODEBASE: ("search_codebase", '{"query": "<search_query>", "project_path": "."}'),
         AgentAction.SEARCH_WEB: ("web_search", '{"query": "<search_query>"}'),
-        AgentAction.FETCH_URL: ("web_search", '{"query": "<url_or_query>"}'),
-        AgentAction.CONSULT_AGENT: ("read_file", '{"path": "<context_file>"}'),
+        AgentAction.FETCH_URL: ("fetch_url", '{"url": "<target_url>"}'),
+        AgentAction.CONSULT_AGENT: ("consult_agent", '{"agent": "<agent_name>", "question": "<question_to_ask>"}'),
         AgentAction.READ_DOCS: ("read_file", '{"path": "<doc_file>"}'),
-        AgentAction.RECALL_CONTEXT: ("read_file", '{"path": "<context_file>"}'),
+        AgentAction.RECALL_CONTEXT: ("recall_context", '{"query": "<search_query>"}'),
+        AgentAction.ANALYZE_DATA: ("data_analysis", '{"data_path": "<file>", "query": "<analysis_query>"}'),
+        AgentAction.GENERATE_REPORT: ("report_generation", '{"title": "<title>", "sections": "<json_sections>"}'),
     }
 
     def build_messages(self, request: AgentRequest, context: str = "") -> list[ChatMessage]:
@@ -134,7 +140,14 @@ class AgentBase(ABC):
     def _build_tool_instructions(self) -> str:
         """Build tool usage instructions for agents with ReAct support."""
         lines = [
-            "TOOL USAGE — You have access to the following tools. Use them by outputting exactly:",
+            "TOOL USAGE — You have access to the following tools. Use them by outputting one of these formats:",
+            "",
+            "Format 1 (preferred - JSON code block):",
+            '```tool',
+            '{"name": "tool_name", "arguments": {"arg1": "value1", "arg2": "value2"}}',
+            '```',
+            "",
+            "Format 2 (legacy - inline tags):",
             '<tool>tool_name|{"arg1": "value1", "arg2": "value2"}</tool>',
             "",
             "Available tools:",
@@ -143,7 +156,7 @@ class AgentBase(ABC):
             mapping = self._ACTION_TOOLS.get(action)
             if mapping:
                 tool_name, example_args = mapping
-                lines.append(f'  - <tool>{tool_name}|{example_args}</tool>')
+                lines.append(f'  - {tool_name}: {example_args}')
 
         lines.extend([
             "",
@@ -233,16 +246,66 @@ class AgentBase(ABC):
             raise last_error
 
     def _parse_tool_calls(self, content: str) -> list[tuple[str, dict]]:
-        """Parse <tool>name|json_args</tool> format from content."""
-        pattern = r"<tool>(\w+)\|(.+?)</tool>"
+        """Parse tool calls from content.
+
+        Supports two formats:
+        1. <tool>name|json_args</tool>  (legacy tag format)
+        2. ```tool\n{"name": "...", "arguments": {...}}\n```  (JSON code block format)
+
+        Returns list of (tool_name, args_dict) tuples.
+        """
         calls = []
-        for match in re.finditer(pattern, content):
+
+        # Format 1: Legacy <tool>name|json_args</tool> tags
+        tag_pattern = r"<tool>(\w+)\|(.+?)</tool>"
+        for match in re.finditer(tag_pattern, content):
             tool_name = match.group(1)
             try:
                 args = json.loads(match.group(2))
                 calls.append((tool_name, args))
             except json.JSONDecodeError:
                 logger.warning(f"Failed to parse tool args: {match.group(2)}")
+
+        # Format 2: JSON code blocks with tool calls
+        # Matches: ```tool\n{"name": "tool_name", "arguments": {...}}\n```
+        # Also matches: ```tool\n{"tool": "tool_name", "args": {...}}\n```
+        code_block_pattern = r"```tool\s*\n(.*?)```"
+        for match in re.finditer(code_block_pattern, content, re.DOTALL):
+            try:
+                tool_json = json.loads(match.group(1).strip())
+                # Support multiple key naming conventions
+                tool_name = (
+                    tool_json.get("name")
+                    or tool_json.get("tool")
+                    or tool_json.get("function")
+                    or ""
+                )
+                tool_args = (
+                    tool_json.get("arguments")
+                    or tool_json.get("args")
+                    or tool_json.get("parameters")
+                    or tool_json.get("params")
+                    or {}
+                )
+                if tool_name and isinstance(tool_args, dict):
+                    calls.append((tool_name, tool_args))
+            except (json.JSONDecodeError, AttributeError):
+                logger.warning("Failed to parse JSON tool block: %s", match.group(1)[:100])
+
+        # Format 3: Inline JSON tool calls (no code block)
+        # Matches: {"tool_call": {"name": "...", "arguments": {...}}}
+        inline_pattern = r'\{["\s]*tool_call["\s]*:\s*\{[^}]*"name"["\s]*:\s*"([^"]+)"[^}]*\}[^}]*\}'
+        for match in re.finditer(inline_pattern, content):
+            try:
+                full_json = json.loads(match.group(0))
+                tc = full_json.get("tool_call", {})
+                tool_name = tc.get("name", "")
+                tool_args = tc.get("arguments", tc.get("args", {}))
+                if tool_name and isinstance(tool_args, dict):
+                    calls.append((tool_name, tool_args))
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
         return calls
 
     def _extract_thinking(self, content: str) -> tuple[str, str]:
@@ -294,6 +357,10 @@ class AgentBase(ABC):
             # Execute tools
             for tool_name, args in tool_calls:
                 yield f"<event>tool_call|{tool_name}|{json.dumps(args)}</event>"
+
+                # Inject project_path from the request if the tool expects it
+                if request.project_path and "project_path" not in args:
+                    args["project_path"] = request.project_path
 
                 result = await execute_tool(tool_name, request.session_id, args)
 

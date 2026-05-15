@@ -12,6 +12,7 @@ from backend.agents.analyzer import AnalyzerAgent
 from backend.agents.architect import ArchitectAgent
 from backend.agents.base import AgentBase
 from backend.agents.coder import CoderAgent
+from backend.agents.dashboard_agent import DashboardAgent
 from backend.agents.debugger import DebuggerAgent
 from backend.agents.documenter import DocumenterAgent
 from backend.agents.micro import MicroAgent
@@ -33,14 +34,16 @@ def build_default_registry() -> dict[AgentName, AgentBase]:
         "DOCUMENTER": DocumenterAgent(),
         "OPTIMIZER": OptimizerAgent(),
         "MICRO": MicroAgent(),
+        "DASHBOARD": DashboardAgent(),
     }
 
 
 def resolve(registry: AgentRegistry, name: AgentName) -> AgentBase:
     """Return the agent for ``name`` or fall back to CODER.
 
-    DASHBOARD and ROUTER are never user-invocable; route them to CODER so the
+    ROUTER is never user-invocable; route it to CODER so the
     system still produces useful output instead of 500-ing.
+    DASHBOARD is invocable for metrics queries.
     """
     if name in registry:
         return registry[name]

@@ -1,6 +1,6 @@
 """CODER — production code generation agent with ReAct loop.
 
-Model: qwen2.5-coder:7b (MEDIUM). Context 8K.
+Model: qwen2.5-coder:7b (CODER tier). Context 8K.
 Prompt: config/prompts/coder.md
 See ARCHITECTURE.md §3.4.
 
@@ -29,7 +29,7 @@ class CoderAgent(AgentBase):
     """
 
     name = "CODER"
-    model_key = "medium"
+    model_key = "coder"
     prompt_file = "coder"
     supported_actions = {
         AgentAction.READ_FILE,

@@ -1,4 +1,7 @@
-"""Prompt-injection defences. See ARCHITECTURE.md §11.1."""
+"""Prompt-injection defences. See ARCHITECTURE.md §11.1.
+
+Supports English and Portuguese injection patterns.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import re
 from dataclasses import dataclass
 
 INJECTION_PATTERNS = [
+    # English patterns
     r"ignore (previous|all|prior) instructions",
     r"you are now",
     r"new system prompt",
@@ -13,6 +17,33 @@ INJECTION_PATTERNS = [
     r"act as",
     r"pretend you are",
     r"your real instructions",
+    r"forget (everything|all|previous|prior)",
+    r"override (your|the|all) (instructions|rules|prompt|system)",
+    r"jailbreak",
+    r"system prompt:",
+    r"<\|system\|>",
+    r"\[system\]",
+    r"sudo (mode|execute|run)",
+    r"developer mode",
+    r"DAN mode",
+    r"bypass (filter|safety|security|restriction)",
+    r"reveal (your|the|system) (prompt|instructions|rules)",
+
+    # Portuguese patterns
+    r"ignore .{0,15}instru",
+    r"voc[eê] agora [eé]",
+    r"novo prompt de sistema",
+    r"desconsidere (suas?|as?|o)",
+    r"aja como",
+    r"finja que voc[eê] [eé]",
+    r"suas? verdadeiras? instru",
+    r"esque[çc]a (tudo|todas?|as? anteriores)",
+    r"sobrescreva (suas?|as?|o) (instru|regras|prompt|sistema)",
+    r"modo desenvolvedor",
+    r"contorne .{0,10}(filtro|seguran|restri)",
+    r"revele (seu|o|a) (prompt|instru|regras)",
+    r"libere (o|a) (modo|sistema)",
+    r"desative (suas?|as?|o) (regras|filtro|seguran)",
 ]
 
 

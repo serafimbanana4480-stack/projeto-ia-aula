@@ -1,8 +1,8 @@
-"""Tests for backend.tools.web_search — dataclasses."""
+"""Tests for backend.tools.web_search — dataclasses and fetch_url."""
 
 from __future__ import annotations
 
-from backend.tools.web_search import SearchHit, SearchResult
+from backend.tools.web_search import SearchHit, SearchResult, fetch_url
 
 
 class TestSearchHit:
@@ -34,3 +34,8 @@ class TestSearchResult:
         assert len(result.sources) == 1
         assert result.confidence == 0.88
         assert result.search_iterations == 3
+
+
+class TestFetchUrl:
+    def test_function_exists(self) -> None:
+        assert callable(fetch_url)

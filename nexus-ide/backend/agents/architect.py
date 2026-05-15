@@ -1,6 +1,6 @@
 """ARCHITECT — system design agent.
 
-Model: qwen3.5:27b (LARGE) with thinking mode always on.
+Model: deepseek-r1:8b (REASONING tier) with thinking mode always on.
 Prompt: config/prompts/architect.md
 See ARCHITECTURE.md §3.2.
 

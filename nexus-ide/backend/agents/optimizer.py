@@ -1,6 +1,6 @@
 """OPTIMIZER — performance tuning agent.
 
-Model: qwen3.5:9b (SMALL) with optional thinking mode.
+Model: qwen2.5-coder:7b (CODER tier) with optional thinking mode.
 Prompt: config/prompts/optimizer.md
 See ARCHITECTURE.md §3.8.
 
@@ -19,12 +19,13 @@ from .base import AgentAction, AgentBase, AgentRequest
 
 class OptimizerAgent(AgentBase):
     name = "OPTIMIZER"
-    model_key = "medium"  # qwen2.5-coder:7b for benchmarking + code optimization
+    model_key = "coder"  # qwen2.5-coder:7b for benchmarking + code optimization
     prompt_file = "optimizer"
     supported_actions = {
         AgentAction.READ_FILE,
         AgentAction.EXECUTE_CODE,
         AgentAction.SEARCH_CODEBASE,
+        AgentAction.ANALYZE_DATA,
     }
 
     async def run(self, request: AgentRequest) -> AsyncIterator[str]:

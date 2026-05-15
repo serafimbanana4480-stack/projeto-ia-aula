@@ -24,6 +24,8 @@ filterwarnings = [
   # httpx deprecation we cannot control in FastAPI TestClient
   "ignore::DeprecationWarning:httpx",
   "ignore::PendingDeprecationWarning",
+  # python-jose uses deprecated datetime.utcnow() internally
+  "ignore::DeprecationWarning:jose",
   # Sockets reclaimed during GC are cosmetic; not a real leak for the test
   # since the TestClient/lifespan always close the AsyncClient deterministically.
   "ignore::ResourceWarning",

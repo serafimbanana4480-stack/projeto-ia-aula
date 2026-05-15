@@ -1,6 +1,6 @@
 """DEBUGGER — root cause analysis.
 
-Model: qwen3-coder:7b (MEDIUM). Can execute code in Docker sandbox.
+Model: qwen2.5-coder:7b (CODER tier). Can execute code in Docker sandbox.
 Prompt: config/prompts/debugger.md
 See ARCHITECTURE.md §3.6.
 
@@ -19,7 +19,7 @@ from .base import AgentAction, AgentBase, AgentRequest
 
 class DebuggerAgent(AgentBase):
     name = "DEBUGGER"
-    model_key = "medium"
+    model_key = "coder"
     prompt_file = "debugger"
     supported_actions = {
         AgentAction.READ_FILE,

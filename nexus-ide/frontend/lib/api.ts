@@ -57,15 +57,20 @@ export async function postChat(
   sessionId: string,
   mode: string = "agent",
   signal?: AbortSignal,
+  model: string = "",
+  projectPath: string = "",
 ): Promise<Response> {
   try {
+    const body: Record<string, string> = { message, session_id: sessionId, mode };
+    if (model) body.model = model;
+    if (projectPath) body.project_path = projectPath;
     const response = await fetch(apiUrl("/api/chat"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       },
-      body: JSON.stringify({ message, session_id: sessionId, mode }),
+      body: JSON.stringify(body),
       signal,
     });
 

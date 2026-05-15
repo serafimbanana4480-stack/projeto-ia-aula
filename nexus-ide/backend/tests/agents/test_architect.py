@@ -9,5 +9,5 @@ class TestArchitectAgent:
     def test_metadata(self) -> None:
         agent = ArchitectAgent()
         assert agent.name == "ARCHITECT"
-        assert agent.model_key == "large"
+        assert agent.model_key == "reasoning"
         assert agent.prompt_file == "architect"

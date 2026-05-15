@@ -1,6 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { useState, useEffect } from "react";
 import TopBar from "../../components/layout/TopBar";
 import Sidebar from "../../components/layout/Sidebar";
 import BottomHUD from "../../components/layout/BottomHUD";
@@ -11,35 +10,45 @@ import AlertFeed from "../../components/dashboard/AlertFeed";
 import SystemHealth from "../../components/dashboard/SystemHealth";
 import AgentActivity from "../../components/dashboard/AgentActivity";
 import RequestFlow from "../../components/dashboard/RequestFlow";
+import { MOCK_METRICS } from "../../lib/mock-data";
 
-// Dedicated dashboard route. See ARCHITECTURE.md §9.
+/** IDE-style dashboard — practical, always-populated, VS Code inspired.
+ *
+ * Layout:
+ *  ┌─ Status Bar (quick metrics) ──────────────────────────────┐
+ *  ├─ Left: Health + Agents ─┬─ Right: Timeline + Models ─────┤
+ *  ├─ Request Flow (full width) ──────────────────────────────┤
+ *  └─ Alerts ─────────────────────────────────────────────────┘
+ */
 export default function DashboardPage() {
-  const [expandedSections, setExpandedSections] = useState<
-    Record<string, boolean>
-  >({
-    overview: true,
-    throughput: true,
-    performance: true,
-    flow: true,
-    health: true,
-    activity: true,
-    alerts: true,
-  });
   const [lastUpdated, setLastUpdated] = useState<string>("—");
+  const [backendOnline, setBackendOnline] = useState(false);
 
   useEffect(() => {
-    const updateTimestamp = () => {
-      setLastUpdated(new Date().toLocaleTimeString());
-    };
-
+    const updateTimestamp = () => setLastUpdated(new Date().toLocaleTimeString());
     updateTimestamp();
     const interval = setInterval(updateTimestamp, 1000);
     return () => clearInterval(interval);
   }, []);
 
-  const toggleSection = (section: string) => {
-    setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] }));
-  };
+  // Quick backend check
+  useEffect(() => {
+    let mounted = true;
+    const check = async () => {
+      try {
+        const r = await fetch("http://localhost:8000/health", { signal: AbortSignal.timeout(3000) });
+        if (mounted) setBackendOnline(r.ok);
+      } catch {
+        if (mounted) setBackendOnline(false);
+      }
+    };
+    check();
+    const id = setInterval(check, 15000);
+    return () => { mounted = false; clearInterval(id); };
+  }, []);
+
+  const m = MOCK_METRICS;
+
   return (
     <div className="flex h-screen flex-col bg-nexus-bg text-nexus-text">
       <TopBar />
@@ -47,174 +56,80 @@ export default function DashboardPage() {
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
 
-        <main className="flex-1 overflow-auto p-4">
-          <div className="mb-4 flex items-center justify-between rounded-2xl border border-nexus-border bg-nexus-panel/70 px-4 py-3 backdrop-blur">
-            <div>
-              <div className="text-xs uppercase tracking-wide text-gray-500">
-                Observability
+        <main className="flex-1 overflow-auto">
+          {/* ── Quick Status Bar (VS Code style) ─────────────────────── */}
+          <div className="sticky top-0 z-10 border-b border-nexus-border bg-nexus-panel/90 px-4 py-2 backdrop-blur">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4 text-xs">
+                <div className="flex items-center gap-1.5">
+                  <div className={`h-2 w-2 rounded-full ${backendOnline ? "bg-green-500" : "bg-red-500 animate-pulse"}`} />
+                  <span className="text-gray-400">{backendOnline ? "Connected" : "Offline — using demo data"}</span>
+                </div>
+                <div className="h-3 w-px bg-nexus-border" />
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500">Model:</span>
+                  <span className="font-mono text-nexus-accent">{m.active_model}</span>
+                </div>
+                <div className="h-3 w-px bg-nexus-border" />
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500">Tokens/s:</span>
+                  <span className="font-mono">{m.tokens_per_second.toFixed(1)}</span>
+                </div>
+                <div className="h-3 w-px bg-nexus-border" />
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500">CPU:</span>
+                  <span className={`font-mono ${m.cpu_percent > 80 ? "text-red-400" : ""}`}>{m.cpu_percent.toFixed(0)}%</span>
+                </div>
+                <div className="h-3 w-px bg-nexus-border" />
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500">RAM:</span>
+                  <span className="font-mono">{(m.ram_used_bytes / 1e9).toFixed(1)}/{(m.ram_total_bytes / 1e9).toFixed(0)} GB</span>
+                </div>
+                <div className="h-3 w-px bg-nexus-border" />
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500">Sessions:</span>
+                  <span className="font-mono">{m.active_sessions}</span>
+                </div>
+                <div className="h-3 w-px bg-nexus-border" />
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500">Latency:</span>
+                  <span className="font-mono">{m.avg_latency_ms.toFixed(0)}ms</span>
+                </div>
+                <div className="h-3 w-px bg-nexus-border" />
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500">Requests:</span>
+                  <span className="font-mono text-green-400">{m.requests_successful}</span>
+                  <span className="text-gray-600">/</span>
+                  <span className="font-mono text-red-400">{m.requests_failed}</span>
+                </div>
               </div>
-              <h1 className="text-xl font-bold text-white">NEXUS Dashboard</h1>
-            </div>
-            <div className="text-right text-xs text-gray-500">
-              <div>Live system view</div>
-              <div>Última atualização: {lastUpdated}</div>
+              <div className="text-xs text-gray-500">
+                Updated {lastUpdated}
+              </div>
             </div>
           </div>
 
-          <div className="space-y-4">
-            <section className="rounded-2xl border border-nexus-border bg-nexus-panel/30 overflow-hidden">
-              <button
-                onClick={() => toggleSection("overview")}
-                className="w-full flex items-center justify-between p-4 hover:bg-nexus-border/20 transition-colors"
-              >
-                <div>
-                  <div className="text-xs uppercase tracking-wide text-gray-500">
-                    System overview
-                  </div>
-                  <div className="text-sm text-gray-300">
-                    Core metrics with drill-down and live state
-                  </div>
-                </div>
-                {expandedSections.overview ? (
-                  <ChevronUp className="h-4 w-4 text-gray-500" />
-                ) : (
-                  <ChevronDown className="h-4 w-4 text-gray-500" />
-                )}
-              </button>
-              {expandedSections.overview && (
-                <div className="p-4 pt-0">
-                  <MetricsGrid />
-                </div>
-              )}
-            </section>
+          <div className="p-4 space-y-4">
+            {/* ── Metrics Grid (full width) ─────────────────────── */}
+            <MetricsGrid />
 
+            {/* ── Two-column: Health + Agents | Timeline + Models ── */}
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              <section className="rounded-2xl border border-nexus-border bg-nexus-panel/30 overflow-hidden">
-                <button
-                  onClick={() => toggleSection("throughput")}
-                  className="w-full flex items-center justify-between p-4 hover:bg-nexus-border/20 transition-colors"
-                >
-                  <div className="text-xs uppercase tracking-wide text-gray-500">
-                    Throughput
-                  </div>
-                  {expandedSections.throughput ? (
-                    <ChevronUp className="h-4 w-4 text-gray-500" />
-                  ) : (
-                    <ChevronDown className="h-4 w-4 text-gray-500" />
-                  )}
-                </button>
-                {expandedSections.throughput && (
-                  <div className="p-4 pt-0">
-                    <TokenTimeline />
-                  </div>
-                )}
-              </section>
-              <section className="rounded-2xl border border-nexus-border bg-nexus-panel/30 overflow-hidden">
-                <button
-                  onClick={() => toggleSection("performance")}
-                  className="w-full flex items-center justify-between p-4 hover:bg-nexus-border/20 transition-colors"
-                >
-                  <div className="text-xs uppercase tracking-wide text-gray-500">
-                    Model performance
-                  </div>
-                  {expandedSections.performance ? (
-                    <ChevronUp className="h-4 w-4 text-gray-500" />
-                  ) : (
-                    <ChevronDown className="h-4 w-4 text-gray-500" />
-                  )}
-                </button>
-                {expandedSections.performance && (
-                  <div className="p-4 pt-0">
-                    <ModelComparison />
-                  </div>
-                )}
-              </section>
+              <div className="space-y-4">
+                <SystemHealth />
+                <AgentActivity />
+              </div>
+              <div className="space-y-4">
+                <TokenTimeline />
+                <ModelComparison />
+              </div>
             </div>
 
-            <section className="rounded-2xl border border-nexus-border bg-nexus-panel/30 overflow-hidden">
-              <button
-                onClick={() => toggleSection("flow")}
-                className="w-full flex items-center justify-between p-4 hover:bg-nexus-border/20 transition-colors"
-              >
-                <div className="text-xs uppercase tracking-wide text-gray-500">
-                  Request flow
-                </div>
-                {expandedSections.flow ? (
-                  <ChevronUp className="h-4 w-4 text-gray-500" />
-                ) : (
-                  <ChevronDown className="h-4 w-4 text-gray-500" />
-                )}
-              </button>
-              {expandedSections.flow && (
-                <div className="p-4 pt-0">
-                  <RequestFlow />
-                </div>
-              )}
-            </section>
+            {/* ── Request Flow (full width) ─────────────────────── */}
+            <RequestFlow />
 
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              <section className="rounded-2xl border border-nexus-border bg-nexus-panel/30 overflow-hidden">
-                <button
-                  onClick={() => toggleSection("health")}
-                  className="w-full flex items-center justify-between p-4 hover:bg-nexus-border/20 transition-colors"
-                >
-                  <div className="text-xs uppercase tracking-wide text-gray-500">
-                    System health
-                  </div>
-                  {expandedSections.health ? (
-                    <ChevronUp className="h-4 w-4 text-gray-500" />
-                  ) : (
-                    <ChevronDown className="h-4 w-4 text-gray-500" />
-                  )}
-                </button>
-                {expandedSections.health && (
-                  <div className="p-4 pt-0">
-                    <SystemHealth />
-                  </div>
-                )}
-              </section>
-              <section className="rounded-2xl border border-nexus-border bg-nexus-panel/30 overflow-hidden">
-                <button
-                  onClick={() => toggleSection("activity")}
-                  className="w-full flex items-center justify-between p-4 hover:bg-nexus-border/20 transition-colors"
-                >
-                  <div className="text-xs uppercase tracking-wide text-gray-500">
-                    Agent activity
-                  </div>
-                  {expandedSections.activity ? (
-                    <ChevronUp className="h-4 w-4 text-gray-500" />
-                  ) : (
-                    <ChevronDown className="h-4 w-4 text-gray-500" />
-                  )}
-                </button>
-                {expandedSections.activity && (
-                  <div className="p-4 pt-0">
-                    <AgentActivity />
-                  </div>
-                )}
-              </section>
-            </div>
-
-            <section className="rounded-2xl border border-nexus-border bg-nexus-panel/30 overflow-hidden">
-              <button
-                onClick={() => toggleSection("alerts")}
-                className="w-full flex items-center justify-between p-4 hover:bg-nexus-border/20 transition-colors"
-              >
-                <div className="text-xs uppercase tracking-wide text-gray-500">
-                  Alerts
-                </div>
-                {expandedSections.alerts ? (
-                  <ChevronUp className="h-4 w-4 text-gray-500" />
-                ) : (
-                  <ChevronDown className="h-4 w-4 text-gray-500" />
-                )}
-              </button>
-              {expandedSections.alerts && (
-                <div className="p-4 pt-0">
-                  <AlertFeed />
-                </div>
-              )}
-            </section>
+            {/* ── Alerts (full width) ───────────────────────────── */}
+            <AlertFeed />
           </div>
         </main>
       </div>

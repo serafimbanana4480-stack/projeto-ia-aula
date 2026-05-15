@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { apiUrl } from "../../lib/api";
+import { MOCK_FLOW } from "../../lib/mock-data";
 
 interface FlowNode {
   id: string;
@@ -33,8 +34,9 @@ interface FlowData {
 }
 
 export default function RequestFlow() {
-  const [flowData, setFlowData] = useState<FlowData | null>(null);
+  const [flowData, setFlowData] = useState<FlowData>(MOCK_FLOW as FlowData);
   const [loading, setLoading] = useState(true);
+  const [isMock, setIsMock] = useState(true);
 
   useEffect(() => {
     const fetchFlowData = async () => {
@@ -42,19 +44,20 @@ export default function RequestFlow() {
         setLoading(true);
         const response = await fetch(apiUrl("/api/metrics/flow"));
         const data = await response.json();
-        setFlowData(data);
-      } catch (error) {
-        console.error("Failed to fetch flow data:", error);
+        if (data && data.nodes && data.nodes.length > 0) {
+          setFlowData(data);
+          setIsMock(false);
+        }
+        // If empty, keep mock data
+      } catch {
+        // Backend unavailable — keep mock data
       } finally {
         setLoading(false);
       }
     };
 
     fetchFlowData();
-
-    // Refresh every 30 seconds
     const interval = setInterval(fetchFlowData, 30000);
-
     return () => clearInterval(interval);
   }, []);
 
@@ -69,7 +72,7 @@ export default function RequestFlow() {
   };
 
   const formatLatency = (ms: number) => {
-    if (ms < 1) return `${(ms * 1000).toFixed(0)}μs`;
+    if (ms < 1) return `${(ms * 1000).toFixed(0)}us`;
     if (ms < 1000) return `${ms.toFixed(0)}ms`;
     return `${(ms / 1000).toFixed(1)}s`;
   };
@@ -81,32 +84,20 @@ export default function RequestFlow() {
       transition={{ duration: 0.3 }}
       className="rounded border border-nexus-border bg-nexus-panel p-3"
     >
-      <div className="mb-3 text-sm font-semibold">Fluxo de Requisições</div>
+      <div className="mb-3 flex items-center justify-between">
+        <div className="text-sm font-semibold">Fluxo de Requisições</div>
+        {isMock && !loading && <span className="text-xs text-gray-600">demo</span>}
+      </div>
 
       {loading ? (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex h-40 items-center justify-center text-xs text-gray-500"
-        >
+        <div className="flex h-40 items-center justify-center text-xs text-gray-500">
           Carregando...
-        </motion.div>
+        </div>
       ) : flowData?.available === false ? (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex h-48 flex-col items-center justify-center gap-3 text-center text-xs text-gray-500"
-        >
-          <svg className="h-10 w-10 text-nexus-border" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <circle cx="5" cy="12" r="2" />
-            <circle cx="12" cy="12" r="2" />
-            <circle cx="19" cy="12" r="2" />
-            <path d="M7 12h3M14 12h3" />
-          </svg>
-          <div className="font-medium text-gray-400">Rastreamento de fluxo indisponível</div>
+        <div className="flex h-32 flex-col items-center justify-center gap-2 text-center text-xs text-gray-500">
+          <div className="font-medium text-gray-400">Rastreamento indisponível</div>
           <div className="max-w-md text-gray-600">
-            {flowData.reason ??
-              "O backend ainda não instrumentou o rastreamento distribuído de requisições."}
+            {flowData.reason ?? "Backend ainda não instrumentou rastreamento distribuído."}
           </div>
           {flowData.summary && (
             <div className="mt-2 grid grid-cols-4 gap-3 rounded-lg border border-nexus-border/50 bg-nexus-border/20 px-4 py-2 text-gray-400">
@@ -128,19 +119,12 @@ export default function RequestFlow() {
               </div>
             </div>
           )}
-        </motion.div>
+        </div>
       ) : flowData ? (
         <div>
           <svg className="h-48 w-full" viewBox="0 0 600 200">
             <defs>
-              <marker
-                id="arrowhead"
-                markerWidth="10"
-                markerHeight="7"
-                refX="9"
-                refY="3.5"
-                orient="auto"
-              >
+              <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
                 <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280" />
               </marker>
             </defs>
@@ -234,64 +218,47 @@ export default function RequestFlow() {
                   <motion.text
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
-                    transition={{ delay: index * 0.3 + 1 }}
+                    transition={{ delay: index * 0.3 + 1.0 }}
                     x={pos.x}
                     y={pos.y + 20}
                     textAnchor="middle"
                     fontSize={9}
                     fill="#9ca3af"
                   >
-                    {node.value > 0 ? node.value : "0"}
+                    {node.value} req
                   </motion.text>
                 </g>
               );
             })}
           </svg>
 
-          {/* Summary */}
-          <div className="mt-3 grid grid-cols-4 gap-2 border-t border-nexus-border/50 pt-2">
-            <div className="text-center">
-              <div className="text-xs text-gray-500">Total</div>
-              <div className="text-sm font-semibold">
-                {flowData.summary.total_requests}
+          {/* Summary bar */}
+          {flowData.summary && (
+            <div className="mt-2 grid grid-cols-5 gap-2 rounded border border-nexus-border/50 bg-nexus-border/20 px-3 py-2 text-xs text-gray-400">
+              <div className="text-center">
+                <div className="text-gray-600">Total</div>
+                <div className="font-semibold">{flowData.summary.total_requests}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-gray-600">OK</div>
+                <div className="font-semibold text-green-400">{flowData.summary.successful_requests}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-gray-600">Fail</div>
+                <div className="font-semibold text-red-400">{flowData.summary.failed_requests}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-gray-600">Avg Lat</div>
+                <div className="font-semibold">{formatLatency(flowData.summary.avg_latency_ms)}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-gray-600">TPS</div>
+                <div className="font-semibold">{flowData.summary.throughput_tps.toFixed(1)}</div>
               </div>
             </div>
-            <div className="text-center">
-              <div className="text-xs text-gray-500">Sucesso</div>
-              <div className="text-sm font-semibold text-green-400">
-                {flowData.summary.successful_requests}
-              </div>
-            </div>
-            <div className="text-center">
-              <div className="text-xs text-gray-500">Falha</div>
-              <div className="text-sm font-semibold text-red-400">
-                {flowData.summary.failed_requests}
-              </div>
-            </div>
-            <div className="text-center">
-              <div className="text-xs text-gray-500">Latência</div>
-              <div className="text-sm font-semibold">
-                {formatLatency(flowData.summary.avg_latency_ms)}
-              </div>
-            </div>
-          </div>
+          )}
         </div>
-      ) : (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex h-40 flex-col items-center justify-center gap-2 text-xs text-gray-500"
-        >
-          <svg className="h-8 w-8 text-nexus-border" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <circle cx="5" cy="12" r="2" />
-            <circle cx="12" cy="12" r="2" />
-            <circle cx="19" cy="12" r="2" />
-            <path d="M7 12h3M14 12h3" />
-          </svg>
-          <div>Sem dados de fluxo</div>
-          <div className="text-gray-600">Inicia o backend para ver o fluxo</div>
-        </motion.div>
-      )}
+      ) : null}
     </motion.div>
   );
 }

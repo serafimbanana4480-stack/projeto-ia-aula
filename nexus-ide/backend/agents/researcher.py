@@ -1,6 +1,6 @@
 """RESEARCHER — online research agent.
 
-Model: qwen3.5:9b (SMALL) with Brave Search + URL fetching.
+Model: qwen2.5-coder:7b (CODER tier) with DuckDuckGo Search + URL fetching.
 Prompt: config/prompts/researcher.md
 See ARCHITECTURE.md §3.3 and §5.3 (web search pipeline).
 
@@ -19,13 +19,14 @@ from .base import AgentAction, AgentBase, AgentRequest
 
 class ResearcherAgent(AgentBase):
     name = "RESEARCHER"
-    model_key = "medium"  # qwen2.5-coder:7b for thorough research with tool use
+    model_key = "coder"  # qwen2.5-coder:7b for thorough research with tool use
     prompt_file = "researcher"
     supported_actions = {
         AgentAction.SEARCH_WEB,
         AgentAction.FETCH_URL,
         AgentAction.READ_DOCS,
         AgentAction.RECALL_CONTEXT,
+        AgentAction.ANALYZE_DATA,
     }
 
     async def run(self, request: AgentRequest) -> AsyncIterator[str]:

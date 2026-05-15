@@ -161,6 +161,51 @@ async def web_search(query: str, max_results: int = 10) -> list[SearchHit]:
         return []
 
 
+async def fetch_url(url: str, max_chars: int = 10000) -> dict:
+    """Fetch a URL and return its text content with HTML tags stripped.
+
+    Useful for reading the content of a web page found via search.
+    Respects max_chars to avoid returning huge payloads.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+
+            content_type = response.headers.get("content-type", "")
+            html = response.text
+
+            if "text/html" in content_type or html.strip().startswith("<"):
+                text = _strip_tags(html)
+            else:
+                text = html
+
+            text = re.sub(r"\s+", " ", text).strip()
+
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n... [truncated]"
+
+            return {
+                "url": url,
+                "content": text,
+                "content_length": len(text),
+                "content_type": content_type,
+            }
+
+    except httpx.HTTPStatusError as e:
+        return {"error": f"HTTP {e.response.status_code} for {url}"}
+    except httpx.TimeoutException:
+        return {"error": f"Timeout fetching {url}"}
+    except Exception as e:
+        return {"error": f"Failed to fetch {url}: {e}"}
+
+
 register_tool(
     ToolSpec(
         name="web_search",
@@ -174,5 +219,21 @@ register_tool(
             "required": ["query"],
         },
         handler=web_search,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="fetch_url",
+        description="Fetch a URL and return its text content with HTML stripped. Use after web_search to read a specific result page.",
+        schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch"},
+                "max_chars": {"type": "integer", "default": 10000, "description": "Maximum characters to return"},
+            },
+            "required": ["url"],
+        },
+        handler=fetch_url,
     )
 )

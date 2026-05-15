@@ -9,5 +9,5 @@ class TestDocumenterAgent:
     def test_metadata(self) -> None:
         agent = DocumenterAgent()
         assert agent.name == "DOCUMENTER"
-        assert agent.model_key == "small"
+        assert agent.model_key == "fast"
         assert agent.prompt_file == "documenter"

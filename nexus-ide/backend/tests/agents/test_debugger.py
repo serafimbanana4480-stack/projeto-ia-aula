@@ -10,7 +10,7 @@ class TestDebuggerAgent:
     def test_metadata(self) -> None:
         agent = DebuggerAgent()
         assert agent.name == "DEBUGGER"
-        assert agent.model_key == "medium"
+        assert agent.model_key == "coder"
         assert agent.prompt_file == "debugger"
 
     def test_supported_actions(self) -> None:

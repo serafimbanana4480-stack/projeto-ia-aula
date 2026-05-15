@@ -6,6 +6,8 @@ import { getSessionHistory, createPlan, approvePlan, executePlan, getPlanStatus,
 import { apiUrl } from "../../lib/api";
 import type { PlanCreateResult, PlanStatus as PlanStatusType } from "../../lib/api";
 import { useModeStore } from "../../stores/modeStore";
+import { useModelStore } from "../../stores/modelStore";
+import { useProjectStore } from "../../stores/projectStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import MessageBubble from "./MessageBubble";
@@ -92,6 +94,8 @@ export default function ChatPanel({
 }: ChatPanelProps) {
   const [sessionId, setSessionId] = useState("default");
   const { currentMode } = useModeStore();
+  const { activeModel } = useModelStore();
+  const { currentProject } = useProjectStore();
   const { events, streaming, send, cancel, reset } = useAgentStream(sessionId);
   const [input, setInput] = useState("");
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
@@ -154,9 +158,40 @@ export default function ChatPanel({
     [historyMessages, pendingUser, events],
   );
 
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const previousMessagesLength = useRef(messages.length);
+  const userScrolledUp = useRef(false);
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const isNewMessageAdded = messages.length > previousMessagesLength.current;
+    previousMessagesLength.current = messages.length;
+
+    if (!isNewMessageAdded) return;
+
+    const isNearBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+
+    if (!userScrolledUp.current || isNearBottom) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages]);
+
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const isNearBottom =
+        container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+      userScrolledUp.current = !isNearBottom;
+    };
+
+    container.addEventListener("scroll", handleScroll);
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, []);
 
   const lastUserMessage =
     [...historyMessages, ...pendingUser]
@@ -176,7 +211,7 @@ export default function ChatPanel({
         timestamp: new Date().toISOString(),
       },
     ]);
-    await send(trimmed, currentMode);
+    await send(trimmed, currentMode, activeModel, currentProject?.path ?? "");
     await new Promise((resolve) => setTimeout(resolve, 500));
     await loadHistory();
     setInput("");
@@ -197,7 +232,7 @@ export default function ChatPanel({
   function handleRegenerate() {
     if (streaming) return;
     if (!lastUserMessage) return;
-    void send(lastUserMessage, currentMode).then(() => loadHistory());
+    void send(lastUserMessage, currentMode, activeModel, currentProject?.path ?? "").then(() => loadHistory());
   }
 
   async function handleNewChat() {
@@ -373,7 +408,7 @@ export default function ChatPanel({
       </div>
 
       {/* Messages area */}
-      <div className="min-h-0 flex-1 overflow-y-auto thin-scrollbar px-5 py-3">
+      <div ref={messagesContainerRef} className="min-h-0 flex-1 overflow-y-auto thin-scrollbar px-5 py-3">
         {!historyLoaded && (
           <div className="flex h-full items-center justify-center">
             <div className="flex items-center gap-3 text-sm text-nexus-muted">

@@ -9,5 +9,5 @@ class TestAnalyzerAgent:
     def test_metadata(self) -> None:
         agent = AnalyzerAgent()
         assert agent.name == "ANALYZER"
-        assert agent.model_key == "large"
+        assert agent.model_key == "reasoning"
         assert agent.prompt_file == "analyzer"

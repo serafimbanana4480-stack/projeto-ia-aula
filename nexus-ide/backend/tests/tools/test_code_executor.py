@@ -1,4 +1,4 @@
-"""Tests for backend.tools.code_executor — sandbox config, dataclass, and execution."""
+"""Tests for backend.tools.code_executor — dataclass and execution."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from backend.tools.code_executor import SANDBOX_CONFIG, ExecutionResult, execute_code
+from backend.tools.code_executor import ExecutionResult, execute_code
 
 
 class TestExecutionResult:
@@ -24,16 +24,21 @@ class TestExecutionResult:
 
 
 class TestSandboxConfig:
-    def test_security_hardening(self) -> None:
-        assert SANDBOX_CONFIG["network_mode"] == "none"
-        assert SANDBOX_CONFIG["mem_limit"] == "512m"
-        assert SANDBOX_CONFIG["read_only"] is True
-        assert SANDBOX_CONFIG["user"] == "nobody"
-        assert "no-new-privileges" in SANDBOX_CONFIG["security_opt"]
-        assert SANDBOX_CONFIG["cap_drop"] == ["ALL"]
+    def test_sandbox_executor_available(self) -> None:
+        """Verify SandboxExecutor is importable and provides security."""
+        from backend.sandbox.executor import SandboxConfig
+        config = SandboxConfig()
+        assert config.network_enabled is False
+        assert config.max_memory_mb == 512
+        assert config.read_only_root is True
+        assert config.timeout_seconds == 30
 
-    def test_tmpfs_present(self) -> None:
-        assert "/tmp" in SANDBOX_CONFIG["tmpfs"]
+    def test_dangerous_command_detector(self) -> None:
+        """Verify dangerous command detection works."""
+        from backend.sandbox.executor import DangerousCommandDetector, RiskLevel
+        risk, reasons = DangerousCommandDetector.assess_risk("rm -rf /")
+        assert risk == RiskLevel.CRITICAL
+        assert len(reasons) > 0
 
 
 class TestExecuteCode:

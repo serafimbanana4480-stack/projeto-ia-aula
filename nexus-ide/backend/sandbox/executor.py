@@ -172,6 +172,7 @@ class SandboxExecutor:
         timeout: int | None = None,
         files: dict[str, str] | None = None,  # filename -> content
         session_id: str = "",
+        cwd: str | None = None,  # working directory override
     ) -> SandboxResult:
         """Execute code in a sandboxed environment."""
         execution_id = uuid.uuid4().hex[:12]
@@ -200,7 +201,7 @@ class SandboxExecutor:
         if docker_ok:
             return await self._execute_docker(code, language, execution_id, timeout_sec, files)
         else:
-            return await self._execute_subprocess(code, language, execution_id, timeout_sec)
+            return await self._execute_subprocess(code, language, execution_id, timeout_sec, cwd)
 
     async def _execute_docker(
         self,
@@ -320,6 +321,7 @@ class SandboxExecutor:
         language: str,
         execution_id: str,
         timeout: int,
+        cwd: str | None = None,
     ) -> SandboxResult:
         """Fallback: execute in subprocess with resource limits."""
         start = time.time()
@@ -345,7 +347,7 @@ class SandboxExecutor:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=tempfile.gettempdir(),
+                cwd=cwd or tempfile.gettempdir(),
             )
 
             try:
