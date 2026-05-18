@@ -137,15 +137,9 @@ async def web_search(query: str, max_results: int = 10) -> list[SearchHit]:
             results = _parse_ddg_html(html)
 
             if not results:
-                logger.info(f"Web search: no results parsed for query '{query}'")
-                # Return a single informative result instead of mock
-                return [
-                    SearchHit(
-                        title=f"DuckDuckGo search: {query}",
-                        url=f"https://duckduckgo.com/?q={encoded_query}",
-                        snippet=f"Search completed for '{query}' but no structured results could be extracted. Try the direct link.",
-                    )
-                ]
+                logger.warning(f"Web search: no results parsed for query '{query}' (HTML structure may have changed)")
+                # Return empty list instead of placeholder to avoid confusing agents
+                return []
 
             logger.info(f"Web search returning {len(results)} results for '{query}'")
             return results[:max_results]

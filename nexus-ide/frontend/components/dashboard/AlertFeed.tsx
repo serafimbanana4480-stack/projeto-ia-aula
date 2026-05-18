@@ -2,13 +2,21 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { apiUrl } from "../../lib/api";
-import { MOCK_ALERTS, type AlertData } from "../../lib/mock-data";
+
+export interface AlertData {
+  id: string;
+  severity: "info" | "warning" | "error" | "critical";
+  message: string;
+  timestamp: string;
+  source: string;
+}
 
 export default function AlertFeed() {
-  const [alerts, setAlerts] = useState<AlertData[]>(MOCK_ALERTS);
+  const [alerts, setAlerts] = useState<AlertData[]>([]);
   const [filter, setFilter] = useState<"all" | "warning" | "error" | "critical">("all");
   const [connected, setConnected] = useState(false);
-  const [isMock, setIsMock] = useState(true);
+  const [hasData, setHasData] = useState(false);
+  const [backendOnline, setBackendOnline] = useState(false);
 
   useEffect(() => {
     const fetchInitialAlerts = async () => {
@@ -17,11 +25,17 @@ export default function AlertFeed() {
         const data = await response.json();
         if (Array.isArray(data) && data.length > 0) {
           setAlerts(data);
-          setIsMock(false);
+          setHasData(true);
+          setBackendOnline(true);
+        } else {
+          setAlerts([]);
+          setHasData(false);
+          setBackendOnline(true);
         }
-        // If empty, keep mock data
       } catch {
-        // Backend unavailable — keep mock data
+        setAlerts([]);
+        setHasData(false);
+        setBackendOnline(false);
       }
     };
 
@@ -39,7 +53,6 @@ export default function AlertFeed() {
 
       eventSource.onopen = () => {
         setConnected(true);
-        setIsMock(false);
       };
 
       eventSource.onmessage = (e) => {
@@ -49,6 +62,7 @@ export default function AlertFeed() {
             if (prev.some((a) => a.id === alert.id)) return prev;
             return [alert, ...prev].slice(0, 50);
           });
+          setHasData(true);
         } catch { /* ignore parse errors */ }
       };
 
@@ -103,11 +117,16 @@ export default function AlertFeed() {
 
   return (
     <div className="rounded border border-nexus-border bg-nexus-panel p-3">
+      {!backendOnline && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mb-2 rounded border border-yellow-500/30 bg-yellow-500/10 px-3 py-1.5 text-xs text-yellow-400">
+          OFFLINE — Dados de exemplo (backend desconectado)
+        </motion.div>
+      )}
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="text-sm font-semibold">Alertas</div>
           <div className={`h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-gray-500"}`} />
-          {isMock && <span className="text-xs text-gray-600">demo</span>}
+          {!hasData && <span className="text-xs text-gray-600">indisponível</span>}
         </div>
         <div className="flex gap-1">
           {(["all", "warning", "error", "critical"] as const).map((f) => (
@@ -159,6 +178,7 @@ export default function AlertFeed() {
       ) : (
         <div className="flex h-20 items-center justify-center text-xs text-gray-500">
           Nenhum alerta {filter !== "all" && `de tipo ${filter}`}
+          {!hasData && filter === "all" && " — backend offline"}
         </div>
       )}
     </div>

@@ -27,10 +27,12 @@ def _load_concurrency_limits() -> dict[str, int]:
         if config_path.exists():
             with config_path.open("r", encoding="utf-8") as f:
                 config = yaml.safe_load(f) or {}
+            # Concurrency is a top-level key in models.yaml, not under "agents"
+            concurrency_config = config.get("concurrency", {})
             limits: dict[str, int] = {}
-            for agent_name, agent_cfg in config.get("agents", {}).items():
-                if isinstance(agent_cfg, dict) and "concurrency" in agent_cfg:
-                    limits[agent_name] = int(agent_cfg["concurrency"])
+            for agent_name, limit in concurrency_config.items():
+                if isinstance(limit, int):
+                    limits[agent_name] = limit
             return limits
     except Exception as exc:
         logger.warning("Failed to load concurrency limits: %s", exc)

@@ -2,12 +2,21 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { getCurrentMetrics } from "../../lib/api";
-import { MOCK_AGENT_ACTIVITY, type AgentActivityData } from "../../lib/mock-data";
+
+export interface AgentActivityData {
+  agent: string;
+  status: "idle" | "active" | "error";
+  tasks_completed: number;
+  tasks_failed: number;
+  avg_latency_ms: number;
+  last_activity: string;
+}
 
 export default function AgentActivity() {
-  const [activities, setActivities] = useState<AgentActivityData[]>(MOCK_AGENT_ACTIVITY);
+  const [activities, setActivities] = useState<AgentActivityData[]>([]);
   const [loading, setLoading] = useState(true);
-  const [isMock, setIsMock] = useState(true);
+  const [hasData, setHasData] = useState(false);
+  const [backendOnline, setBackendOnline] = useState(false);
 
   useEffect(() => {
     const fetchActivities = async () => {
@@ -16,11 +25,17 @@ export default function AgentActivity() {
         const agentMetrics = Array.isArray(metrics.agent_activity) ? metrics.agent_activity : [];
         if (agentMetrics.length > 0) {
           setActivities(agentMetrics as AgentActivityData[]);
-          setIsMock(false);
+          setHasData(true);
+          setBackendOnline(true);
+        } else {
+          setActivities([]);
+          setHasData(false);
+          setBackendOnline(true);
         }
-        // If empty, keep mock data
       } catch {
-        // Backend unavailable — keep mock data
+        setActivities([]);
+        setHasData(false);
+        setBackendOnline(false);
       } finally {
         setLoading(false);
       }
@@ -63,16 +78,26 @@ export default function AgentActivity() {
       transition={{ duration: 0.3 }}
       className="rounded border border-nexus-border bg-nexus-panel p-3"
     >
+      {!backendOnline && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mb-2 rounded border border-yellow-500/30 bg-yellow-500/10 px-3 py-1.5 text-xs text-yellow-400">
+          OFFLINE — Dados de exemplo (backend desconectado)
+        </motion.div>
+      )}
       <div className="mb-2 flex items-center justify-between">
         <div className="text-sm font-semibold">Atividade dos Agentes</div>
-        {isMock && !loading && (
-          <span className="text-xs text-gray-600">demo</span>
+        {!hasData && !loading && (
+          <span className="text-xs text-gray-600">indisponível</span>
         )}
       </div>
 
       {loading ? (
         <div className="flex h-40 items-center justify-center text-xs text-gray-500">
           Carregando...
+        </div>
+      ) : !hasData ? (
+        <div className="flex h-40 flex-col items-center justify-center text-xs text-gray-500">
+          <span className="text-gray-400">Sem atividade de agentes</span>
+          <span className="text-gray-600">Backend offline ou sem sessões ativas</span>
         </div>
       ) : (
         <div className="space-y-1.5">
