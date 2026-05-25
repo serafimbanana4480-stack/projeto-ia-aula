@@ -1,9 +1,11 @@
 # NEXUS IDE - IDE Assistida por IA com Arquitetura Multiagente
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-Em%20Desenvolvimento-yellow" alt="Status: Em Desenvolvimento">
+  <img src="https://img.shields.io/badge/status-Quase%20Pronto%20para%20Produção-orange" alt="Status: Quase Pronto para Produção">
   <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python 3.12">
   <img src="https://img.shields.io/badge/node-20+-green" alt="Node 20+">
+  <img src="https://img.shields.io/badge/tests-435%20passing-brightgreen" alt="Tests: 435 passing">
+  <img src="https://img.shields.io/badge/coverage-71%25-green" alt="Coverage: 71%">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="License: MIT">
 </p>
 
@@ -263,6 +265,33 @@ Acede a:
 
 ---
 
+## 🔌 API Endpoints
+
+| Endpoint | Metodo | Descricao |
+|----------|--------|-----------|
+| `/health` | GET | Health check do sistema |
+| `/api/auth/register` | POST | Registo de novo utilizador |
+| `/api/auth/login` | POST | Login (retorna JWT) |
+| `/api/auth/me` | GET | Perfil do utilizador autenticado |
+| `/api/chat` | POST | Chat streaming (SSE) |
+| `/api/models/status` | GET | Status dos modelos Ollama |
+| `/api/metrics/current` | GET | Metricas do sistema em tempo real |
+| `/api/metrics/history` | GET | Historico de metricas |
+| `/api/embeddings/index` | POST | Indexar codebase para RAG |
+| `/api/files/read` | POST | Ler ficheiro |
+| `/api/files/write` | POST | Escrever ficheiro |
+
+## 🚀 Producao
+
+Ver [`nexus-ide/PRODUCTION_READINESS_REPORT.md`](./nexus-ide/PRODUCTION_READINESS_REPORT.md) para o relatorio completo de prontidao.
+
+**Resumo**: Backend e frontend funcionais, 435 testes passando, funcionalidades core implementadas. Antes do deployment:
+
+1. Gerar `SECRET_KEY` e `JWT_SECRET` fortes
+2. Configurar `REDIS_URL` para rate limiting distribuido
+3. Revisar `ALLOWED_ORIGINS` em producao
+4. Atualizar modelos em `config/models.yaml` se necessario
+
 ## 📚 Documentacao
 
 | Documento | Descricao |
@@ -275,7 +304,9 @@ Acede a:
 | [`nexus-ide/docs/FAQ.md`](./nexus-ide/docs/FAQ.md) | Perguntas frequentes |
 | [`nexus-ide/docs/troubleshooting.md`](./nexus-ide/docs/troubleshooting.md) | Guia de resolucao de problemas |
 | [`nexus-ide/docs/developer-setup.md`](./nexus-ide/docs/developer-setup.md) | Setup detalhado de desenvolvimento |
+| [`nexus-ide/docs/troubleshooting.md`](./nexus-ide/docs/troubleshooting.md) | Guia de resolucao de problemas |
 | [`nexus-ide/planeamento/`](./nexus-ide/planeamento/) | 15 documentos de planeamento tecnico |
+| [`nexus-ide/PRODUCTION_READINESS_REPORT.md`](./nexus-ide/PRODUCTION_READINESS_REPORT.md) | Relatorio de prontidao para producao |
 
 ---
 
@@ -314,6 +345,14 @@ Acede a:
 - ✅ Error handling com hierarquia de excecoes
 - ✅ Base de dados inicializada e operacional
 - ✅ Listagem de modelos disponiveis
+- ✅ Autenticacao JWT (registo, login, tokens)
+- ✅ Execucao sandboxed de codigo (Docker + fallback)
+- ✅ Pesquisa web integrada (DuckDuckGo)
+- ✅ Embeddings semanticos / RAG
+- ✅ File manager com path safety
+- ✅ Agent pool com concorrencia controlada
+- ✅ Rate limiting por IP
+- ✅ CI/CD com GitHub Actions
 
 ---
 
@@ -347,4 +386,4 @@ Este e um projeto educacional e de demonstracao de uma IDE assistida por IA com 
 
 ---
 
-**Ultima atualizacao**: 2026-05-18 
+**Ultima atualizacao**: 2026-05-25 
