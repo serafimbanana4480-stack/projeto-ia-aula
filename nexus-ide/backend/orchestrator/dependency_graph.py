@@ -72,6 +72,9 @@ class TaskNode:
     completed_at: float = 0.0
     error_message: str = ""
 
+    # Subtasks
+    subtasks: list[str] = field(default_factory=list)
+
     # Tool configuration
     allowed_tools: list[str] = field(default_factory=list)
     sandboxed: bool = False
@@ -115,6 +118,9 @@ class DependencyGraph:
         self._in_degree[task.task_id] = len(task.depends_on)
         for dep_id in task.depends_on:
             self._adjacency[dep_id].append(task.task_id)
+            if dep_id in self._nodes:
+                if task.task_id not in self._nodes[dep_id].required_by:
+                    self._nodes[dep_id].required_by.append(task.task_id)
         return task
 
     def add_dependency(self, from_task_id: str, to_task_id: str) -> None:

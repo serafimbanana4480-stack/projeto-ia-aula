@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 import logging
+import os
+
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 logger = logging.getLogger(__name__)
 
-# Create limiter instance
-# Uses IP address as the key for rate limiting
+# Use Redis for rate limiting when REDIS_URL is configured;
+# fall back to in-memory storage for development.
+_redis_url = os.getenv("REDIS_URL", "")
+if _redis_url:
+    _storage_uri = _redis_url
+    logger.info("Rate limiting using Redis: %s", _redis_url)
+else:
+    _storage_uri = "memory://"
+    logger.info("Rate limiting using in-memory storage")
+
 limiter = Limiter(
     key_func=get_remote_address,
     default_limits=["200/minute", "1000/hour"],  # Default limits for all endpoints
-    storage_uri="memory://",  # In-memory storage (for production, use Redis)
+    storage_uri=_storage_uri,
 )
 
 

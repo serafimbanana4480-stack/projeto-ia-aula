@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from backend.config.settings import get_settings
@@ -41,11 +42,9 @@ async def register(user_data: UserRegister):
             detail="User with this email already exists",
         )
     
-    # Hash password using bcrypt
-    from passlib.context import CryptContext
-    
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-    password_hash = pwd_context.hash(user_data.password)
+    # Hash password using bcrypt directly (avoids passlib/bcrypt version issues)
+    password_bytes = user_data.password.encode("utf-8")
+    password_hash = bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8")
     
     # Create user
     user = create_user(
@@ -86,11 +85,10 @@ async def login(user_data: UserLogin):
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Verify password
-    from passlib.context import CryptContext
-    
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-    if not pwd_context.verify(user_data.password, user["password_hash"]):
+    # Verify password using bcrypt directly
+    password_bytes = user_data.password.encode("utf-8")
+    hash_bytes = user["password_hash"].encode("utf-8")
+    if not bcrypt.checkpw(password_bytes, hash_bytes):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",

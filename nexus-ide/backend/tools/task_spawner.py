@@ -8,7 +8,7 @@ it can spawn new tasks that the orchestrator will then schedule.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, get_args
 
 from backend.tools.registry import ToolSpec, register_tool
 
@@ -42,7 +42,7 @@ async def spawn_task(
     # Validate agent is in the allowed list
     from backend.models.api import AgentName
 
-    valid_agents = [a.value for a in AgentName]
+    valid_agents = list(get_args(AgentName))
     if agent not in valid_agents:
         error_msg = f"Invalid agent '{agent}'. Must be one of: {valid_agents}"
         logger.error(error_msg)

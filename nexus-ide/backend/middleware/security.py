@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from starlette.datastructures import MutableHeaders
 
+from backend.config.settings import get_settings
+
 
 class SecurityHeadersMiddleware:
     """ASGI middleware to add security headers to all responses.
@@ -13,7 +15,7 @@ class SecurityHeadersMiddleware:
     - X-Frame-Options
     - X-Content-Type-Options
     - X-XSS-Protection
-    - Strict-Transport-Security
+    - Strict-Transport-Security (production only)
     - Referrer-Policy
     - Permissions-Policy
     """
@@ -52,6 +54,11 @@ class SecurityHeadersMiddleware:
 
                 # X-XSS-Protection - Enable XSS filter
                 headers["X-XSS-Protection"] = "1; mode=block"
+
+                # Strict-Transport-Security - Force HTTPS in production
+                settings = get_settings()
+                if getattr(settings, "require_https", False) or getattr(settings, "environment", "development") == "production":
+                    headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
                 # Referrer-Policy - Control referrer information
                 headers["Referrer-Policy"] = "strict-origin-when-cross-origin"

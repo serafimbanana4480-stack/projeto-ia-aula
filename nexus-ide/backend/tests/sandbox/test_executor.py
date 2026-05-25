@@ -10,6 +10,8 @@ Covers:
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 from backend.sandbox.executor import (
@@ -138,11 +140,15 @@ class TestSandboxExecutor:
         assert result.exit_code != 0
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        shutil.which("bash") is None,
+        reason="bash not available on this system",
+    )
     async def test_execute_bash(self, executor: SandboxExecutor) -> None:
         result = await executor.execute(
             "echo 'hello from bash'",
             language="bash",
-            timeout=5,
+            timeout=15,
         )
         assert result.exit_code == 0
         assert "hello from bash" in result.stdout

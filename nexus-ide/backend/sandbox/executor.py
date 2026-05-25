@@ -153,12 +153,12 @@ class SandboxExecutor:
             proc = await asyncio.create_subprocess_exec(
                 "docker",
                 "info",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
             await proc.wait()
             self._docker_available = proc.returncode == 0
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
             self._docker_available = False
 
         logger.info("Docker available: %s", self._docker_available)

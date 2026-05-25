@@ -105,6 +105,68 @@ class TestWriteFile:
         with pytest.raises(UnsafePathError, match="Disallowed extension"):
             await write_file(str(test_file), "content")
 
+    @pytest.mark.asyncio
+    async def test_write_file_with_session_id_calls_propose_change(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that write_file with session_id calls propose_change for audit."""
+        from unittest.mock import MagicMock
+
+        mock_propose = MagicMock()
+        monkeypatch.setattr("backend.tools.file_manager.propose_change", mock_propose)
+
+        test_file = tmp_path / "audit_test.txt"
+        await write_file(
+            str(test_file),
+            "Audit content",
+            session_id="test-session-123",
+            project_id="test-project-456",
+        )
+
+        mock_propose.assert_called_once()
+        call_kwargs = mock_propose.call_args.kwargs
+        assert call_kwargs["session_id"] == "test-session-123"
+        assert call_kwargs["project_id"] == "test-project-456"
+        assert call_kwargs["operation"] == "create"
+        assert call_kwargs["new_content"] == "Audit content"
+
+    @pytest.mark.asyncio
+    async def test_write_file_modify_operation_when_file_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that write_file uses 'modify' operation when overwriting existing file."""
+        from unittest.mock import MagicMock
+
+        mock_propose = MagicMock()
+        monkeypatch.setattr("backend.tools.file_manager.propose_change", mock_propose)
+
+        test_file = tmp_path / "existing.txt"
+        test_file.write_text("Original content", encoding="utf-8")
+
+        await write_file(
+            str(test_file),
+            "Modified content",
+            session_id="test-session",
+        )
+
+        call_kwargs = mock_propose.call_args.kwargs
+        assert call_kwargs["operation"] == "modify"
+
+    @pytest.mark.asyncio
+    async def test_write_file_no_propose_change_without_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that write_file does NOT call propose_change when session_id is None."""
+        from unittest.mock import MagicMock
+
+        mock_propose = MagicMock()
+        monkeypatch.setattr("backend.tools.file_manager.propose_change", mock_propose)
+
+        test_file = tmp_path / "no_audit.txt"
+        await write_file(str(test_file), "No audit content")
+
+        mock_propose.assert_not_called()
+
 
 class TestPathValidation:
     """Test path validation logic."""

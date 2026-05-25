@@ -18,33 +18,33 @@ class TestAutonomyCycle:
     """Test the complete Plan→Execute→Verify→Iterate autonomy cycle."""
 
     @pytest.mark.asyncio
-    async def test_create_plan_generates_structured_steps(self, mock_ollama_client) -> None:
-        """Test that create_plan returns a valid structured plan."""
-        from backend.orchestrator.engine import create_plan
+    async def test_create_plan_generates_structured_steps(self) -> None:
+        """Test that OrchestrationEngine.create_plan returns a valid structured plan."""
+        from unittest.mock import AsyncMock, MagicMock
+        from backend.orchestrator.engine import OrchestrationEngine
+        from backend.orchestrator.events import EventBus
 
-        # Mock the LLM response to return a valid plan
-        mock_ollama_client.chat_complete.return_value = """
-        {
-            "title": "Test Plan",
-            "description": "Test description",
-            "steps": [
-                {
-                    "name": "step1",
-                    "description": "First step",
-                    "agent": "CODER"
-                }
-            ]
-        }
-        """
+        async def _mock_stream(*args, **kwargs):
+            yield """[
+                {"name": "step1", "description": "First step", "agent": "CODER"}
+            ]"""
 
-        plan = await create_plan(
-            query="Create a simple calculator",
+        mock_ollama = MagicMock()
+        mock_ollama.chat_stream = _mock_stream
+
+        engine = OrchestrationEngine(
+            ollama=mock_ollama,
+            registry={},
+            event_bus=EventBus(),
+        )
+
+        plan = await engine.create_plan(
+            objective="Create a simple calculator",
             session_id="test-session",
-            client=mock_ollama_client,
         )
 
         assert plan is not None
-        assert plan.title == "Test Plan"
+        assert plan.title == "Create a simple calculator"
         assert len(plan.steps) > 0
         assert plan.dependency_graph.validate()[0] is True
 
@@ -122,42 +122,32 @@ class TestAutonomyCycle:
         assert not graph.has_failures()
 
     @pytest.mark.asyncio
-    async def test_full_cycle_end_to_end(self, mock_ollama_client) -> None:
+    async def test_full_cycle_end_to_end(self) -> None:
         """Test a simplified full cycle from query to completion."""
-        from backend.orchestrator.engine import create_plan
+        from unittest.mock import AsyncMock, MagicMock
+        from backend.orchestrator.engine import OrchestrationEngine
+        from backend.orchestrator.events import EventBus
 
-        # Mock the LLM response
-        mock_ollama_client.chat_complete.return_value = """
-        {
-            "title": "Calculator Plan",
-            "description": "Create a calculator with tests",
-            "steps": [
-                {
-                    "name": "implement_calculator",
-                    "description": "Write the calculator function",
-                    "agent": "CODER"
-                },
-                {
-                    "name": "write_tests",
-                    "description": "Write unit tests",
-                    "agent": "CODER",
-                    "depends_on": ["implement_calculator"]
-                },
-                {
-                    "name": "verify",
-                    "description": "Verify implementation",
-                    "agent": "DEBUGGER",
-                    "depends_on": ["write_tests"]
-                }
-            ]
-        }
-        """
+        async def _mock_stream(*args, **kwargs):
+            yield """[
+                {"name": "implement_calculator", "description": "Write the calculator function", "agent": "CODER"},
+                {"name": "write_tests", "description": "Write unit tests", "agent": "CODER", "depends_on": ["implement_calculator"]},
+                {"name": "verify", "description": "Verify implementation", "agent": "DEBUGGER", "depends_on": ["write_tests"]}
+            ]"""
+
+        mock_ollama = MagicMock()
+        mock_ollama.chat_stream = _mock_stream
+
+        engine = OrchestrationEngine(
+            ollama=mock_ollama,
+            registry={},
+            event_bus=EventBus(),
+        )
 
         # Create plan
-        plan = await create_plan(
-            query="Create a calculator in Python with tests",
+        plan = await engine.create_plan(
+            objective="Create a calculator in Python with tests",
             session_id="test-session",
-            client=mock_ollama_client,
         )
 
         # Verify plan structure

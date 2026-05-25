@@ -1,12 +1,12 @@
 # NEXUS / LUSO AI IDE — Multi-Model Configuration
-# 5 tiers especializados, com fallback automático para qwen2.5-coder:7b se algum
-# modelo não estiver instalado (este é o modelo mais provável de estar presente).
+# 5 tiers especializados, com fallback automático para qwen3.5:9b se algum
+# modelo não estiver instalado (qwen3.5 é a série de modelos principal).
 
 models:
   # MICRO — perguntas triviais (1+1, classificação rápida)
   micro:
-    id: "qwen2.5:0.5b"
-    fallback_id: "qwen2.5-coder:7b"
+    id: "qwen3.5:4b"
+    fallback_id: "qwen3.5:9b"
     ollama_host: "http://localhost:11434"
     thinking_mode: false
     max_tokens: 512
@@ -15,8 +15,8 @@ models:
 
   # FAST — respostas rápidas, formatação leve
   fast:
-    id: "qwen2.5:3b"
-    fallback_id: "qwen2.5-coder:7b"
+    id: "qwen3.5:9b"
+    fallback_id: "qwen3.5:4b"
     ollama_host: "http://localhost:11434"
     thinking_mode: false
     max_tokens: 2048
@@ -25,8 +25,8 @@ models:
 
   # CODER — geração e análise de código
   coder:
-    id: "qwen2.5-coder:7b"
-    fallback_id: "qwen2.5:3b"
+    id: "qwen3-coder:7b"
+    fallback_id: "qwen3.5:9b"
     ollama_host: "http://localhost:11434"
     thinking_mode: false
     max_tokens: 8192
@@ -36,7 +36,7 @@ models:
   # REASONING — raciocínio multi-step com thinking
   reasoning:
     id: "deepseek-r1:8b"
-    fallback_id: "qwen2.5-coder:7b"
+    fallback_id: "qwen3.5:9b"
     ollama_host: "http://localhost:11434"
     thinking_mode: true
     max_tokens: 8192
@@ -45,7 +45,7 @@ models:
 
   # DEEP — análises complexas, arquitetura
   deep:
-    id: "qwen2.5:32b"
+    id: "qwen3.5:27b"
     fallback_id: "deepseek-r1:8b"
     ollama_host: "http://localhost:11434"
     thinking_mode: true
@@ -55,24 +55,24 @@ models:
 
   # Aliases retro-compatibilidade (legacy registry)
   nano:
-    id: "qwen2.5:0.5b"
-    fallback_id: "qwen2.5-coder:7b"
+    id: "qwen3.5:2b"
+    fallback_id: "qwen3.5:4b"
     ollama_host: "http://localhost:11434"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.1
     use_cases: [routing]
   small:
-    id: "qwen2.5:3b"
-    fallback_id: "qwen2.5-coder:7b"
+    id: "qwen3.5:9b"
+    fallback_id: "qwen3.5:4b"
     ollama_host: "http://localhost:11434"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.7
     use_cases: [general_tasks]
   medium:
-    id: "qwen2.5-coder:7b"
-    fallback_id: "qwen2.5:3b"
+    id: "qwen3-coder:7b"
+    fallback_id: "qwen3.5:9b"
     ollama_host: "http://localhost:11434"
     thinking_mode: false
     max_tokens: 8192
@@ -80,39 +80,39 @@ models:
     use_cases: [code_generation]
   large:
     id: "deepseek-r1:8b"
-    fallback_id: "qwen2.5-coder:7b"
+    fallback_id: "qwen3.5:27b"
     ollama_host: "http://localhost:11434"
     thinking_mode: true
     max_tokens: 8192
     temperature: 0.7
     use_cases: [reasoning]
   expert:
-    id: "qwen2.5:32b"
-    fallback_id: "deepseek-r1:8b"
+    id: "qwen3-coder:30b"
+    fallback_id: "qwen3.5:27b"
     ollama_host: "http://localhost:11434"
     thinking_mode: true
     max_tokens: 16384
     temperature: 0.3
     use_cases: [architecture]
   vision:
-    id: "qwen2.5-coder:7b"
-    fallback_id: "qwen2.5:3b"
+    id: "qwen3-vl:7b"
+    fallback_id: "qwen3.5:9b"
     ollama_host: "http://localhost:11434"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.7
     use_cases: [image_analysis]
   embed:
-    id: "qwen2.5:0.5b"
-    fallback_id: "qwen2.5-coder:7b"
+    id: "qwen3-embedding:4b"
+    fallback_id: "nomic-embed-text"
     ollama_host: "http://localhost:11434"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.0
     use_cases: [retrieval]
   dashboard:
-    id: "qwen2.5:3b"
-    fallback_id: "qwen2.5-coder:7b"
+    id: "qwen3.5:4b"
+    fallback_id: "qwen3.5:9b"
     ollama_host: "http://localhost:11435"
     thinking_mode: false
     max_tokens: 2048
