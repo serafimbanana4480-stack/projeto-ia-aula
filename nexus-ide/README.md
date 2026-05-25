@@ -3,9 +3,11 @@
 > **IDE Assistida por IA com Arquitetura Multiagente** — Desenvolvimento local, privacidade total.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-Em%20Desenvolvimento-yellow" alt="Status">
+  <img src="https://img.shields.io/badge/status-Quase%20Pronto%20para%20Produção-orange" alt="Status">
   <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python">
   <img src="https://img.shields.io/badge/node-20+-green" alt="Node">
+  <img src="https://img.shields.io/badge/tests-435%20passing-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/coverage-71%25-green" alt="Coverage">
 </p>
 
 ---
@@ -32,15 +34,15 @@ Quando escreves "Debug esta funcao", o **ROUTER** analisa o teu pedido e encamin
 
 | Agente | Modelo | Funcao |
 |--------|--------|--------|
-| **ROUTER** | NANO (2B) | Classifica intencoes e roteia pedidos |
-| **ARCHITECT** | LARGE (27B) | Design de sistemas e arquitetura |
-| **RESEARCHER** | SMALL (9B) | Pesquisa web e informacao atualizada |
-| **CODER** | EXPERT (30B MoE) | Geracao de codigo de producao |
-| **ANALYZER** | LARGE (27B) | Revisao critica e analise |
-| **DEBUGGER** | MEDIUM (7B) | Diagnostico de causa raiz |
-| **DOCUMENTER** | SMALL (9B) | Documentacao tecnica |
-| **OPTIMIZER** | SMALL (9B) | Otimizacao de performance |
-| **DASHBOARD** | MICRO (4B) | Monitorizacao continua do sistema |
+| **ROUTER** | qwen3.5:4b | Classifica intencoes e roteia pedidos |
+| **ARCHITECT** | deepseek-r1:8b | Design de sistemas e arquitetura |
+| **RESEARCHER** | qwen3.5:9b | Pesquisa web e informacao atualizada |
+| **CODER** | qwen3-coder:7b | Geracao de codigo de producao |
+| **ANALYZER** | qwen3.5:9b | Revisao critica e analise |
+| **DEBUGGER** | qwen3-coder:7b | Diagnostico de causa raiz |
+| **DOCUMENTER** | qwen3.5:9b | Documentacao tecnica |
+| **OPTIMIZER** | qwen3.5:9b | Otimizacao de performance |
+| **DASHBOARD** | qwen3.5:4b | Monitorizacao continua do sistema |
 
 Os prompts de sistema de cada agente encontram-se em `config/prompts/`.
 
@@ -48,16 +50,17 @@ Os prompts de sistema de cada agente encontram-se em `config/prompts/`.
 
 ## Stack
 
-- **Backend**: Python 3.12 + FastAPI + Uvicorn
+- **Backend**: Python 3.12 + FastAPI + Uvicorn + Pydantic v2
 - **Frontend**: Next.js 15 + React 19 + TypeScript + Tailwind CSS + shadcn/ui
 - **Editor**: Monaco Editor (motor do VS Code)
-- **IA**: Ollama com modelos Qwen locais
-- **Base de Dados**: SQLite (migracao para PostgreSQL planeada)
-- **Cache & Queue**: Redis
-- **Embeddings**: ChromaDB
-- **Observabilidade**: OpenTelemetry + Prometheus
-- **Sandbox**: Docker
-- **Testes**: pytest + vitest + Playwright
+- **IA**: Ollama com modelos Qwen3 e DeepSeek locais
+- **Base de Dados**: SQLite (com migracoes Alembic; PostgreSQL suportado)
+- **Cache & Queue**: Redis (opcional; in-memory fallback)
+- **Embeddings**: Ollama embeddings + store in-memory (ChromaDB ready)
+- **Observabilidade**: OpenTelemetry + Prometheus + metricas SSE
+- **Sandbox**: Docker containers com resource limits + subprocess fallback
+- **Testes**: pytest (backend) + vitest (frontend) + Playwright (E2E)
+- **CI/CD**: GitHub Actions (tests, lint, type-check, security scan)
 
 ---
 
@@ -137,8 +140,10 @@ make clean             # Limpar tudo
 
 ## Status
 
-**Em desenvolvimento ativo.** Fase inicial com arquitetura solida de agentes. Funcionalidades principais operacionais: chat com streaming, roteamento inteligente, persistencia, dashboard, temas dark/light, Monaco Editor, gestao de projetos.
+**Quase pronto para producao.** Backend e frontend funcionais. Testes passando (435 backend, 5 frontend). Funcionalidades core implementadas: chat com streaming, roteamento inteligente, auth JWT, web search, code execution sandbox, embeddings/RAG, file manager, observabilidade, dashboard, temas dark/light, Monaco Editor, gestao de projetos.
+
+Ver [`PRODUCTION_READINESS_REPORT.md`](./PRODUCTION_READINESS_REPORT.md) para detalhes completos.
 
 ---
 
-**Ultima atualizacao**: 2026-05-18
+**Ultima atualizacao**: 2026-05-25
