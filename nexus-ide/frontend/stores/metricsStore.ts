@@ -33,6 +33,14 @@ export interface SystemMetrics {
     total_changes: number;
     files_modified: number;
   };
+  agent_activity?: Array<{
+    agent: string;
+    status: "idle" | "active" | "error";
+    tasks_completed: number;
+    tasks_failed: number;
+    avg_latency_ms: number;
+    last_activity: string;
+  }>;
 }
 
 interface MetricsState {

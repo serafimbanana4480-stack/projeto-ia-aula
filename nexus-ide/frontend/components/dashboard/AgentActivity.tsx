@@ -1,6 +1,6 @@
 "use client";
-import { useEffect, useState, useMemo } from "react";
-import { apiUrl } from "../../lib/api";
+import { useMemo } from "react";
+import { useMetricsStore } from "../../stores/metricsStore";
 import { Bot, CheckCircle2, XCircle, Zap, Clock } from "lucide-react";
 
 interface AgentActivityData {
@@ -39,46 +39,15 @@ const AGENT_COLORS: Record<string, string> = {
 };
 
 export default function AgentActivity() {
-  const [activities, setActivities] = useState<AgentActivityData[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [backendOnline, setBackendOnline] = useState(false);
+  const metrics = useMetricsStore((s) => s.metrics);
+  const backendOnline = useMetricsStore((s) => s.backendOnline);
 
-  useEffect(() => {
-    let mounted = true;
+  const activities = useMemo<AgentActivityData[]>(() => {
+    if (!metrics || !Array.isArray(metrics.agent_activity)) return [];
+    return metrics.agent_activity as AgentActivityData[];
+  }, [metrics]);
 
-    const fetchActivities = async () => {
-      try {
-        const response = await fetch(apiUrl("/api/metrics/current"), {
-          signal: AbortSignal.timeout(5000),
-        });
-        if (!response.ok) throw new Error("Backend error");
-        const metrics = await response.json();
-        const agentMetrics = Array.isArray(metrics.agent_activity) ? metrics.agent_activity : [];
-        if (mounted) {
-          if (agentMetrics.length > 0) {
-            setActivities(agentMetrics as AgentActivityData[]);
-          } else {
-            setActivities([]);
-          }
-          setBackendOnline(true);
-        }
-      } catch {
-        if (mounted) {
-          setActivities([]);
-          setBackendOnline(false);
-        }
-      } finally {
-        if (mounted) setLoading(false);
-      }
-    };
-
-    fetchActivities();
-    const interval = setInterval(fetchActivities, 30000);
-    return () => {
-      mounted = false;
-      clearInterval(interval);
-    };
-  }, []);
+  const loading = !metrics;
 
   const activeCount = useMemo(() => activities.filter((a) => a.status === "active").length, [activities]);
   const totalTasks = useMemo(

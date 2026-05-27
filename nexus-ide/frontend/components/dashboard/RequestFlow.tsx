@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState, useMemo, useCallback } from "react";
+import { useMetricsStore } from "../../stores/metricsStore";
 import { apiUrl } from "../../lib/api";
 import { GitBranch, CheckCircle2, XCircle, Timer, Gauge } from "lucide-react";
 
@@ -19,6 +20,8 @@ export default function RequestFlow() {
   const [flowData, setFlowData] = useState<FlowData | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const metrics = useMetricsStore((s) => s.metrics);
+
   const fetchFlowData = useCallback(async () => {
     try {
       setLoading(true);
@@ -28,17 +31,34 @@ export default function RequestFlow() {
         setFlowData(data);
       }
     } catch {
-      /* Backend unavailable */
+      /* Backend unavailable — will use metrics store data on next render */
     } finally {
       setLoading(false);
     }
   }, []);
 
+  // Sync with metrics store when metrics change
+  useEffect(() => {
+    if (metrics && !flowData) {
+      setFlowData({
+        summary: {
+          total_requests: metrics.requests_total,
+          successful_requests: metrics.requests_successful,
+          failed_requests: metrics.requests_failed,
+          avg_latency_ms: metrics.avg_latency_ms,
+          throughput_tps: metrics.tokens_per_second,
+        },
+      });
+    }
+  }, [metrics, flowData]);
+
+  // Fetch from API every 60s
   useEffect(() => {
     fetchFlowData();
-    const interval = setInterval(fetchFlowData, 30000);
+    const interval = setInterval(fetchFlowData, 60000);
     return () => clearInterval(interval);
-  }, [fetchFlowData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const formatLatency = useCallback((ms: number) => {
     if (ms < 1) return `${(ms * 1000).toFixed(0)}μs`;

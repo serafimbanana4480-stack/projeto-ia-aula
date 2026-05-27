@@ -2,6 +2,7 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { apiUrl } from "../../lib/api";
+import { useMetricsStore } from "../../stores/metricsStore";
 import { Bell, AlertTriangle, AlertCircle, Info, XCircle, X, Shield } from "lucide-react";
 
 export interface AlertData {
@@ -23,69 +24,27 @@ export default function AlertFeed() {
   const [alerts, setAlerts] = useState<AlertData[]>([]);
   const [filter, setFilter] = useState<"all" | "warning" | "error" | "critical">("all");
   const [connected, setConnected] = useState(false);
-  const [backendOnline, setBackendOnline] = useState(false);
+
+  const backendOnline = useMetricsStore((s) => s.backendOnline);
+
+  const fetchAlerts = useCallback(async () => {
+    try {
+      const response = await fetch(apiUrl("/api/alerts/current"), { signal: AbortSignal.timeout(5000) });
+      if (!response.ok) throw new Error("Backend error");
+      const data = (await response.json()) as AlertData[];
+      setAlerts(Array.isArray(data) ? data : []);
+      setConnected(true);
+    } catch {
+      setAlerts([]);
+      setConnected(false);
+    }
+  }, []);
 
   useEffect(() => {
-    let mounted = true;
-    let eventSource: EventSource | null = null;
-
-    const fetchInitial = async () => {
-      try {
-        const response = await fetch(apiUrl("/api/alerts/current"), { signal: AbortSignal.timeout(5000) });
-        if (!response.ok) throw new Error("Backend error");
-        const data = (await response.json()) as AlertData[];
-        if (mounted) {
-          setAlerts(Array.isArray(data) ? data : []);
-          setBackendOnline(true);
-        }
-      } catch {
-        if (mounted) {
-          setAlerts([]);
-          setBackendOnline(false);
-        }
-      }
-    };
-
-    fetchInitial();
-
-    // SSE stream
-    try {
-      eventSource = new EventSource(apiUrl("/api/alerts/stream"));
-
-      eventSource.onopen = () => {
-        if (mounted) setConnected(true);
-      };
-
-      eventSource.onmessage = (e) => {
-        try {
-          const alert = JSON.parse(e.data) as AlertData;
-          if (mounted) {
-            setAlerts((prev) => {
-              if (prev.some((a) => a.id === alert.id)) return prev;
-              return [alert, ...prev].slice(0, 50);
-            });
-          }
-        } catch {
-          /* ignore */
-        }
-      };
-
-      eventSource.onerror = () => {
-        if (mounted) setConnected(false);
-        if (eventSource) {
-          eventSource.close();
-          eventSource = null;
-        }
-      };
-    } catch {
-      /* SSE not available */
-    }
-
-    return () => {
-      mounted = false;
-      if (eventSource) eventSource.close();
-    };
-  }, []);
+    fetchAlerts();
+    const interval = setInterval(fetchAlerts, 30000);
+    return () => clearInterval(interval);
+  }, [fetchAlerts]);
 
   const dismissAlert = useCallback((id: string) => {
     setAlerts((prev) => prev.filter((a) => a.id !== id));

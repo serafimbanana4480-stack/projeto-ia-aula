@@ -1,13 +1,8 @@
 "use client";
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
-import { apiUrl } from "../../lib/api";
+import { useMetricsStore } from "../../stores/metricsStore";
 import { TrendingUp } from "lucide-react";
-
-interface TimelineDataPoint {
-  timestamp: number;
-  value: number;
-}
 
 interface TimelineStats {
   total: number;
@@ -25,53 +20,40 @@ function computeStats(values: number[]): TimelineStats {
 }
 
 export default function TokenTimeline() {
-  const [data, setData] = useState<{ time: string; value: number }[]>([]);
-  const [loading, setLoading] = useState(true);
   const [timeRange, setTimeRange] = useState(3600);
-  const [hasRealData, setHasRealData] = useState(false);
-  const [stats, setStats] = useState<TimelineStats>({ total: 0, peak: 0, avg: 0 });
 
-  const fetchTimeline = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await fetch(apiUrl(`/api/metrics/history?seconds=${timeRange}&metric=tokens_per_second`), {
-        signal: AbortSignal.timeout(5000),
-      });
-      const timelineData = (await response.json()) as TimelineDataPoint[];
+  const history = useMetricsStore((s) => s.history);
 
-      if (Array.isArray(timelineData) && timelineData.length > 0) {
-        const values = timelineData.map((p) => p.value);
-        const realData = values.some((v) => v > 0);
-
-        const formattedData = timelineData.map((point) => ({
-          time: new Date(point.timestamp * 1000).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
-          value: point.value,
-        }));
-
-        setData(formattedData);
-        setHasRealData(realData);
-        setStats(computeStats(values));
-      } else {
-        setData([]);
-        setHasRealData(false);
-        setStats({ total: 0, peak: 0, avg: 0 });
-      }
-    } catch {
-      setData([]);
-      setHasRealData(false);
-    } finally {
-      setLoading(false);
+  const { data, hasRealData, stats } = useMemo(() => {
+    if (history.length === 0) {
+      return { data: [] as { time: string; value: number }[], hasRealData: false, stats: { total: 0, peak: 0, avg: 0 } };
     }
-  }, [timeRange]);
 
-  useEffect(() => {
-    fetchTimeline();
-    const interval = setInterval(fetchTimeline, 30000);
-    return () => clearInterval(interval);
-  }, [fetchTimeline]);
+    const now = Date.now() / 1000;
+    const cutoff = now - timeRange;
+    const filtered = history.filter((h) => h.timestamp >= cutoff);
+
+    if (filtered.length === 0) {
+      return { data: [] as { time: string; value: number }[], hasRealData: false, stats: { total: 0, peak: 0, avg: 0 } };
+    }
+
+    const values = filtered.map((h) => h.tokens_per_second);
+    const realData = values.some((v) => v > 0);
+
+    const formattedData = filtered.map((point) => ({
+      time: new Date(point.timestamp * 1000).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+      value: point.tokens_per_second,
+    }));
+
+    return {
+      data: formattedData,
+      hasRealData: realData,
+      stats: computeStats(values),
+    };
+  }, [history, timeRange]);
 
   const formatValue = useCallback((value: number) => {
     if (value < 1) return `${(value * 1000).toFixed(1)} m`;
@@ -87,6 +69,8 @@ export default function TokenTimeline() {
     ],
     []
   );
+
+  const loading = false;
 
   return (
     <div className="rounded border border-nexus-border bg-nexus-panel p-3">

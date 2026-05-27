@@ -39,7 +39,7 @@ export default function ModelComparison() {
     };
 
     fetchModels();
-    const interval = setInterval(fetchModels, 60000);
+    const interval = setInterval(fetchModels, 120000);
     return () => {
       mounted = false;
       clearInterval(interval);

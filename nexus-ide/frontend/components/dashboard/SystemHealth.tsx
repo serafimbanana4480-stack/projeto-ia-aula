@@ -1,7 +1,6 @@
 "use client";
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { useMetricsStore } from "../../stores/metricsStore";
-import { apiUrl } from "../../lib/api";
 import { Activity, Server, Cpu, Database, Wifi } from "lucide-react";
 
 interface HealthCheck {
@@ -19,31 +18,23 @@ export default function SystemHealth() {
   const [lastUpdate, setLastUpdate] = useState<string>("—");
 
   const metrics = useMetricsStore((s) => s.metrics);
+  const backendOnline = useMetricsStore((s) => s.backendOnline);
 
   const performHealthChecks = useCallback(async () => {
     setLoading(true);
-
     const startAll = Date.now();
 
-    // All checks in parallel — no blocking
-    const [ollamaRes, backendRes, metricsRes, dbRes, sseRes] = await Promise.allSettled([
+    // Only check external services — metrics/stream health comes from the store
+    const [ollamaRes, backendRes, dbRes] = await Promise.allSettled([
       fetch("http://localhost:11434/api/tags", { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
         ok: r.ok,
         latency: Date.now() - startAll,
       })),
-      fetch(apiUrl("/health"), { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
+      fetch("http://localhost:8000/health", { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
         ok: r.ok,
         latency: Date.now() - startAll,
       })),
-      fetch(apiUrl("/api/metrics/current"), { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
-        ok: r.ok,
-        latency: Date.now() - startAll,
-      })),
-      fetch(apiUrl("/api/projects"), { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
-        ok: r.ok,
-        latency: Date.now() - startAll,
-      })),
-      fetch(apiUrl("/api/dashboard/stream"), { signal: AbortSignal.timeout(2000) }).then(async (r) => ({
+      fetch("http://localhost:8000/api/projects", { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
         ok: r.ok,
         latency: Date.now() - startAll,
       })),
@@ -69,9 +60,8 @@ export default function SystemHealth() {
       },
       {
         name: "Metrics",
-        status: metricsRes.status === "fulfilled" && metricsRes.value.ok ? "healthy" : "unhealthy",
-        latency_ms: metricsRes.status === "fulfilled" ? metricsRes.value.latency : undefined,
-        message: metricsRes.status === "rejected" ? "Connection refused" : undefined,
+        status: backendOnline ? "healthy" : "unhealthy",
+        message: backendOnline ? undefined : "No metrics received",
         last_check: now,
         icon: <Activity className="h-3.5 w-3.5" />,
       },
@@ -85,9 +75,8 @@ export default function SystemHealth() {
       },
       {
         name: "Event Stream",
-        status: sseRes.status === "fulfilled" && sseRes.value.ok ? "healthy" : "unhealthy",
-        latency_ms: sseRes.status === "fulfilled" ? sseRes.value.latency : undefined,
-        message: sseRes.status === "rejected" ? "Connection refused" : undefined,
+        status: backendOnline ? "healthy" : "unhealthy",
+        message: backendOnline ? undefined : "SSE disconnected",
         last_check: now,
         icon: <Wifi className="h-3.5 w-3.5" />,
       },
@@ -96,11 +85,11 @@ export default function SystemHealth() {
     setChecks(healthChecks);
     setLastUpdate(new Date().toLocaleTimeString());
     setLoading(false);
-  }, []);
+  }, [backendOnline]);
 
   useEffect(() => {
     performHealthChecks();
-    const interval = setInterval(performHealthChecks, 15000);
+    const interval = setInterval(performHealthChecks, 30000);
     return () => clearInterval(interval);
   }, [performHealthChecks]);
 
