@@ -14,8 +14,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className="h-screen overflow-hidden">
+    <html lang="en" suppressHydrationWarning>
+      <body className="h-screen overflow-hidden bg-nexus-bg text-nexus-text">
         <ErrorBoundary>
           <ThemeProvider>{children}</ThemeProvider>
         </ErrorBoundary>

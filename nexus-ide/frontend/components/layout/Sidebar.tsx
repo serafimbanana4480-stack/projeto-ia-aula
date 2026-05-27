@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter, usePathname } from "next/navigation";
-import { motion } from "framer-motion";
+import { useState, useEffect, useMemo, useCallback } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
   MessageSquare,
@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { useProjectStore } from "../../stores/projectStore";
 import { getProjects } from "../../lib/api";
-import { apiUrl } from "../../lib/api";
+import { useMetricsStore } from "../../stores/metricsStore";
 
 interface NavItem {
   id: string;
@@ -30,66 +30,16 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
-  {
-    id: "dashboard",
-    label: "Dashboard",
-    icon: <LayoutDashboard className="h-4 w-4" />,
-    path: "/dashboard",
-  },
-  {
-    id: "chat",
-    label: "Chat",
-    icon: <MessageSquare className="h-4 w-4" />,
-    path: "/",
-  },
-  {
-    id: "projects",
-    label: "Projetos",
-    icon: <FolderKanban className="h-4 w-4" />,
-    path: "/projects",
-  },
-  {
-    id: "tools",
-    label: "Ferramentas",
-    icon: <Wrench className="h-4 w-4" />,
-    path: "/tools",
-  },
-  {
-    id: "models",
-    label: "Modelos IA",
-    icon: <Cpu className="h-4 w-4" />,
-    path: "/models",
-  },
-  {
-    id: "database",
-    label: "Base de Dados",
-    icon: <Database className="h-4 w-4" />,
-    path: "/database",
-  },
-  {
-    id: "scraping",
-    label: "Scraping",
-    icon: <Globe className="h-4 w-4" />,
-    path: "/scraping",
-  },
-  {
-    id: "analysis",
-    label: "Análises",
-    icon: <BarChart3 className="h-4 w-4" />,
-    path: "/analysis",
-  },
-  {
-    id: "documents",
-    label: "Documentos",
-    icon: <FileText className="h-4 w-4" />,
-    path: "/documents",
-  },
-  {
-    id: "settings",
-    label: "Definições",
-    icon: <Settings className="h-4 w-4" />,
-    path: "/settings",
-  },
+  { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard className="h-4 w-4" />, path: "/dashboard" },
+  { id: "chat", label: "Chat", icon: <MessageSquare className="h-4 w-4" />, path: "/" },
+  { id: "projects", label: "Projetos", icon: <FolderKanban className="h-4 w-4" />, path: "/projects" },
+  { id: "tools", label: "Ferramentas", icon: <Wrench className="h-4 w-4" />, path: "/tools" },
+  { id: "models", label: "Modelos IA", icon: <Cpu className="h-4 w-4" />, path: "/models" },
+  { id: "database", label: "Base de Dados", icon: <Database className="h-4 w-4" />, path: "/database" },
+  { id: "scraping", label: "Scraping", icon: <Globe className="h-4 w-4" />, path: "/scraping" },
+  { id: "analysis", label: "Análises", icon: <BarChart3 className="h-4 w-4" />, path: "/analysis" },
+  { id: "documents", label: "Documentos", icon: <FileText className="h-4 w-4" />, path: "/documents" },
+  { id: "settings", label: "Definições", icon: <Settings className="h-4 w-4" />, path: "/settings" },
 ];
 
 function formatBytes(bytes: number): string {
@@ -110,132 +60,91 @@ interface ProjectData {
   updated_at: string;
 }
 
-interface DiskMetrics {
-  disk_percent: number;
-  disk_used_bytes: number;
-  disk_total_bytes: number;
-}
+const projectColors = ["#7c6afb", "#60a5fa", "#fbbf24", "#5eead4", "#f87171"];
 
 export default function Sidebar() {
-  const router = useRouter();
   const pathname = usePathname();
-  const [activeItem, setActiveItem] = useState("chat");
   const { currentProject, setCurrentProject } = useProjectStore();
   const [recentProjects, setRecentProjects] = useState<ProjectData[]>([]);
-  const [diskMetrics, setDiskMetrics] = useState<DiskMetrics | null>(null);
+  const diskMetrics = useMetricsStore((s) =>
+    s.metrics
+      ? {
+          disk_percent: s.metrics.disk_percent,
+          disk_used_bytes: s.metrics.disk_used_bytes,
+          disk_total_bytes: s.metrics.disk_total_bytes,
+        }
+      : null
+  );
 
+  // Fetch projects once on mount
   useEffect(() => {
-    const active = navItems.find((item) => item.path === pathname);
-    if (active) setActiveItem(active.id);
-  }, [pathname]);
-
-  // Fetch real projects from backend
-  useEffect(() => {
-    const fetchProjects = async () => {
-      try {
-        const data = await getProjects();
-        if (Array.isArray(data) && data.length > 0) {
+    let mounted = true;
+    getProjects()
+      .then((data) => {
+        if (mounted && Array.isArray(data) && data.length > 0) {
           setRecentProjects(data.slice(0, 5));
         }
-      } catch (error) {
-        console.error("Failed to fetch projects:", error);
-      }
+      })
+      .catch(() => {
+        /* ignore */
+      });
+    return () => {
+      mounted = false;
     };
-
-    fetchProjects();
-    const interval = setInterval(fetchProjects, 30000);
-    return () => clearInterval(interval);
   }, []);
 
-  // Fetch real disk metrics from backend
-  useEffect(() => {
-    const fetchDiskMetrics = async () => {
-      try {
-        const response = await fetch(apiUrl("/api/metrics/current"));
-        if (response.ok) {
-          const data = await response.json();
-          setDiskMetrics({
-            disk_percent: data.disk_percent ?? 0,
-            disk_used_bytes: data.disk_used_bytes ?? 0,
-            disk_total_bytes: data.disk_total_bytes ?? 0,
-          });
-        }
-      } catch (error) {
-        // Disk metrics not available
-      }
-    };
-
-    fetchDiskMetrics();
-    const interval = setInterval(fetchDiskMetrics, 10000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const handleNav = (item: NavItem) => {
-    setActiveItem(item.id);
-    router.push(item.path as any);
-  };
-
-  const formatProjectDate = (dateStr: string) => {
+  const formatProjectDate = useCallback((dateStr: string) => {
     try {
-      const date = new Date(dateStr);
-      const now = new Date();
-      const diffMs = now.getTime() - date.getTime();
+      const diffMs = Date.now() - new Date(dateStr).getTime();
       const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
       const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
       if (diffHours < 1) return "agora";
       if (diffHours < 24) return `há ${diffHours}h`;
       if (diffDays < 7) return `há ${diffDays}d`;
-      return date.toLocaleDateString();
+      return new Date(dateStr).toLocaleDateString();
     } catch {
       return "";
     }
-  };
+  }, []);
 
-  // Generate colors for projects based on name
-  const getProjectColor = (_name: string, index: number) => {
-    const colors = ["#7c6afb", "#60a5fa", "#fbbf24", "#5eead4", "#f87171"];
-    return colors[index % colors.length];
-  };
+  const activeItemId = useMemo(() => {
+    const active = navItems.find((item) => item.path === pathname);
+    return active?.id ?? "chat";
+  }, [pathname]);
 
   return (
-    <motion.aside
-      initial={{ x: -16, opacity: 0 }}
-      animate={{ x: 0, opacity: 1 }}
-      className="flex w-[260px] shrink-0 flex-col border-r border-nexus-border bg-nexus-panel"
-    >
+    <aside className="flex w-[260px] shrink-0 flex-col border-r border-nexus-border bg-nexus-panel">
       {/* New Project Button */}
       <div className="p-4">
-        <button
-          onClick={() => router.push("/projects")}
+        <Link
+          href="/projects"
           className="flex w-full items-center justify-center gap-2 rounded-xl bg-nexus-accent px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-nexus-accent/20 hover:bg-nexus-accent/90 transition-colors"
         >
           <Plus className="h-4 w-4" />
           Novo Projeto
-        </button>
+        </Link>
       </div>
 
       {/* Navigation */}
       <nav className="flex-1 space-y-0.5 px-3">
-        {navItems.map((item, index) => (
-          <motion.button
-            key={item.id}
-            initial={{ opacity: 0, x: -8 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ delay: index * 0.03 }}
-            onClick={() => handleNav(item)}
-            className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-all ${
-              activeItem === item.id
-                ? "bg-nexus-accent/15 text-nexus-accent font-medium"
-                : "text-nexus-muted hover:bg-nexus-card hover:text-nexus-text"
-            }`}
-          >
-            <span className={activeItem === item.id ? "text-nexus-accent" : ""}>
-              {item.icon}
-            </span>
-            <span>{item.label}</span>
-          </motion.button>
-        ))}
+        {navItems.map((item) => {
+          const isActive = activeItemId === item.id;
+          return (
+            <Link
+              key={item.id}
+              href={item.path as "/dashboard" | "/" | "/projects" | "/tools" | "/models" | "/database" | "/scraping" | "/analysis" | "/documents" | "/settings"}
+              prefetch={true}
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
+                isActive
+                  ? "bg-nexus-accent/15 text-nexus-accent font-medium"
+                  : "text-nexus-muted hover:bg-nexus-card hover:text-nexus-text"
+              }`}
+            >
+              <span className={isActive ? "text-nexus-accent" : ""}>{item.icon}</span>
+              <span>{item.label}</span>
+            </Link>
+          );
+        })}
       </nav>
 
       {/* Recent Projects */}
@@ -262,14 +171,12 @@ export default function Sidebar() {
                   })
                 }
                 className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors ${
-                  currentProject?.id === p.id
-                    ? "bg-nexus-accent/10"
-                    : "hover:bg-nexus-card"
+                  currentProject?.id === p.id ? "bg-nexus-accent/10" : "hover:bg-nexus-card"
                 }`}
               >
                 <span
-                  className="h-2 w-2 rounded-full"
-                  style={{ background: getProjectColor(p.name, index) }}
+                  className="h-2 w-2 rounded-full shrink-0"
+                  style={{ background: projectColors[index % projectColors.length] }}
                 />
                 <div className="flex-1 overflow-hidden">
                   <div className="truncate text-xs font-medium">{p.name}</div>
@@ -280,18 +187,16 @@ export default function Sidebar() {
               </button>
             ))
           ) : (
-            <div className="px-3 py-2 text-xs text-nexus-muted">
-              Nenhum projeto ainda
-            </div>
+            <div className="px-3 py-2 text-xs text-nexus-muted">Nenhum projeto ainda</div>
           )}
         </div>
-        <button
-          onClick={() => router.push("/projects")}
+        <Link
+          href="/projects"
           className="mt-2 flex items-center gap-1 text-[11px] text-nexus-accent hover:underline"
         >
           Ver todos os projetos
           <ChevronRight className="h-3 w-3" />
-        </button>
+        </Link>
       </div>
 
       {/* Storage */}
@@ -302,19 +207,13 @@ export default function Sidebar() {
             Armazenamento
           </div>
           <span className="font-medium text-nexus-text">
-            {diskMetrics
-              ? `${diskMetrics.disk_percent.toFixed(0)}% usado`
-              : "—"}
+            {diskMetrics ? `${diskMetrics.disk_percent.toFixed(0)}% usado` : "—"}
           </span>
         </div>
         <div className="h-1.5 overflow-hidden rounded-full bg-nexus-border">
-          <motion.div
-            initial={{ width: 0 }}
-            animate={{
-              width: diskMetrics ? `${diskMetrics.disk_percent}%` : "0%",
-            }}
-            transition={{ duration: 1, delay: 0.4 }}
-            className="h-full rounded-full bg-nexus-accent"
+          <div
+            className="h-full rounded-full bg-nexus-accent transition-all duration-700"
+            style={{ width: diskMetrics ? `${diskMetrics.disk_percent}%` : "0%" }}
           />
         </div>
         <div className="mt-1 text-[10px] text-nexus-muted">
@@ -323,6 +222,6 @@ export default function Sidebar() {
             : "A carregar..."}
         </div>
       </div>
-    </motion.aside>
+    </aside>
   );
 }

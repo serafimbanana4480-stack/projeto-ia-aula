@@ -1,29 +1,11 @@
 "use client";
-import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { apiUrl } from "../../lib/api";
-import { MOCK_FLOW } from "../../lib/mock-data";
-
-interface FlowNode {
-  id: string;
-  label: string;
-  type: "source" | "process" | "destination";
-  value: number;
-  color: string;
-}
-
-interface FlowLink {
-  source: string;
-  target: string;
-  value: number;
-  latency_ms: number;
-}
+import { GitBranch, CheckCircle2, XCircle, Timer, Gauge } from "lucide-react";
 
 interface FlowData {
   available?: boolean;
   reason?: string;
-  nodes: FlowNode[];
-  links: FlowLink[];
   summary: {
     total_requests: number;
     successful_requests: number;
@@ -34,231 +16,142 @@ interface FlowData {
 }
 
 export default function RequestFlow() {
-  const [flowData, setFlowData] = useState<FlowData>(MOCK_FLOW as FlowData);
+  const [flowData, setFlowData] = useState<FlowData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [isMock, setIsMock] = useState(true);
+
+  const fetchFlowData = useCallback(async () => {
+    try {
+      setLoading(true);
+      const response = await fetch(apiUrl("/api/metrics/flow"), { signal: AbortSignal.timeout(5000) });
+      const data = (await response.json()) as FlowData;
+      if (data?.summary) {
+        setFlowData(data);
+      }
+    } catch {
+      /* Backend unavailable */
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchFlowData = async () => {
-      try {
-        setLoading(true);
-        const response = await fetch(apiUrl("/api/metrics/flow"));
-        const data = await response.json();
-        if (data && data.nodes && data.nodes.length > 0) {
-          setFlowData(data);
-          setIsMock(false);
-        }
-        // If empty, keep mock data
-      } catch {
-        // Backend unavailable — keep mock data
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchFlowData();
     const interval = setInterval(fetchFlowData, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchFlowData]);
 
-  const getNodePosition = (nodeId: string) => {
-    const positions: Record<string, { x: number; y: number }> = {
-      user: { x: 50, y: 100 },
-      router: { x: 200, y: 100 },
-      agent: { x: 350, y: 100 },
-      llm: { x: 500, y: 100 },
-    };
-    return positions[nodeId] || { x: 0, y: 0 };
-  };
-
-  const formatLatency = (ms: number) => {
-    if (ms < 1) return `${(ms * 1000).toFixed(0)}us`;
+  const formatLatency = useCallback((ms: number) => {
+    if (ms < 1) return `${(ms * 1000).toFixed(0)}μs`;
     if (ms < 1000) return `${ms.toFixed(0)}ms`;
     return `${(ms / 1000).toFixed(1)}s`;
-  };
+  }, []);
+
+  const successRate = useMemo(() => {
+    if (!flowData?.summary || flowData.summary.total_requests === 0) return "0.0";
+    return ((flowData.summary.successful_requests / flowData.summary.total_requests) * 100).toFixed(1);
+  }, [flowData]);
+
+  const summary = flowData?.summary;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.3 }}
-      className="rounded border border-nexus-border bg-nexus-panel p-3"
-    >
+    <div className="rounded border border-nexus-border bg-nexus-panel p-3">
       <div className="mb-3 flex items-center justify-between">
-        <div className="text-sm font-semibold">Fluxo de Requisições</div>
-        {isMock && !loading && <span className="text-xs text-gray-600">demo</span>}
+        <div className="flex items-center gap-2">
+          <GitBranch className="h-4 w-4 text-nexus-accent" />
+          <div className="text-sm font-semibold">Fluxo de Requisições</div>
+        </div>
+        <div className="flex items-center gap-3 text-[10px] text-gray-500">
+          <span className="flex items-center gap-1">
+            <CheckCircle2 className="h-3 w-3 text-green-400" />
+            {successRate}% success
+          </span>
+        </div>
       </div>
 
       {loading ? (
         <div className="flex h-40 items-center justify-center text-xs text-gray-500">
-          Carregando...
-        </div>
-      ) : flowData?.available === false ? (
-        <div className="flex h-32 flex-col items-center justify-center gap-2 text-center text-xs text-gray-500">
-          <div className="font-medium text-gray-400">Rastreamento indisponível</div>
-          <div className="max-w-md text-gray-600">
-            {flowData.reason ?? "Backend ainda não instrumentou rastreamento distribuído."}
+          <div className="flex items-center gap-2">
+            <div className="h-3 w-3 animate-spin rounded-full border-2 border-nexus-accent border-t-transparent" />
+            Carregando...
           </div>
-          {flowData.summary && (
-            <div className="mt-2 grid grid-cols-4 gap-3 rounded-lg border border-nexus-border/50 bg-nexus-border/20 px-4 py-2 text-gray-400">
-              <div className="text-center">
-                <div className="text-gray-600">Total</div>
-                <div className="font-semibold">{flowData.summary.total_requests}</div>
-              </div>
-              <div className="text-center">
-                <div className="text-gray-600">OK</div>
-                <div className="font-semibold text-green-400">{flowData.summary.successful_requests}</div>
-              </div>
-              <div className="text-center">
-                <div className="text-gray-600">Fail</div>
-                <div className="font-semibold text-red-400">{flowData.summary.failed_requests}</div>
-              </div>
-              <div className="text-center">
-                <div className="text-gray-600">Latência</div>
-                <div className="font-semibold">{formatLatency(flowData.summary.avg_latency_ms)}</div>
-              </div>
+        </div>
+      ) : !summary ? (
+        <div className="flex h-32 flex-col items-center justify-center gap-2 text-center text-xs text-gray-500">
+          <GitBranch className="h-8 w-8 text-gray-600" />
+          <div className="font-medium text-gray-400">Dados indisponíveis</div>
+          <div className="text-gray-600">O backend não está a fornecer métricas de fluxo</div>
+        </div>
+      ) : (
+        <div>
+          {/* Flow diagram - simplified static version */}
+          <div className="flex items-center justify-center gap-4 py-6">
+            {[
+              { label: "User", color: "#60a5fa", icon: "👤" },
+              { label: "→", color: "transparent", icon: "" },
+              { label: "Router", color: "#7c6afb", icon: "🧭" },
+              { label: "→", color: "transparent", icon: "" },
+              { label: "Agent", color: "#5eead4", icon: "🤖" },
+              { label: "→", color: "transparent", icon: "" },
+              { label: "Ollama", color: "#fbbf24", icon: "🧠" },
+            ].map((node, i) =>
+              node.label === "→" ? (
+                <div key={i} className="text-gray-600 text-lg">→</div>
+              ) : (
+                <div key={i} className="flex flex-col items-center gap-1">
+                  <div
+                    className="flex h-12 w-12 items-center justify-center rounded-full text-lg"
+                    style={{ backgroundColor: `${node.color}20`, border: `2px solid ${node.color}40` }}
+                  >
+                    {node.icon}
+                  </div>
+                  <span className="text-[10px] text-gray-400">{node.label}</span>
+                </div>
+              )
+            )}
+          </div>
+
+          {/* Status message */}
+          {flowData?.available === false && (
+            <div className="text-center text-xs text-gray-500 mb-3">
+              {flowData.reason || "Rastreamento distribuído não instrumentado"}
             </div>
           )}
-        </div>
-      ) : flowData ? (
-        <div>
-          <svg className="h-48 w-full" viewBox="0 0 600 200">
-            <defs>
-              <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280" />
-              </marker>
-            </defs>
-
-            {/* Links */}
-            {flowData.links.map((link, index) => {
-              const sourcePos = getNodePosition(link.source);
-              const targetPos = getNodePosition(link.target);
-              const midX = (sourcePos.x + targetPos.x) / 2;
-              const midY = (sourcePos.y + targetPos.y) / 2;
-
-              return (
-                <g key={`${link.source}-${link.target}`}>
-                  <motion.path
-                    initial={{ pathLength: 0 }}
-                    animate={{ pathLength: 1 }}
-                    transition={{ duration: 1, delay: index * 0.2 }}
-                    d={`M ${sourcePos.x} ${sourcePos.y} L ${targetPos.x} ${targetPos.y}`}
-                    stroke="#6b7280"
-                    strokeWidth={2}
-                    fill="none"
-                    markerEnd="url(#arrowhead)"
-                    opacity={0.5}
-                  />
-                  <motion.text
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ delay: index * 0.2 + 0.5 }}
-                    x={midX}
-                    y={midY - 10}
-                    textAnchor="middle"
-                    fontSize={10}
-                    fill="#9ca3af"
-                  >
-                    {link.value > 0 ? link.value : "0"}
-                  </motion.text>
-                  <motion.text
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ delay: index * 0.2 + 0.7 }}
-                    x={midX}
-                    y={midY + 15}
-                    textAnchor="middle"
-                    fontSize={9}
-                    fill="#6b7280"
-                  >
-                    {formatLatency(link.latency_ms)}
-                  </motion.text>
-                </g>
-              );
-            })}
-
-            {/* Nodes */}
-            {flowData.nodes.map((node, index) => {
-              const pos = getNodePosition(node.id);
-              return (
-                <g key={node.id}>
-                  <motion.circle
-                    initial={{ scale: 0 }}
-                    animate={{ scale: 1 }}
-                    transition={{ delay: index * 0.3 + 0.5 }}
-                    cx={pos.x}
-                    cy={pos.y}
-                    r={30}
-                    fill={node.color}
-                    opacity={0.2}
-                  />
-                  <motion.circle
-                    initial={{ scale: 0 }}
-                    animate={{ scale: 1 }}
-                    transition={{ delay: index * 0.3 + 0.6 }}
-                    cx={pos.x}
-                    cy={pos.y}
-                    r={25}
-                    fill={node.color}
-                    opacity={0.4}
-                  />
-                  <motion.text
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ delay: index * 0.3 + 0.8 }}
-                    x={pos.x}
-                    y={pos.y + 4}
-                    textAnchor="middle"
-                    fontSize={11}
-                    fontWeight="bold"
-                    fill="#e6edf3"
-                  >
-                    {node.label}
-                  </motion.text>
-                  <motion.text
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ delay: index * 0.3 + 1.0 }}
-                    x={pos.x}
-                    y={pos.y + 20}
-                    textAnchor="middle"
-                    fontSize={9}
-                    fill="#9ca3af"
-                  >
-                    {node.value} req
-                  </motion.text>
-                </g>
-              );
-            })}
-          </svg>
 
           {/* Summary bar */}
-          {flowData.summary && (
-            <div className="mt-2 grid grid-cols-5 gap-2 rounded border border-nexus-border/50 bg-nexus-border/20 px-3 py-2 text-xs text-gray-400">
-              <div className="text-center">
-                <div className="text-gray-600">Total</div>
-                <div className="font-semibold">{flowData.summary.total_requests}</div>
+          <div className="mt-2 grid grid-cols-5 gap-2 rounded border border-nexus-border/50 bg-nexus-bg/50 px-3 py-2 text-xs text-gray-400">
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-1 text-[10px] text-gray-600">
+                <GitBranch className="h-3 w-3" /> Total
               </div>
-              <div className="text-center">
-                <div className="text-gray-600">OK</div>
-                <div className="font-semibold text-green-400">{flowData.summary.successful_requests}</div>
-              </div>
-              <div className="text-center">
-                <div className="text-gray-600">Fail</div>
-                <div className="font-semibold text-red-400">{flowData.summary.failed_requests}</div>
-              </div>
-              <div className="text-center">
-                <div className="text-gray-600">Avg Lat</div>
-                <div className="font-semibold">{formatLatency(flowData.summary.avg_latency_ms)}</div>
-              </div>
-              <div className="text-center">
-                <div className="text-gray-600">TPS</div>
-                <div className="font-semibold">{flowData.summary.throughput_tps.toFixed(1)}</div>
-              </div>
+              <div className="font-semibold text-white">{summary.total_requests}</div>
             </div>
-          )}
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-1 text-[10px] text-gray-600">
+                <CheckCircle2 className="h-3 w-3" /> OK
+              </div>
+              <div className="font-semibold text-green-400">{summary.successful_requests}</div>
+            </div>
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-1 text-[10px] text-gray-600">
+                <XCircle className="h-3 w-3" /> Fail
+              </div>
+              <div className="font-semibold text-red-400">{summary.failed_requests}</div>
+            </div>
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-1 text-[10px] text-gray-600">
+                <Timer className="h-3 w-3" /> Avg Lat
+              </div>
+              <div className="font-semibold text-white">{formatLatency(summary.avg_latency_ms)}</div>
+            </div>
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-1 text-[10px] text-gray-600">
+                <Gauge className="h-3 w-3" /> TPS
+              </div>
+              <div className="font-semibold text-white">{summary.throughput_tps.toFixed(1)}</div>
+            </div>
+          </div>
         </div>
-      ) : null}
-    </motion.div>
+      )}
+    </div>
   );
 }

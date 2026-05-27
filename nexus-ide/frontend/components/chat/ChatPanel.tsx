@@ -132,6 +132,7 @@ export default function ChatPanel({
 
   useEffect(() => {
     loadHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const { toggleTheme } = useThemeStore();

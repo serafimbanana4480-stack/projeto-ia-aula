@@ -1,7 +1,8 @@
 "use client";
-import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
+import { useEffect, useState, useMemo, useCallback } from "react";
+import { useMetricsStore } from "../../stores/metricsStore";
 import { apiUrl } from "../../lib/api";
+import { Activity, Server, Cpu, Database, Wifi } from "lucide-react";
 
 interface HealthCheck {
   name: string;
@@ -9,163 +10,229 @@ interface HealthCheck {
   latency_ms?: number;
   message?: string;
   last_check: string;
+  icon: React.ReactNode;
 }
 
 export default function SystemHealth() {
   const [checks, setChecks] = useState<HealthCheck[]>([]);
   const [loading, setLoading] = useState(true);
+  const [lastUpdate, setLastUpdate] = useState<string>("—");
+
+  const metrics = useMetricsStore((s) => s.metrics);
+
+  const performHealthChecks = useCallback(async () => {
+    setLoading(true);
+
+    const startAll = Date.now();
+
+    // All checks in parallel — no blocking
+    const [ollamaRes, backendRes, metricsRes, dbRes, sseRes] = await Promise.allSettled([
+      fetch("http://localhost:11434/api/tags", { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
+        ok: r.ok,
+        latency: Date.now() - startAll,
+      })),
+      fetch(apiUrl("/health"), { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
+        ok: r.ok,
+        latency: Date.now() - startAll,
+      })),
+      fetch(apiUrl("/api/metrics/current"), { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
+        ok: r.ok,
+        latency: Date.now() - startAll,
+      })),
+      fetch(apiUrl("/api/projects"), { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
+        ok: r.ok,
+        latency: Date.now() - startAll,
+      })),
+      fetch(apiUrl("/api/dashboard/stream"), { signal: AbortSignal.timeout(2000) }).then(async (r) => ({
+        ok: r.ok,
+        latency: Date.now() - startAll,
+      })),
+    ]);
+
+    const now = new Date().toISOString();
+    const healthChecks: HealthCheck[] = [
+      {
+        name: "Ollama",
+        status: ollamaRes.status === "fulfilled" && ollamaRes.value.ok ? "healthy" : "unhealthy",
+        latency_ms: ollamaRes.status === "fulfilled" ? ollamaRes.value.latency : undefined,
+        message: ollamaRes.status === "rejected" ? "Connection refused" : undefined,
+        last_check: now,
+        icon: <Cpu className="h-3.5 w-3.5" />,
+      },
+      {
+        name: "Backend",
+        status: backendRes.status === "fulfilled" && backendRes.value.ok ? "healthy" : "unhealthy",
+        latency_ms: backendRes.status === "fulfilled" ? backendRes.value.latency : undefined,
+        message: backendRes.status === "rejected" ? "Connection refused" : undefined,
+        last_check: now,
+        icon: <Server className="h-3.5 w-3.5" />,
+      },
+      {
+        name: "Metrics",
+        status: metricsRes.status === "fulfilled" && metricsRes.value.ok ? "healthy" : "unhealthy",
+        latency_ms: metricsRes.status === "fulfilled" ? metricsRes.value.latency : undefined,
+        message: metricsRes.status === "rejected" ? "Connection refused" : undefined,
+        last_check: now,
+        icon: <Activity className="h-3.5 w-3.5" />,
+      },
+      {
+        name: "Database",
+        status: dbRes.status === "fulfilled" && dbRes.value.ok ? "healthy" : "unhealthy",
+        latency_ms: dbRes.status === "fulfilled" ? dbRes.value.latency : undefined,
+        message: dbRes.status === "rejected" ? "Connection refused" : undefined,
+        last_check: now,
+        icon: <Database className="h-3.5 w-3.5" />,
+      },
+      {
+        name: "Event Stream",
+        status: sseRes.status === "fulfilled" && sseRes.value.ok ? "healthy" : "unhealthy",
+        latency_ms: sseRes.status === "fulfilled" ? sseRes.value.latency : undefined,
+        message: sseRes.status === "rejected" ? "Connection refused" : undefined,
+        last_check: now,
+        icon: <Wifi className="h-3.5 w-3.5" />,
+      },
+    ];
+
+    setChecks(healthChecks);
+    setLastUpdate(new Date().toLocaleTimeString());
+    setLoading(false);
+  }, []);
 
   useEffect(() => {
-    const performHealthChecks = async () => {
-      const healthChecks: HealthCheck[] = [];
-
-      // Check Ollama
-      try {
-        const start = Date.now();
-        const response = await fetch("http://localhost:11434/api/tags", {
-          signal: AbortSignal.timeout(5000),
-        });
-        const latency = Date.now() - start;
-        healthChecks.push({
-          name: "Ollama",
-          status: response.ok ? "healthy" : "degraded",
-          latency_ms: latency,
-          message: response.ok ? undefined : `HTTP ${response.status}`,
-          last_check: new Date().toISOString(),
-        });
-      } catch (error) {
-        healthChecks.push({
-          name: "Ollama",
-          status: "unhealthy",
-          message: "Connection refused",
-          last_check: new Date().toISOString(),
-        });
-      }
-
-      // Check Backend
-      try {
-        const start = Date.now();
-        const response = await fetch(apiUrl("/health"), {
-          signal: AbortSignal.timeout(5000),
-        });
-        const latency = Date.now() - start;
-        healthChecks.push({
-          name: "Backend",
-          status: response.ok ? "healthy" : "degraded",
-          latency_ms: latency,
-          message: response.ok ? undefined : `HTTP ${response.status}`,
-          last_check: new Date().toISOString(),
-        });
-      } catch {
-        healthChecks.push({
-          name: "Backend",
-          status: "unhealthy",
-          message: "Connection refused",
-          last_check: new Date().toISOString(),
-        });
-      }
-
-      // Check Metrics
-      try {
-        const start = Date.now();
-        const response = await fetch(apiUrl("/api/metrics/current"), {
-          signal: AbortSignal.timeout(5000),
-        });
-        const latency = Date.now() - start;
-        healthChecks.push({
-          name: "Metrics",
-          status: response.ok ? "healthy" : "degraded",
-          latency_ms: latency,
-          message: response.ok ? undefined : `HTTP ${response.status}`,
-          last_check: new Date().toISOString(),
-        });
-      } catch {
-        healthChecks.push({
-          name: "Metrics",
-          status: "unhealthy",
-          message: "Connection refused",
-          last_check: new Date().toISOString(),
-        });
-      }
-
-      setChecks(healthChecks);
-      setLoading(false);
-    };
-
     performHealthChecks();
-    const interval = setInterval(performHealthChecks, 30000);
+    const interval = setInterval(performHealthChecks, 15000);
     return () => clearInterval(interval);
-  }, []);
+  }, [performHealthChecks]);
+
+  const overallStatus = useMemo(() => {
+    if (checks.length === 0) return "unknown";
+    if (checks.every((c) => c.status === "healthy")) return "healthy";
+    if (checks.some((c) => c.status === "unhealthy")) return "unhealthy";
+    return "degraded";
+  }, [checks]);
+
+  const healthyCount = useMemo(() => checks.filter((c) => c.status === "healthy").length, [checks]);
 
   const getStatusColor = (status: HealthCheck["status"]) => {
     switch (status) {
-      case "healthy": return "bg-green-500/20 text-green-400 border-green-500/30";
-      case "degraded": return "bg-yellow-500/20 text-yellow-400 border-yellow-500/30";
-      case "unhealthy": return "bg-red-500/20 text-red-400 border-red-500/30";
-      case "unknown": return "bg-gray-500/20 text-gray-400 border-gray-500/30";
+      case "healthy":
+        return "bg-green-500/15 text-green-400 border-green-500/30";
+      case "degraded":
+        return "bg-yellow-500/15 text-yellow-400 border-yellow-500/30";
+      case "unhealthy":
+        return "bg-red-500/15 text-red-400 border-red-500/30";
+      case "unknown":
+        return "bg-gray-500/15 text-gray-400 border-gray-500/30";
     }
   };
 
-  const getStatusIcon = (status: HealthCheck["status"]) => {
+  const getStatusDot = (status: HealthCheck["status"]) => {
     switch (status) {
-      case "healthy": return "ok";
-      case "degraded": return "! ";
-      case "unhealthy": return "X";
-      case "unknown": return "?";
+      case "healthy":
+        return <span className="h-2 w-2 rounded-full bg-green-400" />;
+      case "degraded":
+        return <span className="h-2 w-2 rounded-full bg-yellow-400" />;
+      case "unhealthy":
+        return <span className="h-2 w-2 rounded-full bg-red-400 animate-pulse" />;
+      case "unknown":
+        return <span className="h-2 w-2 rounded-full bg-gray-500" />;
     }
   };
 
-  const overallStatus =
-    checks.length > 0
-      ? checks.every((c) => c.status === "healthy")
-        ? "healthy"
-        : checks.some((c) => c.status === "unhealthy")
-          ? "unhealthy"
-          : "degraded"
-      : "unknown";
+  const resourceBar = (label: string, value: number, used: number, total: number, color: string) => (
+    <div className="space-y-1">
+      <div className="flex justify-between text-[10px]">
+        <span className="text-gray-500">{label}</span>
+        <span className={value > 80 ? "text-red-400" : value > 60 ? "text-yellow-400" : "text-gray-300"}>
+          {label === "RAM"
+            ? `${(used / 1e9).toFixed(1)}/${(total / 1e9).toFixed(0)} GB (${value.toFixed(1)}%)`
+            : `${value.toFixed(1)}%`}
+        </span>
+      </div>
+      <div className="h-1.5 w-full rounded-full bg-nexus-border/50 overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${color}`}
+          style={{ width: `${Math.min(value, 100)}%` }}
+        />
+      </div>
+    </div>
+  );
 
   return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.3 }}
-      className="rounded border border-nexus-border bg-nexus-panel p-3"
-    >
+    <div className="rounded border border-nexus-border bg-nexus-panel p-3">
       <div className="mb-3 flex items-center justify-between">
-        <div className="text-sm font-semibold">Saúde do Sistema</div>
-        <div className={`flex items-center gap-1.5 rounded px-2 py-1 text-xs ${getStatusColor(overallStatus)}`}>
-          <span className="font-bold">{getStatusIcon(overallStatus)}</span>
+        <div className="flex items-center gap-2">
+          <div className="text-sm font-semibold">Saúde do Sistema</div>
+          <span className="text-[10px] text-gray-500">
+            ({healthyCount}/{checks.length} healthy)
+          </span>
+        </div>
+        <div
+          className={`flex items-center gap-1.5 rounded px-2 py-1 text-xs ${getStatusColor(overallStatus)}`}
+        >
+          {getStatusDot(overallStatus)}
           <span className="capitalize">{overallStatus}</span>
         </div>
       </div>
 
+      {/* Resource bars from shared store */}
+      {metrics && (
+        <div className="mb-3 space-y-2 rounded border border-nexus-border/50 bg-nexus-bg/50 p-2.5">
+          {resourceBar(
+            "CPU",
+            metrics.cpu_percent,
+            0,
+            100,
+            metrics.cpu_percent > 80 ? "bg-red-500" : metrics.cpu_percent > 50 ? "bg-yellow-500" : "bg-green-500"
+          )}
+          {resourceBar(
+            "RAM",
+            metrics.ram_percent,
+            metrics.ram_used_bytes,
+            metrics.ram_total_bytes,
+            metrics.ram_percent > 80 ? "bg-red-500" : metrics.ram_percent > 60 ? "bg-yellow-500" : "bg-green-500"
+          )}
+          {resourceBar(
+            "Disk",
+            metrics.disk_percent,
+            metrics.disk_used_bytes,
+            metrics.disk_total_bytes,
+            metrics.disk_percent > 90 ? "bg-red-500" : metrics.disk_percent > 75 ? "bg-yellow-500" : "bg-green-500"
+          )}
+        </div>
+      )}
+
       {loading ? (
         <div className="flex h-24 items-center justify-center text-xs text-gray-500">
-          Verificando...
+          <div className="flex items-center gap-2">
+            <div className="h-3 w-3 animate-spin rounded-full border-2 border-nexus-accent border-t-transparent" />
+            Verificando...
+          </div>
         </div>
       ) : checks.length > 0 ? (
         <div className="space-y-1.5">
           {checks.map((check) => (
             <div
               key={check.name}
-              className={`flex items-center justify-between rounded border px-2.5 py-1.5 ${getStatusColor(check.status)}`}
+              className={`flex items-center justify-between rounded border px-2.5 py-2 ${getStatusColor(check.status)}`}
             >
               <div className="flex items-center gap-2">
-                <span className="text-xs font-bold">{getStatusIcon(check.status)}</span>
+                <span className="text-gray-400">{check.icon}</span>
                 <span className="text-xs font-medium">{check.name}</span>
               </div>
               <div className="flex items-center gap-2 text-xs">
-                {check.latency_ms && <span className="text-gray-400">{check.latency_ms}ms</span>}
+                {check.latency_ms !== undefined && <span className="text-gray-400">{check.latency_ms}ms</span>}
                 {check.message && <span className="text-gray-500">{check.message}</span>}
+                {getStatusDot(check.status)}
               </div>
             </div>
           ))}
         </div>
       ) : (
-        <div className="flex h-24 items-center justify-center text-xs text-gray-500">
-          Sem dados de saúde
-        </div>
+        <div className="flex h-24 items-center justify-center text-xs text-gray-500">Sem dados de saúde</div>
       )}
-    </motion.div>
+
+      <div className="mt-2 text-right text-[10px] text-gray-600">Last check: {lastUpdate}</div>
+    </div>
   );
 }

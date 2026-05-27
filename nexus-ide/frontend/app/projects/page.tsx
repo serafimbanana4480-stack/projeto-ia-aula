@@ -6,13 +6,13 @@ import TopBar from "../../components/layout/TopBar";
 import Sidebar from "../../components/layout/Sidebar";
 import BottomHUD from "../../components/layout/BottomHUD";
 import { FolderKanban, Plus, Settings, Trash2, Clock, FolderOpen } from "lucide-react";
-import { MOCK_PROJECTS, type ProjectData } from "../../lib/mock-data";
+import type { ProjectData } from "../../lib/mock-data";
 import { useProjectStore } from "../../stores/projectStore";
 
 export default function ProjectsPage() {
-  const [projects, setProjects] = useState<ProjectData[]>(MOCK_PROJECTS);
+  const [projects, setProjects] = useState<ProjectData[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [isMock, setIsMock] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [form, setForm] = useState({
     name: "",
     path: "",
@@ -26,14 +26,15 @@ export default function ProjectsPage() {
 
   async function loadProjects() {
     try {
+      setLoading(true);
       const data = await getProjects();
-      if (Array.isArray(data) && data.length > 0) {
+      if (Array.isArray(data)) {
         setProjects(data);
-        setIsMock(false);
       }
-      // If empty, keep mock data
     } catch {
-      // Backend unavailable — keep mock data
+      // Backend unavailable — show empty state
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -114,7 +115,7 @@ export default function ProjectsPage() {
               <div className="flex items-center gap-3">
                 <FolderKanban className="h-6 w-6 text-nexus-accent" />
                 <h1 className="text-2xl font-bold">Projects</h1>
-                {isMock && <span className="text-xs text-gray-600">demo data</span>}
+  
               </div>
               <button
                 onClick={() => setShowCreateModal(true)}
@@ -180,7 +181,15 @@ export default function ProjectsPage() {
               ))}
             </div>
 
-            {projects.length === 0 && (
+            {loading && (
+              <div className="flex h-64 items-center justify-center">
+                <div className="flex items-center gap-3 text-sm text-nexus-muted">
+                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-nexus-accent border-t-transparent" />
+                  <span>Loading projects...</span>
+                </div>
+              </div>
+            )}
+            {!loading && projects.length === 0 && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}

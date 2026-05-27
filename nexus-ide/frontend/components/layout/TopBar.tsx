@@ -56,6 +56,7 @@ export default function TopBar() {
 
         <button className="flex items-center gap-2 text-xs">
           <div className="h-7 w-7 overflow-hidden rounded-full bg-nexus-accent/20">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="https://ui-avatars.com/api/?name=Luso&background=7c6afb&color=fff&size=64"
               alt="User"
