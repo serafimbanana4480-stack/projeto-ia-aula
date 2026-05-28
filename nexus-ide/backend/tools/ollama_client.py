@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)
+DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)
 
 # Connection pooling limits for better performance
 DEFAULT_LIMITS = httpx.Limits(

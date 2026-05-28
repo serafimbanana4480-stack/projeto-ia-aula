@@ -19,7 +19,6 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Wand2,
-  Globe,
   Paperclip,
   Mic,
   Send,
@@ -32,6 +31,8 @@ import {
   Clock,
   Loader2,
   ListChecks,
+  AlertTriangle,
+  X,
 } from "lucide-react";
 import type { AgentName, ChatMessage, StreamEvent } from "../../lib/types";
 
@@ -93,16 +94,18 @@ export default function ChatPanel({
   setRightOpen,
 }: ChatPanelProps) {
   const [sessionId, setSessionId] = useState("default");
-  const { currentMode } = useModeStore();
+  const { currentMode, modes, modesLoaded, loadModes } = useModeStore();
   const { activeModel } = useModelStore();
   const { currentProject } = useProjectStore();
-  const { events, streaming, send, cancel, reset } = useAgentStream(sessionId);
+  const { events, streaming, error: streamError, send, cancel, reset } = useAgentStream(sessionId);
   const [input, setInput] = useState("");
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pendingUser, setPendingUser] = useState<ChatMessage[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [shared, setShared] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [activePlan, setActivePlan] = useState<PlanCreateResult | null>(null);
   const [planStatus, setPlanStatus] = useState<PlanStatusType | null>(null);
@@ -132,6 +135,7 @@ export default function ChatPanel({
 
   useEffect(() => {
     loadHistory();
+    loadModes();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -228,6 +232,18 @@ export default function ChatPanel({
 
   function handleCancel() {
     cancel();
+  }
+
+  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) {
+      setAttachedFiles((prev) => [...prev, ...files].slice(0, 5)); // Max 5 files
+    }
+    e.target.value = ""; // Reset input
+  }
+
+  function handleRemoveFile(index: number) {
+    setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
   }
 
   function handleRegenerate() {
@@ -370,12 +386,34 @@ export default function ChatPanel({
           <div className="leading-tight">
             <div className="text-sm font-semibold">Chat com IA</div>
             <div className="text-[11px] text-nexus-muted">
-              Pergunte, analise, crie. A sua IA, os seus dados.
+              {currentProject ? (
+                <span className="flex items-center gap-1">
+                  <span className="text-nexus-accent">●</span>
+                  {currentProject.name}
+                </span>
+              ) : (
+                "Sem projeto ativo — seleciona um projeto para usar ferramentas"
+              )}
             </div>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Mode selector */}
+          <select
+            value={currentMode}
+            onChange={(e) => useModeStore.getState().setMode(e.target.value)}
+            className="rounded-lg border border-nexus-border bg-nexus-card px-2 py-1.5 text-xs text-nexus-muted outline-none focus:border-nexus-accent/50"
+            title={modes.find((m) => m.id === currentMode)?.description || ""}
+          >
+            {modes.map((mode) => (
+              <option key={mode.id} value={mode.id}>
+                {mode.id}
+              </option>
+            ))}
+            {!modesLoaded && <option value={currentMode}>{currentMode}</option>}
+          </select>
+
           <button
             onClick={handleNewChat}
             className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-3 py-1.5 text-xs text-nexus-muted hover:text-nexus-text transition-colors"
@@ -410,6 +448,16 @@ export default function ChatPanel({
 
       {/* Messages area */}
       <div ref={messagesContainerRef} className="min-h-0 flex-1 overflow-y-auto thin-scrollbar px-5 py-3">
+        {/* Stream error banner */}
+        {streamError && (
+          <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2">
+            <div className="flex items-center gap-2 text-xs text-red-400">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              <span>{streamError}</span>
+            </div>
+          </div>
+        )}
+
         {!historyLoaded && (
           <div className="flex h-full items-center justify-center">
             <div className="flex items-center gap-3 text-sm text-nexus-muted">
@@ -592,6 +640,29 @@ export default function ChatPanel({
 
       {/* Input area — fixed at bottom */}
       <div className="shrink-0 border-t border-nexus-border bg-nexus-panel px-5 pt-3 pb-2">
+        {/* Attached files preview */}
+        {attachedFiles.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {attachedFiles.map((file, idx) => (
+              <div
+                key={`${file.name}-${idx}`}
+                className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-bg px-2 py-1 text-[11px] text-nexus-muted"
+              >
+                <Paperclip className="h-3 w-3" />
+                <span className="max-w-[120px] truncate">{file.name}</span>
+                <span className="text-gray-600">({(file.size / 1024).toFixed(0)} KB)</span>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveFile(idx)}
+                  className="ml-1 text-gray-500 hover:text-red-400"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Quick suggestion chips above input */}
         <div className="mb-2 flex flex-wrap gap-2">
           {suggestions.map((s) => (
@@ -608,21 +679,19 @@ export default function ChatPanel({
 
         <form onSubmit={handleSubmit}>
           <div className="flex items-end gap-1.5 rounded-xl border border-nexus-border bg-nexus-card p-2 focus-within:border-nexus-accent/50 transition-colors">
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileSelect}
+              className="hidden"
+              multiple
+              accept=".txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.sql,.log"
+            />
             <button
               type="button"
+              onClick={() => fileInputRef.current?.click()}
               className="shrink-0 rounded-lg p-2 text-nexus-muted hover:text-nexus-text transition-colors"
-            >
-              <Plus className="h-4 w-4" />
-            </button>
-            <button
-              type="button"
-              className="shrink-0 rounded-lg p-2 text-nexus-muted hover:text-nexus-text transition-colors"
-            >
-              <Globe className="h-4 w-4" />
-            </button>
-            <button
-              type="button"
-              className="shrink-0 rounded-lg p-2 text-nexus-muted hover:text-nexus-text transition-colors"
+              title="Anexar ficheiros"
             >
               <Paperclip className="h-4 w-4" />
             </button>

@@ -3,37 +3,65 @@ import { useCallback, useRef, useState } from "react";
 import type { StreamEvent } from "../lib/types";
 import { postChat } from "../lib/api";
 
+const STREAM_TIMEOUT_MS = 45000; // 45s timeout for the entire stream
+
 // Posts a chat message and consumes the SSE body stream incrementally.
-// Returns the aggregated events and a send() function.
-// TODO: handle backpressure, abort controllers, and reconnection.
 export function useAgentStream(sessionId: string) {
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [streaming, setStreaming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const activeRequestId = useRef(0);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearStreamTimeout = useCallback(() => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+  }, []);
 
   const send = useCallback(
     async (message: string, mode = "agent", model = "", projectPath = "") => {
+      // Cancel any previous request
       abortRef.current?.abort();
+      clearStreamTimeout();
       const controller = new AbortController();
       abortRef.current = controller;
       const requestId = ++activeRequestId.current;
 
       setStreaming(true);
-      setEvents([]); // Clear previous events for new message
+      setError(null);
+      setEvents([]);
+
+      // Auto-timeout if stream takes too long
+      timeoutRef.current = setTimeout(() => {
+        if (requestId === activeRequestId.current) {
+          controller.abort();
+          setStreaming(false);
+          setError("O modelo demorou demasiado tempo a responder. Tenta novamente ou escolhe um modelo mais leve.");
+          setEvents([
+            {
+              type: "error",
+              content: "Timeout: O modelo não respondeu dentro do tempo esperado (45s).",
+              timestamp: new Date().toISOString(),
+            },
+          ]);
+        }
+      }, STREAM_TIMEOUT_MS);
 
       try {
         const res = await postChat(message, sessionId, mode, controller.signal, model, projectPath);
 
-        // Check if response is ok
         if (!res.ok) {
           const errorText = await res.text();
           if (requestId !== activeRequestId.current) return;
-          console.error("Chat request failed:", res.status, errorText);
+          clearStreamTimeout();
+          setError(`Erro ${res.status}: ${errorText}`);
           setEvents([
             {
               type: "error",
-              content: `Request failed: ${res.status} ${errorText}`,
+              content: `Pedido falhou: ${res.status} ${errorText}`,
               timestamp: new Date().toISOString(),
             },
           ]);
@@ -44,10 +72,12 @@ export function useAgentStream(sessionId: string) {
         const reader = res.body?.getReader();
         if (!reader) {
           if (requestId !== activeRequestId.current) return;
+          clearStreamTimeout();
+          setError("Sem resposta do servidor");
           setEvents([
             {
               type: "error",
-              content: "No response body received",
+              content: "Não foi recebida resposta do servidor.",
               timestamp: new Date().toISOString(),
             },
           ]);
@@ -57,12 +87,14 @@ export function useAgentStream(sessionId: string) {
 
         const decoder = new TextDecoder();
         let buffer = "";
+        let receivedData = false;
 
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
           if (requestId !== activeRequestId.current) return;
 
+          receivedData = true;
           buffer += decoder.decode(value, { stream: true });
 
           const chunks = buffer.split("\n\n");
@@ -75,11 +107,14 @@ export function useAgentStream(sessionId: string) {
             if (!line) continue;
             try {
               const jsonStr = line.slice(5).trim();
+              if (!jsonStr) continue;
               const evt = JSON.parse(jsonStr) as StreamEvent;
               if (requestId !== activeRequestId.current) return;
               setEvents((prev) => [...prev, evt]);
 
               if (evt.type === "done" || evt.type === "agent_finished") {
+                clearStreamTimeout();
+                setStreaming(false);
                 return;
               }
             } catch (e) {
@@ -87,34 +122,51 @@ export function useAgentStream(sessionId: string) {
             }
           }
         }
+
+        // Stream ended without explicit done event
+        if (requestId === activeRequestId.current) {
+          clearStreamTimeout();
+          setStreaming(false);
+          if (!receivedData) {
+            setError("O modelo não devolveu dados. Verifica se o Ollama está a correr.");
+            setEvents([
+              {
+                type: "error",
+                content: "O modelo não devolveu dados. Verifica se o Ollama está a correr com o modelo selecionado.",
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+          }
+        }
       } catch (error) {
         if (controller.signal.aborted || requestId !== activeRequestId.current)
           return;
-        console.error("Chat stream error:", error);
+        clearStreamTimeout();
+        const msg = error instanceof Error ? error.message : "Erro desconhecido";
+        setError(msg);
         setEvents([
           {
             type: "error",
-            content: error instanceof Error ? error.message : "Unknown error",
+            content: msg,
             timestamp: new Date().toISOString(),
           },
         ]);
-      } finally {
-        if (requestId === activeRequestId.current) {
-          setStreaming(false);
-        }
+        setStreaming(false);
       }
     },
-    [sessionId],
+    [sessionId, clearStreamTimeout],
   );
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
+    clearStreamTimeout();
     setStreaming(false);
-  }, []);
+  }, [clearStreamTimeout]);
 
   const reset = useCallback(() => {
     setEvents([]);
+    setError(null);
   }, []);
 
-  return { events, streaming, send, cancel, reset };
+  return { events, streaming, error, send, cancel, reset };
 }

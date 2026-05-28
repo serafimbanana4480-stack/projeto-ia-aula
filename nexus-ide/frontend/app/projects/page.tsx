@@ -79,24 +79,51 @@ export default function ProjectsPage() {
     // Use the native File System Access API if available (Chromium browsers)
     if ("showDirectoryPicker" in window) {
       (window as any).showDirectoryPicker()
-        .then((dirHandle: any) => {
+        .then(async (dirHandle: any) => {
+          // Try to get the full path using File System Access API
+          let fullPath = dirHandle.name;
+          try {
+            // Request permission to read the directory
+            const permission = await dirHandle.requestPermission({ mode: "read" });
+            if (permission === "granted") {
+              // We can't get the absolute path from File System Access API
+              // So we use the fallback prompt to ask the user
+              const userPath = prompt(
+                `Caminho absoluto para a pasta "${dirHandle.name}":`,
+                `C:/Users/rodri/Desktop/${dirHandle.name}`
+              );
+              if (userPath) {
+                fullPath = userPath.trim();
+              }
+            }
+          } catch {
+            // Permission denied — use name only
+          }
           setForm((prev) => ({
             ...prev,
-            path: dirHandle.name,
+            path: fullPath,
             name: prev.name || dirHandle.name,
           }));
         })
         .catch(() => {
-          // User cancelled or not supported
+          // User cancelled or not supported — fallback to prompt
+          const path = prompt("Caminho absoluto da pasta do projeto:", "C:/Users/rodri/Desktop/");
+          if (path) {
+            setForm((prev) => ({
+              ...prev,
+              path: path.trim(),
+              name: prev.name || path.split(/[/\\]/).pop() || "Project",
+            }));
+          }
         });
     } else {
       // Fallback: prompt the user to type the path
-      const path = prompt("Enter the absolute path to your project folder:", "/Users/");
+      const path = prompt("Caminho absoluto da pasta do projeto:", "C:/Users/rodri/Desktop/");
       if (path) {
         setForm((prev) => ({
           ...prev,
           path: path.trim(),
-          name: prev.name || path.split("/").pop() || "Project",
+          name: prev.name || path.split(/[/\\]/).pop() || "Project",
         }));
       }
     }
