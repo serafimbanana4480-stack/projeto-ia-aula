@@ -28,28 +28,6 @@ class DebuggerAgent(AgentBase):
     }
 
     async def run(self, request: AgentRequest) -> AsyncIterator[str]:
-        """Run debugger with ReAct loop for debugging tasks.
-
-        Uses ReAct loop when the task involves debugging, fixing,
-        or diagnosing issues. Falls back to single-shot for simple questions.
-        """
-        is_complex = self._is_complex_task(request.query)
-
-        if is_complex and request.max_iterations > 1:
-            async for token in self._run_react_loop(request):
-                yield token
-        else:
-            async for token in self.stream_llm(request):
-                yield token
-
-    def _is_complex_task(self, query: str) -> bool:
-        """Heuristic to detect tasks needing the ReAct loop."""
-        complex_markers = [
-            "debug", "fix", "error", "bug", "crash", "exception",
-            "traceback", "not working", "broken", "issue",
-            "why does", "what's wrong", "diagnose", "troubleshoot",
-            "stack trace", "fail", "failing",
-            "depurar", "corrigir", "erro", "falha", "problema",
-        ]
-        lowered = query.lower()
-        return any(marker in lowered for marker in complex_markers)
+        """Run with ReAct loop so tools are always available."""
+        async for token in self._run_react_loop(request):
+            yield token
