@@ -28,7 +28,7 @@ class AnalyzerAgent(AgentBase):
         AgentAction.ANALYZE_DATA,
     }
 
-    async def run(self, request: AgentRequest) -> AsyncIterator[str]:
+    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
         """Run analyzer with ReAct loop so tools are always available."""
         async for token in self._run_react_loop(request):
             yield token

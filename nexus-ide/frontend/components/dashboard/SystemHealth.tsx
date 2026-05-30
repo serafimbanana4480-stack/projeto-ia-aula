@@ -26,15 +26,15 @@ export default function SystemHealth() {
 
     // Only check external services — metrics/stream health comes from the store
     const [ollamaRes, backendRes, dbRes] = await Promise.allSettled([
-      fetch("http://localhost:11434/api/tags", { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
+      fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api/models/status`, { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
         ok: r.ok,
         latency: Date.now() - startAll,
       })),
-      fetch("http://localhost:8000/health", { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
+      fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/health`, { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
         ok: r.ok,
         latency: Date.now() - startAll,
       })),
-      fetch("http://localhost:8000/api/projects", { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
+      fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api/projects`, { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
         ok: r.ok,
         latency: Date.now() - startAll,
       })),

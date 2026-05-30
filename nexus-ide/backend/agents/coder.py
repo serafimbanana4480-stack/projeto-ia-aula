@@ -39,7 +39,7 @@ class CoderAgent(AgentBase):
         AgentAction.EXECUTE_CODE,
     }
 
-    async def run(self, request: AgentRequest) -> AsyncIterator[str]:
+    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
         """Run the coder agent with ReAct loop for autonomous execution.
 
         ALWAYS uses the ReAct loop so that file operations, code execution,

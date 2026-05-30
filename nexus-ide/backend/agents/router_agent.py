@@ -25,7 +25,7 @@ class RouterAgent(AgentBase):
     prompt_file = "router"
     supported_actions = set()
 
-    async def run(self, request: AgentRequest) -> AsyncIterator[str]:
+    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
         # Even though routing is normally invoked non-streamed, expose a
         # streaming variant for debugging & uniformity.
         async for token in self.stream_llm(request, temperature=0.1):

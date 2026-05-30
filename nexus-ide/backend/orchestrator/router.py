@@ -23,7 +23,8 @@ from pydantic import ValidationError
 
 from backend.config.settings import get_model_config, load_prompt
 from backend.models.api import AgentName, RoutingDecision
-from backend.tools.ollama_client import ChatMessage, OllamaClient, OllamaError
+from backend.tools.ollama_client import ChatMessage, OllamaError
+from typing import Any
 from backend.tools.sanitizer import detect_injection
 
 logger = logging.getLogger(__name__)
@@ -198,6 +199,81 @@ _OPTIMIZER_MARKERS: Final = (
     "acelerar",
     "reduzir memória",
 )
+_REFACTOR_PERF_MARKERS: Final = (
+    "refactor performance",
+    "performance refactor",
+    "profile code",
+    "cache optimization",
+    "memoize",
+    "vectorize",
+    "async optimization",
+    "parallelize",
+    "execution time",
+    "memory usage",
+    "benchmark",
+    "hot path",
+)
+_REFACTOR_CLEAN_MARKERS: Final = (
+    "clean code",
+    "clean up",
+    "cleanup",
+    "code cleanup",
+    "refactor clean",
+    "solid principles",
+    "dry violation",
+    "remove duplication",
+    "improve naming",
+    "add type hints",
+    "cognitive complexity",
+    "pep8",
+    "style guide",
+    "linting",
+    "format code",
+)
+_BUG_HUNTER_STATIC_MARKERS: Final = (
+    "static analysis",
+    "lint",
+    "linter",
+    "pylint",
+    "mypy",
+    "bandit",
+    "ruff",
+    "code smell",
+    "anti-pattern",
+    "cyclomatic complexity",
+    "security audit",
+    "vulnerability scan",
+    "find vulnerabilities",
+    "sql injection",
+    "xss",
+    "path traversal",
+    "scan code",
+    "analise estatica",
+    "analise estática",
+    "vulnerabilidade",
+    "auditoria de seguranca",
+)
+_BUG_HUNTER_RUNTIME_MARKERS: Final = (
+    "runtime error",
+    "runtime bug",
+    "test failure",
+    "fuzz test",
+    "fuzzing",
+    "edge case",
+    "stress test",
+    "malformed input",
+    "api test",
+    "integration test",
+    "e2e bug",
+    "memory leak",
+    "race condition",
+    "stack trace",
+    "exception handling",
+    "reproduce bug",
+    "runtime crash",
+    "erro em tempo de execucao",
+    "teste de stress",
+)
 _DOCUMENTER_MARKERS: Final = (
     "document",
     "documenta",
@@ -257,6 +333,10 @@ def fast_route(query: str) -> AgentName | None:
     if any(marker in lowered for marker in _DEBUGGER_MARKERS):
         return "DEBUGGER"
 
+    # 1b. BUG_HUNTER_RUNTIME — runtime testing and reproduction patterns
+    if any(marker in lowered for marker in _BUG_HUNTER_RUNTIME_MARKERS):
+        return "BUG_HUNTER_RUNTIME"
+
     # 2. ARCHITECT — design/planning patterns
     if any(marker in lowered for marker in _ARCHITECT_MARKERS):
         return "ARCHITECT"
@@ -265,9 +345,21 @@ def fast_route(query: str) -> AgentName | None:
     if any(marker in lowered for marker in _ANALYZER_MARKERS):
         return "ANALYZER"
 
+    # 3b. BUG_HUNTER_STATIC — static analysis and security scan patterns
+    if any(marker in lowered for marker in _BUG_HUNTER_STATIC_MARKERS):
+        return "BUG_HUNTER_STATIC"
+
     # 4. OPTIMIZER — performance patterns
     if any(marker in lowered for marker in _OPTIMIZER_MARKERS):
         return "OPTIMIZER"
+
+    # 4b. REFACTOR_PERFORMANCE — specific performance refactoring patterns
+    if any(marker in lowered for marker in _REFACTOR_PERF_MARKERS):
+        return "REFACTOR_PERFORMANCE"
+
+    # 4c. REFACTOR_CLEAN — code cleanliness refactoring patterns
+    if any(marker in lowered for marker in _REFACTOR_CLEAN_MARKERS):
+        return "REFACTOR_CLEAN"
 
     # 5. CODER — code generation patterns
     if any(marker in lowered for marker in _CODER_MARKERS):
@@ -308,7 +400,7 @@ _FALLBACK_DECISION = RoutingDecision(
 )
 
 
-async def route_with_model(query: str, client: OllamaClient) -> RoutingDecision:
+async def route_with_model(query: str, client: Any) -> RoutingDecision:
     """Level 2 — ask the NANO model to classify the request.
 
     Returns a best-effort :class:`RoutingDecision`. If the model output is
@@ -347,7 +439,7 @@ async def route_with_model(query: str, client: OllamaClient) -> RoutingDecision:
             ],
             options={"temperature": 0.1, "num_predict": 512},
         )
-    except OllamaError as exc:
+    except Exception as exc:
         logger.warning("Router model call failed: %s", exc)
         return _FALLBACK_DECISION
 

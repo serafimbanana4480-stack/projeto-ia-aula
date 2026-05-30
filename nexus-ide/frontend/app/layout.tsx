@@ -4,8 +4,8 @@ import ThemeProvider from "./ThemeProvider";
 import ErrorBoundary from "../components/ErrorBoundary";
 
 export const metadata: Metadata = {
-  title: "LUSO AI - Inteligência que constrói futuro",
-  description: "NEXUS IDE powered by LUSO AI",
+  title: "NEXUS IDE - Inteligência Artificial Local",
+  description: "NEXUS IDE - IDE assistida por IA com arquitetura multi-agente",
 };
 
 export default function RootLayout({
@@ -14,7 +14,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="pt" suppressHydrationWarning>
       <body className="h-screen overflow-hidden bg-nexus-bg text-nexus-text">
         <ErrorBoundary>
           <ThemeProvider>{children}</ThemeProvider>

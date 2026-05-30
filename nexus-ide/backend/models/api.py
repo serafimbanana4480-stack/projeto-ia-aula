@@ -14,15 +14,28 @@ from pydantic import BaseModel, ConfigDict, Field
 AgentName = Literal[
     "ROUTER",
     "ARCHITECT",
+    "ARCHITECT_DESIGN",
+    "ARCHITECT_COMPLEXITY",
     "RESEARCHER",
     "CODER",
     "ANALYZER",
     "DEBUGGER",
     "DOCUMENTER",
     "OPTIMIZER",
+    "REFACTOR_PERFORMANCE",
+    "REFACTOR_CLEAN",
     "DASHBOARD",
     "MICRO",
     "ORCHESTRATOR",
+    "SWARM",
+    "SUPERVISOR",
+    "GUARDIAN",
+    "TEST_RUNNER_UNIT",
+    "TEST_RUNNER_E2E",
+    "OVERSEER",
+    "BUG_HUNTER_STATIC",
+    "BUG_HUNTER_RUNTIME",
+    "META_ANALYZER",
 ]
 ThinkingMode = Literal["fast", "deep", "iterative"]
 ContextNeed = Literal["low", "medium", "high"]
@@ -51,6 +64,9 @@ class ChatRequest(BaseModel):
     mode: str = Field(default="agent", min_length=1, max_length=32)
     model: str = Field(default="", max_length=128, description="Model tier key (e.g. 'coder','deep','reasoning') selected by the user in the UI. Empty string means auto-route.")
     project_path: str = Field(default="", max_length=2000, description="Absolute path to the active project directory. Empty string means no project context.")
+    provider: str = Field(default="", max_length=128, description="LLM provider to use (e.g. 'ollama', 'openai', 'kimi'). Empty string means use default.")
+    swarm_agents: list[str] = Field(default_factory=list, description="Agent names to use in swarm mode")
+    swarm_strategy: str = Field(default="divide", description="Swarm strategy: divide, ensemble, pipeline, debate")
 
 
 class ProjectCreateRequest(BaseModel):
@@ -164,3 +180,115 @@ class StreamEvent(BaseModel):
     content: str | None = None
     routing: RoutingDecision | None = None
     timestamp: str = Field(default_factory=_utcnow_iso)
+
+
+# ---------------------------------------------------------------------------
+# Workspace Manager models
+# ---------------------------------------------------------------------------
+
+
+class WorkspaceReadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)
+
+
+class WorkspaceWriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)
+    content: str
+
+
+class WorkspaceListRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(default=".", min_length=1, max_length=2000)
+    recursive: bool = False
+
+
+class WorkspaceDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)
+    move_to_trash: bool = True
+
+
+class WorkspaceSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pattern: str = Field(min_length=1, max_length=500)
+    root_path: str = Field(min_length=1, max_length=2000)
+    max_results: int = Field(default=100, ge=1, le=1000)
+
+
+class WorkspaceShellRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    command: str = Field(min_length=1, max_length=10_000)
+    cwd: str | None = Field(default=None, max_length=2000)
+    timeout: int = Field(default=120, ge=1, le=600)
+    env: dict[str, str] | None = None
+
+
+class WorkspacePythonRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=50_000)
+    cwd: str | None = Field(default=None, max_length=2000)
+    timeout: int = Field(default=120, ge=1, le=600)
+
+
+class WorkspaceScriptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)
+    args: list[str] = Field(default_factory=list)
+    cwd: str | None = Field(default=None, max_length=2000)
+    timeout: int = Field(default=120, ge=1, le=600)
+
+
+class WorkspaceGitInitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)
+
+
+class WorkspaceGitCloneRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=2000)
+    path: str = Field(min_length=1, max_length=2000)
+
+
+class WorkspaceGitCommitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)
+    message: str = Field(default="auto: changes from NEXUS workspace", max_length=500)
+
+
+class WorkspaceGitPushRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)
+    remote: str = Field(default="origin", max_length=128)
+    branch: str | None = Field(default=None, max_length=128)
+
+
+class WorkspaceGitStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)
+
+
+class WorkspaceDiscoverRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_path: str = Field(min_length=1, max_length=2000)
+
+
+class WorkspaceProjectInfoRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)

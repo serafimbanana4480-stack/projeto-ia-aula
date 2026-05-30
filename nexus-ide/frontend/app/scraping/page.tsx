@@ -12,6 +12,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { apiUrl } from "../../lib/api";
+import { log } from "../../lib/log";
 
 interface SearchResult {
   title: string;
@@ -50,7 +51,7 @@ export default function ScrapingPage() {
       }
     } catch (err) {
       setError("Failed to perform search. Make sure backend is running.");
-      console.error(err);
+      log.error(err);
     } finally {
       setLoading(false);
     }

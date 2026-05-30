@@ -46,7 +46,7 @@ from backend.orchestrator.events import (
     EventType,
     OrchestratorEvent,
 )
-from backend.tools.ollama_client import ChatMessage, OllamaClient, OllamaError
+from backend.tools.ollama_client import ChatMessage
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,7 @@ class OrchestrationEngine:
 
     def __init__(
         self,
-        ollama: OllamaClient,
+        llm_client: Any,
         registry: dict[str, AgentBase],
         event_bus: EventBus,
         *,
@@ -122,7 +122,7 @@ class OrchestrationEngine:
         default_timeout: int = 300,
         max_retries: int = 2,
     ) -> None:
-        self._ollama = ollama
+        self._llm_client = llm_client
         self._registry = registry
         self._events = event_bus
         self._max_parallel = max_parallel
@@ -184,9 +184,9 @@ class OrchestrationEngine:
         # Stream planning directly from Ollama
         plan_content = ""
         async with EventEmitter(self._events, "PLANNER", session_id) as emit:
-            async for token in self._ollama.chat_stream(
+            async for token in self._llm_client.chat_stream(
                 model=planner_model,
-                messages=messages,
+                messages=[{"role": m.role, "content": m.content} for m in messages],
                 options={
                     "temperature": planner_cfg.get("temperature", 0.2),
                     "num_predict": 16384,  # Large plans need more tokens
@@ -628,7 +628,7 @@ class OrchestrationEngine:
                 request = AgentRequest(
                     session_id=session_id,
                     query=self._build_task_prompt(task, dep_context, ctx.project_path),
-                    client=self._ollama,
+                    client=self._llm_client,
                     context={"task": task.to_dict(), "shared_memory": ctx.shared_memory, "project_path": ctx.project_path},
                     max_iterations=5,
                 )
@@ -666,7 +666,7 @@ class OrchestrationEngine:
 
                 return {"success": True, "output": output, "tokens": len(output_parts)}
 
-            except (OllamaError, Exception) as exc:
+            except Exception as exc:
                 task.retry_count = attempt + 1
                 logger.warning(
                     "Task %s failed (attempt %d/%d): %s",

@@ -13,6 +13,7 @@ import {
   FileText,
 } from "lucide-react";
 import { getCurrentMetrics } from "../../lib/api";
+import { log } from "../../lib/log";
 
 interface AnalyticsData {
   tokens_per_second: number;
@@ -62,7 +63,7 @@ export default function AnalysisPage() {
 
         setAnalytics(analyticsData);
       } catch (error) {
-        console.error("Failed to fetch analytics:", error);
+        log.error("Failed to fetch analytics:", error);
       } finally {
         setLoading(false);
       }

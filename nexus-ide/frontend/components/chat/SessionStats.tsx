@@ -3,6 +3,7 @@ import { useState, useEffect } from "react";
 import { getCurrentMetrics } from "../../lib/api";
 import { motion } from "framer-motion";
 import { Clock, Zap, Activity } from "lucide-react";
+import { log } from "../../lib/log";
 
 interface SessionStats {
   tokens_used: number;
@@ -33,7 +34,7 @@ export default function SessionStats() {
         });
         setIsLoading(false);
       } catch (error) {
-        console.error("Failed to fetch stats:", error);
+        log.error("Failed to fetch stats:", error);
         setError(
           error instanceof Error ? error.message : "Failed to fetch stats",
         );

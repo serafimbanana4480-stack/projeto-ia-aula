@@ -119,3 +119,33 @@ CREATE INDEX IF NOT EXISTS idx_changes_session ON proposed_changes(session_id, c
 CREATE INDEX IF NOT EXISTS idx_changes_pending ON proposed_changes(applied) WHERE applied = 0;
 CREATE INDEX IF NOT EXISTS idx_changes_project ON proposed_changes(project_id);
 CREATE INDEX IF NOT EXISTS idx_changes_operation ON proposed_changes(operation);
+
+-- ---------------------------------------------------------------------------
+-- AGENT STATES — persistent memory for agents (short / medium / long term)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS agent_states (
+    id              TEXT PRIMARY KEY,
+    agent_name      TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    project_path    TEXT NOT NULL DEFAULT '',
+    memory_tier     TEXT NOT NULL CHECK (memory_tier IN ('short_term', 'medium_term', 'long_term')),
+    key             TEXT NOT NULL,
+    value           TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    access_count    INTEGER DEFAULT 0,
+    importance_score REAL DEFAULT 0.5 CHECK (importance_score >= 0.0 AND importance_score <= 1.0),
+    UNIQUE(agent_name, session_id, project_path, memory_tier, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_states_lookup
+    ON agent_states(agent_name, session_id, project_path, memory_tier, key);
+CREATE INDEX IF NOT EXISTS idx_agent_states_agent
+    ON agent_states(agent_name);
+CREATE INDEX IF NOT EXISTS idx_agent_states_tier
+    ON agent_states(memory_tier);
+CREATE INDEX IF NOT EXISTS idx_agent_states_project
+    ON agent_states(project_path);
+CREATE INDEX IF NOT EXISTS idx_agent_states_importance
+    ON agent_states(importance_score DESC);

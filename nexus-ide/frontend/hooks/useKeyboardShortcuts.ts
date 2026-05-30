@@ -14,6 +14,15 @@ interface KeyboardShortcut {
 export function useKeyboardShortcuts(shortcuts: KeyboardShortcut[]) {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      // Ignore shortcuts when user is typing in an input field
+      const target = event.target as HTMLElement;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target.isContentEditable
+      ) {
+        return;
+      }
       for (const shortcut of shortcuts) {
         const matchesKey =
           shortcut.key.toLowerCase() === event.key.toLowerCase();

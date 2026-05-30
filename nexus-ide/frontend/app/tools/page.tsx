@@ -14,6 +14,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import { getTools, toggleTool } from "../../lib/api";
+import { log } from "../../lib/log";
 
 interface ToolInfo {
   name: string;
@@ -36,7 +37,7 @@ export default function ToolsPage() {
       setTools(data);
     } catch (err) {
       setError("Failed to load tools. Make sure backend is running.");
-      console.error(err);
+      log.error(err);
     } finally {
       setLoading(false);
     }
@@ -56,7 +57,7 @@ export default function ToolsPage() {
         ),
       );
     } catch (err) {
-      console.error("Failed to toggle tool:", err);
+      log.error("Failed to toggle tool:", err);
     } finally {
       setToggling(null);
     }

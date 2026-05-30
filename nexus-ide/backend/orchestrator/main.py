@@ -24,6 +24,7 @@ from slowapi.errors import RateLimitExceeded
 
 from backend import tools as _tools  # noqa: F401
 from backend.config.settings import get_settings, validate_configuration
+from backend.core import workspace as _workspace  # noqa: F401 — registers workspace tools
 from backend.middleware.rate_limit import limiter
 from backend.middleware.security import SecurityHeadersMiddleware
 from backend.observability.routes.alerts import router as alerts_router
@@ -31,18 +32,29 @@ from backend.observability.routes.metrics import router as metrics_router
 from backend.orchestrator.context_manager import ContextStore
 from backend.orchestrator.events import EventBus as OrchestrationEventBus
 from backend.orchestrator.registry import build_default_registry
+from backend.orchestrator.routes.agent_bus import router as agent_bus_router
+from backend.orchestrator.routes.agent_state import router as agent_state_router
+from backend.orchestrator.routes.agents import router as agents_router
 from backend.orchestrator.routes.auth import router as auth_router
 from backend.orchestrator.routes.chat import router as chat_router
 from backend.orchestrator.routes.dashboard import router as dashboard_router
 from backend.orchestrator.routes.files import router as files_router
+from backend.orchestrator.routes.guardian import router as guardian_router
+from backend.orchestrator.routes.meta import router as meta_router
+from backend.orchestrator.routes.meta_analyzer import router as meta_analyzer_router
 from backend.orchestrator.routes.modes import router as modes_router
+from backend.orchestrator.routes.overseer import router as overseer_router
 from backend.orchestrator.routes.plan import router as plan_router
 from backend.orchestrator.routes.projects import router as projects_router
+from backend.orchestrator.routes.system import router as system_router
 from backend.orchestrator.routes.terminal import router as terminal_router
 from backend.orchestrator.routes.web_search import router as web_search_router
+from backend.orchestrator.routes.workers import router as workers_router
+from backend.orchestrator.routes.workspace import router as workspace_router
 from backend.orchestrator.routes.embeddings import router as embeddings_router
+from backend.orchestrator.routes.wizard import router as wizard_router
 from backend.persistence import init_db
-from backend.tools.ollama_client import OllamaClient
+from backend.llm import create_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +63,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create long-lived singletons and guarantee clean shutdown.
 
-    ``OllamaClient`` must be closed explicitly so httpx does not warn about
+    ``llm_client`` must be closed explicitly so httpx does not warn about
     orphaned connections. ``ContextStore`` and the agent registry are plain
     Python objects and need no teardown.
     """
@@ -72,10 +84,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Initialize database
     init_db()
 
-    app.state.ollama = OllamaClient(settings.ollama_host)
+    app.state.llm_client = create_llm_client()
     app.state.registry = build_default_registry()
     app.state.context = ContextStore()
     app.state.event_bus = OrchestrationEventBus()
+
+    # Initialize Agent Lifecycle Manager
+    from backend.core.agent_lifecycle import AgentLifecycleManager
+
+    lifecycle = AgentLifecycleManager()
+    # Wire overseer callback if overseer is in registry
+    overseer = app.state.registry.get("OVERSEER")
+    if overseer:
+        lifecycle.set_overseer_callback(
+            lambda iid, event, data, ov=overseer: ov.record_agent_event(
+                data.get("agent_type", "UNKNOWN"), event, {**data, "instance_id": iid}
+            )
+        )
+    app.state.agent_lifecycle = lifecycle
+    logger.info("Agent lifecycle manager initialized")
+
+    # Start Background Workers
+    from backend.core.background_workers import BackgroundWorkerManager
+
+    worker_manager = BackgroundWorkerManager()
+    await worker_manager.start_all()
+    app.state.worker_manager = worker_manager
+    logger.info("Background workers started")
 
     # Start DashboardAgent background loops
     from backend.agents.dashboard_agent import DashboardAgent
@@ -87,14 +122,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.dashboard_summary_task = summary_task
     logger.info("Dashboard agent background loops started")
 
-    logger.info("NEXUS orchestrator ready (ollama=%s)", settings.ollama_host)
+    # Start GuardianAgent background loop
+    from backend.agents.guardian import NexusGuardianAgent
+
+    guardian = NexusGuardianAgent()
+    guardian_task = asyncio.create_task(guardian.monitor_loop())
+    app.state.guardian_agent = guardian
+    app.state.guardian_task = guardian_task
+    logger.info("Guardian agent background loop started")
+
+    logger.info("NEXUS orchestrator ready (provider=%s)", settings.llm_provider)
     try:
         yield
     finally:
         # Cancel dashboard background loops
         monitor_task.cancel()
         summary_task.cancel()
-        await app.state.ollama.aclose()
+        # Cancel guardian background loop
+        await guardian.stop()
+        guardian_task.cancel()
+        # Stop background workers
+        worker_manager = getattr(app.state, "worker_manager", None)
+        if worker_manager:
+            await worker_manager.stop_all()
+        # Wait for all background tasks to finish cleanly
+        await asyncio.gather(
+            monitor_task, summary_task, guardian_task,
+            return_exceptions=True,
+        )
+        await app.state.llm_client.aclose()
 
 
 app = FastAPI(title="NEXUS IDE Orchestrator", version="0.1.0", lifespan=lifespan)
@@ -129,6 +185,22 @@ app.include_router(terminal_router, prefix="/api")
 app.include_router(web_search_router, prefix="/api")
 app.include_router(embeddings_router, prefix="/api")
 app.include_router(plan_router, prefix="/api")
+app.include_router(guardian_router, prefix="/api")
+app.include_router(overseer_router, prefix="/api")
+app.include_router(wizard_router, prefix="/api")
+app.include_router(agent_state_router, prefix="/api")
+app.include_router(workspace_router, prefix="/api")
+app.include_router(agent_bus_router, prefix="/api")
+app.include_router(meta_router, prefix="/api")
+app.include_router(meta_analyzer_router, prefix="/api")
+app.include_router(collaboration_router, prefix="/api")
+app.include_router(workers_router, prefix="/api")
+app.include_router(agents_router, prefix="/api")
+app.include_router(system_router, prefix="/api")
+
+# MetaOrchestrator WebSocket — mounted directly so path is ``/ws/missions/{id}``
+from backend.orchestrator.routes.meta import mission_websocket as _meta_ws  # noqa: E402
+app.add_api_websocket_route("/ws/missions/{mission_id}", _meta_ws)
 
 
 @app.get("/health")

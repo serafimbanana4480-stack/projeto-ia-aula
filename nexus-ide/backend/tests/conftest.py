@@ -143,6 +143,16 @@ def sample_routing_decision() -> dict[str, Any]:
     }
 
 
+@pytest.fixture(autouse=True)
+def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect the SQLite DB to a temporary file so tests are isolated."""
+    db_file = tmp_path / "test_nexus.db"
+    monkeypatch.setattr("backend.persistence.db.DB_PATH", db_file)
+    from backend.persistence.db import init_db
+
+    init_db()
+
+
 @pytest.fixture
 def temp_project_dir(tmp_path: Path) -> Path:
     """Create a temporary project directory with sample files.

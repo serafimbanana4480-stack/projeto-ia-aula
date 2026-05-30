@@ -24,7 +24,8 @@ import time
 from dataclasses import dataclass
 
 from backend.config.settings import get_model_config, load_models_config
-from backend.tools.ollama_client import ChatMessage, OllamaClient
+from backend.tools.ollama_client import ChatMessage
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +186,7 @@ def _classify_by_heuristics(user_input: str, config: dict) -> TierDecision | Non
     return None
 
 
-async def _classify_by_llm(user_input: str, client: OllamaClient, config: dict) -> TierDecision:
+async def _classify_by_llm(user_input: str, client: Any, config: dict) -> TierDecision:
     """Fallback LLM-based classification for uncertain cases."""
     start = time.time()
     models = config.get("models", {})
@@ -228,7 +229,7 @@ async def _classify_by_llm(user_input: str, client: OllamaClient, config: dict) 
         )
 
 
-async def smart_route_tier(query: str, client: OllamaClient) -> str:
+async def smart_route_tier(query: str, client: Any) -> str:
     """Select the optimal model tier for a query.
 
     Returns the tier key (e.g. "coder", "reasoning", "deep") that should be

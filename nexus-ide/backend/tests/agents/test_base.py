@@ -22,6 +22,7 @@ class TestAgentAction:
             "recall_context",
             "analyze_data",
             "generate_report",
+            "scaffold_project",
         }
         assert actions == expected
 
@@ -85,6 +86,8 @@ class TestAgentBaseContract:
 
         with pytest.raises(TypeError):
             BrokenAgent()  # type: ignore[abstract]
+        # The abstract method is now _execute, not run
+        assert hasattr(AgentBase, '_execute')
 
     def test_supported_actions_default_empty(self) -> None:
         class MinimalAgent(AgentBase):
@@ -92,7 +95,7 @@ class TestAgentBaseContract:
             model_key = "nano"
             prompt_file = "router"
 
-            async def run(self, request):
+            async def _execute(self, request):
                 yield "ok"
 
         agent = MinimalAgent()
@@ -104,7 +107,7 @@ class TestAgentBaseContract:
             model_key = "nano"
             prompt_file = "router"
 
-            async def run(self, request):
+            async def _execute(self, request):
                 yield "ok"
 
         agent = T()
@@ -154,7 +157,7 @@ class TestAgentBaseContract:
             model_key = "nano"
             prompt_file = "router"
 
-            async def run(self, request):
+            async def _execute(self, request):
                 async for tok in self.stream_llm(request):
                     yield tok
 

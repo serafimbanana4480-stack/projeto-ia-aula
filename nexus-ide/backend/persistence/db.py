@@ -339,6 +339,16 @@ def count_active_sessions() -> int:
         return int(row["count"] if row else 0)
 
 
+def get_project_by_path(project_path: str) -> dict | None:
+    """Get project by its path. Used for trust verification."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM projects WHERE path = ?",
+            (project_path,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 @sync_cache_invalidate_pattern("project:*")
 def update_project(project_id: str, **fields: Any) -> dict | None:
     if not fields:

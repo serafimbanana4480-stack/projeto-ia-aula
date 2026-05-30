@@ -1,7 +1,7 @@
-"""File operations tool - read, write, list, search files in project workspace.
+"""File operations tool — read, write, list, search files via WorkspaceManager.
 
-CRITICAL: This tool enables agents to modify REAL files on disk, not just output in chat.
-Includes sandbox validation to prevent path traversal outside project root.
+Delegates filesystem operations to :class:`backend.core.workspace.WorkspaceManager`
+while preserving shared/exclusive file locks for concurrent safety.
 """
 
 from __future__ import annotations
@@ -9,14 +9,21 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from backend.core.file_locks import DeadlockError, FileLockManager, LockError
+from backend.core.workspace import WorkspaceManager
 from backend.persistence.db import propose_change
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
 
+_lock_manager = FileLockManager()
+
 
 def _validate_path(project_path: str, target_path: str) -> Path:
-    """Validate that target_path is within project_path (sandbox)."""
+    """Validate that target_path is within project_path (sandbox).
+
+    Kept for backward compatibility with directory_tools.py.
+    """
     project = Path(project_path).resolve()
     target = (
         (project / target_path).resolve()
@@ -30,18 +37,29 @@ def _validate_path(project_path: str, target_path: str) -> Path:
     return target
 
 
-async def read_file(path: str, project_path: str = ".") -> dict:
-    """Read file contents."""
+async def read_file(
+    path: str,
+    project_path: str = ".",
+    owner: str = "anonymous",
+    timeout_seconds: float = 30.0,
+) -> dict:
+    """Read file contents.
+
+    Acquires a shared read lock to prevent concurrent writes.
+    """
+    manager = WorkspaceManager(project_path)
+    full_path = manager._resolve_path(path)
     try:
-        full_path = _validate_path(project_path, path)
-        content = full_path.read_text(encoding="utf-8")
-        return {"path": str(full_path), "content": content, "size": len(content)}
-    except FileNotFoundError:
-        return {"error": f"File not found: {path}"}
-    except PermissionError as e:
-        return {"error": str(e)}
+        await _lock_manager.acquire_read_lock(
+            str(full_path), owner, timeout=timeout_seconds
+        )
+        return await manager.read_file(path)
+    except (LockError, DeadlockError) as e:
+        return {"error": f"Lock error: {e}"}
     except Exception as e:
         return {"error": f"Failed to read: {e}"}
+    finally:
+        _lock_manager.release_lock(str(full_path), owner)
 
 
 async def write_file(
@@ -50,99 +68,72 @@ async def write_file(
     project_path: str = ".",
     session_id: str | None = None,
     project_id: str | None = None,
+    owner: str = "anonymous",
+    timeout_seconds: float = 30.0,
 ) -> dict:
-    """Write content to file. Logs as proposed change for audit."""
+    """Write content to file. Logs as proposed change for audit.
+
+    Trust check: if the project is not trusted, the write is blocked
+    unless a session_id is provided (interactive mode).
+
+    Acquires an exclusive write lock to prevent concurrent reads/writes.
+    """
+    manager = WorkspaceManager(project_path)
+    full_path = manager._resolve_path(path)
     try:
-        full_path = _validate_path(project_path, path)
-        existing = ""
-        if full_path.exists():
-            existing = full_path.read_text(encoding="utf-8")
+        await _lock_manager.acquire_write_lock(
+            str(full_path), owner, timeout=timeout_seconds
+        )
 
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_text(content, encoding="utf-8")
+        # Trust verification — block writes to untrusted projects
+        from backend.persistence.db import get_project_by_path
 
-        if session_id:
+        project = get_project_by_path(str(Path(project_path).resolve()))
+        if project and not project.get("trust", False):
+            return {
+                "error": (
+                    f"Project '{project['name']}' is NOT trusted. "
+                    "Enable trust in project settings before allowing file modifications."
+                )
+            }
+
+        result = await manager.write_file(
+            path, content, session_id=session_id, project_id=project_id
+        )
+
+        # Re-log with relative path for consistency with legacy behaviour
+        if session_id and "error" not in result:
             propose_change(
                 session_id=session_id,
                 project_id=project_id,
                 file_path=str(full_path.relative_to(Path(project_path).resolve())),
-                operation="modify" if existing else "create",
+                operation="modify" if result.get("backup", {}).get("backed_up") else "create",
                 new_content=content,
             )
 
-        return {"path": str(full_path), "written": True, "size": len(content)}
-    except PermissionError as e:
-        return {"error": str(e)}
+        return result
+    except (LockError, DeadlockError) as e:
+        return {"error": f"Lock error: {e}"}
     except Exception as e:
         return {"error": f"Failed to write: {e}"}
+    finally:
+        _lock_manager.release_lock(str(full_path), owner)
 
 
-async def list_dir(path: str = ".", project_path: str = ".", recursive: bool = False) -> dict:
+async def list_dir(
+    path: str = ".", project_path: str = ".", recursive: bool = False
+) -> dict:
     """List directory contents."""
-    try:
-        full_path = _validate_path(project_path, path)
-        if not full_path.exists():
-            return {"error": f"Path not found: {path}"}
-
-        if recursive:
-            items = []
-            for item in full_path.rglob("*"):
-                items.append(
-                    {
-                        "path": str(item.relative_to(Path(project_path).resolve())),
-                        "type": "file" if item.is_file() else "dir",
-                        "size": item.stat().st_size if item.is_file() else 0,
-                    }
-                )
-        else:
-            items = []
-            for item in full_path.iterdir():
-                items.append(
-                    {
-                        "path": str(item.relative_to(Path(project_path).resolve())),
-                        "type": "file" if item.is_file() else "dir",
-                        "size": item.stat().st_size if item.is_file() else 0,
-                    }
-                )
-
-        return {"path": str(full_path), "items": items, "count": len(items)}
-    except PermissionError as e:
-        return {"error": str(e)}
-    except Exception as e:
-        return {"error": f"Failed to list: {e}"}
+    manager = WorkspaceManager(project_path)
+    return await manager.list_directory(path, recursive=recursive)
 
 
-async def search_in_files(query: str, project_path: str = ".", file_pattern: str = "*.py") -> dict:
+async def search_in_files(
+    query: str, project_path: str = ".", file_pattern: str = "*.py"
+) -> dict:
     """Search for text in files."""
-    try:
-        project = Path(project_path).resolve()
-        results = []
-
-        for file_path in project.rglob(file_pattern):
-            if file_path.is_file():
-                try:
-                    content = file_path.read_text(encoding="utf-8")
-                    if query.lower() in content.lower():
-                        lines = content.split("\n")
-                        matches = [
-                            (i + 1, line)
-                            for i, line in enumerate(lines)
-                            if query.lower() in line.lower()
-                        ]
-                        if matches:
-                            results.append(
-                                {
-                                    "path": str(file_path.relative_to(project)),
-                                    "matches": len(matches),
-                                    "preview": matches[:3],
-                                }
-                            )
-                except Exception:
-                    continue
-
-        return {"query": query, "results": results, "count": len(results)}
-    except Exception as e:
-        return {"error": f"Failed to search: {e}"}
+    manager = WorkspaceManager(project_path)
+    return await manager.search_files(path=".", pattern=query, glob=file_pattern)
 
 
 # Register tools

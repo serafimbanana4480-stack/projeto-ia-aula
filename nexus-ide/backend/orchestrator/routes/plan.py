@@ -58,7 +58,7 @@ def _get_engine(request: Request) -> OrchestrationEngine:
         from backend.orchestrator.engine import OrchestrationEngine
 
         request.app.state.orchestration_engine = OrchestrationEngine(
-            ollama=request.app.state.ollama,
+            llm_client=request.app.state.llm_client,
             registry=request.app.state.registry,
             event_bus=request.app.state.event_bus,
         )

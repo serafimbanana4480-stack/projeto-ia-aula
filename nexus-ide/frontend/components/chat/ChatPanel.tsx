@@ -35,6 +35,7 @@ import {
   X,
 } from "lucide-react";
 import type { AgentName, ChatMessage, StreamEvent } from "../../lib/types";
+import { log } from "../../lib/log";
 
 interface ChatPanelProps {
   rightOpen?: boolean;
@@ -110,7 +111,7 @@ export default function ChatPanel({
   const [activePlan, setActivePlan] = useState<PlanCreateResult | null>(null);
   const [planStatus, setPlanStatus] = useState<PlanStatusType | null>(null);
   const [planExecuting, setPlanExecuting] = useState(false);
-  const planPollRef = useRef<NodeJS.Timeout | null>(null);
+  const planPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadHistory = async () => {
     try {
@@ -125,10 +126,11 @@ export default function ChatPanel({
       reset();
       setHistoryLoaded(true);
     } catch (error) {
-      console.error("Failed to load chat history:", error);
+      log.error("Failed to load chat history:", error);
       setHistoryError(
         error instanceof Error ? error.message : "Failed to load chat history",
       );
+      // Keep local pendingUser and events visible so messages don't disappear
       setHistoryLoaded(true);
     }
   };
@@ -140,12 +142,69 @@ export default function ChatPanel({
   }, []);
 
   const { toggleTheme } = useThemeStore();
+
+  // Read file contents and compose message with attachments
+  async function composeMessageWithAttachments(
+    message: string,
+    files: File[],
+  ): Promise<string> {
+    if (files.length === 0) return message;
+    const parts: string[] = [];
+    for (const file of files) {
+      // Skip files larger than 50KB to avoid hitting backend limits
+      if (file.size > 50 * 1024) {
+        parts.push(`\n---\n[Anexo: ${file.name} — ${(file.size / 1024).toFixed(0)}KB (ficheiro demasiado grande para incluir)]\n---\n`);
+        continue;
+      }
+      // Only include text-like files; skip binary/image files
+      const isText = file.type.startsWith("text/") ||
+        file.name.match(/\.(txt|md|py|js|ts|tsx|jsx|json|yaml|yml|toml|css|scss|html|xml|csv|sql|sh|bat|ps1|ini|cfg|env|gitignore|dockerfile)$/i);
+      if (!isText) {
+        parts.push(`\n---\n[Anexo: ${file.name} — ${(file.size / 1024).toFixed(0)}KB (tipo ${file.type || "binário"})]\n---\n`);
+        continue;
+      }
+      try {
+        const text = await file.text();
+        parts.push(`\n---\n[Anexo: ${file.name}]\n\n\`\`\`\n${text}\n\`\`\`\n---\n`);
+      } catch {
+        parts.push(`\n---\n[Anexo: ${file.name} — erro ao ler conteúdo]\n---\n`);
+      }
+    }
+    return `${message}\n${parts.join("\n")}`;
+  }
+
+  const doSendMessage = async () => {
+    const trimmed = input.trim();
+    if (!trimmed || streaming) return;
+    const hasAttachments = attachedFiles.length > 0;
+    const displayContent = hasAttachments
+      ? `${trimmed}\n\n[${attachedFiles.length} ficheiro(s) anexado(s): ${attachedFiles.map(f => f.name).join(", ")}]`
+      : trimmed;
+    setPendingUser((prev) => [
+      ...prev,
+      {
+        id: `u-${prev.length}-${Date.now()}`,
+        role: "user",
+        content: displayContent,
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+    setInput("");
+    const messageToSend = hasAttachments
+      ? await composeMessageWithAttachments(trimmed, attachedFiles)
+      : trimmed;
+    setAttachedFiles([]); // Clear attachments after reading
+    await send(messageToSend, currentMode, activeModel, currentProject?.path ?? "");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await loadHistory();
+  };
+
   useKeyboardShortcuts([
     {
       key: "Enter",
       callback: () => {
         if (!streaming && input.trim()) {
-          handleSubmit(new Event("submit") as any);
+          void doSendMessage();
         }
       },
       description: "Send message",
@@ -205,21 +264,7 @@ export default function ChatPanel({
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const trimmed = input.trim();
-    if (!trimmed || streaming) return;
-    setPendingUser((prev) => [
-      ...prev,
-      {
-        id: `u-${prev.length}-${Date.now()}`,
-        role: "user",
-        content: trimmed,
-        timestamp: new Date().toISOString(),
-      },
-    ]);
-    await send(trimmed, currentMode, activeModel, currentProject?.path ?? "");
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    await loadHistory();
-    setInput("");
+    await doSendMessage();
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -298,7 +343,7 @@ export default function ChatPanel({
       const status = await getPlanStatus(plan.plan_id);
       setPlanStatus(status);
     } catch (err) {
-      console.error("Failed to create plan:", err);
+      log.error("Failed to create plan:", err);
     }
   }, [sessionId]);
 
@@ -309,7 +354,7 @@ export default function ChatPanel({
       const status = await getPlanStatus(activePlan.plan_id);
       setPlanStatus(status);
     } catch (err) {
-      console.error("Failed to approve plan:", err);
+      log.error("Failed to approve plan:", err);
     }
   }, [activePlan, sessionId]);
 
@@ -334,7 +379,7 @@ export default function ChatPanel({
         }
       }, 2000);
     } catch (err) {
-      console.error("Failed to execute plan:", err);
+      log.error("Failed to execute plan:", err);
       setPlanExecuting(false);
     }
   }, [activePlan, sessionId]);
@@ -347,7 +392,7 @@ export default function ChatPanel({
       setPlanExecuting(false);
       if (planPollRef.current) clearInterval(planPollRef.current);
     } catch (err) {
-      console.error("Failed to cancel plan:", err);
+      log.error("Failed to cancel plan:", err);
     }
   }, [sessionId]);
 
@@ -506,7 +551,7 @@ export default function ChatPanel({
             <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-nexus-accent/10 text-nexus-accent">
               <Sparkles className="h-7 w-7" />
             </div>
-            <h2 className="mb-1 text-lg font-semibold">LUSO AI</h2>
+            <h2 className="mb-1 text-lg font-semibold">NEXUS IDE</h2>
             <p className="mb-6 max-w-sm text-sm text-nexus-muted">
               Pergunte, analise, crie. A sua IA, os seus dados.
             </p>
@@ -709,7 +754,9 @@ export default function ChatPanel({
 
             <button
               type="button"
-              className="shrink-0 rounded-lg p-2 text-nexus-muted hover:text-nexus-text transition-colors"
+              disabled
+              title="Em breve"
+              className="shrink-0 rounded-lg p-2 text-nexus-muted opacity-50 cursor-not-allowed transition-colors"
             >
               <Mic className="h-4 w-4" />
             </button>
@@ -728,7 +775,7 @@ export default function ChatPanel({
                 disabled={!input.trim()}
                 className="shrink-0 rounded-lg bg-nexus-accent p-2 text-white hover:bg-nexus-accent/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
-                <Send className="h-4 w-4" />
+                <Send className="h-4 w-4 pointer-events-none" />
               </button>
             )}
           </div>

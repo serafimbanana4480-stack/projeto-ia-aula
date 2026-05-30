@@ -88,7 +88,7 @@ class OllamaClient:
         """
         payload: dict[str, Any] = {
             "model": model,
-            "messages": [m.to_dict() for m in messages],
+            "messages": [m.to_dict() if hasattr(m, "to_dict") else m for m in messages],
             "stream": True,
         }
         if options:

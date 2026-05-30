@@ -23,6 +23,7 @@ import {
 } from "../../lib/api";
 import { AreaChart, Area, ResponsiveContainer } from "recharts";
 import { useRouter } from "next/navigation";
+import { log } from "../../lib/log";
 
 interface MetricsData {
   tokens_per_second: number;
@@ -157,7 +158,7 @@ export default function RightPanel() {
         const data = await getCurrentMetrics();
         setMetrics(data as MetricsData);
       } catch (error) {
-        console.error("Failed to fetch metrics:", error);
+        log.error("Failed to fetch metrics:", error);
       }
     };
 
@@ -231,7 +232,7 @@ export default function RightPanel() {
       try {
         await toggleToolRemote(toolName, !enabled);
       } catch (error) {
-        console.error("Failed to toggle tool:", error);
+        log.error("Failed to toggle tool:", error);
         // Revert on failure
         toggleTool(toolName);
       }

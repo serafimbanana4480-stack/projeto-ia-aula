@@ -21,7 +21,7 @@ export default function TopBar() {
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-nexus-accent/15 text-nexus-accent">
             <Brain className="h-5 w-5" />
           </div>
-          <span className="text-sm font-bold tracking-wide">LUSO AI</span>
+          <span className="text-sm font-bold tracking-wide">NEXUS IDE</span>
         </div>
 
         <div className="h-5 w-px bg-nexus-border" />

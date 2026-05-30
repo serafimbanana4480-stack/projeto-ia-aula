@@ -6,6 +6,7 @@ import TopBar from "../../components/layout/TopBar";
 import Sidebar from "../../components/layout/Sidebar";
 import BottomHUD from "../../components/layout/BottomHUD";
 import { Cpu, Download, CheckCircle, XCircle, Loader2 } from "lucide-react";
+import { log } from "../../lib/log";
 
 interface Model {
   id: string;
@@ -26,7 +27,7 @@ export default function ModelsPage() {
         const data = await getModelStatus();
         setModels(data || []);
       } catch (error) {
-        console.error("Failed to fetch models:", error);
+        log.error("Failed to fetch models:", error);
       }
     };
     fetchModels();
@@ -45,7 +46,8 @@ export default function ModelsPage() {
 
     try {
       // Use Ollama's pull API to download the model
-      const response = await fetch("http://localhost:11434/api/pull", {
+      const OLLAMA_HOST = process.env.NEXT_PUBLIC_OLLAMA_HOST ?? "http://localhost:11434";
+      const response = await fetch(`${OLLAMA_HOST}/api/pull`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: modelId, stream: true }),
@@ -93,7 +95,7 @@ export default function ModelsPage() {
       const data = await getModelStatus();
       setModels(data || []);
     } catch (error) {
-      console.error("Failed to install model:", error);
+      log.error("Failed to install model:", error);
       setInstallProgress(
         `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
       );

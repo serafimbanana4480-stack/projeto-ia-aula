@@ -11,6 +11,7 @@ const TokenTimeline = dynamic(() => import("../../components/dashboard/TokenTime
 const ModelComparison = dynamic(() => import("../../components/dashboard/ModelComparison"), { ssr: false });
 const RequestFlow = dynamic(() => import("../../components/dashboard/RequestFlow"), { ssr: false });
 const AlertFeed = dynamic(() => import("../../components/dashboard/AlertFeed"), { ssr: false });
+const GuardianWidget = dynamic(() => import("../../components/dashboard/GuardianWidget"), { ssr: false });
 
 function WidgetSkeleton({ height }: { height: string }) {
   return <div className={`${height} animate-pulse rounded bg-nexus-border/20`} />;
@@ -106,11 +107,14 @@ export default function DashboardPage() {
           <MetricsGrid />
         </Suspense>
 
-        {/* ── Two-column: Health + Agents | Timeline + Models ── */}
+        {/* ── Two-column: Health + Agents + Guardian | Timeline + Models ── */}
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           <div className="space-y-4">
             <Suspense fallback={<WidgetSkeleton height="h-64" />}>
               <SystemHealth />
+            </Suspense>
+            <Suspense fallback={<WidgetSkeleton height="h-64" />}>
+              <GuardianWidget />
             </Suspense>
             <Suspense fallback={<WidgetSkeleton height="h-64" />}>
               <AgentActivity />

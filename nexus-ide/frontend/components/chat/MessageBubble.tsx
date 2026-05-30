@@ -18,7 +18,7 @@ function MessageBubbleComponent({ message }: { message: ChatMessage }) {
         <div className="mb-2 flex items-center justify-between gap-3 text-[11px] text-nexus-muted">
           <div className="flex items-center gap-2">
             {!isUser && message.agent && <AgentBadge agent={message.agent} />}
-            <span className="font-medium">{isUser ? "Você" : "LUSO AI"}</span>
+            <span className="font-medium">{isUser ? "Você" : "NEXUS IDE"}</span>
           </div>
           <span>
             {new Date(message.timestamp).toLocaleTimeString("pt-PT", {

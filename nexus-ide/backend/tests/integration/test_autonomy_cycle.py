@@ -33,7 +33,7 @@ class TestAutonomyCycle:
         mock_ollama.chat_stream = _mock_stream
 
         engine = OrchestrationEngine(
-            ollama=mock_ollama,
+            llm_client=mock_ollama,
             registry={},
             event_bus=EventBus(),
         )
@@ -139,7 +139,7 @@ class TestAutonomyCycle:
         mock_ollama.chat_stream = _mock_stream
 
         engine = OrchestrationEngine(
-            ollama=mock_ollama,
+            llm_client=mock_ollama,
             registry={},
             event_bus=EventBus(),
         )

@@ -4,6 +4,7 @@ import { useModelStore } from "../../stores/modelStore";
 import { getModelStatus } from "../../lib/api";
 import { motion } from "framer-motion";
 import { Cpu, Check, Loader2 } from "lucide-react";
+import { log } from "../../lib/log";
 
 interface DynamicModel {
   id: string;
@@ -113,7 +114,7 @@ export default function ModelPanel() {
         }
       } catch (error) {
         // Keep fallback models
-        console.error("Failed to fetch models:", error);
+        log.error("Failed to fetch models:", error);
       } finally {
         setLoading(false);
       }

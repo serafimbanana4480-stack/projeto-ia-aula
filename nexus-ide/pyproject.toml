@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "NEXUS IDE orchestrator"
 requires-python = ">=3.12"
 
+[tool.setuptools]
+packages = ["backend"]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-ra --strict-markers --strict-config -p no:cacheprovider"

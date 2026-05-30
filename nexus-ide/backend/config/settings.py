@@ -30,9 +30,35 @@ class Settings(BaseSettings):
     # Environment
     environment: str = Field(default="development")
 
+    # LLM Provider selection
+    llm_provider: str = Field(default="ollama")
+
     # Ollama
     ollama_host: str = Field(default="http://localhost:11434")
     ollama_dashboard_host: str = Field(default="http://localhost:11435")
+
+    # Cloud API keys (used when llm_provider != "ollama")
+    openai_api_key: str = Field(default="")
+    deepseek_api_key: str = Field(default="")
+    kimi_api_key: str = Field(default="")
+    groq_api_key: str = Field(default="")
+
+    # Multi-LLM Manager
+    multi_llm_enabled: bool = Field(default=False)
+    default_provider: str = Field(default="ollama")
+    fallback_provider: str = Field(default="ollama")
+
+    # Provider-specific defaults
+    openai_temperature: float = Field(default=0.7)
+    openai_max_tokens: int = Field(default=2048)
+    kimi_temperature: float = Field(default=0.7)
+    kimi_max_tokens: int = Field(default=2048)
+    ollama_temperature: float = Field(default=0.7)
+    ollama_max_tokens: int = Field(default=2048)
+    deepseek_temperature: float = Field(default=0.7)
+    deepseek_max_tokens: int = Field(default=2048)
+    groq_temperature: float = Field(default=0.7)
+    groq_max_tokens: int = Field(default=2048)
 
     # Redis
     redis_url: str = Field(default="redis://localhost:6379")
@@ -234,6 +260,17 @@ def validate_configuration() -> list[str]:
         prompts_dir = CONFIG_DIR / "prompts"
         if not prompts_dir.exists():
             errors.append(f"Required prompts directory not found: {prompts_dir}")
+
+        # Validate provider configuration
+        provider = settings.llm_provider.lower()
+        cloud_providers = {"openai", "deepseek", "kimi", "groq"}
+        if provider in cloud_providers:
+            key_attr = f"{provider}_api_key"
+            api_key = getattr(settings, key_attr, "")
+            if not api_key:
+                errors.append(
+                    f"LLM_PROVIDER is set to '{provider}' but {key_attr.upper()} is not set."
+                )
 
         # Log warnings
         for warning in warnings:

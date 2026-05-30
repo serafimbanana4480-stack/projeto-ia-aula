@@ -6,10 +6,11 @@ import logging
 from datetime import timedelta
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from backend.config.settings import get_settings
 from backend.middleware.auth import create_access_token, require_auth
+from backend.middleware.rate_limit import limiter
 from backend.models.auth import (
     TokenResponse,
     UserLogin,
@@ -29,7 +30,8 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(user_data: UserRegister):
+@limiter.limit("5/minute")
+async def register(request: Request, user_data: UserRegister):
     """Register a new user.
     
     Rate limited to 5 requests per minute to prevent abuse.
@@ -71,7 +73,8 @@ async def register(user_data: UserRegister):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(user_data: UserLogin):
+@limiter.limit("5/minute")
+async def login(request: Request, user_data: UserLogin):
     """Login with email and password.
     
     Rate limited to 10 requests per minute to prevent brute force attacks.

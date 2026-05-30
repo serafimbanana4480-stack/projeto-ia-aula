@@ -14,6 +14,10 @@ AGENT SELECTION — Choose the primary agent based on these definitions:
 - DEBUGGER: Error messages, stack traces, test failures, unexpected runtime behaviour.
 - DOCUMENTER: README files, docstrings, API docs, comments, wikis, changelogs.
 - OPTIMIZER: Performance tuning, reducing complexity, memory optimization (when code works but is slow).
+- REFACTOR_PERFORMANCE: Deep performance refactoring — profiling, benchmarking, caching, memoization, async patterns, vectorization, generating performance reports.
+- REFACTOR_CLEAN: Code cleanliness refactoring — SOLID principles, DRY, naming, documentation, type hints, complexity reduction, style guide compliance, generating refactoring reports.
+- BUG_HUNTER_STATIC: Static analysis and security auditing — running linters (pylint, mypy, bandit, ruff), detecting SQL injection, XSS, path traversal, anti-patterns, code smells, cyclomatic complexity analysis, generating severity reports.
+- BUG_HUNTER_RUNTIME: Runtime bug hunting — executing test suites, fuzzing with edge cases, testing API endpoints with malformed inputs, detecting memory leaks, race conditions, capturing stack traces and reproduction steps.
 - MICRO: Simple factual questions, definitions, quick lookups, short answers (<50 tokens expected).
 
 COMPLEXITY SCORING (1-10):

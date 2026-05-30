@@ -1,6 +1,7 @@
 "use client";
 
 import React, { Component, ErrorInfo, ReactNode } from "react";
+import { log } from "../lib/log";
 
 interface Props {
   children: ReactNode;
@@ -36,7 +37,7 @@ export default class ErrorBoundary extends Component<Props, State> {
       error,
       errorInfo,
     });
-    console.error("ErrorBoundary caught an error:", error, errorInfo);
+    log.error("ErrorBoundary caught an error:", error, errorInfo);
   }
 
   handleReset = (): void => {

@@ -306,6 +306,94 @@ export async function getCurrentMetrics(): Promise<any> {
   return readJson<any>(await fetch(apiUrl("/api/metrics/current")));
 }
 
+// Guardian API functions
+
+export interface GuardianStatus {
+  agent: string;
+  running: boolean;
+  pending_suggestions: number;
+  total_suggestions: number;
+  system_health?: {
+    cpu_percent: number;
+    memory_percent: number;
+    disk_percent: number;
+    avg_latency_ms: number;
+  };
+}
+
+export interface GuardianSuggestion {
+  id: string;
+  category: "performance" | "reliability" | "security" | "maintenance" | "health";
+  priority: "low" | "medium" | "high" | "critical";
+  title: string;
+  description: string;
+  created_at: string;
+  auto_apply_safe: boolean;
+  applied: boolean;
+}
+
+export async function getGuardianStatus(): Promise<GuardianStatus> {
+  return readJson<GuardianStatus>(await fetch(apiUrl("/api/guardian/status")));
+}
+
+export async function getGuardianSuggestions(
+  limit: number = 10,
+  category?: string,
+  priority?: string,
+): Promise<{ suggestions: GuardianSuggestion[]; count: number }> {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (category) params.set("category", category);
+  if (priority) params.set("priority", priority);
+  return readJson<{ suggestions: GuardianSuggestion[]; count: number }>(
+    await fetch(apiUrl(`/api/guardian/suggestions?${params.toString()}`)),
+  );
+}
+
+export async function applyGuardianSuggestion(suggestionId: string): Promise<any> {
+  const response = await fetch(apiUrl(`/api/guardian/suggestions/${suggestionId}/apply`), {
+    method: "POST",
+  });
+  if (!response.ok) {
+    let errorText = "";
+    try {
+      errorText = await response.text();
+    } catch {
+      errorText = "Unable to read error response";
+    }
+    throw new ApiError(
+      `HTTP ${response.status}: ${response.statusText}`,
+      response.status,
+      errorText,
+    );
+  }
+  return response.json();
+}
+
+export async function getGuardianLogs(
+  params: {
+    session_id?: string;
+    agent?: string;
+    level?: string;
+    since?: string;
+    limit?: number;
+  } = {},
+): Promise<{ logs: any[]; count: number }> {
+  const query = new URLSearchParams();
+  if (params.session_id) query.set("session_id", params.session_id);
+  if (params.agent) query.set("agent", params.agent);
+  if (params.level) query.set("level", params.level);
+  if (params.since) query.set("since", params.since);
+  if (params.limit) query.set("limit", String(params.limit));
+  return readJson<{ logs: any[]; count: number }>(
+    await fetch(apiUrl(`/api/guardian/logs?${query.toString()}`)),
+  );
+}
+
+export async function getGuardianMetrics(): Promise<any> {
+  return readJson<any>(await fetch(apiUrl("/api/guardian/metrics")));
+}
+
 // Plan API functions
 
 export interface PlanStep {
@@ -417,4 +505,182 @@ export async function cancelPlan(
       body: JSON.stringify({ session_id: sessionId }),
     }),
   );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Mission Control API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export interface MissionPhase {
+  name: string;
+  status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "SKIPPED";
+  progress: number;
+  agent?: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
+export type MissionStatus = "PENDING" | "RUNNING" | "PAUSED" | "COMPLETED" | "FAILED" | "ABORTED";
+
+export interface Mission {
+  id: string;
+  objective: string;
+  status: MissionStatus;
+  progress: number;
+  active_agents: string[];
+  elapsed_seconds: number;
+  tokens_used: number;
+  phases: MissionPhase[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentInstance {
+  id: string;
+  name: string;
+  status: "idle" | "running" | "paused" | "failed" | "completed";
+  current_task?: string;
+  cpu_percent?: number;
+  memory_mb?: number;
+  tokens_used: number;
+  mission_id?: string;
+  started_at?: string;
+  last_heartbeat?: string;
+}
+
+export interface BusMessageItem {
+  message_id: string;
+  topic: string;
+  source_agent: string;
+  target_agents: string[];
+  payload: Record<string, unknown>;
+  timestamp: string;
+  priority: number;
+}
+
+export interface Review {
+  id: string;
+  artifact_id: string;
+  agent: string;
+  verdict: "approved" | "rejected" | "needs_work";
+  comments: string[];
+  timestamp: string;
+}
+
+export interface WhiteboardEntry {
+  id: string;
+  agent: string;
+  content: string;
+  timestamp: string;
+  tags: string[];
+}
+
+export interface QualityGate {
+  name: string;
+  label: string;
+  status: "pass" | "fail" | "warn" | "unknown";
+  value: string;
+  threshold?: string;
+}
+
+export interface SystemHealthSnapshot {
+  workers: Array<{
+    name: string;
+    status: "healthy" | "degraded" | "unhealthy" | "unknown";
+    last_run?: string;
+    queue_size?: number;
+  }>;
+  token_usage_hourly: Array<{ hour: string; tokens: number }>;
+  token_usage_daily: Array<{ day: string; tokens: number }>;
+  mission_success_rate: number;
+  mission_failure_rate: number;
+  agent_failure_rate: number;
+  total_missions: number;
+  total_agents: number;
+}
+
+export interface SelfImprovementProposal {
+  id: string;
+  title: string;
+  description: string;
+  agent: string;
+  impact: "low" | "medium" | "high" | "critical";
+  status: "proposed" | "approved" | "rejected" | "implemented";
+  created_at: string;
+}
+
+export async function getMissions(): Promise<Mission[]> {
+  const data = await readJson<{ missions?: Mission[] }>(await fetch(apiUrl("/api/missions")));
+  return data.missions ?? [];
+}
+
+export async function getMission(id: string): Promise<Mission> {
+  return readJson<Mission>(await fetch(apiUrl(`/api/missions/${id}`)));
+}
+
+export async function pauseMission(id: string): Promise<{ status: string; mission_id: string }> {
+  return readJson<{ status: string; mission_id: string }>(
+    await fetch(apiUrl(`/api/missions/${id}/pause`), { method: "POST" }),
+  );
+}
+
+export async function resumeMission(id: string): Promise<{ status: string; mission_id: string }> {
+  return readJson<{ status: string; mission_id: string }>(
+    await fetch(apiUrl(`/api/missions/${id}/resume`), { method: "POST" }),
+  );
+}
+
+export async function abortMission(id: string): Promise<{ status: string; mission_id: string }> {
+  return readJson<{ status: string; mission_id: string }>(
+    await fetch(apiUrl(`/api/missions/${id}/abort`), { method: "POST" }),
+  );
+}
+
+export async function getAgentInstances(): Promise<AgentInstance[]> {
+  const data = await readJson<{ agents?: AgentInstance[] }>(await fetch(apiUrl("/api/agents/instances")));
+  return data.agents ?? [];
+}
+
+export async function interveneAgent(
+  id: string,
+  action: "pause" | "resume" | "abort" | "restart",
+): Promise<{ status: string; agent_id: string }> {
+  return readJson<{ status: string; agent_id: string }>(
+    await fetch(apiUrl(`/api/agents/${id}/intervene`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    }),
+  );
+}
+
+export async function getBusMessages(topic?: string, limit: number = 50): Promise<BusMessageItem[]> {
+  const params = new URLSearchParams();
+  if (topic) params.set("topic", topic);
+  params.set("limit", String(limit));
+  const data = await readJson<{ messages?: BusMessageItem[]; count?: number }>(
+    await fetch(apiUrl(`/api/bus/history/all?${params.toString()}`)),
+  );
+  return data.messages ?? [];
+}
+
+export async function getReviews(artifactId: string): Promise<Review[]> {
+  const data = await readJson<{ reviews?: Review[] }>(await fetch(apiUrl(`/api/reviews?artifact_id=${artifactId}`)));
+  return data.reviews ?? [];
+}
+
+export async function getWhiteboard(): Promise<WhiteboardEntry[]> {
+  const data = await readJson<{ entries?: WhiteboardEntry[] }>(await fetch(apiUrl("/api/whiteboard")));
+  return data.entries ?? [];
+}
+
+export async function getSystemHealth(): Promise<SystemHealthSnapshot> {
+  return readJson<SystemHealthSnapshot>(await fetch(apiUrl("/api/system/health")));
+}
+
+export async function getSelfImprovementProposals(): Promise<SelfImprovementProposal[]> {
+  const data = await readJson<{ proposals?: SelfImprovementProposal[] }>(
+    await fetch(apiUrl("/api/self-improvement/proposals")),
+  );
+  return data.proposals ?? [];
 }

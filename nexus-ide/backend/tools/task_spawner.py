@@ -86,7 +86,7 @@ register_tool(
                 },
                 "agent": {
                     "type": "string",
-                    "enum": ["ARCHITECT", "RESEARCHER", "CODER", "ANALYZER", "DEBUGGER", "DOCUMENTER", "OPTIMIZER"],
+                    "enum": ["ARCHITECT", "RESEARCHER", "CODER", "ANALYZER", "DEBUGGER", "DOCUMENTER", "OPTIMIZER", "REFACTOR_PERFORMANCE", "REFACTOR_CLEAN"],
                     "description": "Agent type to execute the task",
                 },
                 "priority": {

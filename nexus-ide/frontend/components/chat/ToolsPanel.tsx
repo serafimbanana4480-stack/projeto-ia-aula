@@ -4,6 +4,7 @@ import { getTools, toggleTool as toggleToolRemote } from "../../lib/api";
 import { motion } from "framer-motion";
 import { Wrench, Check } from "lucide-react";
 import { useEffect } from "react";
+import { log } from "../../lib/log";
 
 const TOOLS = [
   { id: "read_file", name: "Read File", desc: "Read file contents" },
@@ -24,7 +25,7 @@ export default function ToolsPanel() {
         const data = await getTools();
         setTools(data);
       } catch (error) {
-        console.error("Failed to fetch tools:", error);
+        log.error("Failed to fetch tools:", error);
       }
     };
     initializeTools();
@@ -56,7 +57,7 @@ export default function ToolsPanel() {
                 try {
                   await toggleToolRemote(tool.id, !enabled);
                 } catch (error) {
-                  console.error("Failed to toggle tool:", error);
+                  log.error("Failed to toggle tool:", error);
                 }
               }}
               className={`flex w-full items-center justify-between rounded border p-2 text-left transition-colors ${

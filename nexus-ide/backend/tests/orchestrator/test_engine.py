@@ -334,7 +334,7 @@ class TestOrchestrationEngine:
         self, mock_ollama: MagicMock, mock_registry: dict, event_bus: EventBus
     ) -> OrchestrationEngine:
         return OrchestrationEngine(
-            ollama=mock_ollama,
+            llm_client=mock_ollama,
             registry=mock_registry,
             event_bus=event_bus,
             max_parallel=2,

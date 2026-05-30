@@ -2,8 +2,9 @@
 import { useCallback, useRef, useState } from "react";
 import type { StreamEvent } from "../lib/types";
 import { postChat } from "../lib/api";
+import { log } from "../lib/log";
 
-const STREAM_TIMEOUT_MS = 45000; // 45s timeout for the entire stream
+const STREAM_TIMEOUT_MS = 90000; // 90s timeout for the entire stream (Ollama may need time to load models)
 
 // Posts a chat message and consumes the SSE body stream incrementally.
 export function useAgentStream(sessionId: string) {
@@ -39,11 +40,11 @@ export function useAgentStream(sessionId: string) {
         if (requestId === activeRequestId.current) {
           controller.abort();
           setStreaming(false);
-          setError("O modelo demorou demasiado tempo a responder. Tenta novamente ou escolhe um modelo mais leve.");
+          setError("O modelo demorou demasiado tempo a responder. O Ollama pode estar a carregar o modelo na memória. Tenta novamente ou escolhe um modelo mais leve.");
           setEvents([
             {
               type: "error",
-              content: "Timeout: O modelo não respondeu dentro do tempo esperado (45s).",
+              content: "Timeout: O modelo não respondeu dentro do tempo esperado (90s). O Ollama pode estar a carregar o modelo na VRAM.",
               timestamp: new Date().toISOString(),
             },
           ]);
@@ -118,7 +119,7 @@ export function useAgentStream(sessionId: string) {
                 return;
               }
             } catch (e) {
-              console.error("Failed to parse SSE event:", chunk, e);
+              log.error("Failed to parse SSE event:", chunk, e);
             }
           }
         }

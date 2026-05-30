@@ -22,12 +22,13 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
 from backend.config.settings import get_model_config, load_prompt
 from backend.observability.metrics_collector import get_metrics_collector
-from backend.tools.ollama_client import ChatMessage, OllamaClient, OllamaError
+from backend.tools.ollama_client import ChatMessage
 from backend.tools.registry import execute_tool
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class AgentAction(StrEnum):
     RECALL_CONTEXT = "recall_context"
     ANALYZE_DATA = "analyze_data"
     GENERATE_REPORT = "generate_report"
+    SCAFFOLD_PROJECT = "scaffold_project"
 
 
 @dataclass
@@ -60,7 +62,7 @@ class AgentRequest:
 
     session_id: str
     query: str
-    client: OllamaClient
+    client: Any  # LLM provider — OllamaProvider, OpenAIProvider, etc.
     history: list[ChatMessage] = field(default_factory=list)
     context: dict[str, Any] = field(default_factory=dict)
     max_iterations: int = 7
@@ -116,10 +118,11 @@ class AgentBase(ABC):
         AgentAction.RECALL_CONTEXT: ("recall_context", '{"query": "<search_query>"}'),
         AgentAction.ANALYZE_DATA: ("data_analysis", '{"data_path": "<file>", "query": "<analysis_query>"}'),
         AgentAction.GENERATE_REPORT: ("report_generation", '{"title": "<title>", "sections": "<json_sections>"}'),
+        AgentAction.SCAFFOLD_PROJECT: ("scaffold_project", '{"name": "<project_name>", "template": "python"}'),
     }
 
-    def build_messages(self, request: AgentRequest, context: str = "") -> list[ChatMessage]:
-        """Assemble the message list sent to Ollama: system + history + user."""
+    def build_messages(self, request: AgentRequest, context: str = "") -> list[dict[str, str]]:
+        """Assemble the message list sent to the LLM: system + history + user."""
         system_content = self.system_prompt()
 
         # Inject tool usage instructions if agent supports ReAct actions
@@ -128,13 +131,14 @@ class AgentBase(ABC):
             if tool_instructions:
                 system_content += "\n\n" + tool_instructions
 
-        messages: list[ChatMessage] = [ChatMessage(role="system", content=system_content)]
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
         if context:
             messages.append(
-                ChatMessage(role="system", content=f"Context from previous steps:\n{context}")
+                {"role": "system", "content": f"Context from previous steps:\n{context}"}
             )
-        messages.extend(request.history)
-        messages.append(ChatMessage(role="user", content=request.query))
+        for msg in request.history:
+            messages.append({"role": msg.role, "content": msg.content})
+        messages.append({"role": "user", "content": request.query})
         return messages
 
     def _build_tool_instructions(self) -> str:
@@ -182,11 +186,16 @@ class AgentBase(ABC):
         falls back to the fallback_id defined in models.yaml.
         """
         model_cfg = get_model_config(self.model_key)
+        max_tokens = model_cfg.get("max_tokens", 2048)
+        # Cap tokens for faster responses on simple tasks
+        if max_tokens > 4096:
+            max_tokens = 4096
         options: dict[str, Any] = {
             "temperature": temperature
             if temperature is not None
             else model_cfg.get("temperature", 0.7),
-            "num_predict": model_cfg.get("max_tokens", 2048),
+            "num_predict": max_tokens,
+            "stop": ["<|im_end|>", "<|endoftext|>", "</tool_call>"],
         }
         messages = self.build_messages(request, context)
 
@@ -228,7 +237,7 @@ class AgentBase(ABC):
                     yield token
                 request_success = True
                 return  # Success — done
-            except OllamaError as exc:
+            except Exception as exc:
                 last_error = exc
                 logger.warning(
                     "Model %s failed for agent %s: %s. Trying next fallback.",
@@ -292,7 +301,30 @@ class AgentBase(ABC):
             except (json.JSONDecodeError, AttributeError):
                 logger.warning("Failed to parse JSON tool block: %s", match.group(1)[:100])
 
-        # Format 3: Inline JSON tool calls (no code block)
+        # Format 3: <tool_call>{...}</tool_call> (Qwen 3.x native format)
+        qwen_pattern = r"<tool_call>(.+?)</tool_call>"
+        for match in re.finditer(qwen_pattern, content, re.DOTALL):
+            try:
+                tool_json = json.loads(match.group(1).strip())
+                tool_name = (
+                    tool_json.get("name")
+                    or tool_json.get("tool")
+                    or tool_json.get("function")
+                    or ""
+                )
+                tool_args = (
+                    tool_json.get("arguments")
+                    or tool_json.get("args")
+                    or tool_json.get("parameters")
+                    or tool_json.get("params")
+                    or {}
+                )
+                if tool_name and isinstance(tool_args, dict):
+                    calls.append((tool_name, tool_args))
+            except (json.JSONDecodeError, AttributeError):
+                logger.warning("Failed to parse Qwen tool_call: %s", match.group(1)[:100])
+
+        # Format 4: Inline JSON tool calls (no code block)
         # Matches: {"tool_call": {"name": "...", "arguments": {...}}}
         inline_pattern = r'\{["\s]*tool_call["\s]*:\s*\{[^}]*"name"["\s]*:\s*"([^"]+)"[^}]*\}[^}]*\}'
         for match in re.finditer(inline_pattern, content):
@@ -322,11 +354,16 @@ class AgentBase(ABC):
         self,
         request: AgentRequest,
     ) -> AsyncIterator[str]:
-        """ReAct loop with tool calls and thinking blocks."""
+        """ReAct loop with tool calls, thinking blocks, and detailed logging."""
         context = ""
         iteration = 0
+        logger.info(
+            "[%s] ReAct loop started | session=%s | query=%.80s | project=%s | max_iter=%d",
+            self.name, request.session_id, request.query, request.project_path, request.max_iterations,
+        )
         while iteration < request.max_iterations:
             iteration += 1
+            logger.info("[%s] ReAct iteration %d/%d | session=%s", self.name, iteration, request.max_iterations, request.session_id)
 
             # Yield thinking block if enabled
             if request.enable_thinking:
@@ -334,49 +371,199 @@ class AgentBase(ABC):
 
             # Stream LLM response
             full_response = ""
-            async for token in self.stream_llm(request, context=context):
-                full_response += token
-                yield token
+            token_count = 0
+            stream_start = time.monotonic()
+            try:
+                async for token in self.stream_llm(request, context=context):
+                    full_response += token
+                    token_count += 1
+                    yield token
+            except Exception as exc:
+                logger.error("[%s] LLM stream failed on iteration %d: %s", self.name, iteration, exc, exc_info=True)
+                yield f"<event>error|LLM stream failed: {exc}</event>"
+                return
+            stream_elapsed = time.monotonic() - stream_start
+            logger.info(
+                "[%s] LLM response received | iteration=%d | tokens=%d | elapsed_ms=%.1f",
+                self.name, iteration, token_count, stream_elapsed * 1000,
+            )
 
             # Extract thinking and final answer
             thinking, answer = self._extract_thinking(full_response)
 
             if thinking:
+                logger.debug("[%s] Thinking block extracted | len=%d", self.name, len(thinking))
                 yield "<event>thinking_end</event>"
                 yield f"<thinking>{thinking}</thinking>"
 
             # Parse tool calls
             tool_calls = self._parse_tool_calls(answer)
+            logger.info("[%s] Tool calls parsed | iteration=%d | count=%d", self.name, iteration, len(tool_calls))
 
             if not tool_calls:
                 # No more tools, return final answer
+                logger.info("[%s] No tool calls detected — emitting final answer | iteration=%d", self.name, iteration)
                 yield "<event>answer</event>"
                 yield answer
                 return
 
             # Execute tools
             for tool_name, args in tool_calls:
+                logger.info("[%s] Executing tool | iteration=%d | tool=%s | args=%s", self.name, iteration, tool_name, args)
                 yield f"<event>tool_call|{tool_name}|{json.dumps(args)}</event>"
 
                 # Inject project_path from the request if the tool expects it
                 if request.project_path and "project_path" not in args:
                     args["project_path"] = request.project_path
+                    logger.debug("[%s] Injected project_path=%s into tool args", self.name, request.project_path)
 
+                # Inject source_agent for inter-agent consultation so the
+                # consulted agent knows who is calling and A2A traceability is complete.
+                if tool_name == "consult_agent" and "source_agent" not in args:
+                    args["source_agent"] = self.name
+                    logger.debug("[%s] Injected source_agent=%s into consult_agent args", self.name, self.name)
+
+                tool_start = time.monotonic()
                 result = await execute_tool(tool_name, request.session_id, args)
+                tool_elapsed = time.monotonic() - tool_start
 
                 if "error" in result:
+                    logger.warning(
+                        "[%s] Tool error | iteration=%d | tool=%s | error=%s | elapsed_ms=%.1f",
+                        self.name, iteration, tool_name, result['error'], tool_elapsed * 1000,
+                    )
                     yield f"<event>tool_error|{result['error']}</event>"
                 else:
+                    logger.info(
+                        "[%s] Tool success | iteration=%d | tool=%s | elapsed_ms=%.1f",
+                        self.name, iteration, tool_name, tool_elapsed * 1000,
+                    )
                     yield f"<event>tool_result|{tool_name}|{json.dumps(result.get('result', ''))}</event>"
 
                 context += f"\nTool {tool_name} returned: {json.dumps(result, default=str)}"
 
             # Continue loop with context
 
+        logger.warning("[%s] ReAct loop reached max iterations (%d) | session=%s", self.name, request.max_iterations, request.session_id)
+        yield f"<event>warning|Reached maximum iterations ({request.max_iterations})</event>"
+        yield "<event>answer</event>"
+        yield f"I reached the maximum of {request.max_iterations} iterations. Here's what I accomplished so far:\n{context}"
+
+    # ------------------------------------------------------------------
+    # Agent Bus helpers (pub/sub inter-agent communication)
+    # ------------------------------------------------------------------
+    async def publish(
+        self,
+        topic: str,
+        payload: dict[str, Any],
+        *,
+        target_agents: list[str] | None = None,
+        priority: int = 3,
+        ttl_seconds: int = 3600,
+    ) -> None:
+        """Publish a message to the Agent Bus on *topic*.
+
+        Args:
+            topic: Bus topic, e.g. ``code.changes``.
+            payload: JSON-serialisable dict with the message content.
+            target_agents: If provided, only those agents receive the message.
+            priority: 1 (lowest) to 5 (highest).
+            ttl_seconds: How long to retain the message in persistence.
+        """
+        from backend.core.agent_bus import BusMessage, get_agent_bus
+        import uuid
+
+        bus = get_agent_bus()
+        msg = BusMessage(
+            message_id=uuid.uuid4().hex[:16],
+            topic=topic,
+            source_agent=self.name,
+            target_agents=target_agents or [],
+            payload=payload,
+            priority=priority,
+            ttl_seconds=ttl_seconds,
+        )
+        await bus.publish(topic, msg)
+
+    async def subscribe(
+        self,
+        topic: str,
+        callback: Callable[[Any], Awaitable[Any]],
+    ) -> Any:
+        """Subscribe this agent to a bus topic.
+
+        Args:
+            topic: Topic to listen on, e.g. ``errors.found``.
+            callback: Async callable accepting a :class:`BusMessage`.
+
+        Returns:
+            A :class:`Subscription` handle that can be passed to ``unsubscribe``.
+        """
+        from backend.core.agent_bus import get_agent_bus
+
+        bus = get_agent_bus()
+        return await bus.subscribe(topic, callback)
+
     # ------------------------------------------------------------------
     # Required override
     # ------------------------------------------------------------------
     @abstractmethod
-    async def run(self, request: AgentRequest) -> AsyncIterator[str]:
-        """Execute the agent, yielding streaming chunks to the caller."""
+    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
+        """Agent-specific execution logic — subclasses implement this."""
         raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # State-aware entry point
+    # ------------------------------------------------------------------
+    async def run(self, request: AgentRequest) -> AsyncIterator[str]:
+        """Execute the agent with automatic state load / save.
+
+        Loads existing memories into ``request.context["_agent_memories"]``
+        before calling :meth:`_execute`, then persists a short-term memory
+        entry after the iterator completes.
+        """
+        from backend.core.agent_state import AgentStateStore
+        from backend.core.shared_memory import get_shared_memory
+
+        store = AgentStateStore()
+        brain = store.get_agent_brain(self.name)
+        request.context["_agent_memories"] = brain.model_dump(mode="json")
+
+        started_at = datetime.now(UTC)
+        output_parts: list[str] = []
+        try:
+            async for token in self._execute(request):
+                output_parts.append(token)
+                yield token
+        finally:
+            elapsed = (datetime.now(UTC) - started_at).total_seconds()
+            try:
+                store.save_state(
+                    agent_name=self.name,
+                    session_id=request.session_id,
+                    project_path=request.project_path or "",
+                    tier="short_term",
+                    key=f"run_{started_at.isoformat()}",
+                    value={"query": request.query, "elapsed_seconds": round(elapsed, 3)},
+                    importance=0.3,
+                )
+            except Exception as exc:
+                logger.warning("[%s] Failed to save agent state: %s", self.name, exc)
+
+            # Write execution summary to shared memory (swarm intelligence)
+            try:
+                shm = get_shared_memory()
+                content = "".join(output_parts)
+                shm.write_entry(
+                    agent_name=self.name,
+                    topic=f"agent.execution.{self.name.lower()}",
+                    content=(
+                        f"Query: {request.query}\n"
+                        f"Output (truncated): {content[:2000]}\n"
+                        f"Elapsed: {elapsed:.3f}s"
+                    ),
+                    importance=0.5,
+                    tags=["agent.run", self.name.lower()],
+                )
+            except Exception as exc:
+                logger.warning("[%s] Failed to write shared memory: %s", self.name, exc)

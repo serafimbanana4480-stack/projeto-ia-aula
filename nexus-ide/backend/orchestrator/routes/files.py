@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, File, UploadFile
 
 from backend.models.api import FileListRequest, FileReadRequest, FileTreeEntry, FileWriteRequest
 from backend.tools.file_ops import list_dir, read_file, write_file
@@ -69,3 +69,34 @@ async def write_file_endpoint(req: FileWriteRequest) -> dict:
         session_id=req.session_id,
         project_id=req.project_id,
     )
+
+
+@router.post("/files/upload")
+async def upload_file(
+    file: UploadFile = File(...),
+    project_path: str = ".",
+    session_id: str | None = None,
+) -> dict:
+    """Upload a file to the project workspace."""
+    try:
+        target_dir = Path(project_path).resolve()
+        target_path = target_dir / file.filename
+
+        # Ensure target is within project path
+        try:
+            target_path.relative_to(target_dir)
+        except ValueError:
+            return {"error": "Invalid file path — outside project directory"}
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        content = await file.read()
+        target_path.write_bytes(content)
+
+        return {
+            "filename": file.filename,
+            "path": str(target_path),
+            "size": len(content),
+            "content_type": file.content_type,
+        }
+    except Exception as e:
+        return {"error": f"Upload failed: {e}"}

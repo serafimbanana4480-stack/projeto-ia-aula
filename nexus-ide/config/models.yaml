@@ -2,6 +2,54 @@
 # 5 tiers especializados, com fallback automático para qwen3.5:9b se algum
 # modelo não estiver instalado (qwen3.5 é a série de modelos principal).
 
+# LLM Provider configuration
+# Each provider maps to a base URL and default models.
+providers:
+  ollama:
+    name: "Ollama (Local)"
+    base_url: "http://localhost:11434"
+    default_models:
+      - qwen3.5:9b
+      - qwen3-coder:7b
+      - deepseek-r1:8b
+      - qwen3.5:27b
+    requires_api_key: false
+
+  openai:
+    name: "OpenAI"
+    base_url: "https://api.openai.com/v1"
+    default_models:
+      - gpt-4o
+      - gpt-4o-mini
+      - gpt-3.5-turbo
+    requires_api_key: true
+
+  deepseek:
+    name: "DeepSeek"
+    base_url: "https://api.deepseek.com/v1"
+    default_models:
+      - deepseek-chat
+      - deepseek-reasoner
+    requires_api_key: true
+
+  kimi:
+    name: "Kimi (Moonshot AI)"
+    base_url: "https://api.moonshot.cn/v1"
+    default_models:
+      - kimi-k2.5
+      - kimi-k2
+      - kimi-k2-mini
+    requires_api_key: true
+
+  groq:
+    name: "Groq"
+    base_url: "https://api.groq.com/openai/v1"
+    default_models:
+      - llama-3.3-70b-versatile
+      - llama-3.1-8b-instant
+      - mixtral-8x7b-32768
+    requires_api_key: true
+
 models:
   # MICRO — perguntas triviais (1+1, classificação rápida)
   micro:

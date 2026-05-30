@@ -19,25 +19,24 @@ import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from slowapi import Limiter
-from slowapi.util import get_remote_address
-
 from backend.agents.base import AgentRequest
-from backend.config.settings import get_model_config
+from backend.config.settings import get_model_config, get_settings, load_models_config
+from backend.llm.multi_llm_manager import MultiLLMManager
+from backend.middleware.rate_limit import limiter
 from backend.models.api import ChatRequest, RoutingDecision, StreamEvent
 from backend.orchestrator.fallback import invoke_with_fallback
 from backend.orchestrator.registry import resolve
 from backend.orchestrator.router import fast_route, route_with_model
 from backend.orchestrator.smart_router import smart_route_tier
 from backend.persistence.db import add_message, create_session, get_session
-from backend.tools.ollama_client import ChatMessage, OllamaError
+from backend.tools.ollama_client import ChatMessage
 from backend.tools.sanitizer import detect_injection
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-limiter = Limiter(key_func=get_remote_address)
 
 
 def _sse(event: StreamEvent) -> str:
@@ -63,7 +62,7 @@ _MODEL_TIER_TO_AGENT: dict[str, str] = {
 }
 
 
-async def _decide_route(query: str, ollama) -> RoutingDecision:
+async def _decide_route(query: str, llm_client) -> RoutingDecision:
     """Combine fast_route + smart_route_tier + route_with_model. Never raises.
 
     Routing strategy:
@@ -82,7 +81,7 @@ async def _decide_route(query: str, ollama) -> RoutingDecision:
 
     # Level 2: Smart tier selection (heuristic + optional LLM fallback)
     try:
-        tier = await smart_route_tier(query, ollama)
+        tier = await smart_route_tier(query, llm_client)
         agent_name = _MODEL_TIER_TO_AGENT.get(tier, "CODER")
         return RoutingDecision(
             primary_agent=agent_name,  # type: ignore[arg-type]
@@ -93,7 +92,7 @@ async def _decide_route(query: str, ollama) -> RoutingDecision:
         logger.warning("SmartRouter failed, falling back to model routing: %s", exc)
 
     # Level 3: LLM-based agent classification
-    decision = await route_with_model(query, ollama)
+    decision = await route_with_model(query, llm_client)
 
     # If the model indicates web search is needed, ensure RESEARCHER is involved
     if decision.requires_web_search and decision.primary_agent != "RESEARCHER":
@@ -117,14 +116,14 @@ async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
     can render it gracefully. Returning 4xx/5xx would break the EventSource
     contract on most browsers.
     """
-    ollama = request.app.state.ollama
+    llm_client = request.app.state.llm_client
     registry = request.app.state.registry
     context = request.app.state.context
     event_bus = getattr(request.app.state, "event_bus", None)
 
     async def event_stream() -> AsyncIterator[str]:
         async for chunk in _run_pipeline(
-            req, ollama, registry, context, event_bus
+            req, llm_client, registry, context, event_bus, request
         ):
             yield chunk
 
@@ -140,7 +139,7 @@ async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
 
 
 async def _run_pipeline(
-    req: ChatRequest, ollama, registry, context, event_bus=None
+    req: ChatRequest, llm_client, registry, context, event_bus=None, request: Request | None = None
 ) -> AsyncIterator[str]:
     """The core chat pipeline, extracted for testability (keeps the route tiny)."""
     started_at = time.time()
@@ -182,7 +181,7 @@ async def _run_pipeline(
         try:
             from backend.orchestrator.engine import OrchestrationEngine
             engine = OrchestrationEngine(
-                ollama=ollama,
+                llm_client=llm_client,
                 registry=registry,
                 event_bus=event_bus,
             )
@@ -224,7 +223,7 @@ async def _run_pipeline(
         try:
             from backend.orchestrator.engine import OrchestrationEngine
             engine = OrchestrationEngine(
-                ollama=ollama,
+                llm_client=llm_client,
                 registry=registry,
                 event_bus=event_bus,
             )
@@ -294,9 +293,127 @@ async def _run_pipeline(
             context_needed="low",
             task_type="question",
         )
+    elif mode == "swarm":
+        try:
+            from backend.orchestrator.swarm import SwarmOrchestrator
+
+            swarm_agents = getattr(req, "swarm_agents", []) or []
+            swarm_strategy = getattr(req, "swarm_strategy", "divide") or "divide"
+
+            if not swarm_agents:
+                swarm_agents = ["ARCHITECT", "CODER", "ANALYZER"]
+
+            swarm = SwarmOrchestrator(
+                llm_client=llm_client,
+                registry=registry,
+                event_bus=event_bus,
+                max_agents=5,
+            )
+
+            yield _sse(StreamEvent(type="agent_started", agent="SWARM"))
+
+            result = await swarm.execute_swarm(
+                objective=req.message,
+                session_id=req.session_id,
+                agents=swarm_agents,
+                strategy=swarm_strategy,
+                project_path=project_path,
+            )
+
+            for ar in result.agent_results:
+                yield _sse(StreamEvent(type="agent_started", agent=ar.agent))
+                output_text = ar.output if ar.output else ar.error
+                for line in output_text.split("\n"):
+                    yield _sse(StreamEvent(type="token", agent=ar.agent, content=line + "\n"))
+                yield _sse(StreamEvent(type="agent_finished", agent=ar.agent))
+
+            yield _sse(StreamEvent(type="agent_started", agent="SWARM"))
+            for line in result.final_answer.split("\n"):
+                yield _sse(StreamEvent(type="token", agent="SWARM", content=line + "\n"))
+            yield _sse(StreamEvent(type="agent_finished", agent="SWARM"))
+
+            # Persist exchange
+            full = result.final_answer
+            now = datetime.now(UTC).isoformat()
+            await context.append_message(
+                req.session_id, ChatMessage(role="user", content=req.message, timestamp=now)
+            )
+            await context.append_message(
+                req.session_id, ChatMessage(role="assistant", content=full, timestamp=now)
+            )
+            latency_ms = int((time.time() - started_at) * 1000)
+
+            if get_session(req.session_id) is None:
+                create_session(
+                    title=req.message[:60] or "Nova sessão",
+                    mode="swarm",
+                    session_id=req.session_id,
+                )
+
+            add_message(req.session_id, "user", req.message, tier_used="SWARM", latency_ms=latency_ms)
+            add_message(req.session_id, "assistant", full, tier_used="SWARM", latency_ms=latency_ms)
+
+            try:
+                from backend.knowledge.memory import MemoryType, get_memory_store
+
+                ollama_host = str(llm_client._host) if hasattr(llm_client, "_host") else get_settings().ollama_host
+                mem_store = get_memory_store(ollama_host=ollama_host)
+                await mem_store.store(
+                    content=f"User: {req.message}",
+                    memory_type=MemoryType.CONVERSATION,
+                    session_id=req.session_id,
+                    source="SWARM",
+                    tags=["user_query", "swarm"],
+                    importance=0.6,
+                )
+                if full.strip():
+                    await mem_store.store(
+                        content=f"Assistant (SWARM): {full[:2000]}",
+                        memory_type=MemoryType.CONVERSATION,
+                        session_id=req.session_id,
+                        source="SWARM",
+                        tags=["assistant_response", "swarm"],
+                        importance=0.5,
+                    )
+            except Exception as exc:
+                logger.debug("Semantic memory store failed (non-critical): %s", exc)
+
+            yield _sse(StreamEvent(type="done"))
+            return
+        except Exception as exc:
+            logger.warning("Swarm execution failed, falling back to CODER: %s", exc)
+            yield _sse(
+                StreamEvent(
+                    type="token",
+                    agent="SWARM",
+                    content=f"Swarm execution failed: {exc}. Falling back to single-agent mode.\n",
+                )
+            )
+            decision = RoutingDecision(
+                primary_agent="CODER",
+                routing_confidence=0.7,
+                routing_reason="swarm-mode-fallback",
+                thinking_mode="deep",
+                context_needed="high",
+                task_type="implementation",
+            )
     else:
-        decision = await _decide_route(req.message, ollama)
+        decision = await _decide_route(req.message, llm_client)
     yield _sse(StreamEvent(type="routing", routing=decision))
+
+    # Ensure session exists in relational DB BEFORE invoking the agent.
+    # Agents may execute tools that log to tool_executions (FK to sessions).
+    if get_session(req.session_id) is None:
+        create_session(
+            title=req.message[:60] or "Nova sessão",
+            mode=req.mode or "auto",
+            session_id=req.session_id,
+        )
+
+    # Determine effective LLM client (respect provider selection).
+    effective_client = llm_client
+    if req.provider and isinstance(llm_client, MultiLLMManager):
+        effective_client = llm_client.providers.get(req.provider) or llm_client
 
     # 3. Resolve agent + build per-agent request factory.
     def make_invocation(agent_name: str):
@@ -305,7 +422,7 @@ async def _run_pipeline(
             agent_req = AgentRequest(
                 session_id=req.session_id,
                 query=req.message,
-                client=ollama,
+                client=effective_client,
                 history=history,
                 project_path=project_path,
             )
@@ -319,7 +436,7 @@ async def _run_pipeline(
             decision.primary_agent,
             lambda name: make_invocation(name)(),
         )
-    except OllamaError as exc:
+    except Exception as exc:
         logger.exception("All fallbacks exhausted: %s", exc)
         yield _sse(StreamEvent(type="error", content=f"Upstream unavailable: {exc}"))
         yield _sse(StreamEvent(type="done"))
@@ -329,9 +446,18 @@ async def _run_pipeline(
 
     # 5. Stream tokens and accumulate full response for history.
     parts: list[str] = []
+    MAX_RESPONSE_LENGTH = 100_000  # ~100k chars to prevent memory DoS
     try:
         async for token in token_stream:
+            # Check if client disconnected to avoid wasting tokens
+            if request is not None and await request.is_disconnected():
+                logger.debug("Client disconnected, stopping stream")
+                break
             parts.append(token)
+            # Prevent unbounded memory growth
+            if sum(len(p) for p in parts) > MAX_RESPONSE_LENGTH:
+                logger.warning("Response exceeded max length, truncating")
+                break
             yield _sse(
                 StreamEvent(
                     type="token",
@@ -339,14 +465,14 @@ async def _run_pipeline(
                     content=token,
                 )
             )
-    except OllamaError as exc:
+    except Exception as exc:
         logger.exception("Stream interrupted: %s", exc)
         yield _sse(StreamEvent(type="error", content=f"Stream interrupted: {exc}"))
         yield _sse(StreamEvent(type="done"))
         return
 
     # 6. Persist exchange.
-    full = "".join(parts)
+    full = "".join(parts)[:MAX_RESPONSE_LENGTH]
     now = datetime.now(UTC).isoformat()
     await context.append_message(
         req.session_id, ChatMessage(role="user", content=req.message, timestamp=now)
@@ -355,14 +481,6 @@ async def _run_pipeline(
         req.session_id, ChatMessage(role="assistant", content=full, timestamp=now)
     )
     latency_ms = int((time.time() - started_at) * 1000)
-
-    # Ensure session exists in relational DB before writing messages (FK guard).
-    if get_session(req.session_id) is None:
-        create_session(
-            title=req.message[:60] or "Nova sessão",
-            mode=req.mode or "auto",
-            session_id=req.session_id,
-        )
 
     add_message(
         req.session_id,
@@ -383,7 +501,8 @@ async def _run_pipeline(
     try:
         from backend.knowledge.memory import MemoryType, get_memory_store
 
-        mem_store = get_memory_store(ollama_host=str(ollama._host) if hasattr(ollama, "_host") else "")
+        ollama_host = str(llm_client._host) if hasattr(llm_client, "_host") else get_settings().ollama_host
+        mem_store = get_memory_store(ollama_host=ollama_host)
 
         # Store the user query
         await mem_store.store(
@@ -410,6 +529,72 @@ async def _run_pipeline(
 
     yield _sse(StreamEvent(type="agent_finished", agent=outcome.used_agent))  # type: ignore[arg-type]
     yield _sse(StreamEvent(type="done"))
+
+
+@router.get("/providers")
+async def list_providers(request: Request) -> dict:
+    """Return available LLM providers and their health status."""
+    settings = get_settings()
+    cfg = load_models_config()
+    providers_cfg = cfg.get("providers", {})
+
+    llm_client = request.app.state.llm_client
+    health_data: dict[str, dict] = {}
+
+    if isinstance(llm_client, MultiLLMManager):
+        health_data = await llm_client.health_check_all()
+    else:
+        name = settings.llm_provider.lower()
+        try:
+            client = getattr(llm_client, "_client", None)
+            if isinstance(client, httpx.AsyncClient):
+                resp = await client.get("/models", timeout=5.0)
+                health = {
+                    "status": "healthy" if resp.status_code == 200 else "unhealthy",
+                    "latency": 0,
+                }
+            elif hasattr(client, "_client") and isinstance(
+                client._client, httpx.AsyncClient
+            ):
+                base_url = str(client._client.base_url).rstrip("/")
+                async with httpx.AsyncClient(timeout=5.0) as temp:
+                    resp = await temp.get(f"{base_url}/api/tags")
+                    health = {
+                        "status": "healthy" if resp.status_code == 200 else "unhealthy",
+                        "latency": 0,
+                    }
+            else:
+                health = {"status": "unknown"}
+        except Exception as exc:
+            health = {"status": "unhealthy", "error": str(exc)}
+        health_data = {name: health}
+
+    result: list[dict] = []
+    active_provider = settings.llm_provider.lower()
+    for key, pcfg in providers_cfg.items():
+        requires_key = pcfg.get("requires_api_key", False)
+        api_key_set = False
+        if requires_key:
+            key_attr = f"{key}_api_key"
+            api_key_set = bool(getattr(settings, key_attr, ""))
+
+        result.append(
+            {
+                "id": key,
+                "name": pcfg.get("name", key),
+                "base_url": pcfg.get("base_url", ""),
+                "default_models": pcfg.get("default_models", []),
+                "requires_api_key": requires_key,
+                "api_key_set": api_key_set,
+                "active": key == active_provider,
+                "health": health_data.get(key, {"status": "unknown"}),
+            }
+        )
+
+    return {
+        "providers": result,
+        "active_provider": active_provider,
+    }
 
 
 # Small helper so JSON marshaling can be tested without spinning up FastAPI.

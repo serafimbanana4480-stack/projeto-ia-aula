@@ -26,6 +26,6 @@ class MicroAgent(AgentBase):
     def system_prompt(self) -> str:  # type: ignore[override]
         return _SYSTEM
 
-    async def run(self, request: AgentRequest) -> AsyncIterator[str]:
+    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
         async for token in self.stream_llm(request, temperature=0.3):
             yield token

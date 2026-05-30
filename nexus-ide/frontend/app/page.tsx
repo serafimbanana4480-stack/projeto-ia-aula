@@ -18,7 +18,7 @@ function LoadingFallback() {
   );
 }
 
-// LUSO AI style layout: sidebar + central chat + right panel
+// NEXUS IDE style layout: sidebar + central chat + right panel
 export default function HomePage() {
   const [rightOpen, setRightOpen] = useState(true);
 

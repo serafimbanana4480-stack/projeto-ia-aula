@@ -88,7 +88,7 @@ class DashboardAgent(AgentBase):
         self._monitor_breaker = _CircuitBreaker(failure_threshold=3, reset_timeout_seconds=120.0)
         self._summary_breaker = _CircuitBreaker(failure_threshold=3, reset_timeout_seconds=300.0)
 
-    async def run(self, request: AgentRequest) -> AsyncIterator[str]:
+    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
         """On-demand Q&A about metrics.
 
         Fetches current system metrics and formats them as context,

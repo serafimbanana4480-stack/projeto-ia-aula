@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+import asyncio
 from typing import Any
 
 from backend.contracts.a2a import A2AMessage, TaskType, MessagePriority
@@ -44,6 +45,9 @@ async def consult_agent(
     source_agent: str = "UNKNOWN",
     session_id: str = "consult-sub",
     priority: str = "medium",
+    context: str = "",
+    timeout_seconds: int = 60,
+    project_path: str = "",
 ) -> dict[str, Any]:
     """Consult another agent for specialized input via A2A protocol.
 
@@ -93,8 +97,8 @@ async def consult_agent(
     )
 
     logger.info(
-        "A2A: %s → %s (task=%s, priority=%s, msg_id=%s)",
-        source_upper, agent_upper, task_type.value, priority_enum.value, a2a_msg.message_id,
+        "A2A: %s → %s (task=%s, priority=%s, msg_id=%s, timeout=%ds)",
+        source_upper, agent_upper, task_type.value, priority_enum.value, a2a_msg.message_id, timeout_seconds,
     )
 
     try:
@@ -102,36 +106,59 @@ async def consult_agent(
         from backend.agents.base import AgentRequest
         from backend.config.settings import get_settings
 
-        # Reuse the shared OllamaClient from the FastAPI app state when available,
-        # otherwise create a short-lived one.
+        # Reuse the shared LLM client from the FastAPI app state when available,
+        # otherwise create one via the factory.
         client = None
         try:
             from backend.orchestrator.main import app
-            if hasattr(app.state, "ollama"):
-                client = app.state.ollama
+            if hasattr(app.state, "llm_client"):
+                client = app.state.llm_client
         except (ImportError, AttributeError):
             pass
 
         if client is None:
-            from backend.tools.ollama_client import OllamaClient
-            settings = get_settings()
-            client = OllamaClient(host=settings.ollama_host)
+            from backend.llm import create_llm_client
+            client = create_llm_client()
 
         # Get the target agent from the registry
         registry = build_default_registry()
         target_agent = resolve(registry, agent_upper)  # type: ignore[arg-type]
 
-        # Build a minimal request for the sub-agent
+        # Build a request for the sub-agent, passing through context
+        extra_context: dict[str, Any] = {"a2a_message_id": a2a_msg.message_id}
+        if context:
+            extra_context["consultation_context"] = context
+
         sub_request = AgentRequest(
             session_id=session_id,
             query=question,
             client=client,
+            project_path=project_path,
+            context=extra_context,
         )
 
-        # Run the sub-agent and collect the response
+        # Run the sub-agent with timeout and collect the response
         parts: list[str] = []
-        async for token in target_agent.run(sub_request):
-            parts.append(token)
+
+        async def _collect() -> list[str]:
+            collected: list[str] = []
+            async for token in target_agent.run(sub_request):
+                collected.append(token)
+            return collected
+
+        try:
+            parts = await asyncio.wait_for(_collect(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "A2A consultation timed out | %s → %s | timeout=%ds | msg_id=%s",
+                source_upper, agent_upper, timeout_seconds, a2a_msg.message_id,
+            )
+            return {
+                "error": f"Consultation with {agent_upper} timed out after {timeout_seconds}s",
+                "agent": agent_upper,
+                "a2a_message_id": a2a_msg.message_id,
+                "a2a_correlation_id": a2a_msg.correlation_id,
+            }
 
         response_text = "".join(parts)
 
@@ -201,6 +228,15 @@ register_tool(
                     "type": "string",
                     "enum": ["critical", "high", "medium", "low"],
                     "description": "Message priority level",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Additional context to pass to the consulted agent",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "default": 60,
+                    "description": "Maximum time to wait for the consulted agent response",
                 },
             },
             "required": ["agent", "question"],

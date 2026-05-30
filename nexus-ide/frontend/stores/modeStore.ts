@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
 export interface Mode {
   id: string;
   description: string;
@@ -41,7 +43,7 @@ export const useModeStore = create<ModeStore>((set, get) => ({
   loadModes: async () => {
     if (get().modesLoaded) return;
     try {
-      const res = await fetch("http://localhost:8000/api/modes");
+      const res = await fetch(`${API_BASE}/api/modes`);
       if (res.ok) {
         const data = (await res.json()) as { modes: Record<string, Omit<Mode, "id">> };
         const modes: Mode[] = Object.entries(data.modes).map(([id, m]) => ({

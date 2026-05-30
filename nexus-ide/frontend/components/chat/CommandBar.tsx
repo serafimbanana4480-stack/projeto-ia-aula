@@ -62,7 +62,7 @@ export default function CommandBar({
             disabled={disabled || !input.trim()}
             className="rounded bg-nexus-accent p-2 text-black hover:bg-nexus-accent/80 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <Send className="h-4 w-4" />
+            <Send className="h-4 w-4 pointer-events-none" />
           </button>
         </div>
       </div>
