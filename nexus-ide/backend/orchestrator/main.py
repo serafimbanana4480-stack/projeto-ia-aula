@@ -16,6 +16,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +26,7 @@ from slowapi.errors import RateLimitExceeded
 from backend.config.settings import get_settings, validate_configuration
 from backend.middleware.rate_limit import limiter
 from backend.middleware.security import SecurityHeadersMiddleware
+from backend.observability.health import HealthChecker
 from backend.observability.routes.alerts import router as alerts_router
 from backend.observability.routes.metrics import router as metrics_router
 from backend.orchestrator.routes.agent_bus import router as agent_bus_router
@@ -223,9 +225,17 @@ app.add_api_websocket_route("/ws/missions/{mission_id}", _meta_ws)
 
 @app.get("/health")
 @limiter.limit("100/minute")
-async def health(request: Request) -> dict[str, str]:
-    """Liveness probe. Returns ``200`` whenever the process is up."""
-    return {"status": "ok"}
+async def health(request: Request, deep: bool = False) -> dict[str, Any]:
+    """Liveness probe. Returns ``200`` whenever the process is up.
+
+    With ``?deep=true`` runs a full health check against every background
+    service and returns per-subsystem status.
+    """
+    if not deep:
+        return {"status": "ok"}
+
+    checker = HealthChecker(request.app.state)
+    return await checker.check_all()
 
 
 @app.get("/api/sessions/{session_id}/history")
