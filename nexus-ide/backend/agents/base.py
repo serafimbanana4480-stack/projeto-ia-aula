@@ -49,6 +49,9 @@ class AgentAction(StrEnum):
     ANALYZE_DATA = "analyze_data"
     GENERATE_REPORT = "generate_report"
     SCAFFOLD_PROJECT = "scaffold_project"
+    SEARCH_GITHUB = "search_github"
+    SEARCH_DOCS = "search_docs"
+    DEEP_RESEARCH = "deep_research"
 
 
 @dataclass
@@ -119,6 +122,9 @@ class AgentBase(ABC):
         AgentAction.ANALYZE_DATA: ("data_analysis", '{"data_path": "<file>", "query": "<analysis_query>"}'),
         AgentAction.GENERATE_REPORT: ("report_generation", '{"title": "<title>", "sections": "<json_sections>"}'),
         AgentAction.SCAFFOLD_PROJECT: ("scaffold_project", '{"name": "<project_name>", "template": "python"}'),
+        AgentAction.SEARCH_GITHUB: ("search_github", '{"query": "<query>", "language": "python", "stars_min": 100}'),
+        AgentAction.SEARCH_DOCS: ("search_docs", '{"query": "<query>", "framework": "python"}'),
+        AgentAction.DEEP_RESEARCH: ("deep_research", '{"query": "<research_query>", "max_results": 5}'),
     }
 
     def build_messages(self, request: AgentRequest, context: str = "") -> list[dict[str, str]]:
@@ -204,6 +210,14 @@ class AgentBase(ABC):
         models_to_try = [model_cfg["id"]]
         if fallback_id and fallback_id != model_cfg["id"]:
             models_to_try.append(fallback_id)
+
+        # Optional test override: NEXUS_TEST_MODEL=<alias> forces every agent
+        # to use a smaller, CPU-friendly model regardless of models.yaml.
+        # Useful for CI / dev machines without GPU.
+        import os
+        test_model = os.environ.get("NEXUS_TEST_MODEL", "").strip()
+        if test_model:
+            models_to_try = [test_model]
 
         last_error: Exception | None = None
         for model_id in models_to_try:
@@ -350,6 +364,45 @@ class AgentBase(ABC):
             return thinking, answer
         return "", content
 
+    def _estimate_tokens(self, text: str) -> int:
+        """Rough token estimate: ~4 chars per token for English/ASCII text."""
+        return max(1, len(text) // 4)
+
+    def _trim_context(self, context: str, iteration: int) -> str:
+        """Trim context to keep it under ~4000 tokens.
+
+        Keeps the most recent 3 iterations in full detail.
+        Summarizes older iterations into a memory digest.
+        """
+        token_count = self._estimate_tokens(context)
+        if token_count <= 4000:
+            return context
+
+        # Split by iteration markers
+        iterations = context.split("\nTool ")
+        if len(iterations) <= 4:
+            # Not enough structure — simple truncation of oldest content
+            excess = token_count - 3500
+            chars_to_remove = excess * 4
+            return context[chars_to_remove:]
+
+        # Keep last 3 iterations in full, summarize the rest
+        keep_start = max(1, len(iterations) - 3)
+        summary_parts: list[str] = []
+        for i, part in enumerate(iterations[1:keep_start], start=1):
+            # Extract just the tool name and success/failure
+            first_line = part.split(":", 1)[0] if ":" in part else part[:60]
+            summary_parts.append(f"[Iteration {i}] {first_line}...")
+
+        digest = "\n".join(summary_parts)
+        recent = "\nTool ".join(iterations[keep_start:])
+        trimmed = f"[Memory digest of earlier steps]\n{digest}\n\n[Recent steps]\n{recent}"
+        logger.info(
+            "[%s] Context trimmed | before=%d tokens | after=%d tokens | iterations=%d -> %d recent",
+            self.name, token_count, self._estimate_tokens(trimmed), len(iterations) - 1, len(iterations) - keep_start,
+        )
+        return trimmed
+
     async def _run_react_loop(
         self,
         request: AgentRequest,
@@ -364,6 +417,9 @@ class AgentBase(ABC):
         while iteration < request.max_iterations:
             iteration += 1
             logger.info("[%s] ReAct iteration %d/%d | session=%s", self.name, iteration, request.max_iterations, request.session_id)
+
+            # Trim context before each iteration to prevent unbounded growth
+            context = self._trim_context(context, iteration)
 
             # Yield thinking block if enabled
             if request.enable_thinking:

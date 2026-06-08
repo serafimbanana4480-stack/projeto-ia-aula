@@ -12,6 +12,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.middleware.auth import create_access_token
 from backend.orchestrator import main as main_module
 from backend.tests.conftest import make_stream_response
 from backend.tools.ollama_client import OllamaClient
@@ -37,15 +38,24 @@ def client_with_mocked_ollama(
     # every app.state.ollama created uses our in-process mock transport.
     original = OllamaClient.__init__
 
-    def patched_init(self, host, *, transport=None, timeout=None):  # type: ignore[no-redef]
+    def patched_init(self, base_url: str = "", *, transport=None, timeout=None, limits=None):  # type: ignore[no-redef]
         kwargs: dict = {"transport": mock_transport}
         if timeout is not None:
             kwargs["timeout"] = timeout
-        return original(self, host, **kwargs)
+        if limits is not None:
+            kwargs["limits"] = limits
+        return original(self, base_url, **kwargs)
 
     monkeypatch.setattr(OllamaClient, "__init__", patched_init)
 
-    with TestClient(main_module.app) as client:
+    # Force re-creation of the app's LLM client so a previously closed
+    # singleton from another test module doesn't leak in.
+    for attr in ("ollama", "llm_client"):
+        if hasattr(main_module.app.state, attr):
+            delattr(main_module.app.state, attr)
+
+    token = create_access_token({"sub": "test-user", "email": "test@test.com"})
+    with TestClient(main_module.app, headers={"Authorization": f"Bearer {token}"}) as client:
         yield client
 
 

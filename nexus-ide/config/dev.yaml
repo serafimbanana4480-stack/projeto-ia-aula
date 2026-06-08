@@ -29,12 +29,13 @@ redis:
   db: 0
   password: null
 
-# Ollama Settings
-ollama:
-  host: "http://localhost:11434"
-  dashboard_host: "http://localhost:11435"
-  timeout: 60
-  retry_attempts: 3
+# Local LLM (AirLLM) Settings
+local_llm:
+  device: "auto"        # auto | cuda:0 | cpu
+  dashboard_device: "cpu"
+  compression: ""       # "" | 4bit | 8bit
+  timeout: 300
+  retry_attempts: 1
 
 # Observability Settings
 observability:

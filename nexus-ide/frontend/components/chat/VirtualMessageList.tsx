@@ -1,8 +1,8 @@
 import { useState, ReactNode } from "react";
 
-interface VirtualMessageListProps {
-  messages: any[];
-  renderItem: (message: any, index: number) => ReactNode;
+interface VirtualMessageListProps<TMessage> {
+  messages: TMessage[];
+  renderItem: (message: TMessage, index: number) => ReactNode;
   initialLimit?: number;
   className?: string;
 }
@@ -12,12 +12,12 @@ interface VirtualMessageListProps {
  * Limits the number of rendered messages to improve performance.
  * Users can click "Load more" to see older messages.
  */
-export default function VirtualMessageList({
+export default function VirtualMessageList<TMessage>({
   messages,
   renderItem,
   initialLimit = 50,
   className = "",
-}: VirtualMessageListProps) {
+}: VirtualMessageListProps<TMessage>) {
   const [limit, setLimit] = useState(initialLimit);
   const hasMore = messages.length > limit;
 

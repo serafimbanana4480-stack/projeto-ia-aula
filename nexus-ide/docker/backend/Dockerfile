@@ -17,5 +17,10 @@ RUN pip install --upgrade pip && pip install -r /app/backend/requirements.txt
 COPY backend /app/backend
 COPY config  /app/config
 
+RUN groupadd -r nexus && useradd -r -g nexus nexus \
+    && chown -R nexus:nexus /app
+
+USER nexus
+
 EXPOSE 8000
 CMD ["uvicorn", "backend.orchestrator.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,8 +1,7 @@
-"""Semantic search over the codebase using Ollama embeddings + in-memory store.
+"""Semantic search over the codebase using the configured local embedding backend.
 
-Uses ``nomic-embed-text`` by default (small, fast, good quality). Falls back
-to ``qwen3-embedding:4b`` if that model is available. If no embedding model
-is available, returns empty results gracefully.
+Uses ``nomic-embed-text`` by default when Ollama is the primary provider.
+If no embedding model is available, returns empty results gracefully.
 
 The vector store is a simple in-memory dict. For production, swap in
 ChromaDB or Qdrant — the interface stays the same.
@@ -10,6 +9,7 @@ ChromaDB or Qdrant — the interface stays the same.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from dataclasses import dataclass, field
@@ -23,8 +23,12 @@ from backend.tools.registry import ToolSpec, register_tool
 logger = logging.getLogger(__name__)
 
 # Preferred embedding models in order of preference
-_EMBED_MODELS = ["nomic-embed-text", "mxbai-embed-large", "qwen3-embedding:4b"]
-_EMBED_DIM = 768  # default dimension; overridden by actual model output
+_EMBED_MODELS = ["nomic-embed-text", "sentence-transformers/all-MiniLM-L6-v2"]
+_EMBED_DIM = 384  # default dimension; overridden by actual model output
+
+# Batch size for embedding generation. Tuned for local Ollama; increase
+# for cloud providers with higher throughput.
+EMBED_BATCH_SIZE = 16
 
 # In-memory vector store: {chunk_id: (embedding, CodeChunk)}
 _store: dict[str, tuple[list[float], "CodeChunk"]] = {}
@@ -40,71 +44,77 @@ class CodeChunk:
     score: float = 0.0
 
 
-def _ollama_base() -> str:
-    return get_settings().ollama_host
-
-
 async def _get_available_model() -> str | None:
-    """Check which embedding model is available in Ollama."""
-    base = _ollama_base()
+    """Return the first available embedding model."""
+    return _EMBED_MODELS[0]
+
+
+async def _embed_batch_with_fallback(
+    texts: list[str], model: str
+) -> list[list[float] | None]:
+    """Embed multiple texts with recursive fallback on failure.
+
+    Args:
+        texts: List of texts to embed.
+        model: Model name to use.
+
+    Returns:
+        A list parallel to ``texts`` where each element is either an
+        embedding vector or ``None`` if that individual text could not
+        be embedded.
+    """
+    if not texts:
+        return []
+
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{base}/api/tags")
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            available = {m["name"] for m in data.get("models", [])}
-            # Also check without :latest suffix
-            available_stripped = {n.split(":")[0] for n in available}
-            for model in _EMBED_MODELS:
-                base_name = model.split(":")[0]
-                if model in available or base_name in available_stripped:
-                    return model
-            return None
+        from backend.llm.factory import create_llm_client
+
+        provider = create_llm_client()
+        result = await provider.embed(texts, model=model)
+        # Guard against provider returning mismatched result lengths
+        if result and len(result) == len(texts):
+            return result
+        logger.warning(
+            "Embedding batch returned %d results for %d texts — falling back",
+            len(result) if result else 0,
+            len(texts),
+        )
+        raise RuntimeError("Embedding batch size mismatch")
     except Exception as exc:
-        logger.warning("Cannot reach Ollama to check embedding models: %s", exc)
-        return None
+        if len(texts) == 1:
+            logger.warning("Embedding failed for single text: %s", exc)
+            return [None]
+        # Split batch and retry halves in parallel
+        mid = len(texts) // 2
+        left_task = _embed_batch_with_fallback(texts[:mid], model)
+        right_task = _embed_batch_with_fallback(texts[mid:], model)
+        left, right = await asyncio.gather(left_task, right_task)
+        return left + right
 
 
 async def embed(text: str, model: str | None = None) -> list[float]:
-    """Generate an embedding via Ollama.
+    """Generate an embedding via the configured local provider.
 
     Args:
         text: The text to embed.
-        model: Override model name. If None, auto-detects available model.
+        model: Override model name. If None, uses default embedding model.
 
     Returns:
         List of floats representing the embedding vector.
 
     Raises:
-        RuntimeError: If no embedding model is available in Ollama.
+        RuntimeError: If embedding generation fails.
     """
     if model is None:
-        model = await _get_available_model()
-    if model is None:
-        raise RuntimeError(
-            "No embedding model available. Pull one with: "
-            "ollama pull nomic-embed-text"
-        )
+        model = _EMBED_MODELS[0]
 
-    base = _ollama_base()
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{base}/api/embed",
-                json={"model": model, "input": text},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            embeddings = data.get("embeddings", [])
-            if embeddings and isinstance(embeddings[0], list):
-                return embeddings[0]
-            # Older API format
-            if "embedding" in data:
-                return data["embedding"]
-            raise RuntimeError(f"Unexpected embedding response: {list(data.keys())}")
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"Ollama embedding request failed: {exc}") from exc
+    result = await _embed_batch_with_fallback([text], model)
+    if result[0] is None:
+        raise RuntimeError(
+            "No embedding model available. Install sentence-transformers: "
+            "pip install sentence-transformers"
+        )
+    return result[0]
 
 
 def _cosine_sim(a: list[float], b: list[float]) -> float:
@@ -154,6 +164,9 @@ async def index_codebase(root: str) -> int:
     }
 
     chunk_count = 0
+    batch_texts: list[str] = []
+    batch_meta: list[tuple[str, CodeChunk]] = []
+
     for filepath in root_path.rglob("*"):
         # Skip hidden dirs and very large files
         if any(part.startswith(".") for part in filepath.parts):
@@ -171,11 +184,6 @@ async def index_codebase(root: str) -> int:
         for idx, chunk_text in enumerate(chunks):
             lines = chunk_text.splitlines()
             start_line = idx * (100 - 20) + 1  # approximate
-            try:
-                embedding = await embed(chunk_text, model=model)
-            except RuntimeError:
-                continue  # skip chunks that fail to embed
-
             chunk_id = f"{filepath}::L{start_line}"
             code_chunk = CodeChunk(
                 file=str(filepath),
@@ -183,8 +191,25 @@ async def index_codebase(root: str) -> int:
                 end_line=start_line + len(lines) - 1,
                 content=chunk_text,
             )
-            _store[chunk_id] = (embedding, code_chunk)
-            chunk_count += 1
+            batch_texts.append(chunk_text)
+            batch_meta.append((chunk_id, code_chunk))
+
+            if len(batch_texts) >= EMBED_BATCH_SIZE:
+                embeddings = await _embed_batch_with_fallback(batch_texts, model)
+                for emb, (cid, cc) in zip(embeddings, batch_meta):
+                    if emb is not None:
+                        _store[cid] = (emb, cc)
+                        chunk_count += 1
+                batch_texts = []
+                batch_meta = []
+
+    # Flush remaining batch
+    if batch_texts:
+        embeddings = await _embed_batch_with_fallback(batch_texts, model)
+        for emb, (cid, cc) in zip(embeddings, batch_meta):
+            if emb is not None:
+                _store[cid] = (emb, cc)
+                chunk_count += 1
 
     logger.info("Indexed %d chunks from %s", chunk_count, root)
     return chunk_count

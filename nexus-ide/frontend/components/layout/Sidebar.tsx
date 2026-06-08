@@ -17,9 +17,11 @@ import {
   Plus,
   Wrench,
   ChevronRight,
+  Radar,
+  Menu,
+  X,
 } from "lucide-react";
 import { useProjectStore } from "../../stores/projectStore";
-import { getProjects } from "../../lib/api";
 import { useMetricsStore } from "../../stores/metricsStore";
 
 interface NavItem {
@@ -32,6 +34,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard className="h-4 w-4" />, path: "/dashboard" },
   { id: "chat", label: "Chat", icon: <MessageSquare className="h-4 w-4" />, path: "/" },
+  { id: "mission-control", label: "Mission Control", icon: <Radar className="h-4 w-4" />, path: "/mission-control" },
   { id: "projects", label: "Projetos", icon: <FolderKanban className="h-4 w-4" />, path: "/projects" },
   { id: "tools", label: "Ferramentas", icon: <Wrench className="h-4 w-4" />, path: "/tools" },
   { id: "models", label: "Modelos IA", icon: <Cpu className="h-4 w-4" />, path: "/models" },
@@ -48,50 +51,24 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1e9).toFixed(1)} GB`;
 }
 
-interface ProjectData {
-  id: string;
-  name: string;
-  path: string;
-  description: string;
-  mode: string;
-  preferred_model: string;
-  trust: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
 const projectColors = ["#7c6afb", "#60a5fa", "#fbbf24", "#5eead4", "#f87171"];
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { currentProject, setCurrentProject } = useProjectStore();
-  const [recentProjects, setRecentProjects] = useState<ProjectData[]>([]);
-  const diskMetrics = useMetricsStore((s) =>
-    s.metrics
-      ? {
-          disk_percent: s.metrics.disk_percent,
-          disk_used_bytes: s.metrics.disk_used_bytes,
-          disk_total_bytes: s.metrics.disk_total_bytes,
-        }
-      : null
-  );
+  const currentProject = useProjectStore((s) => s.currentProject);
+  const setCurrentProject = useProjectStore((s) => s.setCurrentProject);
+  const projects = useProjectStore((s) => s.projects);
+  const diskPercent = useMetricsStore((s) => s.metrics?.disk_percent ?? null);
+  const diskUsed = useMetricsStore((s) => s.metrics?.disk_used_bytes ?? null);
+  const diskTotal = useMetricsStore((s) => s.metrics?.disk_total_bytes ?? null);
+  const [mobileOpen, setMobileOpen] = useState(false);
 
-  // Fetch projects once on mount
+  // Close mobile menu on route change
   useEffect(() => {
-    let mounted = true;
-    getProjects()
-      .then((data) => {
-        if (mounted && Array.isArray(data) && data.length > 0) {
-          setRecentProjects(data.slice(0, 5));
-        }
-      })
-      .catch(() => {
-        /* ignore */
-      });
-    return () => {
-      mounted = false;
-    };
-  }, []);
+    setMobileOpen(false);
+  }, [pathname]);
+
+  const recentProjects = useMemo(() => projects.slice(0, 5), [projects]);
 
   const formatProjectDate = useCallback((dateStr: string) => {
     try {
@@ -113,7 +90,25 @@ export default function Sidebar() {
   }, [pathname]);
 
   return (
-    <aside className="flex w-[260px] shrink-0 flex-col border-r border-nexus-border bg-nexus-panel">
+    <>
+      {/* Mobile hamburger toggle */}
+      <button
+        onClick={() => setMobileOpen(!mobileOpen)}
+        className="fixed top-3 left-3 z-50 flex h-8 w-8 items-center justify-center rounded-lg border border-nexus-border bg-nexus-panel md:hidden"
+        aria-label="Toggle menu"
+      >
+        {mobileOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+      </button>
+
+      {/* Overlay for mobile */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/50 md:hidden"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+
+      <aside className={`fixed inset-y-0 left-0 z-40 flex w-[260px] shrink-0 flex-col border-r border-nexus-border bg-nexus-panel transition-transform duration-200 md:relative md:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}>
       {/* New Project Button */}
       <div className="p-4">
         <Link
@@ -132,7 +127,7 @@ export default function Sidebar() {
           return (
             <Link
               key={item.id}
-              href={item.path as "/dashboard" | "/" | "/projects" | "/tools" | "/models" | "/database" | "/scraping" | "/analysis" | "/documents" | "/settings"}
+              href={item.path as "/dashboard" | "/" | "/mission-control" | "/projects" | "/tools" | "/models" | "/database" | "/scraping" | "/analysis" | "/documents" | "/settings"}
               prefetch={true}
               className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
                 isActive
@@ -207,21 +202,22 @@ export default function Sidebar() {
             Armazenamento
           </div>
           <span className="font-medium text-nexus-text">
-            {diskMetrics ? `${diskMetrics.disk_percent.toFixed(0)}% usado` : "—"}
+            {diskPercent != null ? `${diskPercent.toFixed(0)}% usado` : "—"}
           </span>
         </div>
         <div className="h-1.5 overflow-hidden rounded-full bg-nexus-border">
           <div
             className="h-full rounded-full bg-nexus-accent transition-all duration-700"
-            style={{ width: diskMetrics ? `${diskMetrics.disk_percent}%` : "0%" }}
+            style={{ width: diskPercent != null ? `${diskPercent}%` : "0%" }}
           />
         </div>
         <div className="mt-1 text-[10px] text-nexus-muted">
-          {diskMetrics
-            ? `${formatBytes(diskMetrics.disk_used_bytes)} / ${formatBytes(diskMetrics.disk_total_bytes)}`
+          {diskUsed != null && diskTotal != null
+            ? `${formatBytes(diskUsed)} / ${formatBytes(diskTotal)}`
             : "A carregar..."}
         </div>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

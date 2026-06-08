@@ -6,9 +6,38 @@ which provides an expanded command whitelist and comprehensive audit logging.
 
 from __future__ import annotations
 
+import time
+from collections import defaultdict
+from functools import wraps
+from typing import Any, Callable
+
 from backend.tools.registry import ToolSpec, register_tool
 
+# Simple in-memory rate limiter for tool calls
+_TOOL_CALL_BUCKETS: dict[str, list[float]] = defaultdict(list)
+_TOOL_RATE_LIMIT = 60  # calls per minute
+_TOOL_RATE_WINDOW = 60  # seconds
 
+
+def _tool_rate_limit(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator to rate-limit tool execution globally (defense-in-depth)."""
+
+    @wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        now = time.time()
+        bucket = _TOOL_CALL_BUCKETS[func.__name__]
+        # Clean old entries
+        while bucket and now - bucket[0] > _TOOL_RATE_WINDOW:
+            bucket.pop(0)
+        if len(bucket) >= _TOOL_RATE_LIMIT:
+            return {"error": f"Rate limit exceeded for {func.__name__}: {_TOOL_RATE_LIMIT} calls per {_TOOL_RATE_WINDOW}s"}
+        bucket.append(now)
+        return await func(*args, **kwargs)
+
+    return wrapper
+
+
+@_tool_rate_limit
 async def run_shell(
     command: str,
     project_path: str = ".",
@@ -26,9 +55,12 @@ async def run_shell(
     """
     from backend.core.workspace import WorkspaceManager
     manager = WorkspaceManager(project_path)
-    return await manager.execute_shell(command, cwd=project_path, timeout=timeout)
+    # Explicitly pass empty additional env so workspace.py sanitization
+    # handles the full merged environment
+    return await manager.execute_shell(command, cwd=project_path, timeout=timeout, env={})
 
 
+@_tool_rate_limit
 async def run_python_script(
     code: str,
     project_path: str = ".",
@@ -45,8 +77,8 @@ register_tool(
         name="run_shell",
         description=(
             "Run shell commands in the project directory. "
-            "Allowed commands include: python, pip, npm, node, git, cargo, go, docker, make, "
-            "gcc, clang, find, grep, awk, sed, tar, ssh, rsync, and many more. "
+            "Allowed commands include: python, pip, npm, node, git, cargo, go, make, "
+            "gcc, clang, find, grep, awk, sed, tar, rsync, and many more. "
             "Dangerous commands (rm -rf /, dd, mkfs, format, shutdown, etc.) are blocked."
         ),
         schema={

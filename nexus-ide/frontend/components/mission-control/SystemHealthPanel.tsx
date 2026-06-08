@@ -37,10 +37,10 @@ function WorkerStatus({
       : { icon: <HelpCircle className="h-3.5 w-3.5 text-gray-400" />, color: "text-gray-400" };
 
   return (
-    <div className="flex items-center justify-between rounded border border-nexus-border/50 bg-nexus-card px-3 py-2">
-      <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center justify-between rounded border border-nexus-border/50 bg-nexus-card px-3 py-2 gap-y-1">
+      <div className="flex items-center gap-2 min-w-0">
         {cfg.icon}
-        <span className="text-xs font-medium">{worker.name}</span>
+        <span className="text-xs font-medium truncate">{worker.name}</span>
       </div>
       <div className="flex items-center gap-3 text-[10px] text-nexus-muted">
         {worker.queue_size !== undefined && <span>Queue: {worker.queue_size}</span>}
@@ -101,6 +101,7 @@ function MiniChart({
 
 export default function SystemHealthPanel() {
   const health = useMissionStore((s) => s.systemHealth);
+  const loading = useMissionStore((s) => s.loading);
 
   const hourlyData = useMemo(() => {
     if (!health?.token_usage_hourly) return [];
@@ -122,7 +123,19 @@ export default function SystemHealthPanel() {
         </div>
       </div>
 
-      {!health ? (
+      {loading && !health ? (
+        <div className="space-y-3">
+          <div className="h-8 animate-pulse rounded bg-nexus-border/20" />
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className="h-24 animate-pulse rounded bg-nexus-border/20" />
+            <div className="grid grid-cols-2 gap-2">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="h-20 animate-pulse rounded bg-nexus-border/20" />
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : !health ? (
         <div className="flex h-32 items-center justify-center text-xs text-nexus-muted">
           Sem dados de saúde do sistema
         </div>

@@ -31,11 +31,23 @@ def register_tool(spec: ToolSpec) -> ToolSpec:
     return spec
 
 
+def _maybe_register() -> None:
+    """Trigger lazy tool registration if it hasn't happened yet."""
+    try:
+        from backend.tools import _ensure_tools_registered
+
+        _ensure_tools_registered()
+    except ImportError:
+        pass
+
+
 def get_tool(name: str) -> ToolSpec | None:
+    _maybe_register()
     return _registry.get(name)
 
 
 def list_tools(enabled_only: bool = True) -> list[ToolSpec]:
+    _maybe_register()
     tools = list(_registry.values())
     if enabled_only:
         tools = [t for t in tools if t.enabled]
@@ -48,6 +60,7 @@ def set_tool_enabled(name: str, enabled: bool) -> None:
 
 
 async def execute_tool(name: str, session_id: str | None, args: dict) -> dict:
+    _maybe_register()
     spec = get_tool(name)
     if not spec:
         return {"error": f"Tool '{name}' not found"}

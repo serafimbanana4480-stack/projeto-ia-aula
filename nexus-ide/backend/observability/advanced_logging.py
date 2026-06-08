@@ -256,6 +256,75 @@ class StructuredLogger:
             },
         )
 
+    def bus_message(
+        self,
+        topic: str,
+        source_agent: str,
+        payload: dict[str, Any],
+        **extra: Any,
+    ) -> None:
+        """Log a structured bus message event."""
+        self.info(
+            f"Bus message: {topic} from {source_agent}",
+            agent=source_agent,
+            source="agent_bus",
+            extra={
+                "event": "bus_message",
+                "topic": topic,
+                "source_agent": source_agent,
+                "payload": payload,
+                **extra,
+            },
+        )
+
+    def mission_event(
+        self,
+        mission_id: str,
+        event_type: str,
+        objective: str = "",
+        status: str = "",
+        progress: float = 0.0,
+        **extra: Any,
+    ) -> None:
+        """Log a structured mission lifecycle event."""
+        self.info(
+            f"Mission {mission_id}: {event_type} | status={status}",
+            agent="ORCHESTRATOR",
+            source="mission",
+            extra={
+                "event": "mission_event",
+                "mission_id": mission_id,
+                "event_type": event_type,
+                "objective": objective,
+                "status": status,
+                "progress": progress,
+                **extra,
+            },
+        )
+
+    def quality_gate(
+        self,
+        gate_name: str,
+        status: str,
+        value: str,
+        threshold: str = "",
+        **extra: Any,
+    ) -> None:
+        """Log a structured quality gate evaluation."""
+        self.info(
+            f"Quality gate {gate_name}: {status} ({value})",
+            agent="GUARDIAN",
+            source="quality_gate",
+            extra={
+                "event": "quality_gate",
+                "gate_name": gate_name,
+                "status": status,
+                "value": value,
+                "threshold": threshold,
+                **extra,
+            },
+        )
+
     # ------------------------------------------------------------------
     # Query interface
     # ------------------------------------------------------------------

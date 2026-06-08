@@ -4,14 +4,14 @@
 # Application Settings
 app:
   name: "NEXUS IDE (Staging)"
-  debug: false
+  debug: true
   log_level: "INFO"
   reload: false
 
 # CORS Settings
 cors:
   allowed_origins:
-    - "https://staging.your-domain.com"
+    - "https://staging.nexus-ide.example.com"
     - "http://localhost:3000"
   allow_credentials: true
   allow_methods: ["*"]
@@ -19,23 +19,22 @@ cors:
 
 # Database Settings
 database:
-  url: "postgresql://user:password@localhost:5432/nexus_staging"
+  url: "postgresql://user:pass@localhost:5432/nexus_staging"
   echo: false
-  pool_size: 10
-  max_overflow: 5
 
 # Redis Settings
 redis:
   url: "redis://localhost:6379"
-  db: 1
-  password: "${REDIS_PASSWORD}"
+  db: 0
+  password: null
 
-# Ollama Settings
-ollama:
-  host: "http://localhost:11434"
-  dashboard_host: "http://localhost:11435"
-  timeout: 90
-  retry_attempts: 4
+# Local LLM (AirLLM) Settings
+local_llm:
+  device: "auto"
+  dashboard_device: "cpu"
+  compression: "4bit"
+  timeout: 600
+  retry_attempts: 2
 
 # Observability Settings
 observability:
@@ -51,9 +50,8 @@ rate_limiting:
 
 # Security Settings
 security:
-  secret_key: "${SECRET_KEY}"
-  session_expire_hours: 12
-  require_https: false
+  secret_key: "staging-secret-key"
+  session_expire_hours: 24
 
 # Feature Flags
 features:
@@ -61,16 +59,10 @@ features:
   enable_code_execution: true
   enable_file_operations: true
   enable_terminal: true
-  max_file_size_mb: 25
+  max_file_size_mb: 75
 
 # Logging
 logging:
   level: "INFO"
   format: "detailed"
   file: "logs/nexus_staging.log"
-
-# Performance Settings
-performance:
-  max_workers: 4
-  request_timeout: 300
-  max_concurrent_requests: 50

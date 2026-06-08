@@ -12,27 +12,26 @@ export interface Mode {
   system_prompt_addon?: string;
 }
 
+// Avoid Omit<Mode,'id'> to prevent SWC JSX parse ambiguity in this file context
+export type ModePayload = Partial<Mode>;
+
 interface ModeStore {
   currentMode: string;
   modes: Mode[];
   modesLoaded: boolean;
+  modesLoading: boolean;
+  modesError: string | null;
   setMode: (mode: string) => void;
   setModes: (modes: Mode[]) => void;
   loadModes: () => Promise<void>;
 }
 
-function getInitialMode(): string {
-  if (typeof window !== "undefined") {
-    const saved = localStorage.getItem("nexus.currentMode");
-    if (saved) return saved;
-  }
-  return "auto"; // Default to "auto" which exists in backend modes.yaml
-}
-
 export const useModeStore = create<ModeStore>((set, get) => ({
-  currentMode: getInitialMode(),
+  currentMode: "auto", // Inicializa com valor consistente servidor/cliente
   modes: [],
   modesLoaded: false,
+  modesLoading: false,
+  modesError: null,
   setMode: (mode) => {
     if (typeof window !== "undefined") {
       localStorage.setItem("nexus.currentMode", mode);
@@ -41,21 +40,29 @@ export const useModeStore = create<ModeStore>((set, get) => ({
   },
   setModes: (modes) => set({ modes }),
   loadModes: async () => {
-    if (get().modesLoaded) return;
+    if (get().modesLoaded || get().modesLoading) return;
+    set({ modesLoading: true, modesError: null });
     try {
       const res = await fetch(`${API_BASE}/api/modes`);
       if (res.ok) {
-        const data = (await res.json()) as { modes: Record<string, Omit<Mode, "id">> };
+        const data = (await res.json()) as { modes: Record<string, ModePayload> };
         const modes: Mode[] = Object.entries(data.modes).map(([id, m]) => ({
           id,
-          ...m,
+          description: m.description ?? "",
+          default_agent: m.default_agent ?? "CODER",
+          default_model: m.default_model ?? "auto",
+          router: m.router ?? "none",
+          tools_enabled: m.tools_enabled ?? [],
+          system_prompt_addon: m.system_prompt_addon,
         }));
-        set({ modes, modesLoaded: true });
+        set({ modes, modesLoaded: true, modesLoading: false });
         // Validate current mode exists
         const current = get().currentMode;
         if (!modes.find((m) => m.id === current)) {
           set({ currentMode: "auto" });
         }
+      } else {
+        throw new Error(`HTTP ${res.status}`);
       }
     } catch {
       // Backend unavailable — use defaults
@@ -69,6 +76,7 @@ export const useModeStore = create<ModeStore>((set, get) => ({
           { id: "deep", description: "Raciocínio avançado", default_agent: "ARCHITECT", default_model: "deep", router: "none", tools_enabled: ["all"] },
         ],
         modesLoaded: true,
+        modesLoading: false,
       });
     }
   },

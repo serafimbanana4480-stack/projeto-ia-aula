@@ -33,6 +33,7 @@ import {
   ListChecks,
   AlertTriangle,
   X,
+  WifiOff,
 } from "lucide-react";
 import type { AgentName, ChatMessage, StreamEvent } from "../../lib/types";
 import { log } from "../../lib/log";
@@ -111,6 +112,8 @@ export default function ChatPanel({
   const [activePlan, setActivePlan] = useState<PlanCreateResult | null>(null);
   const [planStatus, setPlanStatus] = useState<PlanStatusType | null>(null);
   const [planExecuting, setPlanExecuting] = useState(false);
+  const [backendOffline, setBackendOffline] = useState(false);
+  const errorLoggedRef = useRef(false);
   const planPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadHistory = async () => {
@@ -125,8 +128,14 @@ export default function ChatPanel({
       setPendingUser([]);
       reset();
       setHistoryLoaded(true);
+      setBackendOffline(false);
+      errorLoggedRef.current = false;
     } catch (error) {
-      log.error("Failed to load chat history:", error);
+      setBackendOffline(true);
+      if (!errorLoggedRef.current) {
+        log.warn("Backend offline — chat history unavailable");
+        errorLoggedRef.current = true;
+      }
       setHistoryError(
         error instanceof Error ? error.message : "Failed to load chat history",
       );
@@ -137,7 +146,11 @@ export default function ChatPanel({
 
   useEffect(() => {
     loadHistory();
-    loadModes();
+    // DataInitProvider already triggers mode loading, but keep a lightweight
+    // guard here in case this component is rendered outside that context.
+    if (!modesLoaded) {
+      void loadModes();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -685,6 +698,14 @@ export default function ChatPanel({
 
       {/* Input area — fixed at bottom */}
       <div className="shrink-0 border-t border-nexus-border bg-nexus-panel px-5 pt-3 pb-2">
+        {/* Backend offline indicator */}
+        {backendOffline && (
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-400">
+            <WifiOff className="h-3.5 w-3.5 shrink-0" />
+            <span className="font-medium">Backend offline</span>
+            <span className="text-red-300">— Aguardando reconexão para enviar mensagens.</span>
+          </div>
+        )}
         {/* Attached files preview */}
         {attachedFiles.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-2">

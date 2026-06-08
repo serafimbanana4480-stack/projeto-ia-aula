@@ -5,7 +5,7 @@ vector embeddings and SQLite for structured metadata.
 
 Architecture:
 - ``MemoryStore``: high-level API for storing and retrieving memories
-- ``EmbeddingService``: generates embeddings via Ollama
+- ``EmbeddingService``: generates embeddings via local AirLLM or sentence-transformers
 - ``SemanticIndex``: ChromaDB-backed vector search
 - ``ContextBuilder``: assembles relevant context for agent requests
 
@@ -85,18 +85,17 @@ class Memory:
 
 
 class EmbeddingService:
-    """Generates vector embeddings using Ollama's embedding endpoint.
+    """Generates vector embeddings using local AirLLM / sentence-transformers.
 
     Delegates to backend.tools.embeddings.embed() for the actual API call,
-    with a deterministic fallback when Ollama is unavailable.
+    with a deterministic fallback when the local model is unavailable.
     """
 
     def __init__(
-        self, ollama_host: str = "http://localhost:11434", model: str = "nomic-embed-text"
+        self, model: str = "sentence-transformers/all-MiniLM-L6-v2"
     ) -> None:
-        self._host = ollama_host.rstrip("/")
         self._model = model
-        self._dimension = 768  # default for nomic-embed-text
+        self._dimension = 384  # default for all-MiniLM-L6-v2
 
     async def embed(self, text: str) -> list[float]:
         """Generate embedding vector for text.
@@ -113,35 +112,29 @@ class EmbeddingService:
         except (ImportError, RuntimeError):
             pass
 
-        # Direct API call as secondary fallback
-        import httpx
+        # Direct provider call as secondary fallback
+        try:
+            from backend.llm.factory import create_llm_client
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                # Try new API format first
-                resp = await client.post(
-                    f"{self._host}/api/embed",
-                    json={"model": self._model, "input": text},
-                )
-                if resp.status_code == 404:
-                    # Fall back to old API format
-                    resp = await client.post(
-                        f"{self._host}/api/embeddings",
-                        json={"model": self._model, "prompt": text},
-                    )
-                resp.raise_for_status()
-                data = resp.json()
-                # New API returns "embeddings" (list of lists)
-                embedding = data.get("embeddings", [[]])[0] or data.get("embedding", [])
-                if embedding:
-                    self._dimension = len(embedding)
-                return embedding
-            except Exception as exc:
-                logger.warning("Embedding generation failed: %s. Using fallback.", exc)
-                return self._fallback_embed(text)
+            provider = create_llm_client()
+            result = await provider.embed([text], model=self._model)
+            if result and result[0]:
+                self._dimension = len(result[0])
+                return result[0]
+        except Exception:
+            pass
+
+        # Final deterministic fallback
+        import hashlib
+
+        h = hashlib.sha256(text.encode()).digest()
+        vec = [((b / 255.0) - 0.5) * 2.0 for b in h]
+        while len(vec) < self._dimension:
+            vec.extend(vec)
+        return vec[:self._dimension]
 
     def _fallback_embed(self, text: str) -> list[float]:
-        """Deterministic fallback embedding when Ollama is unavailable."""
+        """Deterministic fallback embedding when local model is unavailable."""
         import hashlib
 
         hash_bytes = hashlib.sha256(text.encode()).digest()
@@ -179,10 +172,9 @@ class MemoryStore:
         embedding_service: EmbeddingService | None = None,
         *,
         max_memories: int = 10_000,
-        ollama_host: str = "http://localhost:11434",
     ) -> None:
         self._memories: dict[str, Memory] = {}
-        self._embeddings = embedding_service or EmbeddingService(ollama_host)
+        self._embeddings = embedding_service or EmbeddingService()
         self._max_memories = max_memories
         self._index: dict[str, list[float]] = {}  # memory_id -> embedding
 
@@ -379,9 +371,9 @@ class MemoryStore:
 _memory_store: MemoryStore | None = None
 
 
-def get_memory_store(ollama_host: str = "http://localhost:11434") -> MemoryStore:
+def get_memory_store() -> MemoryStore:
     """Get or create the global memory store singleton."""
     global _memory_store
     if _memory_store is None:
-        _memory_store = MemoryStore(ollama_host=ollama_host)
+        _memory_store = MemoryStore()
     return _memory_store

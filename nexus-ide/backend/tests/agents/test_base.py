@@ -23,6 +23,9 @@ class TestAgentAction:
             "analyze_data",
             "generate_report",
             "scaffold_project",
+            "search_github",
+            "search_docs",
+            "deep_research",
         }
         assert actions == expected
 
@@ -77,6 +80,58 @@ class TestAgentResponse:
         assert resp.metrics == {}
 
 
+class TestAgentContextTrimming:
+    def test_estimate_tokens(self) -> None:
+        from backend.agents.base import AgentBase
+
+        class T(AgentBase):
+            name = "T"
+            model_key = "nano"
+            prompt_file = "router"
+
+            async def _execute(self, request):
+                yield "ok"
+
+        agent = T()
+        assert agent._estimate_tokens("") == 1
+        assert agent._estimate_tokens("a" * 400) == 100
+
+    def test_trim_context_under_limit(self) -> None:
+        from backend.agents.base import AgentBase
+
+        class T(AgentBase):
+            name = "T"
+            model_key = "nano"
+            prompt_file = "router"
+
+            async def _execute(self, request):
+                yield "ok"
+
+        agent = T()
+        short = "Tool read_file returned: ok"
+        assert agent._trim_context(short, 1) == short
+
+    def test_trim_context_summarizes_old_iterations(self) -> None:
+        from backend.agents.base import AgentBase
+
+        class T(AgentBase):
+            name = "T"
+            model_key = "nano"
+            prompt_file = "router"
+
+            async def _execute(self, request):
+                yield "ok"
+
+        agent = T()
+        # Build a large context (>4000 tokens)
+        parts = [f"Tool tool_{i} returned: {'x' * 500}" for i in range(50)]
+        big_context = "\nTool ".join(parts)
+        trimmed = agent._trim_context(big_context, 10)
+        assert len(trimmed) < len(big_context)
+        assert "Memory digest" in trimmed
+        assert "Recent steps" in trimmed
+
+
 class TestAgentBaseContract:
     def test_subclass_must_implement_run(self) -> None:
         class BrokenAgent(AgentBase):
@@ -111,7 +166,7 @@ class TestAgentBaseContract:
                 yield "ok"
 
         agent = T()
-        assert agent.resolve_model_id().startswith("qwen")
+        assert agent.resolve_model_id().startswith("llama3.1")
         assert "ROUTER" in agent.system_prompt()
 
     def test_action_tools_mapping_uses_registered_tool_names(self) -> None:
@@ -164,5 +219,14 @@ class TestAgentBaseContract:
         agent = T()
         req = AgentRequest(session_id="s1", query="hi", client=ollama_client)
         out = [t async for t in agent.run(req)]
-        assert out == ["Hello", ", ", "world", "!"]
+        # Real LLM test: just verify the stream yields non-empty tokens.
+        # Token content depends on model (0.5B produces different output than
+        # the canned MockTransport stream). Robust assertions:
+        joined = "".join(out)
+        assert out, "stream_llm yielded no tokens"
+        assert len(joined) > 0, "stream_llm produced empty text"
+        # Should contain at least some alphanumeric characters (not just punctuation)
+        assert any(c.isalnum() for c in joined), (
+            f"stream_llm produced non-textual output: {out[:5]!r}"
+        )
         await ollama_client.aclose()

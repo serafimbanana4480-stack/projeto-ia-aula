@@ -45,16 +45,13 @@ check_process() {
     fi
 }
 
-# Check Ollama
-echo -e "${BLUE}[1/3] Checking Ollama...${NC}"
-if ! check_process "Ollama" 11434; then
-    echo -e "${YELLOW}Starting Ollama...${NC}"
-    ollama serve > logs/ollama.log 2>&1 &
-    OLLAMA_PID=$!
-    echo -e "${GREEN}✓${NC} Ollama started (PID: $OLLAMA_PID)"
-    sleep 3
+# Check airllm (HF cache) and download missing models
+echo -e "${BLUE}[1/3] Checking airllm model stack...${NC}"
+if [ -f scripts/install-models.py ]; then
+    source .venv/bin/activate
+    python scripts/install-models.py
 else
-    echo -e "${GREEN}✓${NC} Ollama already running, skipping start"
+    echo -e "${YELLOW}⚠ scripts/install-models.py not found; skipping model check.${NC}"
 fi
 
 # Check Backend
@@ -88,7 +85,6 @@ echo ""
 echo -e "${GREEN}=== All Services Started Successfully ===${NC}"
 echo ""
 echo "Services:"
-echo "  • Ollama:        http://localhost:11434"
 echo "  • Backend API:   http://localhost:8000"
 echo "  • Frontend:      http://localhost:3000"
 echo "  • Dashboard:     http://localhost:3000/dashboard"
@@ -97,7 +93,6 @@ echo "  • Models:        http://localhost:3000/models"
 echo "  • Settings:      http://localhost:3000/settings"
 echo ""
 echo "Logs:"
-echo "  • Ollama:    logs/ollama.log"
 echo "  • Backend:   logs/backend.log"
 echo "  • Frontend:  logs/frontend.log"
 echo ""

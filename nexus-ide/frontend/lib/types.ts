@@ -95,3 +95,56 @@ export interface TerminalExecutionResult {
   duration_ms: number;
   risk_level: string;
 }
+
+export interface Tool {
+  name: string;
+  description: string;
+  enabled: boolean;
+  schema: Record<string, unknown>;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  path: string;
+  description: string;
+  mode: string;
+  preferred_model: string;
+  trust: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LogEntry {
+  timestamp: string;
+  level: string;
+  agent?: string;
+  message: string;
+  session_id?: string;
+}
+
+export interface MetricsData {
+  tokens_per_second: number;
+  active_model: string;
+  active_sessions: number;
+  cpu_percent: number;
+  ram_percent: number;
+  ram_used_bytes: number;
+  ram_total_bytes: number;
+  uptime_seconds: number;
+  requests_total: number;
+  requests_successful: number;
+  requests_failed: number;
+  avg_latency_ms: number;
+  message_stats?: {
+    total_messages: number;
+    tokens_in_total: number;
+    tokens_out_total: number;
+    avg_latency_ms: number;
+  };
+  change_stats?: {
+    total_changes: number;
+    files_modified: number;
+    lines_written: number;
+  };
+}

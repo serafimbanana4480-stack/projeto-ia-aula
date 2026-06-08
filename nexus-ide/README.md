@@ -32,17 +32,19 @@ Quando escreves "Debug esta funcao", o **ROUTER** analisa o teu pedido e encamin
 
 ## Agentes
 
-| Agente | Modelo | Funcao |
-|--------|--------|--------|
-| **ROUTER** | qwen3.5:4b | Classifica intencoes e roteia pedidos |
-| **ARCHITECT** | deepseek-r1:8b | Design de sistemas e arquitetura |
-| **RESEARCHER** | qwen3.5:9b | Pesquisa web e informacao atualizada |
-| **CODER** | qwen3-coder:7b | Geracao de codigo de producao |
-| **ANALYZER** | qwen3.5:9b | Revisao critica e analise |
-| **DEBUGGER** | qwen3-coder:7b | Diagnostico de causa raiz |
-| **DOCUMENTER** | qwen3.5:9b | Documentacao tecnica |
-| **OPTIMIZER** | qwen3.5:9b | Otimizacao de performance |
-| **DASHBOARD** | qwen3.5:4b | Monitorizacao continua do sistema |
+| Agente | Tier | Modelo | Funcao |
+|--------|------|--------|--------|
+| **ROUTER** | nano | llama3.1:8b | Classifica intencoes e roteia pedidos |
+| **ARCHITECT** | reasoning | llama3.1:8b | Design de sistemas e arquitetura |
+| **RESEARCHER** | coder | llama3.1:8b | Pesquisa web e informacao atualizada |
+| **CODER** | coder | llama3.1:8b | Geracao de codigo de producao |
+| **ANALYZER** | reasoning | llama3.1:8b | Revisao critica e analise |
+| **DEBUGGER** | coder | llama3.1:8b | Diagnostico de causa raiz |
+| **DOCUMENTER** | fast | llama3.1:8b | Documentacao tecnica |
+| **OPTIMIZER** | coder | llama3.1:8b | Otimizacao de performance |
+| **DASHBOARD** | dashboard | llama3.1:8b | Monitorizacao continua do sistema |
+
+> **Nota:** A configuracao actual usa `llama3.1:8b` como modelo principal para todos os tiers, com `nomic-embed-text` para embeddings. Veja `config/models.yaml` para detalhes completos e fallbacks.
 
 Os prompts de sistema de cada agente encontram-se em `config/prompts/`.
 
@@ -53,7 +55,7 @@ Os prompts de sistema de cada agente encontram-se em `config/prompts/`.
 - **Backend**: Python 3.12 + FastAPI + Uvicorn + Pydantic v2
 - **Frontend**: Next.js 15 + React 19 + TypeScript + Tailwind CSS + shadcn/ui
 - **Editor**: Monaco Editor (motor do VS Code)
-- **IA**: Ollama com modelos Qwen3 e DeepSeek locais
+- **IA**: Ollama com modelos locais (llama3.1:8b principal, nomic-embed-text para embeddings)
 - **Base de Dados**: SQLite (com migracoes Alembic; PostgreSQL suportado)
 - **Cache & Queue**: Redis (opcional; in-memory fallback)
 - **Embeddings**: Ollama embeddings + store in-memory (ChromaDB ready)
@@ -128,7 +130,7 @@ make clean             # Limpar tudo
 ## Documentacao
 
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — Arquitetura tecnica completa
-- [`PLANO_MELHORIAS.md`](./PLANO_MELHORIAS.md) — Roadmap e melhorias pendentes
+- [`planeamento/15-roadmap.md`](./planeamento/15-roadmap.md) — Roadmap e melhorias pendentes
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — Guia de contribuicao
 - [`docs/user-guide.md`](./docs/user-guide.md) — Guia do utilizador
 - [`docs/FAQ.md`](./docs/FAQ.md) — Perguntas frequentes
@@ -142,8 +144,8 @@ make clean             # Limpar tudo
 
 **Quase pronto para producao.** Backend e frontend funcionais. Testes passando (435 backend, 5 frontend). Funcionalidades core implementadas: chat com streaming, roteamento inteligente, auth JWT, web search, code execution sandbox, embeddings/RAG, file manager, observabilidade, dashboard, temas dark/light, Monaco Editor, gestao de projetos.
 
-Ver [`PRODUCTION_READINESS_REPORT.md`](./PRODUCTION_READINESS_REPORT.md) para detalhes completos.
+Ver [`.archive/PRODUCTION_READINESS_REPORT.md`](./.archive/PRODUCTION_READINESS_REPORT.md) para detalhes completos.
 
 ---
 
-**Ultima atualizacao**: 2026-05-25
+**Ultima atualizacao**: 2026-06-07

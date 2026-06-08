@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Radio, Filter, Clock } from "lucide-react";
-import { useMissionStore, type BusMessage } from "../../stores/missionStore";
+import { useMissionStore } from "../../stores/missionStore";
 
 const topicColors: Record<string, string> = {
   "code.changes": "text-blue-400",
@@ -86,7 +86,7 @@ export default function BusVisualizer() {
       {/* Terminal-like message stream */}
       <div
         ref={containerRef}
-        className="relative flex-1 min-h-[200px] max-h-[300px] overflow-y-auto thin-scrollbar rounded border border-nexus-border/50 bg-nexus-bg/50 p-2 font-mono text-[11px]"
+        className="relative flex-1 min-h-[200px] max-h-[300px] overflow-y-auto overflow-x-hidden thin-scrollbar rounded border border-nexus-border/50 bg-nexus-bg/50 p-2 font-mono text-[11px]"
       >
         {filtered.length === 0 ? (
           <div className="flex h-full items-center justify-center text-nexus-muted">
@@ -100,7 +100,7 @@ export default function BusVisualizer() {
                 key={`${msg.message_id}-${idx}`}
                 initial={{ opacity: 0, x: -8 }}
                 animate={{ opacity: 1, x: 0 }}
-                className="flex items-start gap-2 py-0.5"
+                className="flex flex-wrap items-start gap-x-2 gap-y-0.5 py-0.5"
               >
                 <span className="shrink-0 text-nexus-muted">
                   <Clock className="h-3 w-3 inline mr-1" />
@@ -108,7 +108,7 @@ export default function BusVisualizer() {
                 </span>
                 <span className={`shrink-0 ${getTopicColor(msg.topic)}`}>[{msg.topic}]</span>
                 <span className="shrink-0 text-nexus-accent2">{msg.source_agent}</span>
-                <span className="truncate text-nexus-muted">
+                <span className="min-w-0 break-all text-nexus-muted">
                   {JSON.stringify(msg.payload).slice(0, 120)}
                   {JSON.stringify(msg.payload).length > 120 ? "…" : ""}
                 </span>

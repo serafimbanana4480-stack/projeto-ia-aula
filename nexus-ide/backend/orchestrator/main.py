@@ -22,16 +22,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from backend import tools as _tools  # noqa: F401
 from backend.config.settings import get_settings, validate_configuration
-from backend.core import workspace as _workspace  # noqa: F401 — registers workspace tools
 from backend.middleware.rate_limit import limiter
 from backend.middleware.security import SecurityHeadersMiddleware
 from backend.observability.routes.alerts import router as alerts_router
 from backend.observability.routes.metrics import router as metrics_router
-from backend.orchestrator.context_manager import ContextStore
-from backend.orchestrator.events import EventBus as OrchestrationEventBus
-from backend.orchestrator.registry import build_default_registry
 from backend.orchestrator.routes.agent_bus import router as agent_bus_router
 from backend.orchestrator.routes.agent_state import router as agent_state_router
 from backend.orchestrator.routes.agents import router as agents_router
@@ -48,13 +43,11 @@ from backend.orchestrator.routes.plan import router as plan_router
 from backend.orchestrator.routes.projects import router as projects_router
 from backend.orchestrator.routes.system import router as system_router
 from backend.orchestrator.routes.terminal import router as terminal_router
-from backend.orchestrator.routes.web_search import router as web_search_router
 from backend.orchestrator.routes.workers import router as workers_router
 from backend.orchestrator.routes.workspace import router as workspace_router
 from backend.orchestrator.routes.embeddings import router as embeddings_router
 from backend.orchestrator.routes.wizard import router as wizard_router
-from backend.persistence import init_db
-from backend.llm import create_llm_client
+from backend.orchestrator.routes.collaboration import router as collaboration_router
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +60,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     orphaned connections. ``ContextStore`` and the agent registry are plain
     Python objects and need no teardown.
     """
+    # Lazy imports of heavy modules to keep import-time / worker start-up fast
+    from backend.persistence import init_db
+    from backend.llm import create_llm_client
+    from backend.orchestrator.context_manager import ContextStore
+    from backend.orchestrator.events import EventBus as OrchestrationEventBus
+    from backend.orchestrator.registry import get_registry
+    from backend.core.auto_correction import get_auto_correction_loop
+
     # Validate configuration at startup
     settings = get_settings()
     config_errors = validate_configuration()
@@ -84,17 +85,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Initialize database
     init_db()
 
-    app.state.llm_client = create_llm_client()
-    app.state.registry = build_default_registry()
+    # Lazy-load tools and workspace modules so their heavy imports don't block
+    # startup.  They self-register on first import.
+    import backend.tools as _tools  # noqa: F401
+    import backend.core.workspace as _workspace  # noqa: F401
+
+    # Lazy-init LLM client (cached in app.state)
+    if not hasattr(app.state, "llm_client") or app.state.llm_client is None:
+        app.state.llm_client = create_llm_client()
+
+    # Lazy-init registry on first access instead of eagerly at startup
+    registry = get_registry(app)
     app.state.context = ContextStore()
     app.state.event_bus = OrchestrationEventBus()
 
     # Initialize Agent Lifecycle Manager
     from backend.core.agent_lifecycle import AgentLifecycleManager
 
-    lifecycle = AgentLifecycleManager()
+    lifecycle = AgentLifecycleManager(registry=registry, llm_client=app.state.llm_client)
     # Wire overseer callback if overseer is in registry
-    overseer = app.state.registry.get("OVERSEER")
+    overseer = registry.get("OVERSEER")
     if overseer:
         lifecycle.set_overseer_callback(
             lambda iid, event, data, ov=overseer: ov.record_agent_event(
@@ -102,7 +112,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
         )
     app.state.agent_lifecycle = lifecycle
-    logger.info("Agent lifecycle manager initialized")
+    app.state.registry = registry
+    logger.info("Agent lifecycle manager initialized (execution enabled)")
 
     # Start Background Workers
     from backend.core.background_workers import BackgroundWorkerManager
@@ -131,6 +142,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.guardian_task = guardian_task
     logger.info("Guardian agent background loop started")
 
+    # Start Auto-Correction Loop
+    auto_correction = get_auto_correction_loop(lifecycle_manager=lifecycle)
+    await auto_correction.start_monitoring()
+    app.state.auto_correction = auto_correction
+    logger.info("Auto-correction loop started")
+
     logger.info("NEXUS orchestrator ready (provider=%s)", settings.llm_provider)
     try:
         yield
@@ -141,6 +158,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Cancel guardian background loop
         await guardian.stop()
         guardian_task.cancel()
+        # Stop auto-correction loop
+        await auto_correction.stop_monitoring()
         # Stop background workers
         worker_manager = getattr(app.state, "worker_manager", None)
         if worker_manager:
@@ -182,7 +201,6 @@ app.include_router(modes_router, prefix="/api")
 app.include_router(projects_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
 app.include_router(terminal_router, prefix="/api")
-app.include_router(web_search_router, prefix="/api")
 app.include_router(embeddings_router, prefix="/api")
 app.include_router(plan_router, prefix="/api")
 app.include_router(guardian_router, prefix="/api")

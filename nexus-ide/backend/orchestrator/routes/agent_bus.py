@@ -7,8 +7,6 @@ Endpoints:
     GET  /api/bus/stream       — SSE stream of bus messages.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
@@ -74,9 +72,9 @@ def _sse_payload(data: dict[str, Any]) -> str:
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 
-@router.post("/bus/publish")
+@router.post("/bus/publish", response_model=BusPublishResponse)
 @limiter.limit("120/minute")
-async def bus_publish(req: BusPublishRequest, request: Request) -> BusPublishResponse:
+async def bus_publish(req: BusPublishRequest, request: Request) -> Any:
     """Publish a message to the Agent Bus."""
     import uuid
 

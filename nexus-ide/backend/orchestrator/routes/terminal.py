@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
+from backend.middleware.auth import require_auth
 from backend.models.api import TerminalExecuteRequest, TerminalExecuteResponse
 from backend.sandbox.executor import get_sandbox_executor
 
@@ -12,7 +13,7 @@ router = APIRouter()
 
 @router.post("/terminal/execute", response_model=TerminalExecuteResponse)
 async def execute_terminal_command(
-    req: TerminalExecuteRequest, request: Request
+    req: TerminalExecuteRequest, request: Request, _user: dict = Depends(require_auth)
 ) -> TerminalExecuteResponse:
     executor = get_sandbox_executor()
 

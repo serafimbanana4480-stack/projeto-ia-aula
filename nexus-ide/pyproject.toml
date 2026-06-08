@@ -13,7 +13,7 @@ packages = ["backend"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-ra --strict-markers --strict-config -p no:cacheprovider"
+addopts = "-ra --strict-markers --strict-config -p no:cacheprovider -W ignore::DeprecationWarning:asyncio.coroutines"
 testpaths = ["backend/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
@@ -30,8 +30,20 @@ filterwarnings = [
   # python-jose uses deprecated datetime.utcnow() internally
   "ignore::DeprecationWarning:jose",
   # Sockets reclaimed during GC are cosmetic; not a real leak for the test
-  # since the TestClient/lifespan always close the AsyncClient deterministically.
   "ignore::ResourceWarning",
+  # slowapi uses deprecated asyncio.iscoroutinefunction on Python 3.14+
+  "ignore::DeprecationWarning:asyncio.coroutines",
+  "ignore::DeprecationWarning:slowapi",
+  # starlette/fastapi deprecations we cannot control (HTTP_422_UNPROCESSABLE_ENTITY, etc.)
+  "ignore::DeprecationWarning:starlette",
+  "ignore::DeprecationWarning:fastapi",
+  # google/protobuf warnings during import
+  "ignore::DeprecationWarning:google",
+  "ignore::UserWarning:google",
+  # Catch-all for any remaining deprecation warnings from C extensions during import
+  "ignore::DeprecationWarning",
+  # Windows asyncio pipe cleanup noise
+  "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
 
 [tool.ruff]

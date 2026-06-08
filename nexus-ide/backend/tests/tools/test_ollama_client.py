@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from backend.tests.conftest import make_stream_response
-from backend.tools.ollama_client import ChatMessage, OllamaClient, OllamaError
+from backend.tools.ollama_client import ChatMessage, OllamaClient, OllamaError, DEFAULT_LIMITS
 
 
 class TestChatMessage:
@@ -114,3 +114,132 @@ class TestChatComplete:
             assert out == "Hello world"
         finally:
             await client.aclose()
+
+
+class TestRetryOnServerError:
+    async def test_retry_on_503_then_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        monkeypatch.setattr("backend.tools.ollama_client.asyncio.sleep", fake_sleep)
+
+        call_count = 0
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                return httpx.Response(503, text="upstream busy")
+            return make_stream_response(["ok"])
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            result = await client.chat_complete("m", [ChatMessage(role="user", content="hi")])
+            assert result == "ok"
+            assert call_count == 3
+            assert sleeps == [1, 2]
+        finally:
+            await client.aclose()
+
+    async def test_retry_on_500_then_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        monkeypatch.setattr("backend.tools.ollama_client.asyncio.sleep", fake_sleep)
+
+        call_count = 0
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(500, text="internal error")
+            return make_stream_response(["ok"])
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            result = await client.chat_complete("m", [ChatMessage(role="user", content="hi")])
+            assert result == "ok"
+            assert call_count == 2
+            assert sleeps == [1]
+        finally:
+            await client.aclose()
+
+    async def test_503_exhausted_raises_with_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        monkeypatch.setattr("backend.tools.ollama_client.asyncio.sleep", fake_sleep)
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, text="upstream busy")
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            with pytest.raises(OllamaError) as excinfo:
+                async for _ in client.chat_stream("m", [ChatMessage(role="user", content="q")]):
+                    pass
+            assert "failed after 5 attempts" in str(excinfo.value)
+            assert "HTTP 503" in str(excinfo.value)
+            assert sleeps == [1, 2, 4, 8]
+        finally:
+            await client.aclose()
+
+
+class TestHealthCheck:
+    async def test_health_check_success(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.path == "/api/tags"
+            return httpx.Response(200, json={"models": []})
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            assert await client.health_check() is True
+        finally:
+            await client.aclose()
+
+    async def test_health_check_failure_status(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, text="busy")
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            assert await client.health_check() is False
+        finally:
+            await client.aclose()
+
+    async def test_health_check_failure_exception(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("down")
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            assert await client.health_check() is False
+        finally:
+            await client.aclose()
+
+    async def test_health_check_custom_timeout(self) -> None:
+        captured_timeouts: list[float] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            # httpx MockTransport doesn't expose timeout directly,
+            # but we can verify the method is callable with a custom timeout
+            return httpx.Response(200, json={"models": []})
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            # Just verify it accepts the timeout parameter without error
+            assert await client.health_check(timeout=0.5) is True
+        finally:
+            await client.aclose()
+
+
+class TestConnectionPool:
+    def test_default_limits_have_50_keepalive(self) -> None:
+        assert DEFAULT_LIMITS.max_keepalive_connections == 50

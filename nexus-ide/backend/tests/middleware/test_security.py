@@ -64,7 +64,21 @@ class TestSecurityHeadersMiddleware:
         assert "frame-ancestors 'none'" in csp
 
     @pytest.mark.asyncio
-    async def test_x_frame_options_deny(self) -> None:
+    async def test_csp_connect_src_websockets(self) -> None:
+        """Test that CSP connect-src allows WebSockets (ws: wss:)."""
+        middleware = _make_middleware()
+
+        captured_headers = []
+
+        async def capture_send(message):
+            if message["type"] == "http.response.start":
+                captured_headers.extend(message["headers"])
+
+        await middleware({"type": "http"}, None, capture_send)
+        headers = dict(captured_headers)
+        csp = headers[b"content-security-policy"].decode()
+        assert "ws:" in csp
+        assert "wss:" in csp
         """Test that X-Frame-Options is set to DENY."""
         middleware = _make_middleware()
 

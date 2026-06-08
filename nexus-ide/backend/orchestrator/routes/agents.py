@@ -13,7 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from backend.middleware.auth import require_auth
 
 from backend.core.agent_lifecycle import AgentLifecycleManager
 from backend.middleware.rate_limit import limiter
@@ -28,7 +29,7 @@ def _get_lifecycle(request: Request) -> AgentLifecycleManager | None:
 
 @router.get("/agents/instances")
 @limiter.limit("100/minute")
-async def list_instances(request: Request) -> dict[str, Any]:
+async def list_instances(request: Request, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     """Return all active (non-terminal) agent instances."""
     lifecycle = _get_lifecycle(request)
     if not lifecycle:
@@ -43,7 +44,7 @@ async def list_instances(request: Request) -> dict[str, Any]:
 
 @router.get("/agents/instances/{instance_id}")
 @limiter.limit("100/minute")
-async def get_instance(instance_id: str, request: Request) -> dict[str, Any]:
+async def get_instance(instance_id: str, request: Request, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     """Return the full status of a single agent instance."""
     lifecycle = _get_lifecycle(request)
     if not lifecycle:
@@ -56,7 +57,7 @@ async def get_instance(instance_id: str, request: Request) -> dict[str, Any]:
 
 @router.post("/agents/instances/{instance_id}/pause")
 @limiter.limit("60/minute")
-async def pause_instance(instance_id: str, request: Request) -> dict[str, Any]:
+async def pause_instance(instance_id: str, request: Request, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     """Pause a running agent instance."""
     lifecycle = _get_lifecycle(request)
     if not lifecycle:
@@ -70,7 +71,7 @@ async def pause_instance(instance_id: str, request: Request) -> dict[str, Any]:
 
 @router.post("/agents/instances/{instance_id}/resume")
 @limiter.limit("60/minute")
-async def resume_instance(instance_id: str, request: Request) -> dict[str, Any]:
+async def resume_instance(instance_id: str, request: Request, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     """Resume a paused agent instance."""
     lifecycle = _get_lifecycle(request)
     if not lifecycle:
@@ -85,7 +86,7 @@ async def resume_instance(instance_id: str, request: Request) -> dict[str, Any]:
 @router.post("/agents/instances/{instance_id}/abort")
 @limiter.limit("60/minute")
 async def abort_instance(
-    instance_id: str, request: Request, reason: str = ""
+    instance_id: str, request: Request, reason: str = "", _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:
     """Abort a running or paused agent instance."""
     lifecycle = _get_lifecycle(request)

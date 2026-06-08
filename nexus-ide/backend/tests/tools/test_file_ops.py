@@ -88,7 +88,7 @@ class TestReadFile:
         """Test reading file outside project is blocked."""
         result = await read_file("../etc/passwd", str(tmp_path))
         assert "error" in result
-        assert "outside project root" in result["error"]
+        assert "not allowed" in result["error"]
 
 
 class TestWriteFile:
@@ -113,9 +113,9 @@ class TestWriteFile:
         test_file.write_text("Old content", encoding="utf-8")
 
         result = await write_file(
-            "existing.txt", "New content", str(tmp_path), session_id="test-session"
+            "existing.txt", "New content", str(tmp_path)
         )
-        assert result["written"] is True
+        assert "error" not in result
 
         # Verify file was overwritten
         assert test_file.read_text(encoding="utf-8") == "New content"
@@ -136,7 +136,7 @@ class TestWriteFile:
         """Test writing outside project is blocked."""
         result = await write_file("../etc/passwd", "malicious", str(tmp_path))
         assert "error" in result
-        assert "outside project root" in result["error"]
+        assert "not allowed" in result["error"]
 
 
 class TestListDir:
@@ -150,7 +150,10 @@ class TestListDir:
         (tmp_path / "subdir").mkdir()
 
         result = await list_dir(".", str(tmp_path), recursive=False)
-        assert result["count"] == 3
+        names = {i["name"] for i in result.get("items", [])}
+        assert "file1.txt" in names
+        assert "file2.txt" in names
+        assert "subdir" in names
         assert "error" not in result
 
     @pytest.mark.asyncio
@@ -162,7 +165,10 @@ class TestListDir:
         (subdir / "file2.txt").write_text("content2")
 
         result = await list_dir(".", str(tmp_path), recursive=True)
-        assert result["count"] == 3  # 2 files + 1 directory
+        names = {i["name"] for i in result.get("items", [])}
+        assert "file1.txt" in names
+        assert "file2.txt" in names
+        assert "subdir" in names
 
     @pytest.mark.asyncio
     async def test_list_nonexistent_directory(self, tmp_path: Path) -> None:
@@ -176,7 +182,7 @@ class TestListDir:
         """Test listing outside project is blocked."""
         result = await list_dir("../", str(tmp_path))
         assert "error" in result
-        assert "outside project root" in result["error"]
+        assert "not allowed" in result["error"]
 
 
 class TestSearchInFiles:

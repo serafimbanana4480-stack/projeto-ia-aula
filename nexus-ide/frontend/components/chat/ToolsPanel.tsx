@@ -1,9 +1,8 @@
 "use client";
 import { useToolsStore } from "../../stores/toolsStore";
-import { getTools, toggleTool as toggleToolRemote } from "../../lib/api";
+import { toggleTool as toggleToolRemote } from "../../lib/api";
 import { motion } from "framer-motion";
 import { Wrench, Check } from "lucide-react";
-import { useEffect } from "react";
 import { log } from "../../lib/log";
 
 const TOOLS = [
@@ -16,20 +15,7 @@ const TOOLS = [
 ];
 
 export default function ToolsPanel() {
-  const { tools, setTools, toggleTool } = useToolsStore();
-
-  useEffect(() => {
-    // Initialize tools from backend
-    const initializeTools = async () => {
-      try {
-        const data = await getTools();
-        setTools(data);
-      } catch (error) {
-        log.error("Failed to fetch tools:", error);
-      }
-    };
-    initializeTools();
-  }, [setTools]);
+  const { tools, toggleTool } = useToolsStore();
 
   return (
     <motion.div

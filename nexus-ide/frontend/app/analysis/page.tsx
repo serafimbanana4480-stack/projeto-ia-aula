@@ -57,8 +57,8 @@ export default function AnalysisPage() {
           requests_failed: metrics.requests_failed ?? 0,
           avg_latency_ms: metrics.avg_latency_ms ?? 0,
           uptime_seconds: metrics.uptime_seconds ?? 0,
-          message_stats: metrics.message_stats,
-          change_stats: metrics.change_stats,
+          message_stats: metrics.message_stats as AnalyticsData["message_stats"],
+          change_stats: metrics.change_stats as AnalyticsData["change_stats"],
         };
 
         setAnalytics(analyticsData);

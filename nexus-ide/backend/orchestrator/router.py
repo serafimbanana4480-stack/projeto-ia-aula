@@ -12,6 +12,7 @@ re-exported here for backwards compatibility with existing imports.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -39,6 +40,7 @@ def _query_hash(query: str) -> str:
 # Each entry stores (decision, timestamp) for TTL-based expiry.
 _routing_cache: dict[str, tuple[RoutingDecision, float]] = {}
 _ROUTING_CACHE_TTL = 300.0  # 5 minutes
+_ROUTING_CACHE_MAX = 1000
 
 
 def _get_cached_decision(query_hash: str) -> RoutingDecision | None:
@@ -55,20 +57,87 @@ def _get_cached_decision(query_hash: str) -> RoutingDecision | None:
 
 def _store_cached_decision(query_hash: str, decision: RoutingDecision) -> None:
     """Store a routing decision in cache with TTL timestamp."""
-    if len(_routing_cache) >= 500:
+    if len(_routing_cache) >= _ROUTING_CACHE_MAX:
         # Evict oldest entries (FIFO) and expired entries
         now = time.time()
         expired = [k for k, (_, ts) in _routing_cache.items() if now - ts > _ROUTING_CACHE_TTL]
         for k in expired:
             del _routing_cache[k]
-        if len(_routing_cache) >= 500:
+        if len(_routing_cache) >= _ROUTING_CACHE_MAX:
             keys_to_remove = list(_routing_cache.keys())[:100]
             for k in keys_to_remove:
                 del _routing_cache[k]
     _routing_cache[query_hash] = (decision, time.time())
 
 
-__all__ = ["RoutingDecision", "fast_route", "route_with_model"]
+__all__ = ["RoutingDecision", "fast_route", "route_with_model", "warm_routing_cache"]
+
+# Common queries used to warm the routing cache at startup.
+_COMMON_QUERIES: dict[str, RoutingDecision] = {
+    "what is python": RoutingDecision(
+        primary_agent="MICRO",
+        secondary_agents=[],
+        requires_web_search=False,
+        thinking_mode="fast",
+        estimated_complexity=1,
+        task_type="question",
+        context_needed="low",
+        routing_confidence=0.95,
+        routing_reason="common-trivial-question",
+    ),
+    "write a function": RoutingDecision(
+        primary_agent="CODER",
+        secondary_agents=[],
+        requires_web_search=False,
+        thinking_mode="fast",
+        estimated_complexity=4,
+        task_type="code_generation",
+        context_needed="low",
+        routing_confidence=0.9,
+        routing_reason="common-code-request",
+    ),
+    "fix the bug": RoutingDecision(
+        primary_agent="DEBUGGER",
+        secondary_agents=[],
+        requires_web_search=False,
+        thinking_mode="iterative",
+        estimated_complexity=5,
+        task_type="debugging",
+        context_needed="high",
+        routing_confidence=0.9,
+        routing_reason="common-debug-request",
+    ),
+    "optimize performance": RoutingDecision(
+        primary_agent="OPTIMIZER",
+        secondary_agents=[],
+        requires_web_search=False,
+        thinking_mode="deep",
+        estimated_complexity=6,
+        task_type="optimization",
+        context_needed="high",
+        routing_confidence=0.9,
+        routing_reason="common-optimization-request",
+    ),
+    "design the architecture": RoutingDecision(
+        primary_agent="ARCHITECT",
+        secondary_agents=[],
+        requires_web_search=False,
+        thinking_mode="deep",
+        estimated_complexity=8,
+        task_type="design",
+        context_needed="high",
+        routing_confidence=0.9,
+        routing_reason="common-architecture-request",
+    ),
+}
+
+
+def warm_routing_cache() -> None:
+    """Pre-populate the routing cache with common queries at startup."""
+    for query, decision in _COMMON_QUERIES.items():
+        h = _query_hash(query)
+        _store_cached_decision(h, decision)
+    logger.info("Routing cache warmed with %d common queries", len(_COMMON_QUERIES))
 
 # ---------------------------------------------------------------------------
 # Level 1 — fast deterministic rules
@@ -274,6 +343,38 @@ _BUG_HUNTER_RUNTIME_MARKERS: Final = (
     "erro em tempo de execucao",
     "teste de stress",
 )
+_TEST_RUNNER_UNIT_MARKERS: Final = (
+    "unit test",
+    "write unit tests",
+    "create unit tests",
+    "pytest",
+    "unittest",
+    "test function",
+    "test class",
+    "mock test",
+    "fixture",
+    "parametrize",
+    "assert equal",
+    "test coverage",
+    "teste unitario",
+    "teste unitário",
+    "escrever testes",
+)
+_TEST_RUNNER_E2E_MARKERS: Final = (
+    "end to end test",
+    "e2e test",
+    "integration test",
+    "selenium",
+    "playwright",
+    "cypress",
+    "automation test",
+    "browser test",
+    "ui test",
+    "workflow test",
+    "teste e2e",
+    "teste de integracao",
+    "teste de integração",
+)
 _DOCUMENTER_MARKERS: Final = (
     "document",
     "documenta",
@@ -296,6 +397,24 @@ _RESEARCHER_MARKERS: Final = (
     "released in",
     "recent release",
 )
+_RESEARCHER_WEB_MARKERS: Final = (
+    "deep research",
+    "comprehensive research",
+    "research report",
+    "literature review",
+    "market analysis",
+    "competitive analysis",
+    "survey of",
+    "state of the art",
+    "current state of",
+    "latest developments in",
+    "recent advances",
+    "what does the research say",
+    "find all sources",
+    "cross-reference",
+    "validate this claim",
+    "fact check",
+)
 _WEB_SEARCH_MARKERS: Final = (
     "search the web",
     "search online",
@@ -314,20 +433,10 @@ _WEB_SEARCH_MARKERS: Final = (
 _TRIVIAL_QUESTION = re.compile(r"^\s*(what|who|when|where|why|how)\s+is\b", re.IGNORECASE)
 
 
-def fast_route(query: str) -> AgentName | None:
-    """Level 1 — deterministic pre-routing.
-
-    Returns an agent name when the query is trivially classifiable, otherwise
-    ``None`` so the caller falls through to :func:`route_with_model`.
-
-    Priority order matters: more specific markers are checked first to avoid
-    false positives. For example, "fix the error" should route to DEBUGGER,
-    not CODER, even though "fix" could imply coding.
-    """
-    if not query or not query.strip():
-        return None
-
-    lowered = query.lower()
+@functools.lru_cache(maxsize=1000)
+def _fast_route_cached(normalized_query: str) -> AgentName | None:
+    """Cached inner implementation — operates on pre-normalized query."""
+    lowered = normalized_query
 
     # 1. DEBUGGER — error/debug patterns (most specific, check first)
     if any(marker in lowered for marker in _DEBUGGER_MARKERS):
@@ -360,6 +469,97 @@ def fast_route(query: str) -> AgentName | None:
     # 4c. REFACTOR_CLEAN — code cleanliness refactoring patterns
     if any(marker in lowered for marker in _REFACTOR_CLEAN_MARKERS):
         return "REFACTOR_CLEAN"
+
+    # 4d. TEST_RUNNER_UNIT — unit testing patterns
+    if any(marker in lowered for marker in _TEST_RUNNER_UNIT_MARKERS):
+        return "TEST_RUNNER_UNIT"
+
+    # 4e. TEST_RUNNER_E2E — end-to-end testing patterns
+    if any(marker in lowered for marker in _TEST_RUNNER_E2E_MARKERS):
+        return "TEST_RUNNER_E2E"
+
+    # 5. CODER — code generation patterns
+    if any(marker in lowered for marker in _CODER_MARKERS):
+        return "CODER"
+
+    # 6. DOCUMENTER — documentation patterns
+    if any(marker in lowered for marker in _DOCUMENTER_MARKERS):
+        return "DOCUMENTER"
+
+    # 7. RESEARCHER_WEB — deep research patterns (check before simple researcher)
+    if any(marker in lowered for marker in _RESEARCHER_WEB_MARKERS):
+        return "RESEARCHER_WEB"
+
+    # 7b. RESEARCHER — research/web search patterns
+    if any(marker in lowered for marker in _RESEARCHER_MARKERS):
+        return "RESEARCHER"
+    if any(marker in lowered for marker in _WEB_SEARCH_MARKERS):
+        return "RESEARCHER"
+
+    # 8. MICRO — trivial factoid lookup (very short, simple questions)
+    words = lowered.split()
+    if len(words) <= 12 and _TRIVIAL_QUESTION.match(lowered):
+        return "MICRO"
+
+    return None
+
+
+def fast_route(query: str) -> AgentName | None:
+    """Level 1 — deterministic pre-routing.
+
+    Returns an agent name when the query is trivially classifiable, otherwise
+    ``None`` so the caller falls through to :func:`route_with_model`.
+
+    Priority order matters: more specific markers are checked first to avoid
+    false positives. For example, "fix the error" should route to DEBUGGER,
+    not CODER, even though "fix" could imply coding.
+    
+    Results are cached with LRU (maxsize=1000) for repeated queries.
+    """
+    if not query or not query.strip():
+        return None
+
+    return _fast_route_cached(query.lower().strip())
+
+    # 1. DEBUGGER — error/debug patterns (most specific, check first)
+    if any(marker in lowered for marker in _DEBUGGER_MARKERS):
+        return "DEBUGGER"
+
+    # 1b. BUG_HUNTER_RUNTIME — runtime testing and reproduction patterns
+    if any(marker in lowered for marker in _BUG_HUNTER_RUNTIME_MARKERS):
+        return "BUG_HUNTER_RUNTIME"
+
+    # 2. ARCHITECT — design/planning patterns
+    if any(marker in lowered for marker in _ARCHITECT_MARKERS):
+        return "ARCHITECT"
+
+    # 3. ANALYZER — review/audit patterns
+    if any(marker in lowered for marker in _ANALYZER_MARKERS):
+        return "ANALYZER"
+
+    # 3b. BUG_HUNTER_STATIC — static analysis and security scan patterns
+    if any(marker in lowered for marker in _BUG_HUNTER_STATIC_MARKERS):
+        return "BUG_HUNTER_STATIC"
+
+    # 4. OPTIMIZER — performance patterns
+    if any(marker in lowered for marker in _OPTIMIZER_MARKERS):
+        return "OPTIMIZER"
+
+    # 4b. REFACTOR_PERFORMANCE — specific performance refactoring patterns
+    if any(marker in lowered for marker in _REFACTOR_PERF_MARKERS):
+        return "REFACTOR_PERFORMANCE"
+
+    # 4c. REFACTOR_CLEAN — code cleanliness refactoring patterns
+    if any(marker in lowered for marker in _REFACTOR_CLEAN_MARKERS):
+        return "REFACTOR_CLEAN"
+
+    # 4d. TEST_RUNNER_UNIT — unit testing patterns
+    if any(marker in lowered for marker in _TEST_RUNNER_UNIT_MARKERS):
+        return "TEST_RUNNER_UNIT"
+
+    # 4e. TEST_RUNNER_E2E — end-to-end testing patterns
+    if any(marker in lowered for marker in _TEST_RUNNER_E2E_MARKERS):
+        return "TEST_RUNNER_E2E"
 
     # 5. CODER — code generation patterns
     if any(marker in lowered for marker in _CODER_MARKERS):

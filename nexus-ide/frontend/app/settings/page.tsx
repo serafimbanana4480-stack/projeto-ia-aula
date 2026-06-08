@@ -16,7 +16,7 @@ import {
 import { apiUrl } from "../../lib/api";
 
 interface AppSettings {
-  ollama_host: string;
+  local_llm_device: string;
   backend_host: string;
   default_mode: string;
   default_model: string;
@@ -25,7 +25,7 @@ interface AppSettings {
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings>({
-    ollama_host: "http://localhost:11434",
+    local_llm_device: "auto",
     backend_host: "http://localhost:8000",
     default_mode: "auto",
     default_model: "coder",
@@ -186,15 +186,15 @@ export default function SettingsPage() {
                 <div className="space-y-4">
                   <div>
                     <label className="mb-1 block text-xs text-gray-400">
-                      Ollama Host
+                      Local LLM Device
                     </label>
                     <input
                       type="text"
-                      value={settings.ollama_host}
+                      value={settings.local_llm_device}
                       onChange={(e) =>
                         setSettings({
                           ...settings,
-                          ollama_host: e.target.value,
+                          local_llm_device: e.target.value,
                         })
                       }
                       className="w-full rounded bg-nexus-border px-3 py-2 text-sm text-gray-300 focus:outline-none focus:ring-1 focus:ring-nexus-accent"

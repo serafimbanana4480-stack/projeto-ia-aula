@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Pause,
@@ -57,7 +57,7 @@ const statusConfig: Record<
   },
 };
 
-function AgentTile({ agent }: { agent: AgentInstance }) {
+const AgentTile = React.memo(function AgentTile({ agent }: { agent: AgentInstance }) {
   const [expanded, setExpanded] = useState(false);
   const [acting, setActing] = useState(false);
   const cfg = statusConfig[agent.status];
@@ -104,7 +104,7 @@ function AgentTile({ agent }: { agent: AgentInstance }) {
         </div>
       )}
 
-      <div className="mt-2 flex items-center gap-3 text-[10px] text-nexus-muted">
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-nexus-muted">
         {agent.cpu_percent !== undefined && (
           <span className="flex items-center gap-1">
             <Cpu className="h-3 w-3" />
@@ -168,9 +168,9 @@ function AgentTile({ agent }: { agent: AgentInstance }) {
       </AnimatePresence>
     </motion.div>
   );
-}
+});
 
-export default function AgentGrid() {
+const AgentGrid = React.memo(function AgentGrid() {
   const agents = useMissionStore((s) => s.agents);
   const loading = useMissionStore((s) => s.loading);
 
@@ -206,16 +206,20 @@ export default function AgentGrid() {
       </div>
 
       {loading && agents.length === 0 ? (
-        <div className="flex h-32 items-center justify-center text-xs text-nexus-muted">
-          <div className="h-4 w-4 animate-spin rounded-full border-2 border-nexus-accent2 border-t-transparent mr-2" />
-          A carregar agentes...
+        <div className="space-y-2">
+          <div className="h-6 animate-pulse rounded bg-nexus-border/20" />
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} className="h-24 animate-pulse rounded bg-nexus-border/20" />
+            ))}
+          </div>
         </div>
       ) : sorted.length === 0 ? (
         <div className="flex h-32 items-center justify-center text-xs text-nexus-muted">
           Nenhum agente registado
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 max-h-[400px] overflow-y-auto thin-scrollbar pr-1">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 max-h-[400px] overflow-y-auto thin-scrollbar pr-1">
           {sorted.map((agent) => (
             <AgentTile key={agent.id} agent={agent} />
           ))}
@@ -223,4 +227,6 @@ export default function AgentGrid() {
       )}
     </div>
   );
-}
+});
+
+export default AgentGrid;

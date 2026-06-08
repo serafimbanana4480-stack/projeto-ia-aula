@@ -1,10 +1,8 @@
 "use client";
-import { useEffect, useState } from "react";
 import { useModelStore } from "../../stores/modelStore";
-import { getModelStatus } from "../../lib/api";
+import type { ModelStatus } from "../../lib/types";
 import { motion } from "framer-motion";
 import { Cpu, Check, Loader2 } from "lucide-react";
-import { log } from "../../lib/log";
 
 interface DynamicModel {
   id: string;
@@ -84,46 +82,27 @@ const MODEL_TIERS: Record<string, string> = {
 };
 
 export default function ModelPanel() {
-  const { activeModel, setActiveModel } = useModelStore();
-  const [models, setModels] = useState<DynamicModel[]>(FALLBACK_MODELS);
-  const [loading, setLoading] = useState(true);
+  const { activeModel, setActiveModel, rawModelStatus, modelsLoaded, modelsLoading } = useModelStore();
 
-  useEffect(() => {
-    const fetchModels = async () => {
-      try {
-        const apiModels = await getModelStatus();
+  // Derive display models from shared store; fall back to placeholders while loading
+  const displayModels: DynamicModel[] = rawModelStatus.length > 0
+    ? rawModelStatus.map((m: ModelStatus) => {
+        const modelId = m.id.split(":")[0]; // e.g. "qwen2.5-coder:7b" -> "qwen2.5-coder"
+        return {
+          id: modelId,
+          name: m.id, // Use full Ollama model name
+          tier:
+            m.details?.parameter_size
+              ? `${m.details.parameter_size}B`
+              : MODEL_TIERS[modelId] || "MODEL",
+          size: m.size_bytes ? formatSize(m.size_bytes) : "—",
+          color: MODEL_COLORS[modelId] || MODEL_COLORS["default"],
+          status: m.status || "available",
+        };
+      })
+    : FALLBACK_MODELS;
 
-        if (apiModels && apiModels.length > 0) {
-          // Map API models to our display format
-          const dynamicModels: DynamicModel[] = apiModels.map((m: any) => {
-            const modelId = m.id.split(":")[0]; // e.g. "qwen2.5-coder:7b" -> "qwen2.5-coder"
-            return {
-              id: modelId,
-              name: m.id, // Use full Ollama model name
-              tier:
-                m.details?.parameter_size
-                  ? `${m.details.parameter_size}B`
-                  : MODEL_TIERS[modelId] || "MODEL",
-              size: m.size_bytes ? formatSize(m.size_bytes) : "—",
-              color:
-                MODEL_COLORS[modelId] || MODEL_COLORS["default"],
-              status: m.status || "available",
-            };
-          });
-          setModels(dynamicModels);
-        }
-      } catch (error) {
-        // Keep fallback models
-        log.error("Failed to fetch models:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchModels();
-    const interval = setInterval(fetchModels, 30000);
-    return () => clearInterval(interval);
-  }, []);
+  const loading = modelsLoading || !modelsLoaded;
 
   return (
     <motion.div
@@ -140,7 +119,7 @@ export default function ModelPanel() {
       </div>
 
       <div className="space-y-1.5">
-        {models.map((model) => (
+        {displayModels.map((model) => (
           <motion.button
             key={model.id}
             whileHover={{ scale: 1.02 }}

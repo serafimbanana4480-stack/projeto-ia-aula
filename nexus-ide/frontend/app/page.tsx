@@ -37,7 +37,7 @@ export default function HomePage() {
 
           {/* Right sidebar - model, performance, tools */}
           {rightOpen && (
-            <div className="flex w-[360px] flex-col border-l border-nexus-border bg-nexus-panel overflow-hidden shrink-0">
+            <div className="hidden lg:flex w-[360px] flex-col border-l border-nexus-border bg-nexus-panel overflow-hidden shrink-0">
               <Suspense fallback={<LoadingFallback />}>
                 <RightPanel />
               </Suspense>

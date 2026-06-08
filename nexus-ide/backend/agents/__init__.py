@@ -4,8 +4,9 @@ One module per agent. All agents subclass `AgentBase` (see `base.py`).
 """
 
 from backend.agents.meta_analyzer import MetaAnalyzerAgent
+from backend.agents.researcher_web import ResearcherWebAgent
 
-__all__ = ["MetaAnalyzerAgent"]
+__all__ = ["MetaAnalyzerAgent", "ResearcherWebAgent"]
 
 from backend.agents.architect_complexity import ArchitectComplexityAgent
 from backend.agents.architect_design import ArchitectDesignAgent
@@ -25,4 +26,5 @@ __all__ = [
     "RefactorPerformanceAgent",
     "TestRunnerE2EAgent",
     "TestRunnerUnitAgent",
+    "ResearcherWebAgent",
 ]

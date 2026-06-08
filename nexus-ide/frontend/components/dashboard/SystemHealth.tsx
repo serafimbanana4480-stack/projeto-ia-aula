@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { useMetricsStore } from "../../stores/metricsStore";
+import { useModelStore } from "../../stores/modelStore";
 import { Activity, Server, Cpu, Database, Wifi } from "lucide-react";
 
 interface HealthCheck {
@@ -19,13 +20,16 @@ export default function SystemHealth() {
 
   const metrics = useMetricsStore((s) => s.metrics);
   const backendOnline = useMetricsStore((s) => s.backendOnline);
+  const modelsLoaded = useModelStore((s) => s.modelsLoaded);
+  const rawModelStatus = useModelStore((s) => s.rawModelStatus);
 
+  // Use dedicated lightweight endpoints; avoid calling /api/projects here
+  // because the projectStore already loads it once via DataInitProvider.
   const performHealthChecks = useCallback(async () => {
     setLoading(true);
     const startAll = Date.now();
 
-    // Only check external services — metrics/stream health comes from the store
-    const [ollamaRes, backendRes, dbRes] = await Promise.allSettled([
+    const [localLlmRes, backendRes] = await Promise.allSettled([
       fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api/models/status`, { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
         ok: r.ok,
         latency: Date.now() - startAll,
@@ -34,19 +38,15 @@ export default function SystemHealth() {
         ok: r.ok,
         latency: Date.now() - startAll,
       })),
-      fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api/projects`, { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
-        ok: r.ok,
-        latency: Date.now() - startAll,
-      })),
     ]);
 
     const now = new Date().toISOString();
     const healthChecks: HealthCheck[] = [
       {
-        name: "Ollama",
-        status: ollamaRes.status === "fulfilled" && ollamaRes.value.ok ? "healthy" : "unhealthy",
-        latency_ms: ollamaRes.status === "fulfilled" ? ollamaRes.value.latency : undefined,
-        message: ollamaRes.status === "rejected" ? "Connection refused" : undefined,
+        name: "Local LLM",
+        status: localLlmRes.status === "fulfilled" && localLlmRes.value.ok ? "healthy" : "unhealthy",
+        latency_ms: localLlmRes.status === "fulfilled" ? localLlmRes.value.latency : undefined,
+        message: localLlmRes.status === "rejected" ? "Connection refused" : undefined,
         last_check: now,
         icon: <Cpu className="h-3.5 w-3.5" />,
       },
@@ -67,9 +67,9 @@ export default function SystemHealth() {
       },
       {
         name: "Database",
-        status: dbRes.status === "fulfilled" && dbRes.value.ok ? "healthy" : "unhealthy",
-        latency_ms: dbRes.status === "fulfilled" ? dbRes.value.latency : undefined,
-        message: dbRes.status === "rejected" ? "Connection refused" : undefined,
+        status: backendRes.status === "fulfilled" && backendRes.value.ok ? "healthy" : "unhealthy",
+        latency_ms: backendRes.status === "fulfilled" ? backendRes.value.latency : undefined,
+        message: backendRes.status === "rejected" ? "Connection refused" : undefined,
         last_check: now,
         icon: <Database className="h-3.5 w-3.5" />,
       },
@@ -80,12 +80,19 @@ export default function SystemHealth() {
         last_check: now,
         icon: <Wifi className="h-3.5 w-3.5" />,
       },
+      {
+        name: "Model Registry",
+        status: modelsLoaded && rawModelStatus.length > 0 ? "healthy" : modelsLoaded ? "degraded" : "unknown",
+        message: modelsLoaded ? undefined : "Models not loaded yet",
+        last_check: now,
+        icon: <Cpu className="h-3.5 w-3.5" />,
+      },
     ];
 
     setChecks(healthChecks);
     setLastUpdate(new Date().toLocaleTimeString());
     setLoading(false);
-  }, [backendOnline]);
+  }, [backendOnline, modelsLoaded, rawModelStatus.length]);
 
   useEffect(() => {
     performHealthChecks();

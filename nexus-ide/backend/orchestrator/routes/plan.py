@@ -59,7 +59,7 @@ def _get_engine(request: Request) -> OrchestrationEngine:
 
         request.app.state.orchestration_engine = OrchestrationEngine(
             llm_client=request.app.state.llm_client,
-            registry=request.app.state.registry,
+            registry=get_registry(request.app),
             event_bus=request.app.state.event_bus,
         )
     return request.app.state.orchestration_engine

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -24,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.middleware.rate_limit import limiter
 from backend.orchestrator.meta import MetaOrchestrator, Mission, MissionStatus
+from backend.orchestrator.registry import get_registry
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -89,16 +91,17 @@ def _get_meta(request: Request) -> MetaOrchestrator:
     if not hasattr(app.state, "meta_orchestrator"):
         from backend.orchestrator.engine import OrchestrationEngine
 
+        registry = get_registry(app)
         engine = OrchestrationEngine(
             llm_client=app.state.llm_client,
-            registry=app.state.registry,
+            registry=registry,
             event_bus=app.state.event_bus,
         )
         app.state.meta_orchestrator = MetaOrchestrator(
             engine=engine,
             event_bus=app.state.event_bus,
             llm_client=app.state.llm_client,
-            registry=app.state.registry,
+            registry=registry,
         )
     return app.state.meta_orchestrator
 
@@ -255,16 +258,17 @@ async def mission_websocket(websocket: WebSocket, mission_id: str) -> None:
         if not hasattr(app.state, "meta_orchestrator"):
             from backend.orchestrator.engine import OrchestrationEngine
 
+            registry = get_registry(app)
             engine = OrchestrationEngine(
                 llm_client=app.state.llm_client,
-                registry=app.state.registry,
+                registry=registry,
                 event_bus=app.state.event_bus,
             )
             app.state.meta_orchestrator = MetaOrchestrator(
                 engine=engine,
                 event_bus=app.state.event_bus,
                 llm_client=app.state.llm_client,
-                registry=app.state.registry,
+                registry=registry,
             )
         meta = app.state.meta_orchestrator
 

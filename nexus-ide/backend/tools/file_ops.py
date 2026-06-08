@@ -18,6 +18,20 @@ logger = logging.getLogger(__name__)
 
 _lock_manager = FileLockManager()
 
+# Blocked file extensions for write operations (prevent malware drops)
+_BLOCKED_EXTENSIONS: set[str] = {
+    ".exe",
+    ".dll",
+    ".bat",
+    ".cmd",
+    ".com",
+    ".scr",
+    ".msi",
+    ".vbs",
+    ".wsf",
+    ".jar",
+}
+
 
 def _validate_path(project_path: str, target_path: str) -> Path:
     """Validate that target_path is within project_path (sandbox).
@@ -80,6 +94,11 @@ async def write_file(
     """
     manager = WorkspaceManager(project_path)
     full_path = manager._resolve_path(path)
+
+    # Block dangerous executable extensions
+    if full_path.suffix.lower() in _BLOCKED_EXTENSIONS:
+        return {"error": f"Writing files with extension '{full_path.suffix}' is blocked for security"}
+
     try:
         await _lock_manager.acquire_write_lock(
             str(full_path), owner, timeout=timeout_seconds

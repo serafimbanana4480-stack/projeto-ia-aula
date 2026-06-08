@@ -5,6 +5,7 @@ Detects frameworks, dependencies, test coverage, and potential issues.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import Counter
 from pathlib import Path
@@ -111,7 +112,6 @@ def _find_dependencies(project: Path, files: list[Path]) -> dict:
                             if pkg:
                                 packages.append(pkg)
                 elif key == "package.json":
-                    import json
                     try:
                         data = json.loads(content)
                         packages.extend(data.get("dependencies", {}).keys())
@@ -119,8 +119,8 @@ def _find_dependencies(project: Path, files: list[Path]) -> dict:
                     except json.JSONDecodeError:
                         pass
                 elif key == "cargo.toml":
-                    import tomllib
                     try:
+                        import tomllib
                         data = tomllib.loads(content)
                         packages.extend(data.get("dependencies", {}).keys())
                         packages.extend(data.get("dev-dependencies", {}).keys())

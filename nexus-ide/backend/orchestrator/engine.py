@@ -908,7 +908,7 @@ Provide a clear summary of what you accomplished."""
             if not isinstance(raw_deps, list):
                 raw_deps = [raw_deps] if raw_deps else []
             for dep_ref in raw_deps:
-                dep_idx = self._resolve_dep_ref(dep_ref, i, len(steps), name_to_idx)
+                dep_idx = self._resolve_dep_ref(dep_ref, len(steps), name_to_idx)
                 if dep_idx is not None and dep_idx != i:
                     steps[i].depends_on.append(steps[dep_idx].task_id)
                     steps[dep_idx].required_by.append(steps[i].task_id)
@@ -923,7 +923,6 @@ Provide a clear summary of what you accomplished."""
     @staticmethod
     def _resolve_dep_ref(
         dep_ref: Any,
-        current_idx: int,
         total_steps: int,
         name_to_idx: dict[str, int],
     ) -> int | None:
@@ -1003,7 +1002,7 @@ Provide a clear summary of what you accomplished."""
             return None
 
         steps: list[TaskNode] = []
-        for num_str, content in matches:
+        for _, content in matches:
             content = content.strip()
             if not content:
                 continue

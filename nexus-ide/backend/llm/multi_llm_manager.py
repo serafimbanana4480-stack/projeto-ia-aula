@@ -60,14 +60,9 @@ class MultiLLMManager:
                     # OpenAI-compatible providers (OpenAIProvider, KimiProvider)
                     resp = await client.get("/models", timeout=5.0)
                     healthy = resp.status_code == 200
-                elif hasattr(client, "_client") and isinstance(
-                    client._client, httpx.AsyncClient
-                ):
-                    # OllamaProvider -> OllamaClient -> httpx.AsyncClient
-                    base_url = str(client._client.base_url).rstrip("/")
-                    async with httpx.AsyncClient(timeout=5.0) as temp:
-                        resp = await temp.get(f"{base_url}/api/tags")
-                        healthy = resp.status_code == 200
+                elif hasattr(provider, "health_check"):
+                    # AirLLMProvider or other providers with health_check()
+                    healthy = await provider.health_check()
                 else:
                     healthy = True
                 latency = (time.time() - started) * 1000
@@ -144,6 +139,7 @@ class MultiLLMManager:
                 )
                 success = True
                 self._update_health(name, True, (time.time() - started) * 1000)
+                logger.info("Provider '%s' succeeded for chat_complete", name)
                 return result
             except Exception as exc:
                 last_error = exc
@@ -177,6 +173,7 @@ class MultiLLMManager:
                     yield token
                 success = True
                 self._update_health(name, True, (time.time() - started) * 1000)
+                logger.info("Provider '%s' succeeded for chat_stream", name)
                 return
             except Exception as exc:
                 last_error = exc

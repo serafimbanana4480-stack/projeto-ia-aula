@@ -30,9 +30,7 @@ class SupervisorAgent(AgentBase):
     name = "SUPERVISOR"
     model_key = "fast"
     prompt_file = "supervisor"
-    supported_actions = {
-        AgentRequest,
-    }
+    supported_actions = set()
 
     async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
         """Run supervisor analysis on the current session or project."""

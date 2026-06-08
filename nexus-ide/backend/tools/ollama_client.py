@@ -1,39 +1,45 @@
-"""Async Ollama HTTP client with streaming support.
-
-Uses ``httpx`` directly against the Ollama ``/api/chat`` endpoint instead of the
-``ollama`` SDK so that:
-
-1. There is a single, explicit transport to mock in tests.
-2. We have fine-grained control over timeouts and cancellation.
-3. We do not pull a heavy dependency graph just for two endpoints.
-
-Ollama server reference: https://github.com/ollama/ollama/blob/main/docs/api.md
-"""
+"""Async Ollama HTTP client used by agents, routes, and embeddings."""
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
+DEFAULT_LIMITS = httpx.Limits(
+    max_keepalive_connections=50,
+    max_connections=100,
+    keepalive_expiry=30.0,
+)
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)
 
-# Connection pooling limits for better performance
-DEFAULT_LIMITS = httpx.Limits(
-    max_keepalive_connections=20,  # Maximum number of keepalive connections
-    max_connections=100,  # Maximum number of total connections
-    keepalive_expiry=30.0,  # Expire keepalive connections after 30 seconds
+_RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+_RETRYABLE_EXCEPTIONS = (
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+    httpx.TimeoutException,
 )
+_BACKOFF_DELAYS = (1, 2, 4, 8)
+_MODEL_ALIASES = {
+    # Preserve historical aliases that existed in the AirLLM-only phase.
+    "q3b-4bit": "qwen2.5:3b",
+    "coder3b-4bit": "qwen2.5-coder:3b",
+}
 
 
 @dataclass(frozen=True)
 class ChatMessage:
-    """A single turn in a chat exchange, matching Ollama's schema."""
+    """A single turn in a chat exchange."""
 
-    role: str  # "system" | "user" | "assistant"
+    role: str
     content: str
     timestamp: str = ""
 
@@ -42,95 +48,191 @@ class ChatMessage:
 
 
 class OllamaError(RuntimeError):
-    """Raised when the Ollama server returns a non-2xx response or invalid JSON."""
+    """Raised when the Ollama server returns an error."""
+
+
+class OllamaConnectionError(OllamaError):
+    """Raised when the Ollama server cannot be reached."""
+
+
+class OllamaModelError(OllamaError):
+    """Raised when a requested model is not available."""
 
 
 class OllamaClient:
-    """Thin async client. One instance per process, shared via FastAPI lifespan.
-
-    Not thread-safe in the free-threading sense, but safe under a single asyncio
-    event loop which is how FastAPI uses it.
-    """
+    """Small async wrapper around the Ollama HTTP API."""
 
     def __init__(
         self,
-        host: str,
+        base_url: str = "",
         *,
         transport: httpx.AsyncBaseTransport | None = None,
-        timeout: httpx.Timeout = DEFAULT_TIMEOUT,
-        limits: httpx.Limits = DEFAULT_LIMITS,
+        timeout: httpx.Timeout | float | None = None,
+        limits: httpx.Limits | None = None,
     ) -> None:
+        if not base_url:
+            from backend.config.settings import get_settings
+
+            base_url = get_settings().ollama_host
+
+        self.base_url = (base_url or "http://localhost:11434").rstrip("/")
         self._client = httpx.AsyncClient(
-            base_url=host.rstrip("/"),
+            base_url=self.base_url,
+            timeout=timeout or DEFAULT_TIMEOUT,
+            limits=limits or DEFAULT_LIMITS,
             transport=transport,
-            timeout=timeout,
-            limits=limits,
         )
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    def _resolve_model(self, model: str) -> str:
+        return _MODEL_ALIASES.get(model, model)
+
+    @staticmethod
+    def _normalize_messages(
+        messages: list[dict[str, str]] | list[ChatMessage],
+    ) -> list[dict[str, str]]:
+        return [
+            m.to_dict() if isinstance(m, ChatMessage) else dict(m)
+            for m in messages
+        ]
+
+    @staticmethod
+    def _format_attempt_failure(
+        method: str,
+        path: str,
+        attempt_count: int,
+        failures: list[str],
+    ) -> str:
+        history = " | ".join(failures)
+        return f"{method} {path} failed after {attempt_count} attempts: {history}"
+
+    async def _request_with_retries(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_payload: dict[str, Any] | None = None,
+        timeout: httpx.Timeout | float | None = None,
+    ) -> httpx.Response:
+        failures: list[str] = []
+        max_attempts = len(_BACKOFF_DELAYS) + 1
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await self._client.request(
+                    method,
+                    path,
+                    json=json_payload,
+                    timeout=timeout,
+                )
+            except _RETRYABLE_EXCEPTIONS as exc:
+                error_message = f"{type(exc).__name__}: {exc}"
+                failures.append(error_message)
+                if attempt == max_attempts:
+                    raise OllamaConnectionError(
+                        self._format_attempt_failure(method, path, max_attempts, failures)
+                    ) from exc
+                await asyncio.sleep(_BACKOFF_DELAYS[attempt - 1])
+                continue
+
+            if response.status_code < 400:
+                return response
+
+            body = response.text.strip()
+            error_message = f"HTTP {response.status_code}: {body or response.reason_phrase}"
+
+            if response.status_code == 404:
+                raise OllamaModelError(error_message)
+
+            if response.status_code not in _RETRYABLE_STATUS_CODES:
+                raise OllamaError(error_message)
+
+            failures.append(error_message)
+            if attempt == max_attempts:
+                raise OllamaError(
+                    self._format_attempt_failure(method, path, max_attempts, failures)
+                )
+
+            await asyncio.sleep(_BACKOFF_DELAYS[attempt - 1])
+
+        raise OllamaError(f"{method} {path} failed without a response")
+
     async def chat_stream(
         self,
         model: str,
-        messages: list[ChatMessage],
+        messages: list[dict[str, str]] | list[ChatMessage],
         *,
         options: dict[str, Any] | None = None,
-        on_final_chunk: Callable[[dict[str, Any]], None] | None = None,
+        **_: Any,
     ) -> AsyncIterator[str]:
-        """Stream chat completion tokens from Ollama.
-
-        Yields **content deltas** (not full messages). Each line from Ollama is
-        NDJSON containing a ``message.content`` increment. The final line has
-        ``"done": true`` which terminates the stream.
-
-        Raises :class:`OllamaError` on HTTP failure or malformed chunks.
-        """
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": [m.to_dict() if hasattr(m, "to_dict") else m for m in messages],
+        payload = {
+            "model": self._resolve_model(model),
+            "messages": self._normalize_messages(messages),
             "stream": True,
+            "options": options or {},
         }
-        if options:
-            payload["options"] = options
+        response = await self._request_with_retries("POST", "/api/chat", json_payload=payload)
 
-        async with self._client.stream("POST", "/api/chat", json=payload) as resp:
-            if resp.status_code != 200:
-                body = (await resp.aread()).decode("utf-8", errors="replace")
-                raise OllamaError(f"ollama /api/chat {resp.status_code}: {body[:500]}")
+        async for line in response.aiter_lines():
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                logger.debug("Skipping malformed Ollama stream line: %s", line)
+                continue
 
-            async for line in resp.aiter_lines():
-                if not line:
-                    continue
-                chunk = _parse_chunk(line)
-                if chunk is None:
-                    continue
-                if chunk.get("done"):
-                    if on_final_chunk is not None:
-                        on_final_chunk(chunk)
-                    return
-                content = chunk.get("message", {}).get("content", "")
-                if content:
-                    yield content
+            if data.get("done") is True:
+                break
+
+            chunk = data.get("message", {}).get("content")
+            if chunk:
+                yield chunk
 
     async def chat_complete(
         self,
         model: str,
-        messages: list[ChatMessage],
+        messages: list[dict[str, str]] | list[ChatMessage],
         *,
         options: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> str:
-        """Non-streaming variant. Returns the full concatenated content string."""
         parts: list[str] = []
-        async for token in self.chat_stream(model, messages, options=options):
+        async for token in self.chat_stream(model, messages, options=options, **kwargs):
             parts.append(token)
         return "".join(parts)
 
+    async def embed(
+        self,
+        texts: list[str],
+        model: str,
+        **_: Any,
+    ) -> list[list[float]]:
+        payload = {"model": self._resolve_model(model), "input": texts}
+        response = await self._request_with_retries("POST", "/api/embed", json_payload=payload)
+        data = response.json()
+        if "embeddings" in data and isinstance(data["embeddings"], list):
+            return data["embeddings"]
+        if "embedding" in data and isinstance(data["embedding"], list):
+            return [data["embedding"]]
+        raise OllamaError("Unexpected Ollama embedding response payload")
 
-def _parse_chunk(line: str) -> dict[str, Any] | None:
-    """Parse one NDJSON line. Returns None on malformed input (logged by caller)."""
-    try:
-        data = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+    async def health_check(self, timeout: float = 5.0) -> bool:
+        try:
+            response = await self._client.get("/api/tags", timeout=timeout)
+            return response.status_code == 200
+        except Exception:
+            return False
+
+
+__all__ = [
+    "ChatMessage",
+    "OllamaError",
+    "OllamaConnectionError",
+    "OllamaModelError",
+    "OllamaClient",
+    "DEFAULT_LIMITS",
+    "DEFAULT_TIMEOUT",
+]

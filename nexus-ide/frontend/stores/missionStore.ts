@@ -6,6 +6,10 @@
  */
 import { create } from "zustand";
 
+// Debounce helpers for high-frequency store updates
+let _busMsgTimeout: ReturnType<typeof setTimeout> | null = null;
+let _pendingBusMessages: BusMessage[] = [];
+
 export type MissionStatus = "PENDING" | "RUNNING" | "PAUSED" | "COMPLETED" | "FAILED" | "ABORTED";
 
 export interface MissionPhase {
@@ -95,6 +99,7 @@ interface MissionState {
   selectedMission: string | null;
   loading: boolean;
   error: string | null;
+  backendOnline: boolean;
 
   // Actions
   setMissions: (missions: Mission[]) => void;
@@ -110,6 +115,7 @@ interface MissionState {
   selectMission: (id: string | null) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
+  setBackendOnline: (online: boolean) => void;
 }
 
 export const useMissionStore = create<MissionState>((set) => ({
@@ -122,6 +128,7 @@ export const useMissionStore = create<MissionState>((set) => ({
   selectedMission: null,
   loading: false,
   error: null,
+  backendOnline: true,
 
   setMissions: (missions) => set({ missions }),
   updateMission: (mission) =>
@@ -135,10 +142,18 @@ export const useMissionStore = create<MissionState>((set) => ({
         a.id === agentId ? { ...a, status, ...updates } : a
       ),
     })),
-  addBusMessage: (msg) =>
-    set((state) => ({
-      busMessages: [msg, ...state.busMessages].slice(0, 500),
-    })),
+  addBusMessage: (msg) => {
+    _pendingBusMessages.push(msg);
+    if (_busMsgTimeout) return;
+    _busMsgTimeout = setTimeout(() => {
+      const batch = _pendingBusMessages;
+      _pendingBusMessages = [];
+      _busMsgTimeout = null;
+      set((state) => ({
+        busMessages: [...batch.reverse(), ...state.busMessages].slice(0, 500),
+      }));
+    }, 150);
+  },
   setBusMessages: (messages) => set({ busMessages: messages }),
   addDecision: (decision) =>
     set((state) => ({
@@ -150,4 +165,5 @@ export const useMissionStore = create<MissionState>((set) => ({
   selectMission: (id) => set({ selectedMission: id }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
+  setBackendOnline: (online) => set({ backendOnline: online }),
 }));

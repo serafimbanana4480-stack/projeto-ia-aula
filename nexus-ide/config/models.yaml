@@ -1,61 +1,12 @@
 # NEXUS / LUSO AI IDE — Multi-Model Configuration
-# 5 tiers especializados, com fallback automático para qwen3.5:9b se algum
-# modelo não estiver instalado (qwen3.5 é a série de modelos principal).
-
-# LLM Provider configuration
-# Each provider maps to a base URL and default models.
-providers:
-  ollama:
-    name: "Ollama (Local)"
-    base_url: "http://localhost:11434"
-    default_models:
-      - qwen3.5:9b
-      - qwen3-coder:7b
-      - deepseek-r1:8b
-      - qwen3.5:27b
-    requires_api_key: false
-
-  openai:
-    name: "OpenAI"
-    base_url: "https://api.openai.com/v1"
-    default_models:
-      - gpt-4o
-      - gpt-4o-mini
-      - gpt-3.5-turbo
-    requires_api_key: true
-
-  deepseek:
-    name: "DeepSeek"
-    base_url: "https://api.deepseek.com/v1"
-    default_models:
-      - deepseek-chat
-      - deepseek-reasoner
-    requires_api_key: true
-
-  kimi:
-    name: "Kimi (Moonshot AI)"
-    base_url: "https://api.moonshot.cn/v1"
-    default_models:
-      - kimi-k2.5
-      - kimi-k2
-      - kimi-k2-mini
-    requires_api_key: true
-
-  groq:
-    name: "Groq"
-    base_url: "https://api.groq.com/openai/v1"
-    default_models:
-      - llama-3.3-70b-versatile
-      - llama-3.1-8b-instant
-      - mixtral-8x7b-32768
-    requires_api_key: true
+# Ollama is the primary local provider. AirLLM remains experimental and can be
+# enabled explicitly through environment configuration when needed.
 
 models:
   # MICRO — perguntas triviais (1+1, classificação rápida)
   micro:
-    id: "qwen3.5:4b"
-    fallback_id: "qwen3.5:9b"
-    ollama_host: "http://localhost:11434"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.3
@@ -63,9 +14,8 @@ models:
 
   # FAST — respostas rápidas, formatação leve
   fast:
-    id: "qwen3.5:9b"
-    fallback_id: "qwen3.5:4b"
-    ollama_host: "http://localhost:11434"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.7
@@ -73,9 +23,8 @@ models:
 
   # CODER — geração e análise de código
   coder:
-    id: "qwen3-coder:7b"
-    fallback_id: "qwen3.5:9b"
-    ollama_host: "http://localhost:11434"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: false
     max_tokens: 8192
     temperature: 0.2
@@ -83,85 +32,93 @@ models:
 
   # REASONING — raciocínio multi-step com thinking
   reasoning:
-    id: "deepseek-r1:8b"
-    fallback_id: "qwen3.5:9b"
-    ollama_host: "http://localhost:11434"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: true
     max_tokens: 8192
     temperature: 0.5
     use_cases: [planning, multi_step_reasoning, problem_solving]
 
-  # DEEP — análises complexas, arquitetura
+  # DEEP — análises complexas, arquitetura (uses 1.5B on CPU; promote to 7B on GPU)
   deep:
-    id: "qwen3.5:27b"
-    fallback_id: "deepseek-r1:8b"
-    ollama_host: "http://localhost:11434"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: true
     max_tokens: 16384
     temperature: 0.4
     use_cases: [architecture, complex_analysis, large_codebases]
 
+  # Q3B-4BIT — alias legado mantido por compatibilidade; no Ollama usa 3B padrão
+  q3b-4bit:
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
+    thinking_mode: false
+    max_tokens: 4096
+    temperature: 0.5
+    use_cases: [general_tasks, fast_inference, gpu_quantized]
+
+  # CODER3B-4BIT — alias legado mantido por compatibilidade; no Ollama usa 3B padrão
+  coder3b-4bit:
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
+    thinking_mode: false
+    max_tokens: 4096
+    temperature: 0.2
+    use_cases: [code_generation, refactor, gpu_quantized]
+
   # Aliases retro-compatibilidade (legacy registry)
   nano:
-    id: "qwen3.5:2b"
-    fallback_id: "qwen3.5:4b"
-    ollama_host: "http://localhost:11434"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.1
     use_cases: [routing]
   small:
-    id: "qwen3.5:9b"
-    fallback_id: "qwen3.5:4b"
-    ollama_host: "http://localhost:11434"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.7
     use_cases: [general_tasks]
   medium:
-    id: "qwen3-coder:7b"
-    fallback_id: "qwen3.5:9b"
-    ollama_host: "http://localhost:11434"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: false
     max_tokens: 8192
     temperature: 0.3
     use_cases: [code_generation]
   large:
-    id: "deepseek-r1:8b"
-    fallback_id: "qwen3.5:27b"
-    ollama_host: "http://localhost:11434"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: true
     max_tokens: 8192
     temperature: 0.7
     use_cases: [reasoning]
   expert:
-    id: "qwen3-coder:30b"
-    fallback_id: "qwen3.5:27b"
-    ollama_host: "http://localhost:11434"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: true
     max_tokens: 16384
     temperature: 0.3
     use_cases: [architecture]
   vision:
-    id: "qwen3-vl:7b"
-    fallback_id: "qwen3.5:9b"
-    ollama_host: "http://localhost:11434"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.7
     use_cases: [image_analysis]
   embed:
-    id: "qwen3-embedding:4b"
-    fallback_id: "nomic-embed-text"
-    ollama_host: "http://localhost:11434"
+    id: "nomic-embed-text"
+    fallback_id: "llama3.1:8b"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.0
     use_cases: [retrieval]
   dashboard:
-    id: "qwen3.5:4b"
-    fallback_id: "qwen3.5:9b"
-    ollama_host: "http://localhost:11435"
+    id: "llama3.1:8b"
+    fallback_id: "llama3.1:8b"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.5

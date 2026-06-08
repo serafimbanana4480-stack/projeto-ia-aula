@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "config"
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch environment variables and clear the Settings cache.
 
@@ -38,6 +38,11 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "PROMETHEUS_PORT": "9099",
         "JWT_SECRET": "test-jwt-secret-for-testing",
         "JWT_ALGORITHM": "HS256",
+        # Cross-process file locks are unnecessary in the single-process test
+        # suite and can leave stale lock-files on Windows.
+        "NEXUS_DISABLE_FILELOCK": "1",
+        # Skip the expensive torch import (~3 s) during test Settings creation.
+        "LOCAL_LLM_DEVICE": "cpu",
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -143,13 +148,92 @@ def sample_routing_decision() -> dict[str, Any]:
     }
 
 
+class _InMemoryCache:
+    """Drop-in replacement for CacheClient/SyncCacheClient used in tests.
+
+    Avoids TCP connection attempts to Redis which add ~1-2 s per call when the
+    server is not running.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+
+    async def get(self, key: str) -> str | None:
+        return self._store.get(key)
+
+    async def set(self, key: str, value: str, ttl: int = 300) -> bool:
+        self._store[key] = value
+        return True
+
+    async def delete(self, key: str) -> bool:
+        self._store.pop(key, None)
+        return True
+
+    async def delete_pattern(self, pattern: str) -> int:
+        matched = [k for k in self._store if pattern in k or k == pattern]
+        for k in matched:
+            self._store.pop(k, None)
+        return len(matched)
+
+    async def exists(self, key: str) -> bool:
+        return key in self._store
+
+    async def close(self) -> None:
+        self._store.clear()
+
+
+class _InMemorySyncCache(_InMemoryCache):
+    """Synchronous variant for sync_cache_result / sync cache helpers."""
+
+    def get(self, key: str) -> str | None:  # type: ignore[override]
+        return self._store.get(key)
+
+    def set(self, key: str, value: str, ttl: int = 300) -> bool:  # type: ignore[override]
+        self._store[key] = value
+        return True
+
+    def delete(self, key: str) -> bool:  # type: ignore[override]
+        self._store.pop(key, None)
+        return True
+
+    def delete_pattern(self, pattern: str) -> int:  # type: ignore[override]
+        matched = [k for k in self._store if pattern in k or k == pattern]
+        for k in matched:
+            self._store.pop(k, None)
+        return len(matched)
+
+    def exists(self, key: str) -> bool:  # type: ignore[override]
+        return key in self._store
+
+    def close(self) -> None:  # type: ignore[override]
+        self._store.clear()
+
+
+@pytest.fixture(autouse=True)
+def mock_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace Redis cache clients with in-memory dicts for fast, isolated tests."""
+    import backend.cache as cache_module
+
+    mem_cache = _InMemoryCache()
+    mem_sync_cache = _InMemorySyncCache()
+
+    # Reset module-level singletons so each test starts with a clean cache
+    cache_module._cache_client = mem_cache
+    cache_module._sync_cache_client = mem_sync_cache
+
+    monkeypatch.setattr(cache_module, "get_cache", lambda: mem_cache)
+    monkeypatch.setattr(cache_module, "get_sync_cache", lambda: mem_sync_cache)
+
+
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect the SQLite DB to a temporary file so tests are isolated."""
     db_file = tmp_path / "test_nexus.db"
     monkeypatch.setattr("backend.persistence.db.DB_PATH", db_file)
-    from backend.persistence.db import init_db
+    monkeypatch.setattr("backend.persistence.db.MAX_POOL_SIZE", 100)
+    from backend.persistence.db import init_db, close_pool
 
+    close_pool()
     init_db()
 
 

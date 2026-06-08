@@ -11,9 +11,9 @@ interface Message {
   role: "user" | "assistant" | "thinking" | "tool_call" | "tool_result";
   content: string;
   toolName?: string;
-  args?: any;
+  args?: Record<string, unknown>;
   status?: "running" | "success" | "error";
-  result?: any;
+  result?: unknown;
   error?: string;
   durationMs?: number;
   iteration?: number;

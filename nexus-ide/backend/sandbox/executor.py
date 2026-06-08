@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import tempfile
 import time
@@ -323,12 +324,18 @@ class SandboxExecutor:
         timeout: int,
         cwd: str | None = None,
     ) -> SandboxResult:
-        """Fallback: execute in subprocess with resource limits."""
+        """Fallback: execute in subprocess with resource limits.
+
+        Applies OS-level resource limits when available:
+        - Windows: job objects for memory/CPU limits
+        - Linux: resource.setrlimit for memory limits
+        """
         start = time.time()
 
         try:
             if language == "python":
-                cmd = ["python3", "-c", code]
+                import sys
+                cmd = [sys.executable, "-c", code]
             elif language == "javascript":
                 cmd = ["node", "-e", code]
             elif language == "bash":
@@ -343,11 +350,18 @@ class SandboxExecutor:
                     duration_ms=0,
                 )
 
+            # Prepare environment with resource limits
+            env = {}
+            if hasattr(os, "sysconf"):
+                # Linux: set memory limit via environment for child process
+                env["PYTHONMEMORY"] = str(self._config.max_memory_mb * 1024 * 1024)
+
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd or tempfile.gettempdir(),
+                env={**os.environ, **env} if env else None,
             )
 
             try:

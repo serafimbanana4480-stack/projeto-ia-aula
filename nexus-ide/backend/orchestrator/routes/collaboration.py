@@ -9,7 +9,7 @@ Endpoints:
     GET  /auto-correction/status     — view auto-correction status
 """
 
-from __future__ import annotations
+
 
 import logging
 from datetime import UTC, datetime

@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS tool_executions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_session ON tool_executions(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tool_executions_session_timestamp ON tool_executions(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_tool_name ON tool_executions(tool_name);
 CREATE INDEX IF NOT EXISTS idx_tool_success ON tool_executions(success);
 
@@ -149,3 +150,76 @@ CREATE INDEX IF NOT EXISTS idx_agent_states_project
     ON agent_states(project_path);
 CREATE INDEX IF NOT EXISTS idx_agent_states_importance
     ON agent_states(importance_score DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_states_agent_tier_updated
+    ON agent_states(agent_name, memory_tier, updated_at);
+
+-- ---------------------------------------------------------------------------
+-- WHITEBOARD — shared memory space for agent discoveries
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS whiteboard_entries (
+    entry_id         TEXT PRIMARY KEY,
+    topic            TEXT NOT NULL,
+    author_agent     TEXT NOT NULL,
+    content          TEXT NOT NULL,
+    timestamp        TEXT NOT NULL,
+    importance       REAL NOT NULL DEFAULT 0.5
+        CHECK (importance >= 0.0 AND importance <= 1.0),
+    tags             TEXT NOT NULL DEFAULT '[]',
+    related_entries  TEXT NOT NULL DEFAULT '[]',
+    archived         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_wb_topic ON whiteboard_entries(topic);
+CREATE INDEX IF NOT EXISTS idx_wb_author ON whiteboard_entries(author_agent);
+CREATE INDEX IF NOT EXISTS idx_wb_timestamp ON whiteboard_entries(timestamp);
+CREATE INDEX IF NOT EXISTS idx_wb_archived ON whiteboard_entries(archived);
+
+CREATE TABLE IF NOT EXISTS whiteboard_entry_links (
+    id              TEXT PRIMARY KEY,
+    entry_id_1      TEXT NOT NULL,
+    entry_id_2      TEXT NOT NULL,
+    relation_type   TEXT NOT NULL DEFAULT 'related',
+    created_at      TEXT NOT NULL,
+    UNIQUE(entry_id_1, entry_id_2, relation_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wb_links_1 ON whiteboard_entry_links(entry_id_1);
+CREATE INDEX IF NOT EXISTS idx_wb_links_2 ON whiteboard_entry_links(entry_id_2);
+
+-- ---------------------------------------------------------------------------
+-- PEER REVIEW — automatic code/design review pipeline
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS peer_review_requests (
+    review_id      TEXT PRIMARY KEY,
+    artifact_id    TEXT NOT NULL,
+    artifact_type  TEXT NOT NULL
+        CHECK (artifact_type IN ('code', 'design', 'test', 'config')),
+    author_agent   TEXT NOT NULL,
+    content_hash   TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'in_review', 'approved',
+                          'changes_requested', 'rejected')),
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_artifact ON peer_review_requests(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_pr_status ON peer_review_requests(status);
+
+CREATE TABLE IF NOT EXISTS peer_review_results (
+    result_id       TEXT PRIMARY KEY,
+    review_id       TEXT NOT NULL,
+    reviewer_agent  TEXT NOT NULL,
+    status          TEXT NOT NULL
+        CHECK (status IN ('approved', 'changes_requested', 'rejected')),
+    comments        TEXT NOT NULL DEFAULT '[]',
+    criteria_scores TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY (review_id)
+        REFERENCES peer_review_requests(review_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_results_review ON peer_review_results(review_id);

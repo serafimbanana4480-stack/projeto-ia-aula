@@ -12,8 +12,11 @@ passlib[bcrypt]==1.7.4
 slowapi==0.1.9
 email-validator==2.2.0
 
-# LLM client
-ollama==0.3.3
+# Local LLM (AirLLM)
+# AirLLM is installed from local source or pip:
+#   pip install airllm
+# Core dependencies already present: torch, transformers, accelerate, safetensors, optimum, scipy
+sentence-transformers==3.0.0
 
 # Task queue & cache
 redis==5.1.1

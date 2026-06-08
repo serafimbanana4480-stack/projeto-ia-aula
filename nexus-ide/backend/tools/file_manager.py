@@ -8,8 +8,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from backend.persistence.db import propose_change
-
 logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS = {
@@ -51,12 +49,24 @@ class UnsafePathError(ValueError):
 
 
 def _validate(path: Path) -> None:
+    """Validate that a path is safe to read/write.
+
+    Blocked paths are detected by checking for blocked substrings in BOTH
+    the original path AND the resolved absolute path (with both forward
+    and backward slashes normalised) so that the check works on Windows
+    where ``Path('/etc/passwd').resolve()`` returns ``C:\\etc\\passwd``.
+    """
     resolved = path.resolve()
-    # Normalize separators for cross-platform checking
-    path_str = str(path).replace("\\", "/")
+    # Build normalised strings to check against (both slash styles)
+    raw_str = str(path).replace("\\", "/")
     resolved_str = str(resolved).replace("\\", "/")
     for part in BLOCKED_PATH_PARTS:
-        if part in path_str or part in resolved_str:
+        normalised_part = part.replace("\\", "/")
+        if (
+            normalised_part in raw_str
+            or normalised_part in resolved_str
+            or part in str(resolved)
+        ):
             raise UnsafePathError(f"Blocked path: {resolved}")
     if path.suffix and path.suffix not in ALLOWED_EXTENSIONS:
         raise UnsafePathError(f"Disallowed extension: {path.suffix}")
@@ -88,19 +98,12 @@ async def read_file(path: str) -> str:
     return p.read_text(encoding="utf-8")
 
 
-async def write_file(
-    path: str,
-    content: str,
-    session_id: str | None = None,
-    project_id: str | None = None,
-) -> None:
+async def write_file(path: str, content: str) -> None:
     """Write content to a file, creating parent directories as needed.
 
     Args:
         path: Absolute or relative file path.
         content: The text content to write.
-        session_id: Optional session ID for audit logging.
-        project_id: Optional project ID for audit logging.
 
     Raises:
         UnsafePathError: If the path or extension is blocked.
@@ -108,19 +111,8 @@ async def write_file(
     p = Path(path)
     _validate(p)
 
-    existing = ""
-    if p.exists():
-        existing = p.read_text(encoding="utf-8")
-
+    # Create parent directories if they don't exist
     p.parent.mkdir(parents=True, exist_ok=True)
+
     p.write_text(content, encoding="utf-8")
     logger.info("Wrote %d bytes to %s", len(content), p)
-
-    if session_id:
-        propose_change(
-            session_id=session_id,
-            project_id=project_id,
-            file_path=str(p),
-            operation="modify" if existing else "create",
-            new_content=content,
-        )

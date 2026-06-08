@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { motion } from "framer-motion";
 import {
   Cpu,
@@ -15,36 +15,12 @@ import {
 } from "lucide-react";
 import { useModelStore } from "../../stores/modelStore";
 import { useToolsStore } from "../../stores/toolsStore";
-import {
-  getTools,
-  getModelStatus,
-  getCurrentMetrics,
-  toggleTool as toggleToolRemote,
-} from "../../lib/api";
+import { useMetricsStore } from "../../stores/metricsStore";
+import { toggleTool as toggleToolRemote } from "../../lib/api";
 import { AreaChart, Area, ResponsiveContainer } from "recharts";
 import { useRouter } from "next/navigation";
 import { log } from "../../lib/log";
-
-interface MetricsData {
-  tokens_per_second: number;
-  active_model: string;
-  active_sessions: number;
-  cpu_percent: number;
-  ram_percent: number;
-  ram_used_bytes: number;
-  ram_total_bytes: number;
-  uptime_seconds: number;
-  requests_total: number;
-  requests_successful: number;
-  requests_failed: number;
-  avg_latency_ms: number;
-  message_stats?: {
-    total_messages: number;
-    tokens_in_total: number;
-    tokens_out_total: number;
-    avg_latency_ms: number;
-  };
-}
+import { WifiOff } from "lucide-react";
 
 interface ModelInfo {
   id: string;
@@ -118,56 +94,32 @@ function formatUptime(seconds: number): string {
 }
 
 export default function RightPanel() {
-  const { activeModel, setActiveModel, setModels } = useModelStore();
-  const { tools, setTools, toggleTool } = useToolsStore();
-  const [metrics, setMetrics] = useState<MetricsData | null>(null);
+  const { activeModel, setActiveModel } = useModelStore();
+  const { tools, toggleTool } = useToolsStore();
+  const metrics = useMetricsStore((s) => s.metrics);
+  const backendOnline = useMetricsStore((s) => s.backendOnline);
   const [historyData, setHistoryData] = useState<
     { time: string; v: number }[]
   >([]);
-  const [ollamaOnline, setOllamaOnline] = useState(false);
+  const [backendOffline, setBackendOffline] = useState(false);
+  const errorLoggedRef = useRef(false);
   const router = useRouter();
 
-  // Fetch tools, model status, and metrics on mount
+  // Derive LLM online state from shared metrics store instead of a separate fetch
+  const llmOnline = backendOnline && metrics && metrics.active_model !== "none";
+
+  // Sync local offline banner with shared store
   useEffect(() => {
-    getTools().then(setTools).catch(() => {});
-    getModelStatus()
-      .then((status) => {
-        setModels(
-          DEFAULT_MODELS.map((m) => ({
-            id: m.id,
-            tier: m.id.toUpperCase(),
-            size_gb: parseFloat(m.size),
-            status:
-              status.find((s) => s.id === m.id)?.status === "available"
-                ? "available"
-                : "loading",
-          })),
-        );
-        // If any model is available, Ollama is online
-        setOllamaOnline(status.length > 0);
-      })
-      .catch(() => {
-        setOllamaOnline(false);
-      });
-  }, [setTools, setModels]);
+    setBackendOffline(!backendOnline);
+    if (backendOnline) {
+      errorLoggedRef.current = false;
+    } else if (!errorLoggedRef.current) {
+      log.warn("Backend offline — RightPanel metrics unavailable");
+      errorLoggedRef.current = true;
+    }
+  }, [backendOnline]);
 
-  // Poll metrics every 5 seconds
-  useEffect(() => {
-    const fetchMetrics = async () => {
-      try {
-        const data = await getCurrentMetrics();
-        setMetrics(data as MetricsData);
-      } catch (error) {
-        log.error("Failed to fetch metrics:", error);
-      }
-    };
-
-    fetchMetrics();
-    const interval = setInterval(fetchMetrics, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Fetch metrics history for sparkline
+  // Fetch metrics history for sparkline (kept; this is a separate endpoint)
   useEffect(() => {
     const fetchHistory = async () => {
       try {
@@ -177,7 +129,7 @@ export default function RightPanel() {
         if (response.ok) {
           const data = await response.json();
           if (Array.isArray(data) && data.length > 0) {
-            const formatted = data.slice(-24).map((point: any) => ({
+            const formatted = data.slice(-24).map((point: { timestamp: number; value: number }) => ({
               time: new Date(point.timestamp * 1000).toLocaleTimeString([], {
                 hour: "2-digit",
                 minute: "2-digit",
@@ -187,8 +139,8 @@ export default function RightPanel() {
             setHistoryData(formatted);
           }
         }
-      } catch (error) {
-        // History not available yet - that's OK
+      } catch {
+        // History not available yet - that's OK, suppress silently
       }
     };
 
@@ -242,6 +194,19 @@ export default function RightPanel() {
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto thin-scrollbar p-4">
+      {/* Backend offline banner */}
+      {backendOffline && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2">
+          <div className="flex items-center gap-2 text-xs text-red-400">
+            <WifiOff className="h-3.5 w-3.5 shrink-0" />
+            <span className="font-medium">Backend Offline</span>
+          </div>
+          <div className="mt-0.5 text-[10px] text-red-300">
+            Métricas e modelos indisponíveis até reconexão.
+          </div>
+        </div>
+      )}
+
       {/* Active Model Card */}
       <motion.div
         initial={{ opacity: 0, x: 20 }}
@@ -276,12 +241,12 @@ export default function RightPanel() {
                 {activeModelData.name}
               </span>
               <span
-                className={`inline-flex h-2 w-2 rounded-full ${ollamaOnline ? "bg-green-500" : "bg-red-500"}`}
+                className={`inline-flex h-2 w-2 rounded-full ${llmOnline ? "bg-green-500" : "bg-red-500"}`}
               />
               <span
-                className={`text-[10px] ${ollamaOnline ? "text-green-400" : "text-red-400"}`}
+                className={`text-[10px] ${llmOnline ? "text-green-400" : "text-red-400"}`}
               >
-                {ollamaOnline ? "Online" : "Offline"}
+                {llmOnline ? "Online" : "Offline"}
               </span>
             </div>
             <div className="text-[11px] text-nexus-muted">

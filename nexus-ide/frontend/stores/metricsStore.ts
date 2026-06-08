@@ -28,6 +28,9 @@ export interface SystemMetrics {
   message_stats?: {
     total_messages: number;
     sessions_with_messages: number;
+    tokens_out_total?: number;
+    tokens_in_total?: number;
+    avg_latency_ms?: number;
   };
   change_stats?: {
     total_changes: number;

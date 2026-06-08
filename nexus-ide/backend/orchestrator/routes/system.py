@@ -10,9 +10,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.core.self_improvement import SelfImprovementAnalyzer
+from backend.middleware.auth import require_auth
 from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ router = APIRouter()
 
 @router.get("/system/self-improvement")
 @limiter.limit("60/minute")
-async def get_self_improvement(request: Request) -> dict[str, Any]:
+async def get_self_improvement(request: Request, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     """Return the latest self-improvement report."""
     analyzer = SelfImprovementAnalyzer()
     report = analyzer.get_last_report()
@@ -32,7 +33,7 @@ async def get_self_improvement(request: Request) -> dict[str, Any]:
 
 @router.post("/system/self-improvement/run")
 @limiter.limit("10/minute")
-async def run_self_improvement(request: Request) -> dict[str, Any]:
+async def run_self_improvement(request: Request, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     """Trigger the self-improvement analysis on demand."""
     analyzer = SelfImprovementAnalyzer()
     try:

@@ -314,6 +314,15 @@ class PeerReviewSystem:
         statuses = {r["status"] for r in res_rows}
         return len(statuses) > 1
 
+    def get_review_results(self, review_id: str) -> list[ReviewResult]:
+        """Return all review results associated with a review request."""
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT * FROM peer_review_results WHERE review_id = ?",
+                (review_id,),
+            ).fetchall()
+            return [self._row_to_result(r) for r in rows]
+
     def list_pending_reviews(
         self, reviewer_agent: str | None = None
     ) -> list[ReviewRequest]:

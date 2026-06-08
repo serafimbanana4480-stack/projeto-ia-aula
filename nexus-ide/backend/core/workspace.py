@@ -11,17 +11,20 @@ Exposes both a :class:`WorkspaceManager` (used by legacy ``file_ops.py`` and
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import json
 import logging
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -33,6 +36,30 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Security configuration
 # ---------------------------------------------------------------------------
+
+# Maximum file size (in bytes) for read/write/backup/search operations.
+# Files larger than this limit are rejected to prevent memory exhaustion.
+MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _check_file_size_limit(path: Path) -> tuple[bool, int | None, str]:
+    """Check whether *path* exceeds the configured file-size limit.
+
+    Returns ``(ok, size_bytes, error_message)``.  ``ok`` is ``True`` when the
+    file is within the limit or the size could not be determined.
+    """
+    try:
+        size = path.stat().st_size
+    except (OSError, ValueError):
+        return True, None, ""
+    if size > MAX_FILE_SIZE_BYTES:
+        return (
+            False,
+            size,
+            f"File exceeds size limit of {MAX_FILE_SIZE_BYTES} bytes (actual: {size} bytes)",
+        )
+    return True, size, ""
+
 
 _BLOCKED_COMMAND_PATTERNS = {
     "rm -rf /",
@@ -81,30 +108,170 @@ _BLOCKED_SYSTEM_PATHS = {
     "C:\\ProgramData\\Microsoft\\Windows",
 }
 
-_ALLOWED_OVERRIDES = {"home", "users", "projeto", "nexus", "desktop", "documents"}
+# Sensitive path components that are blocked anywhere in the resolved path
+_BLOCKED_PATH_COMPONENTS: set[str] = {
+    ".ssh",
+    ".aws",
+    ".env",
+    ".git-credentials",
+    ".docker",
+    ".kube",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    ".pgpass",
+    ".mysql_history",
+    ".bash_history",
+    ".zsh_history",
+    ".psql_history",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    "token",
+    "tokens",
+    "wallet",
+    "wallets",
+    "secret",
+    "secrets",
+    "credential",
+    "credentials",
+    "api_key",
+    "apikey",
+    "private_key",
+    "privkey",
+    "keystore",
+    ".keystore",
+    "seed",
+    "mnemonic",
+}
+
+# Sensitive user paths that should NEVER be accessed by AI agents
+_BLOCKED_SENSITIVE_PATHS: set[str] = {
+    ".ssh",
+    ".aws",
+    ".gcloud",
+    ".config/gcloud",
+    ".kube",
+    ".docker",
+    ".npmrc",
+    ".pypirc",
+    ".git-credentials",
+    ".netrc",
+    ".pgpass",
+    ".my.cnf",
+    ".bash_history",
+    ".zsh_history",
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.backup",
+    ".local/share/keyrings",
+    ".config/Keychains",
+    ".gnupg",
+    ".password-store",
+    ".vault",
+    ".terraform.d",
+    "id_rsa",
+    "id_ecdsa",
+    "id_ed25519",
+    ".pem",
+    ".p12",
+    ".pfx",
+    ".keystore",
+    "AppData/Roaming/Mozilla",
+    "AppData/Roaming/Google",
+    "AppData/Local/Google",
+    "AppData/Roaming/Microsoft/Credentials",
+    "AppData/Local/Microsoft/Credentials",
+}
+
+def _verify_auth_token(token: str | None) -> tuple[bool, str]:
+    """Validate a JWT access token."""
+    if token is None:
+        return False, "Authentication required"
+    try:
+        from jose import JWTError, jwt
+        from backend.config.settings import get_settings
+
+        settings = get_settings()
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        if payload.get("sub") is None:
+            return False, "Invalid authentication token"
+        return True, ""
+    except JWTError as exc:
+        return False, f"Authentication failed: {exc}"
+    except Exception as exc:
+        return False, f"Authentication failed: {exc}"
+
+
+def _log_operation(
+    tool_name: str,
+    args: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """Log a workspace operation to the audit database."""
+    try:
+        from backend.persistence.db import log_tool_execution
+
+        log_tool_execution(
+            session_id=None,
+            tool_name=tool_name,
+            args=args,
+            result=result,
+            success="error" not in result,
+            error=result.get("error"),
+            duration_ms=0,
+        )
+    except Exception:
+        logger.exception("Failed to log workspace operation to database")
+
+
+def _get_allowed_base_paths() -> list[Path]:
+    """Return a list of allowed base paths for absolute-path operations.
+
+    A path is permitted only if it is located *under* one of these bases
+    (prefix / ``relative_to`` matching).  Substring matching on individual
+    path components is intentionally **not** used.
+    """
+    paths: set[Path] = set()
+    paths.add(Path.home().resolve())
+    try:
+        paths.add(Path.cwd().resolve())
+    except Exception:
+        pass
+    try:
+        paths.add(Path(tempfile.gettempdir()).resolve())
+    except Exception:
+        pass
+    return list(paths)
 
 
 def _is_blocked_path(path: str) -> tuple[bool, str]:
     """Check whether *path* resolves to a blocked system directory.
 
-    User home and obvious project directories are always permitted.
+    Paths under the user's home directory, the current working directory,
+    or the system temp directory are permitted only if they do NOT also
+    fall under a blocked system path.  All other paths are blocked by
+    default (implicit deny).
     """
     try:
-        resolved = Path(path).expanduser().resolve()
+        raw = Path(path).expanduser()
     except (OSError, ValueError) as exc:
         return True, f"Invalid path: {exc}"
 
-    home = Path.home().resolve()
+    # Explicit ``..`` traversal check before resolution so that symlinks
+    # cannot be used to smuggle traversal past ``resolve()``.
+    if ".." in raw.parts:
+        return True, "Path traversal ('..') is not allowed"
+
     try:
-        resolved.relative_to(home)
-        return False, ""
-    except ValueError:
-        pass
+        resolved = raw.resolve()
+    except (OSError, ValueError) as exc:
+        return True, f"Invalid path: {exc}"
 
-    lower_parts = [p.lower() for p in resolved.parts]
-    if any(part in lower_parts for part in _ALLOWED_OVERRIDES):
-        return False, ""
-
+    # 1. Blocked system paths (prefix matching) — checked FIRST so blocked
+    #    always wins even when the path is inside an allowed base.
     for blocked in _BLOCKED_SYSTEM_PATHS:
         bpath = Path(blocked).resolve() if ":" not in blocked else Path(blocked)
         try:
@@ -113,13 +280,43 @@ def _is_blocked_path(path: str) -> tuple[bool, str]:
         except ValueError:
             continue
 
-    return False, ""
+    # 1b. Blocked path components — checked before allowed bases
+    # Block any path that contains sensitive components (single segments).
+    parts_lower = [p.lower() for p in resolved.parts]
+    for component in _BLOCKED_PATH_COMPONENTS:
+        if component.lower() in parts_lower:
+            return True, f"Access to sensitive component '{component}' is blocked"
+
+    # 1c. Blocked sensitive multi-component paths — checked before allowed bases
+    # These are multi-segment paths like .config/gcloud, AppData/Roaming/Mozilla.
+    # We reconstruct the path string using forward slashes for consistent matching.
+    path_str_normalized = str(resolved).lower().replace("\\", "/")
+    for sensitive in _BLOCKED_SENSITIVE_PATHS:
+        # Skip single-component entries already handled above
+        if "/" not in sensitive:
+            continue
+        sens_normalized = sensitive.lower().replace("\\", "/")
+        # Check if the normalized path contains this sensitive subpath
+        if sens_normalized in path_str_normalized:
+            return True, f"Access to sensitive path '{sensitive}' is blocked"
+
+    # 2. Allowed bases (prefix matching)
+    for allowed in _get_allowed_base_paths():
+        try:
+            resolved.relative_to(allowed)
+            return False, ""
+        except ValueError:
+            continue
+
+    # 3. Implicit deny — path is outside all allowed roots.
+    return True, "Path is outside allowed directories"
 
 
 _SHELL_WHITELIST: set[str] = {
     # Original whitelist
     "python",
     "python3",
+    "py",
     "pip",
     "pip3",
     "npm",
@@ -133,7 +330,6 @@ _SHELL_WHITELIST: set[str] = {
     "echo",
     "pytest",
     "curl",
-    "wget",
     # Expanded whitelist
     "cargo",
     "rustc",
@@ -141,8 +337,6 @@ _SHELL_WHITELIST: set[str] = {
     "javac",
     "mvn",
     "gradle",
-    "docker",
-    "docker-compose",
     "make",
     "cmake",
     "gcc",
@@ -161,11 +355,6 @@ _SHELL_WHITELIST: set[str] = {
     "tar",
     "zip",
     "unzip",
-    "ssh",
-    "scp",
-    "rsync",
-    "nc",
-    "telnet",
     "ping",
     "traceroute",
     "netstat",
@@ -203,15 +392,220 @@ _SHELL_WHITELIST: set[str] = {
 _GIT_BLOCKED_SUBCOMMANDS: set[str] = {"push", "reset", "clean", "rebase", "cherry-pick"}
 _GIT_BLOCKED_FLAGS: set[str] = {"--force", "--hard", "-f", "-D", "--delete"}
 
+_SAFE_GIT_HOSTS: set[str] = {
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+}
+
+# ---------------------------------------------------------------------------
+# Python sandbox (AST-based — bypass-resistant)
+# ---------------------------------------------------------------------------
+
+_DANGEROUS_MODULES: set[str] = {
+    "os",
+    "subprocess",
+    "socket",
+    "urllib",
+    "urllib.request",
+    "ctypes",
+    "pty",
+}
+
+
+def _check_python_sandbox(code: str) -> tuple[bool, str]:
+    """Scan Python code for dangerous imports / operations using AST.
+
+    Regex-based scanning is easily bypassed via encoding tricks, dynamic
+    imports, string concatenation, etc.  AST parsing gives us a reliable
+    view of every import and dangerous call in the code.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        return False, f"Invalid Python syntax: {exc}"
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    base = alias.name.split(".")[0]
+                    if base in _DANGEROUS_MODULES:
+                        return False, f"import {alias.name} is blocked in sandbox mode"
+            elif isinstance(node, ast.ImportFrom):
+                base = (node.module or "").split(".")[0]
+                if base in _DANGEROUS_MODULES:
+                    return False, f"from {node.module} import is blocked in sandbox mode"
+
+        if isinstance(node, ast.Call):
+            # Block __import__ with dangerous modules
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "__import__"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                base = node.args[0].value.split(".")[0]
+                if base in _DANGEROUS_MODULES:
+                    return False, f"__import__({node.args[0].value}) is blocked in sandbox mode"
+
+            # Block importlib.import_module with dangerous modules
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "importlib"
+                and node.func.attr == "import_module"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                base = node.args[0].value.split(".")[0]
+                if base in _DANGEROUS_MODULES:
+                    return False, f"importlib.import_module({node.args[0].value}) is blocked in sandbox mode"
+
+            # Block eval, exec, compile
+            if isinstance(node.func, ast.Name) and node.func.id in ("eval", "exec", "compile"):
+                return False, f"{node.func.id}() is blocked in sandbox mode"
+
+            # Block os.system, os.popen, os.exec*, subprocess.call, etc.
+            if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+                if (
+                    node.func.value.id in _DANGEROUS_MODULES
+                    and node.func.attr in ("system", "popen", "exec", "execv", "execve", "fork", "kill", "spawn")
+                ):
+                    return False, f"{node.func.value.id}.{node.func.attr}() is blocked in sandbox mode"
+
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
+# Dangerous pipe targets (curl piped to these is blocked)
+# ---------------------------------------------------------------------------
+
+_DANGEROUS_PIPE_TARGETS: set[str] = {
+    "python",
+    "python3",
+    "py",
+    "node",
+    "bash",
+    "sh",
+    "zsh",
+    "fish",
+    "ruby",
+    "perl",
+    "php",
+    "cmd",
+    "powershell",
+    "pwsh",
+    "exec",
+}
+
+
+# ---------------------------------------------------------------------------
+# Shell-command validation helpers
+# ---------------------------------------------------------------------------
+
+_DISALLOWED_METACHARACTERS = (";", "&&", "||", "`", "$(", ">>", ">", "<")
+
+
+def _remove_quoted_parts(s: str) -> str:
+    """Strip double-quoted and single-quoted substrings from *s*.
+
+    Used so that metacharacters *inside* quotes do not trigger a block.
+    """
+    # Remove double-quoted strings (greedy is fine here).
+    s = re.sub(r'"[^"]*"', '""', s)
+    # Remove single-quoted strings.
+    s = re.sub(r"'[^']*'", "''", s)
+    return s
+
+
+def _has_unquoted_metacharacters(command: str) -> bool:
+    """Return ``True`` if *command* contains dangerous shell operators
+    outside of quoted regions."""
+    cleaned = _remove_quoted_parts(command)
+    for op in _DISALLOWED_METACHARACTERS:
+        if op in cleaned:
+            return True
+    return False
+
+
+def _split_on_pipes(command: str) -> list[str]:
+    """Split *command* on unquoted ``|`` characters."""
+    segments: list[str] = []
+    current: list[str] = []
+    in_double = False
+    in_single = False
+    for ch in command:
+        if ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == "|" and not in_double and not in_single:
+            segments.append("".join(current))
+            current = []
+            continue
+        current.append(ch)
+    segments.append("".join(current))
+    return [s.strip() for s in segments if s.strip()]
+
+
+def _validate_single_command(command: str) -> tuple[bool, str]:
+    """Validate one shell segment (no pipes, no chaining)."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.strip().split()
+
+    if not tokens:
+        return False, "Empty command"
+
+    base_cmd = Path(tokens[0]).stem.lower()
+
+    # Special handling for git
+    if base_cmd == "git":
+        if len(tokens) >= 2:
+            subcmd = tokens[1].lower()
+            if subcmd in _GIT_BLOCKED_SUBCOMMANDS:
+                return False, f"Git subcommand '{subcmd}' is blocked for safety"
+            cmd_lower = command.lower()
+            for flag in _GIT_BLOCKED_FLAGS:
+                if flag in cmd_lower:
+                    return False, f"Git flag '{flag}' is blocked for safety"
+        return True, ""
+
+    # Block inline code execution flags that enable arbitrary code execution
+    if base_cmd in ("python", "python3", "py"):
+        if any(t == "-c" for t in tokens[1:]):
+            return False, f"{base_cmd} -c (inline code execution) is blocked for safety"
+    if base_cmd == "node":
+        if any(t == "-e" for t in tokens[1:]):
+            return False, "node -e (inline code execution) is blocked for safety"
+    if base_cmd in ("bash", "sh", "zsh", "fish"):
+        if any(t == "-c" for t in tokens[1:]):
+            return False, f"{base_cmd} -c (inline code execution) is blocked for safety"
+
+    if base_cmd not in _SHELL_WHITELIST:
+        return False, f"Command '{base_cmd}' is not in the safe command whitelist"
+
+    return True, ""
+
 
 def _validate_shell_command(command: str) -> tuple[bool, str]:
-    """Validate a shell command against blacklist and whitelist."""
+    """Validate a shell command against blacklist and whitelist.
+
+    Every segment produced by ``|`` is validated individually.  Commands
+    containing ``;``, ``&&``, ``||``, backticks, ``$()``, or redirections
+    are rejected outright.
+    """
     if not command or not command.strip():
         return False, "Empty command"
 
-    cmd_lower = command.lower().strip()
+    cmd_str = command.strip()
+    cmd_lower = cmd_str.lower()
 
-    # Blocked dangerous patterns
+    # Blocked dangerous patterns (whole command)
     for pattern in _BLOCKED_COMMAND_PATTERNS:
         if pattern.lower() in cmd_lower:
             return False, f"Dangerous pattern '{pattern}' is blocked"
@@ -221,30 +615,38 @@ def _validate_shell_command(command: str) -> tuple[bool, str]:
         if blocked_path.lower() in cmd_lower:
             return False, f"Access to system path '{blocked_path}' is blocked"
 
-    # Parse base command
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.strip().split()
+    # Reject shell metacharacters that allow command chaining / substitution
+    if _has_unquoted_metacharacters(cmd_str):
+        return False, "Shell metacharacters (;, &&, ||, `, $(), >, <, >>) are not allowed"
 
-    if not tokens:
+    # Split on pipes and validate every segment
+    segments = _split_on_pipes(cmd_str)
+    if not segments:
         return False, "Empty command"
 
-    base_cmd = Path(tokens[0]).name.lower()
+    for segment in segments:
+        is_safe, reason = _validate_single_command(segment)
+        if not is_safe:
+            return False, reason
 
-    # Special handling for git
-    if base_cmd == "git":
-        if len(tokens) >= 2:
-            subcmd = tokens[1].lower()
-            if subcmd in _GIT_BLOCKED_SUBCOMMANDS:
-                return False, f"Git subcommand '{subcmd}' is blocked for safety"
-            for flag in _GIT_BLOCKED_FLAGS:
-                if flag in cmd_lower:
-                    return False, f"Git flag '{flag}' is blocked for safety"
-        return True, ""
-
-    if base_cmd not in _SHELL_WHITELIST:
-        return False, f"Command '{base_cmd}' is not in the safe command whitelist"
+    # Extra curl restriction: piping curl to an interpreter is forbidden
+    # because it enables one-liner remote code execution.
+    if len(segments) > 1:
+        for seg in segments:
+            try:
+                base = Path(shlex.split(seg)[0]).name.lower()
+            except ValueError:
+                base = seg.strip().split()[0].lower()
+            if base == "curl":
+                for other in segments:
+                    if other is seg:
+                        continue
+                    try:
+                        other_base = Path(shlex.split(other)[0]).name.lower()
+                    except ValueError:
+                        other_base = other.strip().split()[0].lower()
+                    if other_base in _DANGEROUS_PIPE_TARGETS:
+                        return False, f"Piping curl to '{other_base}' is blocked for safety"
 
     return True, ""
 
@@ -271,27 +673,37 @@ def _validate_path(project_path: str, target_path: str) -> Path:
 # Backup helpers
 # ---------------------------------------------------------------------------
 
-def _backup_dir_for(path: Path) -> Path:
+async def _backup_dir_for(path: Path) -> Path:
     """Return the backup directory for a given file path."""
-    candidate = path.resolve()
-    for parent in [candidate] + list(candidate.parents):
-        if (parent / ".git").exists() or (parent / ".nexus").exists():
+    candidate = await asyncio.to_thread(path.resolve)
+    parents = await asyncio.to_thread(lambda: list(candidate.parents))
+    for parent in [candidate] + parents:
+        if await asyncio.to_thread(parent.is_dir):
+            git_root = await _get_git_root(parent)
+            if git_root is not None:
+                return git_root / ".nexus" / "backups"
+        if await asyncio.to_thread((parent / ".nexus").exists):
             return parent / ".nexus" / "backups"
     return Path.home() / ".nexus" / "backups"
 
 
-def _create_backup(path: Path) -> dict[str, Any]:
+async def _create_backup(path: Path) -> dict[str, Any]:
     """Create a timestamped backup of *path* and return metadata."""
-    if not path.exists():
+    if not await asyncio.to_thread(path.exists):
         return {"backed_up": False, "reason": "file did not exist"}
 
+    ok, size, err = _check_file_size_limit(path)
+    if not ok:
+        logger.warning("Backup skipped for %s: %s", path, err)
+        return {"backed_up": False, "reason": err, "size": size}
+
     try:
-        original = path.read_bytes()
+        original = await asyncio.to_thread(path.read_bytes)
     except Exception as exc:
         return {"backed_up": False, "reason": str(exc)}
 
-    backup_dir = _backup_dir_for(path)
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir = await _backup_dir_for(path)
+    await asyncio.to_thread(backup_dir.mkdir, parents=True, exist_ok=True)
 
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     hash_suffix = hashlib.sha256(str(path).encode()).hexdigest()[:8]
@@ -299,7 +711,7 @@ def _create_backup(path: Path) -> dict[str, Any]:
     backup_path = backup_dir / backup_name
 
     try:
-        backup_path.write_bytes(original)
+        await asyncio.to_thread(backup_path.write_bytes, original)
         logger.info("Backup created: %s -> %s", path, backup_path)
         return {
             "backed_up": True,
@@ -324,8 +736,11 @@ async def read_file_absolute(path: str) -> dict[str, Any]:
         return {"error": reason}
 
     try:
-        target = Path(path).expanduser().resolve()
-        content = target.read_text(encoding="utf-8")
+        target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+        ok, size, err = _check_file_size_limit(target)
+        if not ok:
+            return {"error": err, "path": str(target), "size": size}
+        content = await asyncio.to_thread(target.read_text, encoding="utf-8")
         return {"path": str(target), "content": content, "size": len(content)}
     except FileNotFoundError:
         return {"error": f"File not found: {path}"}
@@ -335,24 +750,39 @@ async def read_file_absolute(path: str) -> dict[str, Any]:
         return {"error": f"Failed to read file: {exc}"}
 
 
-async def write_file_absolute(path: str, content: str) -> dict[str, Any]:
+async def write_file_absolute(
+    path: str, content: str, auth_token: str | None = None
+) -> dict[str, Any]:
     """Write any file (absolute path) with backup of the original."""
     logger.info("write_file_absolute: %s (%d bytes)", path, len(content))
 
+    if auth_token is not None:
+        ok, reason = _verify_auth_token(auth_token)
+        if not ok:
+            return {"error": reason}
+
     blocked, reason = _is_blocked_path(path)
     if blocked:
-        return {"error": reason}
+        result = {"error": reason}
+        _log_operation("write_file_absolute", {"path": path}, result)
+        return result
 
     try:
-        target = Path(path).expanduser().resolve()
-        backup_meta = _create_backup(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        return {"path": str(target), "written": True, "size": len(content), "backup": backup_meta}
+        target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+        backup_meta = await _create_backup(target)
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(target.write_text, content, encoding="utf-8")
+        result = {"path": str(target), "written": True, "size": len(content), "backup": backup_meta}
+        _log_operation("write_file_absolute", {"path": path}, result)
+        return result
     except PermissionError:
-        return {"error": f"Permission denied: {path}"}
+        result = {"error": f"Permission denied: {path}"}
+        _log_operation("write_file_absolute", {"path": path}, result)
+        return result
     except Exception as exc:
-        return {"error": f"Failed to write file: {exc}"}
+        result = {"error": f"Failed to write file: {exc}"}
+        _log_operation("write_file_absolute", {"path": path}, result)
+        return result
 
 
 async def list_dir_absolute(path: str, recursive: bool = False) -> dict[str, Any]:
@@ -364,32 +794,29 @@ async def list_dir_absolute(path: str, recursive: bool = False) -> dict[str, Any
         return {"error": reason}
 
     try:
-        target = Path(path).expanduser().resolve()
-        if not target.exists():
+        target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+        if not await asyncio.to_thread(target.exists):
             return {"error": f"Path not found: {path}"}
-        if not target.is_dir():
+        if not await asyncio.to_thread(target.is_dir):
             return {"error": f"Path is not a directory: {path}"}
 
         if recursive:
-            items = [
-                {
-                    "path": str(item),
-                    "name": item.name,
-                    "type": "file" if item.is_file() else "dir",
-                    "size": item.stat().st_size if item.is_file() else 0,
-                }
-                for item in target.rglob("*")
-            ]
+            raw_items = await asyncio.to_thread(lambda: list(target.rglob("*")))
         else:
-            items = [
+            raw_items = await asyncio.to_thread(lambda: list(target.iterdir()))
+
+        items = []
+        for item in raw_items:
+            is_file = await asyncio.to_thread(item.is_file)
+            size = await asyncio.to_thread(lambda: item.stat().st_size) if is_file else 0
+            items.append(
                 {
                     "path": str(item),
                     "name": item.name,
-                    "type": "file" if item.is_file() else "dir",
-                    "size": item.stat().st_size if item.is_file() else 0,
+                    "type": "file" if is_file else "dir",
+                    "size": size,
                 }
-                for item in target.iterdir()
-            ]
+            )
 
         return {"path": str(target), "items": items, "count": len(items)}
     except PermissionError:
@@ -407,8 +834,8 @@ async def create_dir_absolute(path: str) -> dict[str, Any]:
         return {"error": reason}
 
     try:
-        target = Path(path).expanduser().resolve()
-        target.mkdir(parents=True, exist_ok=True)
+        target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+        await asyncio.to_thread(target.mkdir, parents=True, exist_ok=True)
         return {"path": str(target), "created": True}
     except PermissionError:
         return {"error": f"Permission denied: {path}"}
@@ -416,39 +843,60 @@ async def create_dir_absolute(path: str) -> dict[str, Any]:
         return {"error": f"Failed to create directory: {exc}"}
 
 
-async def delete_file_absolute(path: str, move_to_trash: bool = True) -> dict[str, Any]:
+async def delete_file_absolute(
+    path: str, move_to_trash: bool = True, auth_token: str | None = None
+) -> dict[str, Any]:
     """Delete a file (absolute path) with optional trash/recovery."""
     logger.info("delete_file_absolute: %s (trash=%s)", path, move_to_trash)
 
+    if auth_token is not None:
+        ok, reason = _verify_auth_token(auth_token)
+        if not ok:
+            return {"error": reason}
+
     blocked, reason = _is_blocked_path(path)
     if blocked:
-        return {"error": reason}
+        result = {"error": reason}
+        _log_operation("delete_file_absolute", {"path": path}, result)
+        return result
 
     try:
-        target = Path(path).expanduser().resolve()
-        if not target.exists():
-            return {"error": f"File not found: {path}"}
-        if target.is_dir():
-            return {"error": "Path is a directory; use recursive directory deletion instead"}
+        target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+        if not await asyncio.to_thread(target.exists):
+            result = {"error": f"File not found: {path}"}
+            _log_operation("delete_file_absolute", {"path": path}, result)
+            return result
+        if await asyncio.to_thread(target.is_dir):
+            result = {"error": "Path is a directory; use recursive directory deletion instead"}
+            _log_operation("delete_file_absolute", {"path": path}, result)
+            return result
 
         if move_to_trash:
-            trash_dir = _backup_dir_for(target) / "trash"
-            trash_dir.mkdir(parents=True, exist_ok=True)
+            trash_dir = await _backup_dir_for(target) / "trash"
+            await asyncio.to_thread(trash_dir.mkdir, parents=True, exist_ok=True)
             timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
             hash_suffix = hashlib.sha256(str(target).encode()).hexdigest()[:8]
             trash_name = f"{target.name}.{timestamp}.{hash_suffix}"
             trash_path = trash_dir / trash_name
-            shutil.move(str(target), str(trash_path))
+            await asyncio.to_thread(shutil.move, str(target), str(trash_path))
             logger.info("Moved to trash: %s -> %s", target, trash_path)
-            return {"path": str(target), "deleted": True, "trash_path": str(trash_path)}
+            result = {"path": str(target), "deleted": True, "trash_path": str(trash_path)}
+            _log_operation("delete_file_absolute", {"path": path}, result)
+            return result
 
-        target.unlink()
+        await asyncio.to_thread(target.unlink)
         logger.info("Deleted permanently: %s", target)
-        return {"path": str(target), "deleted": True, "trash_path": None}
+        result = {"path": str(target), "deleted": True, "trash_path": None}
+        _log_operation("delete_file_absolute", {"path": path}, result)
+        return result
     except PermissionError:
-        return {"error": f"Permission denied: {path}"}
+        result = {"error": f"Permission denied: {path}"}
+        _log_operation("delete_file_absolute", {"path": path}, result)
+        return result
     except Exception as exc:
-        return {"error": f"Failed to delete file: {exc}"}
+        result = {"error": f"Failed to delete file: {exc}"}
+        _log_operation("delete_file_absolute", {"path": path}, result)
+        return result
 
 
 async def search_files_absolute(
@@ -462,23 +910,24 @@ async def search_files_absolute(
         return {"error": reason}
 
     try:
-        root = Path(root_path).expanduser().resolve()
-        if not root.exists():
+        root = await asyncio.to_thread(lambda: Path(root_path).expanduser().resolve())
+        if not await asyncio.to_thread(root.exists):
             return {"error": f"Root path not found: {root_path}"}
 
         results = []
-        for file_path in root.rglob("*"):
-            if not file_path.is_file():
+        file_paths = await asyncio.to_thread(lambda: list(root.rglob("*")))
+        for file_path in file_paths:
+            if not await asyncio.to_thread(file_path.is_file):
                 continue
             try:
-                stat = file_path.stat()
-                if stat.st_size > 5 * 1024 * 1024:
+                stat = await asyncio.to_thread(file_path.stat)
+                if stat.st_size > MAX_FILE_SIZE_BYTES:
                     continue
             except Exception:
                 continue
 
             try:
-                content = file_path.read_text(encoding="utf-8", errors="ignore")
+                content = await asyncio.to_thread(file_path.read_text, encoding="utf-8", errors="ignore")
             except Exception:
                 continue
 
@@ -515,13 +964,23 @@ async def execute_shell(
     cwd: str | None = None,
     timeout: int = 120,
     env: dict[str, str] | None = None,
+    auth_token: str | None = None,
 ) -> dict[str, Any]:
     """Execute any shell command (with blacklist validation)."""
     logger.info("execute_shell: %s (cwd=%s)", command, cwd)
 
+    if auth_token is not None:
+        ok, reason = _verify_auth_token(auth_token)
+        if not ok:
+            return {"error": reason}
+
+    command = _windows_python_fixup(command)
+
     is_safe, reason = _validate_shell_command(command)
     if not is_safe:
-        return {"error": f"Blocked: {reason}", "command": command}
+        result = {"error": f"Blocked: {reason}", "command": command}
+        _log_operation("execute_shell", {"command": command, "cwd": cwd}, result)
+        return result
 
     try:
         cwd_path = Path(cwd).expanduser().resolve() if cwd else None
@@ -530,14 +989,49 @@ async def execute_shell(
 
     merged_env = {**os.environ, **(env or {})}
 
+    # Sanitize sensitive environment variables to prevent credential leakage
+    for key in list(merged_env.keys()):
+        if key in ("JWT_SECRET", "SECRET_KEY") or key.endswith("_API_KEY"):
+            merged_env.pop(key, None)
+
     try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=str(cwd_path) if cwd_path else None,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=merged_env,
-        )
+        # Prefer create_subprocess_exec (no shell interpreter) for simple
+        # commands without pipes.  This eliminates quoting / injection issues
+        # that only exist when a shell parses the command string.
+        # Pipes require a real shell interpreter, so we keep create_subprocess_shell
+        # for commands containing ``|``.
+        has_pipes = "|" in command
+        # On Windows, shlex.split does not handle spaces in paths reliably,
+        # so we only use exec for simple commands without spaces on Windows.
+        # POSIX systems can use exec for any command without pipes.
+        has_spaces = " " in command
+        use_exec = not has_pipes and (not sys.platform.startswith("win") or not has_spaces)
+        if use_exec:
+            try:
+                # Windows quoting rules differ from POSIX; posix=False handles
+                # backslashes and quotes in a Windows-compatible way.
+                args = shlex.split(command, posix=not sys.platform.startswith("win"))
+            except ValueError:
+                args = [command]
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=str(cwd_path) if cwd_path else None,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=merged_env,
+            )
+        else:
+            # Pipes (|) require shell interpretation to connect stdout of one
+            # process to stdin of another, so we must use create_subprocess_shell.
+            # On Windows, commands with spaces also require the shell to parse
+            # paths correctly.
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=str(cwd_path) if cwd_path else None,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=merged_env,
+            )
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             proc.communicate(), timeout=float(timeout)
         )
@@ -559,16 +1053,32 @@ async def execute_shell(
         return {"error": "Shell executable not found", "command": command}
     except Exception as exc:
         logger.exception("Shell command failed: %s", exc)
-        return {"error": f"Shell execution failed: {exc}", "command": command}
+        result = {"error": f"Shell execution failed: {exc}", "command": command}
+        _log_operation("execute_shell", {"command": command, "cwd": cwd}, result)
+        return result
 
 
 async def execute_python(
     code: str,
     cwd: str | None = None,
     timeout: int = 120,
+    auth_token: str | None = None,
 ) -> dict[str, Any]:
-    """Execute a Python code string in a temporary file."""
+    """Execute a Python code string in a temporary file (sandboxed)."""
     logger.info("execute_python: %d bytes (cwd=%s)", len(code), cwd)
+
+    if auth_token is not None:
+        ok, reason = _verify_auth_token(auth_token)
+        if not ok:
+            return {"error": reason}
+
+    # Sandbox check — block dangerous imports before writing any file
+    is_safe, reason = _check_python_sandbox(code)
+    if not is_safe:
+        logger.warning("Blocked execute_python: %s", reason)
+        result = {"error": f"Sandbox blocked: {reason}", "code": code[:500]}
+        _log_operation("execute_python", {"code": code[:500], "cwd": cwd}, result)
+        return result
 
     try:
         cwd_path = Path(cwd).expanduser().resolve() if cwd else Path.cwd()
@@ -609,7 +1119,9 @@ async def execute_python(
             "success": proc.returncode == 0,
         }
     except Exception as exc:
-        return {"error": f"Python execution failed: {exc}"}
+        result = {"error": f"Python execution failed: {exc}"}
+        _log_operation("execute_python", {"code": code[:500], "cwd": cwd}, result)
+        return result
 
 
 async def execute_script(
@@ -626,18 +1138,21 @@ async def execute_script(
         return {"error": reason}
 
     try:
-        script = Path(path).expanduser().resolve()
-        if not script.exists():
+        script = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+        if not await asyncio.to_thread(script.exists):
             return {"error": f"Script not found: {path}"}
 
-        cwd_path = Path(cwd).expanduser().resolve() if cwd else script.parent
+        cwd_path = await asyncio.to_thread(lambda: Path(cwd).expanduser().resolve()) if cwd else script.parent
     except Exception as exc:
         return {"error": f"Path resolution failed: {exc}"}
 
     interpreter: str | None = None
     ext = script.suffix.lower()
     if ext == ".py":
-        interpreter = "python"
+        if platform.system() == "Windows" and shutil.which("py"):
+            interpreter = "py"
+        else:
+            interpreter = "python"
     elif ext == ".sh":
         interpreter = "bash"
     elif ext in (".ps1", ".psm1"):
@@ -647,7 +1162,10 @@ async def execute_script(
     elif ext == ".rb":
         interpreter = "ruby"
     else:
-        first_line = script.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+        try:
+            first_line = (await asyncio.to_thread(script.read_text, encoding="utf-8", errors="ignore")).splitlines()[0]
+        except (PermissionError, FileNotFoundError, IndexError):
+            first_line = ""
         if first_line.startswith("#!"):
             interpreter = first_line[2:].strip().split()[0]
 
@@ -715,16 +1233,16 @@ async def _git_raw(args: list[str], cwd: str, timeout: int = 60) -> dict[str, An
 async def git_init(path: str) -> dict[str, Any]:
     """Initialise a git repository at *path*."""
     logger.info("git_init: %s", path)
-    target = Path(path).expanduser().resolve()
-    target.mkdir(parents=True, exist_ok=True)
+    target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+    await asyncio.to_thread(target.mkdir, parents=True, exist_ok=True)
     return await _git_raw(["init"], str(target))
 
 
 async def git_clone(url: str, path: str) -> dict[str, Any]:
     """Clone a git repository into *path*."""
     logger.info("git_clone: %s -> %s", url, path)
-    target = Path(path).expanduser().resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+    await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
     return await _git_raw(["clone", url, str(target)], str(target.parent), timeout=180)
 
 
@@ -733,7 +1251,7 @@ async def git_commit_all(
 ) -> dict[str, Any]:
     """Stage all changes and commit in *path*."""
     logger.info("git_commit_all: %s message='%s'", path, message)
-    target = str(Path(path).expanduser().resolve())
+    target = str(await asyncio.to_thread(lambda: Path(path).expanduser().resolve()))
 
     safe_message = message.replace('"', '\\"').replace("`", "").replace("$", "")[:500]
 
@@ -745,12 +1263,40 @@ async def git_commit_all(
     return {"add": add_res, "commit": commit_res}
 
 
+def _is_safe_git_remote(url: str) -> bool:
+    """Return True if *url* points to a known-safe host."""
+    url_lower = url.lower()
+    for host in _SAFE_GIT_HOSTS:
+        if host in url_lower:
+            return True
+    return False
+
+
 async def git_push(
     path: str, remote: str = "origin", branch: str | None = None
 ) -> dict[str, Any]:
-    """Push commits from *path*. Allowed for workspace manager."""
+    """Push commits from *path*. Only safe remotes are permitted."""
     logger.info("git_push: %s remote=%s branch=%s", path, remote, branch)
-    target = str(Path(path).expanduser().resolve())
+    target = str(await asyncio.to_thread(lambda: Path(path).expanduser().resolve()))
+
+    # Validate remote URL before pushing
+    remote_check = await _git_raw(["remote", "get-url", remote], target, timeout=30)
+    if "error" in remote_check and remote_check.get("exit_code", 0) != 0:
+        return {
+            "error": f"Cannot verify remote '{remote}': {remote_check.get('error')}",
+            "command": f"git push {remote}",
+        }
+
+    remote_url = remote_check.get("output", "")
+    if not _is_safe_git_remote(remote_url):
+        logger.warning("Blocked git_push to unsafe remote: %s", remote_url)
+        return {
+            "error": (
+                f"Push to remote '{remote}' (URL: {remote_url}) is not allowed. "
+                "Only GitHub, GitLab, and Bitbucket remotes are permitted."
+            ),
+            "command": f"git push {remote}",
+        }
 
     args = ["push", remote]
     if branch:
@@ -761,7 +1307,7 @@ async def git_push(
 async def git_status(path: str) -> dict[str, Any]:
     """Return git status for *path*."""
     logger.info("git_status: %s", path)
-    target = str(Path(path).expanduser().resolve())
+    target = str(await asyncio.to_thread(lambda: Path(path).expanduser().resolve()))
     return await _git_raw(["status", "-sb"], target)
 
 
@@ -798,54 +1344,139 @@ _FRAMEWORK_INDICATORS: dict[str, list[str]] = {
     "spring": ["src/main/java", "src/main/resources/application.properties"],
 }
 
+_SKIP_DIRS: set[str] = {
+    "node_modules",
+    ".venv",
+    "__pycache__",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    "target",
+    ".cargo",
+}
 
-def _detect_language(project_path: Path) -> str:
+
+async def _is_git_repo(path: Path) -> bool:
+    """Detect whether *path* is inside a git repo by walking up the tree."""
+    try:
+        cwd = str(path) if await asyncio.to_thread(path.is_dir) else str(path.parent)
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "rev-parse", "--git-dir"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+async def _get_git_root(path: Path) -> Path | None:
+    """Return the resolved top-level directory of the git repo containing *path*, or None."""
+    try:
+        cwd = str(path) if await asyncio.to_thread(path.is_dir) else str(path.parent)
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return await asyncio.to_thread(Path(result.stdout.strip()).resolve)
+    except Exception:
+        pass
+    return None
+
+
+def _windows_python_fixup(command: str) -> str:
+    """Replace 'python' with 'py' on Windows to avoid MS Store alias error 9009.
+
+    Only replaces when ``py`` is actually available on PATH; otherwise keeps
+    ``python`` so the shell can fall back.
+    """
+    if platform.system() != "Windows":
+        return command
+    if not shutil.which("py"):
+        return command
+    stripped = command.lstrip()
+    lower = stripped.lower()
+    if lower.startswith("python "):
+        return "py " + stripped[7:]
+    if lower == "python":
+        return "py"
+    return command
+
+
+async def _detect_language(project_path: Path) -> str:
     scores: dict[str, int] = {}
     for lang, indicators in _LANGUAGE_INDICATORS.items():
         for indicator in indicators:
-            if (project_path / indicator).exists():
+            if await asyncio.to_thread((project_path / indicator).exists):
                 scores[lang] = scores.get(lang, 0) + 1
     return max(scores, key=scores.get) if scores else "unknown"
 
 
-def _detect_framework(project_path: Path, language: str) -> str | None:
+async def _detect_framework(project_path: Path, language: str) -> str | None:
     for framework, indicators in _FRAMEWORK_INDICATORS.items():
         for indicator in indicators:
-            if (project_path / indicator).exists():
+            if await asyncio.to_thread((project_path / indicator).exists):
                 return framework
     return None
 
 
-def _get_dependencies(project_path: Path, language: str) -> list[str]:
+async def _get_dependencies(project_path: Path, language: str) -> list[str]:
     deps: list[str] = []
-    if language == "python":
-        req_file = project_path / "requirements.txt"
-        if req_file.exists():
-            for line in req_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    deps.append(line.split("=")[0].split("<")[0].split(">")[0].strip())
-        elif (project_path / "pyproject.toml").exists():
-            deps.append("pyproject.toml")
-    elif language in ("javascript", "typescript"):
-        pkg_file = project_path / "package.json"
-        if pkg_file.exists():
-            try:
-                data = json.loads(pkg_file.read_text(encoding="utf-8"))
-                deps.extend(data.get("dependencies", {}).keys())
-                deps.extend(data.get("devDependencies", {}).keys())
-            except Exception:
-                pass
-    elif language == "rust":
-        if (project_path / "Cargo.toml").exists():
-            deps.append("Cargo.toml")
-    elif language == "go":
-        if (project_path / "go.mod").exists():
-            deps.append("go.mod")
+    try:
+        if language == "python":
+            req_file = project_path / "requirements.txt"
+            if await asyncio.to_thread(req_file.exists):
+                try:
+                    text = await asyncio.to_thread(req_file.read_text, encoding="utf-8", errors="ignore")
+                except (PermissionError, FileNotFoundError):
+                    text = ""
+                for line in text.splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        deps.append(line.split("=")[0].split("<")[0].split(">")[0].strip())
+            elif await asyncio.to_thread((project_path / "pyproject.toml").exists):
+                deps.append("pyproject.toml")
+        elif language in ("javascript", "typescript"):
+            pkg_file = project_path / "package.json"
+            if await asyncio.to_thread(pkg_file.exists):
+                try:
+                    text = await asyncio.to_thread(pkg_file.read_text, encoding="utf-8")
+                    data = json.loads(text)
+                    deps.extend(data.get("dependencies", {}).keys())
+                    deps.extend(data.get("devDependencies", {}).keys())
+                except Exception:
+                    pass
+        elif language == "rust":
+            if await asyncio.to_thread((project_path / "Cargo.toml").exists):
+                deps.append("Cargo.toml")
+        elif language == "go":
+            if await asyncio.to_thread((project_path / "go.mod").exists):
+                deps.append("go.mod")
+    except (PermissionError, FileNotFoundError):
+        pass
     return deps[:50]
 
 
-async def discover_projects(root_path: str) -> dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Discovery cache
+# ---------------------------------------------------------------------------
+
+_DISCOVERY_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_DISCOVERY_CACHE_TTL = 300  # 5 minutes
+
+
+async def discover_projects(
+    root_path: str, max_depth: int = 5, max_results: int = 100
+) -> dict[str, Any]:
     """Find all git repos and common project structures under *root_path*."""
     logger.info("discover_projects: %s", root_path)
 
@@ -854,48 +1485,104 @@ async def discover_projects(root_path: str) -> dict[str, Any]:
         return {"error": reason}
 
     try:
-        root = Path(root_path).expanduser().resolve()
-        if not root.exists():
+        root = await asyncio.to_thread(lambda: Path(root_path).expanduser().resolve())
+        if not await asyncio.to_thread(root.exists):
             return {"error": f"Root path not found: {root_path}"}
+        if not await asyncio.to_thread(root.is_dir):
+            return {"error": f"Path is not a directory: {root_path}"}
+    except (PermissionError, OSError) as exc:
+        return {"error": f"Failed to access root path: {exc}"}
 
-        projects: list[dict[str, Any]] = []
-        seen: set[Path] = set()
+    cache_key = f"{root}:{max_depth}:{max_results}"
+    now = time.monotonic()
+    cached = _DISCOVERY_CACHE.get(cache_key)
+    if cached is not None:
+        cached_at, result = cached
+        if now - cached_at < _DISCOVERY_CACHE_TTL:
+            return {**result, "cached": True}
 
-        for candidate in root.rglob("*"):
-            if not candidate.is_dir():
-                continue
-            if candidate in seen:
-                continue
+    projects: list[dict[str, Any]] = []
+    seen: set[str] = set()
 
-            is_git = (candidate / ".git").is_dir()
-            is_project = any(
-                (candidate / indicator).exists()
-                for indicators in _LANGUAGE_INDICATORS.values()
-                for indicator in indicators
-            )
+    async def _is_project_root(path: Path) -> tuple[bool, bool]:
+        """Return (is_git_root, is_project) for *path*."""
+        try:
+            has_git = await asyncio.to_thread((path / ".git").exists)
+        except (PermissionError, OSError):
+            has_git = False
+        is_project = False
+        for indicators in _LANGUAGE_INDICATORS.values():
+            for indicator in indicators:
+                if await asyncio.to_thread((path / indicator).exists):
+                    is_project = True
+                    break
+            if is_project:
+                break
+        return has_git, is_project
 
-            if is_git or is_project:
-                for parent in candidate.parents:
-                    if parent == root or root in parent.parents:
-                        seen.add(parent)
+    # If root itself is a project, return it immediately.
+    root_git, root_project = await _is_project_root(root)
+    if root_git or root_project:
+        lang = await _detect_language(root)
+        projects.append(
+            {
+                "path": str(root),
+                "name": root.name,
+                "is_git_repo": root_git,
+                "detected_language": lang,
+                "detected_framework": await _detect_framework(root, lang),
+            }
+        )
+        result = {"root": str(root), "projects": projects, "count": len(projects)}
+        _DISCOVERY_CACHE[cache_key] = (now, result)
+        return {**result, "cached": False}
 
-                projects.append(
-                    {
-                        "path": str(candidate),
-                        "name": candidate.name,
-                        "is_git_repo": is_git,
-                        "detected_language": _detect_language(candidate),
-                        "detected_framework": _detect_framework(
-                            candidate, _detect_language(candidate)
-                        ),
-                    }
-                )
+    async def scan(path: Path, depth: int) -> None:
+        if depth > max_depth or len(projects) >= max_results:
+            return
+        try:
+            entries = await asyncio.to_thread(lambda: list(os.scandir(path)))
+            for entry in entries:
+                if not await asyncio.to_thread(entry.is_dir, follow_symlinks=False):
+                    continue
+                name = entry.name
+                if name in _SKIP_DIRS or name.startswith("."):
+                    continue
+                child = Path(entry.path)
+                child_key = str(child)
+                if child_key in seen:
+                    continue
+                has_git, is_project = await _is_project_root(child)
+                if has_git or is_project:
+                    seen.add(child_key)
+                    lang = await _detect_language(child)
+                    projects.append(
+                        {
+                            "path": child_key,
+                            "name": child.name,
+                            "is_git_repo": has_git,
+                            "detected_language": lang,
+                            "detected_framework": await _detect_framework(child, lang),
+                        }
+                    )
+                    # Don't recurse into identified projects — fixes deduplication
+                    continue
+                await scan(child, depth + 1)
+        except PermissionError:
+            pass
+        except OSError:
+            pass
 
-        return {"root": str(root), "projects": projects, "count": len(projects)}
+    try:
+        await scan(root, 1)
     except PermissionError:
-        return {"error": f"Permission denied: {root_path}"}
-    except Exception as exc:
-        return {"error": f"Discovery failed: {exc}"}
+        pass
+    except OSError:
+        pass
+
+    result = {"root": str(root), "projects": projects, "count": len(projects)}
+    _DISCOVERY_CACHE[cache_key] = (now, result)
+    return {**result, "cached": False}
 
 
 async def get_project_info(path: str) -> dict[str, Any]:
@@ -907,35 +1594,50 @@ async def get_project_info(path: str) -> dict[str, Any]:
         return {"error": reason}
 
     try:
-        project = Path(path).expanduser().resolve()
-        if not project.exists():
+        project = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+        if not await asyncio.to_thread(project.exists):
             return {"error": f"Path not found: {path}"}
 
-        language = _detect_language(project)
-        framework = _detect_framework(project, language)
-        dependencies = _get_dependencies(project, language)
+        language = await _detect_language(project)
+        framework = await _detect_framework(project, language)
+        dependencies = await _get_dependencies(project, language)
 
         git_info: dict[str, Any] = {"is_repo": False}
-        if (project / ".git").exists():
+        if await _is_git_repo(project):
             try:
-                branch = subprocess.check_output(
-                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                branch_proc = await asyncio.create_subprocess_exec(
+                    "git", "rev-parse", "--abbrev-ref", "HEAD",
                     cwd=str(project),
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                ).strip()
-                remote = subprocess.check_output(
-                    ["git", "remote", "get-url", "origin"],
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                branch_stdout, _ = await asyncio.wait_for(branch_proc.communicate(), timeout=10)
+                branch = branch_stdout.decode("utf-8", errors="replace").strip()
+
+                remote_proc = await asyncio.create_subprocess_exec(
+                    "git", "remote", "get-url", "origin",
                     cwd=str(project),
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                ).strip()
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                remote_stdout, _ = await asyncio.wait_for(remote_proc.communicate(), timeout=10)
+                remote = remote_stdout.decode("utf-8", errors="replace").strip()
+
                 git_info = {"is_repo": True, "branch": branch, "remote": remote}
-            except subprocess.CalledProcessError:
+            except Exception:
                 git_info = {"is_repo": True, "branch": "unknown", "remote": None}
 
-        file_count = sum(1 for _ in project.rglob("*") if _.is_file())
-        dir_count = sum(1 for _ in project.rglob("*") if _.is_dir())
+        file_count = 0
+        dir_count = 0
+        try:
+            entries = await asyncio.to_thread(lambda: list(project.rglob("*")))
+            for e in entries:
+                if await asyncio.to_thread(e.is_file):
+                    file_count += 1
+                elif await asyncio.to_thread(e.is_dir):
+                    dir_count += 1
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
 
         return {
             "path": str(project),
@@ -993,7 +1695,8 @@ async def get_system_info() -> dict[str, Any]:
 
     info["gpu"] = []
     try:
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             [
                 "nvidia-smi",
                 "--query-gpu=name,memory.total,memory.used,utilization.gpu",
@@ -1050,7 +1753,8 @@ async def find_processes(name: str = "") -> dict[str, Any]:
                 )
     except ImportError:
         if platform.system() == "Windows":
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["tasklist", "/FO", "CSV"],
                 capture_output=True,
                 text=True,
@@ -1070,7 +1774,8 @@ async def find_processes(name: str = "") -> dict[str, Any]:
                             }
                         )
         else:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["ps", "aux"],
                 capture_output=True,
                 text=True,
@@ -1108,14 +1813,18 @@ async def kill_process(pid: int) -> dict[str, Any]:
                 return {"killed": True, "force": True, "pid": pid}
         except ImportError:
             if platform.system() == "Windows":
-                subprocess.run(
+                await asyncio.to_thread(
+                    subprocess.run,
                     ["taskkill", "/PID", str(pid), "/F"],
                     check=True,
                     timeout=10,
                 )
             else:
-                subprocess.run(
-                    ["kill", "-9", str(pid)], check=True, timeout=10
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["kill", "-9", str(pid)],
+                    check=True,
+                    timeout=10,
                 )
 
         return {"killed": True, "force": False, "pid": pid}
@@ -1219,11 +1928,15 @@ class WorkspaceManager:
         count = 0
         try:
             root = Path(search_root)
-            for file_path in root.rglob(glob):
-                if not file_path.is_file():
+            file_paths = await asyncio.to_thread(lambda: list(root.rglob(glob)))
+            for file_path in file_paths:
+                if not await asyncio.to_thread(file_path.is_file):
+                    continue
+                ok, _size, _err = _check_file_size_limit(file_path)
+                if not ok:
                     continue
                 try:
-                    content = file_path.read_text(encoding="utf-8", errors="ignore")
+                    content = await asyncio.to_thread(file_path.read_text, encoding="utf-8", errors="ignore")
                 except Exception:
                     continue
                 if pattern.lower() in content.lower():
@@ -1627,6 +2340,16 @@ register_tool(
             "type": "object",
             "properties": {
                 "root_path": {"type": "string", "description": "Absolute root directory"},
+                "max_depth": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Maximum recursion depth",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "default": 100,
+                    "description": "Maximum number of projects to return",
+                },
             },
             "required": ["root_path"],
         },

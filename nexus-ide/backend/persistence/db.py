@@ -28,7 +28,6 @@ try:
         sync_cache_invalidate_pattern,
         SHORT_TTL,
     )
-    CACHE_AVAILABLE = True
 except ImportError:
     # Fallback for when cache is not available
     SHORT_TTL = 300  # Default TTL in seconds
@@ -43,7 +42,6 @@ except ImportError:
             return func
         return decorator
 
-    CACHE_AVAILABLE = False
     logger.warning("Redis cache not available, running without caching")
 
 # Query performance monitoring
@@ -121,26 +119,43 @@ class SQLiteConnectionPool:
         Raises:
             TimeoutError: If no connection is available within the timeout period.
         """
+        # Fast-path: try to grab an existing connection without blocking.
+        # This avoids a 30-second wait when the pool is empty (common in
+        # tests because init_db() creates standalone connections).
         try:
-            # Try to get a connection from the pool
-            conn = self._pool.get(block=True, timeout=self.timeout)
-            # Verify the connection is still alive
+            conn = self._pool.get(block=False)
             try:
                 conn.execute("SELECT 1")
                 return conn
             except sqlite3.Error:
-                # Connection is dead, create a new one
                 logger.warning("Dead connection found, creating new one")
                 conn.close()
+                with self._lock:
+                    self._created_count -= 1
                 return self._create_connection()
         except Empty:
-            # Pool is empty, try to create a new connection
-            with self._lock:
-                if self._created_count < self.max_size:
-                    self._created_count += 1
-                    logger.debug("Creating new connection (total: %d)", self._created_count)
-                    return self._create_connection()
-            # If we get here, pool is at max capacity
+            pass
+
+        # Pool is empty — create a new connection immediately if under limit.
+        with self._lock:
+            if self._created_count < self.max_size:
+                self._created_count += 1
+                logger.debug("Creating new connection (total: %d)", self._created_count)
+                return self._create_connection()
+
+        # Pool is at max capacity; block and wait for one to be returned.
+        try:
+            conn = self._pool.get(block=True, timeout=self.timeout)
+            try:
+                conn.execute("SELECT 1")
+                return conn
+            except sqlite3.Error:
+                logger.warning("Dead connection found, creating new one")
+                conn.close()
+                with self._lock:
+                    self._created_count -= 1
+                return self._create_connection()
+        except Empty:
             raise TimeoutError(f"Connection pool exhausted after {self.timeout}s")
 
     def return_connection(self, conn: sqlite3.Connection) -> None:
@@ -210,11 +225,16 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
-def init_db() -> None:
+def init_db(run_migrations: bool = False) -> None:
     """Initialize the database with migration support.
 
     Creates directory and applies schema if needed.
     Uses Alembic for schema management if available.
+
+    Args:
+        run_migrations: If True, always run alembic migrations on existing DB.
+            Defaults to False for fast startup — migrations are skipped unless
+            the DB is fresh or this flag is set.
     """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -231,42 +251,64 @@ def init_db() -> None:
         logger.info("DB initialized at %s", DB_PATH)
 
         # Try to stamp with alembic if available
-        try:
-            from alembic.config import Config
-            from alembic import command
-
-            alembic_dir = Path(__file__).resolve().parent.parent / "migrations"
-            alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
-
-            if alembic_dir.exists() and alembic_ini.exists():
-                logger.info("Stamping database with initial migration")
-                config = Config(str(alembic_ini))
-                config.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
-                command.stamp(config, "head")
-                logger.info("Database stamped successfully")
-        except ImportError:
-            logger.warning("Alembic not available, skipping migration stamp")
-        except Exception as e:
-            logger.warning("Failed to stamp database with Alembic: %s", e)
+        _stamp_alembic()
+    elif run_migrations:
+        _run_alembic_migrations()
     else:
-        # Existing database: try to run migrations
+        # Existing database: fast-path skip — only check if schema is present
         try:
-            from alembic.config import Config
-            from alembic import command
+            with sqlite3.connect(str(DB_PATH)) as conn:
+                row = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'"
+                ).fetchone()
+                if row is None:
+                    logger.debug("No alembic_version table found, skipping migrations")
+                else:
+                    logger.debug("Alembic tracked DB found, migrations skipped (use run_migrations=True to force)")
+        except Exception:
+            pass
 
-            alembic_dir = Path(__file__).resolve().parent.parent / "migrations"
-            alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
 
-            if alembic_dir.exists() and alembic_ini.exists():
-                logger.info("Running database migrations")
-                config = Config(str(alembic_ini))
-                config.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
-                command.upgrade(config, "head")
-                logger.info("Migrations completed successfully")
-        except ImportError:
-            logger.warning("Alembic not available, skipping migrations")
-        except Exception as e:
-            logger.warning("Failed to run migrations: %s", e)
+def _stamp_alembic() -> None:
+    """Stamp a fresh database with the current alembic head."""
+    try:
+        from alembic.config import Config
+        from alembic import command
+
+        alembic_dir = Path(__file__).resolve().parent.parent / "migrations"
+        alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
+
+        if alembic_dir.exists() and alembic_ini.exists():
+            logger.info("Stamping database with initial migration")
+            config = Config(str(alembic_ini))
+            config.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
+            command.stamp(config, "head")
+            logger.info("Database stamped successfully")
+    except ImportError:
+        logger.warning("Alembic not available, skipping migration stamp")
+    except Exception as e:
+        logger.warning("Failed to stamp database with Alembic: %s", e)
+
+
+def _run_alembic_migrations() -> None:
+    """Run alembic migrations on an existing database."""
+    try:
+        from alembic.config import Config
+        from alembic import command
+
+        alembic_dir = Path(__file__).resolve().parent.parent / "migrations"
+        alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
+
+        if alembic_dir.exists() and alembic_ini.exists():
+            logger.info("Running database migrations")
+            config = Config(str(alembic_ini))
+            config.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
+            command.upgrade(config, "head")
+            logger.info("Migrations completed successfully")
+    except ImportError:
+        logger.warning("Alembic not available, skipping migrations")
+    except Exception as e:
+        logger.warning("Failed to run migrations: %s", e)
 
 
 def close_pool() -> None:
@@ -283,10 +325,13 @@ def close_pool() -> None:
 
 @contextmanager
 def get_db() -> Iterator[sqlite3.Connection]:
-    """Context manager yielding a sqlite connection with row_factory=Row."""
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    """Context manager yielding a sqlite connection from the pool.
+
+    Uses the connection pool for better performance instead of creating
+    a new connection every time.
+    """
+    pool = get_connection_pool()
+    conn = pool.get_connection()
     try:
         yield conn
         conn.commit()
@@ -294,7 +339,7 @@ def get_db() -> Iterator[sqlite3.Connection]:
         conn.rollback()
         raise
     finally:
-        conn.close()
+        pool.return_connection(conn)
 
 
 # ───── PROJECTS ─────────────────────────────────────────────────────────
@@ -521,6 +566,15 @@ def log_tool_execution(
 ) -> str:
     eid = _new_id()
     with get_db() as conn:
+        # Ensure session exists to satisfy FK constraint
+        if session_id:
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO sessions (id, title, mode) VALUES (?, ?, ?)",
+                    (session_id, session_id, "auto"),
+                )
+            except Exception:
+                pass
         conn.execute(
             """INSERT INTO tool_executions
                (id, session_id, tool_name, args_json, result_json, success, error, duration_ms)

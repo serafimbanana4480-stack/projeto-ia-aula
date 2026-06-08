@@ -95,8 +95,13 @@ class TestMemory:
 
 class TestMemoryStore:
     @pytest.fixture
-    def store(self) -> MemoryStore:
+    def store(self, monkeypatch: pytest.MonkeyPatch) -> MemoryStore:
         svc = EmbeddingService()
+        # Use deterministic fallback embed to avoid slow/outbound Ollama calls
+        async def _fast_embed(text: str) -> list[float]:
+            return svc._fallback_embed(text)
+
+        monkeypatch.setattr(svc, "embed", _fast_embed)
         return MemoryStore(embedding_service=svc, max_memories=100)
 
     @pytest.mark.asyncio

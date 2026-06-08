@@ -33,6 +33,12 @@ async def analyze_data(
     If `query` is provided, generate analysis code from the query.
     If `data_path` is provided, load and summarize the data.
     """
+    # Lazy imports — pandas/numpy are heavy and only needed at runtime
+    try:
+        import pandas as pd  # noqa: F811
+    except ImportError:
+        pd = None  # type: ignore[assignment]
+
     try:
         # Build analysis script
         script_parts = [

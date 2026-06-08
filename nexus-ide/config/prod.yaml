@@ -3,44 +3,43 @@
 
 # Application Settings
 app:
-  name: "NEXUS IDE"
+  name: "NEXUS IDE (Production)"
   debug: false
-  log_level: "INFO"
+  log_level: "WARNING"
   reload: false
 
 # CORS Settings
 cors:
   allowed_origins:
-    - "https://your-production-domain.com"
-  allow_credentials: false
+    - "https://nexus-ide.example.com"
+  allow_credentials: true
   allow_methods: ["GET", "POST", "PUT", "DELETE"]
-  allow_headers: ["Content-Type", "Authorization"]
+  allow_headers: ["*"]
 
 # Database Settings
 database:
-  url: "postgresql://user:password@localhost:5432/nexus"
-  echo: false  # Do not log SQL queries in production
-  pool_size: 20
-  max_overflow: 10
+  url: "postgresql://user:pass@localhost:5432/nexus_prod"
+  echo: false
 
 # Redis Settings
 redis:
   url: "redis://localhost:6379"
   db: 0
-  password: "${REDIS_PASSWORD}"  # Use environment variable
+  password: null
 
-# Ollama Settings
-ollama:
-  host: "http://localhost:11434"
-  dashboard_host: "http://localhost:11435"
-  timeout: 120
-  retry_attempts: 5
+# Local LLM (AirLLM) Settings
+local_llm:
+  device: "auto"
+  dashboard_device: "cpu"
+  compression: "4bit"
+  timeout: 600
+  retry_attempts: 2
 
 # Observability Settings
 observability:
   enable_tracing: true
   enable_metrics: true
-  otel_exporter_otlp_endpoint: "http://localhost:4317"
+  otel_exporter_otlp_endpoint: "http://otel-collector:4317"
   prometheus_port: 9090
 
 # Rate Limiting
@@ -50,26 +49,19 @@ rate_limiting:
 
 # Security Settings
 security:
-  secret_key: "${SECRET_KEY}"  # Must be set via environment variable
-  session_expire_hours: 8
-  require_https: true
+  secret_key: "${SECRET_KEY}"
+  session_expire_hours: 24
 
 # Feature Flags
 features:
   enable_web_search: true
   enable_code_execution: true
   enable_file_operations: true
-  enable_terminal: true
-  max_file_size_mb: 10
+  enable_terminal: false
+  max_file_size_mb: 100
 
 # Logging
 logging:
-  level: "INFO"
+  level: "WARNING"
   format: "json"
   file: "logs/nexus_prod.log"
-
-# Performance Settings
-performance:
-  max_workers: 4
-  request_timeout: 300
-  max_concurrent_requests: 100

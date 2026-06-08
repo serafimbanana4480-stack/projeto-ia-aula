@@ -39,8 +39,7 @@ async def recall_context(
         from backend.knowledge.memory import get_memory_store
         from backend.config.settings import get_settings
 
-        settings = get_settings()
-        store = get_memory_store(ollama_host=settings.ollama_host)
+        store = get_memory_store()
 
         # Search for relevant memories
         results = await store.search(
@@ -108,8 +107,7 @@ async def store_memory(
         from backend.knowledge.memory import MemoryType, get_memory_store
         from backend.config.settings import get_settings
 
-        settings = get_settings()
-        store = get_memory_store(ollama_host=settings.ollama_host)
+        store = get_memory_store()
 
         # Parse memory type
         try:

@@ -134,3 +134,41 @@ class TestRouteWithModel:
         assert d.primary_agent == "MICRO"
         assert "injection" in d.routing_reason
         await ollama_client.aclose()
+
+    async def test_caching_same_query(self) -> None:
+        """Same query should return cached decision without calling model."""
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            return make_single_response(
+                '{"primary_agent": "CODER", "routing_confidence": 0.9, '
+                '"routing_reason": "cached"}'
+            )
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            d1 = await route_with_model("cacheable query xyz", client)
+            d2 = await route_with_model("cacheable query xyz", client)
+            assert d1.primary_agent == "CODER"
+            assert d2.primary_agent == "CODER"
+            assert call_count == 1, f"Expected 1 model call, got {call_count}"
+        finally:
+            await client.aclose()
+
+
+class TestFastRouteCaching:
+    def test_fast_route_is_cached(self) -> None:
+        """fast_route should be memoized with lru_cache."""
+        # First call
+        r1 = fast_route("write a function to sort a list")
+        # Second call with same query — should be instant from cache
+        r2 = fast_route("write a function to sort a list")
+        assert r1 == r2 == "CODER"
+
+    def test_fast_route_cache_key_normalization(self) -> None:
+        """Cache key should be based on normalized (lowered, stripped) query."""
+        r1 = fast_route("  Write A FUNCTION  ")
+        r2 = fast_route("write a function")
+        assert r1 == r2 == "CODER"

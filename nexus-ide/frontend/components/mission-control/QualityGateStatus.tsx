@@ -95,6 +95,7 @@ function GateCard({ gate, index }: { gate: QualityGate; index: number }) {
 
 export default function QualityGateStatus() {
   const gates = useMissionStore((s) => s.qualityGates);
+  const loading = useMissionStore((s) => s.loading);
 
   return (
     <div className="rounded-lg border border-nexus-border bg-nexus-panel p-4">
@@ -105,8 +106,14 @@ export default function QualityGateStatus() {
         </div>
       </div>
 
-      {gates.length === 0 ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+      {loading && gates.length === 0 ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+          {[...Array(6)].map((_, i) => (
+            <div key={i} className="h-28 animate-pulse rounded-lg bg-nexus-border/20" />
+          ))}
+        </div>
+      ) : gates.length === 0 ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
           {Object.entries(gateMeta).map(([key, meta], idx) => (
             <motion.div
               key={key}
@@ -122,7 +129,7 @@ export default function QualityGateStatus() {
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
           {gates.map((gate, idx) => (
             <GateCard key={gate.name} gate={gate} index={idx} />
           ))}

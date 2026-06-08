@@ -3,20 +3,66 @@
 Prevents corruption when multiple agents write to the same file concurrently.
 Supports shared read locks and exclusive write locks with automatic expiry,
 deadlock detection, and administrative override capabilities.
+
+**Cross-process safety**: Uses ``filelock.AsyncFileLock`` as a process-level
+barrier so that multiple Uvicorn workers (or separate Python processes)
+coordinate safely.  The in-memory structures remain for deadlock detection
+and metrics.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import tempfile
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import AsyncGenerator, ClassVar
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Cross-process lock support
+# ---------------------------------------------------------------------------
+try:
+    from filelock import AsyncFileLock as _AsyncFileLock
+
+    _FILELOCK_AVAILABLE = True
+except Exception:  # pragma: no cover
+    _FILELOCK_AVAILABLE = False
+    _AsyncFileLock = None  # type: ignore[misc,assignment]
+
+
+def _cross_process_lock_path(file_path: str) -> str:
+    """Return a deterministic lock-file path for *file_path*.
+
+    The lock file is stored under the system temp directory so it is writable
+    on all platforms and does not pollute the project tree.
+    """
+    # Hash the absolute path to get a short, deterministic filename
+    import hashlib
+
+    abs_path = str(Path(file_path).resolve())
+    path_hash = hashlib.sha256(abs_path.encode()).hexdigest()[:16]
+    lock_name = f"nexus_filelock_{path_hash}.lock"
+    return str(Path(tempfile.gettempdir()) / lock_name)
+
+
+def _filelock_enabled() -> bool:
+    """Return whether the cross-process filelock layer should be used.
+
+    This is evaluated at *call time* so that tests can toggle the behaviour
+    via the ``NEXUS_DISABLE_FILELOCK`` environment variable.
+    """
+    return (
+        _FILELOCK_AVAILABLE
+        and os.environ.get("NEXUS_DISABLE_FILELOCK", "").lower() not in ("1", "true", "yes")
+    )
 
 
 class LockError(Exception):
@@ -90,6 +136,8 @@ class FileLockManager:
         self._wait_graph: dict[str, set[str]] = defaultdict(set)
         # Internal asyncio lock protecting the above structures
         self._mutex = asyncio.Lock()
+        # Cross-process file locks (filelock) — one per file_path
+        self._filelock_map: dict[str, asyncio.Lock] = {}
 
     # --------------------------------------------------------------------- #
     # Required public API
@@ -183,9 +231,30 @@ class FileLockManager:
                 lock.lock_type,
                 lock.lock_id,
             )
+            # Release cross-process lock if this was the last holder
+            if hasattr(lock, "_cross_proc_lock") and lock._cross_proc_lock is not None:
+                try:
+                    lock._cross_proc_lock.release()
+                except Exception:
+                    pass
+                lock._cross_proc_lock = None
+            if hasattr(lock, "_cross_proc_async_lock") and lock._cross_proc_async_lock is not None:
+                try:
+                    lock._cross_proc_async_lock.release()
+                except Exception:
+                    pass
+                lock._cross_proc_async_lock = None
 
         if not locks:
             del self._locks[file_path]
+            # Clean up stale lock file on disk if no in-memory locks remain
+            if _filelock_enabled():
+                lock_file = Path(_cross_process_lock_path(file_path))
+                try:
+                    if lock_file.exists():
+                        lock_file.unlink()
+                except OSError:
+                    pass
 
     def get_lock_status(self, file_path: str) -> dict:
         """Return the current lock status for *file_path*.
@@ -288,6 +357,19 @@ class FileLockManager:
                         file_path,
                         lock.owner,
                     )
+                    # Release cross-process lock if this was the last holder
+                    if hasattr(lock, "_cross_proc_lock") and lock._cross_proc_lock is not None:
+                        try:
+                            lock._cross_proc_lock.release()
+                        except Exception:
+                            pass
+                        lock._cross_proc_lock = None
+                    if hasattr(lock, "_cross_proc_async_lock") and lock._cross_proc_async_lock is not None:
+                        try:
+                            lock._cross_proc_async_lock.release()
+                        except Exception:
+                            pass
+                        lock._cross_proc_async_lock = None
                     break
             if not locks:
                 del self._locks[file_path]
@@ -473,7 +555,13 @@ class FileLockManager:
         owner: str,
         timeout_seconds: float,
     ) -> str:
-        """Internal implementation of lock acquisition."""
+        """Internal implementation of lock acquisition.
+
+        Acquires a cross-process ``filelock`` *only* when the in-memory lock
+        becomes available.  This avoids holding an OS-level lock while
+        waiting for other asyncio tasks, and guarantees safety even when
+        multiple Uvicorn workers run in separate OS processes.
+        """
         file_path = self._normalise_path(file_path)
 
         if lock_type not in ("read", "write"):
@@ -498,6 +586,38 @@ class FileLockManager:
                     )
 
                 if self._can_acquire(file_path, lock_type, owner):
+                    # ------------------------------------------------------
+                    # Cross-process lock (filelock) — only when we are
+                    # about to really take the in-memory lock.
+                    # ------------------------------------------------------
+                    fl: Any = None
+                    fl_async: asyncio.Lock | None = None
+                    if _filelock_enabled() and _AsyncFileLock is not None:
+                        lock_file = _cross_process_lock_path(file_path)
+                        if file_path not in self._filelock_map:
+                            self._filelock_map[file_path] = asyncio.Lock()
+                        fl_async = self._filelock_map[file_path]
+                        try:
+                            await asyncio.wait_for(
+                                fl_async.acquire(),
+                                timeout=min(timeout_seconds, 1.0),
+                            )
+                        except asyncio.TimeoutError:
+                            raise LockError(
+                                f"Timeout waiting for cross-process lock on {file_path}"
+                            )
+                        fl = _AsyncFileLock(lock_file)
+                        try:
+                            await asyncio.wait_for(
+                                fl.acquire(),
+                                timeout=min(timeout_seconds, 5.0),
+                            )
+                        except asyncio.TimeoutError:
+                            fl_async.release()
+                            raise LockError(
+                                f"Timeout acquiring cross-process lock on {file_path}"
+                            )
+
                     lock = FileLock(
                         file_path=file_path,
                         lock_type=lock_type,
@@ -510,8 +630,12 @@ class FileLockManager:
                     lock_id = lock.lock_id
                     acquired = True
                     self._wait_graph[owner].discard(file_path)
+                    # Attach cross-process handles for cleanup in release_lock
+                    if fl is not None:
+                        lock._cross_proc_lock = fl  # type: ignore[attr-defined]
+                        lock._cross_proc_async_lock = fl_async  # type: ignore[attr-defined]
                     logger.debug(
-                        "Lock acquired internally: %s %s on %s by %s",
+                        "Lock acquired: %s %s on %s by %s",
                         lock_type,
                         lock_id,
                         file_path,

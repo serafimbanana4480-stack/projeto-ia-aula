@@ -3,10 +3,18 @@ import type {
   ChatMessage,
   FileListResponse,
   FileTreeEntry,
+  LogEntry,
+  MetricsData,
   ModelStatus,
+  Project,
   SessionHistoryResponse,
   TerminalExecutionResult,
+  Tool,
 } from "./types";
+import { authHeaders, clearAuth, getAccessToken } from "./auth";
+
+// Satisfy noUnusedLocals without changing behavior (getAccessToken is kept for re-export compatibility)
+void getAccessToken;
 
 // Custom error class for API errors
 export class ApiError extends Error {
@@ -29,6 +37,12 @@ export function apiUrl(path: string): string {
 
 async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== "undefined") {
+      // Clear stale token and force re-login. Removing it first prevents an
+      // infinite redirect loop where AuthGuard sees a present-but-expired token.
+      clearAuth();
+      window.location.href = "/login?expired=1";
+    }
     let errorText = "";
     try {
       errorText = await response.text();
@@ -67,7 +81,7 @@ export async function postChat(
     const response = await fetch(apiUrl("/api/chat"), {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
+        ...authHeaders(),
         Accept: "text/event-stream",
       },
       body: JSON.stringify(body),
@@ -106,13 +120,17 @@ export async function postChat(
 
 export async function getSessionHistory(id: string): Promise<ChatMessage[]> {
   const data = await readJson<SessionHistoryResponse | ChatMessage[]>(
-    await fetch(apiUrl(`/api/sessions/${id}/history`)),
+    await fetch(apiUrl(`/api/sessions/${id}/history`), {
+      headers: authHeaders(),
+    }),
   );
   return Array.isArray(data) ? data : (data.messages ?? []);
 }
 
 export async function getModelStatus(): Promise<ModelStatus[]> {
-  return readJson<ModelStatus[]>(await fetch(apiUrl("/api/models/status")));
+  return readJson<ModelStatus[]>(
+    await fetch(apiUrl("/api/models/status"), { headers: authHeaders() }),
+  );
 }
 
 export async function readFile(
@@ -122,7 +140,7 @@ export async function readFile(
   return readJson<{ content: string }>(
     await fetch(apiUrl("/api/files/read"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ path, project_path: projectPath }),
     }),
   );
@@ -136,7 +154,7 @@ export async function writeFile(
   try {
     const response = await fetch(apiUrl("/api/files/write"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ path, content, project_path: projectPath }),
     });
 
@@ -173,7 +191,7 @@ export async function listFiles(
   const data = await readJson<FileListResponse>(
     await fetch(apiUrl("/api/files/list"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ path, recursive, project_path: projectPath }),
     }),
   );
@@ -189,7 +207,7 @@ export async function executeTerminalCommand(
   return readJson<TerminalExecutionResult>(
     await fetch(apiUrl("/api/terminal/execute"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({
         command,
         project_path: projectPath,
@@ -200,9 +218,9 @@ export async function executeTerminalCommand(
   );
 }
 
-export async function getTools(): Promise<any[]> {
-  const data = await readJson<{ tools?: any[] }>(
-    await fetch(apiUrl("/api/tools")),
+export async function getTools(): Promise<Tool[]> {
+  const data = await readJson<{ tools?: Tool[] }>(
+    await fetch(apiUrl("/api/tools"), { headers: authHeaders() }),
   );
   return data.tools ?? [];
 }
@@ -210,12 +228,13 @@ export async function getTools(): Promise<any[]> {
 export async function toggleTool(
   toolName: string,
   enabled: boolean,
-): Promise<any> {
+): Promise<unknown> {
   try {
     const response = await fetch(
       apiUrl(`/api/tools/${toolName}/toggle?enabled=${enabled}`),
       {
         method: "POST",
+        headers: authHeaders(),
       },
     );
 
@@ -246,16 +265,16 @@ export async function toggleTool(
   }
 }
 
-export async function getModes(): Promise<Record<string, any>> {
-  const data = await readJson<{ modes?: Record<string, any> }>(
-    await fetch(apiUrl("/api/modes")),
+export async function getModes(): Promise<Record<string, unknown>> {
+  const data = await readJson<{ modes?: Record<string, unknown> }>(
+    await fetch(apiUrl("/api/modes"), { headers: authHeaders() }),
   );
   return data.modes ?? {};
 }
 
-export async function getProjects(): Promise<any[]> {
-  const data = await readJson<{ projects?: any[] }>(
-    await fetch(apiUrl("/api/projects")),
+export async function getProjects(): Promise<Project[]> {
+  const data = await readJson<{ projects?: Project[] }>(
+    await fetch(apiUrl("/api/projects"), { headers: authHeaders() }),
   );
   return data.projects ?? [];
 }
@@ -267,11 +286,11 @@ export async function createProject(payload: {
   mode?: string;
   preferred_model?: string;
   trust?: boolean;
-}): Promise<any> {
+}): Promise<unknown> {
   try {
     const response = await fetch(apiUrl("/api/projects"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify(payload),
     });
 
@@ -302,8 +321,10 @@ export async function createProject(payload: {
   }
 }
 
-export async function getCurrentMetrics(): Promise<any> {
-  return readJson<any>(await fetch(apiUrl("/api/metrics/current")));
+export async function getCurrentMetrics(): Promise<MetricsData> {
+  return readJson<MetricsData>(
+    await fetch(apiUrl("/api/metrics/current"), { headers: authHeaders() }),
+  );
 }
 
 // Guardian API functions
@@ -333,7 +354,9 @@ export interface GuardianSuggestion {
 }
 
 export async function getGuardianStatus(): Promise<GuardianStatus> {
-  return readJson<GuardianStatus>(await fetch(apiUrl("/api/guardian/status")));
+  return readJson<GuardianStatus>(
+    await fetch(apiUrl("/api/guardian/status"), { headers: authHeaders() }),
+  );
 }
 
 export async function getGuardianSuggestions(
@@ -346,13 +369,16 @@ export async function getGuardianSuggestions(
   if (category) params.set("category", category);
   if (priority) params.set("priority", priority);
   return readJson<{ suggestions: GuardianSuggestion[]; count: number }>(
-    await fetch(apiUrl(`/api/guardian/suggestions?${params.toString()}`)),
+    await fetch(apiUrl(`/api/guardian/suggestions?${params.toString()}`), {
+      headers: authHeaders(),
+    }),
   );
 }
 
-export async function applyGuardianSuggestion(suggestionId: string): Promise<any> {
+export async function applyGuardianSuggestion(suggestionId: string): Promise<unknown> {
   const response = await fetch(apiUrl(`/api/guardian/suggestions/${suggestionId}/apply`), {
     method: "POST",
+    headers: authHeaders(),
   });
   if (!response.ok) {
     let errorText = "";
@@ -378,20 +404,24 @@ export async function getGuardianLogs(
     since?: string;
     limit?: number;
   } = {},
-): Promise<{ logs: any[]; count: number }> {
+): Promise<{ logs: LogEntry[]; count: number }> {
   const query = new URLSearchParams();
   if (params.session_id) query.set("session_id", params.session_id);
   if (params.agent) query.set("agent", params.agent);
   if (params.level) query.set("level", params.level);
   if (params.since) query.set("since", params.since);
   if (params.limit) query.set("limit", String(params.limit));
-  return readJson<{ logs: any[]; count: number }>(
-    await fetch(apiUrl(`/api/guardian/logs?${query.toString()}`)),
+  return readJson<{ logs: LogEntry[]; count: number }>(
+    await fetch(apiUrl(`/api/guardian/logs?${query.toString()}`), {
+      headers: authHeaders(),
+    }),
   );
 }
 
-export async function getGuardianMetrics(): Promise<any> {
-  return readJson<any>(await fetch(apiUrl("/api/guardian/metrics")));
+export async function getGuardianMetrics(): Promise<unknown> {
+  return readJson<unknown>(
+    await fetch(apiUrl("/api/guardian/metrics"), { headers: authHeaders() }),
+  );
 }
 
 // Plan API functions
@@ -447,7 +477,7 @@ export async function createPlan(
   return readJson<PlanCreateResult>(
     await fetch(apiUrl("/api/plan/create"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({
         objective,
         session_id: sessionId,
@@ -465,7 +495,7 @@ export async function approvePlan(
   return readJson<{ status: string; plan_id: string }>(
     await fetch(apiUrl("/api/plan/approve"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ plan_id: planId, session_id: sessionId }),
     }),
   );
@@ -479,7 +509,7 @@ export async function executePlan(
   return readJson<PlanExecuteResult>(
     await fetch(apiUrl("/api/plan/execute"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({
         plan_id: planId,
         session_id: sessionId,
@@ -491,7 +521,7 @@ export async function executePlan(
 
 export async function getPlanStatus(planId: string): Promise<PlanStatus> {
   return readJson<PlanStatus>(
-    await fetch(apiUrl(`/api/plan/${planId}/status`)),
+    await fetch(apiUrl(`/api/plan/${planId}/status`), { headers: authHeaders() }),
   );
 }
 
@@ -501,7 +531,7 @@ export async function cancelPlan(
   return readJson<{ status: string; session_id: string }>(
     await fetch(apiUrl("/api/plan/cancel"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ session_id: sessionId }),
     }),
   );
@@ -610,34 +640,49 @@ export interface SelfImprovementProposal {
 }
 
 export async function getMissions(): Promise<Mission[]> {
-  const data = await readJson<{ missions?: Mission[] }>(await fetch(apiUrl("/api/missions")));
+  const data = await readJson<{ missions?: Mission[] }>(
+    await fetch(apiUrl("/api/missions"), { headers: authHeaders() }),
+  );
   return data.missions ?? [];
 }
 
 export async function getMission(id: string): Promise<Mission> {
-  return readJson<Mission>(await fetch(apiUrl(`/api/missions/${id}`)));
+  return readJson<Mission>(
+    await fetch(apiUrl(`/api/missions/${id}`), { headers: authHeaders() }),
+  );
 }
 
 export async function pauseMission(id: string): Promise<{ status: string; mission_id: string }> {
   return readJson<{ status: string; mission_id: string }>(
-    await fetch(apiUrl(`/api/missions/${id}/pause`), { method: "POST" }),
+    await fetch(apiUrl(`/api/missions/${id}/pause`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
   );
 }
 
 export async function resumeMission(id: string): Promise<{ status: string; mission_id: string }> {
   return readJson<{ status: string; mission_id: string }>(
-    await fetch(apiUrl(`/api/missions/${id}/resume`), { method: "POST" }),
+    await fetch(apiUrl(`/api/missions/${id}/resume`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
   );
 }
 
 export async function abortMission(id: string): Promise<{ status: string; mission_id: string }> {
   return readJson<{ status: string; mission_id: string }>(
-    await fetch(apiUrl(`/api/missions/${id}/abort`), { method: "POST" }),
+    await fetch(apiUrl(`/api/missions/${id}/abort`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
   );
 }
 
 export async function getAgentInstances(): Promise<AgentInstance[]> {
-  const data = await readJson<{ agents?: AgentInstance[] }>(await fetch(apiUrl("/api/agents/instances")));
+  const data = await readJson<{ agents?: AgentInstance[] }>(
+    await fetch(apiUrl("/api/agents/instances"), { headers: authHeaders() }),
+  );
   return data.agents ?? [];
 }
 
@@ -648,7 +693,7 @@ export async function interveneAgent(
   return readJson<{ status: string; agent_id: string }>(
     await fetch(apiUrl(`/api/agents/${id}/intervene`), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ action }),
     }),
   );
@@ -659,28 +704,40 @@ export async function getBusMessages(topic?: string, limit: number = 50): Promis
   if (topic) params.set("topic", topic);
   params.set("limit", String(limit));
   const data = await readJson<{ messages?: BusMessageItem[]; count?: number }>(
-    await fetch(apiUrl(`/api/bus/history/all?${params.toString()}`)),
+    await fetch(apiUrl(`/api/bus/history/all?${params.toString()}`), {
+      headers: authHeaders(),
+    }),
   );
   return data.messages ?? [];
 }
 
 export async function getReviews(artifactId: string): Promise<Review[]> {
-  const data = await readJson<{ reviews?: Review[] }>(await fetch(apiUrl(`/api/reviews?artifact_id=${artifactId}`)));
+  const data = await readJson<{ reviews?: Review[] }>(
+    await fetch(apiUrl(`/api/reviews?artifact_id=${artifactId}`), {
+      headers: authHeaders(),
+    }),
+  );
   return data.reviews ?? [];
 }
 
 export async function getWhiteboard(): Promise<WhiteboardEntry[]> {
-  const data = await readJson<{ entries?: WhiteboardEntry[] }>(await fetch(apiUrl("/api/whiteboard")));
+  const data = await readJson<{ entries?: WhiteboardEntry[] }>(
+    await fetch(apiUrl("/api/whiteboard"), { headers: authHeaders() }),
+  );
   return data.entries ?? [];
 }
 
 export async function getSystemHealth(): Promise<SystemHealthSnapshot> {
-  return readJson<SystemHealthSnapshot>(await fetch(apiUrl("/api/system/health")));
+  return readJson<SystemHealthSnapshot>(
+    await fetch(apiUrl("/api/system/health"), { headers: authHeaders() }),
+  );
 }
 
 export async function getSelfImprovementProposals(): Promise<SelfImprovementProposal[]> {
   const data = await readJson<{ proposals?: SelfImprovementProposal[] }>(
-    await fetch(apiUrl("/api/self-improvement/proposals")),
+    await fetch(apiUrl("/api/self-improvement/proposals"), {
+      headers: authHeaders(),
+    }),
   );
   return data.proposals ?? [];
 }

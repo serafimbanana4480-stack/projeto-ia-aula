@@ -5,12 +5,17 @@ multiprocessing RuntimeError on Windows when ``--reload`` is enabled.
 See: https://github.com/encode/uvicorn/issues/1558
 """
 
+import os
 import sys
 from pathlib import Path
 
 # Ensure project root is on PYTHONPATH so ``backend.*`` imports resolve
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+# Ensure workspace/shell/python operations resolve relative paths from the project
+# root instead of the directory where uvicorn was launched.
+os.chdir(PROJECT_ROOT)
 
 import uvicorn  # noqa: E402
 

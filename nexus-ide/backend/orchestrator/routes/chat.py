@@ -20,7 +20,8 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
+from backend.middleware.auth import require_auth
 from fastapi.responses import StreamingResponse
 from backend.agents.base import AgentRequest
 from backend.config.settings import get_model_config, get_settings, load_models_config
@@ -28,7 +29,7 @@ from backend.llm.multi_llm_manager import MultiLLMManager
 from backend.middleware.rate_limit import limiter
 from backend.models.api import ChatRequest, RoutingDecision, StreamEvent
 from backend.orchestrator.fallback import invoke_with_fallback
-from backend.orchestrator.registry import resolve
+from backend.orchestrator.registry import get_registry, resolve
 from backend.orchestrator.router import fast_route, route_with_model
 from backend.orchestrator.smart_router import smart_route_tier
 from backend.persistence.db import add_message, create_session, get_session
@@ -108,7 +109,7 @@ async def _decide_route(query: str, llm_client) -> RoutingDecision:
 
 @router.post("/chat")
 @limiter.limit("60/minute")
-async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
+async def chat(req: ChatRequest, request: Request, _user: dict = Depends(require_auth)) -> StreamingResponse:
     """Stream the agent response as Server-Sent Events.
 
     We deliberately always return ``200 OK`` even on upstream errors: the
@@ -117,7 +118,7 @@ async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
     contract on most browsers.
     """
     llm_client = request.app.state.llm_client
-    registry = request.app.state.registry
+    registry = get_registry(request.app)
     context = request.app.state.context
     event_bus = getattr(request.app.state, "event_bus", None)
 
@@ -356,8 +357,7 @@ async def _run_pipeline(
             try:
                 from backend.knowledge.memory import MemoryType, get_memory_store
 
-                ollama_host = str(llm_client._host) if hasattr(llm_client, "_host") else get_settings().ollama_host
-                mem_store = get_memory_store(ollama_host=ollama_host)
+                mem_store = get_memory_store()
                 await mem_store.store(
                     content=f"User: {req.message}",
                     memory_type=MemoryType.CONVERSATION,
@@ -501,8 +501,7 @@ async def _run_pipeline(
     try:
         from backend.knowledge.memory import MemoryType, get_memory_store
 
-        ollama_host = str(llm_client._host) if hasattr(llm_client, "_host") else get_settings().ollama_host
-        mem_store = get_memory_store(ollama_host=ollama_host)
+        mem_store = get_memory_store()
 
         # Store the user query
         await mem_store.store(
@@ -532,7 +531,7 @@ async def _run_pipeline(
 
 
 @router.get("/providers")
-async def list_providers(request: Request) -> dict:
+async def list_providers(request: Request, _user: dict = Depends(require_auth)) -> dict:
     """Return available LLM providers and their health status."""
     settings = get_settings()
     cfg = load_models_config()

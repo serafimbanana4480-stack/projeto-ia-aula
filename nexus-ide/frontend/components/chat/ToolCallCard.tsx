@@ -11,9 +11,9 @@ import {
 
 interface ToolCallCardProps {
   toolName: string;
-  args: any;
+  args: Record<string, unknown>;
   status: "running" | "success" | "error";
-  result?: any;
+  result?: unknown;
   error?: string;
   durationMs?: number;
 }
@@ -89,7 +89,7 @@ function ToolCallCard({
               </pre>
             </div>
 
-            {status === "success" && result && (
+            {status === "success" && result != null && (
               <div>
                 <div className="text-xs text-gray-500">Result:</div>
                 <pre className="mt-1 rounded bg-black/20 p-2 text-xs text-gray-400 overflow-x-auto">

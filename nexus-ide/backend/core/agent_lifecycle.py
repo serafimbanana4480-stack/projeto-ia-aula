@@ -82,21 +82,31 @@ class AgentInstance(BaseModel):
 class AgentLifecycleManager:
     """Manages dynamic agent instances with resource limits and overseer integration.
 
+    When ``registry`` and ``llm_client`` are provided, spawned agents are
+    *actually executed* in background asyncio tasks.  Otherwise the manager
+    behaves as a pure state tracker (useful in tests).
+
     Usage::
 
-        manager = AgentLifecycleManager()
+        manager = AgentLifecycleManager(registry, llm_client)
         instance_id = await manager.spawn("CODER", "Implement OAuth2", mission_id="abc")
         await manager.pause(instance_id)
         await manager.resume(instance_id)
         await manager.abort(instance_id)
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        registry: Any | None = None,
+        llm_client: Any | None = None,
+    ) -> None:
         self._instances: dict[str, AgentInstance] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
         self._overseer_callback: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None = None
         self._tasks: dict[str, asyncio.Task[Any]] = {}
+        self._registry = registry
+        self._llm_client = llm_client
 
     # -- overseer integration -----------------------------------------------
 
@@ -185,6 +195,14 @@ class AgentLifecycleManager:
                 agent_type,
                 mission_id,
             )
+
+            # Actually execute the agent if registry + LLM client are wired
+            if self._registry is not None and self._llm_client is not None:
+                task = asyncio.create_task(
+                    self._execute_agent(instance)
+                )
+                self._tasks[instance.instance_id] = task
+
             return instance.instance_id
 
     async def pause(self, instance_id: str) -> AgentInstance:
@@ -343,6 +361,53 @@ class AgentLifecycleManager:
 
     def _get(self, instance_id: str) -> AgentInstance | None:
         return self._instances.get(instance_id)
+
+    async def _execute_agent(self, instance: AgentInstance) -> None:
+        """Run the actual agent and transition the instance to COMPLETED or FAILED."""
+        agent = self._registry.get(instance.agent_type) if self._registry else None
+        if agent is None:
+            await self.fail(
+                instance.instance_id,
+                error=f"Agent type '{instance.agent_type}' not found in registry",
+            )
+            return
+
+        from backend.agents.base import AgentRequest
+
+        session_id = instance.mission_id or instance.instance_id
+        request = AgentRequest(
+            session_id=session_id,
+            query=instance.objective,
+            client=self._llm_client,
+            context=instance.context,
+            project_path=instance.context.get("project_path", "."),
+            max_iterations=5,
+        )
+
+        output_parts: list[str] = []
+
+        async def _consume() -> None:
+            async for token in agent.run(request):
+                output_parts.append(token)
+
+        try:
+            timeout = max(1.0, instance.deadline - time.time())
+            await asyncio.wait_for(_consume(), timeout=timeout)
+            output = "".join(output_parts)
+            instance.context["output"] = output
+            await self.complete(
+                instance.instance_id,
+                output=output,
+                tokens_used=len(output),
+            )
+        except asyncio.TimeoutError:
+            await self.fail(
+                instance.instance_id,
+                error=f"Agent exceeded time budget of {instance.deadline - instance.start_time:.0f}s",
+            )
+        except Exception as exc:
+            logger.exception("Agent execution failed for %s", instance.instance_id)
+            await self.fail(instance.instance_id, error=str(exc))
 
     def get_stats(self) -> dict[str, Any]:
         """Return aggregate statistics about managed instances."""

@@ -1,5 +1,21 @@
 # CHANGELOG — NEXUS IDE
 
+## [2026-06-07] — Documentation Cleanup & Agent Hardening
+
+### Fixed
+- **Agentes:** Loop ReAct agora e obrigatorio; ferramentas em falta registadas corretamente
+- **Dashboard:** Eliminadas chamadas API duplicadas e conexoes SSE redundantes
+
+### Added
+- **Chat:** Timeout handling, sincronizacao de modo, UI de upload de ficheiros, indicador de projeto
+- **Relatorios:** Arquivados 35+ documentos de auditoria/relatorio para `.archive/`
+
+### Changed
+- **Dashboard:** Metricas centralizadas com Zustand store; removida dependencia d3; lazy loading de componentes
+- **Documentacao:** README sincronizado com `config/models.yaml` (matriz de modelos actualizada)
+
+---
+
 ## [2026-05-29] — Deep Verification & Hardening
 
 ### Fixed
@@ -41,7 +57,7 @@
 ## [2026-05-25] — Production Readiness
 
 ### Added
-- PRODUCTION_READINESS_REPORT.md
+- PRODUCTION_READINESS_REPORT.md (arquivado em `.archive/`)
 - GitHub Actions CI workflow
 - Security headers middleware
 - Rate limiting per IP

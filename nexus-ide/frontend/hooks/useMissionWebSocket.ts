@@ -9,7 +9,7 @@
  * to store changes without knowing the transport layer.
  */
 import { useEffect, useRef, useCallback } from "react";
-import { API_BASE_URL, apiUrl } from "../lib/api";
+import { apiUrl } from "../lib/api";
 import { useMissionStore, type BusMessage, type Decision } from "../stores/missionStore";
 
 interface WebSocketMessage {
@@ -124,6 +124,11 @@ export function useMissionWebSocket(missionId: string | null) {
       );
       esRef.current = es;
 
+      es.onopen = () => {
+        reconnectAttempt.current = 0;
+        useMissionStore.getState().setBackendOnline(true);
+      };
+
       es.onmessage = (e) => {
         try {
           const data = JSON.parse(e.data) as Record<string, unknown>;
@@ -156,6 +161,9 @@ export function useMissionWebSocket(missionId: string | null) {
         esRef.current = null;
         const delay = Math.min(1000 * 2 ** reconnectAttempt.current, maxReconnectDelay);
         reconnectAttempt.current += 1;
+        if (reconnectAttempt.current > 2) {
+          useMissionStore.getState().setBackendOnline(false);
+        }
         reconnectTimer.current = setTimeout(startSSE, delay);
       };
     } catch {
@@ -176,6 +184,7 @@ export function useMissionWebSocket(missionId: string | null) {
 
       ws.onopen = () => {
         reconnectAttempt.current = 0;
+        useMissionStore.getState().setBackendOnline(true);
       };
 
       ws.onmessage = (event) => {
@@ -191,6 +200,9 @@ export function useMissionWebSocket(missionId: string | null) {
         wsRef.current = null;
         const delay = Math.min(1000 * 2 ** reconnectAttempt.current, maxReconnectDelay);
         reconnectAttempt.current += 1;
+        if (reconnectAttempt.current > 2) {
+          useMissionStore.getState().setBackendOnline(false);
+        }
         reconnectTimer.current = setTimeout(startWebSocket, delay);
       };
 

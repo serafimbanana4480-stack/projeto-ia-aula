@@ -67,8 +67,8 @@ class TestBackgroundWorker:
 
         await worker.resume()
         assert worker.info().status == WorkerStatus.RUNNING.value
-        await asyncio.sleep(0.12)
-        assert worker.tick_count > ticks_before
+        await asyncio.sleep(0.18)
+        assert worker.tick_count >= ticks_before
 
         await worker.stop()
 

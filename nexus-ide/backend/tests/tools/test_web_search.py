@@ -26,7 +26,6 @@ class TestSearchResult:
         result = SearchResult(
             query="python async",
             sources=hits,
-            synthesis="Async programming in Python...",
             confidence=0.88,
             search_iterations=3,
         )

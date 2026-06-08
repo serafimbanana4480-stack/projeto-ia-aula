@@ -27,6 +27,9 @@ class ResearcherAgent(AgentBase):
         AgentAction.READ_DOCS,
         AgentAction.RECALL_CONTEXT,
         AgentAction.ANALYZE_DATA,
+        AgentAction.SEARCH_GITHUB,
+        AgentAction.SEARCH_DOCS,
+        AgentAction.DEEP_RESEARCH,
     }
 
     async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:

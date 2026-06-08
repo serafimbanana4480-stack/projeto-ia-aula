@@ -6,7 +6,7 @@ directly without going through the generic tool-execution layer.
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Request
 
 from backend.core.workspace import (
     create_dir_absolute,
@@ -26,6 +26,8 @@ from backend.core.workspace import (
     search_files_absolute,
     write_file_absolute,
 )
+from backend.middleware.auth import require_auth
+from backend.middleware.rate_limit import limiter
 from backend.models.api import (
     WorkspaceDeleteRequest,
     WorkspaceDiscoverRequest,
@@ -47,38 +49,52 @@ from backend.models.api import (
 router = APIRouter()
 
 
+def _extract_token(request: Request) -> str | None:
+    """Extract the Bearer token from the Authorization header."""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Filesystem
 # ---------------------------------------------------------------------------
 
 
 @router.post("/workspace/files/read")
-async def workspace_read_file(req: WorkspaceReadRequest) -> dict:
+@limiter.limit("60/minute")
+async def workspace_read_file(req: WorkspaceReadRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await read_file_absolute(req.path)
 
 
 @router.post("/workspace/files/write")
-async def workspace_write_file(req: WorkspaceWriteRequest) -> dict:
-    return await write_file_absolute(req.path, req.content)
+@limiter.limit("30/minute")
+async def workspace_write_file(req: WorkspaceWriteRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
+    return await write_file_absolute(req.path, req.content, auth_token=_extract_token(request))
 
 
 @router.post("/workspace/files/list")
-async def workspace_list_dir(req: WorkspaceListRequest) -> dict:
+@limiter.limit("60/minute")
+async def workspace_list_dir(req: WorkspaceListRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await list_dir_absolute(req.path, recursive=req.recursive)
 
 
 @router.post("/workspace/files/create-dir")
-async def workspace_create_dir(req: WorkspaceListRequest) -> dict:
+@limiter.limit("30/minute")
+async def workspace_create_dir(req: WorkspaceListRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await create_dir_absolute(req.path)
 
 
 @router.post("/workspace/files/delete")
-async def workspace_delete_file(req: WorkspaceDeleteRequest) -> dict:
-    return await delete_file_absolute(req.path, move_to_trash=req.move_to_trash)
+@limiter.limit("30/minute")
+async def workspace_delete_file(req: WorkspaceDeleteRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
+    return await delete_file_absolute(req.path, move_to_trash=req.move_to_trash, auth_token=_extract_token(request))
 
 
 @router.post("/workspace/files/search")
-async def workspace_search_files(req: WorkspaceSearchRequest) -> dict:
+@limiter.limit("60/minute")
+async def workspace_search_files(req: WorkspaceSearchRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await search_files_absolute(req.pattern, req.root_path, max_results=req.max_results)
 
 
@@ -88,26 +104,31 @@ async def workspace_search_files(req: WorkspaceSearchRequest) -> dict:
 
 
 @router.post("/workspace/terminal/shell")
-async def workspace_execute_shell(req: WorkspaceShellRequest) -> dict:
+@limiter.limit("10/minute")
+async def workspace_execute_shell(req: WorkspaceShellRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await execute_shell(
         command=req.command,
         cwd=req.cwd,
         timeout=req.timeout,
         env=req.env,
+        auth_token=_extract_token(request),
     )
 
 
 @router.post("/workspace/terminal/python")
-async def workspace_execute_python(req: WorkspacePythonRequest) -> dict:
+@limiter.limit("10/minute")
+async def workspace_execute_python(req: WorkspacePythonRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await execute_python(
         code=req.code,
         cwd=req.cwd,
         timeout=req.timeout,
+        auth_token=_extract_token(request),
     )
 
 
 @router.post("/workspace/terminal/script")
-async def workspace_execute_script(req: WorkspaceScriptRequest) -> dict:
+@limiter.limit("10/minute")
+async def workspace_execute_script(req: WorkspaceScriptRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await execute_script(
         path=req.path,
         args=req.args,
@@ -122,27 +143,32 @@ async def workspace_execute_script(req: WorkspaceScriptRequest) -> dict:
 
 
 @router.post("/workspace/git/init")
-async def workspace_git_init(req: WorkspaceGitInitRequest) -> dict:
+@limiter.limit("10/minute")
+async def workspace_git_init(req: WorkspaceGitInitRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await git_init(req.path)
 
 
 @router.post("/workspace/git/clone")
-async def workspace_git_clone(req: WorkspaceGitCloneRequest) -> dict:
+@limiter.limit("10/minute")
+async def workspace_git_clone(req: WorkspaceGitCloneRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await git_clone(req.url, req.path)
 
 
 @router.post("/workspace/git/commit-all")
-async def workspace_git_commit(req: WorkspaceGitCommitRequest) -> dict:
+@limiter.limit("10/minute")
+async def workspace_git_commit(req: WorkspaceGitCommitRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await git_commit_all(req.path, req.message)
 
 
 @router.post("/workspace/git/push")
-async def workspace_git_push(req: WorkspaceGitPushRequest) -> dict:
+@limiter.limit("10/minute")
+async def workspace_git_push(req: WorkspaceGitPushRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await git_push(req.path, req.remote, req.branch)
 
 
 @router.post("/workspace/git/status")
-async def workspace_git_status(req: WorkspaceGitStatusRequest) -> dict:
+@limiter.limit("30/minute")
+async def workspace_git_status(req: WorkspaceGitStatusRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await git_status(req.path)
 
 
@@ -152,10 +178,12 @@ async def workspace_git_status(req: WorkspaceGitStatusRequest) -> dict:
 
 
 @router.post("/workspace/projects/discover")
-async def workspace_discover_projects(req: WorkspaceDiscoverRequest) -> dict:
+@limiter.limit("30/minute")
+async def workspace_discover_projects(req: WorkspaceDiscoverRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await discover_projects(req.root_path)
 
 
 @router.post("/workspace/projects/info")
-async def workspace_project_info(req: WorkspaceProjectInfoRequest) -> dict:
+@limiter.limit("30/minute")
+async def workspace_project_info(req: WorkspaceProjectInfoRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await get_project_info(req.path)

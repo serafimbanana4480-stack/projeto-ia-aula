@@ -48,6 +48,7 @@ class SystemHealth:
 
 
 class NexusGuardianAgent:
+    name = "GUARDIAN"
     """Constantly-running guardian that monitors and improves the system.
 
     Usage:

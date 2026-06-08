@@ -113,7 +113,7 @@ function MissionCard({ mission }: { mission: Mission }) {
       </div>
 
       {/* Action buttons */}
-      <div className="flex items-center gap-2 px-4 pb-3">
+      <div className="flex flex-wrap items-center gap-2 px-4 pb-3">
         {mission.status === "RUNNING" && (
           <button
             onClick={() => handleAction("pause")}
@@ -209,9 +209,10 @@ export default function ActiveMissionsPanel() {
       </div>
 
       {loading && missions.length === 0 ? (
-        <div className="flex h-32 items-center justify-center text-xs text-nexus-muted">
-          <div className="h-4 w-4 animate-spin rounded-full border-2 border-nexus-accent border-t-transparent mr-2" />
-          A carregar missões...
+        <div className="space-y-2">
+          <div className="h-8 animate-pulse rounded bg-nexus-border/20" />
+          <div className="h-20 animate-pulse rounded bg-nexus-border/20" />
+          <div className="h-20 animate-pulse rounded bg-nexus-border/20" />
         </div>
       ) : missions.length === 0 ? (
         <div className="flex h-32 items-center justify-center text-xs text-nexus-muted">

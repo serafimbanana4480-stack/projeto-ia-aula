@@ -45,7 +45,7 @@ export default function ProjectsPage() {
   async function handleCreateProject() {
     try {
       const result = await createProject(form);
-      if (result.project) {
+      if (result && typeof result === "object" && "project" in result) {
         setShowCreateModal(false);
         setForm({ name: "", path: "", description: "", mode: "auto", preferred_model: "", trust: false });
         await loadProjects();
@@ -72,19 +72,19 @@ export default function ProjectsPage() {
   }
 
   function handleOpenProject(project: ProjectData) {
-    setCurrentProject(project as any);
+    setCurrentProject(project);
   }
 
   function handleBrowseFolder() {
     // Use the native File System Access API if available (Chromium browsers)
     if ("showDirectoryPicker" in window) {
-      (window as any).showDirectoryPicker()
-        .then(async (dirHandle: any) => {
+      (window as unknown as { showDirectoryPicker: () => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker()
+        .then(async (dirHandle: FileSystemDirectoryHandle) => {
           // Try to get the full path using File System Access API
           let fullPath = dirHandle.name;
           try {
             // Request permission to read the directory
-            const permission = await dirHandle.requestPermission({ mode: "read" });
+            const permission = await (dirHandle as FileSystemDirectoryHandle & { requestPermission: (opts: { mode: string }) => Promise<string> }).requestPermission({ mode: "read" });
             if (permission === "granted") {
               // We can't get the absolute path from File System Access API
               // So we use the fallback prompt to ask the user

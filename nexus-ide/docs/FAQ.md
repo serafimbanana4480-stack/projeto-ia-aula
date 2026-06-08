@@ -276,7 +276,7 @@ Report bugs through the project's issue tracker with:
 
 ### What features are planned?
 
-See the [PLANO_MELHORIAS.md](../PLANO_MELHORIAS.md) for the roadmap and planned improvements.
+See the [roadmap](../planeamento/15-roadmap.md) for planned improvements.
 
 Planned features include:
 - Enhanced security and authentication

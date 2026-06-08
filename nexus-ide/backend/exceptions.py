@@ -33,16 +33,21 @@ class DatabaseError(NexusError):
     pass
 
 
-class OllamaConnectionError(NexusError):
-    """Raised when Ollama connection fails."""
+class LocalLLMConnectionError(NexusError):
+    """Raised when local LLM (AirLLM) connection fails."""
 
     pass
 
 
-class OllamaModelError(NexusError):
-    """Raised when Ollama model operations fail."""
+class LocalLLMModelError(NexusError):
+    """Raised when local LLM model operations fail."""
 
     pass
+
+
+# Backwards compatibility aliases (deprecated, will be removed in v2.0)
+OllamaConnectionError = LocalLLMConnectionError
+OllamaModelError = LocalLLMModelError
 
 
 class ValidationError(NexusError):

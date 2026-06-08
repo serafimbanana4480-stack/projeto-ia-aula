@@ -33,18 +33,32 @@ class SecurityHeadersMiddleware:
                 headers = MutableHeaders(scope=message)
 
                 # Content Security Policy - Restricts sources of content
-                csp = (
-                    "default-src 'self'; "
-                    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
-                    "style-src 'self' 'unsafe-inline'; "
-                    "img-src 'self' data: https:; "
-                    "font-src 'self' data:; "
-                    "connect-src 'self' http://localhost:* ws://localhost:*; "
-                    "frame-ancestors 'none'; "
-                    "base-uri 'self'; "
-                    "form-action 'self';"
+                settings = get_settings()
+                is_prod = getattr(settings, "environment", "development") == "production"
+
+                # In production we drop 'unsafe-eval' and tighten connect-src.
+                # 'unsafe-inline' is kept because Next.js hydration requires it.
+                script_src = "script-src 'self' 'unsafe-inline'" + ("" if is_prod else " 'unsafe-eval'")
+                connect_src = (
+                    "connect-src 'self' ws: wss:"
+                    if is_prod
+                    else "connect-src 'self' http://localhost:* ws://localhost:* ws: wss:"
                 )
-                headers["Content-Security-Policy"] = csp
+                csp_parts = [
+                    "default-src 'self'",
+                    script_src,
+                    "style-src 'self' 'unsafe-inline'",
+                    "img-src 'self' data: https:",
+                    "font-src 'self' data:",
+                    connect_src,
+                    "frame-ancestors 'none'",
+                    "base-uri 'self'",
+                    "form-action 'self'",
+                    "object-src 'none'",
+                ]
+                if is_prod:
+                    csp_parts.append("upgrade-insecure-requests")
+                headers["Content-Security-Policy"] = "; ".join(csp_parts) + ";"
 
                 # X-Frame-Options - Prevent clickjacking
                 headers["X-Frame-Options"] = "DENY"
@@ -56,8 +70,7 @@ class SecurityHeadersMiddleware:
                 headers["X-XSS-Protection"] = "1; mode=block"
 
                 # Strict-Transport-Security - Force HTTPS in production
-                settings = get_settings()
-                if getattr(settings, "require_https", False) or getattr(settings, "environment", "development") == "production":
+                if getattr(settings, "require_https", False) or is_prod:
                     headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
                 # Referrer-Policy - Control referrer information

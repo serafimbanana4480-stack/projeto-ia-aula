@@ -81,7 +81,7 @@ async def toggle_tool(tool_name: str, enabled: bool) -> dict:
 
 
 class SettingsUpdate(BaseModel):
-    ollama_host: str | None = None
+    local_llm_device: str | None = None
     backend_host: str | None = None
     default_mode: str | None = None
     default_model: str | None = None
@@ -91,7 +91,7 @@ class SettingsUpdate(BaseModel):
 def _load_settings() -> dict:
     """Load settings from JSON file, falling back to config defaults."""
     defaults = {
-        "ollama_host": get_settings().ollama_host,
+        "local_llm_device": get_settings().local_llm_device,
         "backend_host": f"http://localhost:{get_settings().backend_port}",
         "default_mode": "auto",
         "default_model": "coder",

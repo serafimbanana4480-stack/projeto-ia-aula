@@ -264,9 +264,8 @@ class CodeWatcher(BackgroundWorker):
         self.watch_path = Path(watch_path).resolve()
         self._snapshots: dict[Path, float] = {}
         self._has_watchdog = self._detect_watchdog()
-        if self._has_watchdog:
-            self._observer: Any = None
-            self._event_queue: asyncio.Queue[list[Path]] = asyncio.Queue()
+        self._observer: Any = None
+        self._event_queue: asyncio.Queue[list[Path]] = asyncio.Queue()
 
     def _detect_watchdog(self) -> bool:
         try:

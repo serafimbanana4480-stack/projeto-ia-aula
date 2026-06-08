@@ -19,11 +19,15 @@ Prioritizes:
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from backend.config.settings import get_model_config, load_models_config
+from backend.models.api import RoutingDecision
+from backend.orchestrator.router import fast_route, route_with_model
 from backend.tools.ollama_client import ChatMessage
 from typing import Any
 
@@ -41,9 +45,9 @@ class TierDecision:
     decision_ms: int
 
 
-# In-memory cache for tier decisions (keyed by query prefix).
-_tier_cache: dict[str, TierDecision] = {}
-_TIER_CACHE_MAX = 500
+# In-memory LRU cache for tier decisions (keyed by query prefix).
+_tier_cache: OrderedDict[str, TierDecision] = OrderedDict()
+_TIER_CACHE_MAX = 1000
 
 
 def _word_count(text: str) -> int:
@@ -75,6 +79,16 @@ _ACTION_VERBS = frozenset({
 def _is_trivial(text: str, config: dict) -> bool:
     """Determine if a query is trivial (simple factoid lookup).
 
+    Backwards-compatible wrapper around the cached implementation.
+    """
+    trivial_keywords = config.get("smart_router", {}).get("trivial_keywords", [])
+    return _is_trivial_cached(text, tuple(trivial_keywords))
+
+
+@functools.lru_cache(maxsize=1000)
+def _is_trivial_cached(text: str, trivial_keywords: tuple[str, ...] = ()) -> bool:
+    """Determine if a query is trivial (simple factoid lookup).
+
     A query is trivial ONLY if:
     - It is very short (<=3 words) AND contains no action verbs
     - It is a simple math expression
@@ -82,7 +96,6 @@ def _is_trivial(text: str, config: dict) -> bool:
 
     IMPORTANT: Queries with action verbs are NEVER trivial, even if short.
     """
-    trivial_keywords = config.get("smart_router", {}).get("trivial_keywords", [])
     word_count = _word_count(text)
     lowered = text.lower()
 
@@ -229,6 +242,16 @@ async def _classify_by_llm(user_input: str, client: Any, config: dict) -> TierDe
         )
 
 
+@functools.lru_cache(maxsize=1000)
+def _cached_heuristic_tier(query: str) -> str | None:
+    """Fast sync path: return tier from deterministic heuristics if confident."""
+    config = load_models_config()
+    decision = _classify_by_heuristics(query, config)
+    if decision is not None and decision.confidence >= 0.7:
+        return decision.tier
+    return None
+
+
 async def smart_route_tier(query: str, client: Any) -> str:
     """Select the optimal model tier for a query.
 
@@ -237,12 +260,24 @@ async def smart_route_tier(query: str, client: Any) -> str:
     via the _MODEL_TIER_TO_AGENT mapping.
 
     This is the main entry point called from the chat pipeline.
+    Uses a two-level cache:
+      1. LRU cache on deterministic heuristics (sync, zero-cost).
+      2. OrderedDict LRU for LLM fallback results.
     """
-    # Cache check
-    cache_key = query[:100].lower().strip()
-    if cache_key in _tier_cache:
-        cached = _tier_cache[cache_key]
-        logger.debug("SmartRouter cache hit for tier: %s", cached.tier)
+    normalized = query[:120].lower().strip()
+
+    # Level 1: deterministic heuristic cache (sync, zero-cost)
+    cached_tier = _cached_heuristic_tier(normalized)
+    if cached_tier is not None:
+        logger.debug("SmartRouter heuristic cache hit for tier: %s", cached_tier)
+        return cached_tier
+
+    # Level 2: LLM result cache
+    if normalized in _tier_cache:
+        cached = _tier_cache[normalized]
+        logger.debug("SmartRouter LLM cache hit for tier: %s", cached.tier)
+        # Move to end (most recently used)
+        _tier_cache.move_to_end(normalized)
         return cached.tier
 
     config = load_models_config()
@@ -254,13 +289,13 @@ async def smart_route_tier(query: str, client: Any) -> str:
     if decision is None or decision.confidence < 0.7:
         decision = await _classify_by_llm(query, client, config)
 
-    # Cache the result
+    # Cache the result with LRU eviction
     if len(_tier_cache) >= _TIER_CACHE_MAX:
-        # Evict oldest entries
-        keys_to_remove = list(_tier_cache.keys())[:100]
-        for k in keys_to_remove:
-            del _tier_cache[k]
-    _tier_cache[cache_key] = decision
+        # Evict oldest 100 entries
+        for _ in range(100):
+            if _tier_cache:
+                _tier_cache.popitem(last=False)
+    _tier_cache[normalized] = decision
 
     logger.info(
         "SmartRouter: tier=%s confidence=%.2f reason=%s (%dms)",
