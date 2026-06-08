@@ -48,3 +48,6 @@ mypy==1.12.0
 
 # Database migrations
 alembic==1.13.3
+
+# Cross-process file locking
+filelock>=3.14.0
