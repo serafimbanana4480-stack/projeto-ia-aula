@@ -549,7 +549,7 @@ def _validate_single_command(command: str) -> tuple[bool, str]:
     if not tokens:
         return False, "Empty command"
 
-    base_cmd = Path(tokens[0]).name.lower()
+    base_cmd = Path(tokens[0]).stem.lower()
 
     # Special handling for git
     if base_cmd == "git":
