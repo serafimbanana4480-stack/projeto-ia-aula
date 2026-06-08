@@ -303,3 +303,128 @@ async def smart_route_tier(query: str, client: Any) -> str:
     )
 
     return decision.tier
+
+
+class SmartRouter:
+    """Automatic query router implementing the 4-step pipeline described in docs.
+
+    1. **Fast path** — deterministic keyword matching via :func:`fast_route`.
+    2. **Cache check** — LRU cache of previous :class:`RoutingDecision` objects.
+    3. **Model routing** — tier heuristic (``smart_route_tier``) maps to an agent.
+    4. **Fallback chain** — LLM-based agent classification via
+       :func:`route_with_model` if the tier heuristic is uncertain or fails.
+
+    The class is fully backwards-compatible: ``smart_route_tier`` and all existing
+    free functions remain untouched.
+    """
+
+    _MODEL_TIER_TO_AGENT: dict[str, str] = {
+        "micro": "MICRO",
+        "fast": "DOCUMENTER",
+        "coder": "CODER",
+        "reasoning": "ARCHITECT",
+        "deep": "ARCHITECT",
+        # Legacy aliases
+        "small": "DOCUMENTER",
+        "medium": "CODER",
+        "large": "ANALYZER",
+        "expert": "ARCHITECT",
+        "nano": "MICRO",
+        "dashboard": "MICRO",
+    }
+
+    def __init__(self, llm_client: Any = None) -> None:
+        self.llm_client = llm_client
+        self._decision_cache: OrderedDict[str, RoutingDecision] = OrderedDict()
+        self._cache_max = 1000
+
+    # ------------------------------------------------------------------
+    # Cache helpers
+    # ------------------------------------------------------------------
+
+    def _get_cached(self, key: str) -> RoutingDecision | None:
+        if key in self._decision_cache:
+            self._decision_cache.move_to_end(key)
+            return self._decision_cache[key]
+        return None
+
+    def _store_cache(self, key: str, decision: RoutingDecision) -> None:
+        if len(self._decision_cache) >= self._cache_max:
+            for _ in range(100):
+                if self._decision_cache:
+                    self._decision_cache.popitem(last=False)
+        self._decision_cache[key] = decision
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def route(
+        self,
+        query: str,
+        session_id: str = "",
+        **kwargs: Any,
+    ) -> RoutingDecision:
+        """Route *query* through the 4-step pipeline and return a decision.
+
+        Parameters
+        ----------
+        query:
+            The user message to classify.
+        session_id:
+            Optional session identifier (reserved for future session-scoped
+            caching).
+        **kwargs:
+            Reserved for future extensibility (e.g. project context).
+        """
+        if not query or not query.strip():
+            return RoutingDecision(
+                primary_agent="MICRO",
+                routing_confidence=0.95,
+                routing_reason="empty-query",
+            )
+
+        normalized = query[:120].lower().strip()
+
+        # Step 1 — Fast path: deterministic keyword matching (zero-cost)
+        fast = fast_route(query)
+        if fast is not None:
+            return RoutingDecision(
+                primary_agent=fast,
+                routing_confidence=0.9,
+                routing_reason=f"fast-rule:{fast.lower()}",
+            )
+
+        # Step 2 — Cache check: LRU cache of previous RoutingDecision objects
+        cached = self._get_cached(normalized)
+        if cached is not None:
+            return cached
+
+        # Step 3 — Model routing: tier heuristic + optional LLM fallback
+        decision: RoutingDecision | None = None
+        try:
+            tier = await smart_route_tier(query, self.llm_client)
+            agent_name = self._MODEL_TIER_TO_AGENT.get(tier, "CODER")
+            decision = RoutingDecision(
+                primary_agent=agent_name,  # type: ignore[arg-type]
+                routing_confidence=0.8,
+                routing_reason=f"smart-tier:{tier}",
+            )
+        except Exception as exc:
+            logger.warning("SmartRouter tier routing failed: %s", exc)
+
+        # Step 4 — Fallback chain: LLM-based agent classification
+        if decision is None:
+            try:
+                decision = await route_with_model(query, self.llm_client)
+            except Exception as exc:
+                logger.warning("SmartRouter model routing failed: %s", exc)
+                decision = RoutingDecision(
+                    primary_agent="CODER",
+                    routing_confidence=0.5,
+                    routing_reason="fallback-chain-failure",
+                )
+
+        self._store_cache(normalized, decision)
+        return decision
+

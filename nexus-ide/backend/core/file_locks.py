@@ -4,15 +4,21 @@ Prevents corruption when multiple agents write to the same file concurrently.
 Supports shared read locks and exclusive write locks with automatic expiry,
 deadlock detection, and administrative override capabilities.
 
-**Cross-process safety**: Uses ``filelock.AsyncFileLock`` as a process-level
-barrier so that multiple Uvicorn workers (or separate Python processes)
-coordinate safely.  The in-memory structures remain for deadlock detection
-and metrics.
+**Cross-process safety**: Uses ``filelock.SoftFileLock`` (synchronous variant
+wrapped with ``asyncio.to_thread``) as a process-level barrier so that
+multiple Uvicorn workers (or separate Python processes) coordinate safely.
+The in-memory structures remain for deadlock detection and metrics.
+
+Shared read locks across processes are implemented with a dedicated
+*readers counter* file protected by its own mutex lock, as requested in the
+refactoring spec.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import tempfile
@@ -22,7 +28,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import AsyncGenerator, ClassVar
+from typing import Any, AsyncGenerator, ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -30,41 +36,41 @@ logger = logging.getLogger(__name__)
 # Cross-process lock support
 # ---------------------------------------------------------------------------
 try:
-    from filelock import AsyncFileLock as _AsyncFileLock
+    from filelock import SoftFileLock, Timeout
 
     _FILELOCK_AVAILABLE = True
 except Exception:  # pragma: no cover
     _FILELOCK_AVAILABLE = False
-    _AsyncFileLock = None  # type: ignore[misc,assignment]
+    SoftFileLock = None  # type: ignore[misc,assignment]
+    Timeout = None  # type: ignore[misc,assignment]
 
 
-def _cross_process_lock_path(file_path: str) -> str:
-    """Return a deterministic lock-file path for *file_path*.
-
-    The lock file is stored under the system temp directory so it is writable
-    on all platforms and does not pollute the project tree.
-    """
-    # Hash the absolute path to get a short, deterministic filename
-    import hashlib
-
+def _cross_process_lock_path(file_path: str, suffix: str = "write") -> str:
+    """Return a deterministic lock-file path for *file_path*."""
     abs_path = str(Path(file_path).resolve())
     path_hash = hashlib.sha256(abs_path.encode()).hexdigest()[:16]
-    lock_name = f"nexus_filelock_{path_hash}.lock"
+    lock_name = f"nexus_filelock_{suffix}_{path_hash}.lock"
     return str(Path(tempfile.gettempdir()) / lock_name)
 
 
-def _filelock_enabled() -> bool:
-    """Return whether the cross-process filelock layer should be used.
+def _readers_count_path(file_path: str) -> str:
+    """Return a deterministic path for the readers counter file."""
+    abs_path = str(Path(file_path).resolve())
+    path_hash = hashlib.sha256(abs_path.encode()).hexdigest()[:16]
+    return str(Path(tempfile.gettempdir()) / f"nexus_readers_count_{path_hash}.json")
 
-    This is evaluated at *call time* so that tests can toggle the behaviour
-    via the ``NEXUS_DISABLE_FILELOCK`` environment variable.
-    """
+
+def _filelock_enabled() -> bool:
+    """Return whether the cross-process filelock layer should be used."""
     return (
         _FILELOCK_AVAILABLE
         and os.environ.get("NEXUS_DISABLE_FILELOCK", "").lower() not in ("1", "true", "yes")
     )
 
 
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
 class LockError(Exception):
     """Raised when a lock cannot be acquired or is invalid."""
 
@@ -73,6 +79,9 @@ class DeadlockError(LockError):
     """Raised when acquiring a lock would cause a deadlock."""
 
 
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
 @dataclass
 class FileLock:
     """Represents an active lock on a file.
@@ -102,15 +111,83 @@ class FileLock:
         return datetime.now(timezone.utc) >= self.expires_at
 
 
+# ---------------------------------------------------------------------------
+# Cross-process helpers (synchronous — safe to call from async via to_thread)
+# ---------------------------------------------------------------------------
+def _cleanup_stale_lock(lock_path: str, timeout: float) -> None:
+    """Remove a stale SoftFileLock file if it is older than *timeout* × 2."""
+    path = Path(lock_path)
+    if not path.exists():
+        return
+    try:
+        mtime = path.stat().st_mtime
+        age = datetime.now(timezone.utc).timestamp() - mtime
+        if age > timeout * 2:
+            logger.warning("Removing stale lock file %s (age=%.1fs)", lock_path, age)
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _read_readers_count(count_path: str) -> int:
+    """Read the current reader count from disk."""
+    try:
+        with open(count_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return int(data.get("count", 0))
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return 0
+
+
+def _write_readers_count(count_path: str, count: int) -> None:
+    """Persist the reader count to disk."""
+    with open(count_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "count": count,
+                "updated": datetime.now(timezone.utc).isoformat(),
+            },
+            f,
+        )
+
+
+def _sync_acquire_soft_lock(lock_path: str, timeout: float) -> SoftFileLock:
+    """Synchronously acquire a SoftFileLock, cleaning stale files first."""
+    if SoftFileLock is None:
+        raise LockError("filelock is not available")
+    _cleanup_stale_lock(lock_path, timeout)
+    lock = SoftFileLock(lock_path)
+    try:
+        lock.acquire(timeout=timeout)
+    except Timeout as exc:
+        raise LockError(f"Timeout acquiring cross-process lock on {lock_path}") from exc
+    return lock
+
+
+def _sync_release_soft_lock(lock: SoftFileLock | None) -> None:
+    """Synchronously release a SoftFileLock, swallowing errors."""
+    if lock is None:
+        return
+    try:
+        lock.release()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Manager
+# ---------------------------------------------------------------------------
 class FileLockManager:
     """Singleton manager for concurrent file locking across agents.
 
     Features:
-    - Multiple simultaneous **read** locks (shared).
+    - Multiple simultaneous **read** locks (shared, both in-process and
+      cross-process via a readers counter).
     - Exclusive **write** locks (blocks reads and other writes).
     - Auto-expiry to prevent permanent blocks.
     - Deadlock detection via a wait-for graph.
     - asyncio-safe internal state.
+    - Cross-process safety via ``filelock.SoftFileLock``.
 
     Usage:
         manager = FileLockManager()
@@ -136,8 +213,8 @@ class FileLockManager:
         self._wait_graph: dict[str, set[str]] = defaultdict(set)
         # Internal asyncio lock protecting the above structures
         self._mutex = asyncio.Lock()
-        # Cross-process file locks (filelock) — one per file_path
-        self._filelock_map: dict[str, asyncio.Lock] = {}
+        # Cross-process SoftFileLock instances cached per path
+        self._filelock_map: dict[str, SoftFileLock] = {}
 
     # --------------------------------------------------------------------- #
     # Required public API
@@ -231,30 +308,12 @@ class FileLockManager:
                 lock.lock_type,
                 lock.lock_id,
             )
-            # Release cross-process lock if this was the last holder
-            if hasattr(lock, "_cross_proc_lock") and lock._cross_proc_lock is not None:
-                try:
-                    lock._cross_proc_lock.release()
-                except Exception:
-                    pass
-                lock._cross_proc_lock = None
-            if hasattr(lock, "_cross_proc_async_lock") and lock._cross_proc_async_lock is not None:
-                try:
-                    lock._cross_proc_async_lock.release()
-                except Exception:
-                    pass
-                lock._cross_proc_async_lock = None
+            # Release cross-process resources synchronously
+            if _filelock_enabled():
+                self._release_cross_process_lock(lock)
 
         if not locks:
             del self._locks[file_path]
-            # Clean up stale lock file on disk if no in-memory locks remain
-            if _filelock_enabled():
-                lock_file = Path(_cross_process_lock_path(file_path))
-                try:
-                    if lock_file.exists():
-                        lock_file.unlink()
-                except OSError:
-                    pass
 
     def get_lock_status(self, file_path: str) -> dict:
         """Return the current lock status for *file_path*.
@@ -357,19 +416,8 @@ class FileLockManager:
                         file_path,
                         lock.owner,
                     )
-                    # Release cross-process lock if this was the last holder
-                    if hasattr(lock, "_cross_proc_lock") and lock._cross_proc_lock is not None:
-                        try:
-                            lock._cross_proc_lock.release()
-                        except Exception:
-                            pass
-                        lock._cross_proc_lock = None
-                    if hasattr(lock, "_cross_proc_async_lock") and lock._cross_proc_async_lock is not None:
-                        try:
-                            lock._cross_proc_async_lock.release()
-                        except Exception:
-                            pass
-                        lock._cross_proc_async_lock = None
+                    if _filelock_enabled():
+                        self._release_cross_process_lock(lock)
                     break
             if not locks:
                 del self._locks[file_path]
@@ -432,7 +480,6 @@ class FileLockManager:
             A list of agent names involved in a deadlock cycle.
             Empty list if no deadlock is detected.
         """
-        # Build the wait-for graph: owner -> set of owners they are waiting on
         graph: dict[str, set[str]] = defaultdict(set)
 
         for owner, file_paths in self._wait_graph.items():
@@ -441,7 +488,6 @@ class FileLockManager:
                     if not lock.is_expired():
                         graph[owner].add(lock.owner)
 
-        # DFS for cycles
         visited: set[str] = set()
         rec_stack: set[str] = set()
         cycle_nodes: set[str] = set()
@@ -487,6 +533,8 @@ class FileLockManager:
                 file_path,
                 lock.owner,
             )
+            if _filelock_enabled():
+                self._release_cross_process_lock(lock)
         return count
 
     # --------------------------------------------------------------------- #
@@ -496,8 +544,6 @@ class FileLockManager:
     @staticmethod
     def _normalise_path(file_path: str) -> str:
         """Return a canonical, absolute path string."""
-        from pathlib import Path
-
         return str(Path(file_path).resolve())
 
     def _can_acquire(self, file_path: str, lock_type: str, owner: str) -> bool:
@@ -527,6 +573,8 @@ class FileLockManager:
                     file_path,
                     lock.owner,
                 )
+                if _filelock_enabled():
+                    self._release_cross_process_lock(lock)
             if not locks:
                 del self._locks[file_path]
 
@@ -536,17 +584,137 @@ class FileLockManager:
         lock_type: str,
         owner: str,
     ) -> None:
-        """Poll until the predicate for acquiring the lock becomes true.
-
-        This is used with ``asyncio.wait_for`` to implement a cancellable
-        blocking wait without holding the internal mutex.
-        """
+        """Poll until the predicate for acquiring the lock becomes true."""
         while True:
             await asyncio.sleep(0.1)
             async with self._mutex:
                 self._prune_expired()
                 if self._can_acquire(file_path, lock_type, owner):
                     return
+
+    # --------------------------------------------------------------------- #
+    # Cross-process helpers
+    # --------------------------------------------------------------------- #
+
+    def _get_or_create_soft_lock(self, lock_path: str) -> SoftFileLock:
+        """Return a cached SoftFileLock instance for *lock_path*."""
+        if lock_path not in self._filelock_map:
+            self._filelock_map[lock_path] = SoftFileLock(lock_path)
+        return self._filelock_map[lock_path]
+
+    async def _acquire_cross_process_write_lock(
+        self, file_path: str, timeout: float
+    ) -> SoftFileLock:
+        """Acquire the exclusive cross-process write lock."""
+        lock_path = _cross_process_lock_path(file_path, "write")
+        lock = self._get_or_create_soft_lock(lock_path)
+        try:
+            await asyncio.to_thread(lock.acquire, timeout=timeout)
+        except Timeout as exc:
+            raise LockError(
+                f"Timeout acquiring cross-process write lock on {file_path}"
+            ) from exc
+        return lock
+
+    async def _acquire_cross_process_read_lock(
+        self, file_path: str, timeout: float
+    ) -> tuple[SoftFileLock, SoftFileLock | None]:
+        """Acquire cross-process resources for a read lock.
+
+        Returns:
+            A tuple of *(readers_mutex_lock, write_lock_or_None)*.
+            The mutex must be released by the caller after updating the
+            in-memory state (we release it immediately inside this helper).
+        """
+        deadline = asyncio.get_event_loop().time() + timeout
+        mutex_path = _cross_process_lock_path(file_path, "readers_mutex")
+        write_path = _cross_process_lock_path(file_path, "write")
+        count_path = _readers_count_path(file_path)
+
+        # 1. Acquire readers mutex
+        mutex_lock = self._get_or_create_soft_lock(mutex_path)
+        try:
+            await asyncio.to_thread(mutex_lock.acquire, timeout=timeout)
+        except Timeout as exc:
+            raise LockError(
+                f"Timeout waiting for readers mutex on {file_path}"
+            ) from exc
+
+        write_lock: SoftFileLock | None = None
+        try:
+            count = _read_readers_count(count_path)
+            if count == 0:
+                # First reader: block writers from other processes
+                write_lock = self._get_or_create_soft_lock(write_path)
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    raise LockError(
+                        f"Timeout acquiring cross-process read lock on {file_path}"
+                    )
+                try:
+                    await asyncio.to_thread(write_lock.acquire, timeout=remaining)
+                except Timeout as exc:
+                    raise LockError(
+                        f"Timeout acquiring cross-process read lock on {file_path}"
+                    ) from exc
+
+            count += 1
+            _write_readers_count(count_path, count)
+        except Exception:
+            # On any failure, release the mutex before re-raising
+            _sync_release_soft_lock(mutex_lock)
+            raise
+
+        # Release mutex so other readers can enter
+        _sync_release_soft_lock(mutex_lock)
+        return mutex_lock, write_lock
+
+    def _release_cross_process_lock(self, lock: FileLock) -> None:
+        """Synchronously release cross-process resources held by *lock*."""
+        file_path = lock.file_path
+        if lock.lock_type == "write":
+            write_path = _cross_process_lock_path(file_path, "write")
+            fl = self._filelock_map.pop(write_path, None)
+            _sync_release_soft_lock(fl)
+        else:
+            # Read lock: decrement counter, release write lock if last reader
+            mutex_path = _cross_process_lock_path(file_path, "readers_mutex")
+            count_path = _readers_count_path(file_path)
+            write_path = _cross_process_lock_path(file_path, "write")
+
+            mutex_lock = self._filelock_map.get(mutex_path)
+            if mutex_lock is None:
+                # Best-effort: create a new instance just to acquire & release
+                mutex_lock = SoftFileLock(mutex_path)
+                self._filelock_map[mutex_path] = mutex_lock
+
+            try:
+                mutex_lock.acquire(timeout=5.0)
+            except Exception:
+                logger.warning(
+                    "Could not acquire readers mutex to release read lock on %s",
+                    file_path,
+                )
+                return
+
+            try:
+                count = _read_readers_count(count_path)
+                count = max(0, count - 1)
+                _write_readers_count(count_path, count)
+                if count == 0:
+                    write_lock = self._filelock_map.pop(write_path, None)
+                    _sync_release_soft_lock(write_lock)
+                    # Clean up counter file
+                    try:
+                        Path(count_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            finally:
+                _sync_release_soft_lock(mutex_lock)
+
+    # --------------------------------------------------------------------- #
+    # Core acquisition logic
+    # --------------------------------------------------------------------- #
 
     async def _acquire_lock(
         self,
@@ -555,13 +723,7 @@ class FileLockManager:
         owner: str,
         timeout_seconds: float,
     ) -> str:
-        """Internal implementation of lock acquisition.
-
-        Acquires a cross-process ``filelock`` *only* when the in-memory lock
-        becomes available.  This avoids holding an OS-level lock while
-        waiting for other asyncio tasks, and guarantees safety even when
-        multiple Uvicorn workers run in separate OS processes.
-        """
+        """Internal implementation of lock acquisition."""
         file_path = self._normalise_path(file_path)
 
         if lock_type not in ("read", "write"):
@@ -590,33 +752,24 @@ class FileLockManager:
                     # Cross-process lock (filelock) — only when we are
                     # about to really take the in-memory lock.
                     # ------------------------------------------------------
-                    fl: Any = None
-                    fl_async: asyncio.Lock | None = None
-                    if _filelock_enabled() and _AsyncFileLock is not None:
-                        lock_file = _cross_process_lock_path(file_path)
-                        if file_path not in self._filelock_map:
-                            self._filelock_map[file_path] = asyncio.Lock()
-                        fl_async = self._filelock_map[file_path]
-                        try:
-                            await asyncio.wait_for(
-                                fl_async.acquire(),
-                                timeout=min(timeout_seconds, 1.0),
-                            )
-                        except asyncio.TimeoutError:
+                    cross_proc_locks: list[SoftFileLock] = []
+                    if _filelock_enabled():
+                        remaining = deadline - asyncio.get_event_loop().time()
+                        if remaining <= 0:
                             raise LockError(
-                                f"Timeout waiting for cross-process lock on {file_path}"
+                                f"Timeout acquiring {lock_type} lock on {file_path} for {owner!r}"
                             )
-                        fl = _AsyncFileLock(lock_file)
-                        try:
-                            await asyncio.wait_for(
-                                fl.acquire(),
-                                timeout=min(timeout_seconds, 5.0),
+                        if lock_type == "write":
+                            fl = await self._acquire_cross_process_write_lock(
+                                file_path, remaining
                             )
-                        except asyncio.TimeoutError:
-                            fl_async.release()
-                            raise LockError(
-                                f"Timeout acquiring cross-process lock on {file_path}"
+                            cross_proc_locks.append(fl)
+                        else:
+                            _mutex_fl, _write_fl = await self._acquire_cross_process_read_lock(
+                                file_path, remaining
                             )
+                            if _write_fl is not None:
+                                cross_proc_locks.append(_write_fl)
 
                     lock = FileLock(
                         file_path=file_path,
@@ -631,9 +784,8 @@ class FileLockManager:
                     acquired = True
                     self._wait_graph[owner].discard(file_path)
                     # Attach cross-process handles for cleanup in release_lock
-                    if fl is not None:
-                        lock._cross_proc_lock = fl  # type: ignore[attr-defined]
-                        lock._cross_proc_async_lock = fl_async  # type: ignore[attr-defined]
+                    if cross_proc_locks:
+                        lock._cross_proc_locks = cross_proc_locks  # type: ignore[attr-defined]
                     logger.debug(
                         "Lock acquired: %s %s on %s by %s",
                         lock_type,
@@ -670,7 +822,6 @@ class FileLockManager:
 # --------------------------------------------------------------------- #
 # Standalone convenience context managers
 # --------------------------------------------------------------------- #
-
 _default_manager = FileLockManager()
 
 

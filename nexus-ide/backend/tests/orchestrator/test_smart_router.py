@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
+from backend.models.api import RoutingDecision
 from backend.orchestrator.smart_router import (
+    SmartRouter,
     TierDecision,
     _classify_by_heuristics,
     _contains_code,
     _is_trivial,
     _word_count,
 )
+from backend.tests.conftest import make_single_response
+from backend.tools.ollama_client import OllamaClient
 
 
 class TestWordCount:
@@ -194,3 +199,165 @@ class TestTierDecision:
         assert decision.model_id == "qwen2.5-coder:7b"
         assert 0.0 <= decision.confidence <= 1.0
         assert decision.decision_ms >= 0
+
+
+# ---------------------------------------------------------------------------
+# SmartRouter class tests
+# ---------------------------------------------------------------------------
+
+class TestSmartRouterInit:
+    def test_init_without_client(self) -> None:
+        router = SmartRouter()
+        assert router.llm_client is None
+        assert router._cache_max == 1000
+
+    def test_init_with_client(self) -> None:
+        client = object()
+        router = SmartRouter(llm_client=client)
+        assert router.llm_client is client
+
+
+class TestSmartRouterRouteFastPath:
+    async def test_empty_query_returns_micro(self) -> None:
+        router = SmartRouter()
+        decision = await router.route("")
+        assert decision.primary_agent == "MICRO"
+        assert decision.routing_reason == "empty-query"
+
+    @pytest.mark.parametrize(
+        "query,expected_agent",
+        [
+            ("Got a Traceback (most recent call last)", "DEBUGGER"),
+            ("write a function to sort a list", "CODER"),
+            ("please document this function", "DOCUMENTER"),
+            ("what is HTTP?", "MICRO"),
+        ],
+    )
+    async def test_fast_path_routes(self, query: str, expected_agent: str) -> None:
+        router = SmartRouter()
+        decision = await router.route(query)
+        assert decision.primary_agent == expected_agent
+        assert decision.routing_confidence == 0.9
+        assert decision.routing_reason.startswith("fast-rule:")
+
+
+class TestSmartRouterRouteCache:
+    async def test_cache_hit_returns_same_decision(self) -> None:
+        router = SmartRouter()
+        query = "some ambiguous query that needs tier routing"
+
+        # First call — must hit tier/LLM path; patch smart_route_tier to avoid real LLM
+        from unittest.mock import AsyncMock
+        router.llm_client = AsyncMock()
+        router.llm_client.chat_complete = AsyncMock(return_value="coder")
+
+        d1 = await router.route(query)
+        # Second call — should come from instance cache, no extra mock calls
+        d2 = await router.route(query)
+        assert d1.primary_agent == d2.primary_agent
+        assert d1.routing_reason == d2.routing_reason
+        # chat_complete called once by smart_route_tier, then cached
+        assert router.llm_client.chat_complete.call_count == 1
+
+
+class TestSmartRouterRouteTier:
+    async def test_tier_routing_maps_to_agent(self) -> None:
+        from unittest.mock import AsyncMock
+
+        client = AsyncMock()
+        client.chat_complete = AsyncMock(return_value="coder")
+        router = SmartRouter(llm_client=client)
+
+        # A query that misses fast_route but hits heuristic tier (code indicator)
+        query = "create a function that sorts a list"
+        decision = await router.route(query)
+        # fast_route should catch this, so let's use a query that misses fast_route
+        # but hits heuristics. "build a cli tool" hits _contains_code but also fast_route.
+        # Let's use a query that only hits heuristics without fast_route markers.
+        # Actually, fast_route has very broad CODER_MARKERS. Let's use a query that
+        # is moderate length without any fast_route markers.
+        query = "word " * 35  # 35 words, no markers
+        decision = await router.route(query)
+        # Should map to coder via smart_route_tier heuristic default
+        assert decision.primary_agent == "CODER"
+        assert "smart-tier:" in decision.routing_reason
+
+    async def test_tier_routing_with_llm_fallback(self) -> None:
+        from unittest.mock import AsyncMock
+        from backend.orchestrator.smart_router import _tier_cache
+
+        # Clear global tier cache so this test is isolated
+        _tier_cache.clear()
+
+        client = AsyncMock()
+        client.chat_complete = AsyncMock(return_value="deep")
+        router = SmartRouter(llm_client=client)
+
+        # A query that misses fast_route and heuristics (long, no markers)
+        # Use a unique query to avoid cache pollution from other tests
+        query = "unique_test_query_12345 " + "word " * 60
+        decision = await router.route(query)
+        assert decision.primary_agent == "ARCHITECT"  # deep -> ARCHITECT
+        assert "smart-tier:deep" in decision.routing_reason
+
+
+class TestSmartRouterRouteFallback:
+    async def test_fallback_to_route_with_model(self) -> None:
+        """When smart_route_tier raises, route_with_model is used."""
+        from unittest.mock import AsyncMock, patch
+
+        client = AsyncMock()
+        client.chat_complete = AsyncMock(return_value="deep")
+
+        router = SmartRouter(llm_client=client)
+
+        # Use a query that does NOT match any fast_route markers
+        query = "totally ambiguous query with no markers at all"
+
+        with patch("backend.orchestrator.smart_router.smart_route_tier", side_effect=RuntimeError("boom")):
+            with patch("backend.orchestrator.smart_router.route_with_model") as mock_route:
+                mock_route.return_value = RoutingDecision(
+                    primary_agent="ANALYZER",
+                    routing_confidence=0.85,
+                    routing_reason="model-fallback",
+                )
+                decision = await router.route(query)
+                assert decision.primary_agent == "ANALYZER"
+                assert decision.routing_reason == "model-fallback"
+                mock_route.assert_awaited_once()
+
+    async def test_total_fallback_when_everything_fails(self) -> None:
+        """When both tier and route_with_model fail, return hard fallback."""
+        from unittest.mock import AsyncMock, patch
+
+        client = AsyncMock()
+        client.chat_complete = AsyncMock(side_effect=Exception("network down"))
+
+        router = SmartRouter(llm_client=client)
+
+        with patch("backend.orchestrator.smart_router.smart_route_tier", side_effect=RuntimeError("boom")):
+            with patch("backend.orchestrator.smart_router.route_with_model", side_effect=RuntimeError("also boom")):
+                decision = await router.route("something something")
+                assert decision.primary_agent == "CODER"
+                assert decision.routing_confidence == 0.5
+                assert decision.routing_reason == "fallback-chain-failure"
+
+
+class TestSmartRouterIntegration:
+    async def test_end_to_end_with_mock_ollama(self) -> None:
+        """Full pipeline with a real OllamaClient wired to MockTransport."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return make_single_response("coder")
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            router = SmartRouter(llm_client=client)
+            # Query that misses fast_route but hits no heuristics strongly
+            query = "word " * 60
+            decision = await router.route(query)
+            assert decision.primary_agent == "CODER"
+            assert "smart-tier:coder" in decision.routing_reason
+        finally:
+            await client.aclose()
+
