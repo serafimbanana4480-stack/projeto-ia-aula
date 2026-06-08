@@ -63,9 +63,9 @@ class TestPathTraversal:
         an override word (e.g. *desktop* inside System32)."""
         fake_blocked = {str(tmp_path / "blocked")}
         fake_allowed = [tmp_path]
-        with patch("backend.core.workspace._BLOCKED_SYSTEM_PATHS", fake_blocked):
+        with patch("backend.core.workspace_security._BLOCKED_SYSTEM_PATHS", fake_blocked):
             with patch(
-                "backend.core.workspace._get_allowed_base_paths", return_value=fake_allowed
+                "backend.core.workspace_security._get_allowed_base_paths", return_value=fake_allowed
             ):
                 target = tmp_path / "blocked" / "nexus" / "file.txt"
                 blocked, reason = _is_blocked_path(str(target))
@@ -75,7 +75,7 @@ class TestPathTraversal:
     def test_path_inside_allowed_base_permitted(self, tmp_path: Path) -> None:
         fake_allowed = [tmp_path]
         with patch(
-            "backend.core.workspace._get_allowed_base_paths", return_value=fake_allowed
+            "backend.core.workspace_security._get_allowed_base_paths", return_value=fake_allowed
         ):
             target = tmp_path / "nexus" / "test.txt"
             blocked, reason = _is_blocked_path(str(target))
@@ -85,9 +85,9 @@ class TestPathTraversal:
         """Paths outside all allowed bases must be blocked (implicit deny)."""
         fake_allowed = [tmp_path]
         fake_blocked: set[str] = set()
-        with patch("backend.core.workspace._BLOCKED_SYSTEM_PATHS", fake_blocked):
+        with patch("backend.core.workspace_security._BLOCKED_SYSTEM_PATHS", fake_blocked):
             with patch(
-                "backend.core.workspace._get_allowed_base_paths", return_value=fake_allowed
+                "backend.core.workspace_security._get_allowed_base_paths", return_value=fake_allowed
             ):
                 blocked, reason = _is_blocked_path("/var/nexus_test.txt")
                 # On Windows this resolves to the current drive; on Linux it stays /var.
@@ -182,7 +182,7 @@ class TestPathNormalization:
     def test_dotdot_traversal_blocked(self, tmp_path: Path) -> None:
         fake_allowed = [tmp_path]
         with patch(
-            "backend.core.workspace._get_allowed_base_paths", return_value=fake_allowed
+            "backend.core.workspace_security._get_allowed_base_paths", return_value=fake_allowed
         ):
             blocked, reason = _is_blocked_path(str(tmp_path / ".." / "etc" / "passwd"))
             assert blocked
@@ -191,7 +191,7 @@ class TestPathNormalization:
     def test_single_dot_allowed(self, tmp_path: Path) -> None:
         fake_allowed = [tmp_path]
         with patch(
-            "backend.core.workspace._get_allowed_base_paths", return_value=fake_allowed
+            "backend.core.workspace_security._get_allowed_base_paths", return_value=fake_allowed
         ):
             blocked, _ = _is_blocked_path(str(tmp_path / "." / "file.txt"))
             assert not blocked

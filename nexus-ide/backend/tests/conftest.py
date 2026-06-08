@@ -38,9 +38,6 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "PROMETHEUS_PORT": "9099",
         "JWT_SECRET": "test-jwt-secret-for-testing",
         "JWT_ALGORITHM": "HS256",
-        # Cross-process file locks are unnecessary in the single-process test
-        # suite and can leave stale lock-files on Windows.
-        "NEXUS_DISABLE_FILELOCK": "1",
         # Skip the expensive torch import (~3 s) during test Settings creation.
         "LOCAL_LLM_DEVICE": "cpu",
     }

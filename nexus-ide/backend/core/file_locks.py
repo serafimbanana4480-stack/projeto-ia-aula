@@ -156,7 +156,7 @@ def _sync_acquire_soft_lock(lock_path: str, timeout: float) -> SoftFileLock:
     if SoftFileLock is None:
         raise LockError("filelock is not available")
     _cleanup_stale_lock(lock_path, timeout)
-    lock = SoftFileLock(lock_path)
+    lock = SoftFileLock(lock_path, thread_local=False)
     try:
         lock.acquire(timeout=timeout)
     except Timeout as exc:
@@ -599,7 +599,7 @@ class FileLockManager:
     def _get_or_create_soft_lock(self, lock_path: str) -> SoftFileLock:
         """Return a cached SoftFileLock instance for *lock_path*."""
         if lock_path not in self._filelock_map:
-            self._filelock_map[lock_path] = SoftFileLock(lock_path)
+            self._filelock_map[lock_path] = SoftFileLock(lock_path, thread_local=False)
         return self._filelock_map[lock_path]
 
     async def _acquire_cross_process_write_lock(
@@ -685,7 +685,7 @@ class FileLockManager:
             mutex_lock = self._filelock_map.get(mutex_path)
             if mutex_lock is None:
                 # Best-effort: create a new instance just to acquire & release
-                mutex_lock = SoftFileLock(mutex_path)
+                mutex_lock = SoftFileLock(mutex_path, thread_local=False)
                 self._filelock_map[mutex_path] = mutex_lock
 
             try:

@@ -216,20 +216,20 @@ class TestWindowsPythonFallback:
         assert "py" in workspace_mod._SHELL_WHITELIST
 
     def test_fixup_replaces_python_when_py_available(self) -> None:
-        with patch("backend.core.workspace.shutil.which", return_value="/bin/py"):
-            with patch("backend.core.workspace.platform.system", return_value="Windows"):
+        with patch("backend.core.workspace_shell.shutil.which", return_value="/bin/py"):
+            with patch("backend.core.workspace_shell.platform.system", return_value="Windows"):
                 assert _windows_python_fixup("python script.py") == "py script.py"
                 assert _windows_python_fixup("python") == "py"
                 assert _windows_python_fixup("  python --version") == "py --version"
 
     def test_fixup_keeps_python_when_py_missing(self) -> None:
-        with patch("backend.core.workspace.shutil.which", return_value=None):
-            with patch("backend.core.workspace.platform.system", return_value="Windows"):
+        with patch("backend.core.workspace_shell.shutil.which", return_value=None):
+            with patch("backend.core.workspace_shell.platform.system", return_value="Windows"):
                 assert _windows_python_fixup("python script.py") == "python script.py"
                 assert _windows_python_fixup("python") == "python"
 
     def test_fixup_noop_on_non_windows(self) -> None:
-        with patch("backend.core.workspace.platform.system", return_value="Linux"):
+        with patch("backend.core.workspace_shell.platform.system", return_value="Linux"):
             assert _windows_python_fixup("python script.py") == "python script.py"
 
 
