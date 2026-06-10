@@ -27,6 +27,7 @@ import asyncio
 import logging
 import os
 import re
+import sys
 import tempfile
 import time
 import uuid
@@ -35,6 +36,16 @@ from enum import StrEnum
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Lazy imports to avoid circular deps at module load time
+_workspace_security = None
+
+def _get_security():
+    global _workspace_security
+    if _workspace_security is None:
+        from backend.core import workspace_security as _ws
+        _workspace_security = _ws
+    return _workspace_security
 
 
 class RiskLevel(StrEnum):
@@ -151,14 +162,17 @@ class SandboxExecutor:
             return self._docker_available
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "docker",
-                "info",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            # Use asyncio.to_thread + subprocess.run for Windows compatibility
+            # asyncio.create_subprocess_exec can raise NotImplementedError on Windows
+            import subprocess
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["docker", "info"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
             )
-            await proc.wait()
-            self._docker_available = proc.returncode == 0
+            self._docker_available = result.returncode == 0
         except (FileNotFoundError, OSError):
             self._docker_available = False
 
@@ -196,6 +210,33 @@ class SandboxExecutor:
                 duration_ms=0,
                 risk_level=risk,
             )
+
+        # Security validation before any execution path
+        ws = _get_security()
+        if language == "python":
+            is_safe, reason = ws._check_python_sandbox(code)
+            if not is_safe:
+                return SandboxResult(
+                    execution_id=execution_id,
+                    stdout="",
+                    stderr=f"Sandbox blocked: {reason}",
+                    exit_code=1,
+                    timed_out=False,
+                    duration_ms=0,
+                    risk_level=RiskLevel.CRITICAL,
+                )
+        elif language == "bash":
+            is_safe, reason = ws._validate_shell_command(code)
+            if not is_safe:
+                return SandboxResult(
+                    execution_id=execution_id,
+                    stdout="",
+                    stderr=f"Shell blocked: {reason}",
+                    exit_code=1,
+                    timed_out=False,
+                    duration_ms=0,
+                    risk_level=RiskLevel.CRITICAL,
+                )
 
         docker_ok = await self.check_docker()
 
@@ -264,22 +305,25 @@ class SandboxExecutor:
                 )
 
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(),
+                # Use asyncio.to_thread + subprocess.run for Windows compatibility
+                import subprocess
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        subprocess.run,
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    ),
                     timeout=timeout,
                 )
                 duration_ms = int((time.time() - start) * 1000)
 
                 return SandboxResult(
                     execution_id=execution_id,
-                    stdout=stdout_bytes.decode("utf-8", errors="replace"),
-                    stderr=stderr_bytes.decode("utf-8", errors="replace"),
-                    exit_code=proc.returncode or 0,
+                    stdout=result.stdout.decode("utf-8", errors="replace") if result.stdout else "",
+                    stderr=result.stderr.decode("utf-8", errors="replace") if result.stderr else "",
+                    exit_code=result.returncode or 0,
                     timed_out=False,
                     duration_ms=duration_ms,
                 )
@@ -287,12 +331,13 @@ class SandboxExecutor:
             except TimeoutError:
                 # Kill container
                 try:
-                    kill_proc = await asyncio.create_subprocess_exec(
-                        "docker",
-                        "kill",
-                        f"nexus-sandbox-{execution_id}",
+                    await asyncio.to_thread(
+                        subprocess.run,
+                        ["docker", "kill", f"nexus-sandbox-{execution_id}"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
                     )
-                    await kill_proc.wait()
                 except Exception:
                     pass
 
@@ -356,32 +401,44 @@ class SandboxExecutor:
                 # Linux: set memory limit via environment for child process
                 env["PYTHONMEMORY"] = str(self._config.max_memory_mb * 1024 * 1024)
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd or tempfile.gettempdir(),
-                env={**os.environ, **env} if env else None,
-            )
+            # Use asyncio.to_thread + subprocess.run for Windows compatibility
+            import subprocess
+            def _run_subprocess():
+                return subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=cwd or tempfile.gettempdir(),
+                    env={**os.environ, **env} if env else None,
+                )
 
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(),
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(_run_subprocess),
                     timeout=timeout,
                 )
                 duration_ms = int((time.time() - start) * 1000)
 
                 return SandboxResult(
                     execution_id=execution_id,
-                    stdout=stdout_bytes.decode("utf-8", errors="replace"),
-                    stderr=stderr_bytes.decode("utf-8", errors="replace"),
-                    exit_code=proc.returncode or 0,
+                    stdout=result.stdout.decode("utf-8", errors="replace") if result.stdout else "",
+                    stderr=result.stderr.decode("utf-8", errors="replace") if result.stderr else "",
+                    exit_code=result.returncode or 0,
                     timed_out=False,
                     duration_ms=duration_ms,
                 )
             except TimeoutError:
-                proc.kill()
-                await proc.wait()
+                # Try to kill the process tree on timeout
+                try:
+                    await asyncio.to_thread(
+                        subprocess.run,
+                        ["taskkill", "/F", "/T", "/IM", Path(cmd[0]).name],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+                except Exception:
+                    pass
                 duration_ms = int((time.time() - start) * 1000)
                 return SandboxResult(
                     execution_id=execution_id,

@@ -5,7 +5,8 @@
  * feeds all subscribers. Polling fallback when SSE unavailable.
  */
 import { create } from "zustand";
-import { apiUrl } from "../lib/api";
+import { apiUrl, authHeaders } from "../lib/api";
+import { isAuthenticated } from "../lib/auth";
 
 export interface SystemMetrics {
   tokens_per_second: number;
@@ -80,6 +81,7 @@ export const useMetricsStore = create<MetricsState>((set) => ({
 let sseInstance: EventSource | null = null;
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
 let isInitialized = false;
+let isStopped = false;
 
 function stopAll() {
   if (sseInstance) {
@@ -95,8 +97,18 @@ function stopAll() {
 async function fetchMetrics() {
   try {
     const response = await fetch(apiUrl("/api/metrics/current"), {
+      headers: authHeaders(),
       signal: AbortSignal.timeout(5000),
     });
+
+    if (response.status === 401) {
+      // Stop everything on auth failure — don't retry
+      stopAll();
+      isStopped = true;
+      useMetricsStore.getState()._setConnectionStatus("offline");
+      return false;
+    }
+
     if (response.ok) {
       const data = (await response.json()) as SystemMetrics;
       useMetricsStore.getState()._setMetrics(data);
@@ -115,8 +127,12 @@ async function fetchMetrics() {
 function startSSE() {
   stopAll();
 
+  if (isStopped) return;
+
   try {
-    const es = new EventSource(apiUrl("/api/dashboard/stream"));
+    const es = new EventSource(apiUrl("/api/dashboard/stream"), {
+      withCredentials: true,
+    });
     sseInstance = es;
 
     es.onopen = () => {
@@ -137,16 +153,20 @@ function startSSE() {
       useMetricsStore.getState()._setConnectionStatus("offline");
       es.close();
       sseInstance = null;
-      // Fallback to polling
-      startPolling();
+      // Fallback to polling only if not explicitly stopped
+      if (!isStopped) {
+        startPolling();
+      }
     };
   } catch {
-    startPolling();
+    if (!isStopped) {
+      startPolling();
+    }
   }
 }
 
 function startPolling() {
-  if (pollingTimer) return;
+  if (pollingTimer || isStopped) return;
   fetchMetrics(); // immediate
   pollingTimer = setInterval(fetchMetrics, 3000);
 }
@@ -154,13 +174,19 @@ function startPolling() {
 /** Initialize the metrics stream (SSE → polling fallback). Idempotent. */
 export function initMetricsStream() {
   if (isInitialized) return;
+
+  // Do not start if user is not authenticated
+  if (!isAuthenticated()) return;
+
   isInitialized = true;
+  isStopped = false;
   startSSE();
 }
 
 /** Stop all metrics streaming. Call on app unmount if needed. */
 export function stopMetricsStream() {
   isInitialized = false;
+  isStopped = true;
   stopAll();
 }
 

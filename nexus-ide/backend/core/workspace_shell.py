@@ -19,6 +19,7 @@ from typing import Any
 
 from backend.core.workspace_security import (
     _check_python_sandbox,
+    _is_blocked_path,
     _log_operation,
     _validate_shell_command,
     _verify_auth_token,
@@ -73,6 +74,12 @@ async def execute_shell(
     except Exception:
         cwd_path = None
 
+    # Validate cwd against blocked paths
+    if cwd_path:
+        blocked, reason = _is_blocked_path(str(cwd_path))
+        if blocked:
+            return {"error": f"Blocked working directory: {reason}", "command": command}
+
     merged_env = {**os.environ, **(env or {})}
 
     # Sanitize sensitive environment variables to prevent credential leakage
@@ -81,44 +88,32 @@ async def execute_shell(
             merged_env.pop(key, None)
 
     try:
-        # Prefer create_subprocess_exec (no shell interpreter) for simple
-        # commands without pipes on POSIX systems.  Windows quoting rules are
-        # different and shlex.split can leave literal quotes in arguments, so
-        # we keep the shell there.  This eliminates quoting / injection issues
-        # that only exist when a shell parses the command string.
-        use_exec = (not sys.platform.startswith("win")) and ("|" not in command)
-        if use_exec:
-            try:
-                args = shlex.split(command)
-            except ValueError:
-                args = [command]
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=str(cwd_path) if cwd_path else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=merged_env,
-            )
-        else:
-            proc = await asyncio.create_subprocess_shell(
+        # Use asyncio.to_thread + subprocess.run for Windows compatibility.
+        # asyncio.create_subprocess_exec raises NotImplementedError on Windows
+        # with the default event loop policy.
+        import subprocess
+        def _run_shell():
+            return subprocess.run(
                 command,
                 cwd=str(cwd_path) if cwd_path else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 env=merged_env,
+                shell=True,
+                text=True,
+                errors="replace",
             )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(), timeout=float(timeout)
-        )
 
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_run_shell),
+            timeout=float(timeout),
+        )
 
         return {
             "command": command,
-            "stdout": stdout,
-            "stderr": stderr,
-            "exit_code": proc.returncode,
+            "stdout": result.stdout or "",
+            "stderr": result.stderr or "",
+            "exit_code": result.returncode,
             "cwd": str(cwd_path) if cwd_path else None,
         }
     except asyncio.TimeoutError:
@@ -167,25 +162,40 @@ async def execute_python(
             f.write(code)
             temp_path = f.name
 
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            temp_path,
-            cwd=str(cwd_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        def _run_python():
+            import subprocess
+            return subprocess.run(
+                [sys.executable, temp_path],
+                cwd=str(cwd_path),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+            )
 
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_run_python),
+                timeout=timeout,
+            )
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            # Attempt to kill the Python process on timeout
+            try:
+                import subprocess
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/IM", Path(sys.executable).name],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+            except Exception:
+                pass
             return {"error": f"Python script timed out after {timeout}s", "returncode": -1}
         finally:
             Path(temp_path).unlink(missing_ok=True)
 
-        stdout_text = stdout.decode("utf-8", errors="replace") if stdout else ""
-        stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+        stdout_text = result.stdout or ""
+        stderr_text = result.stderr or ""
 
         return {
             "returncode": proc.returncode,
@@ -204,9 +214,15 @@ async def execute_script(
     args: list[str] | None = None,
     cwd: str | None = None,
     timeout: int = 120,
+    auth_token: str | None = None,
 ) -> dict[str, Any]:
     """Execute any script file (absolute path)."""
     logger.info("execute_script: %s args=%s (cwd=%s)", path, args, cwd)
+
+    if auth_token is not None:
+        ok, reason = _verify_auth_token(auth_token)
+        if not ok:
+            return {"error": reason}
 
     from backend.core.workspace_security import _is_blocked_path
 
@@ -249,23 +265,38 @@ async def execute_script(
     cmd = [interpreter, str(script)] if interpreter else [str(script)]
     cmd.extend(args or [])
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(cwd_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=float(timeout))
+    # For Python scripts, apply sandbox check before execution
+    if ext == ".py":
+        try:
+            script_content = script.read_text(encoding="utf-8", errors="ignore")
+        except Exception as exc:
+            return {"error": f"Failed to read script: {exc}", "command": " ".join(cmd)}
+        is_safe, reason = _check_python_sandbox(script_content)
+        if not is_safe:
+            return {"error": f"Sandbox blocked: {reason}", "command": " ".join(cmd)}
 
-        stdout_text = stdout.decode("utf-8", errors="replace") if stdout else ""
-        stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+    try:
+        def _run_script():
+            import subprocess
+            return subprocess.run(
+                cmd,
+                cwd=str(cwd_path),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+            )
+
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_run_script),
+            timeout=float(timeout),
+        )
 
         return {
             "command": " ".join(shlex.quote(c) for c in cmd),
-            "stdout": stdout_text,
-            "stderr": stderr_text,
-            "exit_code": proc.returncode,
+            "stdout": result.stdout or "",
+            "stderr": result.stderr or "",
+            "exit_code": result.returncode,
             "cwd": str(cwd_path),
         }
     except asyncio.TimeoutError:

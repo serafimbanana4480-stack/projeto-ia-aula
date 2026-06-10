@@ -134,6 +134,7 @@ async def workspace_execute_script(req: WorkspaceScriptRequest, request: Request
         args=req.args,
         cwd=req.cwd,
         timeout=req.timeout,
+        auth_token=_extract_token(request),
     )
 
 

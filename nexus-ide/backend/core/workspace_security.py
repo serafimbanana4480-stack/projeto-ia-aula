@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shlex
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -253,6 +254,13 @@ def _is_blocked_path(path: str) -> tuple[bool, str]:
     if ".." in raw.parts:
         return True, "Path traversal ('..') is not allowed"
 
+    # Block Windows drive-relative paths (e.g. C:Windows\System32)
+    # These are treated as relative by pathlib but resolve to absolute system paths.
+    if platform.system() == "Windows":
+        import re as _re
+        if _re.search(r"^[A-Za-z]:[^/\\]", str(raw)):
+            return True, "Windows drive-relative paths are not allowed"
+
     try:
         resolved = raw.resolve()
     except (OSError, ValueError) as exc:
@@ -413,6 +421,21 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
     except SyntaxError as exc:
         return False, f"Invalid Python syntax: {exc}"
 
+    def _resolve_string_arg(node: ast.expr) -> str | None:
+        """Resolve an AST expression to a string constant if possible.
+        Returns the resolved string for simple literals and concatenations,
+        or None for dynamic expressions that cannot be safely resolved.
+        """
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = _resolve_string_arg(node.left)
+            right = _resolve_string_arg(node.right)
+            if left is not None and right is not None:
+                return left + right
+        # Cannot safely resolve dynamic expressions (calls, variables, etc.)
+        return None
+
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             if isinstance(node, ast.Import):
@@ -426,31 +449,43 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
                     return False, f"from {node.module} import is blocked in sandbox mode"
 
         if isinstance(node, ast.Call):
-            # Block __import__ with dangerous modules
+            # Block __import__ with dangerous modules — reject dynamic args
             if (
                 isinstance(node.func, ast.Name)
                 and node.func.id == "__import__"
                 and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
             ):
-                base = node.args[0].value.split(".")[0]
+                resolved = _resolve_string_arg(node.args[0])
+                if resolved is None:
+                    return False, "__import__ with dynamic argument is blocked in sandbox mode"
+                base = resolved.split(".")[0]
                 if base in _DANGEROUS_MODULES:
-                    return False, f"__import__({node.args[0].value}) is blocked in sandbox mode"
+                    return False, f"__import__({resolved}) is blocked in sandbox mode"
 
-            # Block importlib.import_module with dangerous modules
+            # Block importlib.import_module with dangerous modules — reject dynamic args
             if (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "importlib"
                 and node.func.attr == "import_module"
                 and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
             ):
-                base = node.args[0].value.split(".")[0]
+                resolved = _resolve_string_arg(node.args[0])
+                if resolved is None:
+                    return False, "importlib.import_module with dynamic argument is blocked in sandbox mode"
+                base = resolved.split(".")[0]
                 if base in _DANGEROUS_MODULES:
-                    return False, f"importlib.import_module({node.args[0].value}) is blocked in sandbox mode"
+                    return False, f"importlib.import_module({resolved}) is blocked in sandbox mode"
+
+            # Block getattr that resolves to dangerous names (e.g. getattr(__builtins__, 'ex'+'ec'))
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) >= 2
+            ):
+                resolved = _resolve_string_arg(node.args[1])
+                if resolved and resolved.lower() in ("eval", "exec", "compile", "__import__", "import_module"):
+                    return False, f"getattr targeting '{resolved}' is blocked in sandbox mode"
 
             # Block eval, exec, compile
             if isinstance(node.func, ast.Name) and node.func.id in ("eval", "exec", "compile"):
@@ -463,6 +498,11 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
                     and node.func.attr in ("system", "popen", "exec", "execv", "execve", "fork", "kill", "spawn")
                 ):
                     return False, f"{node.func.value.id}.{node.func.attr}() is blocked in sandbox mode"
+
+            # Block access to __builtins__ via attribute (e.g. __builtins__['eval'])
+            if isinstance(node.func, ast.Subscript):
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == "__builtins__":
+                    return False, "__builtins__ access is blocked in sandbox mode"
 
     return True, ""
 
@@ -494,7 +534,13 @@ _DANGEROUS_PIPE_TARGETS: set[str] = {
 # Shell-command validation helpers
 # ---------------------------------------------------------------------------
 
-_DISALLOWED_METACHARACTERS = (";", "&&", "||", "`", "$(", ">>", ">", "<")
+import platform
+
+_DISALLOWED_METACHARACTERS_BASE = (";", "&&", "||", "`", "$(", ">>", ">", "<")
+if sys.platform.startswith("win"):
+    _DISALLOWED_METACHARACTERS = _DISALLOWED_METACHARACTERS_BASE + ("&", "^")
+else:
+    _DISALLOWED_METACHARACTERS = _DISALLOWED_METACHARACTERS_BASE
 
 
 def _remove_quoted_parts(s: str) -> str:

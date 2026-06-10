@@ -177,43 +177,30 @@ echo [%date% %time%] Verificando Docker... >> "%NEXUS_LOG%"
 
 docker --version > NUL 2>&1
 if !errorlevel! neq 0 (
-    echo [AVISO] Docker nao encontrado. A iniciar em modo sem Docker ^(--dev^).
+    echo [AVISO] Docker CLI nao encontrado. A iniciar em modo sem Docker ^(--dev^).
     echo         Instale Docker Desktop para sandbox completo.
     set "NEXUS_SKIP_DOCKER=1"
-    echo [%date% %time%] AVISO: Docker nao encontrado, modo dev >> "%NEXUS_LOG%"
+    echo [%date% %time%] AVISO: Docker CLI nao encontrado, modo dev >> "%NEXUS_LOG%"
     goto :docker_done
 )
 
 for /f "tokens=*" %%a in ('docker --version') do set "DOCKER_VERSION=%%a"
 echo [OK] %DOCKER_VERSION%
 
-REM Verificar se Docker engine responde
-docker info > NUL 2>&1
-if !errorlevel! neq 0 (
-    echo [INFO] A iniciar Docker Desktop...
-    set "DOCKER_DESKTOP_EXE=C:\Program Files\Docker\Docker\Docker Desktop.exe"
-    if exist "!DOCKER_DESKTOP_EXE!" (
-        start "" "!DOCKER_DESKTOP_EXE!"
-        echo [INFO] Aguardando Docker Desktop (ate 60s)...
-        set "DOCKER_WAIT=0"
-        :docker_wait_loop
-        timeout /t 3 /nobreak > NUL
-        docker info > NUL 2>&1
-        if !errorlevel! equ 0 goto :docker_ready
-        set /a DOCKER_WAIT+=1
-        if !DOCKER_WAIT! geq 20 (
-            echo [AVISO] Docker nao ficou pronto. A continuar sem Docker.
-            set "NEXUS_SKIP_DOCKER=1"
-            echo [%date% %time%] AVISO: Docker timeout, modo dev >> "%NEXUS_LOG%"
-            goto :docker_done
-        )
-        goto :docker_wait_loop
-    ) else (
-        echo [AVISO] Docker Desktop nao encontrado. A continuar sem Docker.
+REM Tentar iniciar servicos Docker se docker-compose.yml existir
+if exist "docker\docker-compose.yml" (
+    echo [INFO] A iniciar servicos Docker...
+    docker compose -f "docker\docker-compose.yml" up -d
+    if !errorlevel! neq 0 (
+        echo [AVISO] docker compose up falhou. A continuar sem Docker.
         set "NEXUS_SKIP_DOCKER=1"
-        echo [%date% %time%] AVISO: Docker Desktop nao encontrado >> "%NEXUS_LOG%"
-        goto :docker_done
+        echo [%date% %time%] AVISO: docker compose up falhou >> "%NEXUS_LOG%"
+    ) else (
+        echo [OK] Servicos Docker iniciados.
+        echo [%date% %time%] Docker services started >> "%NEXUS_LOG%"
     )
+) else (
+    echo [AVISO] docker-compose.yml nao encontrado.
 )
 
 :docker_ready

@@ -13,6 +13,9 @@ import type {
 } from "./types";
 import { authHeaders, clearAuth, getAccessToken } from "./auth";
 
+// Re-export authHeaders for consumers that import it from api.ts
+export { authHeaders } from "./auth";
+
 // Satisfy noUnusedLocals without changing behavior (getAccessToken is kept for re-export compatibility)
 void getAccessToken;
 

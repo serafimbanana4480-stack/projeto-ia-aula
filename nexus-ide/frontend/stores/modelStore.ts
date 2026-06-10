@@ -54,7 +54,8 @@ export const useModelStore = create<ModelStore>((set, get) => ({
         modelsError: error instanceof Error ? error.message : "Failed to load models",
         modelsLoading: false,
       });
-      throw error;
+      // Do NOT re-throw — prevents unhandled rejections and retry loops
+      // when called from DataInitProvider or other orchestrators.
     }
   },
 }));

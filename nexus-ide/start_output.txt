@@ -1,0 +1,17 @@
+========================================
+   NEXUS IDE - Iniciando Aplicacao
+========================================
+
+[INFO] Log: C:\Users\rodri\Desktop\PROJETO IA AULA GIT CLONE\projeto-ia-aula\nexus-ide\start.log
+[INFO] Modo: 1
+
+[INFO] A detetar Python...
+[OK] Python detetado no venv: .venv\Scripts\python.exe
+[INFO] Usando: C:\Users\rodri\Desktop\PROJETO IA AULA GIT CLONE\projeto-ia-aula\nexus-ide\.venv\Scripts\python.exe 
+
+[INFO] A verificar dependencias do backend...
+[OK] Dependencias do backend OK.
+
+[INFO] A verificar Node.js...
+[OK] Node.js v24.15.0
+EXIT CODE: %ERRORLEVEL%

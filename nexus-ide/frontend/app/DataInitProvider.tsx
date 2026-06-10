@@ -6,6 +6,7 @@ import { useModeStore } from "../stores/modeStore";
 import { useToolsStore } from "../stores/toolsStore";
 import { useModelStore } from "../stores/modelStore";
 import { initMetricsStream } from "../stores/metricsStore";
+import { isAuthenticated } from "../lib/auth";
 
 /**
  * DataInitProvider — loads reference data once on app startup.
@@ -34,15 +35,46 @@ export default function DataInitProvider({
     if (initializedRef.current) return;
     initializedRef.current = true;
 
+    // Do NOT start any data fetches if the user is not authenticated.
+    if (!isAuthenticated()) return;
+
     // Start singleton metrics stream (SSE -> polling fallback)
-    initMetricsStream();
+    try {
+      initMetricsStream();
+    } catch {
+      /* ignore metrics stream init errors */
+    }
 
     // Load reference data in parallel; failures are handled inside each store
     void Promise.allSettled([
-      loadProjects(),
-      loadModes(),
-      loadTools(),
-      loadModels(),
+      (async () => {
+        try {
+          await loadProjects();
+        } catch {
+          /* ignore */
+        }
+      })(),
+      (async () => {
+        try {
+          await loadModes();
+        } catch {
+          /* ignore */
+        }
+      })(),
+      (async () => {
+        try {
+          await loadTools();
+        } catch {
+          /* ignore */
+        }
+      })(),
+      (async () => {
+        try {
+          await loadModels();
+        } catch {
+          /* ignore */
+        }
+      })(),
     ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

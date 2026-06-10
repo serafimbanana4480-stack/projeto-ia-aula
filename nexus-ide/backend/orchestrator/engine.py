@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -47,6 +48,11 @@ from backend.orchestrator.events import (
     OrchestratorEvent,
 )
 from backend.tools.ollama_client import ChatMessage
+
+try:
+    from cachetools import TTLCache
+except ImportError:
+    TTLCache = None
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +90,19 @@ class ExecutionContext:
     project_path: str = "."
     shared_memory: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)  # task outputs keyed by task_id
-    global_context: str = ""  # accumulated context from completed tasks
+    _global_context_parts: list[str] = field(default_factory=list)  # accumulated context from completed tasks
+
+    @property
+    def global_context(self) -> str:
+        return "".join(self._global_context_parts)
+
+    @global_context.setter
+    def global_context(self, value: str) -> None:
+        # Support legacy assignment, but internally append
+        if not self._global_context_parts:
+            self._global_context_parts.append(value)
+        else:
+            self._global_context_parts.append(value)
 
 
 @dataclass
@@ -134,9 +152,14 @@ class OrchestrationEngine:
         self._cancellation_events: dict[str, asyncio.Event] = {}
         self._state: dict[str, OrchestrationState] = {}
 
-        # Plan storage (in-memory; persists across requests within a process)
-        self._plans: dict[str, ExecutionPlan] = {}
-        self._session_plans: dict[str, str] = {}  # session_id -> plan_id
+        # Plan storage with TTL eviction to prevent memory leaks
+        if TTLCache is not None:
+            self._plans: Any = TTLCache(maxsize=1000, ttl=3600)
+            self._session_plans: Any = TTLCache(maxsize=1000, ttl=3600)
+        else:
+            self._plans: dict[str, ExecutionPlan] = {}
+            self._session_plans: dict[str, str] = {}
+        self._active_tasks: dict[str, list[asyncio.Task[Any]]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -182,7 +205,7 @@ class OrchestrationEngine:
         ]
 
         # Stream planning directly from Ollama
-        plan_content = ""
+        plan_content_parts: list[str] = []
         async with EventEmitter(self._events, "PLANNER", session_id) as emit:
             async for token in self._llm_client.chat_stream(
                 model=planner_model,
@@ -192,8 +215,9 @@ class OrchestrationEngine:
                     "num_predict": 16384,  # Large plans need more tokens
                 },
             ):
-                plan_content += token
+                plan_content_parts.append(token)
                 await emit.emit(EventType.TOKEN, content=token)
+        plan_content = "".join(plan_content_parts)
 
         # Parse plan into structured steps
         plan = self._parse_plan(plan_content, objective, session_id)
@@ -258,8 +282,9 @@ class OrchestrationEngine:
         )
 
         try:
+            self._active_tasks[session_id] = []
             for _layer_idx, layer in enumerate(layers):
-                if self._cancellation_events[session_id].is_set():
+                if self._cancellation_events.get(session_id, asyncio.Event()).is_set():
                     break
 
                 # Execute all tasks in this layer in parallel
@@ -269,7 +294,10 @@ class OrchestrationEngine:
                     if task is None:
                         continue
                     task.status = TaskStatus.READY
-                    layer_tasks.append(self._execute_task(task, ctx, graph, session_id, run_id))
+                    coro = self._execute_task(task, ctx, graph, session_id, run_id)
+                    t = asyncio.create_task(coro)
+                    layer_tasks.append(t)
+                    self._active_tasks[session_id].append(t)
 
                 if layer_tasks:
                     results = await asyncio.gather(*layer_tasks, return_exceptions=True)
@@ -292,6 +320,9 @@ class OrchestrationEngine:
                 )
             )
             raise
+        finally:
+            # Clean up active task references to avoid memory leaks
+            self._active_tasks.pop(session_id, None)
 
         duration_ms = int((time.time() - start_time) * 1000)
         completed = sum(1 for t in graph.get_all_tasks() if t.status == TaskStatus.COMPLETED)
@@ -329,6 +360,10 @@ class OrchestrationEngine:
             self._cancellation_events[session_id] = asyncio.Event()
         self._cancellation_events[session_id].set()
         self._state[session_id] = OrchestrationState.CANCELLED
+        # Actually cancel running asyncio tasks
+        for t in self._active_tasks.pop(session_id, []):
+            if not t.done():
+                t.cancel()
         logger.info("Cancelled orchestration for session %s", session_id)
 
     async def execute_autonomous(
@@ -633,12 +668,13 @@ class OrchestrationEngine:
                     max_iterations=5,
                 )
 
-                # Stream execution
+                # Stream execution with hard timeout
                 output_parts: list[str] = []
                 async with EventEmitter(self._events, task.agent, session_id, task.task_id) as emit:
-                    async for token in _iterate_agent_output(agent.run(request)):
-                        output_parts.append(token)
-                        await emit.emit(EventType.TOKEN, content=token)
+                    async with asyncio.timeout(self._default_timeout):
+                        async for token in _iterate_agent_output(agent.run(request)):
+                            output_parts.append(token)
+                            await emit.emit(EventType.TOKEN, content=token)
 
                 output = "".join(output_parts)
                 task.output_data["content"] = output
@@ -652,7 +688,7 @@ class OrchestrationEngine:
                     "output": output,
                     "status": "completed",
                 }
-                ctx.global_context += f"\n[{task.name}]: {output[:500]}"
+                ctx._global_context_parts.append(f"\n[{task.name}]: {output[:500]}")
 
                 await self._events.publish(
                     OrchestratorEvent(
@@ -665,6 +701,36 @@ class OrchestrationEngine:
                 )
 
                 return {"success": True, "output": output, "tokens": len(output_parts)}
+
+            except asyncio.TimeoutError as exc:
+                task.retry_count = attempt + 1
+                logger.warning("Task %s timed out (attempt %d/%d)", task.task_id, attempt + 1, task.max_retries + 1)
+                if attempt < task.max_retries:
+                    await self._events.publish(
+                        OrchestratorEvent(
+                            event_type=EventType.AGENT_RETRY,
+                            source=task.agent,
+                            session_id=session_id,
+                            task_id=task.task_id,
+                            data={"attempt": attempt + 1, "max_retries": task.max_retries, "reason": "timeout"},
+                        )
+                    )
+                    jitter = random.uniform(0, 1)
+                    await asyncio.sleep((2**attempt) + jitter)
+                else:
+                    task.status = TaskStatus.FAILED
+                    task.error_message = f"Task timed out after {self._default_timeout}s"
+                    task.completed_at = time.time()
+                    await self._events.publish(
+                        OrchestratorEvent(
+                            event_type=EventType.TASK_FAILED,
+                            source=task.agent,
+                            session_id=session_id,
+                            task_id=task.task_id,
+                            data={"error": task.error_message, "attempts": attempt + 1},
+                        )
+                    )
+                    return {"error": task.error_message, "attempts": attempt + 1}
 
             except Exception as exc:
                 task.retry_count = attempt + 1
@@ -686,7 +752,8 @@ class OrchestrationEngine:
                             data={"attempt": attempt + 1, "max_retries": task.max_retries},
                         )
                     )
-                    await asyncio.sleep(2**attempt)  # exponential backoff
+                    jitter = random.uniform(0, 1)
+                    await asyncio.sleep((2**attempt) + jitter)
                 else:
                     task.status = TaskStatus.FAILED
                     task.error_message = str(exc)
