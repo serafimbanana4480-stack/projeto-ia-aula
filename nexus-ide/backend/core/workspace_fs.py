@@ -7,11 +7,12 @@ security validation and automatic backups.
 from __future__ import annotations
 
 import asyncio
-import logging
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from backend.core.workspace_backup import _backup_dir_for, _create_backup
 from backend.core.workspace_security import (
     MAX_FILE_SIZE_BYTES,
     _check_file_size_limit,
@@ -20,7 +21,6 @@ from backend.core.workspace_security import (
     _verify_auth_token,
     logger,
 )
-from backend.core.workspace_backup import _backup_dir_for, _create_backup
 
 
 async def read_file_absolute(path: str) -> dict[str, Any]:
@@ -51,10 +51,10 @@ async def write_file_absolute(
 ) -> dict[str, Any]:
     """Write any file (absolute path) with backup of the original.
 
-    The ``overwrite`` parameter is accepted for compatibility with agent calls
-    but is ignored — the tool always writes (and backs up) the file.
+    ``overwrite`` defaults to ``True``.  When ``False`` and the file already
+    exists, the write is rejected without modifying the existing file.
     """
-    logger.info("write_file_absolute: %s (%d bytes)", path, len(content))
+    logger.info("write_file_absolute: %s (%d bytes) overwrite=%s", path, len(content), overwrite)
 
     if auth_token is not None:
         ok, reason = _verify_auth_token(auth_token)
@@ -64,29 +64,55 @@ async def write_file_absolute(
     blocked, reason = _is_blocked_path(path)
     if blocked:
         result = {"error": reason}
-        _log_operation("write_file_absolute", {"path": path}, result)
+        _log_operation("write_file_absolute", {"path": path, "overwrite": overwrite}, result)
         return result
 
     try:
         target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+        if not overwrite and await asyncio.to_thread(target.exists):
+            result = {
+                "error": f"File already exists: {target}",
+                "path": str(target),
+                "exists": True,
+            }
+            _log_operation("write_file_absolute", {"path": path, "overwrite": overwrite}, result)
+            return result
+
         backup_meta = await _create_backup(target)
         await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(target.write_text, content, encoding="utf-8")
         result = {"path": str(target), "written": True, "size": len(content), "backup": backup_meta}
-        _log_operation("write_file_absolute", {"path": path}, result)
+        _log_operation("write_file_absolute", {"path": path, "overwrite": overwrite}, result)
         return result
     except PermissionError:
         result = {"error": f"Permission denied: {path}"}
-        _log_operation("write_file_absolute", {"path": path}, result)
+        _log_operation("write_file_absolute", {"path": path, "overwrite": overwrite}, result)
         return result
     except Exception as exc:
         result = {"error": f"Failed to write file: {exc}"}
-        _log_operation("write_file_absolute", {"path": path}, result)
+        _log_operation("write_file_absolute", {"path": path, "overwrite": overwrite}, result)
         return result
 
 
-async def list_dir_absolute(path: str, recursive: bool = False, max_results: int = 10_000) -> dict[str, Any]:
-    """List any directory (absolute path)."""
+async def list_dir_absolute(
+    path: str,
+    recursive: bool = False,
+    max_results: int = 10_000,
+    include_hidden: bool = True,
+    include_files: bool = True,
+    include_dirs: bool = True,
+    glob_pattern: str | None = None,
+) -> dict[str, Any]:
+    """List any directory (absolute path).
+
+    ``include_hidden`` controls whether entries whose name starts with ``.``
+    are returned.  Hiding hidden entries makes large project trees easier to
+    navigate while still allowing the caller to opt-in.
+
+    ``include_files`` / ``include_dirs`` can be used to return only one kind
+    of entry (e.g. only source files).  ``glob_pattern`` applies an optional
+    fnmatch filter to the entry name.
+    """
     logger.info("list_dir_absolute: %s (recursive=%s)", path, recursive)
 
     blocked, reason = _is_blocked_path(path)
@@ -101,24 +127,50 @@ async def list_dir_absolute(path: str, recursive: bool = False, max_results: int
             return {"error": f"Path is not a directory: {path}"}
 
         if recursive:
-            raw_items = await asyncio.to_thread(lambda: list(target.rglob("*")))
+            raw_items = await asyncio.to_thread(lambda: list(target.rglob(glob_pattern or "*")))
         else:
             raw_items = await asyncio.to_thread(lambda: list(target.iterdir()))
+            if glob_pattern:
+                import fnmatch
+                raw_items = [item for item in raw_items if fnmatch.fnmatch(item.name, glob_pattern)]
 
         items = []
+        skipped_hidden = 0
         for item in raw_items[:max_results]:
+            name = item.name
+            if not include_hidden and name.startswith("."):
+                skipped_hidden += 1
+                continue
+
             is_file = await asyncio.to_thread(item.is_file)
-            size = await asyncio.to_thread(lambda: item.stat().st_size) if is_file else 0
+            is_dir = await asyncio.to_thread(item.is_dir)
+
+            if is_file and not include_files:
+                continue
+            if is_dir and not include_dirs:
+                continue
+
+            size = (await asyncio.to_thread(item.stat)).st_size if is_file else 0
             items.append(
                 {
                     "path": str(item),
-                    "name": item.name,
+                    "name": name,
                     "type": "file" if is_file else "dir",
                     "size": size,
                 }
             )
 
-        return {"path": str(target), "items": items, "count": len(items), "truncated": len(raw_items) > max_results}
+        return {
+            "path": str(target),
+            "items": items,
+            "count": len(items),
+            "truncated": len(raw_items) > max_results,
+            "skipped_hidden": skipped_hidden,
+            "include_hidden": include_hidden,
+            "include_files": include_files,
+            "include_dirs": include_dirs,
+            "glob_pattern": glob_pattern,
+        }
     except PermissionError:
         return {"error": f"Permission denied: {path}"}
     except Exception as exc:
@@ -157,24 +209,23 @@ async def delete_file_absolute(
     blocked, reason = _is_blocked_path(path)
     if blocked:
         result = {"error": reason}
-        _log_operation("delete_file_absolute", {"path": path}, result)
+        _log_operation("delete_file_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
         return result
 
     try:
         target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
         if not await asyncio.to_thread(target.exists):
             result = {"error": f"File not found: {path}"}
-            _log_operation("delete_file_absolute", {"path": path}, result)
+            _log_operation("delete_file_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
             return result
         if await asyncio.to_thread(target.is_dir):
             result = {"error": "Path is a directory; use recursive directory deletion instead"}
-            _log_operation("delete_file_absolute", {"path": path}, result)
+            _log_operation("delete_file_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
             return result
 
         if move_to_trash:
             trash_dir = await _backup_dir_for(target) / "trash"
             await asyncio.to_thread(trash_dir.mkdir, parents=True, exist_ok=True)
-            from datetime import UTC, datetime
             import hashlib
             timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
             hash_suffix = hashlib.sha256(str(target).encode()).hexdigest()[:8]
@@ -183,22 +234,303 @@ async def delete_file_absolute(
             await asyncio.to_thread(shutil.move, str(target), str(trash_path))
             logger.info("Moved to trash: %s -> %s", target, trash_path)
             result = {"path": str(target), "deleted": True, "trash_path": str(trash_path)}
-            _log_operation("delete_file_absolute", {"path": path}, result)
+            _log_operation("delete_file_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
             return result
 
         await asyncio.to_thread(target.unlink)
         logger.info("Deleted permanently: %s", target)
         result = {"path": str(target), "deleted": True, "trash_path": None}
-        _log_operation("delete_file_absolute", {"path": path}, result)
+        _log_operation("delete_file_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
         return result
     except PermissionError:
         result = {"error": f"Permission denied: {path}"}
-        _log_operation("delete_file_absolute", {"path": path}, result)
+        _log_operation("delete_file_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
         return result
     except Exception as exc:
         result = {"error": f"Failed to delete file: {exc}"}
-        _log_operation("delete_file_absolute", {"path": path}, result)
+        _log_operation("delete_file_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
         return result
+
+
+async def delete_dir_absolute(
+    path: str, move_to_trash: bool = True, auth_token: str | None = None
+) -> dict[str, Any]:
+    """Delete a directory recursively (absolute path) with optional trash backup.
+
+    When ``move_to_trash`` is ``True`` the entire directory tree is moved to
+    ``.nexus/backups/trash/`` so it can be recovered.  Permanent deletion is
+    destructive and requires explicit opt-out.
+    """
+    logger.info("delete_dir_absolute: %s (trash=%s)", path, move_to_trash)
+
+    if auth_token is not None:
+        ok, reason = _verify_auth_token(auth_token)
+        if not ok:
+            return {"error": reason}
+
+    blocked, reason = _is_blocked_path(path)
+    if blocked:
+        result = {"error": reason}
+        _log_operation("delete_dir_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
+        return result
+
+    try:
+        target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+        if not await asyncio.to_thread(target.exists):
+            result = {"error": f"Directory not found: {path}"}
+            _log_operation("delete_dir_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
+            return result
+        if not await asyncio.to_thread(target.is_dir):
+            result = {"error": f"Path is not a directory: {path}"}
+            _log_operation("delete_dir_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
+            return result
+
+        if move_to_trash:
+            trash_dir = await _backup_dir_for(target) / "trash"
+            await asyncio.to_thread(trash_dir.mkdir, parents=True, exist_ok=True)
+            import hashlib
+            timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+            hash_suffix = hashlib.sha256(str(target).encode()).hexdigest()[:8]
+            trash_name = f"{target.name}.{timestamp}.{hash_suffix}"
+            trash_path = trash_dir / trash_name
+            await asyncio.to_thread(shutil.move, str(target), str(trash_path))
+            logger.info("Moved directory to trash: %s -> %s", target, trash_path)
+            result = {
+                "path": str(target),
+                "deleted": True,
+                "trash_path": str(trash_path),
+                "items_moved": None,
+            }
+            _log_operation("delete_dir_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
+            return result
+
+        await asyncio.to_thread(shutil.rmtree, str(target))
+        logger.info("Deleted directory permanently: %s", target)
+        result = {"path": str(target), "deleted": True, "trash_path": None, "items_moved": None}
+        _log_operation("delete_dir_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
+        return result
+    except PermissionError:
+        result = {"error": f"Permission denied: {path}"}
+        _log_operation("delete_dir_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
+        return result
+    except Exception as exc:
+        result = {"error": f"Failed to delete directory: {exc}"}
+        _log_operation("delete_dir_absolute", {"path": path, "move_to_trash": move_to_trash}, result)
+        return result
+
+
+async def move_file_absolute(
+    src: str, dest: str, auth_token: str | None = None
+) -> dict[str, Any]:
+    """Move or rename a file or directory (absolute paths)."""
+    logger.info("move_file_absolute: %s -> %s", src, dest)
+
+    if auth_token is not None:
+        ok, reason = _verify_auth_token(auth_token)
+        if not ok:
+            return {"error": reason}
+
+    for p in (src, dest):
+        blocked, reason = _is_blocked_path(p)
+        if blocked:
+            result = {"error": reason}
+            _log_operation("move_file_absolute", {"src": src, "dest": dest}, result)
+            return result
+
+    try:
+        src_path = await asyncio.to_thread(lambda: Path(src).expanduser().resolve())
+        dest_path = await asyncio.to_thread(lambda: Path(dest).expanduser().resolve())
+
+        if not await asyncio.to_thread(src_path.exists):
+            return {"error": f"Source not found: {src}"}
+        if await asyncio.to_thread(dest_path.exists):
+            return {"error": f"Destination already exists: {dest}"}
+
+        await asyncio.to_thread(dest_path.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(shutil.move, str(src_path), str(dest_path))
+        result = {"src": str(src_path), "dest": str(dest_path), "moved": True}
+        _log_operation("move_file_absolute", {"src": src, "dest": dest}, result)
+        return result
+    except PermissionError:
+        result = {"error": f"Permission denied: {src}"}
+        _log_operation("move_file_absolute", {"src": src, "dest": dest}, result)
+        return result
+    except Exception as exc:
+        result = {"error": f"Failed to move file: {exc}"}
+        _log_operation("move_file_absolute", {"src": src, "dest": dest}, result)
+        return result
+
+
+async def copy_file_absolute(
+    src: str, dest: str, auth_token: str | None = None
+) -> dict[str, Any]:
+    """Copy a file (absolute paths).  Directories are not supported."""
+    logger.info("copy_file_absolute: %s -> %s", src, dest)
+
+    if auth_token is not None:
+        ok, reason = _verify_auth_token(auth_token)
+        if not ok:
+            return {"error": reason}
+
+    for p in (src, dest):
+        blocked, reason = _is_blocked_path(p)
+        if blocked:
+            result = {"error": reason}
+            _log_operation("copy_file_absolute", {"src": src, "dest": dest}, result)
+            return result
+
+    try:
+        src_path = await asyncio.to_thread(lambda: Path(src).expanduser().resolve())
+        dest_path = await asyncio.to_thread(lambda: Path(dest).expanduser().resolve())
+
+        if not await asyncio.to_thread(src_path.exists):
+            return {"error": f"Source not found: {src}"}
+        if await asyncio.to_thread(src_path.is_dir):
+            return {"error": "Source is a directory; use directory copy instead"}
+        if await asyncio.to_thread(dest_path.exists):
+            return {"error": f"Destination already exists: {dest}"}
+
+        await asyncio.to_thread(dest_path.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(shutil.copy2, str(src_path), str(dest_path))
+        result = {"src": str(src_path), "dest": str(dest_path), "copied": True}
+        _log_operation("copy_file_absolute", {"src": src, "dest": dest}, result)
+        return result
+    except PermissionError:
+        result = {"error": f"Permission denied: {src}"}
+        _log_operation("copy_file_absolute", {"src": src, "dest": dest}, result)
+        return result
+    except Exception as exc:
+        result = {"error": f"Failed to copy file: {exc}"}
+        _log_operation("copy_file_absolute", {"src": src, "dest": dest}, result)
+        return result
+
+
+async def get_file_info_absolute(path: str) -> dict[str, Any]:
+    """Return metadata for a file or directory (absolute path)."""
+    logger.info("get_file_info_absolute: %s", path)
+
+    blocked, reason = _is_blocked_path(path)
+    if blocked:
+        return {"error": reason}
+
+    try:
+        target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
+        if not await asyncio.to_thread(target.exists):
+            return {"error": f"Path not found: {path}"}
+
+        stat = await asyncio.to_thread(target.stat)
+        is_file = await asyncio.to_thread(target.is_file)
+        is_dir = await asyncio.to_thread(target.is_dir)
+        info = {
+            "path": str(target),
+            "name": target.name,
+            "type": "file" if is_file else ("dir" if is_dir else "other"),
+            "size": stat.st_size,
+            "created": stat.st_ctime,
+            "modified": stat.st_mtime,
+            "accessed": stat.st_atime,
+            "exists": True,
+        }
+        if is_dir:
+            try:
+                entries = await asyncio.to_thread(lambda: list(target.iterdir()))
+                info["children_count"] = len(entries)
+            except Exception:
+                info["children_count"] = None
+        return info
+    except PermissionError:
+        return {"error": f"Permission denied: {path}"}
+    except Exception as exc:
+        return {"error": f"Failed to get file info: {exc}"}
+
+
+async def read_multiple_files_absolute(
+    paths: list[str],
+    max_total_bytes: int = 5 * 1024 * 1024,
+    max_files: int = 100,
+) -> dict[str, Any]:
+    """Read multiple files in a single call (absolute paths).
+
+    Each path is validated against the security blocklist and file-size
+    limits.  Failures for individual files are collected in ``errors``
+    without aborting the whole batch, so agents can safely request many
+    files at once.
+
+    Args:
+        paths: List of absolute file paths to read.
+        max_total_bytes: Maximum combined size of all successful reads.
+        max_files: Maximum number of paths that will be processed.
+
+    Returns:
+        Dict with ``files`` (path -> content), ``errors`` (path -> reason),
+        ``read_count``, ``skipped_count``, and ``total_bytes``.
+    """
+    logger.info("read_multiple_files_absolute: %d paths", len(paths))
+
+    if not paths:
+        return {
+            "files": {},
+            "errors": {},
+            "read_count": 0,
+            "skipped_count": 0,
+            "total_bytes": 0,
+        }
+
+    if len(paths) > max_files:
+        skipped = paths[max_files:]
+        paths = paths[:max_files]
+    else:
+        skipped = []
+
+    files: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    total_bytes = 0
+
+    for raw_path in paths:
+        blocked, reason = _is_blocked_path(raw_path)
+        if blocked:
+            errors[raw_path] = reason
+            continue
+
+        try:
+            target = await asyncio.to_thread(Path(raw_path).expanduser().resolve)
+            ok, size, err = _check_file_size_limit(target)
+            if not ok:
+                errors[str(target)] = err or "File too large"
+                continue
+
+            if not await asyncio.to_thread(target.exists):
+                errors[str(target)] = f"File not found: {raw_path}"
+                continue
+            if not await asyncio.to_thread(target.is_file):
+                errors[str(target)] = f"Not a file: {raw_path}"
+                continue
+
+            content = await asyncio.to_thread(target.read_text, encoding="utf-8")
+            content_bytes = len(content.encode("utf-8"))
+            if total_bytes + content_bytes > max_total_bytes:
+                errors[str(target)] = (
+                    f"Skipped: would exceed max_total_bytes ({max_total_bytes} bytes)"
+                )
+                continue
+
+            files[str(target)] = content
+            total_bytes += content_bytes
+        except PermissionError:
+            errors[raw_path] = f"Permission denied: {raw_path}"
+        except Exception as exc:
+            errors[raw_path] = f"Failed to read file: {exc}"
+
+    for skipped_path in skipped:
+        errors[skipped_path] = f"Skipped: exceeded max_files ({max_files})"
+
+    return {
+        "files": files,
+        "errors": errors,
+        "read_count": len(files),
+        "skipped_count": len(skipped),
+        "total_bytes": total_bytes,
+    }
 
 
 async def search_files_absolute(

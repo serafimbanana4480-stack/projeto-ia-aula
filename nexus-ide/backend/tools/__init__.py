@@ -31,6 +31,7 @@ def _ensure_tools_registered() -> None:
     from backend.tools import code_executor as _code_executor  # noqa: F401
     from backend.tools import data_analysis as _data_analysis  # noqa: F401
     from backend.tools import dependency_manager as _dependency_manager  # noqa: F401
+    from backend.tools import doc_tools as _doc_tools  # noqa: F401
     from backend.tools import directory_tools as _directory_tools  # noqa: F401
     from backend.tools import email_tools as _email_tools  # noqa: F401
     from backend.tools import embeddings as _embeddings  # noqa: F401

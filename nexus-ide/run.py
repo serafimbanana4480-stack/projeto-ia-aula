@@ -20,9 +20,11 @@ os.chdir(PROJECT_ROOT)
 import uvicorn  # noqa: E402
 
 if __name__ == "__main__":
+    # reload=True causa RuntimeError/loops de subprocesso no Windows.
+    # Usar reload=False por padrao; ativar reload apenas via variavel de ambiente.
     uvicorn.run(
         "backend.orchestrator.main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,
+        reload=os.environ.get("NEXUS_UVICORN_RELOAD", "false").lower() in ("1", "true", "yes"),
     )

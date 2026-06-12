@@ -1,12 +1,12 @@
 """Memory and Knowledge System for Nexus IDE.
 
-Provides persistent, semantic memory across sessions using ChromaDB for
-vector embeddings and SQLite for structured metadata.
+Provides persistent, semantic memory across sessions using embeddings for
+vector similarity and SQLite for structured metadata.
 
 Architecture:
 - ``MemoryStore``: high-level API for storing and retrieving memories
 - ``EmbeddingService``: generates embeddings via local AirLLM or sentence-transformers
-- ``SemanticIndex``: ChromaDB-backed vector search
+- ``SemanticIndex``: in-memory vector search with hybrid keyword boost
 - ``ContextBuilder``: assembles relevant context for agent requests
 
 Key features:
@@ -15,11 +15,13 @@ Key features:
 - Automatic context window assembly
 - Memory decay and relevance scoring
 - Hybrid search (semantic + keyword)
+- Conversation memory helpers
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -37,6 +39,7 @@ class MemoryType(StrEnum):
     FILE_CONTENT = "file_content"  # file contents for search
     CONVERSATION = "conversation"  # chat turn
     TOOL_RESULT = "tool_result"  # cached tool execution result
+    DOCUMENTATION = "documentation"  # generated docs
 
 
 @dataclass
@@ -73,14 +76,18 @@ class Memory:
             "memory_id": self.memory_id,
             "memory_type": self.memory_type.value,
             "session_id": self.session_id,
+            "project_id": self.project_id,
             "content": self.content[:500],
             "summary": self.summary,
             "tags": self.tags,
             "source": self.source,
             "file_path": self.file_path,
+            "language": self.language,
             "importance": self.importance,
             "created_at": self.created_at,
+            "last_accessed_at": self.last_accessed_at,
             "access_count": self.access_count,
+            "related_memory_ids": self.related_memory_ids,
         }
 
 
@@ -125,13 +132,7 @@ class EmbeddingService:
             pass
 
         # Final deterministic fallback
-        import hashlib
-
-        h = hashlib.sha256(text.encode()).digest()
-        vec = [((b / 255.0) - 0.5) * 2.0 for b in h]
-        while len(vec) < self._dimension:
-            vec.extend(vec)
-        return vec[:self._dimension]
+        return self._fallback_embed(text)
 
     def _fallback_embed(self, text: str) -> list[float]:
         """Deterministic fallback embedding when local model is unavailable."""
@@ -163,8 +164,9 @@ class EmbeddingService:
 class MemoryStore:
     """High-level memory management with semantic search.
 
-    Stores memories in-memory with optional ChromaDB persistence.
-    For production, swap with a full vector DB backend.
+    Stores memories in-memory with optional persistence via
+    :class:`PersistentMemoryStore`. For production, swap with a full
+    vector DB backend.
     """
 
     def __init__(
@@ -189,8 +191,14 @@ class MemoryStore:
         source: str = "",
         summary: str = "",
         importance: float = 0.5,
+        file_path: str = "",
+        language: str = "",
+        related_memory_ids: list[str] | None = None,
     ) -> Memory:
         """Store a new memory with automatic embedding generation."""
+        if not content or not content.strip():
+            raise ValueError("Memory content cannot be empty")
+
         # Generate embedding
         embedding = await self._embeddings.embed(content)
 
@@ -199,11 +207,14 @@ class MemoryStore:
             session_id=session_id,
             project_id=project_id,
             content=content,
-            summary=summary or content[:100],
+            summary=summary or content[:120],
             embedding=embedding,
             tags=tags or [],
             source=source,
-            importance=importance,
+            importance=max(0.0, min(1.0, importance)),
+            file_path=file_path,
+            language=language,
+            related_memory_ids=related_memory_ids or [],
         )
 
         self._memories[memory.memory_id] = memory
@@ -227,6 +238,7 @@ class MemoryStore:
         query: str,
         *,
         session_id: str | None = None,
+        project_id: str | None = None,
         memory_type: MemoryType | None = None,
         top_k: int = 10,
         min_similarity: float = 0.3,
@@ -236,8 +248,10 @@ class MemoryStore:
 
         results: list[tuple[Memory, float]] = []
         for mem_id, mem in self._memories.items():
-            # Filter by session/type
+            # Filter by session/type/project
             if session_id and mem.session_id and mem.session_id != session_id:
+                continue
+            if project_id and mem.project_id and mem.project_id != project_id:
                 continue
             if memory_type and mem.memory_type != memory_type:
                 continue
@@ -258,12 +272,22 @@ class MemoryStore:
         self,
         query: str,
         session_id: str = "",
+        project_id: str = "",
         *,
         max_tokens: int = 4000,
         top_k: int = 5,
     ) -> str:
-        """Build a context string from relevant memories for an agent request."""
-        results = await self.search(query, session_id=session_id, top_k=top_k)
+        """Build a context string from relevant memories for an agent request.
+
+        Combines semantic search with keyword boosting, deduplicates results,
+        and respects a token budget using a simple character-to-token ratio.
+        """
+        results = await self.search(
+            query,
+            session_id=session_id or None,
+            project_id=project_id or None,
+            top_k=top_k,
+        )
 
         query_terms = {
             term
@@ -279,7 +303,11 @@ class MemoryStore:
                     continue
                 if session_id and mem.session_id and mem.session_id != session_id:
                     continue
-                content_terms = set(__import__("re").findall(r"[A-Za-z0-9_]+", mem.content.lower()))
+                if project_id and mem.project_id and mem.project_id != project_id:
+                    continue
+                content_terms = set(
+                    __import__("re").findall(r"[A-Za-z0-9_]+", mem.content.lower())
+                )
                 overlap = len(query_terms & content_terms)
                 if overlap:
                     keyword_matches.append((mem, min(1.0, 0.3 + overlap * 0.2)))
@@ -290,19 +318,83 @@ class MemoryStore:
         if not results:
             return ""
 
+        # Deduplicate by memory_id and re-rank
+        unique_results: dict[str, tuple[Memory, float]] = {}
+        for mem, score in results:
+            if mem.memory_id not in unique_results or unique_results[mem.memory_id][1] < score:
+                unique_results[mem.memory_id] = (mem, score)
+
+        ranked = sorted(unique_results.values(), key=lambda x: x[1], reverse=True)
+
         context_parts: list[str] = []
         token_estimate = 0
+        chars_per_token = 4
 
-        for mem, similarity in results:
-            snippet = mem.content[:500]
-            token_estimate += len(snippet.split())
-            if token_estimate > max_tokens:
+        for mem, similarity in ranked:
+            snippet = mem.content[:600]
+            estimated = math.ceil(len(snippet) / chars_per_token)
+            if token_estimate + estimated > max_tokens:
                 break
-            context_parts.append(
-                f"[Memory {mem.memory_id[:8]} | relevance={similarity:.2f}]: {snippet}"
-            )
+            token_estimate += estimated
+
+            header = f"[Memory {mem.memory_id[:8]}"
+            if mem.memory_type:
+                header += f" | type={mem.memory_type.value}"
+            if mem.source:
+                header += f" | source={mem.source}"
+            header += f" | relevance={similarity:.2f}]"
+            context_parts.append(f"{header}:\n{snippet}")
 
         return "\n\n".join(context_parts)
+
+    async def remember_conversation(
+        self,
+        user_message: str,
+        assistant_message: str,
+        *,
+        session_id: str = "",
+        project_id: str = "",
+        source: str = "",
+        importance: float = 0.5,
+    ) -> tuple[Memory, Memory]:
+        """Store a user/assistant exchange as conversation memories."""
+        user_mem = await self.store(
+            content=f"User: {user_message}",
+            memory_type=MemoryType.CONVERSATION,
+            session_id=session_id,
+            project_id=project_id,
+            source=source,
+            tags=["user_query", source.lower() if source else "chat"],
+            importance=importance,
+        )
+        assistant_mem = await self.store(
+            content=f"Assistant: {assistant_message[:2000]}",
+            memory_type=MemoryType.CONVERSATION,
+            session_id=session_id,
+            project_id=project_id,
+            source=source,
+            tags=["assistant_response", source.lower() if source else "chat"],
+            importance=max(0.0, importance - 0.1),
+            related_memory_ids=[user_mem.memory_id],
+        )
+        user_mem.related_memory_ids.append(assistant_mem.memory_id)
+        return user_mem, assistant_mem
+
+    async def recall_for_query(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        project_id: str = "",
+        top_k: int = 5,
+    ) -> str:
+        """Convenience alias for ``get_context`` used by agents."""
+        return await self.get_context(
+            query,
+            session_id=session_id,
+            project_id=project_id,
+            top_k=top_k,
+        )
 
     async def get_by_tag(self, tag: str, limit: int = 20) -> list[Memory]:
         """Retrieve memories by tag."""
@@ -313,6 +405,10 @@ class MemoryStore:
     async def get_session_memories(self, session_id: str) -> list[Memory]:
         """Get all memories for a session."""
         return [m for m in self._memories.values() if m.session_id == session_id]
+
+    async def get_project_memories(self, project_id: str) -> list[Memory]:
+        """Get all memories scoped to a project."""
+        return [m for m in self._memories.values() if m.project_id == project_id]
 
     async def list_all(self, limit: int = 1000) -> list[Memory]:
         """Return all memories ordered by creation time (newest first)."""
@@ -350,20 +446,23 @@ class MemoryStore:
         }
 
     def _evict_least_important(self) -> None:
-        """Evict the least important memory to stay under the limit."""
+        """Evict the least valuable memory to stay under the limit.
+
+        We maximise a retention score: important + recently accessed + recent
+        memories are kept. The memory with the lowest score is evicted first.
+        """
         if not self._memories:
             return
 
-        # Score: lower importance + older + less accessed = evict first
         now = time.time()
         scored = []
         for mem_id, mem in self._memories.items():
-            age_days = (now - mem.created_at) / 86400
-            score = (
-                mem.importance * 0.5
-                + (1.0 / (mem.access_count + 1)) * 0.3
-                + (1.0 / (age_days + 1)) * 0.2
-            )
+            age_days = max(0.0, (now - mem.created_at) / 86400)
+            # Access component saturates quickly: 0 accesses -> 0, many -> ~0.3
+            access_score = mem.access_count / (mem.access_count + 10) * 0.3
+            # Age component: recent memories get the full 0.2, old ones decay
+            age_score = (1.0 / (age_days + 1.0)) * 0.2
+            score = mem.importance * 0.5 + access_score + age_score
             scored.append((mem_id, score))
 
         scored.sort(key=lambda x: x[1])

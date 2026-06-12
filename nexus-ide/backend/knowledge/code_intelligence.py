@@ -315,3 +315,132 @@ def get_code_indexer() -> CodeIndexer:
     if _code_indexer is None:
         _code_indexer = CodeIndexer()
     return _code_indexer
+
+
+# ---------------------------------------------------------------------------
+# Tool registry integration (optional — loaded when tools are imported)
+# ---------------------------------------------------------------------------
+
+
+def _register_code_intelligence_tools() -> None:
+    """Register symbol-search tools if the registry is available."""
+    try:
+        from backend.tools.registry import ToolSpec, register_tool
+    except ImportError:
+        return
+
+    async def _search_symbols_tool(
+        query: str = "",
+        project_path: str = ".",
+        kind: str = "",
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Search the AST symbol index for definitions matching ``query``."""
+        if not query.strip():
+            return {"error": "Query cannot be empty."}
+
+        indexer = get_code_indexer()
+        if not indexer._files:
+            indexer.index_directory(project_path)
+
+        matches: list[Symbol]
+        if kind:
+            matches = [
+                sym
+                for sym in indexer.search_by_kind(kind)
+                if query.lower() in sym.name.lower()
+            ]
+        else:
+            matches = [
+                sym
+                for sym_name, syms in indexer._symbols.items()
+                if query.lower() in sym_name.lower()
+                for sym in syms
+            ]
+
+        matches = matches[:limit]
+        return {
+            "query": query,
+            "kind": kind or "any",
+            "results": [sym.to_dict() for sym in matches],
+            "total_found": len(matches),
+        }
+
+    async def _index_symbols_tool(
+        project_path: str = ".",
+        force_reindex: bool = False,
+    ) -> dict[str, Any]:
+        """Index Python symbols in ``project_path``."""
+        indexer = get_code_indexer()
+        if force_reindex:
+            indexer._files.clear()
+            indexer._symbols.clear()
+        count = indexer.index_directory(project_path)
+        return {"files_indexed": count, **indexer.stats()}
+
+    register_tool(
+        ToolSpec(
+            name="search_symbols",
+            description=(
+                "AST-aware symbol search over the project. "
+                "Finds function/class/variable definitions by name or kind. "
+                "Index the project first with index_symbols if no results are returned."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Symbol name or substring to search for",
+                    },
+                    "project_path": {
+                        "type": "string",
+                        "default": ".",
+                        "description": "Project root path",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Optional symbol kind filter (function, class, variable, import)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Maximum number of results",
+                    },
+                },
+                "required": ["query"],
+            },
+            handler=_search_symbols_tool,
+        )
+    )
+
+    register_tool(
+        ToolSpec(
+            name="index_symbols",
+            description=(
+                "Index Python source files in a project for AST symbol search. "
+                "This is lightweight and complements the semantic embedding index."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "project_path": {
+                        "type": "string",
+                        "default": ".",
+                        "description": "Project root path to index",
+                    },
+                    "force_reindex": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Rebuild the symbol index from scratch",
+                    },
+                },
+                "required": [],
+            },
+            handler=_index_symbols_tool,
+        )
+    )
+
+
+_register_code_intelligence_tools()

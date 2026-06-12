@@ -19,14 +19,16 @@ import re
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, Request
-from backend.middleware.auth import require_auth
 from fastapi.responses import StreamingResponse
+
 from backend.agents.base import AgentRequest
-from backend.config.settings import get_model_config, get_settings, load_models_config
+from backend.config.settings import get_mode_config, get_settings, load_models_config
 from backend.llm.multi_llm_manager import MultiLLMManager
+from backend.middleware.auth import require_auth
 from backend.middleware.rate_limit import limiter
 from backend.models.api import ChatRequest, RoutingDecision, StreamEvent
 from backend.orchestrator.fallback import invoke_with_fallback
@@ -249,11 +251,28 @@ async def _run_pipeline(
     user_model = getattr(req, "model", "") or ""
     project_path = getattr(req, "project_path", "") or ""
 
-    # Default effective message; auto mode may prepend an autonomy prefix.
+    # Load mode configuration once; every mode can contribute a system-prompt
+    # addon, iteration budget, and thinking preference.
+    mode_cfg = get_mode_config(mode)
+    if mode == "agent":
+        # The default "agent" mode is neutral: honour explicit model tiers or
+        # smart routing without injecting a mode-specific addon.
+        mode_addon = ""
+        mode_max_iterations = 7
+        mode_enable_thinking = False
+    else:
+        mode_addon = (mode_cfg.get("system_prompt_addon") or "").strip()
+        mode_max_iterations = int(mode_cfg.get("max_iterations", 7))
+        mode_enable_thinking = bool(mode_cfg.get("enable_thinking", False))
+
     effective_message = req.message
 
     # Load history early so it's available for plan mode and agent invocation.
     history = await context.get_history(req.session_id)
+
+    # Routing decision placeholder; filled by every branch that reaches the
+    # single-agent invocation path.
+    decision: RoutingDecision | None = None
 
     # When the user explicitly picks a chat mode (anything other than the
     # default "agent" mode), the mode always wins over the selected model tier.
@@ -285,7 +304,7 @@ async def _run_pipeline(
             )
             # Stream the plan as structured output
             yield _sse(StreamEvent(type="agent_started", agent="ARCHITECT"))
-            plan_text = f"# Execution Plan\n\n"
+            plan_text = "# Execution Plan\n\n"
             plan_text += f"**Objective:** {plan.title or req.message}\n\n"
             for i, step in enumerate(plan.steps, 1):
                 plan_text += f"## Step {i}: {step.name}\n"
@@ -312,27 +331,42 @@ async def _run_pipeline(
                 task_type="planning",
             )
     elif mode == "auto":
-        # Autonomous mode: delegate to CODER with an autonomous system prefix.
-        # The full OrchestrationEngine is powerful but too heavy for the small
-        # local models used in this environment and does not stream progress
-        # back through the SSE channel, which makes the UI hang/reconnect.
-        # Using CODER keeps the stream alive and gives the user full visibility.
-        auto_prefix = (
-            "[MODO AUTÓNOMO] Atua como engenheiro autónomo. "
-            "Analisa o pedido, planeia os passos necessários, executa as ferramentas "
-            "(write_file_absolute para caminhos absolutos como C:\\Users\\..., "
-            "write_file para caminhos relativos, list_dir, read_file, execute_code), "
-            "verifica o resultado e responde com um resumo profissional do que foi feito.\n\n"
-        )
-        decision = RoutingDecision(
-            primary_agent="CODER",
-            routing_confidence=1.0,
-            routing_reason="explicit-mode:auto",
-            thinking_mode="iterative",
-            context_needed="high",
-            task_type="implementation",
-        )
-        effective_message = auto_prefix + req.message
+        # Auto mode: smart routing picks the best primary agent, then that agent
+        # acts autonomously using tools and sub-agent consultation. The mode
+        # configuration now supplies the autonomy instructions via a system-prompt
+        # addon, keeping the user message clean and centralising behaviour.
+        try:
+            decision = await _decide_route(req.message, llm_client)
+            # Auto mode needs an agent with tool support. Upgrade lightweight picks.
+            if decision.primary_agent in ("MICRO", "DOCUMENTER"):
+                logger.info(
+                    "Auto mode upgraded agent %s -> CODER for tool autonomy",
+                    decision.primary_agent,
+                )
+                decision = decision.model_copy(
+                    update={
+                        "primary_agent": "CODER",
+                        "routing_reason": f"auto:upgraded-from-{decision.primary_agent}",
+                    }
+                )
+            decision = decision.model_copy(
+                update={
+                    "routing_reason": f"auto:{decision.routing_reason}",
+                    "thinking_mode": "iterative",
+                    "context_needed": "high",
+                    "task_type": "autonomous",
+                }
+            )
+        except Exception as exc:
+            logger.warning("Auto routing failed, falling back to CODER: %s", exc)
+            decision = RoutingDecision(
+                primary_agent="CODER",
+                routing_confidence=1.0,
+                routing_reason="auto:fallback-coder",
+                thinking_mode="iterative",
+                context_needed="high",
+                task_type="autonomous",
+            )
     elif mode == "debug":
         decision = RoutingDecision(
             primary_agent="DEBUGGER",
@@ -412,6 +446,9 @@ async def _run_pipeline(
                 agents=swarm_agents,
                 strategy=swarm_strategy,
                 project_path=project_path,
+                history=history,
+                max_iterations=mode_max_iterations,
+                enable_thinking=mode_enable_thinking,
             )
 
             for ar in result.agent_results:
@@ -509,15 +546,36 @@ async def _run_pipeline(
         effective_client = llm_client.providers.get(req.provider) or llm_client
 
     # 3. Resolve agent + build per-agent request factory.
+    # Compose the system-prompt addon for this mode. Include routing metadata so
+    # the primary agent knows which secondary agents the router considered useful.
+    enriched_addon = mode_addon
+    if decision is not None:
+        routing_info = (
+            f"\n\n[ROUTING INFO] Primary agent: {decision.primary_agent}. "
+            f"Reason: {decision.routing_reason}. "
+            f"Confidence: {decision.routing_confidence:.2f}. "
+            f"Secondary agents suggested: {', '.join(decision.secondary_agents) or 'none'}."
+        )
+        enriched_addon += routing_info
+
     def make_invocation(agent_name: str):
         async def invoke() -> AsyncIterator[str]:
             agent = resolve(registry, agent_name)  # type: ignore[arg-type]
+            agent_context: dict[str, Any] = {}
+            if project_path:
+                agent_context["project_path"] = project_path
+            if enriched_addon:
+                agent_context["_system_addon"] = enriched_addon
+
             agent_req = AgentRequest(
                 session_id=req.session_id,
                 query=effective_message,
                 client=effective_client,
                 history=history,
                 project_path=project_path,
+                context=agent_context,
+                max_iterations=mode_max_iterations,
+                enable_thinking=mode_enable_thinking,
             )
             return agent.run(agent_req)
 
@@ -592,29 +650,17 @@ async def _run_pipeline(
 
     # 7. Store in semantic memory for future recall (best-effort, non-blocking).
     try:
-        from backend.knowledge.memory import MemoryType, get_memory_store
+        from backend.knowledge.memory import get_memory_store
 
         mem_store = get_memory_store()
-
-        # Store the user query
-        await mem_store.store(
-            content=f"User: {req.message}",
-            memory_type=MemoryType.CONVERSATION,
-            session_id=req.session_id,
-            source=decision.primary_agent,
-            tags=["user_query", decision.primary_agent],
-            importance=0.6,
-        )
-
-        # Store the assistant response (truncated for efficiency)
         if full.strip():
-            await mem_store.store(
-                content=f"Assistant ({outcome.used_agent}): {full[:2000]}",
-                memory_type=MemoryType.CONVERSATION,
+            await mem_store.remember_conversation(
+                user_message=req.message,
+                assistant_message=full,
                 session_id=req.session_id,
+                project_id=project_path,
                 source=outcome.used_agent,
-                tags=["assistant_response", outcome.used_agent],
-                importance=0.5,
+                importance=0.6,
             )
     except Exception as exc:
         logger.debug("Semantic memory store failed (non-critical): %s", exc)

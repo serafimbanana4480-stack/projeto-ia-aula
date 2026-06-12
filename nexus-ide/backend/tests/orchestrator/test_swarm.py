@@ -16,6 +16,16 @@ class FakeAgent:
             yield token
 
 
+class FakeLLM:
+    """Fake LLM client that returns a simple synthesis."""
+
+    async def chat_complete(self, model, messages, options=None):
+        return "Synthesised answer from swarm."
+
+    async def chat_stream(self, model, messages, options=None):
+        yield "stream token"
+
+
 @pytest.fixture
 def fake_registry():
     return {
@@ -23,10 +33,6 @@ def fake_registry():
         "ANALYZER": FakeAgent("ANALYZER"),
         "DEBUGGER": FakeAgent("DEBUGGER"),
     }
-
-
-class FakeLLM:
-    pass
 
 
 @pytest.mark.asyncio
@@ -42,6 +48,9 @@ async def test_swarm_divide(fake_registry):
     assert result.strategy_used == "divide"
     assert len(result.agent_results) > 0
     assert result.confidence > 0
+    # With fake agents the subtask planner returns raw tokens, so the final
+    # answer may be the single agent output. Just ensure a non-empty answer.
+    assert result.final_answer.strip()
 
 
 @pytest.mark.asyncio
@@ -83,3 +92,37 @@ async def test_swarm_debate(fake_registry):
     )
     assert isinstance(result, SwarmResult)
     assert result.strategy_used == "debate"
+
+
+@pytest.mark.asyncio
+async def test_swarm_no_valid_agents():
+    swarm = SwarmOrchestrator(FakeLLM(), {}, None, max_agents=3)
+    result = await swarm.execute_swarm(
+        objective="Any task",
+        session_id="test-5",
+        agents=["MISSING"],
+        strategy="divide",
+    )
+    assert isinstance(result, SwarmResult)
+    assert result.confidence == 0.0
+    assert "No valid agents" in result.final_answer
+
+
+@pytest.mark.asyncio
+async def test_swarm_adaptive_selects_strategy(fake_registry):
+    swarm = SwarmOrchestrator(FakeLLM(), fake_registry, None, max_agents=3)
+    result = await swarm.execute_swarm(
+        objective="Compare REST vs GraphQL for our API",
+        session_id="test-adaptive",
+        agents=["CODER", "ANALYZER"],
+        strategy="adaptive",
+    )
+    assert isinstance(result, SwarmResult)
+    assert result.strategy_used == "debate"
+
+
+def test_pick_agent_for_task():
+    swarm = SwarmOrchestrator(FakeLLM(), {}, None, max_agents=3)
+    assert swarm._pick_agent_for_task("Implement the auth module", ["CODER", "ANALYZER"]) == "CODER"
+    assert swarm._pick_agent_for_task("Security audit and code review", ["CODER", "ANALYZER"]) == "ANALYZER"
+    assert swarm._pick_agent_for_task("Debug the failing test", ["CODER", "DEBUGGER"]) == "DEBUGGER"

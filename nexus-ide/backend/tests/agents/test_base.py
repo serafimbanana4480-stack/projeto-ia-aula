@@ -22,8 +22,11 @@ class TestAgentAction:
             "execute_code",
             "consult_agent",
             "search_codebase",
+            "search_symbols",
+            "index_symbols",
             "read_docs",
             "recall_context",
+            "store_memory",
             "analyze_data",
             "generate_report",
             "scaffold_project",
@@ -170,7 +173,7 @@ class TestAgentBaseContract:
                 yield "ok"
 
         agent = T()
-        assert agent.resolve_model_id().startswith("llama3.1")
+        assert agent.resolve_model_id() == "qwen2.5:0.5b"
         assert "ROUTER" in agent.system_prompt()
 
     def test_action_tools_mapping_uses_registered_tool_names(self) -> None:
@@ -180,7 +183,7 @@ class TestAgentBaseContract:
         for action, (tool_name, _example) in AgentBase._ACTION_TOOLS.items():
             assert tool_name == action.value or tool_name in {
                 "read_file", "write_file", "execute_code", "web_search",
-                "fetch_url", "consult_agent", "recall_context",
+                "fetch_url", "consult_agent", "recall_context", "store_memory",
                 "search_codebase", "data_analysis", "report_generation",
             }, f"Action {action.value} maps to unknown tool {tool_name}"
 

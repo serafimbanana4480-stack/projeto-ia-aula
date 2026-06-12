@@ -135,7 +135,10 @@ def _build_tree(root: Path, items: list[dict]) -> list[FileTreeEntry]:
     entries: list[FileTreeEntry] = []
 
     for item in sorted(items, key=lambda row: row["path"]):
-        relative = Path(item["path"])
+        try:
+            relative = Path(item["path"]).relative_to(root)
+        except ValueError:
+            relative = Path(item["path"])
         parts = relative.parts
         node = FileTreeEntry(
             path=item["path"],
@@ -186,7 +189,7 @@ async def list_files_endpoint(req: FileListRequest, _user: dict = Depends(requir
 @router.post("/files/write")
 async def write_file_endpoint(req: FileWriteRequest, _user: dict = Depends(require_auth)) -> dict:
     if Path(req.path).is_absolute():
-        return await write_file_absolute(req.path, req.content)
+        return await write_file_absolute(req.path, req.content, overwrite=req.overwrite)
     return await write_file(
         path=req.path,
         content=req.content,

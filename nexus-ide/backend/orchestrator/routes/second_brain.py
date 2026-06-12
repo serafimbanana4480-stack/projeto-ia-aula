@@ -42,15 +42,14 @@ async def ingest(
             title = title or fetched.get("title", url)
 
     memory_id = str(uuid.uuid4()).replace("-", "")[:16]
-    conn = _get_db(request)
-    conn.execute(
-        """INSERT INTO persistent_memories
-           (id, user_id, content, summary, memory_type, tags, source, importance)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (memory_id, user_id, content, title, item_type, json.dumps(tags), url or "manual", 0.7),
-    )
-    conn.commit()
-    conn.close()
+    with _get_db(request) as conn:
+        conn.execute(
+            """INSERT INTO persistent_memories
+               (id, user_id, content, summary, memory_type, tags, source, importance)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (memory_id, user_id, content, title, item_type, json.dumps(tags), url or "manual", 0.7),
+        )
+        conn.commit()
     return {"memory_id": memory_id, "type": item_type, "title": title, "stored": True}
 
 
@@ -62,17 +61,16 @@ async def search_brain(
 ) -> dict[str, Any]:
     """Search the Second Brain."""
     user_id = _user.get("user_id", "")
-    conn = _get_db(request)
-    cursor = conn.execute(
-        """SELECT id, content, summary, memory_type, tags, source, importance, created_at
-           FROM persistent_memories
-           WHERE user_id = ? AND (content LIKE ? OR summary LIKE ? OR tags LIKE ?)
-           ORDER BY importance DESC, created_at DESC
-           LIMIT 20""",
-        (user_id, f"%{q}%", f"%{q}%", f"%{q}%"),
-    )
-    rows = cursor.fetchall()
-    conn.close()
+    with _get_db(request) as conn:
+        cursor = conn.execute(
+            """SELECT id, content, summary, memory_type, tags, source, importance, created_at
+               FROM persistent_memories
+               WHERE user_id = ? AND (content LIKE ? OR summary LIKE ? OR tags LIKE ?)
+               ORDER BY importance DESC, created_at DESC
+               LIMIT 20""",
+            (user_id, f"%{q}%", f"%{q}%", f"%{q}%"),
+        )
+        rows = cursor.fetchall()
     memories = []
     for r in rows:
         memories.append({
@@ -95,17 +93,16 @@ async def list_memories(
 ) -> dict[str, Any]:
     """List all memories."""
     user_id = _user.get("user_id", "")
-    conn = _get_db(request)
-    cursor = conn.execute(
-        """SELECT id, content, summary, memory_type, tags, source, importance, created_at
-           FROM persistent_memories
-           WHERE user_id = ?
-           ORDER BY created_at DESC
-           LIMIT 100""",
-        (user_id,),
-    )
-    rows = cursor.fetchall()
-    conn.close()
+    with _get_db(request) as conn:
+        cursor = conn.execute(
+            """SELECT id, content, summary, memory_type, tags, source, importance, created_at
+               FROM persistent_memories
+               WHERE user_id = ?
+               ORDER BY created_at DESC
+               LIMIT 100""",
+            (user_id,),
+        )
+        rows = cursor.fetchall()
     memories = []
     for r in rows:
         memories.append({
@@ -129,11 +126,10 @@ async def delete_memory(
 ) -> dict[str, Any]:
     """Delete a memory."""
     user_id = _user.get("user_id", "")
-    conn = _get_db(request)
-    conn.execute(
-        "DELETE FROM persistent_memories WHERE id = ? AND user_id = ?",
-        (memory_id, user_id),
-    )
-    conn.commit()
-    conn.close()
+    with _get_db(request) as conn:
+        conn.execute(
+            "DELETE FROM persistent_memories WHERE id = ? AND user_id = ?",
+            (memory_id, user_id),
+        )
+        conn.commit()
     return {"deleted": True, "memory_id": memory_id}

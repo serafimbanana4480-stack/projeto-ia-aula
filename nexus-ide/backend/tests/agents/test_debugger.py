@@ -17,7 +17,13 @@ class TestDebuggerAgent:
         agent = DebuggerAgent()
         expected = {
             AgentAction.READ_FILE,
+            AgentAction.READ_FILE_ABSOLUTE,
             AgentAction.EXECUTE_CODE,
             AgentAction.SEARCH_CODEBASE,
+            AgentAction.SEARCH_SYMBOLS,
+            AgentAction.INDEX_SYMBOLS,
+            AgentAction.CONSULT_AGENT,
+            AgentAction.RECALL_CONTEXT,
+            AgentAction.STORE_MEMORY,
         }
         assert agent.supported_actions == expected

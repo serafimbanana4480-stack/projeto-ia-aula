@@ -282,6 +282,11 @@ A NEXUS IDE implementa **múltiplas camadas de defesa**:
 | `/api/metrics/current` | GET | Métricas do sistema em tempo real |
 | `/api/metrics/history` | GET | Histórico de métricas |
 | `/api/embeddings/index` | POST | Indexar codebase para RAG |
+| `/api/embeddings/search` | POST | Pesquisar codebase semanticamente |
+| `/api/memories` | POST | Guardar memória semântica |
+| `/api/memories/search` | POST | Pesquisar memórias semanticamente |
+| `/api/memories` | GET | Listar memórias |
+| `/api/memories/{id}` | DELETE | Apagar memória |
 | `/api/files/read` | POST | Ler ficheiro |
 | `/api/files/write` | POST | Escrever ficheiro |
 | `/api/terminal/execute` | POST | Executar comando shell |
@@ -312,6 +317,7 @@ A NEXUS IDE implementa **múltiplas camadas de defesa**:
 | [`docs/FAQ.md`](./docs/FAQ.md) | Perguntas frequentes |
 | [`docs/troubleshooting.md`](./docs/troubleshooting.md) | Resolução de problemas |
 | [`docs/developer-setup.md`](./docs/developer-setup.md) | Setup detalhado de desenvolvimento |
+| [`docs/memory-and-rag.md`](./docs/memory-and-rag.md) | Memória, RAG e code intelligence |
 | [`planeamento/`](./planeamento/) | 15 documentos de planeamento técnico |
 | [`.archive/`](./.archive/) | Relatórios de auditoria históricos |
 
@@ -338,7 +344,9 @@ A NEXUS IDE implementa **múltiplas camadas de defesa**:
 - ✅ Autenticação JWT (registo, login, tokens)
 - ✅ Execução sandboxed de código (Docker + Python AST)
 - ✅ Pesquisa web integrada (DuckDuckGo)
-- ✅ Embeddings semânticos / RAG
+- ✅ Embeddings semânticos / RAG com indexação incremental
+- ✅ Code intelligence — pesquisa de símbolos AST
+- ✅ Memórias semânticas persistentes + REST API
 - ✅ File manager com path safety + locks inter-processo
 - ✅ Agent pool com concorrência controlada
 - ✅ Auto-correction loop com 7 testes E2E
@@ -375,4 +383,4 @@ Ver [`CONTRIBUTING.md`](./CONTRIBUTING.md) para detalhes completos.
 
 Este é um projeto educacional e de demonstração de uma IDE assistida por IA com arquitetura de agentes especializados. Todo o processamento de IA é feito localmente via Ollama, garantindo total privacidade dos dados.
 
-**Última atualização**: 2026-06-08
+**Última atualização**: 2026-06-12

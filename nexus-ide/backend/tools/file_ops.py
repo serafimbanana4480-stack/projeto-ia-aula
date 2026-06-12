@@ -10,15 +10,22 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from backend.core.file_locks import DeadlockError, FileLockManager, LockError
+from backend.core.file_locks import FileLockManager
 from backend.core.workspace import WorkspaceManager
 from backend.persistence.db import propose_change
 from backend.tools.file_api import (
-    _validate_relative_path as _validate_path,
-    delete as _delete,
     list_files as _list,
+)
+from backend.tools.file_api import (
     read as _read,
+)
+from backend.tools.file_api import (
+    read_multiple as _read_multiple,
+)
+from backend.tools.file_api import (
     search as _search,
+)
+from backend.tools.file_api import (
     write as _write,
 )
 from backend.tools.registry import ToolSpec, register_tool
@@ -75,7 +82,10 @@ async def write_file(
     trust verification and ``propose_change`` logging.
     """
     manager = WorkspaceManager(project_path)
-    full_path = manager._resolve_path(path)
+    try:
+        full_path = manager._resolve_path(path)
+    except PermissionError as exc:
+        return {"error": str(exc)}
 
     # Block dangerous executable extensions
     if full_path.suffix.lower() in _BLOCKED_EXTENSIONS:
@@ -119,6 +129,25 @@ async def write_file(
     return result
 
 
+async def read_multiple_files(
+    paths: list[str],
+    project_path: str = ".",
+    owner: str = "anonymous",
+    timeout_seconds: float = 30.0,
+    max_total_bytes: int = 5 * 1024 * 1024,
+    max_files: int = 100,
+) -> dict:
+    """Read multiple files in one call. Backward-compatible wrapper."""
+    return await _read_multiple(
+        paths,
+        project_path=project_path,
+        owner=owner,
+        timeout_seconds=timeout_seconds,
+        max_total_bytes=max_total_bytes,
+        max_files=max_files,
+    )
+
+
 async def list_dir(
     path: str = ".", project_path: str = ".", recursive: bool = False
 ) -> dict:
@@ -156,6 +185,40 @@ register_tool(
             "required": ["path"],
         },
         handler=read_file,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="read_multiple_files",
+        description="Read multiple files from the project workspace in one call",
+        schema={
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of file paths relative to project root",
+                },
+                "project_path": {
+                    "type": "string",
+                    "default": ".",
+                    "description": "Project root path",
+                },
+                "max_total_bytes": {
+                    "type": "integer",
+                    "default": 5 * 1024 * 1024,
+                    "description": "Maximum combined bytes to return",
+                },
+                "max_files": {
+                    "type": "integer",
+                    "default": 100,
+                    "description": "Maximum number of files to read",
+                },
+            },
+            "required": ["paths"],
+        },
+        handler=read_multiple_files,
     )
 )
 

@@ -212,12 +212,12 @@ class TestFileLocksDirect:
 class TestFileLocksAPI:
     """Test file locking behaviour through the REST API."""
 
-    def test_parallel_writes_via_api(self, client: TestClient, tmp_project: Path, monkeypatch):
-        """Write to same file from two parallel requests via /api/files/write.
+    @pytest.mark.asyncio
+    async def test_parallel_writes_via_api(self, client: TestClient, tmp_project: Path, monkeypatch):
+        """Write to same file from two parallel async requests via /api/files/write.
 
-        Because the API uses write locks internally, one should complete first
-        and the second should overwrite (or error) — we verify the file ends up
-        with one of the two contents and that no corruption occurs.
+        Using httpx.AsyncClient avoids blocking the shared TestClient event loop
+        across threads, which previously caused hangs/timeouts on Windows.
         """
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_project.parent / "api_test.db")
         init_db()
@@ -233,12 +233,16 @@ class TestFileLocksAPI:
         target = str(tmp_project / "test_file.txt")
         Path(target).write_text("original", encoding="utf-8")
 
-        responses: list[dict] = []
-        errors: list[str] = []
+        import httpx
+        from backend.orchestrator.main import app
 
-        def writer(content: str):
-            try:
-                resp = client.post(
+        token = create_access_token({"sub": "test-user", "email": "test@test.com"})
+        async with httpx.AsyncClient(
+            app=app, base_url="http://testserver", headers={"Authorization": f"Bearer {token}"}
+        ) as ac:
+
+            async def writer(content: str):
+                return await ac.post(
                     "/api/files/write",
                     json={
                         "path": "test_file.txt",
@@ -247,19 +251,17 @@ class TestFileLocksAPI:
                         "session_id": "sess-123",
                     },
                 )
-                responses.append({"status": resp.status_code, "json": resp.json()})
-            except Exception as e:
-                errors.append(str(e))
 
-        t1 = threading.Thread(target=writer, args=("CONTENT-A",))
-        t2 = threading.Thread(target=writer, args=("CONTENT-B",))
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
+            resp_a, resp_b = await asyncio.gather(
+                writer("CONTENT-A"), writer("CONTENT-B")
+            )
+
+        responses = [
+            {"status": resp_a.status_code, "json": resp_a.json()},
+            {"status": resp_b.status_code, "json": resp_b.json()},
+        ]
 
         # Both requests should succeed (one waits, then overwrites)
-        assert len(responses) == 2, f"Expected 2 responses, got {len(responses)}, errors: {errors}"
         for r in responses:
             assert r["status"] == 200, f"Unexpected status: {r}"
 

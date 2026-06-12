@@ -23,8 +23,14 @@ class DebuggerAgent(AgentBase):
     prompt_file = "debugger"
     supported_actions = {
         AgentAction.READ_FILE,
+        AgentAction.READ_FILE_ABSOLUTE,
         AgentAction.EXECUTE_CODE,
         AgentAction.SEARCH_CODEBASE,
+        AgentAction.SEARCH_SYMBOLS,
+        AgentAction.INDEX_SYMBOLS,
+        AgentAction.CONSULT_AGENT,
+        AgentAction.RECALL_CONTEXT,
+        AgentAction.STORE_MEMORY,
     }
 
     async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:

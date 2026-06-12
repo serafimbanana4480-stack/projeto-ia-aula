@@ -90,10 +90,17 @@ _BLOCKED_SYSTEM_PATHS = {
     "/bin",
     "/lib",
     "/lib64",
+    "C:\\Windows",
     "C:\\Windows\\System32",
     "C:\\Windows\\SysWOW64",
     "C:\\Windows\\System",
+    "C:\\ProgramData",
     "C:\\ProgramData\\Microsoft\\Windows",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
+    "/Windows",
+    "/ProgramData",
+    "/Program Files",
 }
 
 # Sensitive path components that are blocked anywhere in the resolved path
@@ -154,6 +161,9 @@ _BLOCKED_SENSITIVE_PATHS: set[str] = {
     ".env.local",
     ".env.production",
     ".env.backup",
+    ".env.development",
+    ".env.test",
+    ".env.*",
     ".local/share/keyrings",
     ".config/Keychains",
     ".gnupg",
@@ -198,19 +208,25 @@ def _log_operation(
     tool_name: str,
     args: dict[str, Any],
     result: dict[str, Any],
+    session_id: str | None = None,
+    duration_ms: int | None = None,
 ) -> None:
-    """Log a workspace operation to the audit database."""
+    """Log a workspace operation to the audit database.
+
+    ``duration_ms`` is recorded when supplied so callers can measure real
+    elapsed time.  If omitted it defaults to ``0`` for backward compatibility.
+    """
     try:
         from backend.persistence.db import log_tool_execution
 
         log_tool_execution(
-            session_id=None,
+            session_id=session_id,
             tool_name=tool_name,
             args=args,
             result=result,
             success="error" not in result,
             error=result.get("error"),
-            duration_ms=0,
+            duration_ms=duration_ms if duration_ms is not None else 0,
         )
     except Exception:
         logger.exception("Failed to log workspace operation to database")
@@ -289,11 +305,12 @@ def _is_blocked_path(path: str) -> tuple[bool, str]:
 
     # 1. Blocked system paths (prefix matching) — checked FIRST so blocked
     #    always wins even when the path is inside an allowed base.
-    for blocked in _BLOCKED_SYSTEM_PATHS:
+    # Longer paths are checked first so the most specific match wins.
+    for blocked in sorted(_BLOCKED_SYSTEM_PATHS, key=len, reverse=True):
         bpath = Path(blocked).resolve() if ":" not in blocked else Path(blocked)
         try:
             resolved.relative_to(bpath)
-            return True, f"Access to system path '{blocked}' is blocked"
+            return True, f"Access to system path '{bpath}' is blocked"
         except ValueError:
             continue
 
@@ -308,9 +325,16 @@ def _is_blocked_path(path: str) -> tuple[bool, str]:
     # These are multi-segment paths like .config/gcloud, AppData/Roaming/Mozilla.
     # We reconstruct the path string using forward slashes for consistent matching.
     path_str_normalized = str(resolved).lower().replace("\\", "/")
+    parts_lower = [p.lower() for p in resolved.parts]
     for sensitive in _BLOCKED_SENSITIVE_PATHS:
-        # Skip single-component entries already handled above
+        # Single-component entries (including wildcard .env.*) are handled by
+        # checking individual path parts.
         if "/" not in sensitive:
+            if sensitive == ".env.*":
+                for part in parts_lower:
+                    if part.startswith(".env.") and len(part) > len(".env."):
+                        return True, "Access to sensitive env file is blocked"
+                continue
             continue
         sens_normalized = sensitive.lower().replace("\\", "/")
         # Check if the normalized path contains this sensitive subpath
@@ -745,3 +769,52 @@ def _is_safe_git_remote(url: str) -> bool:
         if host in url_lower:
             return True
     return False
+
+
+def _is_allowed_path(path: str) -> bool:
+    """Public helper: return True if *path* is inside an allowed base.
+
+    This is the inverse of :func:`_is_blocked_path` but only checks allowed
+    bases (not blocked system paths).  Useful for callers that already know
+    the path is not sensitive/system and just want the implicit-deny check.
+    """
+    blocked, _ = _is_blocked_path(path)
+    return not blocked
+
+
+def _is_path_within_project(project_path: str, target_path: str) -> tuple[bool, str]:
+    """Return whether *target_path* resolves safely under *project_path*.
+
+    Resolves both paths, rejects traversal through ``..`` or symlinks that
+    leave the project root, and returns a human-readable reason on failure.
+    """
+    try:
+        project = Path(project_path).expanduser().resolve()
+        raw = Path(target_path).expanduser()
+    except (OSError, ValueError) as exc:
+        return False, f"Invalid path: {exc}"
+
+    if ".." in raw.parts:
+        return False, "Path traversal ('..') is not allowed"
+
+    try:
+        target = raw.resolve()
+    except (OSError, ValueError) as exc:
+        return False, f"Invalid path: {exc}"
+
+    # Reject symlinks that escape the project root
+    try:
+        real = Path(os.path.realpath(str(raw)))
+        if real != target:
+            try:
+                real.relative_to(project)
+            except ValueError:
+                return False, "Symlinks pointing outside project root are not permitted"
+    except (OSError, ValueError):
+        pass
+
+    try:
+        target.relative_to(project)
+        return True, ""
+    except ValueError:
+        return False, f"Path {target} is outside project root {project}"

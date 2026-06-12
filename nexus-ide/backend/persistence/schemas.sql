@@ -237,12 +237,17 @@ CREATE INDEX IF NOT EXISTS idx_pr_results_review ON peer_review_results(review_i
 CREATE TABLE IF NOT EXISTS persistent_memories (
     id              TEXT PRIMARY KEY,
     user_id         TEXT,
+    session_id      TEXT,
+    project_id      TEXT,
     content         TEXT NOT NULL,
     summary         TEXT,
     embedding_json  TEXT,
     memory_type     TEXT,
     tags            TEXT,
     source          TEXT,
+    file_path       TEXT,
+    language        TEXT,
+    related_memory_ids TEXT,
     importance      REAL,
     created_at      REAL,
     last_accessed_at REAL,
@@ -250,6 +255,9 @@ CREATE TABLE IF NOT EXISTS persistent_memories (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pm_user ON persistent_memories(user_id);
+CREATE INDEX IF NOT EXISTS idx_pm_session ON persistent_memories(session_id);
+CREATE INDEX IF NOT EXISTS idx_pm_project ON persistent_memories(project_id);
 CREATE INDEX IF NOT EXISTS idx_pm_type ON persistent_memories(memory_type);
+CREATE INDEX IF NOT EXISTS idx_pm_source ON persistent_memories(source);
 CREATE INDEX IF NOT EXISTS idx_pm_accessed ON persistent_memories(last_accessed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pm_created ON persistent_memories(created_at DESC);

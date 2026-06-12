@@ -23,9 +23,16 @@ class AnalyzerAgent(AgentBase):
     prompt_file = "analyzer"
     supported_actions = {
         AgentAction.READ_FILE,
+        AgentAction.READ_FILE_ABSOLUTE,
         AgentAction.SEARCH_CODEBASE,
+        AgentAction.SEARCH_SYMBOLS,
+        AgentAction.INDEX_SYMBOLS,
         AgentAction.READ_DOCS,
         AgentAction.ANALYZE_DATA,
+        AgentAction.CONSULT_AGENT,
+        AgentAction.RECALL_CONTEXT,
+        AgentAction.STORE_MEMORY,
+        AgentAction.EXECUTE_CODE,
     }
 
     async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:

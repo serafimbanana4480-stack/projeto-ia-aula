@@ -17,6 +17,7 @@ Welcome to the NEXUS IDE documentation hub. This index provides quick access to 
 | Document | Description | Audience |
 |----------|-------------|----------|
 | [Architecture](../ARCHITECTURE.md) | System architecture and design decisions | Developers |
+| [Memory, RAG & Code Intelligence](./memory-and-rag.md) | Semantic memory, embedding RAG, and AST symbol search | Developers |
 | [Troubleshooting](./troubleshooting.md) | Common issues and solutions | All |
 | [Contributing](../CONTRIBUTING.md) | Contribution guidelines and workflow | Developers |
 
@@ -57,6 +58,7 @@ Welcome to the NEXUS IDE documentation hub. This index provides quick access to 
 ### AI & Models
 - [User Guide - AI Agents](./user-guide.md#ai-agents)
 - [Architecture - Model Matrix](../ARCHITECTURE.md#2-model-matrix)
+- [Memory, RAG & Code Intelligence](./memory-and-rag.md)
 - [FAQ - AI Models](./FAQ.md#what-ai-models-should-i-use)
 
 ### Development
@@ -158,6 +160,7 @@ If you can't find what you're looking for:
 | Developer Setup | ✅ Complete | 2026-05-13 |
 | FAQ | ✅ Complete | 2026-05-13 |
 | Troubleshooting | ✅ Complete | 2026-05-13 |
+| Memory, RAG & Code Intelligence | ✅ Complete | 2026-06-12 |
 | Architecture | ✅ Complete | - |
 | Contributing | ✅ Complete | - |
 
@@ -170,14 +173,14 @@ If you can't find what you're looking for:
 
 ## 📈 Documentation Metrics
 
-- **Total Documents**: 8
-- **Total Topics Covered**: 50+
-- **Code Examples**: 100+
-- **Troubleshooting Solutions**: 30+
+- **Total Documents**: 9
+- **Total Topics Covered**: 55+
+- **Code Examples**: 110+
+- **Troubleshooting Solutions**: 35+
 - **FAQ Items**: 40+
 
 ---
 
-**Last Updated**: 2026-05-13
+**Last Updated**: 2026-06-12
 
 For questions or suggestions about documentation, please open an issue or pull request.

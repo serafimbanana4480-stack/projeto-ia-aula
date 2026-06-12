@@ -9,37 +9,49 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 
 from backend.core.workspace import (
+    copy_file_absolute,
     create_dir_absolute,
+    delete_dir_absolute,
     delete_file_absolute,
     discover_projects,
     execute_python,
     execute_script,
     execute_shell,
+    get_file_info_absolute,
     get_project_info,
     git_clone,
     git_commit_all,
     git_init,
     git_push,
     git_status,
+    list_backups,
     list_dir_absolute,
+    move_file_absolute,
     read_file_absolute,
+    restore_backup,
     search_files_absolute,
     write_file_absolute,
 )
 from backend.middleware.auth import require_auth
 from backend.middleware.rate_limit import limiter
 from backend.models.api import (
+    WorkspaceCopyRequest,
+    WorkspaceDeleteDirRequest,
     WorkspaceDeleteRequest,
     WorkspaceDiscoverRequest,
+    WorkspaceFileInfoRequest,
     WorkspaceGitCloneRequest,
     WorkspaceGitCommitRequest,
     WorkspaceGitInitRequest,
     WorkspaceGitPushRequest,
     WorkspaceGitStatusRequest,
+    WorkspaceListBackupsRequest,
     WorkspaceListRequest,
+    WorkspaceMoveRequest,
     WorkspaceProjectInfoRequest,
     WorkspacePythonRequest,
     WorkspaceReadRequest,
+    WorkspaceRestoreBackupRequest,
     WorkspaceScriptRequest,
     WorkspaceSearchRequest,
     WorkspaceShellRequest,
@@ -90,6 +102,30 @@ async def workspace_create_dir(req: WorkspaceListRequest, request: Request, _use
 @limiter.limit("30/minute")
 async def workspace_delete_file(req: WorkspaceDeleteRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await delete_file_absolute(req.path, move_to_trash=req.move_to_trash, auth_token=_extract_token(request))
+
+
+@router.post("/workspace/files/delete-dir")
+@limiter.limit("10/minute")
+async def workspace_delete_dir(req: WorkspaceDeleteDirRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
+    return await delete_dir_absolute(req.path, move_to_trash=req.move_to_trash, auth_token=_extract_token(request))
+
+
+@router.post("/workspace/files/move")
+@limiter.limit("30/minute")
+async def workspace_move_file(req: WorkspaceMoveRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
+    return await move_file_absolute(req.src, req.dest, auth_token=_extract_token(request))
+
+
+@router.post("/workspace/files/copy")
+@limiter.limit("30/minute")
+async def workspace_copy_file(req: WorkspaceCopyRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
+    return await copy_file_absolute(req.src, req.dest, auth_token=_extract_token(request))
+
+
+@router.post("/workspace/files/info")
+@limiter.limit("60/minute")
+async def workspace_file_info(req: WorkspaceFileInfoRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
+    return await get_file_info_absolute(req.path)
 
 
 @router.post("/workspace/files/search")
@@ -171,6 +207,23 @@ async def workspace_git_push(req: WorkspaceGitPushRequest, request: Request, _us
 @limiter.limit("30/minute")
 async def workspace_git_status(req: WorkspaceGitStatusRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
     return await git_status(req.path)
+
+
+# ---------------------------------------------------------------------------
+# Backup / restore
+# ---------------------------------------------------------------------------
+
+
+@router.post("/workspace/backups/list")
+@limiter.limit("30/minute")
+async def workspace_list_backups(req: WorkspaceListBackupsRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
+    return await list_backups(req.path)
+
+
+@router.post("/workspace/backups/restore")
+@limiter.limit("10/minute")
+async def workspace_restore_backup(req: WorkspaceRestoreBackupRequest, request: Request, _user: dict = Depends(require_auth)) -> dict:
+    return await restore_backup(req.backup_path, req.target_path)
 
 
 # ---------------------------------------------------------------------------

@@ -39,8 +39,13 @@ class CoderAgent(AgentBase):
         AgentAction.LIST_DIR,
         AgentAction.LIST_DIR_ABSOLUTE,
         AgentAction.SEARCH_CODEBASE,
+        AgentAction.SEARCH_SYMBOLS,
+        AgentAction.INDEX_SYMBOLS,
         AgentAction.CONSULT_AGENT,
         AgentAction.EXECUTE_CODE,
+        AgentAction.RECALL_CONTEXT,
+        AgentAction.STORE_MEMORY,
+        AgentAction.FETCH_URL,
     }
 
     async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:

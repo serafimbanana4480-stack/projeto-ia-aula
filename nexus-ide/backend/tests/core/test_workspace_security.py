@@ -197,6 +197,44 @@ class TestPathNormalization:
             assert not blocked
 
 
+class TestBlockedSystemPaths:
+    def test_windows_root_blocked(self) -> None:
+        blocked, reason = _is_blocked_path(r"C:\Windows")
+        assert blocked
+        assert "C:\\Windows" in reason
+
+    def test_program_files_blocked(self) -> None:
+        blocked, reason = _is_blocked_path(r"C:\Program Files\SomeApp")
+        assert blocked
+        assert "Program Files" in reason
+
+
+class TestBlockedEnvFiles:
+    def test_env_local_blocked_in_home(self) -> None:
+        home = Path.home()
+        blocked, reason = _is_blocked_path(str(home / ".env.local"))
+        assert blocked
+        assert "env file" in reason.lower()
+
+    def test_env_production_blocked_in_home(self) -> None:
+        home = Path.home()
+        blocked, reason = _is_blocked_path(str(home / ".env.production"))
+        assert blocked
+
+    def test_normal_env_allowed(self, tmp_path: Path) -> None:
+        # A file literally named .env is still allowed by project-level checks,
+        # but the component check blocks it.  A project-local .env.example should
+        # not be blocked when inside an allowed base.
+        fake_allowed = [tmp_path]
+        with patch(
+            "backend.core.workspace_security._get_allowed_base_paths", return_value=fake_allowed
+        ):
+            blocked, reason = _is_blocked_path(str(tmp_path / "config" / ".env.example"))
+            # .env.* is blocked by the wildcard rule
+            assert blocked
+            assert "env file" in reason.lower()
+
+
 # ---------------------------------------------------------------------------
 # 6. Backward compatibility
 # ---------------------------------------------------------------------------

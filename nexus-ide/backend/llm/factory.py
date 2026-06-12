@@ -227,6 +227,16 @@ def _build_fallback_chain(
             )
         )
 
+    if settings.anthropic_api_key:
+        from backend.llm.anthropic_provider import AnthropicProvider
+
+        fallbacks.append(
+            AnthropicProvider(
+                base_url="https://api.anthropic.com",
+                api_key=settings.anthropic_api_key,
+            )
+        )
+
     # Add DevProvider for zero-cost local development before the ultimate mock fallback
     has_any_real_provider = bool(
         settings.openai_api_key
@@ -305,6 +315,18 @@ def create_multi_llm_manager() -> MultiLLMManager:
             priority=3,
         )
 
+    if settings.anthropic_api_key:
+        from backend.llm.anthropic_provider import AnthropicProvider
+
+        manager.register_provider(
+            "anthropic",
+            AnthropicProvider(
+                base_url="https://api.anthropic.com",
+                api_key=settings.anthropic_api_key,
+            ),
+            priority=2,
+        )
+
     return manager
 
 
@@ -312,7 +334,7 @@ def create_llm_client(**overrides: Any) -> Any:
     """Create an LLM provider instance based on configuration.
 
     Reads ``llm_provider`` from settings (env var ``LLM_PROVIDER``).
-    Supported providers: ``ollama``/``local``, ``airllm``, ``openai``, ``deepseek``, ``kimi``, ``groq``.
+    Supported providers: ``ollama``/``local``, ``airllm``, ``openai``, ``deepseek``, ``kimi``, ``groq``, ``anthropic``.
 
     If ``MULTI_LLM_ENABLED`` is true, returns a :class:`MultiLLMManager`
     configured with all available providers.
@@ -411,6 +433,18 @@ def create_llm_client(**overrides: Any) -> Any:
         logger.info("Using Groq provider")
         return OpenAIProvider(
             base_url=overrides.get("groq_base_url", "https://api.groq.com/openai/v1"),
+            api_key=api_key,
+        )
+
+    if provider == "anthropic":
+        from backend.llm.anthropic_provider import AnthropicProvider
+
+        api_key = overrides.get("anthropic_api_key", settings.anthropic_api_key)
+        if not api_key:
+            logger.warning("ANTHROPIC_API_KEY not set — requests will fail")
+        logger.info("Using Anthropic provider")
+        return AnthropicProvider(
+            base_url=overrides.get("anthropic_base_url", "https://api.anthropic.com"),
             api_key=api_key,
         )
 

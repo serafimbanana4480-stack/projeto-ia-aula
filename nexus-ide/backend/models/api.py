@@ -109,6 +109,7 @@ class FileWriteRequest(BaseModel):
     project_path: str = Field(default=".", min_length=1, max_length=2000)
     session_id: str | None = None
     project_id: str | None = None
+    overwrite: bool = True
 
 
 class FileListRequest(BaseModel):
@@ -221,6 +222,46 @@ class WorkspaceDeleteRequest(BaseModel):
 
     path: str = Field(min_length=1, max_length=2000)
     move_to_trash: bool = True
+
+
+class WorkspaceDeleteDirRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)
+    move_to_trash: bool = True
+
+
+class WorkspaceMoveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    src: str = Field(min_length=1, max_length=2000)
+    dest: str = Field(min_length=1, max_length=2000)
+
+
+class WorkspaceCopyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    src: str = Field(min_length=1, max_length=2000)
+    dest: str = Field(min_length=1, max_length=2000)
+
+
+class WorkspaceFileInfoRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)
+
+
+class WorkspaceListBackupsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2000)
+
+
+class WorkspaceRestoreBackupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backup_path: str = Field(min_length=1, max_length=2000)
+    target_path: str = Field(min_length=1, max_length=2000)
 
 
 class WorkspaceSearchRequest(BaseModel):

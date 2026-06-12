@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import logging
 import shutil
-from pathlib import Path
 
 from backend.core.file_locks import DeadlockError, FileLockManager, LockError
-from backend.tools.file_ops import _validate_path
+from backend.core.workspace_fs import delete_dir_absolute, get_file_info_absolute
+from backend.tools.file_api import _validate_relative_path as _validate_path
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
@@ -194,6 +194,64 @@ async def delete_file(path: str, project_path: str = ".") -> dict:
         return {"error": f"Failed to delete file: {e}"}
 
 
+async def delete_directory(
+    path: str, project_path: str = ".", move_to_trash: bool = True
+) -> dict:
+    """Delete a directory recursively with optional trash backup.
+
+    Args:
+        path: Directory path relative to project root.
+        project_path: Project root path.
+        move_to_trash: If True, move to trash instead of permanent deletion.
+
+    Returns:
+        Dict with deleted path and success status.
+    """
+    try:
+        full_path = _validate_path(project_path, path)
+
+        if not full_path.exists():
+            return {"error": f"Directory not found: {path}"}
+
+        if not full_path.is_dir():
+            return {"error": f"Path is not a directory: {path}"}
+
+        # Critical directories should never be deleted accidentally.
+        critical_dirs = {".git", ".nexus", "node_modules", ".venv", "__pycache__"}
+        if full_path.name.lower() in critical_dirs:
+            return {
+                "error": (
+                    f"Deletion of protected directory '{full_path.name}' "
+                    "is blocked for safety"
+                )
+            }
+
+        return await delete_dir_absolute(str(full_path), move_to_trash=move_to_trash)
+    except PermissionError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Failed to delete directory: {e}"}
+
+
+async def get_file_info(path: str, project_path: str = ".") -> dict:
+    """Get metadata for a file or directory.
+
+    Args:
+        path: Path relative to project root.
+        project_path: Project root path.
+
+    Returns:
+        Dict with file/directory metadata.
+    """
+    try:
+        full_path = _validate_path(project_path, path)
+        return await get_file_info_absolute(str(full_path))
+    except PermissionError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Failed to get file info: {e}"}
+
+
 # Register tools
 register_tool(
     ToolSpec(
@@ -282,3 +340,50 @@ register_tool(
         handler=delete_file,
     )
 )
+
+register_tool(
+    ToolSpec(
+        name="delete_directory",
+        description="Delete a directory recursively within the project workspace (moves to trash by default)",
+        schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Directory path relative to project root"},
+                "project_path": {
+                    "type": "string",
+                    "default": ".",
+                    "description": "Project root path",
+                },
+                "move_to_trash": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Move to trash instead of permanent delete",
+                },
+            },
+            "required": ["path"],
+        },
+        handler=delete_directory,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="get_file_info",
+        description="Get metadata for a file or directory within the project workspace",
+        schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path relative to project root"},
+                "project_path": {
+                    "type": "string",
+                    "default": ".",
+                    "description": "Project root path",
+                },
+            },
+            "required": ["path"],
+        },
+        handler=get_file_info,
+    )
+)
+
+

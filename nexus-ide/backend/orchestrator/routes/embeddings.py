@@ -9,7 +9,11 @@ from pydantic import BaseModel, Field
 
 from backend.core.workspace_security import _is_blocked_path
 from backend.middleware.auth import require_auth
-from backend.tools.embeddings import index_codebase, search_codebase
+from backend.tools.embeddings import (
+    get_index_stats,
+    index_codebase,
+    search_codebase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +22,12 @@ router = APIRouter()
 
 class IndexRequest(BaseModel):
     project_path: str = Field(min_length=1, max_length=2000, description="Absolute path to the project root to index")
+    force_reindex: bool = Field(default=False, description="Ignore the existing snapshot and rebuild the index")
 
 
 class IndexResponse(BaseModel):
     chunks_indexed: int
+    total_chunks: int
     project_path: str
 
 
@@ -35,6 +41,9 @@ class SearchResultItem(BaseModel):
     start_line: int
     end_line: int
     score: float
+    language: str
+    symbol_name: str
+    symbol_type: str
     content: str
 
 
@@ -42,6 +51,14 @@ class SearchResponse(BaseModel):
     query: str
     results: list[SearchResultItem]
     total_found: int
+
+
+class StatsResponse(BaseModel):
+    total_chunks: int
+    total_files: int
+    by_language: dict[str, int]
+    by_symbol_type: dict[str, int]
+    snapshot_path: str
 
 
 @router.post("/embeddings/index", response_model=IndexResponse)
@@ -52,14 +69,20 @@ async def index_endpoint(
     """Index a project codebase for semantic search.
 
     Walks the project directory, chunks code files, generates embeddings
-    via Ollama, and stores them in memory for search.
+    via Ollama, and stores them in memory for search. Supports incremental
+    updates and forced re-indexing.
     """
     blocked, reason = _is_blocked_path(req.project_path)
     if blocked:
         raise HTTPException(status_code=400, detail=f"Blocked path: {reason}")
 
-    chunk_count = await index_codebase(req.project_path)
-    return IndexResponse(chunks_indexed=chunk_count, project_path=req.project_path)
+    chunk_count = await index_codebase(req.project_path, force_reindex=req.force_reindex)
+    stats = await get_index_stats()
+    return IndexResponse(
+        chunks_indexed=chunk_count,
+        total_chunks=stats["total_chunks"],
+        project_path=req.project_path,
+    )
 
 
 @router.post("/embeddings/search", response_model=SearchResponse)
@@ -81,9 +104,21 @@ async def search_endpoint(
                 start_line=r.start_line,
                 end_line=r.end_line,
                 score=round(r.score, 3),
+                language=r.language,
+                symbol_name=r.symbol_name,
+                symbol_type=r.symbol_type,
                 content=r.content[:500],
             )
             for r in results
         ],
         total_found=len(results),
     )
+
+
+@router.get("/embeddings/stats", response_model=StatsResponse)
+async def stats_endpoint(
+    _user: dict = Depends(require_auth),
+) -> StatsResponse:
+    """Return statistics about the current codebase embedding index."""
+    stats = await get_index_stats()
+    return StatsResponse(**stats)

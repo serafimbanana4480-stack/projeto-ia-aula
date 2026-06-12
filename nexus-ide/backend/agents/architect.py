@@ -22,10 +22,18 @@ class ArchitectAgent(AgentBase):
     model_key = "reasoning"  # deepseek-r1:8b for deep design reasoning
     prompt_file = "architect"
     supported_actions = {
-        AgentAction.CONSULT_AGENT,  # may consult RESEARCHER, ANALYZER
+        AgentAction.CONSULT_AGENT,  # may consult RESEARCHER, ANALYZER, CODER
         AgentAction.READ_FILE,
+        AgentAction.READ_FILE_ABSOLUTE,
         AgentAction.SEARCH_CODEBASE,
+        AgentAction.SEARCH_SYMBOLS,
+        AgentAction.INDEX_SYMBOLS,
         AgentAction.RECALL_CONTEXT,
+        AgentAction.STORE_MEMORY,
+        AgentAction.WRITE_FILE,
+        AgentAction.WRITE_FILE_ABSOLUTE,
+        AgentAction.LIST_DIR,
+        AgentAction.LIST_DIR_ABSOLUTE,
     }
 
     async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:

@@ -63,7 +63,7 @@ One `.md` file per agent under `config/prompts/`. Treated as first-class configu
 
 ## 7. Backend
 
-Python 3.12 + FastAPI + Uvicorn. Redis for queue/cache. ChromaDB for codebase embeddings. Prometheus + OpenTelemetry for observability. Docker SDK for sandboxed execution.
+Python 3.12 + FastAPI + Uvicorn. Redis for queue/cache. Local embeddings (Ollama/sentence-transformers) with an on-disk JSON snapshot for codebase RAG; ChromaDB/Qdrant ready for production. SQLite-backed semantic memory and agent state. Prometheus + OpenTelemetry for observability. Docker SDK for sandboxed execution.
 
 ## 8. IDE Frontend
 

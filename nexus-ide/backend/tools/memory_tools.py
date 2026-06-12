@@ -1,7 +1,13 @@
-"""Memory recall tool for agents.
+"""Memory recall and storage tools for agents.
 
-Provides RECALL_CONTEXT action — semantic search over stored memories
-from previous sessions, tool results, and code snippets.
+Provides ``recall_context`` and ``store_memory`` actions — semantic search
+over stored memories from previous sessions, conversations, code snippets,
+and tool results.
+
+These tools reuse the global :class:`~backend.knowledge.memory.MemoryStore`
+(via :func:`~backend.knowledge.memory.get_memory_store`) so that agent
+conversations, the Second Brain, and the persistent memory layer all share
+the same semantic index and SQLite backing store.
 """
 
 from __future__ import annotations
@@ -9,36 +15,17 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from backend.knowledge.memory import MemoryType, get_memory_store
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
-
-# Use persistent store when available
-_persistent_store = None
-
-
-def _get_memory_store():
-    """Get the global memory store, preferring PersistentMemoryStore."""
-    global _persistent_store
-    if _persistent_store is None:
-        try:
-            from backend.knowledge.persistent_memory import PersistentMemoryStore
-
-            _persistent_store = PersistentMemoryStore()
-        except Exception as exc:
-            logger.warning(
-                "PersistentMemoryStore unavailable, falling back to MemoryStore: %s",
-                exc,
-            )
-            from backend.knowledge.memory import MemoryStore
-
-            _persistent_store = MemoryStore()
-    return _persistent_store
 
 
 async def recall_context(
     query: str = "",
     session_id: str = "",
+    project_id: str = "",
+    memory_type: str = "",
     top_k: int = 5,
 ) -> dict[str, Any]:
     """Search semantic memory for relevant context from past sessions.
@@ -49,6 +36,8 @@ async def recall_context(
     Args:
         query: The search query to find relevant memories.
         session_id: Optional session ID to scope the search.
+        project_id: Optional project ID to scope the search.
+        memory_type: Optional memory type filter (session, project, global, etc.).
         top_k: Maximum number of results to return.
 
     Returns:
@@ -58,14 +47,20 @@ async def recall_context(
         return {"error": "Query cannot be empty."}
 
     try:
-        from backend.config.settings import get_settings
+        store = get_memory_store()
 
-        store = _get_memory_store()
+        mem_type = None
+        if memory_type:
+            try:
+                mem_type = MemoryType(memory_type)
+            except ValueError:
+                pass
 
-        # Search for relevant memories
         results = await store.search(
             query,
             session_id=session_id or None,
+            project_id=project_id or None,
+            memory_type=mem_type,
             top_k=min(top_k, 10),
             min_similarity=0.2,
         )
@@ -87,6 +82,10 @@ async def recall_context(
                 "relevance": round(similarity, 3),
                 "source": mem.source,
                 "tags": mem.tags,
+                "file_path": mem.file_path,
+                "language": mem.language,
+                "session_id": mem.session_id,
+                "project_id": mem.project_id,
             })
 
         return {
@@ -104,19 +103,26 @@ async def store_memory(
     content: str = "",
     memory_type: str = "session",
     session_id: str = "",
+    project_id: str = "",
     tags: str = "",
     source: str = "",
     importance: float = 0.5,
+    file_path: str = "",
+    language: str = "",
 ) -> dict[str, Any]:
     """Store a memory for future recall by agents.
 
     Args:
         content: The content to store in memory.
-        memory_type: Type of memory (session, project, global, code_snippet, conversation).
+        memory_type: Type of memory (session, project, global, code_snippet,
+            conversation, documentation, file_content, tool_result).
         session_id: Session ID to scope this memory.
+        project_id: Project ID to scope this memory.
         tags: Comma-separated tags for categorization.
         source: Agent or tool that created this memory.
         importance: Importance score 0.0-1.0 (affects retention).
+        file_path: Optional related file path.
+        language: Optional programming language.
 
     Returns:
         Dict with the stored memory ID and metadata.
@@ -125,27 +131,25 @@ async def store_memory(
         return {"error": "Content cannot be empty."}
 
     try:
-        from backend.knowledge.memory import MemoryType
-        from backend.config.settings import get_settings
+        store = get_memory_store()
 
-        store = _get_memory_store()
-
-        # Parse memory type
         try:
             mem_type = MemoryType(memory_type)
         except ValueError:
             mem_type = MemoryType.SESSION
 
-        # Parse tags
         tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
         memory = await store.store(
             content,
             memory_type=mem_type,
             session_id=session_id,
+            project_id=project_id,
             tags=tag_list,
             source=source,
             importance=max(0.0, min(1.0, importance)),
+            file_path=file_path,
+            language=language,
         )
 
         return {
@@ -164,8 +168,9 @@ register_tool(
         name="recall_context",
         description=(
             "Search semantic memory for relevant context from past sessions, "
-            "conversations, and tool results. Use this when you need to recall "
-            "information from earlier in the conversation or from previous sessions."
+            "conversations, code snippets, and tool results. Use this when you "
+            "need to recall information from earlier in the conversation or from "
+            "previous sessions."
         ),
         schema={
             "type": "object",
@@ -177,6 +182,16 @@ register_tool(
                 "session_id": {
                     "type": "string",
                     "description": "Optional session ID to scope the search",
+                    "default": "",
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "Optional project ID to scope the search",
+                    "default": "",
+                },
+                "memory_type": {
+                    "type": "string",
+                    "description": "Optional memory type filter",
                     "default": "",
                 },
                 "top_k": {
@@ -196,8 +211,8 @@ register_tool(
         name="store_memory",
         description=(
             "Store important information in memory for future recall. "
-            "Use this to save key insights, decisions, or results that "
-            "may be needed later in this session or in future sessions."
+            "Use this to save key insights, decisions, results, or documentation "
+            "that may be needed later in this session or in future sessions."
         ),
         schema={
             "type": "object",
@@ -208,12 +223,26 @@ register_tool(
                 },
                 "memory_type": {
                     "type": "string",
-                    "enum": ["session", "project", "global", "code_snippet", "conversation"],
+                    "enum": [
+                        "session",
+                        "project",
+                        "global",
+                        "code_snippet",
+                        "conversation",
+                        "documentation",
+                        "file_content",
+                        "tool_result",
+                    ],
                     "default": "session",
                 },
                 "session_id": {
                     "type": "string",
                     "description": "Session ID to scope this memory",
+                    "default": "",
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "Project ID to scope this memory",
                     "default": "",
                 },
                 "tags": {
@@ -230,6 +259,16 @@ register_tool(
                     "type": "number",
                     "description": "Importance score 0.0-1.0",
                     "default": 0.5,
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "Optional related file path",
+                    "default": "",
+                },
+                "language": {
+                    "type": "string",
+                    "description": "Optional programming language",
+                    "default": "",
                 },
             },
             "required": ["content"],

@@ -8,8 +8,9 @@ Esta pasta contém a suite de testes do backend usando pytest.
 backend/tests/
 ├── conftest.py              # Fixtures globais (mocks, settings)
 ├── agents/                  # Testes dos 9 agentes
-├── orchestrator/           # Testes de routing, pool, fallback
-├── tools/                   # Testes de ReAct tools
+├── orchestrator/           # Testes de routing, pool, fallback, chat
+├── tools/                   # Testes de ReAct tools e rotas de ficheiros
+├── knowledge/               # Testes de memória, RAG e Second Brain
 ├── config/                  # Testes de settings e models.yaml
 └── observability/           # Testes de métricas e tracing
 ```
@@ -135,6 +136,35 @@ def test_metadata():
     agent = NewAgent()
     assert agent.name == "NEW_AGENT"
     assert agent.model_key == "small"
+```
+
+## Novos Testes Adicionados
+
+| Ficheiro | Âmbito |
+|----------|--------|
+| `tests/llm/test_anthropic_provider.py` | Provider Anthropic: alias de modelos, normalização de mensagens, `chat_complete`, `chat_stream`, `embed`, `health_check` e registo na factory. |
+| `tests/orchestrator/test_chat_auto_swarm.py` | Modos `auto` (smart routing + upgrade para CODER) e `swarm` (ensemble/default agents) via `POST /api/chat`. |
+| `tests/tools/test_file_routes.py` | Rotas `POST /api/files/read`, `/api/files/list` e `/api/files/write` com validação de segurança. |
+| `tests/knowledge/test_rag_memory.py` | Contexto RAG, `remember_conversation`, tools `store_memory`/`recall_context` e rotas Second Brain. |
+| `scripts/e2e_main_flow_test.py` | Smoke test end-to-end: `health → providers → chat(auto) → chat(swarm)`. |
+
+### Executar os novos testes
+
+```bash
+# Anthropic provider
+pytest backend/tests/llm/test_anthropic_provider.py -v
+
+# Auto / Swarm chat
+pytest backend/tests/orchestrator/test_chat_auto_swarm.py -v
+
+# Rotas de ficheiros
+pytest backend/tests/tools/test_file_routes.py -v
+
+# RAG / memórias
+pytest backend/tests/knowledge/test_rag_memory.py -v
+
+# Smoke test end-to-end (requer backend a correr em localhost:8000)
+python scripts/e2e_main_flow_test.py
 ```
 
 ## Convenções

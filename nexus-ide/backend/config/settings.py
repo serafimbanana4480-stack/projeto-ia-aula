@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "config"
 PROMPTS_DIR = CONFIG_DIR / "prompts"
 MODELS_YAML = CONFIG_DIR / "models.yaml"
+MODES_YAML = CONFIG_DIR / "modes.yaml"
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str = Field(default="")
     kimi_api_key: str = Field(default="")
     groq_api_key: str = Field(default="")
+    anthropic_api_key: str = Field(default="")
 
     # Multi-LLM Manager
     multi_llm_enabled: bool = Field(default=False)
@@ -77,6 +79,8 @@ class Settings(BaseSettings):
     deepseek_max_tokens: int = Field(default=2048)
     groq_temperature: float = Field(default=0.7)
     groq_max_tokens: int = Field(default=2048)
+    anthropic_temperature: float = Field(default=0.7)
+    anthropic_max_tokens: int = Field(default=4096)
 
     # Redis
     redis_url: str = Field(default="redis://localhost:6379")
@@ -224,6 +228,39 @@ def get_model_config(model_key: str) -> dict[str, Any]:
     return models[model_key]
 
 
+@lru_cache
+def load_modes_config() -> dict[str, Any]:
+    """Load and cache the ``config/modes.yaml`` configuration."""
+    if not MODES_YAML.exists():
+        return {"modes": {}, "tool_aliases": {}}
+    with MODES_YAML.open("r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def get_mode_config(mode_name: str) -> dict[str, Any]:
+    """Return a mode configuration block with resolved tool aliases.
+
+    Falls back to the ``auto`` mode configuration if the requested mode is
+    not defined, so the chat pipeline always has sensible defaults.
+    """
+    cfg = load_modes_config()
+    modes = cfg.get("modes", {})
+    mode = modes.get(mode_name) or modes.get("auto") or {}
+    mode = dict(mode)
+
+    # Resolve tool aliases (e.g. "all" -> list of concrete tools)
+    enabled = mode.get("tools_enabled", [])
+    aliases = cfg.get("tool_aliases", {})
+    resolved: list[str] = []
+    for item in enabled:
+        if isinstance(item, str) and item in aliases:
+            resolved.extend(aliases[item])
+        elif isinstance(item, str):
+            resolved.append(item)
+    mode["tools_enabled_resolved"] = resolved
+    return mode
+
+
 def validate_configuration() -> list[str]:
     """Validate the application configuration.
 
@@ -276,7 +313,7 @@ def validate_configuration() -> list[str]:
             errors.append(f"Required prompts directory not found: {prompts_dir}")
 
         provider = settings.llm_provider.lower()
-        cloud_providers = {"openai", "deepseek", "kimi", "groq"}
+        cloud_providers = {"openai", "deepseek", "kimi", "groq", "anthropic"}
         if provider in cloud_providers:
             key_attr = f"{provider}_api_key"
             api_key = getattr(settings, key_attr, "")

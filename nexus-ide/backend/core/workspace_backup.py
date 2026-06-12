@@ -103,11 +103,17 @@ async def _create_backup(path: Path) -> dict[str, Any]:
         return {"backed_up": False, "reason": str(exc)}
 
 
-async def _restore_backup(backup_path: str, target_path: str) -> dict[str, Any]:
+async def restore_backup(backup_path: str, target_path: str) -> dict[str, Any]:
     """Restore a backup file to its original location.
 
     Returns metadata about the restore operation.
+    This is the public alias used by tools and routes.
     """
+    return await _restore_backup(backup_path, target_path)
+
+
+async def _restore_backup(backup_path: str, target_path: str) -> dict[str, Any]:
+    """Internal implementation of :func:`restore_backup`."""
     from backend.core.workspace_security import _is_blocked_path
 
     blocked, reason = _is_blocked_path(target_path)
@@ -134,11 +140,17 @@ async def _restore_backup(backup_path: str, target_path: str) -> dict[str, Any]:
         return {"restored": False, "error": str(exc)}
 
 
-async def _list_backups(path: str) -> dict[str, Any]:
+async def list_backups(path: str) -> dict[str, Any]:
     """List available backups for files under *path*.
 
     Returns a dict with ``backups`` (list of backup metadata) and ``count``.
+    This is the public alias used by tools and routes.
     """
+    return await _list_backups(path)
+
+
+async def _list_backups(path: str) -> dict[str, Any]:
+    """Internal implementation of :func:`list_backups`."""
     from backend.core.workspace_security import _is_blocked_path
 
     blocked, reason = _is_blocked_path(path)

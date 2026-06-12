@@ -37,6 +37,10 @@ WEB SEARCH: Set requires_web_search to true if the query involves:
 - Benchmarks or comparisons requiring current data
 - Security vulnerabilities (CVEs)
 
+MEMORY AND CONTEXT:
+- When context_needed is "medium" or "high", the primary agent will receive relevant semantic memories automatically.
+- Agents can also call `recall_context` and `store_memory` to retrieve or persist important facts.
+
 OUTPUT FORMAT — Return ONLY this JSON, nothing else:
 {
   "primary_agent": "<AGENT_NAME>",

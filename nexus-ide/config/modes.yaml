@@ -3,83 +3,119 @@
 
 modes:
   auto:
-    description: "Modo autónomo: planifica e executa tarefas com o agente CODER"
+    description: "Modo autónomo inteligente: escolhe o agente certo via smart router, executa ferramentas e consulta subagentes automaticamente"
     default_agent: "CODER"
     default_model: "auto"
     router: "smart"
     tools_enabled: ["all"]
+    enable_thinking: true
+    max_iterations: 12
+    supports_subagents: true
     system_prompt_addon: |
-      You are an intelligent assistant that adapts to the user's needs.
-      Use tools when helpful. Think step by step for complex tasks.
+      You are in AUTONOMOUS mode. Act as a senior engineer who owns the full request lifecycle.
+      Workflow:
+        1. Understand the objective, the active project path, and the routing information provided.
+        2. Recall relevant memories (recall_context) and scan the project (list_dir/read_file/search_codebase) before acting.
+        3. Choose the right approach. When specialised expertise is useful, call CONSULT_AGENT with a focused question:
+           - ARCHITECT → design, architecture, trade-offs, component boundaries
+           - ANALYZER → code review, security audit, quality assessment
+           - DEBUGGER → bug diagnosis, test failures, root-cause analysis
+           - RESEARCHER → external APIs, libraries, current best practices
+           - OPTIMIZER → performance bottlenecks, benchmarking, optimisation
+        4. Implement changes with write_file/write_file_absolute; prefer real files over chat explanations.
+        5. Verify with execute_code, search_codebase or by re-consulting the reviewer.
+        6. Store important facts (store_memory) and finish with a concise professional summary of what was done.
+      Do not ask for permission. If uncertain, consult a specialist rather than guessing.
 
   coder:
-    description: "Modo focado em geração e análise de código"
+    description: "Modo focado em geração e análise de código com autonomia total de ferramentas"
     default_agent: "CODER"
     default_model: "coder"
     router: "none"
-    tools_enabled: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code"]
+    tools_enabled: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code", "consult_agent"]
+    supports_subagents: true
     system_prompt_addon: |
-      Focus on clean, idiomatic code.
-      Always use the write_file tool to create/modify files - do NOT output code in the chat.
+      Focus on clean, idiomatic, production-ready code.
+      Always use write_file to create/modify files — do NOT output code in the chat.
       Explain changes briefly before applying them.
       Follow project conventions and best practices.
+      Consult ARCHITECT or ANALYZER when design decisions are unclear.
+      Recall relevant project memories before modifying existing code.
 
   analyst:
-    description: "Modo para análise de dados, scraping e relatórios"
+    description: "Modo para análise de dados, scraping, revisão de código e relatórios detalhados"
     default_agent: "ANALYZER"
     default_model: "coder"
     router: "none"
-    tools_enabled: ["execute_code", "web_search", "web_scraper", "sql_query"]
+    tools_enabled: ["execute_code", "web_search", "web_scraper", "sql_query", "read_file", "consult_agent"]
+    enable_thinking: true
+    max_iterations: 10
+    supports_subagents: true
     system_prompt_addon: |
-      Focus on data analysis, web scraping, and generating reports.
-      Use code execution for data processing.
-      Present results in tables or structured formats when possible.
+      Focus on data analysis, web scraping, and generating structured reports.
+      Use code execution for data processing; present results in tables or bullet lists when useful.
+      Consult RESEARCHER for external data or DEBUGGER for code issues.
+      Recall prior project context before drawing conclusions.
+      If a finding is important, store it as a memory for future reference.
 
   fast:
-    description: "Respostas rápidas com modelos leves"
+    description: "Respostas rápidas com modelos leves sem ferramentas"
     default_agent: "MICRO"
     default_model: "fast"
     router: "none"
     tools_enabled: []
+    supports_subagents: false
     system_prompt_addon: |
       Provide quick, concise answers.
       Do not use tools unless explicitly requested.
       Keep responses under 200 words when possible.
 
   deep:
-    description: "Raciocínio avançado com modelos grandes e thinking blocks"
+    description: "Raciocínio avançado com thinking blocks e ferramentas completas"
     default_agent: "ARCHITECT"
     default_model: "deep"
     router: "none"
     tools_enabled: ["all"]
     enable_thinking: true
     max_iterations: 10
+    supports_subagents: true
     system_prompt_addon: |
-      Think deeply about the problem.
-      Show your reasoning in thinking blocks.
-      Consider multiple perspectives and edge cases.
+      Think deeply about the problem. Show your reasoning in thinking blocks.
+      Consider multiple perspectives, edge cases, and trade-offs.
       Provide comprehensive, well-structured answers.
+      Consult ANALYZER for review and RESEARCHER for external knowledge.
+      Recall and store relevant memories throughout the investigation.
 
   plan:
     description: "Cria um plano de execução estruturado para aprovação"
     default_agent: "ARCHITECT"
     default_model: "reasoning"
     router: "none"
-    tools_enabled: ["read_file", "list_dir", "search_in_files"]
+    tools_enabled: ["read_file", "list_dir", "search_in_files", "consult_agent"]
+    enable_thinking: true
+    max_iterations: 8
+    supports_subagents: true
     system_prompt_addon: |
-      Create a structured execution plan with clear steps, agents, and dependencies.
+      Create a structured execution plan with clear steps, agents, dependencies, and deliverables.
       Do not execute the plan; present it for user approval.
+      You may consult other agents to refine the plan.
+      Recall prior project decisions and constraints so the plan is consistent with existing work.
 
   debug:
-    description: "Análise e correção de erros de código"
+    description: "Análise e correção de erros de código com execução de testes"
     default_agent: "DEBUGGER"
     default_model: "coder"
     router: "none"
-    tools_enabled: ["read_file", "execute_code", "search_codebase"]
+    tools_enabled: ["read_file", "execute_code", "search_codebase", "consult_agent"]
+    enable_thinking: true
+    max_iterations: 10
+    supports_subagents: true
     system_prompt_addon: |
-      Investigate bugs, errors, and failures.
-      Use tools to read code and reproduce issues.
-      Provide root cause and a fix.
+      Investigate bugs, errors, and failures systematically.
+      Use tools to read code, reproduce issues, and verify fixes.
+      Provide root cause and a concrete fix.
+      Consult CODER for implementation details or ANALYZER for deeper review.
+      Recall previous debugging sessions and project context to avoid re-discovering known issues.
 
   ask:
     description: "Respostas rápidas sem ferramentas"
@@ -87,20 +123,46 @@ modes:
     default_model: "fast"
     router: "none"
     tools_enabled: []
+    supports_subagents: false
     system_prompt_addon: |
       Answer the question directly without using tools.
       Keep responses concise.
 
   swarm:
-    description: "Vários agentes colaboram numa resposta"
+    description: "Vários agentes colaboram numa resposta com fusão inteligente via LLM"
     default_agent: "SWARM"
     default_model: "auto"
-    router: "none"
+    router: "smart"
     tools_enabled: ["all"]
+    enable_thinking: false
+    max_iterations: 7
+    supports_subagents: true
     system_prompt_addon: |
-      Coordinate multiple agents to analyze the problem from different angles.
-      Synthesize their outputs into a final answer.
+      You are the SWARM coordinator. Multiple expert agents are working in parallel on the same objective.
+      Available strategies:
+        - divide: split the objective into subtasks and assign each to the most capable agent.
+        - ensemble: let all agents solve the same task and synthesise the best parts.
+        - pipeline: chain agents so the output of one becomes the input of the next (e.g. design → implement → verify).
+        - debate: let agents propose competing solutions and have a moderator pick and integrate the best.
+      Each agent may consult sub-agents (CONSULT_AGENT) and recall memories.
+      Final output must be a single coherent, professional answer that resolves contradictions, cites agent contributions, and lists concrete next actions.
+
+  dashboard:
+    description: "Monitorização contínua, alertas e interpretação de métricas do sistema"
+    default_agent: "DASHBOARD"
+    default_model: "dashboard"
+    router: "none"
+    tools_enabled: ["consult_agent", "recall_context", "store_memory", "analyze_data"]
+    enable_thinking: false
+    max_iterations: 5
+    supports_subagents: true
+    system_prompt_addon: |
+      You are the system monitoring assistant.
+      Interpret metrics, detect anomalies, and give actionable recommendations.
+      Be concise for routine data and clear for alerts.
+      When a user asks for diagnosis or root-cause analysis, consult ANALYZER or DEBUGGER via CONSULT_AGENT.
+      Recall previous alerts and stored system facts to provide context-aware answers.
 
 # Tool aliases for mode configuration
 tool_aliases:
-  all: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code", "web_search", "web_scraper", "sql_query"]
+  all: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code", "web_search", "web_scraper", "sql_query", "consult_agent"]

@@ -43,7 +43,9 @@ from backend.core.workspace_security import (
     _check_python_sandbox,
     _get_allowed_base_paths,
     _has_unquoted_metacharacters,
+    _is_allowed_path,
     _is_blocked_path,
+    _is_path_within_project,
     _is_safe_git_remote,
     _log_operation,
     _remove_quoted_parts,
@@ -62,14 +64,21 @@ from backend.core.workspace_backup import (
     _is_git_repo,
     _list_backups,
     _restore_backup,
+    list_backups,
+    restore_backup,
 )
 
 # Re-export filesystem layer ------------------------------------------------
 from backend.core.workspace_fs import (
+    copy_file_absolute,
     create_dir_absolute,
+    delete_dir_absolute,
     delete_file_absolute,
+    get_file_info_absolute,
     list_dir_absolute,
+    move_file_absolute,
     read_file_absolute,
+    read_multiple_files_absolute,
     search_files_absolute,
     write_file_absolute,
 )
@@ -688,8 +697,15 @@ class WorkspaceManager:
             blocked, reason = _is_blocked_path(path)
             if blocked:
                 raise PermissionError(f"Blocked path: {reason}")
-            return path
-        return str(self.project_path / path)
+            return str(Path(path).expanduser().resolve())
+        resolved = (self.project_path / path).expanduser().resolve()
+        try:
+            resolved.relative_to(self.project_path)
+        except ValueError:
+            raise PermissionError(
+                f"Access not allowed — path {resolved} is outside project root {self.project_path}"
+            ) from None
+        return str(resolved)
 
     def _resolve_path(self, path: str) -> Path:
         """Return a :class:`Path` resolved relative to ``project_path``."""
@@ -697,17 +713,21 @@ class WorkspaceManager:
             blocked, reason = _is_blocked_path(path)
             if blocked:
                 raise PermissionError(f"Blocked path: {reason}")
-            return Path(path).resolve()
-        return (self.project_path / path).resolve()
+            return Path(path).expanduser().resolve()
+        resolved = (self.project_path / path).expanduser().resolve()
+        try:
+            resolved.relative_to(self.project_path)
+        except ValueError:
+            raise PermissionError(
+                f"Access not allowed — path {resolved} is outside project root {self.project_path}"
+            ) from None
+        return resolved
 
     def _validate_path(self, path: Path, _operation: str = "") -> None:
         """Raise ``PermissionError`` if *path* is outside ``project_path``."""
-        try:
-            path.relative_to(self.project_path)
-        except ValueError:
-            raise PermissionError(
-                f"Path {path} is outside project root {self.project_path}"
-            ) from None
+        ok, reason = _is_path_within_project(str(self.project_path), str(path))
+        if not ok:
+            raise PermissionError(reason)
 
     def _check_project_trust(self, _path: Path) -> None:
         """Raise ``PermissionError`` if the project is not trusted."""
@@ -722,6 +742,15 @@ class WorkspaceManager:
 
     async def read_file(self, path: str) -> dict[str, Any]:
         return await read_file_absolute(self._resolve(path))
+
+    async def read_multiple_files(
+        self, paths: list[str], max_total_bytes: int = 5 * 1024 * 1024, max_files: int = 100
+    ) -> dict[str, Any]:
+        """Read several project files in one batch."""
+        resolved = [self._resolve(p) for p in paths]
+        return await read_multiple_files_absolute(
+            resolved, max_total_bytes=max_total_bytes, max_files=max_files
+        )
 
     async def write_file(
         self,
@@ -820,6 +849,24 @@ class WorkspaceManager:
 
     async def delete_file(self, path: str, move_to_trash: bool = True) -> dict[str, Any]:
         return await delete_file_absolute(self._resolve(path), move_to_trash=move_to_trash)
+
+    async def delete_directory(self, path: str, move_to_trash: bool = True) -> dict[str, Any]:
+        return await delete_dir_absolute(self._resolve(path), move_to_trash=move_to_trash)
+
+    async def move_file(self, src: str, dest: str) -> dict[str, Any]:
+        return await move_file_absolute(self._resolve(src), self._resolve(dest))
+
+    async def copy_file(self, src: str, dest: str) -> dict[str, Any]:
+        return await copy_file_absolute(self._resolve(src), self._resolve(dest))
+
+    async def get_file_info(self, path: str) -> dict[str, Any]:
+        return await get_file_info_absolute(self._resolve(path))
+
+    async def list_backups(self, path: str | None = None) -> dict[str, Any]:
+        return await list_backups(self._resolve(path) if path else str(self.project_path))
+
+    async def restore_backup(self, backup_path: str, target_path: str) -> dict[str, Any]:
+        return await restore_backup(backup_path, self._resolve(target_path))
 
     async def git_init(self, path: str | None = None) -> dict[str, Any]:
         return await git_init(self._resolve(path) if path else str(self.project_path))
@@ -1025,6 +1072,73 @@ register_tool(
 
 register_tool(
     ToolSpec(
+        name="delete_dir_absolute",
+        description="Delete a directory recursively using an absolute path (moves to trash by default)",
+        schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute directory path"},
+                "move_to_trash": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Move to trash instead of permanent delete",
+                },
+            },
+            "required": ["path"],
+        },
+        handler=delete_dir_absolute,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="move_file_absolute",
+        description="Move or rename a file or directory using absolute paths",
+        schema={
+            "type": "object",
+            "properties": {
+                "src": {"type": "string", "description": "Absolute source path"},
+                "dest": {"type": "string", "description": "Absolute destination path"},
+            },
+            "required": ["src", "dest"],
+        },
+        handler=move_file_absolute,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="copy_file_absolute",
+        description="Copy a file using absolute paths",
+        schema={
+            "type": "object",
+            "properties": {
+                "src": {"type": "string", "description": "Absolute source path"},
+                "dest": {"type": "string", "description": "Absolute destination path"},
+            },
+            "required": ["src", "dest"],
+        },
+        handler=copy_file_absolute,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="get_file_info_absolute",
+        description="Get metadata for a file or directory using an absolute path",
+        schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute file or directory path"},
+            },
+            "required": ["path"],
+        },
+        handler=get_file_info_absolute,
+    )
+)
+
+register_tool(
+    ToolSpec(
         name="search_files_absolute",
         description="Grep-like search across files under an absolute root path",
         schema={
@@ -1041,6 +1155,66 @@ register_tool(
             "required": ["pattern", "root_path"],
         },
         handler=search_files_absolute,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="list_backups",
+        description="List available backups for files under an absolute path",
+        schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute path to list backups for"},
+            },
+            "required": ["path"],
+        },
+        handler=list_backups,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="restore_backup",
+        description="Restore a backup file to its original absolute path",
+        schema={
+            "type": "object",
+            "properties": {
+                "backup_path": {"type": "string", "description": "Absolute backup file path"},
+                "target_path": {"type": "string", "description": "Absolute target path to restore to"},
+            },
+            "required": ["backup_path", "target_path"],
+        },
+        handler=restore_backup,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="read_multiple_files_absolute",
+        description="Read multiple files by absolute path in one call. Returns a map of path -> content and a map of path -> error.",
+        schema={
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of absolute file paths to read",
+                },
+                "max_total_bytes": {
+                    "type": "integer",
+                    "default": 5 * 1024 * 1024,
+                    "description": "Maximum combined bytes to return",
+                },
+                "max_files": {
+                    "type": "integer",
+                    "default": 100,
+                    "description": "Maximum number of files to read",
+                },
+            },
+            "required": ["paths"],
+        },
+        handler=read_multiple_files_absolute,
     )
 )
 

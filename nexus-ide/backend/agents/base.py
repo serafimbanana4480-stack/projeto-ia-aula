@@ -15,6 +15,7 @@ Supports:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -48,8 +49,11 @@ class AgentAction(StrEnum):
     EXECUTE_CODE = "execute_code"
     CONSULT_AGENT = "consult_agent"
     SEARCH_CODEBASE = "search_codebase"
+    SEARCH_SYMBOLS = "search_symbols"
+    INDEX_SYMBOLS = "index_symbols"
     READ_DOCS = "read_docs"
     RECALL_CONTEXT = "recall_context"
+    STORE_MEMORY = "store_memory"
     ANALYZE_DATA = "analyze_data"
     GENERATE_REPORT = "generate_report"
     SCAFFOLD_PROJECT = "scaffold_project"
@@ -100,6 +104,7 @@ class AgentBase(ABC):
     model_key: str
     prompt_file: str
     supported_actions: set[AgentAction] = set()
+    enable_memory: bool = True  # automatically recall/store semantic memories
 
     # ------------------------------------------------------------------
     # Shared helpers (DRY for single-shot streaming agents)
@@ -122,11 +127,14 @@ class AgentBase(ABC):
         AgentAction.LIST_DIR_ABSOLUTE: ("list_dir_absolute", '{"path": "<absolute_directory_path>"}'),
         AgentAction.EXECUTE_CODE: ("execute_code", '{"code": "<code_string>", "language": "python"}'),
         AgentAction.SEARCH_CODEBASE: ("search_codebase", '{"query": "<search_query>", "project_path": "."}'),
+        AgentAction.SEARCH_SYMBOLS: ("search_symbols", '{"query": "<symbol_name>", "kind": "function|class|variable"}'),
+        AgentAction.INDEX_SYMBOLS: ("index_symbols", '{"project_path": ".", "force_reindex": false}'),
         AgentAction.SEARCH_WEB: ("web_search", '{"query": "<search_query>"}'),
         AgentAction.FETCH_URL: ("fetch_url", '{"url": "<target_url>"}'),
         AgentAction.CONSULT_AGENT: ("consult_agent", '{"agent": "<agent_name>", "question": "<question_to_ask>"}'),
         AgentAction.READ_DOCS: ("read_file", '{"path": "<doc_file>"}'),
-        AgentAction.RECALL_CONTEXT: ("recall_context", '{"query": "<search_query>"}'),
+        AgentAction.RECALL_CONTEXT: ("recall_context", '{"query": "<search_query>", "session_id": "<optional_session_id>"}'),
+        AgentAction.STORE_MEMORY: ("store_memory", '{"content": "<important_fact>", "memory_type": "session|project|global", "tags": "tag1,tag2"}'),
         AgentAction.ANALYZE_DATA: ("data_analysis", '{"data_path": "<file>", "query": "<analysis_query>"}'),
         AgentAction.GENERATE_REPORT: ("report_generation", '{"title": "<title>", "sections": "<json_sections>"}'),
         AgentAction.SCAFFOLD_PROJECT: ("scaffold_project", '{"name": "<project_name>", "template": "python"}'),
@@ -135,8 +143,14 @@ class AgentBase(ABC):
         AgentAction.DEEP_RESEARCH: ("deep_research", '{"query": "<research_query>", "max_results": 5}'),
     }
 
-    def build_messages(self, request: AgentRequest, context: str = "") -> list[dict[str, str]]:
-        """Assemble the message list sent to the LLM: system + history + user."""
+    async def abuild_messages(
+        self, request: AgentRequest, context: str = ""
+    ) -> list[dict[str, str]]:
+        """Assemble the message list sent to the LLM: system + history + user.
+
+        When ``enable_memory`` is true, relevant semantic memories from past
+        sessions are automatically injected as an additional system message.
+        """
         system_content = self.system_prompt()
 
         # Inject tool usage instructions if agent supports ReAct actions
@@ -145,7 +159,40 @@ class AgentBase(ABC):
             if tool_instructions:
                 system_content += "\n\n" + tool_instructions
 
+        # Allow the orchestrator to inject mode-specific instructions cleanly
+        # via the request context instead of polluting the user message.
+        system_addon = request.context.get("_system_addon") or request.context.get("system_prompt_addon")
+        if system_addon:
+            system_content += "\n\n" + "=" * 60 + "\nMODE-SPECIFIC INSTRUCTIONS\n" + "=" * 60 + "\n" + str(system_addon)
+
         messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
+
+        # Inject relevant semantic memories asynchronously (non-blocking)
+        if self.enable_memory:
+            try:
+                from backend.knowledge.memory import get_memory_store
+
+                memory_store = get_memory_store()
+                memory_context = await asyncio.wait_for(
+                    memory_store.get_context(
+                        request.query,
+                        session_id=request.session_id,
+                        project_id=request.project_path or "",
+                        top_k=5,
+                        max_tokens=1500,
+                    ),
+                    timeout=10.0,
+                )
+                if memory_context:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": f"Relevant memories from past conversations:\n{memory_context}",
+                        }
+                    )
+            except Exception as exc:
+                logger.debug("[%s] Failed to load semantic memory context: %s", self.name, exc)
+
         if context:
             messages.append(
                 {"role": "system", "content": f"Context from previous steps:\n{context}"}
@@ -154,6 +201,25 @@ class AgentBase(ABC):
             messages.append({"role": msg.role, "content": msg.content})
         messages.append({"role": "user", "content": request.query})
         return messages
+
+    def build_messages(self, request: AgentRequest, context: str = "") -> list[dict[str, str]]:
+        """Synchronous wrapper for :meth:`abuild_messages`.
+
+        Prefer :meth:`abuild_messages` in async code to avoid event-loop
+        conflicts. This wrapper is kept for backward compatibility and
+        test helpers.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.abuild_messages(request, context))
+
+        # Already inside an event loop: schedule and block the current
+        # thread. This is safe when called from synchronous test code
+        # that is itself running inside the async test runner.
+        return asyncio.run_coroutine_threadsafe(
+            self.abuild_messages(request, context), loop
+        ).result(timeout=12.0)
 
     def _build_tool_instructions(self) -> str:
         """Build tool usage instructions for agents with ReAct support."""
@@ -194,10 +260,18 @@ class AgentBase(ABC):
             "6. You may emit MULTIPLE tool calls in a single response.",
             "7. After each tool result, decide the next action or give your final answer.",
             "8. NEVER apologise for not being able to act - just call the tool.",
+            "9. Use CONSULT_AGENT when you need specialised expertise you do not have.",
+            "   Examples: consult ARCHITECT for design, ANALYZER for review, DEBUGGER for bugs, RESEARCHER for external info.",
+            "10. In MODO AUTÓNOMO / auto mode, act with maximum autonomy: plan, explore, consult, execute, verify, and summarise.",
             "",
             "EXAMPLE - create a file with an absolute path:",
             '```tool',
             '{"name": "write_file_absolute", "arguments": {"path": "C:\\\\Users\\\\rodri\\\\Desktop\\\\desligar\\\\teste.txt", "content": "Ola Mundo"}}',
+            '```',
+            "",
+            "EXAMPLE - consult another agent:",
+            '```tool',
+            '{"name": "consult_agent", "arguments": {"agent": "ARCHITECT", "question": "What is the best design for a plugin registry?"}}',
             '```',
             "",
         ])
@@ -227,7 +301,7 @@ class AgentBase(ABC):
             "num_predict": max_tokens,
             "stop": ["<|im_end|>", "<|endoftext|>", "</tool_call>"],
         }
-        messages = self.build_messages(request, context)
+        messages = await self.abuild_messages(request, context)
 
         # Try primary model, then fallback
         fallback_id = model_cfg.get("fallback_id")
@@ -614,8 +688,9 @@ class AgentBase(ABC):
             priority: 1 (lowest) to 5 (highest).
             ttl_seconds: How long to retain the message in persistence.
         """
-        from backend.core.agent_bus import BusMessage, get_agent_bus
         import uuid
+
+        from backend.core.agent_bus import BusMessage, get_agent_bus
 
         bus = get_agent_bus()
         msg = BusMessage(
@@ -711,3 +786,25 @@ class AgentBase(ABC):
                 )
             except Exception as exc:
                 logger.warning("[%s] Failed to write shared memory: %s", self.name, exc)
+
+            # Persist a semantic memory of this exchange for future recall
+            if self.enable_memory:
+                try:
+                    from backend.knowledge.memory import MemoryType, get_memory_store
+
+                    mem_store = get_memory_store()
+                    summary = (
+                        f"Agent {self.name} answered query: {request.query[:200]}\n"
+                        f"Response (truncated): {''.join(output_parts)[:1000]}"
+                    )
+                    await mem_store.store(
+                        content=summary,
+                        memory_type=MemoryType.CONVERSATION,
+                        session_id=request.session_id,
+                        project_id=request.project_path or "",
+                        source=self.name,
+                        tags=["agent.run", self.name.lower(), "auto_memory"],
+                        importance=0.5,
+                    )
+                except Exception as exc:
+                    logger.debug("[%s] Failed to store semantic memory: %s", self.name, exc)

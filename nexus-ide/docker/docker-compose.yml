@@ -8,11 +8,23 @@ services:
       - "8000:8000"
     environment:
       - LLM_PROVIDER=ollama
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_DASHBOARD_HOST=http://ollama:11434
       - LOCAL_LLM_DEVICE=cpu
-      - ENVIRONMENT=production
-      - OLLAMA_BASE_URL=http://ollama:11434
+      - ENVIRONMENT=development
+      - DATABASE_URL=sqlite:///./data/nexus.db
+      - REDIS_URL=redis://redis:6379
+      - SECRET_KEY=${SECRET_KEY:-development-secret-key-change-in-production}
+      - JWT_SECRET=${JWT_SECRET:-development-jwt-secret-change-in-production}
+      # Cloud providers (optional) — set these in your .env file
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - KIMI_API_KEY=${KIMI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     volumes:
       - nexus-data:/app/data
+      - ../config:/app/config:ro
       - huggingface-cache:/root/.cache/huggingface
     depends_on:
       redis:

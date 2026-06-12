@@ -21,6 +21,7 @@ from backend.core.workspace_fs import (
     delete_file_absolute,
     list_dir_absolute,
     read_file_absolute,
+    read_multiple_files_absolute,
     search_files_absolute,
     write_file_absolute,
 )
@@ -47,9 +48,12 @@ _BLOCKED_EXTENSIONS: set[str] = {
 
 def _resolve_path(path: str, project_path: str) -> Path:
     """Resolve *path* relative to *project_path* if it is not absolute."""
+    project = Path(project_path).expanduser().resolve()
     if Path(path).is_absolute():
-        return Path(path).resolve()
-    return (Path(project_path).resolve() / path).resolve()
+        target = Path(path).expanduser().resolve()
+    else:
+        target = (project / path).expanduser().resolve()
+    return target
 
 
 def _validate_relative_path(project_path: str, target_path: str) -> Path:
@@ -58,7 +62,7 @@ def _validate_relative_path(project_path: str, target_path: str) -> Path:
     Raises ``PermissionError`` with a message containing *not allowed* so
     that legacy tests can match on that substring.
     """
-    project = Path(project_path).resolve()
+    project = Path(project_path).expanduser().resolve()
     target = _resolve_path(target_path, project_path)
     try:
         target.relative_to(project)
@@ -107,6 +111,75 @@ async def read(
         return {"error": f"Failed to read: {exc}"}
     finally:
         _lock_manager.release_lock(str(full_path), owner)
+
+
+async def read_multiple(
+    paths: list[str],
+    project_path: str = ".",
+    owner: str = "anonymous",
+    timeout_seconds: float = 30.0,
+    max_total_bytes: int = 5 * 1024 * 1024,
+    max_files: int = 100,
+) -> dict[str, Any]:
+    """Read multiple files in one call. Supports absolute and relative paths.
+
+    Relative paths are resolved against *project_path* and validated against
+    the project sandbox.  Absolute paths are validated against the global
+    allowed-base security rules.
+    """
+    if not paths:
+        return {
+            "files": {},
+            "errors": {},
+            "read_count": 0,
+            "skipped_count": 0,
+            "total_bytes": 0,
+        }
+
+    resolved_paths: list[str] = []
+    for path in paths:
+        if _is_absolute(path):
+            blocked, reason = _is_blocked_path(path)
+            if blocked:
+                return {
+                    "files": {},
+                    "errors": {path: reason},
+                    "read_count": 0,
+                    "skipped_count": len(paths) - 1,
+                    "total_bytes": 0,
+                }
+            resolved_paths.append(path)
+        else:
+            try:
+                full_path = _validate_relative_path(project_path, path)
+            except PermissionError as exc:
+                return {
+                    "files": {},
+                    "errors": {path: str(exc)},
+                    "read_count": 0,
+                    "skipped_count": len(paths) - 1,
+                    "total_bytes": 0,
+                }
+            resolved_paths.append(str(full_path))
+
+    # Acquire read locks on all resolved paths in sorted order to avoid
+    # deadlocks with concurrent writers.
+    sorted_paths = sorted(set(resolved_paths))
+    try:
+        for p in sorted_paths:
+            await _lock_manager.acquire_read_lock(p, owner, timeout=timeout_seconds)
+        return await read_multiple_files_absolute(
+            resolved_paths,
+            max_total_bytes=max_total_bytes,
+            max_files=max_files,
+        )
+    except (LockError, DeadlockError) as exc:
+        return {"error": f"Lock error: {exc}"}
+    except Exception as exc:
+        return {"error": f"Failed to read multiple files: {exc}"}
+    finally:
+        for p in sorted_paths:
+            _lock_manager.release_lock(p, owner)
 
 
 async def write(

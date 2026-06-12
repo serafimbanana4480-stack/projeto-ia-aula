@@ -39,6 +39,7 @@ from backend.orchestrator.routes.dashboard import router as dashboard_router
 from backend.orchestrator.routes.email import router as email_router
 from backend.orchestrator.routes.files import router as files_router
 from backend.orchestrator.routes.guardian import router as guardian_router
+from backend.orchestrator.routes.memories import router as memories_router
 from backend.orchestrator.routes.meta import router as meta_router
 from backend.orchestrator.routes.meta_analyzer import router as meta_analyzer_router
 from backend.orchestrator.routes.modes import router as modes_router
@@ -135,6 +136,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from backend.agents.dashboard_agent import DashboardAgent
 
     dashboard = DashboardAgent()
+    app.state.dashboard_agent = dashboard
     monitor_task = asyncio.create_task(dashboard.monitor_loop())
     summary_task = asyncio.create_task(dashboard.session_summary_loop())
     app.state.dashboard_monitor_task = monitor_task
@@ -213,6 +215,7 @@ app.include_router(projects_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
 app.include_router(terminal_router, prefix="/api")
 app.include_router(embeddings_router, prefix="/api")
+app.include_router(memories_router, prefix="/api")
 app.include_router(plan_router, prefix="/api")
 app.include_router(guardian_router, prefix="/api")
 app.include_router(overseer_router, prefix="/api")

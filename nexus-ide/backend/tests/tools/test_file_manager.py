@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
+from pathlib import Path
 
 import pytest
-from pathlib import Path
-from pydantic import ValidationError
 
 from backend.tools.file_manager import (
     ALLOWED_EXTENSIONS,
@@ -124,3 +122,28 @@ class TestPathValidation:
         assert "/proc" in BLOCKED_PATH_PARTS
         assert ".ssh" in BLOCKED_PATH_PARTS
         assert "/root" in BLOCKED_PATH_PARTS
+
+    @pytest.mark.asyncio
+    async def test_blocked_path_component_rejects_system_path(self, tmp_path: Path) -> None:
+        """Real system paths like /etc/passwd are still blocked."""
+        with pytest.raises(UnsafePathError, match="Blocked path"):
+            await read_file("/etc/passwd")
+
+    @pytest.mark.asyncio
+    async def test_substring_false_positive_allowed(self, tmp_path: Path) -> None:
+        """Legitimate paths containing blocked substrings are permitted."""
+        # e.g. ``my.ssh.project`` or ``etcetera`` should not be blocked.
+        test_file = tmp_path / "etcetera.txt"
+        test_file.write_text("safe content", encoding="utf-8")
+
+        content = await read_file(str(test_file))
+        assert content == "safe content"
+
+    @pytest.mark.asyncio
+    async def test_ssh_substring_in_filename_allowed(self, tmp_path: Path) -> None:
+        """A file name containing '.ssh' as a substring is not blocked."""
+        test_file = tmp_path / "my.ssh.project.txt"
+        test_file.write_text("safe content", encoding="utf-8")
+
+        content = await read_file(str(test_file))
+        assert content == "safe content"

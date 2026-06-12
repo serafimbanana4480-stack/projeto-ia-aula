@@ -1,14 +1,15 @@
 """Tests for file operations tool."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
+from backend.tools.file_api import _validate_relative_path as _validate_path
 from backend.tools.file_ops import (
-    _validate_path,
     list_dir,
     read_file,
+    read_multiple_files,
     search_in_files,
     write_file,
 )
@@ -233,3 +234,46 @@ class TestSearchInFiles:
         assert result["count"] == 1
         assert "preview" in result["results"][0]
         assert len(result["results"][0]["preview"]) > 0
+
+class TestReadMultipleFiles:
+    """Test reading multiple files in one call."""
+
+    @pytest.mark.asyncio
+    async def test_read_multiple_files(self, tmp_path: Path) -> None:
+        (tmp_path / "a.txt").write_text("content a", encoding="utf-8")
+        (tmp_path / "b.txt").write_text("content b", encoding="utf-8")
+
+        result = await read_multiple_files(
+            ["a.txt", "b.txt"], project_path=str(tmp_path)
+        )
+
+        assert result["read_count"] == 2
+        assert result["files"][str(tmp_path / "a.txt")] == "content a"
+        assert result["files"][str(tmp_path / "b.txt")] == "content b"
+
+    @pytest.mark.asyncio
+    async def test_read_multiple_files_with_missing(self, tmp_path: Path) -> None:
+        (tmp_path / "a.txt").write_text("content a", encoding="utf-8")
+
+        result = await read_multiple_files(
+            ["a.txt", "missing.txt"], project_path=str(tmp_path)
+        )
+
+        assert result["read_count"] == 1
+        assert "File not found" in result["errors"][str(tmp_path / "missing.txt")]
+
+    @pytest.mark.asyncio
+    async def test_read_multiple_files_outside_project(self, tmp_path: Path) -> None:
+        result = await read_multiple_files(
+            ["../etc/passwd"], project_path=str(tmp_path)
+        )
+
+        assert result["read_count"] == 0
+        assert "not allowed" in result["errors"]["../etc/passwd"]
+
+    @pytest.mark.asyncio
+    async def test_read_multiple_files_empty(self, tmp_path: Path) -> None:
+        result = await read_multiple_files([], project_path=str(tmp_path))
+
+        assert result["read_count"] == 0
+        assert result["skipped_count"] == 0
