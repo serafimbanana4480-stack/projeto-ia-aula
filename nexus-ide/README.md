@@ -188,6 +188,8 @@ make backend   # Terminal 1 — uvicorn reload
 make frontend  # Terminal 2 — npm run dev
 ```
 
+> **Nota multi-plataforma:** em Windows podes usar `start.bat` / `stop.bat`; em macOS/Linux usa `./start-all.sh` / `./stop-all.sh`.
+
 Acede a:
 - **IDE**: http://localhost:3000
 - **API Docs**: http://localhost:8000/docs

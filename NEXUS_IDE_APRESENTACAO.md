@@ -214,7 +214,10 @@ bash scripts/setup.sh
 ```bash
 # Terminal 1 — Backend
 cd nexus-ide
-.venv/Scripts/python -m uvicorn backend.orchestrator.main:app --host 0.0.0.0 --port 8000 --reload
+# macOS/Linux:
+.venv/bin/python -m uvicorn backend.orchestrator.main:app --host 0.0.0.0 --port 8000 --reload
+# Windows:
+# .venv\Scripts\python -m uvicorn backend.orchestrator.main:app --host 0.0.0.0 --port 8000 --reload
 # ou: make backend
 
 # Terminal 2 — Frontend
