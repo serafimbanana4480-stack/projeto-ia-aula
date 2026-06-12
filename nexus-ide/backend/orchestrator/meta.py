@@ -411,6 +411,10 @@ class MetaOrchestrator:
         """Retrieve mission by id (reads from memory, falls back to store)."""
         return self._get_mission(mission_id)
 
+    def list_all_missions(self) -> list[Mission]:
+        """Return all missions currently in memory."""
+        return list(self._missions.values())
+
     def list_active_agents(self, mission_id: str) -> list[AgentTask]:
         """Return all active (non-terminal) agents for a mission."""
         mission = self._get_mission(mission_id)
@@ -630,7 +634,7 @@ class MetaOrchestrator:
                 continue
             artifact_type = "code" if phase.name == "Implementation" else "design"
             author = task.type
-            prs.submit_for_review(
+            await prs.submit_for_review(
                 artifact_id=f"{mission.id}:{task.id}",
                 artifact_type=artifact_type,
                 author_agent=author,

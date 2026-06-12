@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { apiUrl } from "../../lib/api";
+import { getAlerts } from "../../lib/api";
 import { useMetricsStore } from "../../stores/metricsStore";
 import { Bell, AlertTriangle, AlertCircle, Info, XCircle, X, Shield } from "lucide-react";
 
@@ -29,10 +29,8 @@ export default function AlertFeed() {
 
   const fetchAlerts = useCallback(async () => {
     try {
-      const response = await fetch(apiUrl("/api/alerts/current"), { signal: AbortSignal.timeout(5000) });
-      if (!response.ok) throw new Error("Backend error");
-      const data = (await response.json()) as AlertData[];
-      setAlerts(Array.isArray(data) ? data : []);
+      const data = await getAlerts();
+      setAlerts(Array.isArray(data) ? (data as AlertData[]) : []);
       setConnected(true);
     } catch {
       setAlerts([]);

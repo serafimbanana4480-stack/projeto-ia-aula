@@ -2,6 +2,7 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { useMetricsStore } from "../../stores/metricsStore";
 import { useModelStore } from "../../stores/modelStore";
+import { getHealth, getModelStatus } from "../../lib/api";
 import { Activity, Server, Cpu, Database, Wifi } from "lucide-react";
 
 interface HealthCheck {
@@ -30,12 +31,18 @@ export default function SystemHealth() {
     const startAll = Date.now();
 
     const [localLlmRes, backendRes] = await Promise.allSettled([
-      fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api/models/status`, { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
-        ok: r.ok,
+      getModelStatus().then(() => ({
+        ok: true,
+        latency: Date.now() - startAll,
+      })).catch(() => ({
+        ok: false,
         latency: Date.now() - startAll,
       })),
-      fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/health`, { signal: AbortSignal.timeout(3000) }).then(async (r) => ({
-        ok: r.ok,
+      getHealth().then(() => ({
+        ok: true,
+        latency: Date.now() - startAll,
+      })).catch(() => ({
+        ok: false,
         latency: Date.now() - startAll,
       })),
     ]);

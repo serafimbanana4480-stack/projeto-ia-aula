@@ -101,12 +101,22 @@ class ResilientLLMProvider:
             try:
                 return await getattr(provider, method)(*args, **kwargs)
             except Exception as exc:
-                logger.warning(
-                    "Provider %s failed for %s: %s",
-                    provider.__class__.__name__,
-                    method,
-                    exc,
-                )
+                # Embeddings fall back silently to deterministic hashes; don't
+                # pollute logs with provider warnings for optional features.
+                if method == "embed":
+                    logger.debug(
+                        "Provider %s failed for %s: %s",
+                        provider.__class__.__name__,
+                        method,
+                        exc,
+                    )
+                else:
+                    logger.warning(
+                        "Provider %s failed for %s: %s",
+                        provider.__class__.__name__,
+                        method,
+                        exc,
+                    )
                 continue
         raise RuntimeError(f"All providers failed for {method}")
 

@@ -6,13 +6,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps for chromadb and docker SDK
+# System deps for chromadb, psutil and docker SDK
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY backend/requirements.txt /app/backend/requirements.txt
-RUN pip install --upgrade pip && pip install -r /app/backend/requirements.txt
+# Copy docker-specific lightweight requirements (NO PyTorch/CUDA)
+COPY docker/backend/requirements-docker.txt /app/requirements-docker.txt
+RUN pip install --upgrade pip && pip install -r /app/requirements-docker.txt
 
 COPY backend /app/backend
 COPY config  /app/config

@@ -189,7 +189,7 @@ async def execute_python(
                     check=False,
                 )
             except Exception:
-                pass
+                logger.debug("Failed to kill timed-out Python process", exc_info=True)
             return {"error": f"Python script timed out after {timeout}s", "returncode": -1}
         finally:
             Path(temp_path).unlink(missing_ok=True)
@@ -198,10 +198,10 @@ async def execute_python(
         stderr_text = result.stderr or ""
 
         return {
-            "returncode": proc.returncode,
+            "returncode": result.returncode,
             "stdout": stdout_text,
             "stderr": stderr_text,
-            "success": proc.returncode == 0,
+            "success": result.returncode == 0,
         }
     except Exception as exc:
         result = {"error": f"Python execution failed: {exc}"}

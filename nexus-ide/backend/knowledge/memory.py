@@ -314,6 +314,13 @@ class MemoryStore:
         """Get all memories for a session."""
         return [m for m in self._memories.values() if m.session_id == session_id]
 
+    async def list_all(self, limit: int = 1000) -> list[Memory]:
+        """Return all memories ordered by creation time (newest first)."""
+        memories = sorted(
+            self._memories.values(), key=lambda m: m.created_at, reverse=True
+        )
+        return memories[:limit]
+
     async def delete(self, memory_id: str) -> bool:
         """Delete a memory by ID."""
         if memory_id in self._memories:
@@ -372,8 +379,21 @@ _memory_store: MemoryStore | None = None
 
 
 def get_memory_store() -> MemoryStore:
-    """Get or create the global memory store singleton."""
+    """Get or create the global memory store singleton.
+
+    Uses :class:`PersistentMemoryStore` when available so that memories
+    survive process restarts.
+    """
     global _memory_store
     if _memory_store is None:
-        _memory_store = MemoryStore()
+        try:
+            from backend.knowledge.persistent_memory import PersistentMemoryStore
+
+            _memory_store = PersistentMemoryStore()
+        except Exception as exc:
+            logger.warning(
+                "PersistentMemoryStore unavailable, falling back to MemoryStore: %s",
+                exc,
+            )
+            _memory_store = MemoryStore()
     return _memory_store

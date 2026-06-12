@@ -49,7 +49,7 @@ class AutoCorrectionLoop:
         self, lifecycle_manager: AgentLifecycleManager | None = None
     ) -> None:
         self._task: asyncio.Task[Any] | None = None
-        self._stop_event = asyncio.Event()
+        self._stop_event: asyncio.Event | None = None
         self._status: dict[str, Any] = {
             "monitoring": False,
             "corrections": [],
@@ -65,6 +65,8 @@ class AutoCorrectionLoop:
             logger.warning("Auto-correction loop already running")
             return
 
+        # Recreate the event in the current loop to avoid cross-loop issues
+        self._stop_event = asyncio.Event()
         self._stop_event.clear()
         self._task = asyncio.create_task(self._monitor())
         self._status["monitoring"] = True
@@ -72,7 +74,8 @@ class AutoCorrectionLoop:
 
     async def stop_monitoring(self) -> None:
         """Stop the background bus-monitoring task."""
-        self._stop_event.set()
+        if self._stop_event is not None:
+            self._stop_event.set()
         for task in self._monitor_tasks:
             if not task.done():
                 task.cancel()
@@ -82,7 +85,7 @@ class AutoCorrectionLoop:
             try:
                 await self._task
             except asyncio.CancelledError:
-                pass
+                logger.debug("Auto-correction task cancelled")
             self._task = None
         self._status["monitoring"] = False
         logger.info("Auto-correction loop stopped")
@@ -122,14 +125,13 @@ class AutoCorrectionLoop:
         sub4 = await bus.subscribe("performance.regression", _on_performance_regression)
 
         try:
-            while not self._stop_event.is_set():
-                await asyncio.sleep(1.0)
+            await self._stop_event.wait()
         finally:
             for sub in (sub1, sub2, sub3, sub4):
                 try:
                     await bus.unsubscribe(sub.subscription_id)
                 except Exception:
-                    pass
+                    logger.warning("Failed to unsubscribe from event bus")
 
     # ------------------------------------------------------------------
     # Handlers
@@ -142,11 +144,8 @@ class AutoCorrectionLoop:
             async with self._lock:
                 tracker = self._get_or_create_tracker(artifact_id, "test_failure")
                 if tracker.iterations >= MAX_ITERATIONS:
-                    await self._escalate(
-                        artifact_id,
-                        "Max auto-correction iterations reached for test failure",
-                    )
-                    return
+                    reason = "Max auto-correction iterations reached for test failure"
+                    break
                 tracker.iterations += 1
                 self._update_tracker(tracker)
                 iteration = tracker.iterations
@@ -172,11 +171,8 @@ class AutoCorrectionLoop:
             async with self._lock:
                 tracker = self._get_or_create_tracker(artifact_id, "test_failure")
                 if tracker.iterations >= MAX_ITERATIONS:
-                    await self._escalate(
-                        artifact_id,
-                        f"Tests still failing after {MAX_ITERATIONS} iterations",
-                    )
-                    return
+                    reason = f"Tests still failing after {MAX_ITERATIONS} iterations"
+                    break
 
             await self._publish_status(
                 "test_failure",
@@ -184,6 +180,8 @@ class AutoCorrectionLoop:
                 iteration,
                 f"Tests still failing after iteration {iteration}, looping",
             )
+
+        await self._escalate(artifact_id, reason)
 
     async def _run_test_failure_iteration(
         self, artifact_id: str, payload: dict[str, Any], iteration: int
@@ -264,11 +262,8 @@ class AutoCorrectionLoop:
             async with self._lock:
                 tracker = self._get_or_create_tracker(artifact_id, "critical_error")
                 if tracker.iterations >= MAX_ITERATIONS:
-                    await self._escalate(
-                        artifact_id,
-                        "Max auto-correction iterations reached for critical error",
-                    )
-                    return
+                    reason = "Max auto-correction iterations reached for critical error"
+                    break
                 tracker.iterations += 1
                 self._update_tracker(tracker)
                 iteration = tracker.iterations
@@ -293,11 +288,8 @@ class AutoCorrectionLoop:
             async with self._lock:
                 tracker = self._get_or_create_tracker(artifact_id, "critical_error")
                 if tracker.iterations >= MAX_ITERATIONS:
-                    await self._escalate(
-                        artifact_id,
-                        f"Critical error still present after {MAX_ITERATIONS} iterations",
-                    )
-                    return
+                    reason = f"Critical error still present after {MAX_ITERATIONS} iterations"
+                    break
 
             await self._publish_status(
                 "critical_error",
@@ -305,6 +297,8 @@ class AutoCorrectionLoop:
                 iteration,
                 f"Critical error still present after iteration {iteration}, looping",
             )
+
+        await self._escalate(artifact_id, reason)
 
     async def _run_critical_error_iteration(
         self, artifact_id: str, payload: dict[str, Any], iteration: int
@@ -372,7 +366,7 @@ class AutoCorrectionLoop:
         from backend.core.peer_review import get_peer_review_system
 
         prs = get_peer_review_system()
-        review = prs.get_review_request(review_id)
+        review = await prs.get_review_request(review_id)
         if review is None:
             return
         if review.status != "changes_requested":
@@ -382,17 +376,19 @@ class AutoCorrectionLoop:
         async with self._lock:
             tracker = self._get_or_create_tracker(artifact_id, "review_changes")
             if tracker.iterations >= MAX_ITERATIONS:
-                await self._escalate(
-                    artifact_id,
-                    "Max auto-correction iterations reached for review changes",
-                )
-                return
-            tracker.iterations += 1
-            self._update_tracker(tracker)
-            iteration = tracker.iterations
+                reason = "Max auto-correction iterations reached for review changes"
+            else:
+                tracker.iterations += 1
+                self._update_tracker(tracker)
+                iteration = tracker.iterations
+                reason = None
+
+        if reason:
+            await self._escalate(artifact_id, reason)
+            return
 
         # Fetch review results to get actual comments
-        results = prs.get_review_results(review_id)
+        results = await prs.get_review_results(review_id)
         all_comments: list[dict[str, Any]] = []
         for result in results:
             for comment in result.comments:
@@ -472,14 +468,16 @@ class AutoCorrectionLoop:
                 artifact_id, "performance_regression"
             )
             if tracker.iterations >= MAX_ITERATIONS:
-                await self._escalate(
-                    artifact_id,
-                    "Max auto-correction iterations reached for performance regression",
-                )
-                return
-            tracker.iterations += 1
-            self._update_tracker(tracker)
-            iteration = tracker.iterations
+                reason = "Max auto-correction iterations reached for performance regression"
+            else:
+                tracker.iterations += 1
+                self._update_tracker(tracker)
+                iteration = tracker.iterations
+                reason = None
+
+        if reason:
+            await self._escalate(artifact_id, reason)
+            return
 
         objective = (
             f"Fix performance regression in artifact {artifact_id}. "
@@ -571,7 +569,7 @@ class AutoCorrectionLoop:
         """Poll a single agent instance until it reaches a terminal state."""
         start = time.time()
         while time.time() - start < timeout:
-            if self._stop_event.is_set():
+            if self._stop_event is not None and self._stop_event.is_set():
                 logger.info(
                     "AutoCorrection stop requested while waiting for %s", instance_id
                 )
@@ -593,7 +591,11 @@ class AutoCorrectionLoop:
                 )
                 return
 
-            await asyncio.sleep(1.0)
+            # Responsive sleep: wake immediately on stop event
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
 
         logger.warning(
             "AutoCorrection timeout waiting for agent %s after %.0fs",
@@ -605,7 +607,7 @@ class AutoCorrectionLoop:
                 instance_id, reason="Auto-correction timeout"
             )
         except Exception:
-            pass
+            logger.warning("Failed to abort lifecycle for %s", instance_id)
 
     def _get_agent_output(self, instance_id: str) -> str | None:
         """Return the output stored by the lifecycle manager for an instance."""
@@ -691,9 +693,9 @@ class AutoCorrectionLoop:
     async def _escalate(self, artifact_id: str, reason: str) -> None:
         """Escalate to META_ANALYZER + OVERSEER.
 
-        .. note::
-           Callers must already hold ``self._lock``; this method does **not**
-           acquire it to avoid re-entrance deadlocks.
+        This method performs its own I/O (spawning agents and publishing to
+        the bus) **without** holding ``self._lock``. The lock is only acquired
+        for the brief state mutation on ``active_corrections``.
         """
         logger.warning(
             "Escalating artifact %s to META_ANALYZER + OVERSEER: %s",
@@ -746,7 +748,8 @@ class AutoCorrectionLoop:
                 "Failed to spawn OVERSEER for %s", artifact_id
             )
 
-        self.active_corrections.setdefault(artifact_id, []).extend(instance_ids)
+        async with self._lock:
+            self.active_corrections.setdefault(artifact_id, []).extend(instance_ids)
 
         bus = get_agent_bus()
         await bus.publish(

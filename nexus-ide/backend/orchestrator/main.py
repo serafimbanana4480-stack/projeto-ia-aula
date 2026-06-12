@@ -33,8 +33,10 @@ from backend.orchestrator.routes.agent_bus import router as agent_bus_router
 from backend.orchestrator.routes.agent_state import router as agent_state_router
 from backend.orchestrator.routes.agents import router as agents_router
 from backend.orchestrator.routes.auth import router as auth_router
+from backend.orchestrator.routes.browser import router as browser_router
 from backend.orchestrator.routes.chat import router as chat_router
 from backend.orchestrator.routes.dashboard import router as dashboard_router
+from backend.orchestrator.routes.email import router as email_router
 from backend.orchestrator.routes.files import router as files_router
 from backend.orchestrator.routes.guardian import router as guardian_router
 from backend.orchestrator.routes.meta import router as meta_router
@@ -42,6 +44,7 @@ from backend.orchestrator.routes.meta_analyzer import router as meta_analyzer_ro
 from backend.orchestrator.routes.modes import router as modes_router
 from backend.orchestrator.routes.overseer import router as overseer_router
 from backend.orchestrator.routes.plan import router as plan_router
+from backend.orchestrator.routes.profile import router as profile_router
 from backend.orchestrator.routes.projects import router as projects_router
 from backend.orchestrator.routes.system import router as system_router
 from backend.orchestrator.routes.terminal import router as terminal_router
@@ -50,6 +53,9 @@ from backend.orchestrator.routes.workspace import router as workspace_router
 from backend.orchestrator.routes.embeddings import router as embeddings_router
 from backend.orchestrator.routes.wizard import router as wizard_router
 from backend.orchestrator.routes.collaboration import router as collaboration_router
+from backend.orchestrator.routes.second_brain import router as second_brain_router
+from backend.orchestrator.routes.orchestrator import router as orchestrator_router
+from backend.orchestrator.routes.skills import router as skills_router
 
 logger = logging.getLogger(__name__)
 
@@ -195,11 +201,14 @@ app.add_middleware(
 
 # Include routers
 app.include_router(auth_router, prefix="/api")
+app.include_router(browser_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(dashboard_router, prefix="/api")
+app.include_router(email_router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
 app.include_router(alerts_router, prefix="/api")
 app.include_router(modes_router, prefix="/api")
+app.include_router(profile_router, prefix="/api")
 app.include_router(projects_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
 app.include_router(terminal_router, prefix="/api")
@@ -217,6 +226,9 @@ app.include_router(collaboration_router, prefix="/api")
 app.include_router(workers_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")
 app.include_router(system_router, prefix="/api")
+app.include_router(second_brain_router, prefix="/api")
+app.include_router(orchestrator_router, prefix="/api")
+app.include_router(skills_router, prefix="/api")
 
 # MetaOrchestrator WebSocket — mounted directly so path is ``/ws/missions/{id}``
 from backend.orchestrator.routes.meta import mission_websocket as _meta_ws  # noqa: E402
@@ -286,3 +298,4 @@ def main() -> None:  # pragma: no cover
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+# force reload 1781149067

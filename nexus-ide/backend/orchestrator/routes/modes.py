@@ -10,10 +10,11 @@ import logging
 from pathlib import Path
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.config.settings import get_settings
+from backend.middleware.auth import require_auth
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,11 @@ async def list_tools() -> dict:
 
 
 @router.post("/tools/{tool_name}/toggle")
-async def toggle_tool(tool_name: str, enabled: bool) -> dict:
+async def toggle_tool(
+    tool_name: str,
+    enabled: bool,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Enable or disable a tool."""
     from backend.tools.registry import set_tool_enabled
 
@@ -115,13 +120,16 @@ def _save_settings(settings: dict) -> None:
 
 
 @router.get("/settings")
-async def get_app_settings() -> dict:
+async def get_app_settings(_user: dict = Depends(require_auth)) -> dict:
     """Get current application settings."""
     return _load_settings()
 
 
 @router.put("/settings")
-async def update_app_settings(update: SettingsUpdate) -> dict:
+async def update_app_settings(
+    update: SettingsUpdate,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Update application settings."""
     current = _load_settings()
     updates = update.model_dump(exclude_none=True)
@@ -136,7 +144,11 @@ async def update_app_settings(update: SettingsUpdate) -> dict:
 
 
 @router.post("/sessions")
-async def create_session(title: str = "Nova sessão", mode: str = "auto") -> dict:
+async def create_session(
+    title: str = "Nova sessão",
+    mode: str = "auto",
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Create a new chat session."""
     from backend.persistence.db import create_session as db_create_session
 
@@ -145,7 +157,7 @@ async def create_session(title: str = "Nova sessão", mode: str = "auto") -> dic
 
 
 @router.get("/sessions")
-async def list_sessions() -> list[dict]:
+async def list_sessions(_user: dict = Depends(require_auth)) -> list[dict]:
     """List all chat sessions."""
     from backend.persistence.db import list_sessions as db_list_sessions
 
@@ -153,14 +165,14 @@ async def list_sessions() -> list[dict]:
 
 
 @router.get("/db/stats")
-async def get_db_stats() -> dict:
+async def get_db_stats(_user: dict = Depends(require_auth)) -> dict:
     """Get database statistics: table row counts, message stats, recent sessions."""
     from backend.persistence.db import (
+        count_pending_changes,
+        get_db,
         get_message_statistics,
         list_sessions,
-        count_pending_changes,
     )
-    from backend.persistence.db import get_db
 
     # Table row counts
     table_counts: dict[str, int] = {}
@@ -199,7 +211,7 @@ async def get_db_stats() -> dict:
             ).fetchall()
             recent_tools = [dict(r) for r in rows]
         except Exception:
-            pass
+            logger.debug("Failed to load recent tool executions", exc_info=True)
 
     # Recent routing decisions
     recent_routing: list[dict] = []
@@ -211,7 +223,7 @@ async def get_db_stats() -> dict:
             ).fetchall()
             recent_routing = [dict(r) for r in rows]
         except Exception:
-            pass
+            logger.debug("Failed to load recent routing decisions", exc_info=True)
 
     return {
         "table_counts": table_counts,

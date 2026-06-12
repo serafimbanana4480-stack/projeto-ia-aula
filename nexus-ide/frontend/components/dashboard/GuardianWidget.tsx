@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { apiUrl } from "../../lib/api";
+import { authHeaders } from "../../lib/auth";
 import { useMetricsStore } from "../../stores/metricsStore";
 import {
   Shield,
@@ -75,8 +76,8 @@ export default function GuardianWidget() {
     }
     try {
       const [statusRes, suggestionsRes] = await Promise.allSettled([
-        fetch(apiUrl("/api/guardian/status"), { signal: AbortSignal.timeout(5000) }),
-        fetch(apiUrl("/api/guardian/suggestions?limit=10"), { signal: AbortSignal.timeout(5000) }),
+        fetch(apiUrl("/api/guardian/status"), { headers: authHeaders(), signal: AbortSignal.timeout(5000) }),
+        fetch(apiUrl("/api/guardian/suggestions?limit=10"), { headers: authHeaders(), signal: AbortSignal.timeout(5000) }),
       ]);
 
       if (statusRes.status === "fulfilled" && statusRes.value.ok) {
@@ -104,6 +105,7 @@ export default function GuardianWidget() {
       setApplyingId(id);
       try {
         const response = await fetch(apiUrl(`/api/guardian/suggestions/${id}/apply`), {
+          headers: authHeaders(),
           method: "POST",
           signal: AbortSignal.timeout(10000),
         });

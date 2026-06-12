@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from backend.core.workspace_security import _is_blocked_path
+from backend.middleware.auth import require_auth
 from backend.models.api import ProjectCreateRequest, ProjectUpdateRequest
 from backend.persistence.db import (
     create_project,
@@ -22,17 +24,24 @@ router = APIRouter()
 
 
 @router.get("/projects")
-async def list_projects_endpoint() -> dict:
+async def list_projects_endpoint(_user: dict = Depends(require_auth)) -> dict:
     """List all projects."""
     projects = list_projects()
     return {"projects": projects}
 
 
 @router.post("/projects")
-async def create_project_endpoint(req: ProjectCreateRequest) -> dict:
+async def create_project_endpoint(
+    req: ProjectCreateRequest,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Create a new project. Creates the directory if it doesn't exist."""
     try:
         project_path = Path(req.path).resolve()
+
+        blocked, reason = _is_blocked_path(str(project_path))
+        if blocked:
+            raise HTTPException(status_code=400, detail=f"Blocked path: {reason}")
 
         # Create directory if it doesn't exist
         if not project_path.exists():
@@ -51,13 +60,18 @@ async def create_project_endpoint(req: ProjectCreateRequest) -> dict:
             trust=req.trust,
         )
         return {"project": project}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to create project: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/projects/{project_id}")
-async def get_project_endpoint(project_id: str) -> dict:
+async def get_project_endpoint(
+    project_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Get a specific project."""
     project = get_project(project_id)
     if not project:
@@ -66,7 +80,11 @@ async def get_project_endpoint(project_id: str) -> dict:
 
 
 @router.put("/projects/{project_id}")
-async def update_project_endpoint(project_id: str, req: ProjectUpdateRequest) -> dict:
+async def update_project_endpoint(
+    project_id: str,
+    req: ProjectUpdateRequest,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Update a project."""
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     project = update_project(project_id, **fields)
@@ -76,14 +94,21 @@ async def update_project_endpoint(project_id: str, req: ProjectUpdateRequest) ->
 
 
 @router.delete("/projects/{project_id}")
-async def delete_project_endpoint(project_id: str) -> dict:
+async def delete_project_endpoint(
+    project_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Delete a project."""
     delete_project(project_id)
     return {"deleted": True}
 
 
 @router.get("/projects/{project_id}/files")
-async def list_project_files(project_id: str, recursive: bool = False) -> dict:
+async def list_project_files(
+    project_id: str,
+    recursive: bool = False,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """List files in a project (sandboxed)."""
     project = get_project(project_id)
     if not project:

@@ -36,7 +36,7 @@ async def list_instances(request: Request, _user: dict = Depends(require_auth)) 
         raise HTTPException(status_code=503, detail="Agent lifecycle manager not available")
     active = lifecycle.list_active()
     return {
-        "instances": [i.model_dump(mode="json") for i in active],
+        "agents": [i.model_dump(mode="json") for i in active],
         "count": len(active),
         "stats": lifecycle.get_stats(),
     }

@@ -139,6 +139,18 @@ def _mission_to_status_dict(mission: Mission) -> dict[str, Any]:
 # ── Routes ──────────────────────────────────────────────────────────────────
 
 
+@router.get("/missions")
+@limiter.limit("120/minute")
+async def list_missions(request: Request) -> dict[str, Any]:
+    """List all active missions."""
+    meta = _get_meta(request)
+    missions = meta.list_all_missions()
+    return {
+        "missions": [_mission_to_status_dict(m) for m in missions],
+        "count": len(missions),
+    }
+
+
 @router.post("/missions")
 @limiter.limit("30/minute")
 async def create_mission(req: CreateMissionRequest, request: Request) -> CreateMissionResponse:
@@ -294,4 +306,4 @@ async def mission_websocket(websocket: WebSocket, mission_id: str) -> None:
         try:
             await websocket.close(code=1011)
         except Exception:
-            pass
+            logger.debug("Failed to close WebSocket for mission %s", mission_id, exc_info=True)

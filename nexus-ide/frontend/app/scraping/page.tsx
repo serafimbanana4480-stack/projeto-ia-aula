@@ -11,7 +11,7 @@ import {
   Loader2,
   AlertCircle,
 } from "lucide-react";
-import { apiUrl } from "../../lib/api";
+import { webSearch } from "../../lib/api";
 import { log } from "../../lib/log";
 
 interface SearchResult {
@@ -34,18 +34,12 @@ export default function ScrapingPage() {
     setResults([]);
 
     try {
-      const response = await fetch(apiUrl("/api/web_search"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, max_results: 10 }),
-      });
+      const data = await webSearch({ query, limit: 10 });
 
-      const data = await response.json();
-
-      if (data.error) {
-        setError(data.error);
+      if (data && typeof data === "object" && "error" in data && data.error) {
+        setError(String(data.error));
       } else if (Array.isArray(data)) {
-        setResults(data);
+        setResults(data as SearchResult[]);
       } else {
         setError("Unexpected response format");
       }

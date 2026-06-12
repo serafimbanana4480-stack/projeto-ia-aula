@@ -97,7 +97,7 @@ class ConsensusEngine:
                     conf_str = response.lower().split("confidence:")[1].split()[0]
                     confidence = float(conf_str)
                 except (ValueError, IndexError):
-                    pass
+                    logger.debug("Failed to parse confidence from consensus response", exc_info=True)
 
             return ConsensusResult(
                 winner=f"proposal_{winner_idx + 1}",

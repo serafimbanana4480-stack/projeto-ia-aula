@@ -277,7 +277,7 @@ class TestEventBus:
         bus = EventBus()
         for i in range(5):
             await bus.publish(OrchestratorEvent(event_type=EventType.TOKEN, content=str(i)))
-        recent = bus.get_recent_events(limit=3)
+        recent = await bus.get_recent_events(limit=3)
         assert len(recent) == 3
         assert recent[-1].content == "4"
 

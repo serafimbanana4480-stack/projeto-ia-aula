@@ -1,24 +1,47 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { login, isAuthenticated } from "../../lib/auth";
+import {
+  login,
+  autoLoginDev,
+  isAutoLoginEnabled,
+} from "../../lib/auth";
 
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const expired = searchParams.get("expired") === "1";
 
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const autoLoginActive = isAutoLoginEnabled();
+  const devEmail = process.env.NEXT_PUBLIC_DEV_EMAIL ?? "admin@nexus-ide.com";
+  const devPassword = process.env.NEXT_PUBLIC_DEV_PASSWORD ?? "admin123";
+
+  const [email, setEmail] = useState(autoLoginActive ? devEmail : "");
+  const [password, setPassword] = useState(autoLoginActive ? devPassword : "");
   const [error, setError] = useState<string | null>(expired ? "Sessão expirada. Por favor faça login novamente." : null);
   const [loading, setLoading] = useState(false);
+  const [autoLoginAttempting, setAutoLoginAttempting] = useState(false);
+  const autoLoginTried = useRef(false);
 
   useEffect(() => {
-    if (isAuthenticated()) {
-      router.replace("/");
+    if (autoLoginActive && !autoLoginTried.current) {
+      autoLoginTried.current = true;
+      setAutoLoginAttempting(true);
+      autoLoginDev()
+        .then((success) => {
+          if (success) {
+            router.replace("/");
+          } else {
+            setError("Login automático falhou. Verifica se o backend está online e as credenciais de teste existem.");
+          }
+        })
+        .catch(() => {
+          setError("Erro de rede no login automático. Verifica se o backend está em execução.");
+        })
+        .finally(() => setAutoLoginAttempting(false));
     }
-  }, [router]);
+  }, [router, autoLoginActive]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -41,6 +64,13 @@ export default function LoginPage() {
           <h1 className="text-2xl font-semibold text-white">NEXUS IDE</h1>
           <p className="mt-2 text-sm text-[#9ca3af]">Inicie sessão para continuar</p>
         </div>
+
+        {autoLoginActive && (
+          <div className="mb-4 rounded-lg border border-[#7c6afb]/30 bg-[#7c6afb]/10 px-4 py-3 text-sm text-[#b8b3ff]">
+            Modo testes — login automático ativo
+            {autoLoginAttempting && " (a tentar...)"}
+          </div>
+        )}
 
         {error && (
           <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
@@ -83,10 +113,10 @@ export default function LoginPage() {
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || autoLoginAttempting}
             className="flex w-full items-center justify-center rounded-lg bg-[#7c6afb] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-[#6b5ce6] disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {loading ? (
+            {loading || autoLoginAttempting ? (
               <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
             ) : (
               "Iniciar sessão"

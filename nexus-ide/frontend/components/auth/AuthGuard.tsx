@@ -2,9 +2,15 @@
 
 import { useEffect, useState, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { isTokenValid } from "../../lib/auth";
+import { isTokenValid, clearAuth } from "../../lib/auth";
+import { initMetricsStream } from "../../stores/metricsStore";
 
 const PUBLIC_PATHS = ["/login"];
+
+// Longer timeout during dev to avoid "Authentication check timed out" while
+// Next.js is hot-reloading or the browser is under heavy load.
+const AUTH_TIMEOUT_MS =
+  process.env.NODE_ENV === "development" ? 10000 : 5000;
 
 export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -16,21 +22,42 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let mounted = true;
 
-    // Safety timeout — never stay in spinner for more than 3.5s
     timeoutRef.current = setTimeout(() => {
       if (mounted && !checked) {
-        setError("Authentication check timed out. Please refresh the page.");
+        // If we hit the safety timeout, clear any stale token and force the
+        // user back to the login page instead of showing a dead-end error.
+        clearAuth();
+        if (!PUBLIC_PATHS.includes(pathname)) {
+          router.replace("/login?expired=1");
+        }
         setChecked(true);
       }
-    }, 3500);
+    }, AUTH_TIMEOUT_MS);
 
     try {
       const isPublic = PUBLIC_PATHS.includes(pathname);
       const valid = isTokenValid();
+
+      if (valid) {
+        // Ensure the metrics stream is running after (re-)authentication.
+        try {
+          initMetricsStream();
+        } catch {
+          /* ignore init errors */
+        }
+      }
+
       if (!isPublic && !valid) {
+        // Clean expired/invalid token immediately to prevent repeated loops.
+        clearAuth();
         router.replace("/login?expired=1");
       }
     } catch (e) {
+      // On any unexpected error, clear auth and redirect rather than hanging.
+      clearAuth();
+      if (!PUBLIC_PATHS.includes(pathname)) {
+        router.replace("/login?expired=1");
+      }
       if (mounted) {
         setError(
           e instanceof Error ? e.message : "Authentication check failed."

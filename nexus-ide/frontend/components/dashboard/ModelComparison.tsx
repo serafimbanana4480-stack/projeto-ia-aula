@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { apiUrl } from "../../lib/api";
+import { authHeaders } from "../../lib/auth";
 import { Brain, HardDrive, Clock, Layers } from "lucide-react";
 
 interface ModelInfo {
@@ -24,7 +25,7 @@ export default function ModelComparison() {
     const fetchModels = async () => {
       try {
         setLoading(true);
-        const response = await fetch(apiUrl("/api/models/status"), { signal: AbortSignal.timeout(10000) });
+        const response = await fetch(apiUrl("/api/models/status"), { headers: authHeaders(), signal: AbortSignal.timeout(10000) });
         if (response.ok) {
           const data = (await response.json()) as ModelInfo[];
           if (mounted && Array.isArray(data) && data.length > 0) {

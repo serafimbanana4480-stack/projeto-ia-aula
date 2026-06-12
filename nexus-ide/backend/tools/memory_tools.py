@@ -13,6 +13,28 @@ from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
 
+# Use persistent store when available
+_persistent_store = None
+
+
+def _get_memory_store():
+    """Get the global memory store, preferring PersistentMemoryStore."""
+    global _persistent_store
+    if _persistent_store is None:
+        try:
+            from backend.knowledge.persistent_memory import PersistentMemoryStore
+
+            _persistent_store = PersistentMemoryStore()
+        except Exception as exc:
+            logger.warning(
+                "PersistentMemoryStore unavailable, falling back to MemoryStore: %s",
+                exc,
+            )
+            from backend.knowledge.memory import MemoryStore
+
+            _persistent_store = MemoryStore()
+    return _persistent_store
+
 
 async def recall_context(
     query: str = "",
@@ -36,10 +58,9 @@ async def recall_context(
         return {"error": "Query cannot be empty."}
 
     try:
-        from backend.knowledge.memory import get_memory_store
         from backend.config.settings import get_settings
 
-        store = get_memory_store()
+        store = _get_memory_store()
 
         # Search for relevant memories
         results = await store.search(
@@ -104,10 +125,10 @@ async def store_memory(
         return {"error": "Content cannot be empty."}
 
     try:
-        from backend.knowledge.memory import MemoryType, get_memory_store
+        from backend.knowledge.memory import MemoryType
         from backend.config.settings import get_settings
 
-        store = get_memory_store()
+        store = _get_memory_store()
 
         # Parse memory type
         try:

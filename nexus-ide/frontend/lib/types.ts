@@ -10,7 +10,10 @@ export type AgentName =
   | "DEBUGGER"
   | "DOCUMENTER"
   | "OPTIMIZER"
-  | "DASHBOARD";
+  | "DASHBOARD"
+  | "ORCHESTRATOR"
+  | "SWARM"
+  | "MICRO"; // MICRO is used by ask mode
 
 export type ThinkingMode = "fast" | "deep" | "iterative";
 export type ContextNeed = "low" | "medium" | "high";
@@ -33,6 +36,8 @@ export interface StreamEvent {
     | "agent_started"
     | "agent_finished"
     | "tool_call"
+    | "tool_result"
+    | "tool_error"
     | "metric"
     | "error"
     | "done"
@@ -41,6 +46,11 @@ export interface StreamEvent {
   content?: string;
   metrics?: Record<string, number | string>;
   routing?: RoutingDecision;
+  // Tool-call events
+  tool_name?: string;
+  tool_args?: Record<string, unknown>;
+  tool_result?: unknown;
+  tool_error?: string;
   timestamp: string;
 }
 
@@ -49,7 +59,20 @@ export interface ChatMessage {
   role: "user" | "assistant";
   agent?: AgentName;
   content: string;
+  thinking?: string;
   metrics?: Record<string, number | string>;
+  timestamp: string;
+  toolCalls?: ToolCallItem[];
+}
+
+export interface ToolCallItem {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  status: "running" | "success" | "error";
+  result?: unknown;
+  error?: string;
+  durationMs?: number;
   timestamp: string;
 }
 

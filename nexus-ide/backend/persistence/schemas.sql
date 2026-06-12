@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active);
 
 CREATE TABLE IF NOT EXISTS projects (
     id            TEXT PRIMARY KEY,
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_mode ON sessions(mode);
 CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(last_active_at DESC);
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -63,7 +65,10 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_session_only ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
+CREATE INDEX IF NOT EXISTS idx_messages_model ON messages(model_used);
+CREATE INDEX IF NOT EXISTS idx_messages_tier ON messages(tier_used);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS tool_executions (
@@ -119,6 +124,7 @@ CREATE TABLE IF NOT EXISTS proposed_changes (
 CREATE INDEX IF NOT EXISTS idx_changes_session ON proposed_changes(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_changes_pending ON proposed_changes(applied) WHERE applied = 0;
 CREATE INDEX IF NOT EXISTS idx_changes_project ON proposed_changes(project_id);
+CREATE INDEX IF NOT EXISTS idx_changes_file ON proposed_changes(file_path);
 CREATE INDEX IF NOT EXISTS idx_changes_operation ON proposed_changes(operation);
 
 -- ---------------------------------------------------------------------------
@@ -223,3 +229,27 @@ CREATE TABLE IF NOT EXISTS peer_review_results (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pr_results_review ON peer_review_results(review_id);
+
+-- ---------------------------------------------------------------------------
+-- SECOND BRAIN — persistent user knowledge base
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS persistent_memories (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT,
+    content         TEXT NOT NULL,
+    summary         TEXT,
+    embedding_json  TEXT,
+    memory_type     TEXT,
+    tags            TEXT,
+    source          TEXT,
+    importance      REAL,
+    created_at      REAL,
+    last_accessed_at REAL,
+    access_count    INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_pm_user ON persistent_memories(user_id);
+CREATE INDEX IF NOT EXISTS idx_pm_type ON persistent_memories(memory_type);
+CREATE INDEX IF NOT EXISTS idx_pm_accessed ON persistent_memories(last_accessed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pm_created ON persistent_memories(created_at DESC);

@@ -15,6 +15,7 @@ until a ``{"type": "done"}`` event.
 
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -43,6 +44,91 @@ router = APIRouter()
 def _sse(event: StreamEvent) -> str:
     """Serialise a :class:`StreamEvent` as one SSE frame."""
     return f"data: {event.model_dump_json()}\n\n"
+
+
+# Inline event tags emitted by the ReAct loop in backend/agents/base.py.
+# We convert them into first-class SSE events so the frontend can render
+# tool calls cleanly instead of showing raw JSON.
+_INLINE_EVENT_RE = re.compile(r"<event>([^|>]+)(?:\|([^>]*)?)</event>")
+
+
+def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
+    """Parse <event>...</event> tags produced by agents into structured events.
+
+    Returns a list of StreamEvents. Any non-event text is returned as a token
+    event. Multiple inline events in one token are supported.
+    """
+    events: list[StreamEvent] = []
+    last_end = 0
+    has_event = False
+
+    for match in _INLINE_EVENT_RE.finditer(token):
+        has_event = True
+        # Emit any plain text before the tag as a token
+        if match.start() > last_end:
+            plain = token[last_end:match.start()]
+            if plain:
+                events.append(StreamEvent(type="token", agent=agent, content=plain))
+        last_end = match.end()
+
+        event_type = match.group(1)
+        payload = match.group(2) or ""
+
+        if event_type == "tool_call":
+            # payload: tool_name|json_args
+            if "|" in payload:
+                tool_name, raw_args = payload.split("|", 1)
+                try:
+                    args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    args = {"raw": raw_args}
+                events.append(
+                    StreamEvent(
+                        type="tool_call",
+                        agent=agent,
+                        tool_name=tool_name,
+                        tool_args=args if isinstance(args, dict) else {"raw": args},
+                    )
+                )
+        elif event_type == "tool_result":
+            # payload: tool_name|json_result
+            if "|" in payload:
+                tool_name, raw_result = payload.split("|", 1)
+                try:
+                    result = json.loads(raw_result)
+                except json.JSONDecodeError:
+                    result = raw_result
+                events.append(
+                    StreamEvent(
+                        type="tool_result",
+                        agent=agent,
+                        tool_name=tool_name,
+                        tool_result=result,
+                    )
+                )
+        elif event_type == "tool_error":
+            events.append(
+                StreamEvent(
+                    type="tool_error",
+                    agent=agent,
+                    tool_error=payload,
+                )
+            )
+        elif event_type == "warning":
+            events.append(StreamEvent(type="token", agent=agent, content=f"⚠ {payload}"))
+        # answer / thinking / thinking_end are internal signals; drop them
+
+    if not has_event:
+        events.append(StreamEvent(type="token", agent=agent, content=token))
+        return events
+
+    # Trailing plain text after the last tag
+    if last_end < len(token):
+        plain = token[last_end:]
+        if plain:
+            events.append(StreamEvent(type="token", agent=agent, content=plain))
+
+    return events
 
 
 # Map model tier keys (from frontend) to the agent that should handle them.
@@ -163,10 +249,16 @@ async def _run_pipeline(
     user_model = getattr(req, "model", "") or ""
     project_path = getattr(req, "project_path", "") or ""
 
+    # Default effective message; auto mode may prepend an autonomy prefix.
+    effective_message = req.message
+
     # Load history early so it's available for plan mode and agent invocation.
     history = await context.get_history(req.session_id)
 
-    if user_model and user_model in _MODEL_TIER_TO_AGENT:
+    # When the user explicitly picks a chat mode (anything other than the
+    # default "agent" mode), the mode always wins over the selected model tier.
+    # Only honour user_model when no specific mode has been chosen.
+    if mode == "agent" and user_model and user_model in _MODEL_TIER_TO_AGENT:
         # User explicitly chose a model tier — route directly to the matching agent.
         agent_name = _MODEL_TIER_TO_AGENT[user_model]
         decision = RoutingDecision(
@@ -220,62 +312,27 @@ async def _run_pipeline(
                 task_type="planning",
             )
     elif mode == "auto":
-        # Autonomous mode: Plan → Execute → Verify → Iterate (full autonomy)
-        try:
-            from backend.orchestrator.engine import OrchestrationEngine
-            engine = OrchestrationEngine(
-                llm_client=llm_client,
-                registry=registry,
-                event_bus=event_bus,
-            )
-
-            yield _sse(StreamEvent(type="agent_started", agent="ORCHESTRATOR"))
-            yield _sse(StreamEvent(
-                type="token", agent="ORCHESTRATOR",
-                content="Starting autonomous execution...\n\n",
-            ))
-
-            # Run autonomous execution
-            result = await engine.execute_autonomous(
-                objective=req.message,
-                session_id=req.session_id,
-                history=history,
-                project_path=project_path,
-            )
-
-            # Stream the result summary
-            summary = f"\n## Autonomous Execution Complete\n\n"
-            summary += f"**State:** {result.state.value}\n"
-            summary += f"**Completed tasks:** {result.completed_tasks}\n"
-            summary += f"**Failed tasks:** {result.failed_tasks}\n"
-            summary += f"**Duration:** {result.total_duration_ms}ms\n"
-
-            if result.errors:
-                summary += f"\n**Errors:**\n"
-                for err in result.errors[:5]:
-                    summary += f"- {err}\n"
-
-            for line in summary.split("\n"):
-                yield _sse(StreamEvent(type="token", agent="ORCHESTRATOR", content=line + "\n"))
-
-            yield _sse(StreamEvent(type="agent_finished", agent="ORCHESTRATOR"))
-            yield _sse(StreamEvent(type="done"))
-            return
-        except Exception as exc:
-            logger.warning("Autonomous execution failed, falling back to CODER: %s", exc)
-            yield _sse(StreamEvent(
-                type="token", agent="ORCHESTRATOR",
-                content=f"Autonomous execution failed: {exc}. Falling back to single-agent mode.\n",
-            ))
-            # Fall through to normal routing
-            decision = RoutingDecision(
-                primary_agent="CODER",
-                routing_confidence=0.7,
-                routing_reason="auto-mode-fallback",
-                thinking_mode="deep",
-                context_needed="high",
-                task_type="implementation",
-            )
+        # Autonomous mode: delegate to CODER with an autonomous system prefix.
+        # The full OrchestrationEngine is powerful but too heavy for the small
+        # local models used in this environment and does not stream progress
+        # back through the SSE channel, which makes the UI hang/reconnect.
+        # Using CODER keeps the stream alive and gives the user full visibility.
+        auto_prefix = (
+            "[MODO AUTÓNOMO] Atua como engenheiro autónomo. "
+            "Analisa o pedido, planeia os passos necessários, executa as ferramentas "
+            "(write_file_absolute para caminhos absolutos como C:\\Users\\..., "
+            "write_file para caminhos relativos, list_dir, read_file, execute_code), "
+            "verifica o resultado e responde com um resumo profissional do que foi feito.\n\n"
+        )
+        decision = RoutingDecision(
+            primary_agent="CODER",
+            routing_confidence=1.0,
+            routing_reason="explicit-mode:auto",
+            thinking_mode="iterative",
+            context_needed="high",
+            task_type="implementation",
+        )
+        effective_message = auto_prefix + req.message
     elif mode == "debug":
         decision = RoutingDecision(
             primary_agent="DEBUGGER",
@@ -293,6 +350,42 @@ async def _run_pipeline(
             thinking_mode="fast",
             context_needed="low",
             task_type="question",
+        )
+    elif mode == "fast":
+        decision = RoutingDecision(
+            primary_agent="MICRO",
+            routing_confidence=1.0,
+            routing_reason="explicit-mode:fast",
+            thinking_mode="fast",
+            context_needed="low",
+            task_type="question",
+        )
+    elif mode == "deep":
+        decision = RoutingDecision(
+            primary_agent="ARCHITECT",
+            routing_confidence=1.0,
+            routing_reason="explicit-mode:deep",
+            thinking_mode="deep",
+            context_needed="high",
+            task_type="analysis",
+        )
+    elif mode == "coder":
+        decision = RoutingDecision(
+            primary_agent="CODER",
+            routing_confidence=1.0,
+            routing_reason="explicit-mode:coder",
+            thinking_mode="iterative",
+            context_needed="high",
+            task_type="implementation",
+        )
+    elif mode == "analyst":
+        decision = RoutingDecision(
+            primary_agent="ANALYZER",
+            routing_confidence=1.0,
+            routing_reason="explicit-mode:analyst",
+            thinking_mode="deep",
+            context_needed="high",
+            task_type="analysis",
         )
     elif mode == "swarm":
         try:
@@ -421,7 +514,7 @@ async def _run_pipeline(
             agent = resolve(registry, agent_name)  # type: ignore[arg-type]
             agent_req = AgentRequest(
                 session_id=req.session_id,
-                query=req.message,
+                query=effective_message,
                 client=effective_client,
                 history=history,
                 project_path=project_path,
@@ -453,18 +546,18 @@ async def _run_pipeline(
             if request is not None and await request.is_disconnected():
                 logger.debug("Client disconnected, stopping stream")
                 break
-            parts.append(token)
+            # Convert inline <event> tags from the agent into structured SSE
+            # events (tool_call / tool_result / tool_error) while keeping plain
+            # text as regular tokens.
+            parsed_events = _parse_inline_events(token, outcome.used_agent)  # type: ignore[arg-type]
+            for evt in parsed_events:
+                if evt.type == "token":
+                    parts.append(evt.content or "")
+                yield _sse(evt)
             # Prevent unbounded memory growth
             if sum(len(p) for p in parts) > MAX_RESPONSE_LENGTH:
                 logger.warning("Response exceeded max length, truncating")
                 break
-            yield _sse(
-                StreamEvent(
-                    type="token",
-                    agent=outcome.used_agent,  # type: ignore[arg-type]
-                    content=token,
-                )
-            )
     except Exception as exc:
         logger.exception("Stream interrupted: %s", exc)
         yield _sse(StreamEvent(type="error", content=f"Stream interrupted: {exc}"))

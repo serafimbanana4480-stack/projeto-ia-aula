@@ -111,7 +111,7 @@ async def list_whiteboard(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid since: {exc}") from exc
 
-    entries = shm.read_entries(
+    entries = await shm.read_entries(
         topic=topic,
         agent=agent,
         tags=tags,
@@ -131,7 +131,7 @@ async def write_whiteboard(
 ) -> WhiteboardWriteResponse:
     """Write a new entry to the shared whiteboard."""
     shm = get_shared_memory()
-    entry = shm.write_entry(
+    entry = await shm.write_entry(
         agent_name=req.agent_name,
         topic=req.topic,
         content=req.content,
@@ -156,7 +156,7 @@ async def search_whiteboard(
 ) -> dict[str, Any]:
     """Search whiteboard entries by text."""
     shm = get_shared_memory()
-    entries = shm.search_entries(query=q, limit=limit)
+    entries = await shm.search_entries(query=q, limit=limit)
     return {
         "query": q,
         "entries": [e.model_dump(mode="json") for e in entries],
@@ -171,7 +171,7 @@ async def get_whiteboard_thread(
 ) -> dict[str, Any]:
     """Return an entry and all related entries recursively."""
     shm = get_shared_memory()
-    thread = shm.get_thread(entry_id)
+    thread = await shm.get_thread(entry_id)
     if not thread:
         raise HTTPException(status_code=404, detail="Entry not found")
     return {
@@ -191,7 +191,7 @@ async def get_reviews(
 ) -> dict[str, Any]:
     """Return all reviews and their results for an artifact."""
     prs = get_peer_review_system()
-    status = prs.get_review_status(artifact_id)
+    status = await prs.get_review_status(artifact_id)
     return status
 
 
@@ -202,7 +202,7 @@ async def submit_review(
 ) -> ReviewSubmitResponse:
     """Submit an artifact for peer review."""
     prs = get_peer_review_system()
-    review = prs.submit_for_review(
+    review = await prs.submit_for_review(
         artifact_id=req.artifact_id,
         artifact_type=req.artifact_type,
         author_agent=req.author_agent,

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from backend.core.workspace_security import _is_blocked_path
+from backend.middleware.auth import require_auth
 from backend.tools.embeddings import index_codebase, search_codebase
 
 logger = logging.getLogger(__name__)
@@ -43,18 +45,28 @@ class SearchResponse(BaseModel):
 
 
 @router.post("/embeddings/index", response_model=IndexResponse)
-async def index_endpoint(req: IndexRequest) -> IndexResponse:
+async def index_endpoint(
+    req: IndexRequest,
+    _user: dict = Depends(require_auth),
+) -> IndexResponse:
     """Index a project codebase for semantic search.
 
     Walks the project directory, chunks code files, generates embeddings
     via Ollama, and stores them in memory for search.
     """
+    blocked, reason = _is_blocked_path(req.project_path)
+    if blocked:
+        raise HTTPException(status_code=400, detail=f"Blocked path: {reason}")
+
     chunk_count = await index_codebase(req.project_path)
     return IndexResponse(chunks_indexed=chunk_count, project_path=req.project_path)
 
 
 @router.post("/embeddings/search", response_model=SearchResponse)
-async def search_endpoint(req: SearchRequest) -> SearchResponse:
+async def search_endpoint(
+    req: SearchRequest,
+    _user: dict = Depends(require_auth),
+) -> SearchResponse:
     """Search the indexed codebase using semantic similarity.
 
     Returns the top-k most relevant code chunks for the query.

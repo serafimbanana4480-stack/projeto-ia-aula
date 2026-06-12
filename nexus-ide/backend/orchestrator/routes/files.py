@@ -7,6 +7,12 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, UploadFile
 
+from backend.core.workspace_fs import (
+    list_dir_absolute,
+    read_file_absolute,
+    write_file_absolute,
+)
+
 from backend.middleware.auth import require_auth
 from backend.models.api import FileListRequest, FileReadRequest, FileTreeEntry, FileWriteRequest
 from backend.tools.file_ops import list_dir, read_file, write_file
@@ -153,12 +159,17 @@ def _build_tree(root: Path, items: list[dict]) -> list[FileTreeEntry]:
 
 @router.post("/files/read")
 async def read_file_endpoint(req: FileReadRequest, _user: dict = Depends(require_auth)) -> dict:
+    if Path(req.path).is_absolute():
+        return await read_file_absolute(req.path)
     return await read_file(path=req.path, project_path=req.project_path)
 
 
 @router.post("/files/list")
 async def list_files_endpoint(req: FileListRequest, _user: dict = Depends(require_auth)) -> dict:
-    result = await list_dir(path=req.path, project_path=req.project_path, recursive=req.recursive)
+    if Path(req.path).is_absolute():
+        result = await list_dir_absolute(req.path, recursive=req.recursive, max_results=5_000)
+    else:
+        result = await list_dir(path=req.path, project_path=req.project_path, recursive=req.recursive)
     if "error" in result:
         return result
 
@@ -174,6 +185,8 @@ async def list_files_endpoint(req: FileListRequest, _user: dict = Depends(requir
 
 @router.post("/files/write")
 async def write_file_endpoint(req: FileWriteRequest, _user: dict = Depends(require_auth)) -> dict:
+    if Path(req.path).is_absolute():
+        return await write_file_absolute(req.path, req.content)
     return await write_file(
         path=req.path,
         content=req.content,

@@ -19,7 +19,11 @@ class TestCoderAgent:
         agent = CoderAgent()
         expected = {
             AgentAction.READ_FILE,
+            AgentAction.READ_FILE_ABSOLUTE,
             AgentAction.WRITE_FILE,
+            AgentAction.WRITE_FILE_ABSOLUTE,
+            AgentAction.LIST_DIR,
+            AgentAction.LIST_DIR_ABSOLUTE,
             AgentAction.SEARCH_CODEBASE,
             AgentAction.CONSULT_AGENT,
             AgentAction.EXECUTE_CODE,

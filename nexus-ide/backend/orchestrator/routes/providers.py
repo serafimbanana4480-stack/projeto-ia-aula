@@ -9,9 +9,10 @@ import asyncio
 import logging
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from backend.config.settings import get_settings, load_models_config
+from backend.middleware.auth import require_auth
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -37,7 +38,7 @@ async def _check_provider_health(base_url: str, provider: str) -> dict:
 
 
 @router.get("/providers")
-async def list_providers() -> dict:
+async def list_providers(_user: dict = Depends(require_auth)) -> dict:
     """Return configured LLM providers, their models, and health status."""
     settings = get_settings()
     cfg = load_models_config()
@@ -53,7 +54,7 @@ async def list_providers() -> dict:
     health_results = await asyncio.gather(*health_tasks, return_exceptions=True)
 
     result: list[dict] = []
-    for (key, pcfg), health in zip(providers_cfg.items(), health_results):
+    for (key, pcfg), health in zip(providers_cfg.items(), health_results, strict=False):
         requires_key = pcfg.get("requires_api_key", False)
         api_key_set = False
         if requires_key:

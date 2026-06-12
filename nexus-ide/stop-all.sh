@@ -10,8 +10,8 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Project root
-PROJECT_ROOT="/Users/240416/Desktop/ia aula/nexus-ide"
+# Project root (works from any checkout location)
+PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_ROOT"
 
 echo -e "${BLUE}=== NEXUS IDE - Stop All Services ===${NC}"

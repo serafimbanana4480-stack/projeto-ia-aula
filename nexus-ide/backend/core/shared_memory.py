@@ -6,6 +6,7 @@ knowledge is shared across the swarm.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -107,26 +108,36 @@ class SharedMemory:
     Usage::
 
         shm = get_shared_memory()
-        entry = shm.write_entry("CODER", "code.change", "Fixed bug in api.py")
-        entries = shm.read_entries(topic="code.change", limit=10)
+        entry = await shm.write_entry("CODER", "code.change", "Fixed bug in api.py")
+        entries = await shm.read_entries(topic="code.change", limit=10)
     """
 
     _instance: SharedMemory | None = None
     _lock: threading.Lock = threading.Lock()
+    _initialized: bool = False
 
     def __new__(cls) -> SharedMemory:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    _init_whiteboard_db()
         return cls._instance
+
+    async def _ensure_init(self) -> None:
+        if self._initialized:
+            return
+        if not hasattr(self, "_init_lock"):
+            self._init_lock = asyncio.Lock()
+        async with self._init_lock:
+            if not self._initialized:
+                await asyncio.to_thread(_init_whiteboard_db)
+                self._initialized = True
 
     # ------------------------------------------------------------------
     # CRUD
     # ------------------------------------------------------------------
 
-    def write_entry(
+    async def write_entry(
         self,
         agent_name: str,
         topic: str,
@@ -136,6 +147,7 @@ class SharedMemory:
         related_entries: list[str] | None = None,
     ) -> WhiteboardEntry:
         """Write a new entry to the whiteboard."""
+        await self._ensure_init()
         entry = WhiteboardEntry(
             topic=topic,
             author_agent=agent_name,
@@ -144,6 +156,16 @@ class SharedMemory:
             tags=tags or [],
             related_entries=related_entries or [],
         )
+        await asyncio.to_thread(self._insert_entry, entry)
+        logger.info(
+            "Whiteboard entry %s written by %s on %s",
+            entry.entry_id,
+            agent_name,
+            topic,
+        )
+        return entry
+
+    def _insert_entry(self, entry: WhiteboardEntry) -> None:
         with get_db() as conn:
             conn.execute(
                 """
@@ -164,15 +186,8 @@ class SharedMemory:
                     0,
                 ),
             )
-        logger.info(
-            "Whiteboard entry %s written by %s on %s",
-            entry.entry_id,
-            agent_name,
-            topic,
-        )
-        return entry
 
-    def read_entries(
+    async def read_entries(
         self,
         topic: str | None = None,
         agent: str | None = None,
@@ -181,6 +196,25 @@ class SharedMemory:
         since: datetime | None = None,
     ) -> list[WhiteboardEntry]:
         """Read whiteboard entries with optional filtering."""
+        await self._ensure_init()
+        rows = await asyncio.to_thread(self._fetch_entries, topic, agent, since, limit)
+
+        results: list[WhiteboardEntry] = []
+        for row in rows:
+            entry = self._row_to_entry(row)
+            if tags:
+                if not any(t in entry.tags for t in tags):
+                    continue
+            results.append(entry)
+        return results[:limit]
+
+    def _fetch_entries(
+        self,
+        topic: str | None,
+        agent: str | None,
+        since: datetime | None,
+        limit: int,
+    ) -> list[sqlite3.Row]:
         conditions = ["archived = 0"]
         params: list[Any] = []
 
@@ -197,7 +231,7 @@ class SharedMemory:
         where_clause = " AND ".join(conditions)
 
         with get_db() as conn:
-            rows = conn.execute(
+            return conn.execute(
                 f"""
                 SELECT * FROM whiteboard_entries
                 WHERE {where_clause}
@@ -207,27 +241,12 @@ class SharedMemory:
                 (*params, limit),
             ).fetchall()
 
-        results: list[WhiteboardEntry] = []
-        for row in rows:
-            entry = self._row_to_entry(row)
-            if tags:
-                if not any(t in entry.tags for t in tags):
-                    continue
-            results.append(entry)
-        return results[:limit]
-
-    def search_entries(self, query: str, limit: int = 20) -> list[WhiteboardEntry]:
+    async def search_entries(self, query: str, limit: int = 20) -> list[WhiteboardEntry]:
         """Full-text search across topics, authors, content and tags."""
-        query_lower = query.lower()
-        with get_db() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM whiteboard_entries
-                WHERE archived = 0
-                ORDER BY timestamp DESC
-                """,
-            ).fetchall()
+        await self._ensure_init()
+        rows = await asyncio.to_thread(self._fetch_all_active_entries)
 
+        query_lower = query.lower()
         scored: list[tuple[float, WhiteboardEntry]] = []
         for row in rows:
             entry = self._row_to_entry(row)
@@ -247,15 +266,33 @@ class SharedMemory:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [e for _, e in scored[:limit]]
 
-    def link_entries(
+    def _fetch_all_active_entries(self) -> list[sqlite3.Row]:
+        with get_db() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM whiteboard_entries
+                WHERE archived = 0
+                ORDER BY timestamp DESC
+                """,
+            ).fetchall()
+
+    async def link_entries(
         self,
         entry_id_1: str,
         entry_id_2: str,
         relation_type: str = "related",
     ) -> bool:
         """Create a bidirectional link between two whiteboard entries."""
+        await self._ensure_init()
         if entry_id_1 == entry_id_2:
             return False
+        return await asyncio.to_thread(
+            self._do_link_entries, entry_id_1, entry_id_2, relation_type
+        )
+
+    def _do_link_entries(
+        self, entry_id_1: str, entry_id_2: str, relation_type: str
+    ) -> bool:
         e1, e2 = sorted([entry_id_1, entry_id_2])
         with get_db() as conn:
             try:
@@ -277,9 +314,10 @@ class SharedMemory:
                 return False
         return True
 
-    def get_thread(self, entry_id: str) -> list[WhiteboardEntry]:
+    async def get_thread(self, entry_id: str) -> list[WhiteboardEntry]:
         """Return an entry and all related entries recursively."""
-        entry = self._get_entry_by_id(entry_id)
+        await self._ensure_init()
+        entry = await asyncio.to_thread(self._get_entry_by_id_sync, entry_id)
         if entry is None:
             return []
 
@@ -293,7 +331,7 @@ class SharedMemory:
                 continue
             visited.add(current_id)
 
-            current = self._get_entry_by_id(current_id)
+            current = await asyncio.to_thread(self._get_entry_by_id_sync, current_id)
             if current is None:
                 continue
             results.append(current)
@@ -302,9 +340,10 @@ class SharedMemory:
                 if related not in visited:
                     queue.append(related)
 
-            for linked in self._get_linked_entries(current_id):
-                if linked not in visited:
-                    queue.append(linked)
+            linked = await asyncio.to_thread(self._get_linked_entries_sync, current_id)
+            for lid in linked:
+                if lid not in visited:
+                    queue.append(lid)
 
         results.sort(key=lambda e: e.timestamp)
         return results
@@ -313,7 +352,7 @@ class SharedMemory:
     # Maintenance
     # ------------------------------------------------------------------
 
-    def archive_old_entries(
+    async def archive_old_entries(
         self,
         days: int = 30,
         max_importance: float = 0.3,
@@ -322,6 +361,17 @@ class SharedMemory:
 
         Returns the number of entries archived.
         """
+        await self._ensure_init()
+        archived = await asyncio.to_thread(self._do_archive, days, max_importance)
+        logger.info(
+            "Archived %d whiteboard entries older than %d days with importance < %.2f",
+            archived,
+            days,
+            max_importance,
+        )
+        return archived
+
+    def _do_archive(self, days: int, max_importance: float) -> int:
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         with get_db() as conn:
             cursor = conn.execute(
@@ -332,14 +382,7 @@ class SharedMemory:
                 """,
                 (cutoff, max_importance),
             )
-            archived = cursor.rowcount
-        logger.info(
-            "Archived %d whiteboard entries older than %d days with importance < %.2f",
-            archived,
-            days,
-            max_importance,
-        )
-        return archived
+            return cursor.rowcount
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -359,7 +402,7 @@ class SharedMemory:
             else [],
         )
 
-    def _get_entry_by_id(self, entry_id: str) -> WhiteboardEntry | None:
+    def _get_entry_by_id_sync(self, entry_id: str) -> WhiteboardEntry | None:
         with get_db() as conn:
             row = conn.execute(
                 """
@@ -372,7 +415,7 @@ class SharedMemory:
                 return self._row_to_entry(row)
             return None
 
-    def _get_linked_entries(self, entry_id: str) -> list[str]:
+    def _get_linked_entries_sync(self, entry_id: str) -> list[str]:
         with get_db() as conn:
             rows = conn.execute(
                 """

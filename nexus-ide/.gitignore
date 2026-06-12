@@ -92,3 +92,19 @@ PROJECT_WORLD_CLASS_AUDIT.txt
 # External analysis files (one level up)
 ../.nexus/
 ../NEXUS_IDE_ANALISE_PROFISSIONAL.md
+../NEXUS_IDE_APRESENTACAO.md
+
+# Generated audit / progress reports (kept in .archive/ if needed)
+AUDITORIA_*.md
+RELATORIO_*.md
+
+# Generated test scripts and temporary plans
+api_integration_test.py
+plan.md
+
+# Playwright test artefacts
+playwright_report/
+playwright_test.js
+
+# Accidental subprojects / scratch directories
+p/

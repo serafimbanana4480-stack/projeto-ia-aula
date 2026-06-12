@@ -3,7 +3,7 @@
 
 modes:
   auto:
-    description: "IA escolhe automaticamente o melhor modelo e ferramentas"
+    description: "Modo autónomo: planifica e executa tarefas com o agente CODER"
     default_agent: "CODER"
     default_model: "auto"
     router: "smart"
@@ -35,17 +35,6 @@ modes:
       Use code execution for data processing.
       Present results in tables or structured formats when possible.
 
-  planner:
-    description: "Divide tarefas complexas em subtarefas e cria planos estruturados"
-    default_agent: "ARCHITECT"
-    default_model: "reasoning"
-    router: "none"
-    tools_enabled: ["read_file", "list_dir", "search_in_files"]
-    system_prompt_addon: |
-      Break down complex tasks into clear, actionable steps.
-      Create structured plans with dependencies.
-      Think deeply about trade-offs and alternatives.
-
   fast:
     description: "Respostas rápidas com modelos leves"
     default_agent: "MICRO"
@@ -70,6 +59,47 @@ modes:
       Show your reasoning in thinking blocks.
       Consider multiple perspectives and edge cases.
       Provide comprehensive, well-structured answers.
+
+  plan:
+    description: "Cria um plano de execução estruturado para aprovação"
+    default_agent: "ARCHITECT"
+    default_model: "reasoning"
+    router: "none"
+    tools_enabled: ["read_file", "list_dir", "search_in_files"]
+    system_prompt_addon: |
+      Create a structured execution plan with clear steps, agents, and dependencies.
+      Do not execute the plan; present it for user approval.
+
+  debug:
+    description: "Análise e correção de erros de código"
+    default_agent: "DEBUGGER"
+    default_model: "coder"
+    router: "none"
+    tools_enabled: ["read_file", "execute_code", "search_codebase"]
+    system_prompt_addon: |
+      Investigate bugs, errors, and failures.
+      Use tools to read code and reproduce issues.
+      Provide root cause and a fix.
+
+  ask:
+    description: "Respostas rápidas sem ferramentas"
+    default_agent: "MICRO"
+    default_model: "fast"
+    router: "none"
+    tools_enabled: []
+    system_prompt_addon: |
+      Answer the question directly without using tools.
+      Keep responses concise.
+
+  swarm:
+    description: "Vários agentes colaboram numa resposta"
+    default_agent: "SWARM"
+    default_model: "auto"
+    router: "none"
+    tools_enabled: ["all"]
+    system_prompt_addon: |
+      Coordinate multiple agents to analyze the problem from different angles.
+      Synthesize their outputs into a final answer.
 
 # Tool aliases for mode configuration
 tool_aliases:

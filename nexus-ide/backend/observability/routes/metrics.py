@@ -35,6 +35,19 @@ async def _get_active_session_count(request: Request) -> int:
     return 0
 
 
+@router.get("/metrics")
+async def get_metrics_index(request: Request) -> dict:
+    """Return available metrics endpoints."""
+    return {
+        "endpoints": {
+            "current": "/api/metrics/current",
+            "history": "/api/metrics/history",
+            "flow": "/api/metrics/flow",
+            "analytics": "/api/metrics/analytics",
+        }
+    }
+
+
 @router.get("/metrics/current")
 async def get_current_metrics(request: Request) -> dict:
     """Get current metrics snapshot."""

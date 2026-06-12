@@ -203,24 +203,6 @@ if exist "docker\docker-compose.yml" (
     echo [AVISO] docker-compose.yml nao encontrado.
 )
 
-:docker_ready
-echo [OK] Docker engine pronto.
-
-REM Iniciar servicos Docker se docker-compose.yml existir
-if exist "docker\docker-compose.yml" (
-    echo [INFO] A iniciar servicos Docker...
-    docker compose -f "docker\docker-compose.yml" up -d
-    if !errorlevel! neq 0 (
-        echo [AVISO] docker compose up falhou. A continuar...
-        echo [%date% %time%] AVISO: docker compose up falhou >> "%NEXUS_LOG%"
-    ) else (
-        echo [OK] Servicos Docker iniciados.
-        echo [%date% %time%] Docker services started >> "%NEXUS_LOG%"
-    )
-) else (
-    echo [AVISO] docker-compose.yml nao encontrado.
-)
-
 :docker_done
 echo.
 
@@ -298,10 +280,10 @@ REM ============================================================================
 echo [INFO] A iniciar Backend (FastAPI)...
 echo [%date% %time%] Iniciando backend... >> "%NEXUS_LOG%"
 
-REM Verificar se backend ja esta a correr
-tasklist /FI "IMAGENAME eq python.exe" 2>NUL | findstr /I "run.py" > NUL 2>&1
+REM Verificar se backend ja esta a correr (via porta 8000)
+netstat -ano 2>NUL | findstr ":8000 " | findstr "LISTENING" > NUL 2>&1
 if !errorlevel! equ 0 (
-    echo [AVISO] Backend ja parece estar a correr.
+    echo [AVISO] Porta 8000 ja em uso. Backend pode ja estar a correr.
     echo         Use stop.bat primeiro se quiser reiniciar.
 )
 
@@ -335,7 +317,7 @@ start /B "NEXUS-FRONTEND" cmd /c "cd /d "%PROJECT_ROOT%\frontend" && call npm ru
 REM Nota: start /B errorlevel nao e fiavel; verificar via healthcheck
 timeout /t 3 /nobreak > NUL 2>&1
 echo [OK] Frontend iniciado.
-echo [INFO] Log: frontend\frontend.log
+echo [INFO] Log: frontend.log
 echo.
 
 REM ============================================================================
@@ -362,8 +344,8 @@ if !errorlevel! equ 0 (
 REM Fallback: usar python para healthcheck
 "%PYTHON_EXE%" %PYTHON_ARGS% -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)" > NUL 2>&1
 if !errorlevel! equ 0 (
-    echo [OK] Backend respondeu (via Python).
-    echo [%date% %time%] Healthcheck OK (Python) >> "%NEXUS_LOG%"
+    echo [OK] Backend respondeu ^(via Python^).
+    echo [%date% %time%] Healthcheck OK ^(Python^) >> "%NEXUS_LOG%"
     goto :healthcheck_done
 )
 

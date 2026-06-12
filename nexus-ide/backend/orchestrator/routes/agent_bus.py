@@ -188,12 +188,12 @@ async def bus_stream(
                 try:
                     await bus.unsubscribe(sub.subscription_id)
                 except Exception:
-                    pass
+                    logger.debug("Failed to unsubscribe %s from bus", sub.subscription_id, exc_info=True)
             # Signal queue to drain
             try:
                 queue.put_nowait(None)
             except asyncio.QueueFull:
-                pass
+                logger.debug("Agent Bus SSE queue full while draining")
 
     return StreamingResponse(
         _event_generator(),

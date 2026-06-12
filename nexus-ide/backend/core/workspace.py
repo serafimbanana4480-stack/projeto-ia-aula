@@ -118,6 +118,9 @@ async def _git_raw(args: list[str], cwd: str, timeout: int = 60) -> dict[str, An
 async def git_init(path: str) -> dict[str, Any]:
     """Initialise a git repository at *path*."""
     logger.info("git_init: %s", path)
+    blocked, reason = _is_blocked_path(path)
+    if blocked:
+        return {"error": f"Blocked path: {reason}"}
     target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
     await asyncio.to_thread(target.mkdir, parents=True, exist_ok=True)
     return await _git_raw(["init"], str(target))
@@ -126,6 +129,9 @@ async def git_init(path: str) -> dict[str, Any]:
 async def git_clone(url: str, path: str) -> dict[str, Any]:
     """Clone a git repository into *path*."""
     logger.info("git_clone: %s -> %s", url, path)
+    blocked, reason = _is_blocked_path(path)
+    if blocked:
+        return {"error": f"Blocked path: {reason}"}
     target = await asyncio.to_thread(lambda: Path(path).expanduser().resolve())
     await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
     return await _git_raw(["clone", url, str(target)], str(target.parent), timeout=180)
@@ -136,6 +142,9 @@ async def git_commit_all(
 ) -> dict[str, Any]:
     """Stage all changes and commit in *path*."""
     logger.info("git_commit_all: %s message='%s'", path, message)
+    blocked, reason = _is_blocked_path(path)
+    if blocked:
+        return {"error": f"Blocked path: {reason}"}
     target = str(await asyncio.to_thread(lambda: Path(path).expanduser().resolve()))
 
     safe_message = message.replace('"', '\\"').replace("`", "").replace("$", "")[:500]
@@ -153,6 +162,9 @@ async def git_push(
 ) -> dict[str, Any]:
     """Push commits from *path*. Only safe remotes are permitted."""
     logger.info("git_push: %s remote=%s branch=%s", path, remote, branch)
+    blocked, reason = _is_blocked_path(path)
+    if blocked:
+        return {"error": f"Blocked path: {reason}"}
     target = str(await asyncio.to_thread(lambda: Path(path).expanduser().resolve()))
 
     # Validate remote URL before pushing
@@ -183,6 +195,9 @@ async def git_push(
 async def git_status(path: str) -> dict[str, Any]:
     """Return git status for *path*."""
     logger.info("git_status: %s", path)
+    blocked, reason = _is_blocked_path(path)
+    if blocked:
+        return {"error": f"Blocked path: {reason}"}
     target = str(await asyncio.to_thread(lambda: Path(path).expanduser().resolve()))
     return await _git_raw(["status", "-sb"], target)
 
@@ -275,7 +290,7 @@ async def _get_dependencies(project_path: Path, language: str) -> list[str]:
                     deps.extend(data.get("dependencies", {}).keys())
                     deps.extend(data.get("devDependencies", {}).keys())
                 except Exception:
-                    pass
+                    logger.debug("Failed to parse package.json in %s", project_path, exc_info=True)
         elif language == "rust":
             if await asyncio.to_thread((project_path / "Cargo.toml").exists):
                 deps.append("Cargo.toml")
@@ -283,7 +298,7 @@ async def _get_dependencies(project_path: Path, language: str) -> list[str]:
             if await asyncio.to_thread((project_path / "go.mod").exists):
                 deps.append("go.mod")
     except (PermissionError, FileNotFoundError):
-        pass
+        logger.debug("Permission or file not found error reading dependencies in %s", project_path, exc_info=True)
     return deps[:50]
 
 
@@ -390,16 +405,16 @@ async def discover_projects(
                     continue
                 await scan(child, depth + 1)
         except PermissionError:
-            pass
+            logger.debug("Permission denied scanning %s", path, exc_info=True)
         except OSError:
-            pass
+            logger.debug("OS error scanning %s", path, exc_info=True)
 
     try:
         await scan(root, 1)
     except PermissionError:
-        pass
+        logger.debug("Permission denied scanning root %s", root, exc_info=True)
     except OSError:
-        pass
+        logger.debug("OS error scanning root %s", root, exc_info=True)
 
     result = {"root": str(root), "projects": projects, "count": len(projects)}
     _DISCOVERY_CACHE[cache_key] = (now, result)
@@ -458,7 +473,7 @@ async def get_project_info(path: str) -> dict[str, Any]:
                 elif await asyncio.to_thread(e.is_dir):
                     dir_count += 1
         except (PermissionError, FileNotFoundError, OSError):
-            pass
+            logger.debug("Failed to count files/dirs in %s", project, exc_info=True)
 
         return {
             "path": str(project),
@@ -540,7 +555,7 @@ async def get_system_info() -> dict[str, Any]:
                         }
                     )
     except Exception:
-        pass
+        logger.debug("nvidia-smi failed or GPU not available", exc_info=True)
 
     if not info["gpu"]:
         info["gpu"] = "No GPU detected or nvidia-smi not available"
@@ -670,12 +685,18 @@ class WorkspaceManager:
     def _resolve(self, path: str) -> str:
         """Resolve *path* relative to ``project_path`` if it is not absolute."""
         if Path(path).is_absolute():
+            blocked, reason = _is_blocked_path(path)
+            if blocked:
+                raise PermissionError(f"Blocked path: {reason}")
             return path
         return str(self.project_path / path)
 
     def _resolve_path(self, path: str) -> Path:
         """Return a :class:`Path` resolved relative to ``project_path``."""
         if Path(path).is_absolute():
+            blocked, reason = _is_blocked_path(path)
+            if blocked:
+                raise PermissionError(f"Blocked path: {reason}")
             return Path(path).resolve()
         return (self.project_path / path).resolve()
 
@@ -939,6 +960,11 @@ register_tool(
             "properties": {
                 "path": {"type": "string", "description": "Absolute file path"},
                 "content": {"type": "string", "description": "Content to write"},
+                "overwrite": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Whether to overwrite if the file exists (always honored)",
+                },
             },
             "required": ["path", "content"],
         },

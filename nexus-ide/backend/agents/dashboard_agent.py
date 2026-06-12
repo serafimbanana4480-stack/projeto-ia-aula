@@ -98,8 +98,9 @@ class DashboardAgent(AgentBase):
         context_parts: list[str] = []
 
         try:
-            from backend.observability.metrics_collector import collect_snapshot
-            snapshot = collect_snapshot()
+            from backend.observability.metrics_collector import get_metrics_collector
+            collector = get_metrics_collector()
+            snapshot = await collector.get_snapshot()
             context_parts.append(f"System Metrics: {snapshot}")
         except Exception as exc:
             logger.warning("Failed to collect metrics for dashboard: %s", exc)
@@ -145,19 +146,18 @@ class DashboardAgent(AgentBase):
                     await asyncio.sleep(10)
                     continue
 
-                # Scrape metrics and detect anomalies
-                from backend.observability.metrics_collector import collect_snapshot
-                snapshot = collect_snapshot()
+                from backend.observability.metrics_collector import get_metrics_collector
+                collector = get_metrics_collector()
+                snapshot = await collector.get_snapshot()
 
                 # Check for anomalies (high CPU, low memory, etc.)
-                if isinstance(snapshot, dict):
-                    cpu = snapshot.get("cpu_percent", 0)
-                    if cpu > 90:
-                        logger.warning("High CPU detected: %.1f%%", cpu)
+                cpu = getattr(snapshot, "cpu_percent", 0)
+                if cpu > 90:
+                    logger.warning("High CPU detected: %.1f%%", cpu)
 
-                    mem = snapshot.get("memory_percent", 0)
-                    if mem > 90:
-                        logger.warning("High memory usage: %.1f%%", mem)
+                mem = getattr(snapshot, "ram_percent", 0)
+                if mem > 90:
+                    logger.warning("High memory usage: %.1f%%", mem)
 
                 self._monitor_breaker.record_success()
 

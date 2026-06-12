@@ -39,7 +39,7 @@ Welcome to NEXUS IDE, your AI-powered development environment. This guide will h
 ### Quick Start
 
 1. **Start Chatting**: Simply type your question or request in the chat input
-2. **Choose a Mode**: Select Auto, Coder, Architect, or Debugger from the mode selector
+2. **Choose a Mode**: Select Auto, Coder, Analyst, Fast, Deep, Plan, Debug, Ask, or Swarm from the mode selector
 3. **Get Help**: Ask anything from "How do I create a REST API?" to "Debug this function"
 
 ## Interface Overview
@@ -111,15 +111,18 @@ NEXUS IDE uses specialized AI agents for different tasks:
 
 ### Available Agents
 
-| Agent | Best For | Model |
-|-------|----------|-------|
-| **CODER** | Code generation, refactoring | qwen2.5-coder:7b |
-| **DEBUGGER** | Finding and fixing bugs | qwen2.5-coder:7b |
-| **ARCHITECT** | System design, architecture | deepseek-r1:14b |
-| **RESEARCHER** | Finding current information | qwen2.5:3b |
-| **ANALYZER** | Code review, analysis | qwen2.5:32b |
-| **DOCUMENTER** | Writing documentation | qwen2.5:3b |
-| **OPTIMIZER** | Performance optimization | qwen2.5:3b |
+| Agent | Best For | Default Model |
+|-------|----------|---------------|
+| **CODER** | Code generation, refactoring | qwen2.5-coder:1.5b |
+| **DEBUGGER** | Finding and fixing bugs | qwen2.5-coder:1.5b |
+| **ARCHITECT** | System design, architecture, planning | qwen2.5-coder:1.5b |
+| **RESEARCHER** | Finding current information | qwen2.5-coder:1.5b |
+| **ANALYZER** | Code review, data analysis | qwen2.5-coder:1.5b |
+| **DOCUMENTER** | Writing documentation | qwen2.5-coder:1.5b |
+| **OPTIMIZER** | Performance optimization | qwen2.5-coder:1.5b |
+| **MICRO** | Quick answers, trivial questions | qwen2.5:0.5b |
+| **ORCHESTRATOR** | Autonomous multi-step execution | qwen2.5-coder:1.5b |
+| **SWARM** | Multi-agent collaboration | qwen2.5-coder:1.5b |
 
 ### How Agents Work
 

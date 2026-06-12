@@ -244,6 +244,10 @@ def _is_blocked_path(path: str) -> tuple[bool, str]:
     fall under a blocked system path.  All other paths are blocked by
     default (implicit deny).
     """
+    # Null-byte injection check
+    if "\x00" in path:
+        return True, "Null bytes in path are not allowed"
+
     try:
         raw = Path(path).expanduser()
     except (OSError, ValueError) as exc:
@@ -265,6 +269,23 @@ def _is_blocked_path(path: str) -> tuple[bool, str]:
         resolved = raw.resolve()
     except (OSError, ValueError) as exc:
         return True, f"Invalid path: {exc}"
+
+    # Symlink check — if realpath differs from resolved path, the path
+    # contains a symlink that may point outside allowed bases.
+    try:
+        real = Path(os.path.realpath(str(raw)))
+        if real != resolved:
+            # The symlink points somewhere else; validate the real target too
+            for allowed in _get_allowed_base_paths():
+                try:
+                    real.relative_to(allowed)
+                    break
+                except ValueError:
+                    continue
+            else:
+                return True, "Symlinks pointing outside allowed directories are not permitted"
+    except (OSError, ValueError):
+        pass  # If we can't verify, continue with normal checks
 
     # 1. Blocked system paths (prefix matching) — checked FIRST so blocked
     #    always wins even when the path is inside an allowed base.
@@ -383,6 +404,14 @@ _SHELL_WHITELIST: set[str] = {
     "yq",
     "xargs",
     "parallel",
+    # Basic navigation & listing
+    "ls",
+    "dir",
+    "pwd",
+    "cd",
+    "clear",
+    "cls",
+    "tree",
 }
 
 _GIT_BLOCKED_SUBCOMMANDS: set[str] = {"push", "reset", "clean", "rebase", "cherry-pick"}
@@ -398,14 +427,20 @@ _SAFE_GIT_HOSTS: set[str] = {
 # Python sandbox (AST-based — bypass-resistant)
 # ---------------------------------------------------------------------------
 
-_DANGEROUS_MODULES: set[str] = {
-    "os",
+# Modules whose imports are blocked entirely
+_BLOCKED_IMPORTS: set[str] = {
     "subprocess",
     "socket",
     "urllib",
     "urllib.request",
     "ctypes",
     "pty",
+}
+
+# Modules whose dangerous methods are blocked (import is allowed, but risky calls are not)
+_DANGEROUS_MODULES: set[str] = {
+    "os",
+    "subprocess",
 }
 
 
@@ -441,11 +476,11 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     base = alias.name.split(".")[0]
-                    if base in _DANGEROUS_MODULES:
+                    if base in _BLOCKED_IMPORTS:
                         return False, f"import {alias.name} is blocked in sandbox mode"
             elif isinstance(node, ast.ImportFrom):
                 base = (node.module or "").split(".")[0]
-                if base in _DANGEROUS_MODULES:
+                if base in _BLOCKED_IMPORTS:
                     return False, f"from {node.module} import is blocked in sandbox mode"
 
         if isinstance(node, ast.Call):
@@ -459,7 +494,7 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
                 if resolved is None:
                     return False, "__import__ with dynamic argument is blocked in sandbox mode"
                 base = resolved.split(".")[0]
-                if base in _DANGEROUS_MODULES:
+                if base in _BLOCKED_IMPORTS:
                     return False, f"__import__({resolved}) is blocked in sandbox mode"
 
             # Block importlib.import_module with dangerous modules — reject dynamic args
@@ -474,7 +509,7 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
                 if resolved is None:
                     return False, "importlib.import_module with dynamic argument is blocked in sandbox mode"
                 base = resolved.split(".")[0]
-                if base in _DANGEROUS_MODULES:
+                if base in _BLOCKED_IMPORTS:
                     return False, f"importlib.import_module({resolved}) is blocked in sandbox mode"
 
             # Block getattr that resolves to dangerous names (e.g. getattr(__builtins__, 'ex'+'ec'))

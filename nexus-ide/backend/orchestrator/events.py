@@ -125,13 +125,12 @@ class EventBus:
 
     async def publish(self, event: OrchestratorEvent) -> None:
         """Publish an event to all matching subscribers."""
-        # Log event
-        self._event_log.append(event)
-        if len(self._event_log) > self._max_log_size:
-            self._event_log = self._event_log[-self._max_log_size :]
-
-        # Get matching subscribers
+        # Get matching subscribers and log event under the same lock
         async with self._lock:
+            self._event_log.append(event)
+            if len(self._event_log) > self._max_log_size:
+                self._event_log = self._event_log[-self._max_log_size :]
+
             subscribers: list[Subscriber] = []
             subscribers.extend(self._subscribers.get(event.event_type.value, []))
             subscribers.extend(self._subscribers.get("*", []))
@@ -183,9 +182,10 @@ class EventBus:
             for et in types:
                 await self.unsubscribe(et, on_event)
 
-    def get_recent_events(self, limit: int = 100) -> list[OrchestratorEvent]:
+    async def get_recent_events(self, limit: int = 100) -> list[OrchestratorEvent]:
         """Return recent events for replay/debugging."""
-        return self._event_log[-limit:]
+        async with self._lock:
+            return self._event_log[-limit:]
 
     async def clear(self) -> None:
         """Clear all subscribers and event log."""

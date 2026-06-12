@@ -27,15 +27,18 @@ def _ensure_tools_registered() -> None:
     from backend.tools import advanced_templates as _advanced_templates  # noqa: F401
     from backend.tools import agent_bus_tools as _agent_bus_tools  # noqa: F401
     from backend.tools import agent_comm as _agent_comm  # noqa: F401
+    from backend.tools import browser_automation as _browser_automation  # noqa: F401
     from backend.tools import code_executor as _code_executor  # noqa: F401
     from backend.tools import data_analysis as _data_analysis  # noqa: F401
     from backend.tools import dependency_manager as _dependency_manager  # noqa: F401
     from backend.tools import directory_tools as _directory_tools  # noqa: F401
+    from backend.tools import email_tools as _email_tools  # noqa: F401
     from backend.tools import embeddings as _embeddings  # noqa: F401
     from backend.tools import file_manager as _file_manager  # noqa: F401
     from backend.tools import file_ops as _file_ops  # noqa: F401
     from backend.tools import git_tools as _git_tools  # noqa: F401
     from backend.tools import memory_tools as _memory_tools  # noqa: F401
+    from backend.tools import profile_tools as _profile_tools  # noqa: F401
     from backend.tools import project_analyzer as _project_analyzer  # noqa: F401
     from backend.tools import report_generator as _report_generator  # noqa: F401
     from backend.tools import scaffold as _scaffold  # noqa: F401
@@ -47,7 +50,7 @@ def _ensure_tools_registered() -> None:
     from backend.tools import web_search_v2 as _web_search_v2  # noqa: F401
 
     _TOOLS_REGISTERED = True
-    logger.debug("Tool registration completed (%d modules)", 20)
+    logger.debug("Tool registration completed (%d modules)", 21)
 
 
 def __getattr__(name: str):

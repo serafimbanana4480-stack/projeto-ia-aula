@@ -49,7 +49,7 @@ async def _get_git_root(path: Path) -> Path | None:
         if result.returncode == 0:
             return await asyncio.to_thread(Path(result.stdout.strip()).resolve)
     except Exception:
-        pass
+        logger.debug("Failed to get git root for %s", path, exc_info=True)
     return None
 
 

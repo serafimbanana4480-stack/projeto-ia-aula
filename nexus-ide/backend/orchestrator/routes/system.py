@@ -8,6 +8,7 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, UTC
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,9 +16,53 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from backend.core.self_improvement import SelfImprovementAnalyzer
 from backend.middleware.auth import require_auth
 from backend.middleware.rate_limit import limiter
+from backend.tools.web_search import search_web
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+@router.get("/system/health")
+@limiter.limit("120/minute")
+async def get_system_health(request: Request) -> dict[str, Any]:
+    """Return overall system health snapshot."""
+    import httpx
+    from backend.config.settings import get_settings
+
+    settings = get_settings()
+    health = {
+        "status": "healthy",
+        "services": {},
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+    # Check Ollama
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"{settings.ollama_host}/api/tags", timeout=3.0)
+            health["services"]["ollama"] = "online" if r.status_code == 200 else "degraded"
+    except Exception:
+        health["services"]["ollama"] = "offline"
+
+    # Check backend itself
+    health["services"]["backend"] = "online"
+
+    # Check database
+    try:
+        from backend.persistence.db import get_db_connection
+        conn = get_db_connection()
+        conn.execute("SELECT 1")
+        conn.close()
+        health["services"]["database"] = "online"
+    except Exception:
+        health["services"]["database"] = "offline"
+
+    if any(v == "offline" for v in health["services"].values()):
+        health["status"] = "degraded"
+    if all(v == "offline" for v in health["services"].values()):
+        health["status"] = "unhealthy"
+
+    return health
 
 
 @router.get("/system/self-improvement")
@@ -45,3 +90,23 @@ async def run_self_improvement(request: Request, _user: dict = Depends(require_a
         "success": True,
         "report": report.model_dump(mode="json"),
     }
+
+
+@router.post("/web_search")
+@limiter.limit("30/minute")
+async def web_search_endpoint(
+    request: Request,
+    payload: dict[str, Any],
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Execute a web search query."""
+    query = payload.get("query", "")
+    if not query:
+        raise HTTPException(status_code=422, detail="Query is required")
+    limit = payload.get("limit", 10)
+    try:
+        result = await search_web(query, max_results=limit)
+        return result
+    except Exception as exc:
+        logger.exception("Web search failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

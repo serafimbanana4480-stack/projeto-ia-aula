@@ -1,14 +1,11 @@
 # NEXUS IDE
 
-> **IDE Assistida por IA com Arquitetura Multiagente** — Desenvolvimento local, privacidade total, produção-ready.
+> **IDE Assistida por IA com Arquitetura Multiagente** — Desenvolvimento local, privacidade total.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-Production%20Ready-brightgreen" alt="Status">
+  <img src="https://img.shields.io/badge/status-Active%20Development-brightgreen" alt="Status">
   <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python">
   <img src="https://img.shields.io/badge/node-20+-green" alt="Node">
-  <img src="https://img.shields.io/badge/tests-847%20passing-brightgreen" alt="Tests">
-  <img src="https://img.shields.io/badge/coverage-71%25-green" alt="Coverage">
-  <img src="https://img.shields.io/badge/security-9.5%2F10-brightgreen" alt="Security">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="License">
 </p>
 
@@ -16,7 +13,7 @@
 
 ## O que é a NEXUS IDE?
 
-A **NEXUS IDE** é um ambiente de desenvolvimento integrado (IDE) assistido por Inteligência Artificial que corre **inteiramente no teu computador**. A diferença fundamental: em vez de um único assistente genérico, a NEXUS IDE utiliza **9 agentes especializados**, cada um otimizado para uma tarefa específica de desenvolvimento.
+A **NEXUS IDE** é um ambiente de desenvolvimento integrado (IDE) assistido por Inteligência Artificial que corre **inteiramente no teu computador**. A diferença fundamental: em vez de um único assistente genérico, a NEXUS IDE utiliza **agentes especializados**, cada um otimizado para uma tarefa específica de desenvolvimento.
 
 Quando escreves "Debug esta função", o **ROUTER** analisa o teu pedido e encaminha-o para o **DEBUGGER**. Quando pedes "Arquitecta uma API REST", o **ARCHITECT** entra em ação. Isto resulta em respostas mais precisas, contextuais e tecnicamente corretas.
 
@@ -25,7 +22,7 @@ Quando escreves "Debug esta função", o **ROUTER** analisa o teu pedido e encam
 ## Filosofia
 
 - **Especialização em vez de generalismo** — 9 agentes, cada um com um system prompt cirúrgico
-- **Modelos certos para tarefas certas** — Do modelo NANO de 2B (roteamento) ao EXPERT de 30B (engenharia)
+- **Modelos certos para tarefas certas** — Configuração flexível via `config/models.yaml`; o projecto funciona bem com modelos pequenos locais (ex.: `qwen2.5-coder:1.5b`)
 - **Privacidade total** — Tudo corre localmente via Ollama; os teus dados nunca saem da máquina
 - **Iteratividade** — Ciclo ReAct (Reason → Act → Observe → Reason) com até 7 iterações
 - **Observabilidade como first-class citizen** — Dashboard dedicado com agente próprio
@@ -35,36 +32,58 @@ Quando escreves "Debug esta função", o **ROUTER** analisa o teu pedido e encam
 
 ## Agentes
 
-| Agente | Tier | Modelo | Função |
-|--------|------|--------|--------|
-| **ROUTER** | nano | qwen3.5:2b | Classifica intenções e roteia pedidos |
-| **ARCHITECT** | large | qwen3.5:27b | Design de sistemas e arquitetura |
-| **RESEARCHER** | small | qwen3.5:9b | Pesquisa web e informação atualizada |
-| **CODER** | expert | qwen3-coder:30b | Geração de código de produção |
-| **ANALYZER** | large | qwen3.5:27b | Revisão crítica e análise de código |
-| **DEBUGGER** | medium | qwen3-coder:7b | Diagnóstico de causa raiz |
-| **DOCUMENTER** | small | qwen3.5:9b | Documentação técnica |
-| **OPTIMIZER** | small | qwen3.5:9b | Otimização de performance |
-| **DASHBOARD** | micro | qwen3.5:4b | Monitorização contínua do sistema |
+| Agente | Função |
+|--------|--------|
+| **ROUTER** | Classifica intenções e roteia pedidos |
+| **ARCHITECT** | Design de sistemas e arquitetura |
+| **RESEARCHER** | Pesquisa web e informação atualizada |
+| **CODER** | Geração e edição de ficheiros, execução de código |
+| **ANALYZER** | Revisão crítica e análise de código/dados |
+| **DEBUGGER** | Diagnóstico de causa raiz |
+| **DOCUMENTER** | Documentação técnica |
+| **OPTIMIZER** | Otimização de performance |
+| **DASHBOARD** | Monitorização contínua do sistema |
+| **MICRO** | Respostas rápidas sem ferramentas |
+| **ORCHESTRATOR** | Coordenação autónoma multi-passo |
+| **SWARM** | Execução colaborativa em enxame |
 
-> **Nota:** A configuração actual usa modelos Qwen3.5/Qwen3-Coder. Vê `config/models.yaml` para detalhes completos, fallbacks e VRAM necessário.
+> **Nota:** A configuração actual usa modelos Qwen2.5/Qwen2.5-Coder pequenos por omissão para evitar exigências elevadas de VRAM. Vê `config/models.yaml` para detalhes, fallbacks e modelos alternativos.
 
 Os prompts de sistema de cada agente encontram-se em `config/prompts/`.
 
 ---
 
+## Modos de Chat
+
+O chat disponibiliza modos cognitivos para diferentes tipos de tarefa:
+
+| Modo | Agente | Uso típico |
+|------|--------|------------|
+| **Auto** | CODER (autónomo) | Planear e executar tarefas de forma autónoma |
+| **Coder** | CODER | Escrever, editar e verificar ficheiros |
+| **Analyst** | ANALYZER | Análise de dados, código ou relatórios |
+| **Fast** | MICRO | Respostas rápidas sem ferramentas |
+| **Deep** | ARCHITECT | Raciocínio profundo e arquitetura |
+| **Plano** | ARCHITECT | Gerar planos estruturados de execução |
+| **Debug** | DEBUGGER | Diagnosticar e corrigir erros |
+| **Ask** | MICRO | Perguntas simples sem ferramentas |
+| **Swarm** | SWARM | Execução colaborativa multi-agente |
+
+A UI mostra uma **timeline compacta de tool-calls** para que vejas exactamente que ficheiros foram lidos/escritos ou comandos executados.
+
+---
+
 ## Funcionalidades Principais
 
-- ✅ **Arquitetura Multiagente** — 9 agentes especializados com roteamento inteligente
+- ✅ **Arquitetura Multiagente** — Agentes especializados com roteamento inteligente
 - ✅ **SmartRouter** — Roteamento em 4 passos: fast rules → cache → tier routing → fallback
 - ✅ **Modelos Locais via Ollama** — Total privacidade, nenhum dado sai do ambiente
 - ✅ **Editor Monaco Integrado** — Syntax highlighting, IntelliSense, multi-cursor (motor do VS Code)
-- ✅ **Chat com Streaming SSE** — Respostas em tempo real com indicadores de carregamento
+- ✅ **Chat com Streaming SSE** — Respostas em tempo real com timeline de ferramentas
 - ✅ **Dashboard de Observabilidade** — Métricas de sistema, tokens/s, latência, atividade dos agentes
 - ✅ **Health Checks Deep** — Verificação de 7 serviços: DB, LLM, Dashboard, Guardian, Auto-Correction, Workers, File Locks
 - ✅ **Execução em Sandbox** — Código executado em containers Docker isolados + Python AST sandbox
 - ✅ **Pesquisa Web Integrada** — Agente Researcher busca informações atualizadas (DuckDuckGo/Brave)
-- ✅ **Embeddings Semânticos / RAG** — Indexação e pesquisa semântica no codebase
 - ✅ **File Manager Seguro** — Path traversal protection, file locks inter-processo, backups automáticos
 - ✅ **Acesso a Ficheiros Locais** — IA pode ler, escrever e listar ficheiros do projeto com validação de segurança
 - ✅ **Acesso ao CMD/Shell** — IA pode executar comandos shell com whitelist, blacklist e sandbox
@@ -155,6 +174,8 @@ O script `setup.sh` vai:
 - Build da imagem Docker de sandbox
 - Instalar dependências do backend e frontend
 - Inicializar a base de dados
+
+> **Dica:** Se tiveres pouca VRAM/RAM, a configuração por omissão em `config/models.yaml` usa modelos pequenos (`qwen2.5:0.5b`, `qwen2.5-coder:1.5b`). Podes alterar para modelos maiores se o teu hardware permitir.
 
 ### Execução
 

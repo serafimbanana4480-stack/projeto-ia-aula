@@ -124,22 +124,42 @@ def resolve(registry: AgentRegistry, name: AgentName) -> AgentBase:
     return registry["CODER"]
 
 
+def register_agent(name: AgentName, agent: AgentBase) -> None:
+    """Register a concrete agent instance in the global registry.
+
+    Used by modules such as ``backend.agents.supervisor`` that need to
+    inject agents at import time.
+    """
+    global _registry_instance
+    if _registry_instance is None:
+        _registry_instance = build_default_registry()
+    # If the registry is still a lazy proxy, force materialisation of the
+    # internal dict so we can mutate it safely.
+    if isinstance(_registry_instance, _LazyRegistry):
+        _registry_instance._instances[name] = agent
+    else:
+        _registry_instance[name] = agent
+
+
 class _LazyRegistry(dict):
     """Proxy dict that instantiates agents on first access."""
 
     def __init__(self, classes: dict[AgentName, Any]) -> None:
+        import threading
         self._classes = classes
         self._instances: dict[AgentName, AgentBase] = {}
+        self._lock = threading.Lock()
         # Pre-populate keys so ``in`` checks work without instantiation
         super().__init__({k: None for k in classes})
 
     def __getitem__(self, key: AgentName) -> AgentBase:
-        if key not in self._instances:
-            cls = self._classes.get(key)
-            if cls is None:
-                raise KeyError(key)
-            self._instances[key] = cls()
-        return self._instances[key]
+        with self._lock:
+            if key not in self._instances:
+                cls = self._classes.get(key)
+                if cls is None:
+                    raise KeyError(key)
+                self._instances[key] = cls()
+            return self._instances[key]
 
     def __contains__(self, key: object) -> bool:
         return key in self._classes

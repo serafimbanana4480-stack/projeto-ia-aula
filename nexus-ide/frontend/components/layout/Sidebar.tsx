@@ -20,6 +20,7 @@ import {
   Radar,
   Menu,
   X,
+  FileCode2,
 } from "lucide-react";
 import { useProjectStore } from "../../stores/projectStore";
 import { useMetricsStore } from "../../stores/metricsStore";
@@ -34,6 +35,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard className="h-4 w-4" />, path: "/dashboard" },
   { id: "chat", label: "Chat", icon: <MessageSquare className="h-4 w-4" />, path: "/" },
+  { id: "editor", label: "Editor", icon: <FileCode2 className="h-4 w-4" />, path: "/editor" },
   { id: "mission-control", label: "Mission Control", icon: <Radar className="h-4 w-4" />, path: "/mission-control" },
   { id: "projects", label: "Projetos", icon: <FolderKanban className="h-4 w-4" />, path: "/projects" },
   { id: "tools", label: "Ferramentas", icon: <Wrench className="h-4 w-4" />, path: "/tools" },

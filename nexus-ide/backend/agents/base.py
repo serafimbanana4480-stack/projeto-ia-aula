@@ -41,6 +41,10 @@ class AgentAction(StrEnum):
     FETCH_URL = "fetch_url"
     READ_FILE = "read_file"
     WRITE_FILE = "write_file"
+    WRITE_FILE_ABSOLUTE = "write_file_absolute"
+    READ_FILE_ABSOLUTE = "read_file_absolute"
+    LIST_DIR = "list_dir"
+    LIST_DIR_ABSOLUTE = "list_dir_absolute"
     EXECUTE_CODE = "execute_code"
     CONSULT_AGENT = "consult_agent"
     SEARCH_CODEBASE = "search_codebase"
@@ -112,6 +116,10 @@ class AgentBase(ABC):
     _ACTION_TOOLS: dict[AgentAction, tuple[str, str]] = {
         AgentAction.READ_FILE: ("read_file", '{"path": "<file_path>"}'),
         AgentAction.WRITE_FILE: ("write_file", '{"path": "<file_path>", "content": "<file_content>"}'),
+        AgentAction.WRITE_FILE_ABSOLUTE: ("write_file_absolute", '{"path": "<absolute_path>", "content": "<file_content>"}'),
+        AgentAction.READ_FILE_ABSOLUTE: ("read_file_absolute", '{"path": "<absolute_path>"}'),
+        AgentAction.LIST_DIR: ("list_dir", '{"path": "<directory_path>"}'),
+        AgentAction.LIST_DIR_ABSOLUTE: ("list_dir_absolute", '{"path": "<absolute_directory_path>"}'),
         AgentAction.EXECUTE_CODE: ("execute_code", '{"code": "<code_string>", "language": "python"}'),
         AgentAction.SEARCH_CODEBASE: ("search_codebase", '{"query": "<search_query>", "project_path": "."}'),
         AgentAction.SEARCH_WEB: ("web_search", '{"query": "<search_query>"}'),
@@ -150,15 +158,22 @@ class AgentBase(ABC):
     def _build_tool_instructions(self) -> str:
         """Build tool usage instructions for agents with ReAct support."""
         lines = [
-            "TOOL USAGE — You have access to the following tools. Use them by outputting one of these formats:",
+            "=" * 60,
+            "TOOL USAGE - You MUST use tools to act. Do not just describe actions.",
+            "=" * 60,
             "",
-            "Format 1 (preferred - JSON code block):",
+            "Use EXACTLY ONE of these formats (Format 1 is preferred):",
+            "",
+            "Format 1 (JSON code block - preferred):",
             '```tool',
-            '{"name": "tool_name", "arguments": {"arg1": "value1", "arg2": "value2"}}',
+            '{"name": "tool_name", "arguments": {"arg1": "value1"}}',
             '```',
             "",
-            "Format 2 (legacy - inline tags):",
-            '<tool>tool_name|{"arg1": "value1", "arg2": "value2"}</tool>',
+            "Format 2 (inline XML tags):",
+            '<tool_call>{"name": "tool_name", "arguments": {"arg1": "value1"}}</tool_call>',
+            "",
+            "Format 3 (legacy inline tags):",
+            '<tool>tool_name|{"arg1": "value1"}</tool>',
             "",
             "Available tools:",
         ]
@@ -170,12 +185,21 @@ class AgentBase(ABC):
 
         lines.extend([
             "",
-            "RULES:",
-            "- Always use write_file to create or modify files - NEVER just describe code.",
-            "- Always use read_file before modifying existing files.",
-            "- Always use execute_code to test your code after writing it.",
-            "- You may use multiple tool calls in one response.",
-            "- After tool results, continue with your next action or provide your final answer.",
+            "CRITICAL RULES:",
+            "1. When asked to create or modify files, IMMEDIATELY call write_file or write_file_absolute.",
+            "2. Use write_file for paths relative to the project root.",
+            "3. Use write_file_absolute for absolute paths outside the project (e.g. C:\\Users\\...).",
+            "4. Use read_file before modifying an existing file.",
+            "5. Use execute_code or execute_terminal to verify your work when applicable.",
+            "6. You may emit MULTIPLE tool calls in a single response.",
+            "7. After each tool result, decide the next action or give your final answer.",
+            "8. NEVER apologise for not being able to act - just call the tool.",
+            "",
+            "EXAMPLE - create a file with an absolute path:",
+            '```tool',
+            '{"name": "write_file_absolute", "arguments": {"path": "C:\\\\Users\\\\rodri\\\\Desktop\\\\desligar\\\\teste.txt", "content": "Ola Mundo"}}',
+            '```',
+            "",
         ])
         return "\n".join(lines)
 
@@ -269,88 +293,104 @@ class AgentBase(ABC):
             raise last_error
 
     def _parse_tool_calls(self, content: str) -> list[tuple[str, dict]]:
-        """Parse tool calls from content.
+        """Parse tool calls from LLM content.
 
-        Supports two formats:
-        1. <tool>name|json_args</tool>  (legacy tag format)
-        2. ```tool\n{"name": "...", "arguments": {...}}\n```  (JSON code block format)
+        Supports many formats to maximise compatibility with local models:
+        1. ```tool\n{"name": "...", "arguments": {...}}\n```  (JSON code block)
+        2. <tool_call>{...}</tool_call>  (XML tag)
+        3. <tool>name|json_args</tool>  (legacy)
+        4. {"name": "...", "arguments": {...}} inline
+        5. Arrays of tool calls: [{"name": ...}, {"name": ...}]
 
         Returns list of (tool_name, args_dict) tuples.
         """
-        calls = []
+        calls: list[tuple[str, dict]] = []
+        seen: set[str] = set()
 
-        # Format 1: Legacy <tool>name|json_args</tool> tags
-        tag_pattern = r"<tool>(\w+)\|(.+?)</tool>"
-        for match in re.finditer(tag_pattern, content):
-            tool_name = match.group(1)
+        def _add(tool_name: str, tool_args: Any) -> None:
+            if not tool_name or not isinstance(tool_args, dict):
+                return
+            key = f"{tool_name}:{json.dumps(tool_args, sort_keys=True, default=str)}"
+            if key in seen:
+                return
+            seen.add(key)
+            calls.append((tool_name, dict(tool_args)))
+
+        def _extract_from_json(obj: Any) -> None:
+            """Recursively extract tool calls from parsed JSON objects."""
+            if isinstance(obj, list):
+                for item in obj:
+                    _extract_from_json(item)
+                return
+            if not isinstance(obj, dict):
+                return
+            name = (
+                obj.get("name")
+                or obj.get("tool")
+                or obj.get("function")
+                or obj.get("tool_name")
+                or ""
+            )
+            args = (
+                obj.get("arguments")
+                or obj.get("args")
+                or obj.get("parameters")
+                or obj.get("params")
+                or {}
+            )
+            if name and isinstance(args, dict):
+                _add(str(name), args)
+            if "function_call" in obj and isinstance(obj["function_call"], dict):
+                _extract_from_json(obj["function_call"])
+
+        # Format 1: JSON code blocks ```tool ... ``` or any code block that
+        # contains a tool call (some models wrap it in ```bash or ```json).
+        for match in re.finditer(r"```(?:tool|bash|json|shell|cmd)?\s*\n(.*?)```", content, re.DOTALL):
+            raw = match.group(1).strip()
+            # If the block contains a <tool_call> tag, parse that instead
+            if "<tool_call>" in raw:
+                continue  # handled by Format 2
             try:
-                args = json.loads(match.group(2))
-                calls.append((tool_name, args))
+                _extract_from_json(json.loads(raw))
             except json.JSONDecodeError:
-                logger.warning(f"Failed to parse tool args: {match.group(2)}")
+                logger.warning("Failed to parse JSON tool block: %s", raw[:120])
 
-        # Format 2: JSON code blocks with tool calls
-        # Matches: ```tool\n{"name": "tool_name", "arguments": {...}}\n```
-        # Also matches: ```tool\n{"tool": "tool_name", "args": {...}}\n```
-        code_block_pattern = r"```tool\s*\n(.*?)```"
-        for match in re.finditer(code_block_pattern, content, re.DOTALL):
+        # Format 2: <tool_call>...</tool_call>
+        for match in re.finditer(r"<tool_call>(.+?)</tool_call>", content, re.DOTALL):
+            raw = match.group(1).strip()
             try:
-                tool_json = json.loads(match.group(1).strip())
-                # Support multiple key naming conventions
-                tool_name = (
-                    tool_json.get("name")
-                    or tool_json.get("tool")
-                    or tool_json.get("function")
-                    or ""
-                )
-                tool_args = (
-                    tool_json.get("arguments")
-                    or tool_json.get("args")
-                    or tool_json.get("parameters")
-                    or tool_json.get("params")
-                    or {}
-                )
-                if tool_name and isinstance(tool_args, dict):
-                    calls.append((tool_name, tool_args))
-            except (json.JSONDecodeError, AttributeError):
-                logger.warning("Failed to parse JSON tool block: %s", match.group(1)[:100])
+                _extract_from_json(json.loads(raw))
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse Qwen tool_call: %s", raw[:120])
 
-        # Format 3: <tool_call>{...}</tool_call> (Qwen 3.x native format)
-        qwen_pattern = r"<tool_call>(.+?)</tool_call>"
-        for match in re.finditer(qwen_pattern, content, re.DOTALL):
+        # Format 3: Legacy <tool>name|json_args</tool>
+        for match in re.finditer(r"<tool>(\w+)\|(.+?)</tool>", content):
             try:
-                tool_json = json.loads(match.group(1).strip())
-                tool_name = (
-                    tool_json.get("name")
-                    or tool_json.get("tool")
-                    or tool_json.get("function")
-                    or ""
-                )
-                tool_args = (
-                    tool_json.get("arguments")
-                    or tool_json.get("args")
-                    or tool_json.get("parameters")
-                    or tool_json.get("params")
-                    or {}
-                )
-                if tool_name and isinstance(tool_args, dict):
-                    calls.append((tool_name, tool_args))
-            except (json.JSONDecodeError, AttributeError):
-                logger.warning("Failed to parse Qwen tool_call: %s", match.group(1)[:100])
+                _add(match.group(1), json.loads(match.group(2)))
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse legacy tool args: %s", match.group(2)[:120])
 
-        # Format 4: Inline JSON tool calls (no code block)
-        # Matches: {"tool_call": {"name": "...", "arguments": {...}}}
-        inline_pattern = r'\{["\s]*tool_call["\s]*:\s*\{[^}]*"name"["\s]*:\s*"([^"]+)"[^}]*\}[^}]*\}'
-        for match in re.finditer(inline_pattern, content):
-            try:
-                full_json = json.loads(match.group(0))
-                tc = full_json.get("tool_call", {})
-                tool_name = tc.get("name", "")
-                tool_args = tc.get("arguments", tc.get("args", {}))
-                if tool_name and isinstance(tool_args, dict):
-                    calls.append((tool_name, tool_args))
-            except (json.JSONDecodeError, AttributeError):
-                pass
+        # Format 4: Inline JSON objects / arrays that look like tool calls.
+        # We scan for likely starting points and greedily extend until valid JSON.
+        for start_marker in ('{"name":', '{"tool":', '{"function":', '[{"name":', '[{"tool":'):
+            idx = 0
+            while True:
+                idx = content.find(start_marker, idx)
+                if idx == -1:
+                    break
+                # Try increasing slice lengths
+                for length in (128, 256, 512, 1024, 2048, 4096, 8192, 16384):
+                    snippet = content[idx:idx + length]
+                    try:
+                        _extract_from_json(json.loads(snippet))
+                        idx += length
+                        break
+                    except json.JSONDecodeError:
+                        continue
+                    except Exception:
+                        break
+                else:
+                    idx += 1
 
         return calls
 
@@ -410,6 +450,7 @@ class AgentBase(ABC):
         """ReAct loop with tool calls, thinking blocks, and detailed logging."""
         context = ""
         iteration = 0
+        previous_tool_calls: list[tuple[str, dict]] | None = None
         logger.info(
             "[%s] ReAct loop started | session=%s | query=%.80s | project=%s | max_iter=%d",
             self.name, request.session_id, request.query, request.project_path, request.max_iterations,
@@ -463,15 +504,57 @@ class AgentBase(ABC):
                 yield answer
                 return
 
+            # Detect duplicate tool-call loops (models sometimes repeat the same
+            # call after a successful write). If the exact same calls appear twice
+            # in a row, stop and return the last answer as final.
+            if previous_tool_calls is not None:
+                current_key = json.dumps(tool_calls, sort_keys=True, default=str)
+                previous_key = json.dumps(previous_tool_calls, sort_keys=True, default=str)
+                if current_key == previous_key:
+                    logger.warning(
+                        "[%s] Detected repeated identical tool calls — breaking loop | iteration=%d",
+                        self.name, iteration,
+                    )
+                    yield "<event>answer</event>"
+                    yield answer
+                    return
+            previous_tool_calls = tool_calls
+
             # Execute tools
             for tool_name, args in tool_calls:
                 logger.info("[%s] Executing tool | iteration=%d | tool=%s | args=%s", self.name, iteration, tool_name, args)
                 yield f"<event>tool_call|{tool_name}|{json.dumps(args)}</event>"
 
-                # Inject project_path from the request if the tool expects it
+                # Inject project_path from the request only if the tool schema accepts it.
+                # This avoids TypeErrors for tools like write_file_absolute that do not
+                # take a project_path argument.
                 if request.project_path and "project_path" not in args:
-                    args["project_path"] = request.project_path
-                    logger.debug("[%s] Injected project_path=%s into tool args", self.name, request.project_path)
+                    from backend.tools.registry import get_tool
+
+                    spec = get_tool(tool_name)
+                    schema_props = (
+                        spec.schema.get("properties", {}) if spec and isinstance(spec.schema, dict) else {}
+                    )
+                    if "project_path" in schema_props:
+                        args["project_path"] = request.project_path
+                        logger.debug("[%s] Injected project_path=%s into tool args", self.name, request.project_path)
+
+                # Auto-upgrade relative file tools to absolute variants when the
+                # supplied path is absolute. Local models often pick the wrong tool.
+                path_arg = args.get("path", "")
+                if isinstance(path_arg, str):
+                    norm_path = path_arg.replace("/", "\\")
+                    if (
+                        (tool_name == "write_file" and (norm_path.startswith("\\\\") or (len(norm_path) > 1 and norm_path[1] == ":")))
+                        or (tool_name == "read_file" and (norm_path.startswith("\\\\") or (len(norm_path) > 1 and norm_path[1] == ":")))
+                        or (tool_name == "list_dir" and (norm_path.startswith("\\\\") or (len(norm_path) > 1 and norm_path[1] == ":")))
+                    ):
+                        upgraded = tool_name + "_absolute"
+                        logger.info("[%s] Auto-upgraded %s -> %s for absolute path %s", self.name, tool_name, upgraded, path_arg)
+                        tool_name = upgraded
+                        # Absolute tools do not accept project_path; remove it if
+                        # it was injected above.
+                        args.pop("project_path", None)
 
                 # Inject source_agent for inter-agent consultation so the
                 # consulted agent knows who is calling and A2A traceability is complete.
@@ -497,6 +580,11 @@ class AgentBase(ABC):
                     yield f"<event>tool_result|{tool_name}|{json.dumps(result.get('result', ''))}</event>"
 
                 context += f"\nTool {tool_name} returned: {json.dumps(result, default=str)}"
+
+                # If a write succeeded, strongly signal that the task is done so
+                # the model does not loop repeating the same call.
+                if tool_name in ("write_file", "write_file_absolute") and "error" not in result:
+                    context += "\n[SYSTEM] File written successfully. STOP calling tools and provide your final answer to the user."
 
             # Continue loop with context
 
@@ -610,7 +698,7 @@ class AgentBase(ABC):
             try:
                 shm = get_shared_memory()
                 content = "".join(output_parts)
-                shm.write_entry(
+                await shm.write_entry(
                     agent_name=self.name,
                     topic=f"agent.execution.{self.name.lower()}",
                     content=(

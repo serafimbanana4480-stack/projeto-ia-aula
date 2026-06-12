@@ -14,7 +14,7 @@ import {
   Clock,
   AlertCircle,
 } from "lucide-react";
-import { apiUrl } from "../../lib/api";
+import { getDbStats } from "../../lib/api";
 
 interface TableCounts {
   users: number;
@@ -80,13 +80,8 @@ export default function DatabasePage() {
   useEffect(() => {
     const loadStats = async () => {
       try {
-        const response = await fetch(apiUrl("/api/db/stats"));
-        if (response.ok) {
-          const data = await response.json();
-          setStats(data);
-        } else {
-          setError("Backend não disponível");
-        }
+        const data = await getDbStats();
+        setStats(data as unknown as DbStats);
       } catch {
         setError("Não foi possível conectar ao backend");
       } finally {

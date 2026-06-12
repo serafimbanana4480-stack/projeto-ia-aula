@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { useMetricsStore } from "../../stores/metricsStore";
-import { apiUrl } from "../../lib/api";
+import { getMetricsFlow } from "../../lib/api";
 import { GitBranch, CheckCircle2, XCircle, Timer, Gauge } from "lucide-react";
 
 interface FlowData {
@@ -25,8 +25,7 @@ export default function RequestFlow() {
   const fetchFlowData = useCallback(async () => {
     try {
       setLoading(true);
-      const response = await fetch(apiUrl("/api/metrics/flow"), { signal: AbortSignal.timeout(5000) });
-      const data = (await response.json()) as FlowData;
+      const data = (await getMetricsFlow()) as unknown as FlowData;
       if (data?.summary) {
         setFlowData(data);
       }

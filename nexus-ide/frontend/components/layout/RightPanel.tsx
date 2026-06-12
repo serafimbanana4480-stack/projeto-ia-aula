@@ -16,7 +16,7 @@ import {
 import { useModelStore } from "../../stores/modelStore";
 import { useToolsStore } from "../../stores/toolsStore";
 import { useMetricsStore } from "../../stores/metricsStore";
-import { toggleTool as toggleToolRemote } from "../../lib/api";
+import { toggleTool as toggleToolRemote, getMetricsHistory } from "../../lib/api";
 import { AreaChart, Area, ResponsiveContainer } from "recharts";
 import { useRouter } from "next/navigation";
 import { log } from "../../lib/log";
@@ -123,21 +123,16 @@ export default function RightPanel() {
   useEffect(() => {
     const fetchHistory = async () => {
       try {
-        const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api/metrics/history?seconds=3600&metric=tokens_per_second`,
-        );
-        if (response.ok) {
-          const data = await response.json();
-          if (Array.isArray(data) && data.length > 0) {
-            const formatted = data.slice(-24).map((point: { timestamp: number; value: number }) => ({
-              time: new Date(point.timestamp * 1000).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              }),
-              v: point.value,
-            }));
-            setHistoryData(formatted);
-          }
+        const data = await getMetricsHistory(3600, "tokens_per_second");
+        if (Array.isArray(data) && data.length > 0) {
+          const formatted = data.slice(-24).map((point: { timestamp: number; value: number }) => ({
+            time: new Date(point.timestamp * 1000).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+            v: point.value,
+          }));
+          setHistoryData(formatted);
         }
       } catch {
         // History not available yet - that's OK, suppress silently

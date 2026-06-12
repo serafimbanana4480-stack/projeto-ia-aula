@@ -5,8 +5,8 @@
 models:
   # MICRO — perguntas triviais (1+1, classificação rápida)
   micro:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5:0.5b"
+    fallback_id: "qwen2.5:0.5b"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.3
@@ -14,8 +14,8 @@ models:
 
   # FAST — respostas rápidas, formatação leve
   fast:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5:1.5b"
+    fallback_id: "qwen2.5:1.5b"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.7
@@ -23,8 +23,8 @@ models:
 
   # CODER — geração e análise de código
   coder:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5-coder:1.5b"
+    fallback_id: "qwen2.5-coder:1.5b"
     thinking_mode: false
     max_tokens: 8192
     temperature: 0.2
@@ -32,8 +32,8 @@ models:
 
   # REASONING — raciocínio multi-step com thinking
   reasoning:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5-coder:1.5b"
+    fallback_id: "qwen2.5-coder:1.5b"
     thinking_mode: true
     max_tokens: 8192
     temperature: 0.5
@@ -41,8 +41,8 @@ models:
 
   # DEEP — análises complexas, arquitetura (uses 1.5B on CPU; promote to 7B on GPU)
   deep:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5-coder:1.5b"
+    fallback_id: "qwen2.5-coder:1.5b"
     thinking_mode: true
     max_tokens: 16384
     temperature: 0.4
@@ -50,8 +50,8 @@ models:
 
   # Q3B-4BIT — alias legado mantido por compatibilidade; no Ollama usa 3B padrão
   q3b-4bit:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5-coder:1.5b"
+    fallback_id: "qwen2.5-coder:1.5b"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.5
@@ -59,8 +59,8 @@ models:
 
   # CODER3B-4BIT — alias legado mantido por compatibilidade; no Ollama usa 3B padrão
   coder3b-4bit:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5-coder:1.5b"
+    fallback_id: "qwen2.5-coder:1.5b"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.2
@@ -68,43 +68,43 @@ models:
 
   # Aliases retro-compatibilidade (legacy registry)
   nano:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5:0.5b"
+    fallback_id: "qwen2.5:0.5b"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.1
     use_cases: [routing]
   small:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5:1.5b"
+    fallback_id: "qwen2.5:1.5b"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.7
     use_cases: [general_tasks]
   medium:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5-coder:1.5b"
+    fallback_id: "qwen2.5-coder:1.5b"
     thinking_mode: false
     max_tokens: 8192
     temperature: 0.3
     use_cases: [code_generation]
   large:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5-coder:1.5b"
+    fallback_id: "qwen2.5-coder:1.5b"
     thinking_mode: true
     max_tokens: 8192
     temperature: 0.7
     use_cases: [reasoning]
   expert:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5-coder:1.5b"
+    fallback_id: "qwen2.5-coder:1.5b"
     thinking_mode: true
     max_tokens: 16384
     temperature: 0.3
     use_cases: [architecture]
   vision:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5-coder:1.5b"
+    fallback_id: "qwen2.5-coder:1.5b"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.7
@@ -117,8 +117,8 @@ models:
     temperature: 0.0
     use_cases: [retrieval]
   dashboard:
-    id: "llama3.1:8b"
-    fallback_id: "llama3.1:8b"
+    id: "qwen2.5-coder:1.5b"
+    fallback_id: "qwen2.5-coder:1.5b"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.5

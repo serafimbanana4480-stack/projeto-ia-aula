@@ -14,7 +14,6 @@ import json
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -255,12 +254,12 @@ async def run_file_lock_tests():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _test_shm_write_three_agents():
+async def _test_shm_write_three_agents():
     shm = get_shared_memory()
-    e1 = shm.write_entry("CODER", "code.change", "Fixed null pointer")
-    e2 = shm.write_entry("ANALYZER", "review.note", "Looks good")
-    e3 = shm.write_entry("BUG_HUNTER_STATIC", "bug.found", "Race condition in locks")
-    ok = {e.author_agent for e in shm.read_entries(limit=10)} == {
+    e1 = await shm.write_entry("CODER", "code.change", "Fixed null pointer")
+    e2 = await shm.write_entry("ANALYZER", "review.note", "Looks good")
+    e3 = await shm.write_entry("BUG_HUNTER_STATIC", "bug.found", "Race condition in locks")
+    ok = {e.author_agent for e in await shm.read_entries(limit=10)} == {
         "CODER",
         "ANALYZER",
         "BUG_HUNTER_STATIC",
@@ -273,14 +272,14 @@ def _test_shm_write_three_agents():
     )
 
 
-def _test_shm_filters():
+async def _test_shm_filters():
     shm = get_shared_memory()
-    shm.write_entry("CODER", "code.change", "fix 1", tags=["api"])
-    shm.write_entry("CODER", "code.change", "fix 2", tags=["ui"])
-    shm.write_entry("ANALYZER", "bug.discovery", "found issue", tags=["security"])
-    ok_topic = len(shm.read_entries(topic="code.change")) == 2
-    ok_agent = len(shm.read_entries(agent="ANALYZER")) == 1
-    ok_tag = len(shm.read_entries(tags=["security"])) == 1
+    await shm.write_entry("CODER", "code.change", "fix 1", tags=["api"])
+    await shm.write_entry("CODER", "code.change", "fix 2", tags=["ui"])
+    await shm.write_entry("ANALYZER", "bug.discovery", "found issue", tags=["security"])
+    ok_topic = len(await shm.read_entries(topic="code.change")) == 2
+    ok_agent = len(await shm.read_entries(agent="ANALYZER")) == 1
+    ok_tag = len(await shm.read_entries(tags=["security"])) == 1
     ok = ok_topic and ok_agent and ok_tag
     REPORT.add(
         "Shared Memory",
@@ -290,12 +289,12 @@ def _test_shm_filters():
     )
 
 
-def _test_shm_search():
+async def _test_shm_search():
     shm = get_shared_memory()
-    shm.write_entry("CODER", "auth.refactor", "Refactored JWT handling")
-    shm.write_entry("ANALYZER", "db.optimisation", "Added indexes on users")
-    r1 = shm.search_entries("JWT")
-    r2 = shm.search_entries("indexes")
+    await shm.write_entry("CODER", "auth.refactor", "Refactored JWT handling")
+    await shm.write_entry("ANALYZER", "db.optimisation", "Added indexes on users")
+    r1 = await shm.search_entries("JWT")
+    r2 = await shm.search_entries("indexes")
     ok = len(r1) == 1 and r1[0].topic == "auth.refactor" and len(r2) == 1
     REPORT.add(
         "Shared Memory",
@@ -305,15 +304,15 @@ def _test_shm_search():
     )
 
 
-def _test_shm_link_and_thread():
+async def _test_shm_link_and_thread():
     shm = get_shared_memory()
-    e1 = shm.write_entry("CODER", "code.change", "Initial implementation")
-    e2 = shm.write_entry("CODER", "code.change", "Follow-up fix")
-    e3 = shm.write_entry("ANALYZER", "review.note", "Approved")
-    ok_link1 = shm.link_entries(e1.entry_id, e2.entry_id, "follow_up") is True
-    ok_link2 = shm.link_entries(e1.entry_id, e3.entry_id, "review") is True
-    ok_dup = shm.link_entries(e1.entry_id, e2.entry_id, "follow_up") is False
-    thread = shm.get_thread(e1.entry_id)
+    e1 = await shm.write_entry("CODER", "code.change", "Initial implementation")
+    e2 = await shm.write_entry("CODER", "code.change", "Follow-up fix")
+    e3 = await shm.write_entry("ANALYZER", "review.note", "Approved")
+    ok_link1 = await shm.link_entries(e1.entry_id, e2.entry_id, "follow_up") is True
+    ok_link2 = await shm.link_entries(e1.entry_id, e3.entry_id, "review") is True
+    ok_dup = await shm.link_entries(e1.entry_id, e2.entry_id, "follow_up") is False
+    thread = await shm.get_thread(e1.entry_id)
     ids = {e.entry_id for e in thread}
     ok_thread = {e1.entry_id, e2.entry_id, e3.entry_id}.issubset(ids)
     ok = ok_link1 and ok_link2 and ok_dup and ok_thread
@@ -325,15 +324,15 @@ def _test_shm_link_and_thread():
     )
 
 
-def _test_shm_archive():
+async def _test_shm_archive():
     shm = get_shared_memory()
     old_ts = (datetime.now(UTC) - timedelta(days=40)).isoformat()
-    shm.write_entry("CODER", "code.change", "Old change", importance=0.1)
+    await shm.write_entry("CODER", "code.change", "Old change", importance=0.1)
     with _db_mod.get_db() as conn:
         conn.execute("UPDATE whiteboard_entries SET timestamp = ?", (old_ts,))
-    shm.write_entry("CODER", "code.change", "Recent change", importance=0.1)
-    archived = shm.archive_old_entries(days=30, max_importance=0.3)
-    remaining = shm.read_entries(topic="code.change")
+    await shm.write_entry("CODER", "code.change", "Recent change", importance=0.1)
+    archived = await shm.archive_old_entries(days=30, max_importance=0.3)
+    remaining = await shm.read_entries(topic="code.change")
     ok = archived == 1 and len(remaining) == 1 and remaining[0].content == "Recent change"
     REPORT.add(
         "Shared Memory",
@@ -343,12 +342,12 @@ def _test_shm_archive():
     )
 
 
-def run_shared_memory_tests():
-    _test_shm_write_three_agents()
-    _test_shm_filters()
-    _test_shm_search()
-    _test_shm_link_and_thread()
-    _test_shm_archive()
+async def run_shared_memory_tests():
+    await _test_shm_write_three_agents()
+    await _test_shm_filters()
+    await _test_shm_search()
+    await _test_shm_link_and_thread()
+    await _test_shm_archive()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -356,9 +355,9 @@ def run_shared_memory_tests():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _test_pr_submit():
+async def _test_pr_submit():
     prs = get_peer_review_system()
-    review = prs.submit_for_review(
+    review = await prs.submit_for_review(
         artifact_id="api.py", artifact_type="code", author_agent="CODER", content="def hello(): pass"
     )
     ok = review.review_id and review.status == "pending"
@@ -370,9 +369,9 @@ def _test_pr_submit():
     )
 
 
-def _test_pr_required_reviewers():
+async def _test_pr_required_reviewers():
     prs = get_peer_review_system()
-    prs.submit_for_review("x.py", "code", "CODER", "x")
+    await prs.submit_for_review("x.py", "code", "CODER", "x")
     required = prs.get_required_reviewers("CODER")
     ok = "ANALYZER" in required and "BUG_HUNTER_STATIC" in required
     REPORT.add(
@@ -383,7 +382,7 @@ def _test_pr_required_reviewers():
     )
 
 
-def _test_pr_review_rules():
+async def _test_pr_review_rules():
     prs = get_peer_review_system()
     coder = prs.get_required_reviewers("CODER")
     arch = prs.get_required_reviewers("ARCHITECT_DESIGN")
@@ -398,11 +397,11 @@ def _test_pr_review_rules():
 
 async def _test_pr_status_flow():
     prs = get_peer_review_system()
-    review = prs.submit_for_review("y.py", "code", "CODER", "y")
+    review = await prs.submit_for_review("y.py", "code", "CODER", "y")
     await prs.conduct_review(review.review_id, "ANALYZER", "approved")
-    s1 = prs.get_review_request(review.review_id).status
+    s1 = (await prs.get_review_request(review.review_id)).status
     await prs.conduct_review(review.review_id, "BUG_HUNTER_STATIC", "approved")
-    s2 = prs.get_review_request(review.review_id).status
+    s2 = (await prs.get_review_request(review.review_id)).status
     ok = s1 == "in_review" and s2 == "approved"
     REPORT.add(
         "Peer Review",
@@ -413,9 +412,9 @@ async def _test_pr_status_flow():
 
 
 async def run_peer_review_tests():
-    _test_pr_submit()
-    _test_pr_required_reviewers()
-    _test_pr_review_rules()
+    await _test_pr_submit()
+    await _test_pr_required_reviewers()
+    await _test_pr_review_rules()
     await _test_pr_status_flow()
 
 
@@ -424,31 +423,27 @@ async def run_peer_review_tests():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _test_concurrent_shm_writes():
+async def _test_concurrent_shm_writes():
     shm = get_shared_memory()
     errors: list[str] = []
     entry_ids: list[str] = []
-    lock = threading.Lock()
+    lock = asyncio.Lock()
 
-    def writer(agent: str, idx: int):
+    async def writer(agent: str, idx: int):
         try:
-            e = shm.write_entry(agent, "stress.test", f"entry-{idx}", tags=["stress"])
-            with lock:
+            e = await shm.write_entry(agent, "stress.test", f"entry-{idx}", tags=["stress"])
+            async with lock:
                 entry_ids.append(e.entry_id)
         except Exception as e:
-            with lock:
+            async with lock:
                 errors.append(str(e))
 
-    threads = [threading.Thread(target=writer, args=(f"agent-{i % 3}", i)) for i in range(30)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    await asyncio.gather(*[writer(f"agent-{i % 3}", i) for i in range(30)])
 
     ok = not errors and len(entry_ids) == 30
     if not ok:
         REPORT.race_conditions.append(
-            "SharedMemory: concurrent writes from 30 threads" + (f" — errors: {errors[:3]}" if errors else "")
+            "SharedMemory: concurrent writes from 30 coroutines" + (f" — errors: {errors[:3]}" if errors else "")
         )
     REPORT.add(
         "Race Conditions",
@@ -458,31 +453,27 @@ def _test_concurrent_shm_writes():
     )
 
 
-def _test_concurrent_pr_submissions():
+async def _test_concurrent_pr_submissions():
     prs = get_peer_review_system()
     review_ids: list[str] = []
     errors: list[str] = []
-    lock = threading.Lock()
+    lock = asyncio.Lock()
 
-    def submit(idx: int):
+    async def submit(idx: int):
         try:
-            r = prs.submit_for_review(f"f{idx}.py", "code", "CODER", f"def f{idx}(): pass")
-            with lock:
+            r = await prs.submit_for_review(f"f{idx}.py", "code", "CODER", f"def f{idx}(): pass")
+            async with lock:
                 review_ids.append(r.review_id)
         except Exception as e:
-            with lock:
+            async with lock:
                 errors.append(str(e))
 
-    threads = [threading.Thread(target=submit, args=(i,)) for i in range(20)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    await asyncio.gather(*[submit(i) for i in range(20)])
 
     ok = not errors and len(review_ids) == 20 and len(set(review_ids)) == 20
     if not ok:
         REPORT.race_conditions.append(
-            "PeerReview: concurrent submissions from 20 threads" + (f" — errors: {errors[:3]}" if errors else "")
+            "PeerReview: concurrent submissions from 20 coroutines" + (f" — errors: {errors[:3]}" if errors else "")
         )
     REPORT.add(
         "Race Conditions",
@@ -492,9 +483,9 @@ def _test_concurrent_pr_submissions():
     )
 
 
-def run_race_condition_tests():
-    _test_concurrent_shm_writes()
-    _test_concurrent_pr_submissions()
+async def run_race_condition_tests():
+    await _test_concurrent_shm_writes()
+    await _test_concurrent_pr_submissions()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -511,13 +502,13 @@ async def main() -> None:
     await run_file_lock_tests()
 
     print("[RUN] Running Shared Memory tests...")
-    run_shared_memory_tests()
+    await run_shared_memory_tests()
 
     print("[RUN] Running Peer Review tests...")
     await run_peer_review_tests()
 
     print("[RUN] Running Race Condition stress tests...")
-    run_race_condition_tests()
+    await run_race_condition_tests()
 
     md = REPORT.markdown()
     Path(args.report_path).write_text(md, encoding="utf-8")

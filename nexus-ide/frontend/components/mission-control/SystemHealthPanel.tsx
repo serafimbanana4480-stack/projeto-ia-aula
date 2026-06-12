@@ -145,9 +145,11 @@ export default function SystemHealthPanel() {
           <div>
             <div className="mb-2 text-xs font-medium text-nexus-muted">Background Workers</div>
             <div className="space-y-1.5 max-h-[160px] overflow-y-auto thin-scrollbar pr-1">
-              {health.workers.map((w) => (
-                <WorkerStatus key={w.name} worker={w} />
-              ))}
+              {Array.isArray(health.workers) && health.workers.length > 0 ? (
+                health.workers.map((w) => <WorkerStatus key={w.name} worker={w} />)
+              ) : (
+                <div className="text-xs text-nexus-muted">Sem workers registados</div>
+              )}
             </div>
           </div>
 

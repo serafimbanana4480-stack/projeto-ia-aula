@@ -126,7 +126,7 @@ def _cleanup_stale_lock(lock_path: str, timeout: float) -> None:
             logger.warning("Removing stale lock file %s (age=%.1fs)", lock_path, age)
             path.unlink(missing_ok=True)
     except OSError:
-        pass
+        logger.debug("Failed to cleanup stale lock %s", lock_path, exc_info=True)
 
 
 def _read_readers_count(count_path: str) -> int:
@@ -171,7 +171,7 @@ def _sync_release_soft_lock(lock: SoftFileLock | None) -> None:
     try:
         lock.release()
     except Exception:
-        pass
+        logger.debug("Failed to release soft lock", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -708,7 +708,7 @@ class FileLockManager:
                     try:
                         Path(count_path).unlink(missing_ok=True)
                     except OSError:
-                        pass
+                        logger.debug("Failed to unlink readers count file %s", count_path, exc_info=True)
             finally:
                 _sync_release_soft_lock(mutex_lock)
 

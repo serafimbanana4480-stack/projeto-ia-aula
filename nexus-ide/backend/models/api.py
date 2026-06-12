@@ -7,7 +7,7 @@ See ARCHITECTURE.md §7.3 for the API contracts.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -44,6 +44,9 @@ EventType = Literal[
     "routing",
     "agent_started",
     "token",
+    "tool_call",
+    "tool_result",
+    "tool_error",
     "agent_finished",
     "error",
     "done",
@@ -180,6 +183,11 @@ class StreamEvent(BaseModel):
     agent: AgentName | None = None
     content: str | None = None
     routing: RoutingDecision | None = None
+    # Tool-call events (type in tool_call / tool_result / tool_error)
+    tool_name: str | None = None
+    tool_args: dict[str, Any] | None = None
+    tool_result: Any | None = None
+    tool_error: str | None = None
     timestamp: str = Field(default_factory=_utcnow_iso)
 
 
@@ -293,3 +301,25 @@ class WorkspaceProjectInfoRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(min_length=1, max_length=2000)
+
+
+class UserPreferencesUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preferences: dict[str, Any] = Field(default_factory=dict)
+
+
+class RoutineCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    description: str = ""
+    schedule_cron: str = ""
+
+
+class MemoryCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1, max_length=10_000)
+    memory_type: Literal["preference", "fact", "routine", "insight"] = "fact"
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)

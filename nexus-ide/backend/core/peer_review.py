@@ -144,27 +144,37 @@ class PeerReviewSystem:
     Usage::
 
         prs = get_peer_review_system()
-        req = prs.submit_for_review("api.py", "code", "CODER", "def foo(): ...")
+        req = await prs.submit_for_review("api.py", "code", "CODER", "def foo(): ...")
         result = await prs.conduct_review(req.review_id, "ANALYZER", "approved")
-        status = prs.get_review_status("api.py")
+        status = await prs.get_review_status("api.py")
     """
 
     _instance: PeerReviewSystem | None = None
     _lock: threading.Lock = threading.Lock()
+    _initialized: bool = False
 
     def __new__(cls) -> PeerReviewSystem:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    _init_peer_review_db()
         return cls._instance
+
+    async def _ensure_init(self) -> None:
+        if self._initialized:
+            return
+        if not hasattr(self, "_init_lock"):
+            self._init_lock = asyncio.Lock()
+        async with self._init_lock:
+            if not self._initialized:
+                await asyncio.to_thread(_init_peer_review_db)
+                self._initialized = True
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def submit_for_review(
+    async def submit_for_review(
         self,
         artifact_id: str,
         artifact_type: str,
@@ -172,6 +182,7 @@ class PeerReviewSystem:
         content: str,
     ) -> ReviewRequest:
         """Queue a new artifact for peer review."""
+        await self._ensure_init()
         content_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
         review = ReviewRequest(
             artifact_id=artifact_id,
@@ -179,6 +190,16 @@ class PeerReviewSystem:
             author_agent=author_agent,
             content_hash=content_hash,
         )
+        await asyncio.to_thread(self._insert_review_request, review)
+        logger.info(
+            "Review %s submitted for %s by %s",
+            review.review_id,
+            artifact_id,
+            author_agent,
+        )
+        return review
+
+    def _insert_review_request(self, review: ReviewRequest) -> None:
         with get_db() as conn:
             conn.execute(
                 """
@@ -198,37 +219,18 @@ class PeerReviewSystem:
                     review.updated_at.isoformat(),
                 ),
             )
-        logger.info(
-            "Review %s submitted for %s by %s",
-            review.review_id,
-            artifact_id,
-            author_agent,
-        )
-        return review
 
-    def get_review_status(self, artifact_id: str) -> dict[str, Any]:
+    async def get_review_status(self, artifact_id: str) -> dict[str, Any]:
         """Return all reviews and their results for an artifact."""
-        with get_db() as conn:
-            req_rows = conn.execute(
-                """
-                SELECT * FROM peer_review_requests
-                WHERE artifact_id = ?
-                ORDER BY created_at DESC
-                """,
-                (artifact_id,),
-            ).fetchall()
+        await self._ensure_init()
+        req_rows = await asyncio.to_thread(self._fetch_request_rows, artifact_id)
 
         reviews: list[dict[str, Any]] = []
         for req_row in req_rows:
             review = self._row_to_request(req_row)
-            with get_db() as conn:
-                res_rows = conn.execute(
-                    """
-                    SELECT * FROM peer_review_results
-                    WHERE review_id = ?
-                    """,
-                    (review.review_id,),
-                ).fetchall()
+            res_rows = await asyncio.to_thread(
+                self._fetch_result_rows, review.review_id
+            )
             results = [self._row_to_result(r) for r in res_rows]
             reviews.append(
                 {
@@ -237,6 +239,27 @@ class PeerReviewSystem:
                 }
             )
         return {"artifact_id": artifact_id, "reviews": reviews}
+
+    def _fetch_request_rows(self, artifact_id: str) -> list[sqlite3.Row]:
+        with get_db() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM peer_review_requests
+                WHERE artifact_id = ?
+                ORDER BY created_at DESC
+                """,
+                (artifact_id,),
+            ).fetchall()
+
+    def _fetch_result_rows(self, review_id: str) -> list[sqlite3.Row]:
+        with get_db() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM peer_review_results
+                WHERE review_id = ?
+                """,
+                (review_id,),
+            ).fetchall()
 
     async def conduct_review(
         self,
@@ -247,6 +270,7 @@ class PeerReviewSystem:
         criteria_scores: dict[str, float] | None = None,
     ) -> ReviewResult:
         """Record a reviewer's verdict for a queued review."""
+        await self._ensure_init()
         if status not in ("approved", "changes_requested", "rejected"):
             raise ValueError(f"Invalid review status: {status}")
 
@@ -258,6 +282,17 @@ class PeerReviewSystem:
             criteria_scores=criteria_scores or {},
         )
 
+        await asyncio.to_thread(self._insert_review_result, result)
+        await self._publish_review_completed(review_id)
+        logger.info(
+            "Review %s conducted by %s: %s",
+            review_id,
+            reviewer_agent,
+            status,
+        )
+        return result
+
+    def _insert_review_result(self, result: ReviewResult) -> None:
         with get_db() as conn:
             conn.execute(
                 """
@@ -276,66 +311,75 @@ class PeerReviewSystem:
                     result.created_at.isoformat(),
                 ),
             )
-            self._update_request_status(conn, review_id)
+            self._update_request_status(conn, result.review_id)
 
-        await self._publish_review_completed(review_id)
-        logger.info(
-            "Review %s conducted by %s: %s",
-            review_id,
-            reviewer_agent,
-            status,
-        )
-        return result
-
-    def get_review_request(self, review_id: str) -> ReviewRequest | None:
+    async def get_review_request(self, review_id: str) -> ReviewRequest | None:
         """Fetch a single review request by id."""
+        await self._ensure_init()
+        row = await asyncio.to_thread(self._fetch_review_request_row, review_id)
+        if row:
+            return self._row_to_request(row)
+        return None
+
+    def _fetch_review_request_row(self, review_id: str) -> sqlite3.Row | None:
         with get_db() as conn:
-            row = conn.execute(
+            return conn.execute(
                 "SELECT * FROM peer_review_requests WHERE review_id = ?",
                 (review_id,),
             ).fetchone()
-            if row:
-                return self._row_to_request(row)
-            return None
 
     def get_required_reviewers(self, author_agent: str) -> list[str]:
         """Return the list of mandatory reviewers for an author agent."""
         return list(REVIEW_RULES.get(author_agent, []))
 
-    def check_disagreement(self, review_id: str) -> bool:
+    async def check_disagreement(self, review_id: str) -> bool:
         """Return ``True`` if reviewers have delivered conflicting verdicts."""
-        with get_db() as conn:
-            res_rows = conn.execute(
-                "SELECT status FROM peer_review_results WHERE review_id = ?",
-                (review_id,),
-            ).fetchall()
+        await self._ensure_init()
+        res_rows = await asyncio.to_thread(self._fetch_status_rows, review_id)
         if len(res_rows) < 2:
             return False
         statuses = {r["status"] for r in res_rows}
         return len(statuses) > 1
 
-    def get_review_results(self, review_id: str) -> list[ReviewResult]:
-        """Return all review results associated with a review request."""
+    def _fetch_status_rows(self, review_id: str) -> list[sqlite3.Row]:
         with get_db() as conn:
-            rows = conn.execute(
+            return conn.execute(
+                "SELECT status FROM peer_review_results WHERE review_id = ?",
+                (review_id,),
+            ).fetchall()
+
+    async def get_review_results(self, review_id: str) -> list[ReviewResult]:
+        """Return all review results associated with a review request."""
+        await self._ensure_init()
+        rows = await asyncio.to_thread(self._fetch_all_result_rows, review_id)
+        return [self._row_to_result(r) for r in rows]
+
+    def _fetch_all_result_rows(self, review_id: str) -> list[sqlite3.Row]:
+        with get_db() as conn:
+            return conn.execute(
                 "SELECT * FROM peer_review_results WHERE review_id = ?",
                 (review_id,),
             ).fetchall()
-            return [self._row_to_result(r) for r in rows]
 
-    def list_pending_reviews(
+    async def list_pending_reviews(
         self, reviewer_agent: str | None = None
     ) -> list[ReviewRequest]:
         """Return review requests that are still pending or in review."""
+        await self._ensure_init()
+        rows = await asyncio.to_thread(self._fetch_pending_rows, reviewer_agent)
+        return [self._row_to_request(r) for r in rows]
+
+    def _fetch_pending_rows(
+        self, reviewer_agent: str | None
+    ) -> list[sqlite3.Row]:
         with get_db() as conn:
-            rows = conn.execute(
+            return conn.execute(
                 """
                 SELECT * FROM peer_review_requests
                 WHERE status IN ('pending', 'in_review')
                 ORDER BY created_at DESC
                 """,
             ).fetchall()
-        return [self._row_to_request(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Internal helpers

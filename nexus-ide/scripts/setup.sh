@@ -28,7 +28,7 @@ python scripts/setup-airllm-models.py micro fast coder || echo "⚠️  Some mod
 
 # 5. Build sandbox image used by the code_executor
 echo "🔨 Building sandbox image..."
-docker build -t nexus-sandbox -f docker/Dockerfile.sandbox . || echo "⚠️  sandbox build skipped"
+docker build -t nexus-sandbox -f docker/sandbox.Dockerfile . || echo "⚠️  sandbox build skipped"
 
 echo ""
 echo "✅ Setup complete!"

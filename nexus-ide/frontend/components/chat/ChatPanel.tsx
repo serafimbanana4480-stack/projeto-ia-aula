@@ -2,10 +2,9 @@
 import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
 import { useAgentStream } from "../../hooks/useAgentStream";
-import { getSessionHistory, createPlan, approvePlan, executePlan, getPlanStatus, cancelPlan } from "../../lib/api";
-import { apiUrl } from "../../lib/api";
+import { getSessionHistory, createPlan, approvePlan, executePlan, getPlanStatus, cancelPlan, createSession } from "../../lib/api";
 import type { PlanCreateResult, PlanStatus as PlanStatusType } from "../../lib/api";
-import { useModeStore } from "../../stores/modeStore";
+import { useModeStore, type Mode } from "../../stores/modeStore";
 import { useModelStore } from "../../stores/modelStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useThemeStore } from "../../stores/themeStore";
@@ -34,6 +33,13 @@ import {
   AlertTriangle,
   X,
   WifiOff,
+  Code,
+  Bug,
+  MessageCircle,
+  Users,
+  Brain,
+  Zap,
+  BarChart3,
 } from "lucide-react";
 import type { AgentName, ChatMessage, StreamEvent } from "../../lib/types";
 import { log } from "../../lib/log";
@@ -43,6 +49,24 @@ interface ChatPanelProps {
   setRightOpen?: (open: boolean) => void;
 }
 
+interface ModeConfig {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  color: string;
+}
+
+const MODE_CONFIG: Record<string, ModeConfig> = {
+  auto: { icon: Sparkles, label: "Auto", color: "text-nexus-accent bg-nexus-accent/10 border-nexus-accent/40" },
+  coder: { icon: Code, label: "Coder", color: "text-emerald-400 bg-emerald-400/10 border-emerald-400/40" },
+  analyst: { icon: BarChart3, label: "Analyst", color: "text-amber-400 bg-amber-400/10 border-amber-400/40" },
+  fast: { icon: Zap, label: "Fast", color: "text-yellow-400 bg-yellow-400/10 border-yellow-400/40" },
+  deep: { icon: Brain, label: "Deep", color: "text-purple-400 bg-purple-400/10 border-purple-400/40" },
+  plan: { icon: ListChecks, label: "Plano", color: "text-sky-400 bg-sky-400/10 border-sky-400/40" },
+  debug: { icon: Bug, label: "Debug", color: "text-red-400 bg-red-400/10 border-red-400/40" },
+  ask: { icon: MessageCircle, label: "Ask", color: "text-blue-400 bg-blue-400/10 border-blue-400/40" },
+  swarm: { icon: Users, label: "Swarm", color: "text-teal-400 bg-teal-400/10 border-teal-400/40" },
+};
+
 /** Fold the raw SSE event stream into an ordered list of ChatMessages. */
 function foldEvents(
   pendingUser: ChatMessage[],
@@ -50,6 +74,17 @@ function foldEvents(
 ): ChatMessage[] {
   const out: ChatMessage[] = [...pendingUser];
   let current: ChatMessage | null = null;
+
+  const findRunningTool = (name?: string) => {
+    if (!current?.toolCalls) return -1;
+    const calls = current.toolCalls;
+    // Search backwards for a running call with matching name (if provided)
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i].status !== "running") continue;
+      if (!name || calls[i].name === name) return i;
+    }
+    return -1;
+  };
 
   for (const e of events) {
     switch (e.type) {
@@ -60,12 +95,51 @@ function foldEvents(
           agent: (e.agent ?? "CODER") as AgentName,
           content: "",
           timestamp: e.timestamp,
+          toolCalls: [],
         };
         out.push(current);
         break;
       }
       case "token": {
         if (current) current.content += e.content ?? "";
+        break;
+      }
+      case "tool_call": {
+        if (!current) {
+          current = {
+            id: `a-${out.length}-${e.timestamp}`,
+            role: "assistant",
+            agent: (e.agent ?? "CODER") as AgentName,
+            content: "",
+            timestamp: e.timestamp,
+            toolCalls: [],
+          };
+          out.push(current);
+        }
+        current.toolCalls = current.toolCalls || [];
+        current.toolCalls.push({
+          id: `tc-${current.toolCalls.length}-${e.timestamp}`,
+          name: e.tool_name || "tool",
+          args: e.tool_args || {},
+          status: "running",
+          timestamp: e.timestamp,
+        });
+        break;
+      }
+      case "tool_result": {
+        const idx = findRunningTool(e.tool_name);
+        if (idx >= 0 && current) {
+          current.toolCalls![idx].status = "success";
+          current.toolCalls![idx].result = e.tool_result;
+        }
+        break;
+      }
+      case "tool_error": {
+        const idx = findRunningTool();
+        if (idx >= 0 && current) {
+          current.toolCalls![idx].status = "error";
+          current.toolCalls![idx].error = e.tool_error;
+        }
         break;
       }
       case "error": {
@@ -88,6 +162,37 @@ function foldEvents(
         break;
     }
   }
+
+  // Defensive: strip any leftover inline <event> tags and raw ```tool blocks
+  // from content so the user sees clean prose instead of JSON/tool markup.
+  const stripToolMarkup = (text: string) =>
+    text
+      .replace(/<event>[^]*?<\/event>/g, "")
+      .replace(/```tool\s*\n[\s\S]*?```/g, "");
+
+  // Extract <thinking>...</thinking> blocks into a separate field so the UI can
+  // render them as an expandable panel instead of mixing them with the answer.
+  const extractThinking = (text: string) => {
+    const thinkingParts: string[] = [];
+    const cleaned = text.replace(/<thinking>([\s\S]*?)<\/thinking>/g, (_, inner) => {
+      thinkingParts.push(inner.trim());
+      return "";
+    });
+    return {
+      content: cleaned.trim(),
+      thinking: thinkingParts.length > 0 ? thinkingParts.join("\n\n---\n\n") : undefined,
+    };
+  };
+
+  for (const m of out) {
+    if (m.content) {
+      m.content = stripToolMarkup(m.content);
+      const { content, thinking } = extractThinking(m.content);
+      m.content = content;
+      if (thinking) m.thinking = thinking;
+    }
+  }
+
   return out;
 }
 
@@ -112,6 +217,7 @@ export default function ChatPanel({
   const [activePlan, setActivePlan] = useState<PlanCreateResult | null>(null);
   const [planStatus, setPlanStatus] = useState<PlanStatusType | null>(null);
   const [planExecuting, setPlanExecuting] = useState(false);
+  const [planError, setPlanError] = useState<string | null>(null);
   const [backendOffline, setBackendOffline] = useState(false);
   const errorLoggedRef = useRef(false);
   const planPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -120,9 +226,14 @@ export default function ChatPanel({
     try {
       setHistoryError(null);
       const history = await getSessionHistory(sessionId);
+      const stripToolMarkup = (text: string) =>
+        text
+          .replace(/<event>[^]*?<\/event>/g, "")
+          .replace(/```tool\s*\n[\s\S]*?```/g, "");
       const normalized = history.map((msg, index) => ({
         ...msg,
         id: `${msg.role}-${index}-${msg.timestamp}`,
+        content: stripToolMarkup(msg.content),
       }));
       setHistoryMessages(normalized);
       setPendingUser([]);
@@ -312,18 +423,10 @@ export default function ChatPanel({
 
   async function handleNewChat() {
     try {
-      const response = await fetch(
-        apiUrl(`/api/sessions?title=Novo Chat&mode=${currentMode}`),
-        { method: "POST" },
-      );
-      if (response.ok) {
-        const data = await response.json();
-        setSessionId(data.id);
-      } else {
-        // Fallback: generate a random session ID
-        setSessionId(`session-${Date.now()}`);
-      }
+      const data = await createSession("Novo Chat", currentMode);
+      setSessionId(data.id as string);
     } catch {
+      // Fallback: generate a random session ID
       setSessionId(`session-${Date.now()}`);
     }
     setHistoryMessages([]);
@@ -349,6 +452,7 @@ export default function ChatPanel({
 
   // Plan execution handlers
   const handlePlanCreate = useCallback(async (objective: string) => {
+    setPlanError(null);
     try {
       const plan = await createPlan(objective, sessionId);
       setActivePlan(plan);
@@ -356,25 +460,31 @@ export default function ChatPanel({
       const status = await getPlanStatus(plan.plan_id);
       setPlanStatus(status);
     } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to create plan";
+      setPlanError(msg);
       log.error("Failed to create plan:", err);
     }
   }, [sessionId]);
 
   const handlePlanApprove = useCallback(async () => {
     if (!activePlan) return;
+    setPlanError(null);
     try {
       await approvePlan(activePlan.plan_id, sessionId);
       const status = await getPlanStatus(activePlan.plan_id);
       setPlanStatus(status);
     } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to approve plan";
+      setPlanError(msg);
       log.error("Failed to approve plan:", err);
     }
   }, [activePlan, sessionId]);
 
   const handlePlanExecute = useCallback(async () => {
-    if (!activePlan) return;
+    if (!activePlan || planExecuting) return;
+    setPlanError(null);
+    setPlanExecuting(true);
     try {
-      setPlanExecuting(true);
       await executePlan(activePlan.plan_id, sessionId);
       // Start polling for status
       planPollRef.current = setInterval(async () => {
@@ -395,7 +505,7 @@ export default function ChatPanel({
       log.error("Failed to execute plan:", err);
       setPlanExecuting(false);
     }
-  }, [activePlan, sessionId]);
+  }, [activePlan, planExecuting, sessionId]);
 
   const handlePlanCancel = useCallback(async () => {
     try {
@@ -458,19 +568,33 @@ export default function ChatPanel({
 
         <div className="flex items-center gap-2">
           {/* Mode selector */}
-          <select
-            value={currentMode}
-            onChange={(e) => useModeStore.getState().setMode(e.target.value)}
-            className="rounded-lg border border-nexus-border bg-nexus-card px-2 py-1.5 text-xs text-nexus-muted outline-none focus:border-nexus-accent/50"
-            title={modes.find((m) => m.id === currentMode)?.description || ""}
-          >
-            {modes.map((mode) => (
-              <option key={mode.id} value={mode.id}>
-                {mode.id}
-              </option>
-            ))}
-            {!modesLoaded && <option value={currentMode}>{currentMode}</option>}
-          </select>
+          <div className="flex items-center rounded-lg border border-nexus-border bg-nexus-card p-0.5">
+            {(modesLoaded ? modes : ([{ id: currentMode }] as Mode[])).map((mode) => {
+              const cfg = MODE_CONFIG[mode.id] || {
+                icon: Sparkles,
+                label: mode.id,
+                color: "text-nexus-muted bg-transparent border-transparent",
+              };
+              const Icon = cfg.icon;
+              const active = mode.id === currentMode;
+              return (
+                <button
+                  key={mode.id}
+                  type="button"
+                  onClick={() => useModeStore.getState().setMode(mode.id)}
+                  title={mode.description || cfg.label}
+                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                    active
+                      ? `${cfg.color} border`
+                      : "text-nexus-muted hover:text-nexus-text hover:bg-nexus-bg"
+                  }`}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">{cfg.label}</span>
+                </button>
+              );
+            })}
+          </div>
 
           <button
             onClick={handleNewChat}
@@ -607,6 +731,11 @@ export default function ChatPanel({
                   </span>
                 )}
               </div>
+              {planError && (
+                <div className="rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">
+                  {planError}
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 {planStatus?.status === "awaiting_approval" && (
                   <button
@@ -689,7 +818,13 @@ export default function ChatPanel({
 
         <VirtualMessageList
           messages={messages}
-          renderItem={(m) => <MessageBubble key={m.id} message={m} />}
+          renderItem={(m, idx) => (
+            <MessageBubble
+              key={m.id}
+              message={m}
+              isStreaming={streaming && idx === messages.length - 1}
+            />
+          )}
           initialLimit={50}
           className="space-y-4"
         />

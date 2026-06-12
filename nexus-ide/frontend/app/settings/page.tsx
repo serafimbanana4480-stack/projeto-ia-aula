@@ -13,7 +13,7 @@ import {
   CheckCircle,
   AlertCircle,
 } from "lucide-react";
-import { apiUrl } from "../../lib/api";
+import { getSettings, saveSettings } from "../../lib/api";
 
 interface AppSettings {
   local_llm_device: string;
@@ -39,29 +39,13 @@ export default function SettingsPage() {
   useEffect(() => {
     const loadSettings = async () => {
       try {
-        const response = await fetch(apiUrl("/api/settings"));
-        if (response.ok) {
-          const data = await response.json();
-          setSettings((prev) => ({
-            ...prev,
-            ...data,
-          }));
-        } else {
-          // Fallback to localStorage if backend not available
-          const stored = localStorage.getItem("nexus_settings");
-          if (stored) {
-            try {
-              setSettings((prev) => ({
-                ...prev,
-                ...JSON.parse(stored),
-              }));
-            } catch {
-              // Ignore parse errors
-            }
-          }
-        }
+        const data = await getSettings();
+        setSettings((prev) => ({
+          ...prev,
+          ...data,
+        }));
       } catch {
-        // Backend not available, try localStorage
+        // Fallback to localStorage if backend not available
         const stored = localStorage.getItem("nexus_settings");
         if (stored) {
           try {
@@ -70,7 +54,7 @@ export default function SettingsPage() {
               ...JSON.parse(stored),
             }));
           } catch {
-            // Ignore
+            // Ignore parse errors
           }
         }
       } finally {
@@ -85,20 +69,7 @@ export default function SettingsPage() {
     setError(null);
     try {
       // Try backend first
-      const response = await fetch(apiUrl("/api/settings"), {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(settings),
-      });
-
-      if (response.ok) {
-        setSaved(true);
-        setTimeout(() => setSaved(false), 2000);
-        return;
-      }
-
-      // Fallback to localStorage
-      localStorage.setItem("nexus_settings", JSON.stringify(settings));
+      await saveSettings(settings as unknown as Record<string, unknown>);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch {
@@ -247,7 +218,10 @@ export default function SettingsPage() {
                       <option value="auto">Auto</option>
                       <option value="coder">Coder</option>
                       <option value="analyst">Analyst</option>
-                      <option value="planner">Planner</option>
+                      <option value="plan">Plano</option>
+                      <option value="debug">Debug</option>
+                      <option value="ask">Ask</option>
+                      <option value="swarm">Swarm</option>
                       <option value="fast">Fast</option>
                       <option value="deep">Deep</option>
                     </select>

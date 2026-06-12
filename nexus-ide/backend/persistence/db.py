@@ -266,7 +266,7 @@ def init_db(run_migrations: bool = False) -> None:
                 else:
                     logger.debug("Alembic tracked DB found, migrations skipped (use run_migrations=True to force)")
         except Exception:
-            pass
+            logger.debug("Alembic check failed, continuing", exc_info=True)
 
 
 def _stamp_alembic() -> None:
@@ -361,7 +361,8 @@ def create_project(
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (pid, name, path, description, mode, preferred_model, 1 if trust else 0),
         )
-    return get_project(pid)
+        row = conn.execute("SELECT * FROM projects WHERE id = ?", (pid,)).fetchone()
+    return dict(row) if row else None
 
 
 @sync_cache_result("project:", ttl=SHORT_TTL)
@@ -426,7 +427,8 @@ def create_session(
             "INSERT INTO sessions (id, project_id, title, mode) VALUES (?, ?, ?, ?)",
             (sid, project_id, title, mode),
         )
-    return get_session(sid)
+        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
+    return dict(row) if row else None
 
 
 @sync_cache_result("session:", ttl=SHORT_TTL)
@@ -493,8 +495,12 @@ def add_message(
                 latency_ms,
             ),
         )
-    touch_session(session_id)
-    return {"id": mid, "session_id": session_id, "role": role, "content": content}
+        conn.execute(
+            "UPDATE sessions SET last_active_at = ? WHERE id = ?",
+            (_now_iso(), session_id),
+        )
+        row = conn.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+    return dict(row) if row else {"id": mid, "session_id": session_id, "role": role, "content": content}
 
 
 @monitor_query_performance
@@ -574,7 +580,7 @@ def log_tool_execution(
                     (session_id, session_id, "auto"),
                 )
             except Exception:
-                pass
+                logger.debug("Failed to ensure session for tool execution", exc_info=True)
         conn.execute(
             """INSERT INTO tool_executions
                (id, session_id, tool_name, args_json, result_json, success, error, duration_ms)
@@ -891,3 +897,94 @@ def assign_permission_to_role(role_id: str, permission_id: str) -> None:
             "INSERT OR IGNORE INTO role_permissions (id, role_id, permission_id) VALUES (?, ?, ?)",
             (_new_id(), role_id, permission_id),
         )
+
+
+# ───── EMAIL ACCOUNTS ───────────────────────────────────────────────────
+
+
+def create_email_account(
+    user_id: str,
+    label: str,
+    host: str,
+    port: int,
+    username: str,
+    password_encrypted: str,
+    use_ssl: bool = True,
+    active: bool = True,
+) -> dict:
+    """Create a new email account configuration."""
+    eid = _new_id()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO email_accounts
+               (id, user_id, label, host, port, username, password_encrypted, use_ssl, active)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                eid,
+                user_id,
+                label,
+                host,
+                port,
+                username,
+                password_encrypted,
+                1 if use_ssl else 0,
+                1 if active else 0,
+            ),
+        )
+    return get_email_account(eid)
+
+
+def get_email_account(account_id: str) -> dict | None:
+    """Get an email account by ID (excludes password)."""
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM email_accounts WHERE id = ?", (account_id,)).fetchone()
+        if not row:
+            return None
+        account = dict(row)
+        account.pop("password_encrypted", None)
+        return account
+
+
+def get_email_account_with_password(account_id: str) -> dict | None:
+    """Get an email account by ID including encrypted password."""
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM email_accounts WHERE id = ?", (account_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_email_accounts(user_id: str | None = None, active_only: bool = True) -> list[dict]:
+    """List email accounts, optionally filtering by user and active status."""
+    with get_db() as conn:
+        query = "SELECT * FROM email_accounts WHERE 1=1"
+        params: list[Any] = []
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        if active_only:
+            query += " AND active = 1"
+        query += " ORDER BY created_at DESC"
+        rows = conn.execute(query, params).fetchall()
+        result = []
+        for row in rows:
+            account = dict(row)
+            account.pop("password_encrypted", None)
+            result.append(account)
+        return result
+
+
+def update_email_account(account_id: str, **fields: Any) -> dict | None:
+    """Update email account fields."""
+    if not fields:
+        return get_email_account(account_id)
+    fields["updated_at"] = _now_iso()
+    fields.pop("id", None)
+    cols = ", ".join(f"{k} = ?" for k in fields)
+    with get_db() as conn:
+        conn.execute(f"UPDATE email_accounts SET {cols} WHERE id = ?", (*fields.values(), account_id))
+    return get_email_account(account_id)
+
+
+def delete_email_account(account_id: str) -> None:
+    """Delete an email account."""
+    with get_db() as conn:
+        conn.execute("DELETE FROM email_accounts WHERE id = ?", (account_id,))

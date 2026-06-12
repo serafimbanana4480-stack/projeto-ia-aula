@@ -12,6 +12,9 @@ const AGENT_COLORS: Record<AgentName, string> = {
   DOCUMENTER: "bg-sky-600",
   OPTIMIZER: "bg-purple-600",
   DASHBOARD: "bg-teal-600",
+  ORCHESTRATOR: "bg-violet-600",
+  SWARM: "bg-pink-600",
+  MICRO: "bg-gray-500",
 };
 
 function AgentBadge({ agent }: { agent: AgentName }) {

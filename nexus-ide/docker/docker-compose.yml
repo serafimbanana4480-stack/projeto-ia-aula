@@ -10,18 +10,51 @@ services:
       - LLM_PROVIDER=ollama
       - LOCAL_LLM_DEVICE=cpu
       - ENVIRONMENT=production
+      - OLLAMA_BASE_URL=http://ollama:11434
     volumes:
       - nexus-data:/app/data
       - huggingface-cache:/root/.cache/huggingface
     depends_on:
       redis:
         condition: service_healthy
+      ollama:
+        condition: service_started
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+    restart: unless-stopped
+    networks:
+      - nexus-network
+
+  nexus-frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../docker/frontend.Dockerfile
+    container_name: nexus-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      nexus-backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - nexus-network
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: nexus-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - nexus-network
 
   redis:
     image: redis:7-alpine
@@ -36,6 +69,9 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
+    restart: unless-stopped
+    networks:
+      - nexus-network
 
   prometheus:
     image: prom/prometheus:latest
@@ -43,7 +79,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ../config/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus-data:/prometheus
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
@@ -51,9 +87,17 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    restart: unless-stopped
+    networks:
+      - nexus-network
 
 volumes:
   nexus-data:
   redis-data:
   prometheus-data:
   huggingface-cache:
+  ollama-data:
+
+networks:
+  nexus-network:
+    driver: bridge

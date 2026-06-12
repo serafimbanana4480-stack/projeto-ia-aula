@@ -47,9 +47,13 @@ async def read_file_absolute(path: str) -> dict[str, Any]:
 
 
 async def write_file_absolute(
-    path: str, content: str, auth_token: str | None = None
+    path: str, content: str, auth_token: str | None = None, overwrite: bool = True
 ) -> dict[str, Any]:
-    """Write any file (absolute path) with backup of the original."""
+    """Write any file (absolute path) with backup of the original.
+
+    The ``overwrite`` parameter is accepted for compatibility with agent calls
+    but is ignored — the tool always writes (and backs up) the file.
+    """
     logger.info("write_file_absolute: %s (%d bytes)", path, len(content))
 
     if auth_token is not None:
@@ -81,7 +85,7 @@ async def write_file_absolute(
         return result
 
 
-async def list_dir_absolute(path: str, recursive: bool = False) -> dict[str, Any]:
+async def list_dir_absolute(path: str, recursive: bool = False, max_results: int = 10_000) -> dict[str, Any]:
     """List any directory (absolute path)."""
     logger.info("list_dir_absolute: %s (recursive=%s)", path, recursive)
 
@@ -102,7 +106,7 @@ async def list_dir_absolute(path: str, recursive: bool = False) -> dict[str, Any
             raw_items = await asyncio.to_thread(lambda: list(target.iterdir()))
 
         items = []
-        for item in raw_items:
+        for item in raw_items[:max_results]:
             is_file = await asyncio.to_thread(item.is_file)
             size = await asyncio.to_thread(lambda: item.stat().st_size) if is_file else 0
             items.append(
@@ -114,7 +118,7 @@ async def list_dir_absolute(path: str, recursive: bool = False) -> dict[str, Any
                 }
             )
 
-        return {"path": str(target), "items": items, "count": len(items)}
+        return {"path": str(target), "items": items, "count": len(items), "truncated": len(raw_items) > max_results}
     except PermissionError:
         return {"error": f"Permission denied: {path}"}
     except Exception as exc:

@@ -131,3 +131,40 @@ export async function logout(): Promise<void> {
   }
   clearAuth();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dev-only auto-login (disabled in production unless explicitly enabled)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const AUTO_LOGIN_ENABLED =
+  process.env.NODE_ENV === "development" &&
+  process.env.NEXT_PUBLIC_AUTO_LOGIN !== "false";
+
+export function isAutoLoginEnabled(): boolean {
+  return AUTO_LOGIN_ENABLED;
+}
+
+/**
+ * Attempt automatic login with development credentials.
+ * Only runs in development mode and when AUTO_LOGIN is not disabled.
+ * Returns true if login succeeded, false otherwise.
+ */
+export async function autoLoginDev(): Promise<boolean> {
+  if (!AUTO_LOGIN_ENABLED) return false;
+  if (isTokenValid()) return true;
+
+  // NOTE: admin@nexus.local is rejected by Pydantic EmailStr as a reserved
+  // TLD, so we default to a domain that passes email validation.
+  const email =
+    process.env.NEXT_PUBLIC_DEV_EMAIL ?? "admin@nexus-ide.com";
+  const password =
+    process.env.NEXT_PUBLIC_DEV_PASSWORD ?? "admin123";
+
+  try {
+    await login({ email, password });
+    return true;
+  } catch {
+    // Auto-login failed; let the user log in manually.
+    return false;
+  }
+}

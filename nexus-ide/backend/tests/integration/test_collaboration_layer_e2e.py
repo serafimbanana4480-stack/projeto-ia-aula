@@ -41,7 +41,9 @@ def reset_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
     close_pool()
     monkeypatch.setattr(FileLockManager, "_instance", None)
     monkeypatch.setattr(SharedMemory, "_instance", None)
+    monkeypatch.setattr(SharedMemory, "_initialized", False)
     monkeypatch.setattr(PeerReviewSystem, "_instance", None)
+    monkeypatch.setattr(PeerReviewSystem, "_initialized", False)
 
 
 @pytest.fixture
@@ -274,90 +276,95 @@ class TestFileLocksAPI:
 class TestSharedMemoryDirect:
     """Test SharedMemory in isolation."""
 
-    def test_write_entries_from_three_agents(self, tmp_path: Path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_write_entries_from_three_agents(self, tmp_path: Path, monkeypatch):
         """Write entries from 3 different 'agents'."""
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         init_db()
 
         shm = get_shared_memory()
-        e1 = shm.write_entry("CODER", "code.change", "Fixed null pointer")
-        e2 = shm.write_entry("ANALYZER", "review.note", "Looks good")
-        e3 = shm.write_entry("BUG_HUNTER_STATIC", "bug.found", "Race condition in locks")
+        e1 = await shm.write_entry("CODER", "code.change", "Fixed null pointer")
+        e2 = await shm.write_entry("ANALYZER", "review.note", "Looks good")
+        e3 = await shm.write_entry("BUG_HUNTER_STATIC", "bug.found", "Race condition in locks")
 
         assert e1.author_agent == "CODER"
         assert e2.author_agent == "ANALYZER"
         assert e3.author_agent == "BUG_HUNTER_STATIC"
 
-        all_entries = shm.read_entries(limit=10)
+        all_entries = await shm.read_entries(limit=10)
         assert len(all_entries) == 3
 
-    def test_read_entries_with_filters(self, tmp_path: Path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_read_entries_with_filters(self, tmp_path: Path, monkeypatch):
         """Read entries with filters (topic, agent, tags)."""
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         init_db()
 
         shm = get_shared_memory()
-        shm.write_entry("CODER", "code.change", "fix 1", tags=["api", "bugfix"])
-        shm.write_entry("CODER", "code.change", "fix 2", tags=["ui"])
-        shm.write_entry("ANALYZER", "bug.discovery", "found issue", tags=["security"])
+        await shm.write_entry("CODER", "code.change", "fix 1", tags=["api", "bugfix"])
+        await shm.write_entry("CODER", "code.change", "fix 2", tags=["ui"])
+        await shm.write_entry("ANALYZER", "bug.discovery", "found issue", tags=["security"])
 
-        by_topic = shm.read_entries(topic="code.change")
+        by_topic = await shm.read_entries(topic="code.change")
         assert len(by_topic) == 2
 
-        by_agent = shm.read_entries(agent="ANALYZER")
+        by_agent = await shm.read_entries(agent="ANALYZER")
         assert len(by_agent) == 1
         assert by_agent[0].topic == "bug.discovery"
 
-        by_tag = shm.read_entries(tags=["security"])
+        by_tag = await shm.read_entries(tags=["security"])
         assert len(by_tag) == 1
         assert by_tag[0].author_agent == "ANALYZER"
 
-    def test_search_entries(self, tmp_path: Path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_search_entries(self, tmp_path: Path, monkeypatch):
         """Search entries."""
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         init_db()
 
         shm = get_shared_memory()
-        shm.write_entry("CODER", "auth.refactor", "Refactored JWT handling")
-        shm.write_entry("ANALYZER", "db.optimisation", "Added indexes on users")
+        await shm.write_entry("CODER", "auth.refactor", "Refactored JWT handling")
+        await shm.write_entry("ANALYZER", "db.optimisation", "Added indexes on users")
 
-        results = shm.search_entries("JWT")
+        results = await shm.search_entries("JWT")
         assert len(results) == 1
         assert results[0].topic == "auth.refactor"
 
-        results = shm.search_entries("indexes")
+        results = await shm.search_entries("indexes")
         assert len(results) == 1
         assert results[0].author_agent == "ANALYZER"
 
-    def test_link_entries_and_get_thread(self, tmp_path: Path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_link_entries_and_get_thread(self, tmp_path: Path, monkeypatch):
         """Link related entries and get thread."""
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         init_db()
 
         shm = get_shared_memory()
-        e1 = shm.write_entry("CODER", "code.change", "Initial implementation")
-        e2 = shm.write_entry("CODER", "code.change", "Follow-up fix")
-        e3 = shm.write_entry("ANALYZER", "review.note", "Approved")
+        e1 = await shm.write_entry("CODER", "code.change", "Initial implementation")
+        e2 = await shm.write_entry("CODER", "code.change", "Follow-up fix")
+        e3 = await shm.write_entry("ANALYZER", "review.note", "Approved")
 
-        assert shm.link_entries(e1.entry_id, e2.entry_id, "follow_up") is True
-        assert shm.link_entries(e1.entry_id, e3.entry_id, "review") is True
+        assert await shm.link_entries(e1.entry_id, e2.entry_id, "follow_up") is True
+        assert await shm.link_entries(e1.entry_id, e3.entry_id, "review") is True
         # Duplicate should fail gracefully
-        assert shm.link_entries(e1.entry_id, e2.entry_id, "follow_up") is False
+        assert await shm.link_entries(e1.entry_id, e2.entry_id, "follow_up") is False
 
-        thread = shm.get_thread(e1.entry_id)
+        thread = await shm.get_thread(e1.entry_id)
         entry_ids = {e.entry_id for e in thread}
         assert e1.entry_id in entry_ids
         assert e2.entry_id in entry_ids
         assert e3.entry_id in entry_ids
 
-    def test_archive_old_entries(self, tmp_path: Path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_archive_old_entries(self, tmp_path: Path, monkeypatch):
         """Archive old entries."""
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         init_db()
 
         shm = get_shared_memory()
         old_ts = (datetime.now(UTC) - timedelta(days=40)).isoformat()
-        shm.write_entry("CODER", "code.change", "Old change", importance=0.1)
+        await shm.write_entry("CODER", "code.change", "Old change", importance=0.1)
 
         # Backdate the entry
         from backend.persistence.db import get_db
@@ -365,12 +372,12 @@ class TestSharedMemoryDirect:
         with get_db() as conn:
             conn.execute("UPDATE whiteboard_entries SET timestamp = ?", (old_ts,))
 
-        shm.write_entry("CODER", "code.change", "Recent change", importance=0.1)
+        await shm.write_entry("CODER", "code.change", "Recent change", importance=0.1)
 
-        archived = shm.archive_old_entries(days=30, max_importance=0.3)
+        archived = await shm.archive_old_entries(days=30, max_importance=0.3)
         assert archived == 1
 
-        remaining = shm.read_entries(topic="code.change")
+        remaining = await shm.read_entries(topic="code.change")
         assert len(remaining) == 1
         assert remaining[0].content == "Recent change"
 
@@ -471,13 +478,14 @@ class TestSharedMemoryAPI:
 class TestPeerReviewDirect:
     """Test PeerReviewSystem in isolation."""
 
-    def test_submit_code_snippet_for_review(self, tmp_path: Path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_submit_code_snippet_for_review(self, tmp_path: Path, monkeypatch):
         """Submit a code snippet for review."""
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         init_db()
 
         prs = get_peer_review_system()
-        review = prs.submit_for_review(
+        review = await prs.submit_for_review(
             artifact_id="api.py",
             artifact_type="code",
             author_agent="CODER",
@@ -486,17 +494,18 @@ class TestPeerReviewDirect:
         assert review.review_id
         assert review.status == "pending"
 
-        status = prs.get_review_status("api.py")
+        status = await prs.get_review_status("api.py")
         assert status["artifact_id"] == "api.py"
         assert len(status["reviews"]) == 1
 
-    def test_required_reviewers_assigned(self, tmp_path: Path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_required_reviewers_assigned(self, tmp_path: Path, monkeypatch):
         """Check if required reviewers are assigned."""
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         init_db()
 
         prs = get_peer_review_system()
-        review = prs.submit_for_review(
+        review = await prs.submit_for_review(
             artifact_id="api.py",
             artifact_type="code",
             author_agent="CODER",
@@ -532,18 +541,18 @@ class TestPeerReviewDirect:
         init_db()
 
         prs = get_peer_review_system()
-        review = prs.submit_for_review(
+        review = await prs.submit_for_review(
             artifact_id="api.py", artifact_type="code", author_agent="CODER", content="x"
         )
 
         # Only one required reviewer approves
         await prs.conduct_review(review.review_id, "ANALYZER", "approved")
-        updated = prs.get_review_request(review.review_id)
+        updated = await prs.get_review_request(review.review_id)
         assert updated.status == "in_review"
 
         # Second required reviewer approves
         await prs.conduct_review(review.review_id, "BUG_HUNTER_STATIC", "approved")
-        updated = prs.get_review_request(review.review_id)
+        updated = await prs.get_review_request(review.review_id)
         assert updated.status == "approved"
 
     @pytest.mark.asyncio
@@ -553,7 +562,7 @@ class TestPeerReviewDirect:
         init_db()
 
         prs = get_peer_review_system()
-        review = prs.submit_for_review(
+        review = await prs.submit_for_review(
             artifact_id="api.py", artifact_type="code", author_agent="CODER", content="x"
         )
 
@@ -565,7 +574,7 @@ class TestPeerReviewDirect:
             comments=[ReviewComment(message="Missing type hints")],
         )
 
-        updated = prs.get_review_request(review.review_id)
+        updated = await prs.get_review_request(review.review_id)
         assert updated.status == "changes_requested"
 
 
@@ -626,75 +635,66 @@ class TestPeerReviewAPI:
 class TestRaceConditions:
     """Stress tests to surface race conditions."""
 
-    def test_shared_memory_concurrent_writes(self, tmp_path: Path, monkeypatch):
-        """Many threads writing to shared memory simultaneously."""
+    @pytest.mark.asyncio
+    async def test_shared_memory_concurrent_writes(self, tmp_path: Path, monkeypatch):
+        """Many coroutines writing to shared memory simultaneously."""
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         init_db()
 
         shm = get_shared_memory()
         errors: list[str] = []
         entry_ids: list[str] = []
-        lock = threading.Lock()
+        lock = asyncio.Lock()
 
-        def writer(agent: str, idx: int):
+        async def writer(agent: str, idx: int):
             try:
-                entry = shm.write_entry(
+                entry = await shm.write_entry(
                     agent_name=agent,
                     topic="stress.test",
                     content=f"entry-{idx}",
                     tags=["stress"],
                 )
-                with lock:
+                async with lock:
                     entry_ids.append(entry.entry_id)
             except Exception as e:
-                with lock:
+                async with lock:
                     errors.append(str(e))
 
-        threads = [
-            threading.Thread(target=writer, args=(f"agent-{i % 3}", i))
-            for i in range(30)
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        await asyncio.gather(*[writer(f"agent-{i % 3}", i) for i in range(30)])
 
         assert not errors, f"Errors during concurrent writes: {errors}"
         assert len(entry_ids) == 30
 
         # Verify all entries are readable
-        entries = shm.read_entries(topic="stress.test", limit=50)
+        entries = await shm.read_entries(topic="stress.test", limit=50)
         assert len(entries) == 30
 
-    def test_peer_review_concurrent_submissions(self, tmp_path: Path, monkeypatch):
-        """Many threads submitting reviews simultaneously."""
+    @pytest.mark.asyncio
+    async def test_peer_review_concurrent_submissions(self, tmp_path: Path, monkeypatch):
+        """Many coroutines submitting reviews simultaneously."""
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         init_db()
 
         prs = get_peer_review_system()
         review_ids: list[str] = []
         errors: list[str] = []
-        lock = threading.Lock()
+        lock = asyncio.Lock()
 
-        def submit(idx: int):
+        async def submit(idx: int):
             try:
-                review = prs.submit_for_review(
+                review = await prs.submit_for_review(
                     artifact_id=f"file_{idx}.py",
                     artifact_type="code",
                     author_agent="CODER",
                     content=f"def func{idx}(): pass",
                 )
-                with lock:
+                async with lock:
                     review_ids.append(review.review_id)
             except Exception as e:
-                with lock:
+                async with lock:
                     errors.append(str(e))
 
-        threads = [threading.Thread(target=submit, args=(i,)) for i in range(20)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        await asyncio.gather(*[submit(i) for i in range(20)])
 
         assert not errors, f"Errors during concurrent submissions: {errors}"
         assert len(review_ids) == 20

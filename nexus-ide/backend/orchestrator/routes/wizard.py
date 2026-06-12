@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from backend.middleware.auth import require_auth
 from backend.tools.advanced_templates import TEMPLATES, generate_project
 
 logger = logging.getLogger(__name__)
@@ -51,129 +52,90 @@ async def list_templates() -> dict[str, Any]:
 @router.get("/wizard/templates/{template_id}")
 async def get_template(template_id: str) -> dict[str, Any]:
     """Get details of a specific template."""
-    if template_id not in TEMPLATES:
+    template = TEMPLATES.get(template_id)
+    if not template:
         raise HTTPException(status_code=404, detail="Template not found")
-    template = TEMPLATES[template_id]
     return {
         "id": template_id,
-        "name": template["name"],
-        "description": template["description"],
-        "tags": template.get("tags", []),
-        "files": list(template.get("files", {}).keys()),
-        "setup_commands": template.get("setup_commands", []),
+        **template,
     }
 
 
 @router.post("/wizard/start")
 async def wizard_start(req: WizardStartRequest) -> dict[str, Any]:
-    """Start a wizard session. Analyzes objective and returns questions."""
+    """Start a new wizard session with a set of questions."""
     import uuid
 
-    session_id = f"wizard_{uuid.uuid4().hex[:12]}"
+    session_id = str(uuid.uuid4())
 
-    # Analyze objective to determine template and questions
+    # Simple heuristic: choose template based on objective keywords
     objective_lower = req.objective.lower()
-
-    # Simple template detection
-    template_id = "python"  # default
-    if any(k in objective_lower for k in ["web", "nextjs", "next.js", "react", "frontend"]):
-        template_id = "fullstack_next_fastapi"
-    elif any(k in objective_lower for k in ["api", "fastapi", "backend", "rest"]):
-        template_id = "fastapi"
-    elif any(k in objective_lower for k in ["mobile", "flutter", "app"]):
-        template_id = "mobile_flutter"
-    elif any(k in objective_lower for k in ["cli", "command line", "terminal"]):
-        template_id = "cli_python"
-    elif any(k in objective_lower for k in ["data", "jupyter", "ml", "machine learning"]):
-        template_id = "data_science"
-    elif any(k in objective_lower for k in ["microservice", "docker", "kong"]):
-        template_id = "microservices"
-    elif any(k in objective_lower for k in ["chrome", "extension", "browser"]):
-        template_id = "chrome_extension"
-    elif any(k in objective_lower for k in ["vscode", "extension"]):
-        template_id = "vscode_extension"
-    elif any(k in objective_lower for k in ["discord", "bot"]):
-        template_id = "discord_bot"
+    if "web" in objective_lower or "site" in objective_lower or "app" in objective_lower:
+        template_id = "nextjs"
+    elif "api" in objective_lower or "backend" in objective_lower or "fastapi" in objective_lower:
+        template_id = "python_api"
+    elif "ml" in objective_lower or "model" in objective_lower or "ai" in objective_lower:
+        template_id = "python_ml"
+    else:
+        template_id = "python"
 
     template = TEMPLATES.get(template_id, TEMPLATES["python"])
 
-    questions = [
-        {
-            "id": "project_name",
-            "question": "What is the project name?",
-            "type": "text",
-            "required": True,
-        },
-        {
-            "id": "description",
-            "question": "Brief project description?",
-            "type": "text",
-            "required": False,
-        },
-        {
-            "id": "template",
-            "question": "Which template to use?",
-            "type": "select",
-            "options": list(TEMPLATES.keys()),
-            "default": template_id,
-            "required": True,
-        },
-    ]
-
     _wizard_sessions[session_id] = {
-        "session_id": session_id,
-        "objective": req.objective,
-        "questions": questions,
+        "status": "started",
+        "progress": 0,
+        "template": template_id,
+        "questions": template.get("questions", []),
         "answers": {},
-        "status": "asking",
-        "progress": 20,
+        "objective": req.objective,
     }
 
     return {
         "session_id": session_id,
-        "status": "asking",
-        "questions": questions,
-        "recommended_template": template_id,
-        "progress": 20,
+        "status": "started",
+        "template": template_id,
+        "questions": template.get("questions", []),
     }
 
 
 @router.post("/wizard/answer")
 async def wizard_answer(req: WizardAnswerRequest) -> dict[str, Any]:
-    """Answer wizard questions."""
+    """Submit answers for the current wizard session."""
     session = _wizard_sessions.get(req.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Wizard session not found")
 
+    if session["status"] == "done":
+        raise HTTPException(status_code=400, detail="Wizard already completed")
+
+    # Merge answers
     session["answers"].update(req.answers)
 
-    # Check if all required questions answered
-    required = {q["id"] for q in session["questions"] if q.get("required", False)}
-    answered = set(session["answers"].keys())
+    # Check if all required questions are answered
+    answered = session["answers"]
+    questions = session.get("questions", [])
+    required = [q["id"] for q in questions if q.get("required", True)]
+    missing = [q for q in required if q not in answered]
 
-    if required.issubset(answered):
+    if not missing:
         session["status"] = "ready"
-        session["progress"] = 80
-        return {
-            "session_id": req.session_id,
-            "status": "ready",
-            "answers": session["answers"],
-            "progress": 80,
-            "message": "All questions answered. Ready to generate project.",
-        }
+        session["progress"] = 100
+    else:
+        session["progress"] = int(100 * len(answered) / max(1, len(required)))
 
-    # Return remaining questions
-    remaining = [q for q in session["questions"] if q["id"] not in answered]
     return {
         "session_id": req.session_id,
-        "status": "asking",
-        "questions": remaining,
-        "progress": 20 + int(60 * len(answered) / max(1, len(session["questions"]))),
+        "status": session["status"],
+        "progress": session["progress"],
+        "missing": missing,
     }
 
 
 @router.post("/wizard/generate")
-async def wizard_generate(req: WizardGenerateRequest) -> dict[str, Any]:
+async def wizard_generate(
+    req: WizardGenerateRequest,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
     """Generate complete project based on wizard answers."""
     session = _wizard_sessions.get(req.session_id)
     if not session:

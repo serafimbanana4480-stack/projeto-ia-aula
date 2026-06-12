@@ -91,8 +91,8 @@ class BackgroundWorker(ABC):
         self._status = WorkerStatus.STOPPED
         self._task: asyncio.Task[Any] | None = None
         self._heartbeat_task: asyncio.Task[Any] | None = None
-        self._pause_event = asyncio.Event()
-        self._stop_event = asyncio.Event()
+        self._pause_event: asyncio.Event | None = None
+        self._stop_event: asyncio.Event | None = None
         self._last_run: datetime | None = None
         self._heartbeat_count = 0
         self._error_count = 0
@@ -107,6 +107,9 @@ class BackgroundWorker(ABC):
                 logger.warning("Worker %s already running", self.name)
                 return
             self._status = WorkerStatus.STARTING
+            # Recreate events in the current loop to avoid cross-loop issues
+            self._stop_event = asyncio.Event()
+            self._pause_event = asyncio.Event()
             self._stop_event.clear()
             self._pause_event.clear()
             self._task = asyncio.create_task(self._run_loop())
@@ -118,21 +121,24 @@ class BackgroundWorker(ABC):
         """Signal the worker to stop and wait for task completion."""
         async with self._lock:
             self._status = WorkerStatus.STOPPED
-            self._stop_event.set()
-            self._pause_event.set()  # unblock any paused wait
+            if self._stop_event is not None:
+                self._stop_event.set()
+            if self._pause_event is not None:
+                if self._pause_event is not None:
+                    self._pause_event.set()  # unblock any paused wait
 
         if self._task and not self._task.done():
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
-                pass
+                logger.debug("Worker %s task cancelled", self.name)
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
             try:
                 await self._heartbeat_task
             except asyncio.CancelledError:
-                pass
+                logger.debug("Worker %s heartbeat cancelled", self.name)
 
         logger.info("Worker %s stopped", self.name)
 
@@ -149,7 +155,8 @@ class BackgroundWorker(ABC):
         async with self._lock:
             if self._status == WorkerStatus.PAUSED:
                 self._status = WorkerStatus.RUNNING
-                self._pause_event.clear()
+                if self._pause_event is not None:
+                    self._pause_event.clear()
                 logger.info("Worker %s resumed", self.name)
 
     def info(self) -> WorkerInfo:
@@ -173,11 +180,11 @@ class BackgroundWorker(ABC):
 
     async def _run_loop(self) -> None:
         """Main worker loop — calls `_tick` at configured intervals."""
-        while not self._stop_event.is_set():
+        while self._stop_event is not None and not self._stop_event.is_set():
             try:
                 if self._status == WorkerStatus.PAUSED:
                     await self._wait_for_resume()
-                    if self._stop_event.is_set():
+                    if self._stop_event is not None and self._stop_event.is_set():
                         break
 
                 await self._tick()
@@ -190,14 +197,14 @@ class BackgroundWorker(ABC):
 
             # Sleep in short chunks so we respond quickly to stop/resume
             deadline = time.monotonic() + self.interval_seconds
-            while time.monotonic() < deadline and not self._stop_event.is_set():
+            while time.monotonic() < deadline and (self._stop_event is None or not self._stop_event.is_set()):
                 if self._status == WorkerStatus.PAUSED:
                     break
                 await asyncio.sleep(min(1.0, deadline - time.monotonic()))
 
     async def _heartbeat_loop(self) -> None:
         """Publish heartbeat to the Agent Bus every 30 seconds."""
-        while not self._stop_event.is_set():
+        while self._stop_event is not None and not self._stop_event.is_set():
             try:
                 await self._publish(
                     "agent.status",
@@ -213,13 +220,14 @@ class BackgroundWorker(ABC):
                 break
             except Exception:
                 logger.exception("Worker %s heartbeat failed", self.name)
-            await asyncio.wait_for(
-                self._stop_event.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS
-            )
+            if self._stop_event is not None:
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS
+                )
 
     async def _wait_for_resume(self) -> None:
         """Block until the worker is resumed or stopped."""
-        while self._status == WorkerStatus.PAUSED and not self._stop_event.is_set():
+        while self._status == WorkerStatus.PAUSED and (self._stop_event is None or not self._stop_event.is_set()):
             await asyncio.sleep(0.5)
 
     # -- bus helper ---------------------------------------------------------
@@ -297,7 +305,7 @@ class CodeWatcher(BackgroundWorker):
                     try:
                         self._queue.put_nowait([Path(event.src_path)])
                     except asyncio.QueueFull:
-                        pass
+                        logger.warning("File watcher queue full, dropping event")
 
             observer = Observer()
             handler = _Handler(self._event_queue)
@@ -751,7 +759,7 @@ class MemoryWatcher(BackgroundWorker):
                 ).fetchone()
                 total_memories = row["cnt"] if row else 0
         except Exception:
-            pass
+            logger.warning("Failed to count agent states for memory maintenance")
 
         await self._publish(
             "memory.maintenance_completed",

@@ -694,11 +694,13 @@ export async function interveneAgent(
   action: "pause" | "resume" | "abort" | "restart",
 ): Promise<{ status: string; agent_id: string }> {
   return readJson<{ status: string; agent_id: string }>(
-    await fetch(apiUrl(`/api/agents/${id}/intervene`), {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({ action }),
-    }),
+    await fetch(
+      apiUrl(`/api/overseer/agents/${id}/intervene?action=${action}`),
+      {
+        method: "POST",
+        headers: authHeaders(),
+      },
+    ),
   );
 }
 
@@ -716,7 +718,7 @@ export async function getBusMessages(topic?: string, limit: number = 50): Promis
 
 export async function getReviews(artifactId: string): Promise<Review[]> {
   const data = await readJson<{ reviews?: Review[] }>(
-    await fetch(apiUrl(`/api/reviews?artifact_id=${artifactId}`), {
+    await fetch(apiUrl(`/api/reviews/${artifactId}`), {
       headers: authHeaders(),
     }),
   );
@@ -738,9 +740,95 @@ export async function getSystemHealth(): Promise<SystemHealthSnapshot> {
 
 export async function getSelfImprovementProposals(): Promise<SelfImprovementProposal[]> {
   const data = await readJson<{ proposals?: SelfImprovementProposal[] }>(
-    await fetch(apiUrl("/api/self-improvement/proposals"), {
+    await fetch(apiUrl("/api/system/self-improvement"), {
       headers: authHeaders(),
     }),
   );
   return data.proposals ?? [];
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Settings, Scraping, Database, Alerts, Metrics helpers (JWT-unified)
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function getSettings(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/settings"), { headers: authHeaders() }),
+  );
+}
+
+export async function saveSettings(
+  update: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/settings"), {
+      method: "PUT",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(update),
+    }),
+  );
+}
+
+export async function webSearch(payload: {
+  query: string;
+  limit?: number;
+}): Promise<unknown> {
+  return readJson<unknown>(
+    await fetch(apiUrl("/api/web_search"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function getDbStats(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/db/stats"), { headers: authHeaders() }),
+  );
+}
+
+export async function getAlerts(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/alerts/current"), { headers: authHeaders() }),
+  );
+}
+
+export async function getHealth(): Promise<{ status: string }> {
+  return readJson<{ status: string }>(
+    await fetch(apiUrl("/health")),
+  );
+}
+
+export async function getMetricsFlow(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/metrics/flow"), { headers: authHeaders() }),
+  );
+}
+
+export async function getMetricsHistory(
+  seconds: number = 3600,
+  metric: string = "tokens_per_second",
+): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams();
+  params.set("seconds", String(seconds));
+  params.set("metric", metric);
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/metrics/history?${params.toString()}`), {
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function createSession(
+  title: string = "Nova sessão",
+  mode: string = "auto",
+): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/sessions"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ title, mode }),
+    }),
+  );
 }

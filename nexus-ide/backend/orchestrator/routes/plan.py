@@ -14,13 +14,15 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from backend.middleware.auth import require_auth
 from backend.models.api import StreamEvent
 from backend.orchestrator.engine import OrchestrationEngine, OrchestrationState
 from backend.orchestrator.events import EventBus
+from backend.orchestrator.registry import get_registry
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -72,7 +74,11 @@ def _get_event_bus(request: Request) -> EventBus:
 
 
 @router.post("/plan/create")
-async def create_plan(req: PlanCreateRequest, request: Request) -> dict:
+async def create_plan(
+    req: PlanCreateRequest,
+    request: Request,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Generate a structured execution plan for an objective."""
     engine = _get_engine(request)
     plan = await engine.create_plan(
@@ -84,7 +90,11 @@ async def create_plan(req: PlanCreateRequest, request: Request) -> dict:
 
 
 @router.post("/plan/approve")
-async def approve_plan(req: PlanApproveRequest, request: Request) -> dict:
+async def approve_plan(
+    req: PlanApproveRequest,
+    request: Request,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Approve a plan for execution."""
     engine = _get_engine(request)
     state = engine.get_state(req.session_id)
@@ -102,7 +112,11 @@ async def approve_plan(req: PlanApproveRequest, request: Request) -> dict:
 
 
 @router.post("/plan/execute")
-async def execute_plan(req: PlanExecuteRequest, request: Request) -> dict:
+async def execute_plan(
+    req: PlanExecuteRequest,
+    request: Request,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Execute an approved plan."""
     engine = _get_engine(request)
 
@@ -134,7 +148,11 @@ async def execute_plan(req: PlanExecuteRequest, request: Request) -> dict:
 
 
 @router.get("/plan/{plan_id}/status")
-async def get_plan_status(plan_id: str, request: Request) -> dict:
+async def get_plan_status(
+    plan_id: str,
+    request: Request,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Get the current status of a plan execution."""
     engine = _get_engine(request)
     plan = engine.get_plan(plan_id)
@@ -164,7 +182,11 @@ async def get_plan_status(plan_id: str, request: Request) -> dict:
 
 
 @router.post("/plan/cancel")
-async def cancel_plan(req: PlanCancelRequest, request: Request) -> dict:
+async def cancel_plan(
+    req: PlanCancelRequest,
+    request: Request,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Cancel an active plan execution."""
     engine = _get_engine(request)
     await engine.cancel(req.session_id)
@@ -175,6 +197,7 @@ async def cancel_plan(req: PlanCancelRequest, request: Request) -> dict:
 async def stream_plan_events(
     request: Request,
     session_id: str = "default",
+    _user: dict = Depends(require_auth),
 ) -> StreamingResponse:
     """Stream orchestration events as SSE."""
     event_bus = _get_event_bus(request)

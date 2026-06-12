@@ -331,7 +331,7 @@ class TestAutoCorrectionE2E:
         init_db()
         monkeypatch.setattr(PeerReviewSystem, "_instance", None)
         prs = get_peer_review_system()
-        review = prs.submit_for_review("svc.py", "code", "CODER", "content")
+        review = await prs.submit_for_review("svc.py", "code", "CODER", "content")
         await prs.conduct_review(review.review_id, "ANALYZER", "changes_requested")
 
         mock_lifecycle = MockLifecycleManager()

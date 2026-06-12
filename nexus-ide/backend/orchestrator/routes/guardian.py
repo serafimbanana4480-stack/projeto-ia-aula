@@ -16,7 +16,7 @@ router = APIRouter()
 
 def _get_guardian(request: Request) -> NexusGuardianAgent | None:
     """Get guardian from app state."""
-    return getattr(request.app.state, "guardian", None)
+    return getattr(request.app.state, "guardian_agent", None)
 
 
 @router.get("/guardian/status")

@@ -61,7 +61,7 @@ def _get_executor():
 
 async def execute_code(
     code: str, language: str = "python", timeout: int = 30
-) -> ExecutionResult:
+) -> dict[str, Any]:
     """Run code in a sandboxed environment.
 
     Uses SandboxExecutor which provides Docker isolation when available,
@@ -93,23 +93,23 @@ async def execute_code(
             timeout=timeout,
         )
 
-        return ExecutionResult(
-            stdout=result.stdout[:100_000],
-            stderr=result.stderr[:100_000],
-            exit_code=result.exit_code,
-            execution_time=result.duration_ms / 1000.0,
-            timed_out=result.timed_out,
-        )
+        return {
+            "stdout": result.stdout[:100_000],
+            "stderr": result.stderr[:100_000],
+            "exit_code": result.exit_code,
+            "execution_time": result.duration_ms / 1000.0,
+            "timed_out": result.timed_out,
+        }
 
     except Exception as exc:
         logger.exception("Code execution failed: %s", exc)
-        return ExecutionResult(
-            stdout="",
-            stderr=f"Execution error: {exc}",
-            exit_code=-1,
-            execution_time=0.0,
-            timed_out=False,
-        )
+        return {
+            "stdout": "",
+            "stderr": f"Execution error: {exc}",
+            "exit_code": -1,
+            "execution_time": 0.0,
+            "timed_out": False,
+        }
 
 
 register_tool(

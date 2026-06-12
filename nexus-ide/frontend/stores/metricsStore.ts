@@ -173,7 +173,8 @@ function startPolling() {
 
 /** Initialize the metrics stream (SSE → polling fallback). Idempotent. */
 export function initMetricsStream() {
-  if (isInitialized) return;
+  // Allow restart after an auth failure stopped the stream.
+  if (isInitialized && !isStopped) return;
 
   // Do not start if user is not authenticated
   if (!isAuthenticated()) return;

@@ -41,6 +41,7 @@ from backend.orchestrator.dependency_graph import (
     TaskPriority,
     TaskStatus,
 )
+from backend.orchestrator.agent_pool import AgentPool, get_agent_pool
 from backend.orchestrator.events import (
     EventBus,
     EventEmitter,
@@ -91,6 +92,7 @@ class ExecutionContext:
     shared_memory: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)  # task outputs keyed by task_id
     _global_context_parts: list[str] = field(default_factory=list)  # accumulated context from completed tasks
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
     def global_context(self) -> str:
@@ -160,6 +162,8 @@ class OrchestrationEngine:
             self._plans: dict[str, ExecutionPlan] = {}
             self._session_plans: dict[str, str] = {}
         self._active_tasks: dict[str, list[asyncio.Task[Any]]] = {}
+        self._active_tasks_lock = asyncio.Lock()
+        self._agent_pool: AgentPool = get_agent_pool()
 
     # ------------------------------------------------------------------
     # Public API
@@ -282,9 +286,10 @@ class OrchestrationEngine:
         )
 
         try:
-            self._active_tasks[session_id] = []
+            async with self._active_tasks_lock:
+                self._active_tasks[session_id] = []
             for _layer_idx, layer in enumerate(layers):
-                if self._cancellation_events.get(session_id, asyncio.Event()).is_set():
+                if session_id in self._cancellation_events and self._cancellation_events[session_id].is_set():
                     break
 
                 # Execute all tasks in this layer in parallel
@@ -297,7 +302,8 @@ class OrchestrationEngine:
                     coro = self._execute_task(task, ctx, graph, session_id, run_id)
                     t = asyncio.create_task(coro)
                     layer_tasks.append(t)
-                    self._active_tasks[session_id].append(t)
+                    async with self._active_tasks_lock:
+                        self._active_tasks[session_id].append(t)
 
                 if layer_tasks:
                     results = await asyncio.gather(*layer_tasks, return_exceptions=True)
@@ -322,7 +328,8 @@ class OrchestrationEngine:
             raise
         finally:
             # Clean up active task references to avoid memory leaks
-            self._active_tasks.pop(session_id, None)
+            async with self._active_tasks_lock:
+                self._active_tasks.pop(session_id, None)
 
         duration_ms = int((time.time() - start_time) * 1000)
         completed = sum(1 for t in graph.get_all_tasks() if t.status == TaskStatus.COMPLETED)
@@ -361,7 +368,9 @@ class OrchestrationEngine:
         self._cancellation_events[session_id].set()
         self._state[session_id] = OrchestrationState.CANCELLED
         # Actually cancel running asyncio tasks
-        for t in self._active_tasks.pop(session_id, []):
+        async with self._active_tasks_lock:
+            tasks = self._active_tasks.pop(session_id, [])
+        for t in tasks:
             if not t.done():
                 t.cancel()
         logger.info("Cancelled orchestration for session %s", session_id)
@@ -656,7 +665,7 @@ class OrchestrationEngine:
 
         for attempt in range(task.max_retries + 1):
             try:
-                if self._cancellation_events.get(session_id, asyncio.Event()).is_set():
+                if session_id in self._cancellation_events and self._cancellation_events[session_id].is_set():
                     task.status = TaskStatus.CANCELLED
                     return {"cancelled": True}
 
@@ -670,11 +679,12 @@ class OrchestrationEngine:
 
                 # Stream execution with hard timeout
                 output_parts: list[str] = []
-                async with EventEmitter(self._events, task.agent, session_id, task.task_id) as emit:
-                    async with asyncio.timeout(self._default_timeout):
-                        async for token in _iterate_agent_output(agent.run(request)):
-                            output_parts.append(token)
-                            await emit.emit(EventType.TOKEN, content=token)
+                async with self._agent_pool.slot(task.agent):
+                    async with EventEmitter(self._events, task.agent, session_id, task.task_id) as emit:
+                        async with asyncio.timeout(self._default_timeout):
+                            async for token in _iterate_agent_output(agent.run(request)):
+                                output_parts.append(token)
+                                await emit.emit(EventType.TOKEN, content=token)
 
                 output = "".join(output_parts)
                 task.output_data["content"] = output
@@ -682,13 +692,14 @@ class OrchestrationEngine:
                 task.completed_at = time.time()
 
                 # Store artifact
-                ctx.artifacts[task.task_id] = {
-                    "name": task.name,
-                    "agent": task.agent,
-                    "output": output,
-                    "status": "completed",
-                }
-                ctx._global_context_parts.append(f"\n[{task.name}]: {output[:500]}")
+                async with ctx._lock:
+                    ctx.artifacts[task.task_id] = {
+                        "name": task.name,
+                        "agent": task.agent,
+                        "output": output,
+                        "status": "completed",
+                    }
+                    ctx._global_context_parts.append(f"\n[{task.name}]: {output[:500]}")
 
                 await self._events.publish(
                     OrchestratorEvent(
@@ -852,6 +863,8 @@ Provide a clear summary of what you accomplished."""
     def _build_dependency_context(self, task: TaskNode, ctx: ExecutionContext) -> str:
         """Build context string from completed dependencies."""
         parts: list[str] = []
+        # Synchronous lock acquisition for read — safe because we only
+        # read and the GIL protects dict.get() as a single opcode.
         for dep_id in task.depends_on:
             artifact = ctx.artifacts.get(dep_id)
             if artifact:
@@ -1029,7 +1042,7 @@ Provide a clear summary of what you accomplished."""
                 if 1 <= num <= total_steps:
                     return num - 1
             except ValueError:
-                pass
+                logger.debug("Non-numeric depends_on reference: %r", lowered)
             # Fuzzy: check if any step name contains this reference
             for name, idx in name_to_idx.items():
                 if lowered in name or name in lowered:

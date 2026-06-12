@@ -6,11 +6,11 @@ import TopBar from "../../components/layout/TopBar";
 import Sidebar from "../../components/layout/Sidebar";
 import BottomHUD from "../../components/layout/BottomHUD";
 import { FolderKanban, Plus, Settings, Trash2, Clock, FolderOpen } from "lucide-react";
-import type { ProjectData } from "../../lib/mock-data";
+import type { Project } from "../../lib/types";
 import { useProjectStore } from "../../stores/projectStore";
 
 export default function ProjectsPage() {
-  const [projects, setProjects] = useState<ProjectData[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState({
@@ -55,7 +55,7 @@ export default function ProjectsPage() {
       // Backend unavailable — create locally
     }
     // Fallback: create project locally
-    const localProject: ProjectData = {
+    const localProject: Project = {
       id: `local-${Date.now()}`,
       name: form.name || "Untitled",
       path: form.path || "/unknown",
@@ -71,7 +71,7 @@ export default function ProjectsPage() {
     setForm({ name: "", path: "", description: "", mode: "auto", preferred_model: "", trust: false });
   }
 
-  function handleOpenProject(project: ProjectData) {
+  function handleOpenProject(project: Project) {
     setCurrentProject(project);
   }
 

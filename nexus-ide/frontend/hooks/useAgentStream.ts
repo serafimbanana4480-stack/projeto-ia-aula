@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { StreamEvent } from "../lib/types";
 import { postChat } from "../lib/api";
 import { log } from "../lib/log";
@@ -14,6 +14,7 @@ export function useAgentStream(sessionId: string) {
   const abortRef = useRef<AbortController | null>(null);
   const activeRequestId = useRef(0);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
 
   const clearStreamTimeout = useCallback(() => {
     if (timeoutRef.current) {
@@ -71,6 +72,7 @@ export function useAgentStream(sessionId: string) {
         }
 
         const reader = res.body?.getReader();
+        readerRef.current = reader || null;
         if (!reader) {
           if (requestId !== activeRequestId.current) return;
           clearStreamTimeout();
@@ -93,7 +95,10 @@ export function useAgentStream(sessionId: string) {
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
-          if (requestId !== activeRequestId.current) return;
+          if (requestId !== activeRequestId.current) {
+            reader.cancel().catch(() => {});
+            return;
+          }
 
           receivedData = true;
           buffer += decoder.decode(value, { stream: true });
@@ -160,6 +165,7 @@ export function useAgentStream(sessionId: string) {
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
+    readerRef.current?.cancel().catch(() => {});
     clearStreamTimeout();
     setStreaming(false);
   }, [clearStreamTimeout]);
@@ -168,6 +174,15 @@ export function useAgentStream(sessionId: string) {
     setEvents([]);
     setError(null);
   }, []);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+      readerRef.current?.cancel().catch(() => {});
+      clearStreamTimeout();
+    };
+  }, [clearStreamTimeout]);
 
   return { events, streaming, error, send, cancel, reset };
 }
