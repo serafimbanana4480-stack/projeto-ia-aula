@@ -48,7 +48,7 @@ def _get_agent_classes() -> dict[AgentName, Any]:
     from backend.agents.refactor_clean import RefactorCleanAgent
     from backend.agents.refactor_performance import RefactorPerformanceAgent
     from backend.agents.researcher import ResearcherAgent
-    from backend.agents.researcher_web import ResearcherWebAgent
+    from backend.agents.reviewer import ReviewerAgent
     from backend.agents.supervisor import SupervisorAgent
     from backend.agents.test_runner_e2e import TestRunnerE2EAgent
     from backend.agents.test_runner_unit import TestRunnerUnitAgent
@@ -60,6 +60,7 @@ def _get_agent_classes() -> dict[AgentName, Any]:
         "RESEARCHER": ResearcherAgent,
         "RESEARCHER_WEB": ResearcherWebAgent,
         "CODER": CoderAgent,
+        "REVIEWER": ReviewerAgent,
         "ANALYZER": AnalyzerAgent,
         "DEBUGGER": DebuggerAgent,
         "DOCUMENTER": DocumenterAgent,

@@ -225,6 +225,42 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
+# Git auto-commit schema snippet for migration
+_GIT_COMMIT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS git_commits (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT,
+    project_id      TEXT,
+    file_path       TEXT NOT NULL,
+    commit_message  TEXT NOT NULL,
+    commit_hash     TEXT,
+    commit_type     TEXT,
+    scope           TEXT,
+    strategy        TEXT NOT NULL DEFAULT 'always',
+    status          TEXT NOT NULL DEFAULT 'committed'
+        CHECK (status IN ('committed', 'pending_review', 'failed', 'rejected')),
+    diff_preview    TEXT,
+    error           TEXT,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_git_commits_session ON git_commits(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_git_commits_project ON git_commits(project_id);
+CREATE INDEX IF NOT EXISTS idx_git_commits_status ON git_commits(status);
+CREATE INDEX IF NOT EXISTS idx_git_commits_hash ON git_commits(commit_hash);
+CREATE INDEX IF NOT EXISTS idx_git_commits_created ON git_commits(created_at DESC);
+"""
+
+
+def _ensure_git_commits_table() -> None:
+    """Ensure the git_commits table exists in the database (idempotent migration)."""
+    try:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            conn.executescript(_GIT_COMMIT_SCHEMA)
+            conn.commit()
+    except Exception as e:
+        logger.warning("Failed to ensure git_commits table: %s", e)
+
+
 def init_db(run_migrations: bool = False) -> None:
     """Initialize the database with migration support.
 
@@ -252,21 +288,24 @@ def init_db(run_migrations: bool = False) -> None:
 
         # Try to stamp with alembic if available
         _stamp_alembic()
-    elif run_migrations:
-        _run_alembic_migrations()
     else:
-        # Existing database: fast-path skip — only check if schema is present
-        try:
-            with sqlite3.connect(str(DB_PATH)) as conn:
-                row = conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'"
-                ).fetchone()
-                if row is None:
-                    logger.debug("No alembic_version table found, skipping migrations")
-                else:
-                    logger.debug("Alembic tracked DB found, migrations skipped (use run_migrations=True to force)")
-        except Exception:
-            logger.debug("Alembic check failed, continuing", exc_info=True)
+        # Ensure git_commits table exists for existing databases (migration)
+        _ensure_git_commits_table()
+        if run_migrations:
+            _run_alembic_migrations()
+        else:
+            # Existing database: fast-path skip — only check if schema is present
+            try:
+                with sqlite3.connect(str(DB_PATH)) as conn:
+                    row = conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'"
+                    ).fetchone()
+                    if row is None:
+                        logger.debug("No alembic_version table found, skipping migrations")
+                    else:
+                        logger.debug("Alembic tracked DB found, migrations skipped (use run_migrations=True to force)")
+            except Exception:
+                logger.debug("Alembic check failed, continuing", exc_info=True)
 
 
 def _stamp_alembic() -> None:
@@ -897,6 +936,132 @@ def assign_permission_to_role(role_id: str, permission_id: str) -> None:
             "INSERT OR IGNORE INTO role_permissions (id, role_id, permission_id) VALUES (?, ?, ?)",
             (_new_id(), role_id, permission_id),
         )
+
+
+# ───── GIT AUTO-COMMIT HISTORY ──────────────────────────────────────────
+
+
+def record_git_commit(
+    session_id: str | None,
+    project_id: str | None,
+    file_path: str,
+    commit_message: str,
+    commit_hash: str | None,
+    commit_type: str = "chore",
+    scope: str = "",
+    strategy: str = "always",
+    status: str = "committed",
+    diff_preview: str = "",
+    error: str | None = None,
+) -> dict | None:
+    """Record an auto-commit in the database history.
+
+    Returns the recorded commit dict or None if db unavailable.
+    """
+    cid = _new_id()
+    try:
+        with get_db() as conn:
+            conn.execute(
+                """INSERT INTO git_commits
+                   (id, session_id, project_id, file_path, commit_message, commit_hash,
+                    commit_type, scope, strategy, status, diff_preview, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (cid, session_id, project_id, file_path, commit_message, commit_hash,
+                 commit_type, scope, strategy, status, diff_preview[:1000], error),
+            )
+            row = conn.execute("SELECT * FROM git_commits WHERE id = ?", (cid,)).fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.warning("Failed to record git commit: %s", e)
+        return None
+
+
+@monitor_query_performance
+def get_git_commits(
+    session_id: str | None = None,
+    project_id: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Retrieve auto-commit history from the database."""
+    conditions = []
+    params: list[Any] = []
+    if session_id:
+        conditions.append("session_id = ?")
+        params.append(session_id)
+    if project_id:
+        conditions.append("project_id = ?")
+        params.append(project_id)
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM git_commits WHERE {where_clause} ORDER BY created_at DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_git_commit(commit_id: str) -> dict | None:
+    """Get a single auto-commit record by ID."""
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM git_commits WHERE id = ?", (commit_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_git_commit_status(commit_id: str, status: str, commit_hash: str | None = None) -> dict | None:
+    """Update the status of a git commit record."""
+    with get_db() as conn:
+        if commit_hash:
+            conn.execute(
+                "UPDATE git_commits SET status = ?, commit_hash = ? WHERE id = ?",
+                (status, commit_hash, commit_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE git_commits SET status = ? WHERE id = ?",
+                (status, commit_id),
+            )
+    return get_git_commit(commit_id)
+
+
+@monitor_query_performance
+def get_git_commit_statistics(project_id: str | None = None, session_id: str | None = None) -> dict[str, Any]:
+    """Get statistics about auto-commits."""
+    conditions = []
+    params: list[Any] = []
+    if project_id:
+        conditions.append("project_id = ?")
+        params.append(project_id)
+    if session_id:
+        conditions.append("session_id = ?")
+        params.append(session_id)
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+    with get_db() as conn:
+        status_rows = conn.execute(
+            f"SELECT status, COUNT(*) as count FROM git_commits WHERE {where_clause} GROUP BY status",
+            params,
+        ).fetchall()
+        type_rows = conn.execute(
+            f"SELECT commit_type, COUNT(*) as count FROM git_commits WHERE {where_clause} AND status = 'committed' GROUP BY commit_type",
+            params,
+        ).fetchall()
+        recent_row = conn.execute(
+            f"SELECT COUNT(*) as count FROM git_commits WHERE {where_clause} AND created_at > datetime('now', '-1 day')",
+            params,
+        ).fetchone()
+        total_row = conn.execute(
+            f"SELECT COUNT(*) as count FROM git_commits WHERE {where_clause}",
+            params,
+        ).fetchone()
+        return {
+            "total": total_row["count"] if total_row else 0,
+            "last_24h": recent_row["count"] if recent_row else 0,
+            "by_status": {r["status"]: r["count"] for r in status_rows},
+            "by_type": {r["commit_type"]: r["count"] for r in type_rows},
+        }
 
 
 # ───── EMAIL ACCOUNTS ───────────────────────────────────────────────────

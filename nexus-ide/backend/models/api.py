@@ -19,6 +19,7 @@ AgentName = Literal[
     "RESEARCHER",
     "RESEARCHER_WEB",
     "CODER",
+    "REVIEWER",
     "ANALYZER",
     "DEBUGGER",
     "DOCUMENTER",

@@ -38,6 +38,10 @@ def _ensure_tools_registered() -> None:
     from backend.tools import file_manager as _file_manager  # noqa: F401
     from backend.tools import file_ops as _file_ops  # noqa: F401
     from backend.tools import git_tools as _git_tools  # noqa: F401
+    from backend.tools import git_auto_commit as _git_auto_commit  # noqa: F401
+    from backend.tools import cron_scheduler as _cron_scheduler  # noqa: F401
+    from backend.tools import tts as _tts  # noqa: F401
+    from backend.tools import vision as _vision  # noqa: F401
     from backend.tools import memory_tools as _memory_tools  # noqa: F401
     from backend.tools import profile_tools as _profile_tools  # noqa: F401
     from backend.tools import project_analyzer as _project_analyzer  # noqa: F401
@@ -50,8 +54,14 @@ def _ensure_tools_registered() -> None:
     from backend.tools import web_search as _web_search  # noqa: F401
     from backend.tools import web_search_v2 as _web_search_v2  # noqa: F401
 
+    # New features: Auto-commit, TTS, Cron, Vision
+    from backend.tools import git_auto_commit as _git_auto_commit  # noqa: F401
+    from backend.tools import cron_scheduler as _cron_scheduler  # noqa: F401
+    from backend.tools import tts as _tts  # noqa: F401
+    from backend.tools import vision as _vision  # noqa: F401
+
     _TOOLS_REGISTERED = True
-    logger.debug("Tool registration completed (%d modules)", 21)
+    logger.debug("Tool registration completed (%d modules)", 26)
 
 
 def __getattr__(name: str):

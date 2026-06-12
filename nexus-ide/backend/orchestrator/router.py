@@ -2,9 +2,9 @@
 
 Three-level routing described in ARCHITECTURE.md §4.2:
 
-1. Fast rules — deterministic, zero-cost (:func:`fast_route`).
-2. ROUTER model (NANO) — JSON classification (:func:`route_with_model`).
-3. Automatic fallback — see :mod:`backend.orchestrator.fallback`.
+1. Fast rules - deterministic, zero-cost (:func:`fast_route`).
+2. ROUTER model (NANO) - JSON classification (:func:`route_with_model`).
+3. Automatic fallback - see :mod:`backend.orchestrator.fallback`.
 
 The public ``RoutingDecision`` type lives in :mod:`backend.models.api` and is
 re-exported here for backwards compatibility with existing imports.
@@ -140,7 +140,7 @@ def warm_routing_cache() -> None:
     logger.info("Routing cache warmed with %d common queries", len(_COMMON_QUERIES))
 
 # ---------------------------------------------------------------------------
-# Level 1 — fast deterministic rules
+# Level 1 - fast deterministic rules
 # ---------------------------------------------------------------------------
 
 _DEBUGGER_MARKERS: Final = (
@@ -233,6 +233,39 @@ _ARCHITECT_MARKERS: Final = (
     "planejar",
     "estruturar",
     "esquema do banco",
+)
+_REVIEWER_MARKERS: Final = (
+    "peer review",
+    "review code",
+    "review this pr",
+    "review this pull request",
+    "code review this",
+    "review my code",
+    "review the implementation",
+    "review the changes",
+    "review pr",
+    "pr review",
+    "pull request review",
+    "review the module",
+    "review the file",
+    "review for bugs",
+    "review for security",
+    "security review",
+    "performance review",
+    "style review",
+    "lint review",
+    "quality review",
+    "revisar codigo",
+    "revisar código",
+    "revisar implementacao",
+    "revisar implementação",
+    "revisar pr",
+    "revisao de codigo",
+    "revisão de código",
+    "revisao de seguranca",
+    "revisão de segurança",
+    "analise de qualidade",
+    "análise de qualidade",
 )
 _ANALYZER_MARKERS: Final = (
     "analyze",
@@ -435,68 +468,72 @@ _TRIVIAL_QUESTION = re.compile(r"^\s*(what|who|when|where|why|how)\s+is\b", re.I
 
 @functools.lru_cache(maxsize=1000)
 def _fast_route_cached(normalized_query: str) -> AgentName | None:
-    """Cached inner implementation — operates on pre-normalized query."""
+    """Cached inner implementation - operates on pre-normalized query."""
     lowered = normalized_query
 
-    # 1. DEBUGGER — error/debug patterns (most specific, check first)
+    # 1. DEBUGGER - error/debug patterns (most specific, check first)
     if any(marker in lowered for marker in _DEBUGGER_MARKERS):
         return "DEBUGGER"
 
-    # 1b. BUG_HUNTER_RUNTIME — runtime testing and reproduction patterns
+    # 1b. BUG_HUNTER_RUNTIME - runtime testing and reproduction patterns
     if any(marker in lowered for marker in _BUG_HUNTER_RUNTIME_MARKERS):
         return "BUG_HUNTER_RUNTIME"
 
-    # 2. ARCHITECT — design/planning patterns
+    # 2. ARCHITECT - design/planning patterns
     if any(marker in lowered for marker in _ARCHITECT_MARKERS):
         return "ARCHITECT"
 
-    # 3. ANALYZER — review/audit patterns
+    # 3. REVIEWER - peer code review patterns (more specific than generic analyzer)
+    if any(marker in lowered for marker in _REVIEWER_MARKERS):
+        return "REVIEWER"
+
+    # 3a. ANALYZER - review/audit patterns
     if any(marker in lowered for marker in _ANALYZER_MARKERS):
         return "ANALYZER"
 
-    # 3b. BUG_HUNTER_STATIC — static analysis and security scan patterns
+    # 3b. BUG_HUNTER_STATIC - static analysis and security scan patterns
     if any(marker in lowered for marker in _BUG_HUNTER_STATIC_MARKERS):
         return "BUG_HUNTER_STATIC"
 
-    # 4. OPTIMIZER — performance patterns
+    # 4. OPTIMIZER - performance patterns
     if any(marker in lowered for marker in _OPTIMIZER_MARKERS):
         return "OPTIMIZER"
 
-    # 4b. REFACTOR_PERFORMANCE — specific performance refactoring patterns
+    # 4b. REFACTOR_PERFORMANCE - specific performance refactoring patterns
     if any(marker in lowered for marker in _REFACTOR_PERF_MARKERS):
         return "REFACTOR_PERFORMANCE"
 
-    # 4c. REFACTOR_CLEAN — code cleanliness refactoring patterns
+    # 4c. REFACTOR_CLEAN - code cleanliness refactoring patterns
     if any(marker in lowered for marker in _REFACTOR_CLEAN_MARKERS):
         return "REFACTOR_CLEAN"
 
-    # 4d. TEST_RUNNER_UNIT — unit testing patterns
+    # 4d. TEST_RUNNER_UNIT - unit testing patterns
     if any(marker in lowered for marker in _TEST_RUNNER_UNIT_MARKERS):
         return "TEST_RUNNER_UNIT"
 
-    # 4e. TEST_RUNNER_E2E — end-to-end testing patterns
+    # 4e. TEST_RUNNER_E2E - end-to-end testing patterns
     if any(marker in lowered for marker in _TEST_RUNNER_E2E_MARKERS):
         return "TEST_RUNNER_E2E"
 
-    # 5. CODER — code generation patterns
+    # 5. CODER - code generation patterns
     if any(marker in lowered for marker in _CODER_MARKERS):
         return "CODER"
 
-    # 6. DOCUMENTER — documentation patterns
+    # 6. DOCUMENTER - documentation patterns
     if any(marker in lowered for marker in _DOCUMENTER_MARKERS):
         return "DOCUMENTER"
 
-    # 7. RESEARCHER_WEB — deep research patterns (check before simple researcher)
+    # 7. RESEARCHER_WEB - deep research patterns (check before simple researcher)
     if any(marker in lowered for marker in _RESEARCHER_WEB_MARKERS):
         return "RESEARCHER_WEB"
 
-    # 7b. RESEARCHER — research/web search patterns
+    # 7b. RESEARCHER - research/web search patterns
     if any(marker in lowered for marker in _RESEARCHER_MARKERS):
         return "RESEARCHER"
     if any(marker in lowered for marker in _WEB_SEARCH_MARKERS):
         return "RESEARCHER"
 
-    # 8. MICRO — trivial factoid lookup (very short, simple questions)
+    # 8. MICRO - trivial factoid lookup (very short, simple questions)
     words = lowered.split()
     if len(words) <= 12 and _TRIVIAL_QUESTION.match(lowered):
         return "MICRO"
@@ -505,7 +542,7 @@ def _fast_route_cached(normalized_query: str) -> AgentName | None:
 
 
 def fast_route(query: str) -> AgentName | None:
-    """Level 1 — deterministic pre-routing.
+    """Level 1 - deterministic pre-routing.
 
     Returns an agent name when the query is trivially classifiable, otherwise
     ``None`` so the caller falls through to :func:`route_with_model`.
@@ -513,7 +550,7 @@ def fast_route(query: str) -> AgentName | None:
     Priority order matters: more specific markers are checked first to avoid
     false positives. For example, "fix the error" should route to DEBUGGER,
     not CODER, even though "fix" could imply coding.
-    
+
     Results are cached with LRU (maxsize=1000) for repeated queries.
     """
     if not query or not query.strip():
@@ -521,61 +558,61 @@ def fast_route(query: str) -> AgentName | None:
 
     return _fast_route_cached(query.lower().strip())
 
-    # 1. DEBUGGER — error/debug patterns (most specific, check first)
+    # 1. DEBUGGER - error/debug patterns (most specific, check first)
     if any(marker in lowered for marker in _DEBUGGER_MARKERS):
         return "DEBUGGER"
 
-    # 1b. BUG_HUNTER_RUNTIME — runtime testing and reproduction patterns
+    # 1b. BUG_HUNTER_RUNTIME - runtime testing and reproduction patterns
     if any(marker in lowered for marker in _BUG_HUNTER_RUNTIME_MARKERS):
         return "BUG_HUNTER_RUNTIME"
 
-    # 2. ARCHITECT — design/planning patterns
+    # 2. ARCHITECT - design/planning patterns
     if any(marker in lowered for marker in _ARCHITECT_MARKERS):
         return "ARCHITECT"
 
-    # 3. ANALYZER — review/audit patterns
+    # 3. ANALYZER - review/audit patterns
     if any(marker in lowered for marker in _ANALYZER_MARKERS):
         return "ANALYZER"
 
-    # 3b. BUG_HUNTER_STATIC — static analysis and security scan patterns
+    # 3b. BUG_HUNTER_STATIC - static analysis and security scan patterns
     if any(marker in lowered for marker in _BUG_HUNTER_STATIC_MARKERS):
         return "BUG_HUNTER_STATIC"
 
-    # 4. OPTIMIZER — performance patterns
+    # 4. OPTIMIZER - performance patterns
     if any(marker in lowered for marker in _OPTIMIZER_MARKERS):
         return "OPTIMIZER"
 
-    # 4b. REFACTOR_PERFORMANCE — specific performance refactoring patterns
+    # 4b. REFACTOR_PERFORMANCE - specific performance refactoring patterns
     if any(marker in lowered for marker in _REFACTOR_PERF_MARKERS):
         return "REFACTOR_PERFORMANCE"
 
-    # 4c. REFACTOR_CLEAN — code cleanliness refactoring patterns
+    # 4c. REFACTOR_CLEAN - code cleanliness refactoring patterns
     if any(marker in lowered for marker in _REFACTOR_CLEAN_MARKERS):
         return "REFACTOR_CLEAN"
 
-    # 4d. TEST_RUNNER_UNIT — unit testing patterns
+    # 4d. TEST_RUNNER_UNIT - unit testing patterns
     if any(marker in lowered for marker in _TEST_RUNNER_UNIT_MARKERS):
         return "TEST_RUNNER_UNIT"
 
-    # 4e. TEST_RUNNER_E2E — end-to-end testing patterns
+    # 4e. TEST_RUNNER_E2E - end-to-end testing patterns
     if any(marker in lowered for marker in _TEST_RUNNER_E2E_MARKERS):
         return "TEST_RUNNER_E2E"
 
-    # 5. CODER — code generation patterns
+    # 5. CODER - code generation patterns
     if any(marker in lowered for marker in _CODER_MARKERS):
         return "CODER"
 
-    # 6. DOCUMENTER — documentation patterns
+    # 6. DOCUMENTER - documentation patterns
     if any(marker in lowered for marker in _DOCUMENTER_MARKERS):
         return "DOCUMENTER"
 
-    # 7. RESEARCHER — research/web search patterns
+    # 7. RESEARCHER - research/web search patterns
     if any(marker in lowered for marker in _RESEARCHER_MARKERS):
         return "RESEARCHER"
     if any(marker in lowered for marker in _WEB_SEARCH_MARKERS):
         return "RESEARCHER"
 
-    # 8. MICRO — trivial factoid lookup (very short, simple questions)
+    # 8. MICRO - trivial factoid lookup (very short, simple questions)
     words = lowered.split()
     if len(words) <= 12 and _TRIVIAL_QUESTION.match(lowered):
         return "MICRO"
@@ -584,7 +621,7 @@ def fast_route(query: str) -> AgentName | None:
 
 
 # ---------------------------------------------------------------------------
-# Level 2 — model-based classification
+# Level 2 - model-based classification
 # ---------------------------------------------------------------------------
 
 _FALLBACK_DECISION = RoutingDecision(
@@ -601,7 +638,7 @@ _FALLBACK_DECISION = RoutingDecision(
 
 
 async def route_with_model(query: str, client: Any) -> RoutingDecision:
-    """Level 2 — ask the NANO model to classify the request.
+    """Level 2 - ask the NANO model to classify the request.
 
     Returns a best-effort :class:`RoutingDecision`. If the model output is
     missing/malformed or the call fails, returns a low-confidence default

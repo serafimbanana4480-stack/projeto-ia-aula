@@ -231,8 +231,31 @@ CREATE TABLE IF NOT EXISTS peer_review_results (
 CREATE INDEX IF NOT EXISTS idx_pr_results_review ON peer_review_results(review_id);
 
 -- ---------------------------------------------------------------------------
--- SECOND BRAIN — persistent user knowledge base
+-- GIT AUTO-COMMIT HISTORY — automatic commit tracking for audit trail
 -- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS git_commits (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT,
+    project_id      TEXT,
+    file_path       TEXT NOT NULL,
+    commit_message  TEXT NOT NULL,
+    commit_hash     TEXT,
+    commit_type     TEXT,
+    scope           TEXT,
+    strategy        TEXT NOT NULL DEFAULT 'always',
+    status          TEXT NOT NULL DEFAULT 'committed'
+        CHECK (status IN ('committed', 'pending_review', 'failed', 'rejected')),
+    diff_preview    TEXT,
+    error           TEXT,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_git_commits_session ON git_commits(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_git_commits_project ON git_commits(project_id);
+CREATE INDEX IF NOT EXISTS idx_git_commits_status ON git_commits(status);
+CREATE INDEX IF NOT EXISTS idx_git_commits_hash ON git_commits(commit_hash);
+CREATE INDEX IF NOT EXISTS idx_git_commits_created ON git_commits(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS persistent_memories (
     id              TEXT PRIMARY KEY,
