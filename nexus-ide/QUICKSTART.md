@@ -1,5 +1,10 @@
 # NEXUS IDE Autonomous System
 
+> **Status: ✅ VERIFICADO - Acesso local confirmado em 2026-06-12**
+> 
+> A IA tem acesso REAL e FUNCIONAL ao sistema de ficheiros local.
+> Verificação completa em `VERIFICACAO_ACESSO_LOCAL.md`
+
 ## 🚀 Quick Start
 
 ### Start the full system (autonomous mode):
