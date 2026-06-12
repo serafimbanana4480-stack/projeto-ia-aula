@@ -18,7 +18,8 @@ modes:
         2. Recall relevant memories (recall_context) and scan the project (list_dir/read_file/search_codebase) before acting.
         3. Choose the right approach. When specialised expertise is useful, call CONSULT_AGENT with a focused question:
            - ARCHITECT → design, architecture, trade-offs, component boundaries
-           - ANALYZER → code review, security audit, quality assessment
+           - REVIEWER → code review, security audit, quality assessment, peer review
+           - ANALYZER → deep analysis, architectural review, complex assessment
            - DEBUGGER → bug diagnosis, test failures, root-cause analysis
            - RESEARCHER → external APIs, libraries, current best practices
            - OPTIMIZER → performance bottlenecks, benchmarking, optimisation
@@ -41,6 +42,24 @@ modes:
       Follow project conventions and best practices.
       Consult ARCHITECT or ANALYZER when design decisions are unclear.
       Recall relevant project memories before modifying existing code.
+
+  reviewer:
+    description: "Modo dedicado a peer review de código com análise de qualidade, segurança, performance e style"
+    default_agent: "REVIEWER"
+    default_model: "coder"
+    router: "none"
+    tools_enabled: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code", "consult_agent"]
+    enable_thinking: true
+    max_iterations: 10
+    supports_subagents: true
+    system_prompt_addon: |
+      You are in CODE REVIEW mode. Your sole focus is comprehensive peer review of code.
+      Analyze code for: bugs, security vulnerabilities, performance issues, style violations, and maintainability problems.
+      Always provide structured findings with severity (CRITICAL/HIGH/MEDIUM/LOW/INFO), line numbers, and concrete fix suggestions.
+      Execute tests when available to verify current behavior.
+      Consult ANALYZER for deep architectural concerns or CODER for implementation details.
+      Generate a structured review report with: executive summary, issue list, positive findings, and recommendations.
+      Store significant findings as memories for future reference.
 
   analyst:
     description: "Modo para análise de dados, scraping, revisão de código e relatórios detalhados"

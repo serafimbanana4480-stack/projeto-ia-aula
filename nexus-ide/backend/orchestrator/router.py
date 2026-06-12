@@ -570,7 +570,13 @@ def fast_route(query: str) -> AgentName | None:
     if any(marker in lowered for marker in _ARCHITECT_MARKERS):
         return "ARCHITECT"
 
-    # 3. ANALYZER - review/audit patterns
+    # 3. REVIEWER - peer code review patterns (more specific than generic analyzer)
+    if any(marker in lowered for marker in _REVIEWER_MARKERS):
+        return "REVIEWER"
+
+    # 3a. ANALYZER - review/audit patterns
+    if any(marker in lowered for marker in _ANALYZER_MARKERS):
+        return "ANALYZER"
     if any(marker in lowered for marker in _ANALYZER_MARKERS):
         return "ANALYZER"
 
