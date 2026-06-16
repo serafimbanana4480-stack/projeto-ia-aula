@@ -156,5 +156,5 @@ class HealthChecker:
             # Best-effort cleanup
             try:
                 tmp_file.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to remove temporary health file: %s", exc)

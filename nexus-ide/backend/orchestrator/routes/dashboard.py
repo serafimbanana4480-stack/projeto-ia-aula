@@ -55,11 +55,12 @@ async def dashboard_status(
     """Return current system health status, latest snapshot, and score."""
     agent = _get_dashboard_agent(request)
     snapshot = agent.get_latest_snapshot()
+    alerts = agent.get_alerts()
     return {
         "health_score": agent.get_health_score(),
         "snapshot": snapshot,
-        "active_alerts": len(agent.get_alerts()),
-        "critical_alerts": len(agent.get_alerts(severity="critical")),
+        "active_alerts": len(alerts),
+        "critical_alerts": len([a for a in alerts if a.get("severity") == "critical"]),
     }
 
 

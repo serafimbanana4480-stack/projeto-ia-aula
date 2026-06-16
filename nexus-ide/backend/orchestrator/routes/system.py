@@ -49,10 +49,10 @@ async def get_system_health(request: Request) -> dict[str, Any]:
 
     # Check database
     try:
-        from backend.persistence.db import get_db_connection
-        conn = get_db_connection()
-        conn.execute("SELECT 1")
-        conn.close()
+        from backend.persistence.db import get_db
+
+        with get_db() as conn:
+            conn.execute("SELECT 1")
         health["services"]["database"] = "online"
     except Exception:
         health["services"]["database"] = "offline"
@@ -67,7 +67,9 @@ async def get_system_health(request: Request) -> dict[str, Any]:
 
 @router.get("/system/self-improvement")
 @limiter.limit("60/minute")
-async def get_self_improvement(request: Request, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def get_self_improvement(
+    request: Request, _user: dict = Depends(require_auth)
+) -> dict[str, Any]:
     """Return the latest self-improvement report."""
     analyzer = SelfImprovementAnalyzer()
     report = analyzer.get_last_report()
@@ -78,7 +80,9 @@ async def get_self_improvement(request: Request, _user: dict = Depends(require_a
 
 @router.post("/system/self-improvement/run")
 @limiter.limit("10/minute")
-async def run_self_improvement(request: Request, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def run_self_improvement(
+    request: Request, _user: dict = Depends(require_auth)
+) -> dict[str, Any]:
     """Trigger the self-improvement analysis on demand."""
     analyzer = SelfImprovementAnalyzer()
     try:

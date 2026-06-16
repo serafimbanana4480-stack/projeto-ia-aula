@@ -139,6 +139,7 @@ def warm_routing_cache() -> None:
         _store_cached_decision(h, decision)
     logger.info("Routing cache warmed with %d common queries", len(_COMMON_QUERIES))
 
+
 # ---------------------------------------------------------------------------
 # Level 1 - fast deterministic rules
 # ---------------------------------------------------------------------------
@@ -210,6 +211,28 @@ _CODER_MARKERS: Final = (
     "desenvolver",
     "gerar código",
     "escrever código",
+)
+_FILE_OPS_MARKERS: Final = (
+    "create a file",
+    "create file",
+    "write a file",
+    "write file",
+    "save a file",
+    "save to file",
+    "make a file",
+    "criar ficheiro",
+    "criar um ficheiro",
+    "criar arquivo",
+    "criar um arquivo",
+    "escrever ficheiro",
+    "escrever um ficheiro",
+    "guardar ficheiro",
+    "modificar ficheiro",
+    "alterar ficheiro",
+    ".txt",
+    ".csv",
+    ".json",
+    ".md",
 )
 _ARCHITECT_MARKERS: Final = (
     "design the",
@@ -515,6 +538,10 @@ def _fast_route_cached(normalized_query: str) -> AgentName | None:
     if any(marker in lowered for marker in _TEST_RUNNER_E2E_MARKERS):
         return "TEST_RUNNER_E2E"
 
+    # 4f. FILE_OPS - explicit file create/modify requests (route to CODER with tools)
+    if any(marker in lowered for marker in _FILE_OPS_MARKERS):
+        return "CODER"
+
     # 5. CODER - code generation patterns
     if any(marker in lowered for marker in _CODER_MARKERS):
         return "CODER"
@@ -557,73 +584,6 @@ def fast_route(query: str) -> AgentName | None:
         return None
 
     return _fast_route_cached(query.lower().strip())
-
-    # 1. DEBUGGER - error/debug patterns (most specific, check first)
-    if any(marker in lowered for marker in _DEBUGGER_MARKERS):
-        return "DEBUGGER"
-
-    # 1b. BUG_HUNTER_RUNTIME - runtime testing and reproduction patterns
-    if any(marker in lowered for marker in _BUG_HUNTER_RUNTIME_MARKERS):
-        return "BUG_HUNTER_RUNTIME"
-
-    # 2. ARCHITECT - design/planning patterns
-    if any(marker in lowered for marker in _ARCHITECT_MARKERS):
-        return "ARCHITECT"
-
-    # 3. REVIEWER - peer code review patterns (more specific than generic analyzer)
-    if any(marker in lowered for marker in _REVIEWER_MARKERS):
-        return "REVIEWER"
-
-    # 3a. ANALYZER - review/audit patterns
-    if any(marker in lowered for marker in _ANALYZER_MARKERS):
-        return "ANALYZER"
-    if any(marker in lowered for marker in _ANALYZER_MARKERS):
-        return "ANALYZER"
-
-    # 3b. BUG_HUNTER_STATIC - static analysis and security scan patterns
-    if any(marker in lowered for marker in _BUG_HUNTER_STATIC_MARKERS):
-        return "BUG_HUNTER_STATIC"
-
-    # 4. OPTIMIZER - performance patterns
-    if any(marker in lowered for marker in _OPTIMIZER_MARKERS):
-        return "OPTIMIZER"
-
-    # 4b. REFACTOR_PERFORMANCE - specific performance refactoring patterns
-    if any(marker in lowered for marker in _REFACTOR_PERF_MARKERS):
-        return "REFACTOR_PERFORMANCE"
-
-    # 4c. REFACTOR_CLEAN - code cleanliness refactoring patterns
-    if any(marker in lowered for marker in _REFACTOR_CLEAN_MARKERS):
-        return "REFACTOR_CLEAN"
-
-    # 4d. TEST_RUNNER_UNIT - unit testing patterns
-    if any(marker in lowered for marker in _TEST_RUNNER_UNIT_MARKERS):
-        return "TEST_RUNNER_UNIT"
-
-    # 4e. TEST_RUNNER_E2E - end-to-end testing patterns
-    if any(marker in lowered for marker in _TEST_RUNNER_E2E_MARKERS):
-        return "TEST_RUNNER_E2E"
-
-    # 5. CODER - code generation patterns
-    if any(marker in lowered for marker in _CODER_MARKERS):
-        return "CODER"
-
-    # 6. DOCUMENTER - documentation patterns
-    if any(marker in lowered for marker in _DOCUMENTER_MARKERS):
-        return "DOCUMENTER"
-
-    # 7. RESEARCHER - research/web search patterns
-    if any(marker in lowered for marker in _RESEARCHER_MARKERS):
-        return "RESEARCHER"
-    if any(marker in lowered for marker in _WEB_SEARCH_MARKERS):
-        return "RESEARCHER"
-
-    # 8. MICRO - trivial factoid lookup (very short, simple questions)
-    words = lowered.split()
-    if len(words) <= 12 and _TRIVIAL_QUESTION.match(lowered):
-        return "MICRO"
-
-    return None
 
 
 # ---------------------------------------------------------------------------

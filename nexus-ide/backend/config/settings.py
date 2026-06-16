@@ -30,6 +30,7 @@ def _detect_device() -> str:
     # LOCAL_LLM_DEVICE=cpu so the import is skipped entirely.
     try:
         import torch
+
         return "cuda:0" if torch.cuda.is_available() else "cpu"
     except Exception:
         return "cpu"
@@ -62,6 +63,12 @@ class Settings(BaseSettings):
     kimi_api_key: str = Field(default="")
     groq_api_key: str = Field(default="")
     anthropic_api_key: str = Field(default="")
+    # Google / Gemini
+    gemini_api_key: str = Field(default="")
+    gemini_base_url: str = Field(default="https://generativelanguage.googleapis.com/v1beta")
+    # OpenRouter
+    openrouter_api_key: str = Field(default="")
+    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
 
     # Multi-LLM Manager
     multi_llm_enabled: bool = Field(default=False)
@@ -93,6 +100,7 @@ class Settings(BaseSettings):
     # Backend
     backend_host: str = Field(default="0.0.0.0")
     backend_port: int = Field(default=8000)
+    backend_reload: bool = Field(default=False)
     log_level: str = Field(default="INFO")
     debug: bool = Field(default=True)
 
@@ -150,10 +158,15 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.allowed_origins.split(",")]
 
 
-@lru_cache
+_settings_instance: Settings | None = None
+
+
 def get_settings() -> Settings:
-    """Get cached settings instance."""
-    return Settings()
+    """Get the settings singleton instance."""
+    global _settings_instance
+    if _settings_instance is None:
+        _settings_instance = Settings()
+    return _settings_instance
 
 
 def load_environment_config() -> dict[str, Any]:
@@ -275,8 +288,7 @@ def validate_configuration() -> list[str]:
         if settings.environment == "production":
             if settings.secret_key == "development-secret-key-change-in-production":
                 errors.append(
-                    "SECRET_KEY is set to default value in production. "
-                    "This is a security risk."
+                    "SECRET_KEY is set to default value in production. This is a security risk."
                 )
             elif len(settings.secret_key) < 32:
                 warnings_list.append(
@@ -285,8 +297,7 @@ def validate_configuration() -> list[str]:
                 )
             if settings.jwt_secret == "development-jwt-secret-change-in-production":
                 errors.append(
-                    "JWT_SECRET is set to default value in production. "
-                    "This is a security risk."
+                    "JWT_SECRET is set to default value in production. This is a security risk."
                 )
             elif len(settings.jwt_secret) < 32:
                 warnings_list.append(
@@ -313,7 +324,15 @@ def validate_configuration() -> list[str]:
             errors.append(f"Required prompts directory not found: {prompts_dir}")
 
         provider = settings.llm_provider.lower()
-        cloud_providers = {"openai", "deepseek", "kimi", "groq", "anthropic"}
+        cloud_providers = {
+            "openai",
+            "deepseek",
+            "kimi",
+            "groq",
+            "anthropic",
+            "gemini",
+            "openrouter",
+        }
         if provider in cloud_providers:
             key_attr = f"{provider}_api_key"
             api_key = getattr(settings, key_attr, "")
@@ -329,3 +348,15 @@ def validate_configuration() -> list[str]:
         errors.append(f"Failed to validate configuration: {e}")
 
     return errors
+
+
+def resolve_project_path(project_path: str) -> tuple[str, bool]:
+    """Return an effective project path and whether a default was applied.
+
+    Empty strings and ``"."`` resolve to :data:`REPO_ROOT` so file tools
+    always have a sensible workspace root when the frontend omits context.
+    """
+    stripped = (project_path or "").strip()
+    if not stripped or stripped == ".":
+        return str(REPO_ROOT), True
+    return stripped, False

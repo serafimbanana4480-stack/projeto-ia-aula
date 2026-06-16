@@ -55,16 +55,15 @@ class MultiLLMManager:
             healthy = False
             latency = 0.0
             try:
-                client = getattr(provider, "_client", None)
-                if isinstance(client, httpx.AsyncClient):
-                    # OpenAI-compatible providers (OpenAIProvider, KimiProvider)
-                    resp = await client.get("/models", timeout=5.0)
-                    healthy = resp.status_code == 200
-                elif hasattr(provider, "health_check"):
-                    # AirLLMProvider or other providers with health_check()
+                if hasattr(provider, "health_check"):
                     healthy = await provider.health_check()
                 else:
-                    healthy = True
+                    client = getattr(provider, "_client", None)
+                    if isinstance(client, httpx.AsyncClient):
+                        resp = await client.get("/models", timeout=5.0)
+                        healthy = resp.status_code == 200
+                    else:
+                        healthy = True
                 latency = (time.time() - started) * 1000
             except Exception as exc:
                 logger.warning("Health check failed for provider '%s': %s", name, exc)
@@ -208,9 +207,7 @@ class MultiLLMManager:
         pending: set[asyncio.Task] = set(tasks.keys())
         last_error: Exception | None = None
         while pending:
-            done, pending = await asyncio.wait(
-                pending, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 try:
                     _, result = task.result()
@@ -220,9 +217,7 @@ class MultiLLMManager:
                 except Exception as exc:
                     last_error = exc
                     self._update_health(tasks[task], False, 0.0)
-                    logger.warning(
-                        "Parallel provider '%s' failed: %s", tasks[task], exc
-                    )
+                    logger.warning("Parallel provider '%s' failed: %s", tasks[task], exc)
 
         raise last_error or RuntimeError("All parallel providers failed")
 

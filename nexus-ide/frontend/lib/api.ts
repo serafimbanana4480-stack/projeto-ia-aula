@@ -3,7 +3,6 @@ import type {
   ChatMessage,
   FileListResponse,
   FileTreeEntry,
-  LogEntry,
   MetricsData,
   ModelStatus,
   Project,
@@ -13,11 +12,8 @@ import type {
 } from "./types";
 import { authHeaders, clearAuth, getAccessToken } from "./auth";
 
-// Re-export authHeaders for consumers that import it from api.ts
-export { authHeaders } from "./auth";
-
-// Satisfy noUnusedLocals without changing behavior (getAccessToken is kept for re-export compatibility)
-void getAccessToken;
+// Re-export auth helpers for consumers that import them from api.ts
+export { authHeaders, getAccessToken } from "./auth";
 
 // Custom error class for API errors
 export class ApiError extends Error {
@@ -72,26 +68,32 @@ async function readJson<T>(response: Response): Promise<T> {
 export async function postChat(
   message: string,
   sessionId: string,
-  mode: string = "agent",
+  mode: string = "auto",
   signal?: AbortSignal,
   model: string = "",
-  projectPath: string = "",
+  projectPath: string = ".",
+  thinkingStrength?: string,
 ): Promise<Response> {
   try {
-    const body: Record<string, string> = { message, session_id: sessionId, mode };
+    const body: Record<string, string> = { message, session_id: sessionId, mode, project_path: projectPath };
     if (model) body.model = model;
-    if (projectPath) body.project_path = projectPath;
+    if (thinkingStrength) body.thinking_strength = thinkingStrength;
     const response = await fetch(apiUrl("/api/chat"), {
       method: "POST",
       headers: {
         ...authHeaders(),
         Accept: "text/event-stream",
+        "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
       signal,
     });
 
     if (!response.ok) {
+      if (response.status === 401 && typeof window !== "undefined") {
+        clearAuth();
+        window.location.href = "/login?expired=1";
+      }
       let errorText = "";
       try {
         errorText = await response.text();
@@ -268,13 +270,6 @@ export async function toggleTool(
   }
 }
 
-export async function getModes(): Promise<Record<string, unknown>> {
-  const data = await readJson<{ modes?: Record<string, unknown> }>(
-    await fetch(apiUrl("/api/modes"), { headers: authHeaders() }),
-  );
-  return data.modes ?? {};
-}
-
 export async function getProjects(): Promise<Project[]> {
   const data = await readJson<{ projects?: Project[] }>(
     await fetch(apiUrl("/api/projects"), { headers: authHeaders() }),
@@ -354,77 +349,6 @@ export interface GuardianSuggestion {
   created_at: string;
   auto_apply_safe: boolean;
   applied: boolean;
-}
-
-export async function getGuardianStatus(): Promise<GuardianStatus> {
-  return readJson<GuardianStatus>(
-    await fetch(apiUrl("/api/guardian/status"), { headers: authHeaders() }),
-  );
-}
-
-export async function getGuardianSuggestions(
-  limit: number = 10,
-  category?: string,
-  priority?: string,
-): Promise<{ suggestions: GuardianSuggestion[]; count: number }> {
-  const params = new URLSearchParams();
-  params.set("limit", String(limit));
-  if (category) params.set("category", category);
-  if (priority) params.set("priority", priority);
-  return readJson<{ suggestions: GuardianSuggestion[]; count: number }>(
-    await fetch(apiUrl(`/api/guardian/suggestions?${params.toString()}`), {
-      headers: authHeaders(),
-    }),
-  );
-}
-
-export async function applyGuardianSuggestion(suggestionId: string): Promise<unknown> {
-  const response = await fetch(apiUrl(`/api/guardian/suggestions/${suggestionId}/apply`), {
-    method: "POST",
-    headers: authHeaders(),
-  });
-  if (!response.ok) {
-    let errorText = "";
-    try {
-      errorText = await response.text();
-    } catch {
-      errorText = "Unable to read error response";
-    }
-    throw new ApiError(
-      `HTTP ${response.status}: ${response.statusText}`,
-      response.status,
-      errorText,
-    );
-  }
-  return response.json();
-}
-
-export async function getGuardianLogs(
-  params: {
-    session_id?: string;
-    agent?: string;
-    level?: string;
-    since?: string;
-    limit?: number;
-  } = {},
-): Promise<{ logs: LogEntry[]; count: number }> {
-  const query = new URLSearchParams();
-  if (params.session_id) query.set("session_id", params.session_id);
-  if (params.agent) query.set("agent", params.agent);
-  if (params.level) query.set("level", params.level);
-  if (params.since) query.set("since", params.since);
-  if (params.limit) query.set("limit", String(params.limit));
-  return readJson<{ logs: LogEntry[]; count: number }>(
-    await fetch(apiUrl(`/api/guardian/logs?${query.toString()}`), {
-      headers: authHeaders(),
-    }),
-  );
-}
-
-export async function getGuardianMetrics(): Promise<unknown> {
-  return readJson<unknown>(
-    await fetch(apiUrl("/api/guardian/metrics"), { headers: authHeaders() }),
-  );
 }
 
 // Plan API functions
@@ -642,45 +566,6 @@ export interface SelfImprovementProposal {
   created_at: string;
 }
 
-export async function getMissions(): Promise<Mission[]> {
-  const data = await readJson<{ missions?: Mission[] }>(
-    await fetch(apiUrl("/api/missions"), { headers: authHeaders() }),
-  );
-  return data.missions ?? [];
-}
-
-export async function getMission(id: string): Promise<Mission> {
-  return readJson<Mission>(
-    await fetch(apiUrl(`/api/missions/${id}`), { headers: authHeaders() }),
-  );
-}
-
-export async function pauseMission(id: string): Promise<{ status: string; mission_id: string }> {
-  return readJson<{ status: string; mission_id: string }>(
-    await fetch(apiUrl(`/api/missions/${id}/pause`), {
-      method: "POST",
-      headers: authHeaders(),
-    }),
-  );
-}
-
-export async function resumeMission(id: string): Promise<{ status: string; mission_id: string }> {
-  return readJson<{ status: string; mission_id: string }>(
-    await fetch(apiUrl(`/api/missions/${id}/resume`), {
-      method: "POST",
-      headers: authHeaders(),
-    }),
-  );
-}
-
-export async function abortMission(id: string): Promise<{ status: string; mission_id: string }> {
-  return readJson<{ status: string; mission_id: string }>(
-    await fetch(apiUrl(`/api/missions/${id}/abort`), {
-      method: "POST",
-      headers: authHeaders(),
-    }),
-  );
-}
 
 export async function getAgentInstances(): Promise<AgentInstance[]> {
   const data = await readJson<{ agents?: AgentInstance[] }>(
@@ -706,46 +591,17 @@ export async function interveneAgent(
 
 export async function getBusMessages(topic?: string, limit: number = 50): Promise<BusMessageItem[]> {
   const params = new URLSearchParams();
-  if (topic) params.set("topic", topic);
   params.set("limit", String(limit));
+  const resolvedTopic = topic || "all";
   const data = await readJson<{ messages?: BusMessageItem[]; count?: number }>(
-    await fetch(apiUrl(`/api/bus/history/all?${params.toString()}`), {
+    await fetch(apiUrl(`/api/bus/history/${resolvedTopic}?${params.toString()}`), {
       headers: authHeaders(),
     }),
   );
   return data.messages ?? [];
 }
 
-export async function getReviews(artifactId: string): Promise<Review[]> {
-  const data = await readJson<{ reviews?: Review[] }>(
-    await fetch(apiUrl(`/api/reviews/${artifactId}`), {
-      headers: authHeaders(),
-    }),
-  );
-  return data.reviews ?? [];
-}
 
-export async function getWhiteboard(): Promise<WhiteboardEntry[]> {
-  const data = await readJson<{ entries?: WhiteboardEntry[] }>(
-    await fetch(apiUrl("/api/whiteboard"), { headers: authHeaders() }),
-  );
-  return data.entries ?? [];
-}
-
-export async function getSystemHealth(): Promise<SystemHealthSnapshot> {
-  return readJson<SystemHealthSnapshot>(
-    await fetch(apiUrl("/api/system/health"), { headers: authHeaders() }),
-  );
-}
-
-export async function getSelfImprovementProposals(): Promise<SelfImprovementProposal[]> {
-  const data = await readJson<{ proposals?: SelfImprovementProposal[] }>(
-    await fetch(apiUrl("/api/system/self-improvement"), {
-      headers: authHeaders(),
-    }),
-  );
-  return data.proposals ?? [];
-}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Settings, Scraping, Database, Alerts, Metrics helpers (JWT-unified)
@@ -829,6 +685,906 @@ export async function createSession(
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ title, mode }),
+    }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Agents Instances API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function getAgentInstance(id: string): Promise<AgentInstance> {
+  return readJson<AgentInstance>(
+    await fetch(apiUrl(`/api/agents/instances/${id}`), { headers: authHeaders() }),
+  );
+}
+
+export async function pauseAgentInstance(id: string): Promise<{ status: string; agent_id: string }> {
+  return readJson<{ status: string; agent_id: string }>(
+    await fetch(apiUrl(`/api/agents/instances/${id}/pause`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function resumeAgentInstance(id: string): Promise<{ status: string; agent_id: string }> {
+  return readJson<{ status: string; agent_id: string }>(
+    await fetch(apiUrl(`/api/agents/instances/${id}/resume`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function abortAgentInstance(id: string): Promise<{ status: string; agent_id: string }> {
+  return readJson<{ status: string; agent_id: string }>(
+    await fetch(apiUrl(`/api/agents/instances/${id}/abort`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Dashboard API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function getDashboardStatus(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/dashboard/status"), { headers: authHeaders() }),
+  );
+}
+
+export async function getDashboardAlerts(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/dashboard/alerts"), { headers: authHeaders() }),
+  );
+}
+
+export async function getDashboardMetrics(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/dashboard/metrics"), { headers: authHeaders() }),
+  );
+}
+
+export async function askDashboard(query: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/dashboard/ask"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    }),
+  );
+}
+
+export async function diagnoseDashboard(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/dashboard/diagnose"), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function getSystemHealth(): Promise<SystemHealthSnapshot> {
+  return readJson<SystemHealthSnapshot>(
+    await fetch(apiUrl("/api/system/health"), { headers: authHeaders() }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Orchestrator API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function createOrchestratorTask(task: unknown): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/orchestrator/tasks"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(task),
+    }),
+  );
+}
+
+export async function createOrchestratorTasksParallel(tasks: unknown[]): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/orchestrator/tasks/parallel"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ tasks }),
+    }),
+  );
+}
+
+export async function getOrchestratorTask(taskId: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/orchestrator/tasks/${taskId}`), { headers: authHeaders() }),
+  );
+}
+
+export async function getOrchestratorTasks(): Promise<Record<string, unknown>[]> {
+  const data = await readJson<{ tasks?: Record<string, unknown>[] }>(
+    await fetch(apiUrl("/api/orchestrator/tasks"), { headers: authHeaders() }),
+  );
+  return data.tasks ?? [];
+}
+
+export async function abortOrchestratorTask(taskId: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/orchestrator/tasks/${taskId}/abort`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function getOrchestratorBriefing(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/orchestrator/briefing"), { headers: authHeaders() }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Workers API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function getWorkers(): Promise<Record<string, unknown>[]> {
+  const data = await readJson<{ workers?: Record<string, unknown>[] }>(
+    await fetch(apiUrl("/api/workers"), { headers: authHeaders() }),
+  );
+  return data.workers ?? [];
+}
+
+export async function startWorker(name: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/workers/${name}/start`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function stopWorker(name: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/workers/${name}/stop`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function pauseWorker(name: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/workers/${name}/pause`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function resumeWorker(name: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/workers/${name}/resume`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Skills API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function getSkills(): Promise<Record<string, unknown>[]> {
+  const data = await readJson<{ skills?: Record<string, unknown>[] }>(
+    await fetch(apiUrl("/api/skills"), { headers: authHeaders() }),
+  );
+  return data.skills ?? [];
+}
+
+export async function getSkill(skillId: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/skills/${skillId}`), { headers: authHeaders() }),
+  );
+}
+
+export async function createSkill(skill: unknown): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/skills"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(skill),
+    }),
+  );
+}
+
+export async function updateSkill(skillId: string, skill: unknown): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/skills/${skillId}`), {
+      method: "PUT",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(skill),
+    }),
+  );
+}
+
+export async function deleteSkill(skillId: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/skills/${skillId}`), {
+      method: "DELETE",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Wizard API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function getWizardTemplates(): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl("/api/wizard/templates"), { headers: authHeaders() }),
+  );
+}
+
+export async function getWizardTemplate(templateId: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/wizard/templates/${templateId}`), { headers: authHeaders() }),
+  );
+}
+
+export async function startWizard(payload: unknown): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/wizard/start"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function answerWizard(payload: unknown): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/wizard/answer"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function generateWizard(payload: unknown): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/wizard/generate"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function getWizardStatus(sessionId: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/wizard/status/${sessionId}`), { headers: authHeaders() }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Email API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function getEmailAccounts(): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl("/api/email/accounts"), { headers: authHeaders() }),
+  );
+}
+
+export async function addEmailAccount(account: unknown): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/email/accounts"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(account),
+    }),
+  );
+}
+
+export async function deleteEmailAccount(accountId: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/email/accounts/${accountId}`), {
+      method: "DELETE",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function getEmailInbox(accountId?: string): Promise<Record<string, unknown>[]> {
+  const url = accountId ? `/api/email/inbox?account_id=${accountId}` : "/api/email/inbox";
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl(url), { headers: authHeaders() }),
+  );
+}
+
+export async function searchEmails(query: string): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl(`/api/email/search?query=${encodeURIComponent(query)}`), { headers: authHeaders() }),
+  );
+}
+
+export async function markEmailAsRead(emailId: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/email/${emailId}/read`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function triageEmails(payload: unknown): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/email/triage"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Browser API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function navigateBrowser(url: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/browser/navigate"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    }),
+  );
+}
+
+export async function clickBrowser(selector: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/browser/click"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ selector }),
+    }),
+  );
+}
+
+export async function fillBrowser(selector: string, value: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/browser/fill"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ selector, value }),
+    }),
+  );
+}
+
+export async function extractBrowser(selector: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/browser/extract"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ selector }),
+    }),
+  );
+}
+
+export async function screenshotBrowser(): Promise<{ screenshot: string }> {
+  return readJson<{ screenshot: string }>(
+    await fetch(apiUrl("/api/browser/screenshot"), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function getBrowserLinks(): Promise<{ links: string[] }> {
+  return readJson<{ links: string[] }>(
+    await fetch(apiUrl("/api/browser/get_links"), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function closeBrowser(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/browser/close"), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Workspace API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function readWorkspaceFile(path: string, projectPath: string = "."): Promise<{ content: string }> {
+  return readJson<{ content: string }>(
+    await fetch(apiUrl("/api/workspace/files/read"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function writeWorkspaceFile(path: string, content: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/files/write"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path, content, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function listWorkspaceFiles(path: string = ".", recursive: boolean = true, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/files/list"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path, recursive, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function createWorkspaceDir(path: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/files/create-dir"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function deleteWorkspaceFile(path: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/files/delete"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function deleteWorkspaceDir(path: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/files/delete-dir"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function moveWorkspaceFile(src: string, dest: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/files/move"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ src, dest, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function copyWorkspaceFile(src: string, dest: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/files/copy"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ src, dest, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function getWorkspaceFileInfo(path: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/files/info"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function searchWorkspaceFiles(query: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/files/search"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ query, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function executeWorkspaceShell(command: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/terminal/shell"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ command, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function executeWorkspacePython(code: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/terminal/python"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ code, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function executeWorkspaceScript(path: string, args: string[] = [], projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/terminal/script"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path, args, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function gitInit(projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/git/init"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ project_path: projectPath }),
+    }),
+  );
+}
+
+export async function gitClone(url: string, path: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/git/clone"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ url, path }),
+    }),
+  );
+}
+
+export async function gitCommitAll(message: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/git/commit-all"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ message, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function gitPush(projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/git/push"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ project_path: projectPath }),
+    }),
+  );
+}
+
+export async function gitStatus(projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/git/status"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ project_path: projectPath }),
+    }),
+  );
+}
+
+export async function listWorkspaceBackups(projectPath: string = "."): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl("/api/workspace/backups/list"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ project_path: projectPath }),
+    }),
+  );
+}
+
+export async function restoreWorkspaceBackup(backupId: string, projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/backups/restore"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ backup_id: backupId, project_path: projectPath }),
+    }),
+  );
+}
+
+export async function discoverWorkspaceProjects(): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl("/api/workspace/projects/discover"), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function getWorkspaceProjectInfo(projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/projects/info"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ project_path: projectPath }),
+    }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Memory API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function searchMemories(query: string, limit: number = 10): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl("/api/memories/search"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ query, limit }),
+    }),
+  );
+}
+
+export async function storeMemory(content: string, tags: string[] = []): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/memories"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ content, tags }),
+    }),
+  );
+}
+
+export async function getMemories(limit: number = 50): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl(`/api/memories?limit=${limit}`), { headers: authHeaders() }),
+  );
+}
+
+export async function deleteMemory(memoryId: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/memories/${memoryId}`), {
+      method: "DELETE",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function getMemoryStats(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/memories/stats"), { headers: authHeaders() }),
+  );
+}
+
+export async function getMissions(): Promise<Mission[]> {
+  const data = await readJson<{ missions?: Mission[] }>(
+    await fetch(apiUrl("/api/missions"), { headers: authHeaders() }),
+  );
+  return data.missions ?? [];
+}
+
+export async function createMission(objective: string): Promise<Mission> {
+  return readJson<Mission>(
+    await fetch(apiUrl("/api/missions"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ objective }),
+    }),
+  );
+}
+
+export async function getMission(id: string): Promise<Mission> {
+  return readJson<Mission>(
+    await fetch(apiUrl(`/api/missions/${id}`), { headers: authHeaders() }),
+  );
+}
+
+export async function pauseMission(id: string): Promise<{ status: string; mission_id: string }> {
+  return readJson<{ status: string; mission_id: string }>(
+    await fetch(apiUrl(`/api/missions/${id}/pause`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function resumeMission(id: string): Promise<{ status: string; mission_id: string }> {
+  return readJson<{ status: string; mission_id: string }>(
+    await fetch(apiUrl(`/api/missions/${id}/resume`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function abortMission(id: string): Promise<{ status: string; mission_id: string }> {
+  return readJson<{ status: string; mission_id: string }>(
+    await fetch(apiUrl(`/api/missions/${id}/abort`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function getMissionAgents(id: string): Promise<AgentInstance[]> {
+  const data = await readJson<{ agents?: AgentInstance[] }>(
+    await fetch(apiUrl(`/api/missions/${id}/agents`), { headers: authHeaders() }),
+  );
+  return data.agents ?? [];
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Embedding API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function indexEmbedding(text: string, metadata: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/embeddings/index"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ text, metadata }),
+    }),
+  );
+}
+
+export async function searchEmbedding(query: string, limit: number = 5): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl("/api/embeddings/search"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ query, limit }),
+    }),
+  );
+}
+
+export async function getEmbeddingStats(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/embeddings/stats"), { headers: authHeaders() }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Second Brain API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function ingestSecondBrain(content: string, source: string = "web"): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/brain/ingest"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ content, source }),
+    }),
+  );
+}
+
+export async function searchSecondBrain(query: string, limit: number = 5): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl(`/api/brain/search?query=${encodeURIComponent(query)}&limit=${limit}`), { headers: authHeaders() }),
+  );
+}
+
+export async function getSecondBrainMemories(limit: number = 50): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl(`/api/brain/memories?limit=${limit}`), { headers: authHeaders() }),
+  );
+}
+
+export async function deleteSecondBrainMemory(memoryId: string): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/brain/memories/${memoryId}`), {
+      method: "DELETE",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Profile API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function getProfile(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/me"), { headers: authHeaders() }),
+  );
+}
+
+export async function updatePreferences(preferences: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/preferences"), {
+      method: "PUT",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(preferences),
+    }),
+  );
+}
+
+export async function getRoutines(): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl("/api/routines"), { headers: authHeaders() }),
+  );
+}
+
+export async function createRoutine(routine: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/routines"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(routine),
+    }),
+  );
+}
+
+export async function getProfileMemories(): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl("/api/memories"), { headers: authHeaders() }),
+  );
+}
+
+export async function createProfileMemory(memory: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/memories"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(memory),
+    }),
+  );
+}
+
+export async function getBusTopics(): Promise<string[]> {
+  return readJson<string[]>(
+    await fetch(apiUrl("/api/bus/topics"), { headers: authHeaders() }),
+  );
+}
+
+export async function getBusHistory(topic: string): Promise<BusMessageItem[]> {
+  const data = await readJson<{ messages?: BusMessageItem[] }>(
+    await fetch(apiUrl(`/api/bus/history/${topic}`), { headers: authHeaders() }),
+  );
+  return data.messages ?? [];
+}
+
+export async function controlWorker(
+  name: string,
+  action: "start" | "stop" | "pause" | "resume",
+): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl(`/api/workers/${name}/${action}`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function getGitStatus(projectPath: string = "."): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/workspace/git/status"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path: projectPath }),
+    }),
+  );
+}
+
+export async function getBackups(projectPath: string = "."): Promise<Record<string, unknown>[]> {
+  return readJson<Record<string, unknown>[]>(
+    await fetch(apiUrl("/api/workspace/backups/list"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ path: projectPath }),
     }),
   );
 }

@@ -203,7 +203,7 @@ def run_e2e_tests() -> None:
     python_cmd = str(venv_py) if venv_py.exists() else "python"
     
     # Run mission control test
-    res = subprocess.run([python_cmd, "mission_control_e2e_test.py"], cwd=str(PROJECT_ROOT))
+    res = subprocess.run([python_cmd, "e2e/mission_control_e2e_test.py"], cwd=str(PROJECT_ROOT))
     if res.returncode == 0:
         print("\033[92m[PASS] Mission Control E2E validation passed.\033[0m")
     else:

@@ -268,6 +268,41 @@ class TestListDirAbsoluteFilters:
         assert "a.py" in names
         assert "b.txt" not in names
 
+
+class TestPosixTmpPaths:
+    async def test_write_read_delete_posix_tmp(self) -> None:
+        import os
+        import uuid
+
+        import pytest
+
+        if os.name != "nt":
+            pytest.skip("POSIX /tmp remapping is Windows-specific")
+
+        rel = f"/tmp/nexus_test_{uuid.uuid4().hex}.txt"
+        content = "posix tmp content"
+
+        write_result = await write_file_absolute(rel, content)
+        assert write_result.get("written") is True
+        resolved = write_result["path"]
+        assert "tmp" in resolved.replace("\\", "/").lower()
+        assert os.path.isfile(resolved)
+
+        read_result = await read_file_absolute(rel)
+        assert read_result.get("content") == content
+
+        list_result = await list_dir_absolute(
+            "/tmp", include_files=True, include_dirs=False, glob_pattern="nexus_test_*.txt"
+        )
+        listed_paths = {item["path"] for item in list_result.get("items", [])}
+        assert resolved in listed_paths
+
+        delete_result = await delete_file_absolute(rel, move_to_trash=False)
+        assert delete_result.get("deleted") is True
+        assert not os.path.isfile(resolved)
+
+
+class TestListDirRecursiveGlob:
     async def test_list_dir_recursive_glob(self, tmp_path: Path) -> None:
         sub = tmp_path / "sub"
         sub.mkdir()

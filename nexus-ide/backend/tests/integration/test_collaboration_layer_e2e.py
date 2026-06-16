@@ -235,10 +235,15 @@ class TestFileLocksAPI:
 
         import httpx
         from backend.orchestrator.main import app
+        from backend.persistence.db import create_session
+
+        create_session(session_id="sess-123", title="test session")
 
         token = create_access_token({"sub": "test-user", "email": "test@test.com"})
         async with httpx.AsyncClient(
-            app=app, base_url="http://testserver", headers={"Authorization": f"Bearer {token}"}
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+            headers={"Authorization": f"Bearer {token}"},
         ) as ac:
 
             async def writer(content: str):

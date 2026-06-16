@@ -6,8 +6,10 @@ environment variable or configuration.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from backend.config.settings import get_settings
@@ -17,6 +19,25 @@ from backend.llm.multi_llm_manager import MultiLLMManager
 from backend.llm.ollama_provider import OllamaProvider
 
 logger = logging.getLogger(__name__)
+
+RUNTIME_SETTINGS_PATH = Path(__file__).resolve().parents[2] / "data" / "settings.json"
+
+
+def _load_runtime_overrides() -> dict[str, str]:
+    """Load user-configured settings written by the Settings REST endpoint.
+
+    The backend reads ``.env`` at startup via Pydantic.  To allow hot-updating
+    API keys without restarting the server, we also check ``data/settings.json``
+    which is written by ``PUT /api/settings``.
+    """
+    if not RUNTIME_SETTINGS_PATH.exists():
+        return {}
+    try:
+        with RUNTIME_SETTINGS_PATH.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return {k: v for k, v in data.items() if isinstance(v, str) and v}
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 class MockProvider:
@@ -237,12 +258,36 @@ def _build_fallback_chain(
             )
         )
 
+    if settings.gemini_api_key:
+        from backend.llm.gemini_provider import GeminiProvider
+
+        fallbacks.append(
+            GeminiProvider(
+                base_url=getattr(
+                    settings, "gemini_base_url", "https://generativelanguage.googleapis.com/v1beta"
+                ),
+                api_key=settings.gemini_api_key,
+            )
+        )
+
+    if settings.openrouter_api_key:
+        from backend.llm.openrouter_provider import OpenRouterProvider
+
+        fallbacks.append(
+            OpenRouterProvider(
+                base_url=getattr(settings, "openrouter_base_url", "https://openrouter.ai/api/v1"),
+                api_key=settings.openrouter_api_key,
+            )
+        )
+
     # Add DevProvider for zero-cost local development before the ultimate mock fallback
     has_any_real_provider = bool(
         settings.openai_api_key
         or settings.kimi_api_key
         or settings.deepseek_api_key
         or settings.groq_api_key
+        or settings.gemini_api_key
+        or settings.openrouter_api_key
     )
     if not has_any_real_provider:
         fallbacks.append(DevProvider())
@@ -327,6 +372,32 @@ def create_multi_llm_manager() -> MultiLLMManager:
             priority=2,
         )
 
+    if settings.gemini_api_key:
+        from backend.llm.gemini_provider import GeminiProvider
+
+        manager.register_provider(
+            "gemini",
+            GeminiProvider(
+                base_url=getattr(
+                    settings, "gemini_base_url", "https://generativelanguage.googleapis.com/v1beta"
+                ),
+                api_key=settings.gemini_api_key,
+            ),
+            priority=2,
+        )
+
+    if settings.openrouter_api_key:
+        from backend.llm.openrouter_provider import OpenRouterProvider
+
+        manager.register_provider(
+            "openrouter",
+            OpenRouterProvider(
+                base_url=getattr(settings, "openrouter_base_url", "https://openrouter.ai/api/v1"),
+                api_key=settings.openrouter_api_key,
+            ),
+            priority=2,
+        )
+
     return manager
 
 
@@ -334,7 +405,7 @@ def create_llm_client(**overrides: Any) -> Any:
     """Create an LLM provider instance based on configuration.
 
     Reads ``llm_provider`` from settings (env var ``LLM_PROVIDER``).
-    Supported providers: ``ollama``/``local``, ``airllm``, ``openai``, ``deepseek``, ``kimi``, ``groq``, ``anthropic``.
+    Supported providers: ``ollama``/``local``, ``airllm``, ``openai``, ``deepseek``, ``kimi``, ``groq``, ``anthropic``, ``gemini``, ``openrouter``.
 
     If ``MULTI_LLM_ENABLED`` is true, returns a :class:`MultiLLMManager`
     configured with all available providers.
@@ -351,11 +422,20 @@ def create_llm_client(**overrides: Any) -> Any:
     """
     settings = get_settings()
 
+    # Runtime overrides from data/settings.json (set via Settings UI)
+    _runtime = _load_runtime_overrides()
+    if _runtime:
+        logger.info("Loaded %d runtime settings overrides", len(_runtime))
+
     if overrides.get("multi_llm_enabled", settings.multi_llm_enabled):
         logger.info("Multi-LLM manager enabled")
         return create_multi_llm_manager()
 
-    provider = overrides.get("llm_provider", settings.llm_provider).lower().strip()
+    provider = (
+        (overrides.get("llm_provider") or _runtime.get("llm_provider") or settings.llm_provider)
+        .lower()
+        .strip()
+    )
 
     if provider in ("local", "ollama"):
         base_url = overrides.get("ollama_host", settings.ollama_host)
@@ -391,7 +471,11 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "openai":
         from backend.llm.openai_provider import OpenAIProvider
 
-        api_key = overrides.get("openai_api_key", settings.openai_api_key)
+        api_key = (
+            overrides.get("openai_api_key", "")
+            or _runtime.get("openai_api_key")
+            or getattr(settings, "openai_api_key", "")
+        )
         if not api_key:
             logger.warning("OPENAI_API_KEY not set — requests will fail")
         logger.info("Using OpenAI provider")
@@ -403,7 +487,11 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "deepseek":
         from backend.llm.openai_provider import OpenAIProvider
 
-        api_key = overrides.get("deepseek_api_key", settings.deepseek_api_key)
+        api_key = (
+            overrides.get("deepseek_api_key", "")
+            or _runtime.get("deepseek_api_key")
+            or getattr(settings, "deepseek_api_key", "")
+        )
         if not api_key:
             logger.warning("DEEPSEEK_API_KEY not set — requests will fail")
         logger.info("Using DeepSeek provider")
@@ -415,7 +503,11 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "kimi":
         from backend.llm.kimi_provider import KimiProvider
 
-        api_key = overrides.get("kimi_api_key", settings.kimi_api_key)
+        api_key = (
+            overrides.get("kimi_api_key", "")
+            or _runtime.get("kimi_api_key")
+            or getattr(settings, "kimi_api_key", "")
+        )
         if not api_key:
             logger.warning("KIMI_API_KEY not set — requests will fail")
         logger.info("Using Kimi provider")
@@ -427,7 +519,11 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "groq":
         from backend.llm.openai_provider import OpenAIProvider
 
-        api_key = overrides.get("groq_api_key", settings.groq_api_key)
+        api_key = (
+            overrides.get("groq_api_key", "")
+            or _runtime.get("groq_api_key")
+            or getattr(settings, "groq_api_key", "")
+        )
         if not api_key:
             logger.warning("GROQ_API_KEY not set — requests will fail")
         logger.info("Using Groq provider")
@@ -439,12 +535,56 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "anthropic":
         from backend.llm.anthropic_provider import AnthropicProvider
 
-        api_key = overrides.get("anthropic_api_key", settings.anthropic_api_key)
+        api_key = (
+            overrides.get("anthropic_api_key", "")
+            or _runtime.get("anthropic_api_key")
+            or getattr(settings, "anthropic_api_key", "")
+        )
         if not api_key:
             logger.warning("ANTHROPIC_API_KEY not set — requests will fail")
         logger.info("Using Anthropic provider")
         return AnthropicProvider(
             base_url=overrides.get("anthropic_base_url", "https://api.anthropic.com"),
+            api_key=api_key,
+        )
+
+    if provider == "gemini":
+        from backend.llm.gemini_provider import GeminiProvider
+
+        api_key = (
+            overrides.get("gemini_api_key", "")
+            or _runtime.get("gemini_api_key")
+            or getattr(settings, "gemini_api_key", "")
+        )
+        if not api_key:
+            logger.warning("GEMINI_API_KEY not set — requests will fail")
+        logger.info("Using Gemini provider")
+        return GeminiProvider(
+            base_url=overrides.get(
+                "gemini_base_url",
+                getattr(
+                    settings, "gemini_base_url", "https://generativelanguage.googleapis.com/v1beta"
+                ),
+            ),
+            api_key=api_key,
+        )
+
+    if provider == "openrouter":
+        from backend.llm.openrouter_provider import OpenRouterProvider
+
+        api_key = (
+            overrides.get("openrouter_api_key", "")
+            or _runtime.get("openrouter_api_key")
+            or getattr(settings, "openrouter_api_key", "")
+        )
+        if not api_key:
+            logger.warning("OPENROUTER_API_KEY not set — requests will fail")
+        logger.info("Using OpenRouter provider")
+        return OpenRouterProvider(
+            base_url=overrides.get(
+                "openrouter_base_url",
+                getattr(settings, "openrouter_base_url", "https://openrouter.ai/api/v1"),
+            ),
             api_key=api_key,
         )
 

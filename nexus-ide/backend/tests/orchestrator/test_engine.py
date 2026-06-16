@@ -26,6 +26,7 @@ from backend.orchestrator.engine import (
     ExecutionContext,
     OrchestrationEngine,
     OrchestrationState,
+    _extract_tool_errors,
 )
 from backend.orchestrator.events import (
     EventBus,
@@ -407,6 +408,45 @@ class TestOrchestrationEngine:
         assert result.state == OrchestrationState.FAILED
         assert result.failed_tasks == 1
         assert len(result.errors) > 0
+
+    @pytest.mark.asyncio
+    async def test_task_fails_when_agent_output_contains_tool_error(
+        self, engine: OrchestrationEngine
+    ) -> None:
+        failing_output = (
+            '<event>tool_call|write_file|{"path": "x.txt", "content": "hi"}</event>'
+            "<event>tool_error|Permission denied: blocked path</event>"
+        )
+
+        async def _run_with_tool_error(_request):
+            for token in [failing_output]:
+                yield token
+
+        tool_fail_agent = MagicMock()
+        tool_fail_agent.name = "CODER"
+        tool_fail_agent.run = _run_with_tool_error
+        engine._registry["CODER"] = tool_fail_agent
+
+        t1 = TaskNode(name="Write file", agent="CODER")
+        plan = ExecutionPlan.from_steps("Tool fail", "Should fail on tool error", [t1], session_id="s1")
+        plan.approved = True
+
+        result = await engine.execute_plan(plan, "s1", auto_approve=True)
+        assert result.state == OrchestrationState.FAILED
+        assert result.failed_tasks == 1
+        artifact = result.task_results[t1.task_id]
+        assert artifact["status"] == "failed"
+
+
+class TestToolErrorExtraction:
+    def test_extract_tool_errors_from_react_output(self) -> None:
+        output = (
+            "Planning..."
+            "<event>tool_error|Write operation failed</event>"
+            "<event>tool_error|Disk full</event>"
+        )
+        errors = _extract_tool_errors(output)
+        assert errors == ["Write operation failed", "Disk full"]
 
 
 # ---------------------------------------------------------------------------

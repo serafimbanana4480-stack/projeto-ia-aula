@@ -22,9 +22,21 @@ import uvicorn  # noqa: E402
 if __name__ == "__main__":
     # reload=True causa RuntimeError/loops de subprocesso no Windows.
     # Usar reload=False por padrao; ativar reload apenas via variavel de ambiente.
-    uvicorn.run(
-        "backend.orchestrator.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=os.environ.get("NEXUS_UVICORN_RELOAD", "false").lower() in ("1", "true", "yes"),
-    )
+    #
+    # A porta e carregada a partir das definicoes da aplicacao (env BACKEND_PORT)
+    # para respeitar o .env e nao ficar hardcoded, evitando conflitos com
+    # processos que ja estejam a ouvir na porta 8000.
+    from backend.config.settings import get_settings  # noqa: E402
+
+    settings = get_settings()
+    print(f"NEXUS backend a arrancar em http://{settings.backend_host}:{settings.backend_port} (reload={settings.backend_reload})")
+    try:
+        uvicorn.run(
+            "backend.orchestrator.main:app",
+            host=settings.backend_host,
+            port=settings.backend_port,
+            reload=settings.backend_reload,
+        )
+    except KeyboardInterrupt:
+        print("Encerrado pelo utilizador")
+        sys.exit(0)

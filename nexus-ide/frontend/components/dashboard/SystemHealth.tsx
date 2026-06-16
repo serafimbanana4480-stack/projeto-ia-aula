@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { useMetricsStore } from "../../stores/metricsStore";
 import { useModelStore } from "../../stores/modelStore";
 import { getHealth, getModelStatus } from "../../lib/api";
@@ -20,92 +20,102 @@ export default function SystemHealth() {
   const [lastUpdate, setLastUpdate] = useState<string>("—");
 
   const metrics = useMetricsStore((s) => s.metrics);
-  const backendOnline = useMetricsStore((s) => s.backendOnline);
-  const modelsLoaded = useModelStore((s) => s.modelsLoaded);
-  const rawModelStatus = useModelStore((s) => s.rawModelStatus);
 
   // Use dedicated lightweight endpoints; avoid calling /api/projects here
   // because the projectStore already loads it once via DataInitProvider.
-  const performHealthChecks = useCallback(async () => {
-    setLoading(true);
-    const startAll = Date.now();
-
-    const [localLlmRes, backendRes] = await Promise.allSettled([
-      getModelStatus().then(() => ({
-        ok: true,
-        latency: Date.now() - startAll,
-      })).catch(() => ({
-        ok: false,
-        latency: Date.now() - startAll,
-      })),
-      getHealth().then(() => ({
-        ok: true,
-        latency: Date.now() - startAll,
-      })).catch(() => ({
-        ok: false,
-        latency: Date.now() - startAll,
-      })),
-    ]);
-
-    const now = new Date().toISOString();
-    const healthChecks: HealthCheck[] = [
-      {
-        name: "Local LLM",
-        status: localLlmRes.status === "fulfilled" && localLlmRes.value.ok ? "healthy" : "unhealthy",
-        latency_ms: localLlmRes.status === "fulfilled" ? localLlmRes.value.latency : undefined,
-        message: localLlmRes.status === "rejected" ? "Connection refused" : undefined,
-        last_check: now,
-        icon: <Cpu className="h-3.5 w-3.5" />,
-      },
-      {
-        name: "Backend",
-        status: backendRes.status === "fulfilled" && backendRes.value.ok ? "healthy" : "unhealthy",
-        latency_ms: backendRes.status === "fulfilled" ? backendRes.value.latency : undefined,
-        message: backendRes.status === "rejected" ? "Connection refused" : undefined,
-        last_check: now,
-        icon: <Server className="h-3.5 w-3.5" />,
-      },
-      {
-        name: "Metrics",
-        status: backendOnline ? "healthy" : "unhealthy",
-        message: backendOnline ? undefined : "No metrics received",
-        last_check: now,
-        icon: <Activity className="h-3.5 w-3.5" />,
-      },
-      {
-        name: "Database",
-        status: backendRes.status === "fulfilled" && backendRes.value.ok ? "healthy" : "unhealthy",
-        latency_ms: backendRes.status === "fulfilled" ? backendRes.value.latency : undefined,
-        message: backendRes.status === "rejected" ? "Connection refused" : undefined,
-        last_check: now,
-        icon: <Database className="h-3.5 w-3.5" />,
-      },
-      {
-        name: "Event Stream",
-        status: backendOnline ? "healthy" : "unhealthy",
-        message: backendOnline ? undefined : "SSE disconnected",
-        last_check: now,
-        icon: <Wifi className="h-3.5 w-3.5" />,
-      },
-      {
-        name: "Model Registry",
-        status: modelsLoaded && rawModelStatus.length > 0 ? "healthy" : modelsLoaded ? "degraded" : "unknown",
-        message: modelsLoaded ? undefined : "Models not loaded yet",
-        last_check: now,
-        icon: <Cpu className="h-3.5 w-3.5" />,
-      },
-    ];
-
-    setChecks(healthChecks);
-    setLastUpdate(new Date().toLocaleTimeString());
-    setLoading(false);
-  }, [backendOnline, modelsLoaded, rawModelStatus.length]);
-
   useEffect(() => {
-    performHealthChecks();
-    const interval = setInterval(performHealthChecks, 30000);
-    return () => clearInterval(interval);
-  }, [performHealthChecks]);
+    let mounted = true;
+
+    const run = async () => {
+      if (!mounted) return;
+      setLoading(true);
+
+      const startAll = Date.now();
+
+      const [localLlmRes, backendRes] = await Promise.allSettled([
+        getModelStatus().then(() => ({
+          ok: true,
+          latency: Date.now() - startAll,
+        })).catch(() => ({
+          ok: false,
+          latency: Date.now() - startAll,
+        })),
+        getHealth().then(() => ({
+          ok: true,
+          latency: Date.now() - startAll,
+        })).catch(() => ({
+          ok: false,
+          latency: Date.now() - startAll,
+        })),
+      ]);
+
+      if (!mounted) return;
+
+      const now = new Date().toISOString();
+      const currentBackendOnline = useMetricsStore.getState().backendOnline;
+      const currentModelsLoaded = useModelStore.getState().modelsLoaded;
+      const currentRawModelStatus = useModelStore.getState().rawModelStatus;
+
+      const healthChecks: HealthCheck[] = [
+        {
+          name: "Local LLM",
+          status: localLlmRes.status === "fulfilled" && localLlmRes.value.ok ? "healthy" : "unhealthy",
+          latency_ms: localLlmRes.status === "fulfilled" ? localLlmRes.value.latency : undefined,
+          message: localLlmRes.status === "rejected" ? "Connection refused" : undefined,
+          last_check: now,
+          icon: <Cpu className="h-3.5 w-3.5" />,
+        },
+        {
+          name: "Backend",
+          status: backendRes.status === "fulfilled" && backendRes.value.ok ? "healthy" : "unhealthy",
+          latency_ms: backendRes.status === "fulfilled" ? backendRes.value.latency : undefined,
+          message: backendRes.status === "rejected" ? "Connection refused" : undefined,
+          last_check: now,
+          icon: <Server className="h-3.5 w-3.5" />,
+        },
+        {
+          name: "Metrics",
+          status: currentBackendOnline ? "healthy" : "unhealthy",
+          message: currentBackendOnline ? undefined : "No metrics received",
+          last_check: now,
+          icon: <Activity className="h-3.5 w-3.5" />,
+        },
+        {
+          name: "Database",
+          status: backendRes.status === "fulfilled" && backendRes.value.ok ? "healthy" : "unhealthy",
+          latency_ms: backendRes.status === "fulfilled" ? backendRes.value.latency : undefined,
+          message: backendRes.status === "rejected" ? "Connection refused" : undefined,
+          last_check: now,
+          icon: <Database className="h-3.5 w-3.5" />,
+        },
+        {
+          name: "Event Stream",
+          status: currentBackendOnline ? "healthy" : "unhealthy",
+          message: currentBackendOnline ? undefined : "SSE disconnected",
+          last_check: now,
+          icon: <Wifi className="h-3.5 w-3.5" />,
+        },
+        {
+          name: "Model Registry",
+          status: currentModelsLoaded && currentRawModelStatus.length > 0 ? "healthy" : currentModelsLoaded ? "degraded" : "unknown",
+          message: currentModelsLoaded ? undefined : "Models not loaded yet",
+          last_check: now,
+          icon: <Cpu className="h-3.5 w-3.5" />,
+        },
+      ];
+
+      setChecks(healthChecks);
+      setLastUpdate(new Date().toLocaleTimeString());
+      setLoading(false);
+    };
+
+    run();
+    const interval = setInterval(run, 30000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
 
   const overallStatus = useMemo(() => {
     if (checks.length === 0) return "unknown";

@@ -5,17 +5,8 @@
 models:
   # MICRO — perguntas triviais (1+1, classificação rápida)
   micro:
-    id: "qwen2.5:0.5b"
-    fallback_id: "qwen2.5:0.5b"
-    thinking_mode: false
-    max_tokens: 512
-    temperature: 0.3
-    use_cases: [trivial_qa, routing, classification]
-
-  # FAST — respostas rápidas, formatação leve
-  fast:
-    id: "qwen2.5:1.5b"
-    fallback_id: "qwen2.5:1.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "openrouter/auto"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.7
@@ -23,8 +14,8 @@ models:
 
   # CODER — geração e análise de código
   coder:
-    id: "qwen2.5-coder:1.5b"
-    fallback_id: "qwen2.5-coder:1.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "google/gemini-2.0-flash-exp:free"
     thinking_mode: false
     max_tokens: 8192
     temperature: 0.2
@@ -32,8 +23,8 @@ models:
 
   # REASONING — raciocínio multi-step com thinking
   reasoning:
-    id: "qwen2.5-coder:1.5b"
-    fallback_id: "qwen2.5-coder:1.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "google/gemini-2.0-flash-exp:free"
     thinking_mode: true
     max_tokens: 8192
     temperature: 0.5
@@ -41,8 +32,8 @@ models:
 
   # DEEP — análises complexas, arquitetura (uses 1.5B on CPU; promote to 7B on GPU)
   deep:
-    id: "qwen2.5-coder:1.5b"
-    fallback_id: "qwen2.5-coder:1.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "google/gemini-2.0-flash-exp:free"
     thinking_mode: true
     max_tokens: 16384
     temperature: 0.4
@@ -50,8 +41,8 @@ models:
 
   # Q3B-4BIT — alias legado mantido por compatibilidade; no Ollama usa 3B padrão
   q3b-4bit:
-    id: "qwen2.5-coder:1.5b"
-    fallback_id: "qwen2.5-coder:1.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "google/gemini-2.0-flash-exp:free"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.5
@@ -59,8 +50,8 @@ models:
 
   # CODER3B-4BIT — alias legado mantido por compatibilidade; no Ollama usa 3B padrão
   coder3b-4bit:
-    id: "qwen2.5-coder:1.5b"
-    fallback_id: "qwen2.5-coder:1.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "google/gemini-2.0-flash-exp:free"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.2
@@ -68,36 +59,36 @@ models:
 
   # Aliases retro-compatibilidade (legacy registry)
   nano:
-    id: "qwen2.5:0.5b"
-    fallback_id: "qwen2.5:0.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "google/gemini-2.0-flash-exp:free"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.1
     use_cases: [routing]
   small:
-    id: "qwen2.5:1.5b"
-    fallback_id: "qwen2.5:1.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "google/gemini-2.0-flash-exp:free"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.7
     use_cases: [general_tasks]
   medium:
-    id: "qwen2.5-coder:1.5b"
-    fallback_id: "qwen2.5-coder:1.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "google/gemini-2.0-flash-exp:free"
     thinking_mode: false
     max_tokens: 8192
     temperature: 0.3
     use_cases: [code_generation]
   large:
-    id: "qwen2.5-coder:1.5b"
-    fallback_id: "qwen2.5-coder:1.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "google/gemini-2.0-flash-exp:free"
     thinking_mode: true
     max_tokens: 8192
     temperature: 0.7
     use_cases: [reasoning]
   expert:
-    id: "qwen2.5-coder:1.5b"
-    fallback_id: "qwen2.5-coder:1.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "google/gemini-2.0-flash-exp:free"
     thinking_mode: true
     max_tokens: 16384
     temperature: 0.3
@@ -110,15 +101,15 @@ models:
     temperature: 0.7
     use_cases: [image_analysis]
   embed:
-    id: "nomic-embed-text"
+    id: "openai/text-embedding-3-small"
     fallback_id: "llama3.1:8b"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.0
     use_cases: [retrieval]
   dashboard:
-    id: "qwen2.5-coder:1.5b"
-    fallback_id: "qwen2.5-coder:1.5b"
+    id: "google/gemini-2.0-flash-exp:free"
+    fallback_id: "google/gemini-2.0-flash-exp:free"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.5
@@ -229,6 +220,24 @@ providers:
     default_models:
       - "llama-3.1-70b-versatile"
       - "mixtral-8x7b-32768"
+  openrouter:
+    name: "OpenRouter"
+    base_url: "https://openrouter.ai/api/v1"
+    requires_api_key: true
+    default_models:
+      - "openai/gpt-4o"
+      - "anthropic/claude-3.5-sonnet"
+      - "google/gemini-2.0-flash"
+      - "deepseek/deepseek-chat"
+      - "meta-llama/llama-4-maverick"
+  gemini:
+    name: "Google Gemini"
+    base_url: "https://generativelanguage.googleapis.com/v1beta"
+    requires_api_key: true
+    default_models:
+      - "gemini-2.0-flash"
+      - "gemini-1.5-pro"
+      - "gemini-1.5-flash-lite"
 
 rate_limits:
   requests_per_minute: 60

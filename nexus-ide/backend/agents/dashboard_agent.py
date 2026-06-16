@@ -231,14 +231,14 @@ class DashboardAgent(AgentBase):
 
         try:
             from backend.persistence.db import get_message_statistics
-            stats = get_message_statistics()
+            stats = await asyncio.to_thread(get_message_statistics)
             snapshot["message_stats"] = stats
         except Exception as exc:
             logger.warning("Failed to get message stats: %s", exc)
             snapshot["message_stats_error"] = str(exc)
 
         try:
-            db_stats = self._collect_db_stats()
+            db_stats = await asyncio.to_thread(self._collect_db_stats)
             snapshot["db_stats"] = db_stats
         except Exception as exc:
             logger.warning("Failed to collect DB stats: %s", exc)
@@ -426,14 +426,14 @@ class DashboardAgent(AgentBase):
         """Produce a 5-minute session and routing quality summary."""
         try:
             from backend.persistence.db import get_message_statistics
-            stats = get_message_statistics()
+            stats = await asyncio.to_thread(get_message_statistics)
         except Exception:
             stats = {}
 
         if not stats.get("total_messages", 0):
             return None
 
-        routing_score = self._compute_routing_quality_score()
+        routing_score = await self._compute_routing_quality_score()
 
         return {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -445,20 +445,27 @@ class DashboardAgent(AgentBase):
             "recent_alert_count": len(self._alerts),
         }
 
-    def _compute_routing_quality_score(self) -> float:
+    async def _compute_routing_quality_score(self) -> float:
         """Heuristic routing quality score 0-1 based on recent DB data."""
-        from backend.persistence.db import get_db
+
+        def _query() -> float:
+            from backend.persistence.db import get_db
+
+            try:
+                with get_db() as conn:
+                    row = conn.execute(
+                        "SELECT AVG(confidence) AS avg_confidence, COUNT(*) AS cnt "
+                        "FROM routing_decisions WHERE created_at > datetime('now', '-30 minutes')"
+                    ).fetchone()
+                    if not row or row["cnt"] == 0:
+                        return 0.0
+                    confidence = row["avg_confidence"] or 0
+                    return round(min(1.0, max(0.0, confidence)), 2)
+            except Exception:
+                return 0.0
 
         try:
-            with get_db() as conn:
-                row = conn.execute(
-                    "SELECT AVG(confidence) AS avg_confidence, COUNT(*) AS cnt "
-                    "FROM routing_decisions WHERE created_at > datetime('now', '-30 minutes')"
-                ).fetchone()
-                if not row or row["cnt"] == 0:
-                    return 0.0
-                confidence = row["avg_confidence"] or 0
-                return round(min(1.0, max(0.0, confidence)), 2)
+            return await asyncio.to_thread(_query)
         except Exception:
             return 0.0
 

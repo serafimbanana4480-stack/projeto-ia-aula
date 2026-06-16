@@ -3,7 +3,6 @@
 import { useEffect, useState, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { isTokenValid, clearAuth } from "../../lib/auth";
-import { initMetricsStream } from "../../stores/metricsStore";
 
 const PUBLIC_PATHS = ["/login"];
 
@@ -37,15 +36,6 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
     try {
       const isPublic = PUBLIC_PATHS.includes(pathname);
       const valid = isTokenValid();
-
-      if (valid) {
-        // Ensure the metrics stream is running after (re-)authentication.
-        try {
-          initMetricsStream();
-        } catch {
-          /* ignore init errors */
-        }
-      }
 
       if (!isPublic && !valid) {
         // Clean expired/invalid token immediately to prevent repeated loops.

@@ -4,8 +4,11 @@ import type { ModelStatus } from "../lib/types";
 
 interface Model {
   id: string;
+  name?: string;
   tier: string;
   size_gb: number;
+  provider?: string;
+  parameter_size?: string;
   status: "available" | "loading" | "error";
 }
 
@@ -37,10 +40,13 @@ export const useModelStore = create<ModelStore>((set, get) => ({
       const data = await getModelStatus();
       const mapped = data.map((m) => ({
         id: m.id.split(":")[0] || m.id,
+        name: m.details?.name || m.id,
         tier: m.details?.parameter_size
           ? `${m.details.parameter_size}B`
           : m.id.toUpperCase(),
         size_gb: m.size_bytes ? m.size_bytes / 1e9 : 0,
+        provider: m.details?.provider || (m.id.includes(":") ? m.id.split(":")[0] : "ollama"),
+        parameter_size: typeof m.details?.parameter_size === "number" ? `${m.details.parameter_size}B` : undefined,
         status: (m.status || "available") as Model["status"],
       }));
       set({

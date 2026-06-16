@@ -9,14 +9,17 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
+from backend.middleware.auth import decode_access_token
 from backend.observability.metrics_collector import get_metrics_collector
 from backend.observability.metrics_store import get_metrics_store
 from backend.persistence.db import (
     count_pending_changes,
+    get_agent_activity,
     get_change_statistics,
     get_message_statistics,
 )
@@ -35,28 +38,24 @@ async def _get_active_session_count(request: Request) -> int:
     return 0
 
 
-@router.get("/metrics")
-async def get_metrics_index(request: Request) -> dict:
-    """Return available metrics endpoints."""
-    return {
-        "endpoints": {
-            "current": "/api/metrics/current",
-            "history": "/api/metrics/history",
-            "flow": "/api/metrics/flow",
-            "analytics": "/api/metrics/analytics",
-        }
-    }
+async def _get_stats() -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        msg_stats = await asyncio.to_thread(get_message_statistics)
+        chg_stats = await asyncio.to_thread(get_change_statistics)
+        return msg_stats, chg_stats
+    except Exception as exc:
+        logger.warning("Failed to load stats for metrics: %s", exc)
+        return {}, {}
 
 
-@router.get("/metrics/current")
-async def get_current_metrics(request: Request) -> dict:
-    """Get current metrics snapshot."""
+async def _build_current_metrics_payload(request: Request) -> dict[str, Any]:
+    """Assemble the metrics dict shared by REST and SSE endpoints."""
     collector = get_metrics_collector()
 
-    message_stats = get_message_statistics()
-    change_stats = get_change_statistics()
+    message_stats, change_stats = await _get_stats()
     active_sessions = await _get_active_session_count(request)
-    queue_depth = count_pending_changes()
+    queue_depth = await asyncio.to_thread(count_pending_changes)
+    agent_activity = await asyncio.to_thread(get_agent_activity)
 
     snapshot = await collector.get_snapshot(
         active_sessions=active_sessions, queue_depth=queue_depth
@@ -82,75 +81,63 @@ async def get_current_metrics(request: Request) -> dict:
         "timestamp": snapshot.timestamp,
         "message_stats": message_stats,
         "change_stats": change_stats,
+        "agent_activity": agent_activity,
     }
 
 
-@router.get("/metrics/history")
-async def get_metrics_history(seconds: int = 3600, metric: str = "tokens_per_second") -> list[dict]:
-    """Get historical metrics for timeline charts."""
-    store = get_metrics_store()
-    return await store.get_timeline(seconds=seconds, metric=metric)
+def _validate_stream_auth(request: Request, token: str | None) -> None:
+    """Authenticate SSE clients that cannot send Authorization headers."""
+    auth_header = request.headers.get("Authorization", "")
+    bearer = (
+        auth_header.removeprefix("Bearer ").strip()
+        if auth_header.startswith("Bearer ")
+        else None
+    )
+    jwt_token = bearer or token
+    if not jwt_token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    decode_access_token(jwt_token)
 
 
-@router.get("/metrics/history/multi")
-async def get_metrics_history_multi(seconds: int = 3600) -> dict:
-    """Get historical metrics for multiple metrics."""
-    store = get_metrics_store()
-    return await store.get_timeline_multi(seconds=seconds)
+@router.get("/metrics")
+async def get_metrics_index(request: Request) -> dict:
+    """Return available metrics endpoints."""
+    return {
+        "endpoints": {
+            "current": "/api/metrics/current",
+            "history": "/api/metrics/history",
+            "flow": "/api/metrics/flow",
+            "analytics": "/api/metrics/analytics",
+        }
+    }
+
+
+@router.get("/metrics/current")
+async def get_current_metrics(request: Request) -> dict:
+    """Get current metrics snapshot."""
+    return await _build_current_metrics_payload(request)
 
 
 @router.get("/dashboard/stream")
-async def dashboard_stream(request: Request) -> StreamingResponse:
-    """Stream real-time metrics via SSE.
+async def dashboard_metrics_stream(
+    request: Request,
+    token: str | None = Query(None, description="JWT for EventSource clients"),
+) -> StreamingResponse:
+    """Stream metrics snapshots over SSE for the dashboard."""
+    _validate_stream_auth(request, token)
 
-    Returns a Server-Sent Events stream with periodic metric snapshots.
-    """
-    collector = get_metrics_collector()
-    store = get_metrics_store()
-
-    async def event_generator() -> AsyncIterator[str]:
-        """Generate SSE events with metric snapshots."""
+    async def event_stream() -> AsyncIterator[str]:
         while True:
-            # Get current metrics
-            active_sessions = await _get_active_session_count(request)
-            queue_depth = count_pending_changes()
-            snapshot = await collector.get_snapshot(
-                active_sessions=active_sessions, queue_depth=queue_depth
-            )
-
-            # Store for history
-            await store.add_snapshot(snapshot)
-
-            # Format as SSE event
-            metrics = {
-                "tokens_per_second": snapshot.tokens_per_second,
-                "active_model": snapshot.active_model,
-                "active_sessions": snapshot.active_sessions,
-                "queue_depth": snapshot.queue_depth,
-                "ram_used_bytes": snapshot.ram_used_bytes,
-                "ram_total_bytes": snapshot.ram_total_bytes,
-                "ram_percent": snapshot.ram_percent,
-                "cpu_percent": snapshot.cpu_percent,
-                "disk_used_bytes": snapshot.disk_used_bytes,
-                "disk_total_bytes": snapshot.disk_total_bytes,
-                "disk_percent": snapshot.disk_percent,
-                "uptime_seconds": snapshot.uptime_seconds,
-                "requests_total": snapshot.requests_total,
-                "requests_successful": snapshot.requests_successful,
-                "requests_failed": snapshot.requests_failed,
-                "avg_latency_ms": snapshot.avg_latency_ms,
-                "timestamp": snapshot.timestamp,
-                "message_stats": get_message_statistics(),
-                "change_stats": get_change_statistics(),
-            }
-            yield f"data: {json.dumps(metrics)}\n\n"
-            await asyncio.sleep(1)  # Update every second
+            payload = await _build_current_metrics_payload(request)
+            yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+            await asyncio.sleep(3)
 
     return StreamingResponse(
-        event_generator(),
+        event_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
         },
     )
@@ -255,8 +242,7 @@ async def get_analytics(request: Request) -> dict:
 
     # Get historical data
     history = await store.get_timeline_multi(seconds=3600)
-    message_stats = get_message_statistics()
-    change_stats = get_change_statistics()
+    message_stats, change_stats = await _get_stats()
 
     return {
         "current": {

@@ -116,8 +116,8 @@ class EmbeddingService:
             if result:
                 self._dimension = len(result)
             return result
-        except (ImportError, RuntimeError):
-            pass
+        except (ImportError, RuntimeError) as exc:
+            logger.debug("Shared embedding unavailable, trying direct provider: %s", exc)
 
         # Direct provider call as secondary fallback
         try:
@@ -128,8 +128,8 @@ class EmbeddingService:
             if result and result[0]:
                 self._dimension = len(result[0])
                 return result[0]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Direct embedding provider failed, using deterministic fallback: %s", exc)
 
         # Final deterministic fallback
         return self._fallback_embed(text)

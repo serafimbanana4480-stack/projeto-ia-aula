@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 EVOLUTION_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "evolution_log.md"
-REPORT_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "self_improvement_report.json"
+REPORT_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "data" / "self_improvement_report.json"
+)
 
 # ---------------------------------------------------------------------------
 # Models
@@ -214,7 +216,9 @@ class SelfImprovementAnalyzer:
                     "success_rate": round(success_count / total, 2) if total else 0.0,
                     "avg_elapsed_seconds": round(
                         sum(r.get("elapsed_seconds", 0) for r in runs) / total, 2
-                    ) if total else 0.0,
+                    )
+                    if total
+                    else 0.0,
                 }
         except Exception as exc:
             logger.warning("Agent success rate analysis failed: %s", exc)
@@ -283,7 +287,9 @@ class SelfImprovementAnalyzer:
             tokens: list[int] = []
             for row in rows:
                 try:
-                    data = json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
+                    data = (
+                        json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
+                    )
                 except json.JSONDecodeError:
                     continue
                 status = data.get("status", "")
@@ -302,9 +308,7 @@ class SelfImprovementAnalyzer:
                 tokens.append(data.get("tokens_used", 0))
 
             if durations:
-                outcomes["avg_duration_seconds"] = round(
-                    sum(durations) / len(durations), 2
-                )
+                outcomes["avg_duration_seconds"] = round(sum(durations) / len(durations), 2)
             if tokens:
                 outcomes["avg_tokens_used"] = round(sum(tokens) / len(tokens), 2)
         except Exception as exc:
@@ -324,7 +328,7 @@ class SelfImprovementAnalyzer:
                     ImprovementProposal(
                         category="prompt",
                         target=aname,
-                        problem=f"Success rate {stats['success_rate']*100:.0f}% over {stats['total_runs']} runs",
+                        problem=f"Success rate {stats['success_rate'] * 100:.0f}% over {stats['total_runs']} runs",
                         proposed_change=f"Review and refine system prompt for {aname}; add examples for common failure cases.",
                         expected_impact="Increase success rate to >85%",
                         confidence=0.6,
@@ -354,7 +358,10 @@ class SelfImprovementAnalyzer:
                 )
             )
         # If no embeddings tool is used but agents do a lot of search_codebase
-        if tool_stats.get("search_codebase", 0) > 30 and tool_stats.get("embeddings_search", 0) == 0:
+        if (
+            tool_stats.get("search_codebase", 0) > 30
+            and tool_stats.get("embeddings_search", 0) == 0
+        ):
             proposals.append(
                 ImprovementProposal(
                     category="tool",
@@ -410,14 +417,16 @@ class SelfImprovementAnalyzer:
         failure_rate = 0.0
         total = mission_outcomes.get("total_missions", 0)
         if total:
-            failure_rate = (mission_outcomes.get("failed", 0) + mission_outcomes.get("aborted", 0)) / total
+            failure_rate = (
+                mission_outcomes.get("failed", 0) + mission_outcomes.get("aborted", 0)
+            ) / total
 
         if failure_rate > 0.3:
             proposals.append(
                 ImprovementProposal(
                     category="architecture",
                     target="orchestrator",
-                    problem=f"Mission failure rate is {failure_rate*100:.0f}%.",
+                    problem=f"Mission failure rate is {failure_rate * 100:.0f}%.",
                     proposed_change="Add a pre-flight validation agent that checks feasibility before spawning missions.",
                     expected_impact="Reduce mission failures to <15%",
                     confidence=0.4,
@@ -425,10 +434,7 @@ class SelfImprovementAnalyzer:
             )
 
         # Identify agents with very low usage that could be merged
-        low_usage = [
-            aname for aname, stats in agent_rates.items()
-            if stats["total_runs"] < 2
-        ]
+        low_usage = [aname for aname, stats in agent_rates.items() if stats["total_runs"] < 2]
         if len(low_usage) >= 3:
             proposals.append(
                 ImprovementProposal(
@@ -498,7 +504,9 @@ class SelfImprovementAnalyzer:
             else:
                 lines.append("# NEXUS IDE Evolution Log")
                 lines.append("")
-                lines.append("This file tracks all major architectural and quality decisions made by the META_ANALYZER agent.")
+                lines.append(
+                    "This file tracks all major architectural and quality decisions made by the META_ANALYZER agent."
+                )
                 lines.append("")
 
             entries_added = 0
@@ -507,7 +515,9 @@ class SelfImprovementAnalyzer:
                     continue
                 lines.append("---")
                 lines.append("")
-                lines.append(f"## [{proposal.category.upper()}] {proposal.target} — {datetime.now(UTC).strftime('%Y-%m-%d')}")
+                lines.append(
+                    f"## [{proposal.category.upper()}] {proposal.target} — {datetime.now(UTC).strftime('%Y-%m-%d')}"
+                )
                 lines.append("")
                 lines.append(f"**Problem:** {proposal.problem}")
                 lines.append("")
@@ -528,3 +538,157 @@ class SelfImprovementAnalyzer:
         except Exception as exc:
             logger.warning("Failed to append to evolution log: %s", exc)
             return 0
+
+    # -- auto-apply approved proposals ----------------------------------------
+
+    async def auto_apply_approved(
+        self,
+        report: SelfImprovementReport,
+        min_confidence: float = 0.7,
+        require_meta_approval: bool = True,
+    ) -> dict[str, Any]:
+        """Automatically apply approved high-confidence proposals.
+
+        Args:
+            report: The self-improvement report containing proposals.
+            min_confidence: Minimum confidence threshold for auto-apply.
+            require_meta_approval: If True, only apply proposals marked as approved.
+
+        Returns:
+            Dict with applied count, skipped count, and any errors.
+        """
+        results = {
+            "applied": [],
+            "skipped": [],
+            "errors": [],
+        }
+
+        for proposal in report.proposals:
+            if proposal.confidence < min_confidence:
+                results["skipped"].append(
+                    {
+                        "id": proposal.id,
+                        "reason": f"Confidence {proposal.confidence} below threshold {min_confidence}",
+                    }
+                )
+                continue
+
+            if require_meta_approval and not proposal.approved:
+                results["skipped"].append(
+                    {
+                        "id": proposal.id,
+                        "reason": "Not approved by META_ANALYZER",
+                    }
+                )
+                continue
+
+            try:
+                applied = await self._apply_proposal(proposal)
+                if applied:
+                    results["applied"].append(
+                        {
+                            "id": proposal.id,
+                            "target": proposal.target,
+                            "category": proposal.category,
+                        }
+                    )
+                    proposal.approved = True
+                    proposal.approved_by = "AUTO_APPLY"
+                    # Update evolution log status
+                    self._update_evolution_log_status(proposal.id, "AUTO_APPLIED")
+                else:
+                    results["skipped"].append(
+                        {
+                            "id": proposal.id,
+                            "reason": "No applicable auto-apply handler for category",
+                        }
+                    )
+            except Exception as exc:
+                results["errors"].append(
+                    {
+                        "id": proposal.id,
+                        "error": str(exc),
+                    }
+                )
+                logger.exception("Auto-apply failed for proposal %s", proposal.id)
+
+        return results
+
+    async def _apply_proposal(self, proposal: ImprovementProposal) -> bool:
+        """Apply a single proposal based on its category."""
+        if proposal.category == "prompt":
+            return await self._apply_prompt_refinement(proposal)
+        elif proposal.category == "tool":
+            return await self._apply_tool_creation(proposal)
+        elif proposal.category == "budget":
+            return await self._apply_budget_adjustment(proposal)
+        elif proposal.category == "architecture":
+            return await self._apply_architecture_change(proposal)
+        return False
+
+    async def _apply_prompt_refinement(self, proposal: ImprovementProposal) -> bool:
+        """Apply prompt refinement by updating the agent's system prompt."""
+        try:
+            from backend.config.settings import load_prompt
+
+            # Load current prompt
+            current_prompt = load_prompt(proposal.target)
+
+            # For auto-apply, we append a refinement note
+            # In practice, this would use an LLM to rewrite the prompt
+            refinement_note = f"\n\n# AUTO-REFINEMENT ({datetime.now(UTC).isoformat()})\n# Problem: {proposal.problem}\n# Action: {proposal.proposed_change}\n"
+            new_prompt = current_prompt + refinement_note
+
+            # Save updated prompt (would need write access to config/prompts/)
+            prompt_path = (
+                Path(__file__).resolve().parent.parent
+                / "config"
+                / "prompts"
+                / f"{proposal.target}.md"
+            )
+            if prompt_path.exists():
+                prompt_path.write_text(new_prompt, encoding="utf-8")
+                logger.info("Applied prompt refinement for %s", proposal.target)
+                return True
+        except Exception as exc:
+            logger.warning("Failed to apply prompt refinement for %s: %s", proposal.target, exc)
+        return False
+
+    async def _apply_tool_creation(self, proposal: ImprovementProposal) -> bool:
+        """Tool creation requires manual implementation - log for review."""
+        logger.info(
+            "Tool creation proposal logged for manual implementation: %s", proposal.proposed_change
+        )
+        return False  # Cannot auto-create tools safely
+
+    async def _apply_budget_adjustment(self, proposal: ImprovementProposal) -> bool:
+        """Apply budget adjustment by updating agent lifecycle config."""
+        try:
+            # This would modify the agent's token/time budget in the registry
+            # For now, log the recommendation
+            logger.info(
+                "Budget adjustment proposed for %s: %s", proposal.target, proposal.proposed_change
+            )
+            # Actual implementation would update agent registry config
+            return False  # Requires integration with agent lifecycle config
+        except Exception as exc:
+            logger.warning("Failed to apply budget adjustment: %s", exc)
+        return False
+
+    async def _apply_architecture_change(self, proposal: ImprovementProposal) -> bool:
+        """Architecture changes require manual review."""
+        logger.info("Architecture change proposal logged for review: %s", proposal.proposed_change)
+        return False
+
+    def _update_evolution_log_status(self, proposal_id: str, status: str) -> None:
+        """Update the status of a proposal in the evolution log."""
+        try:
+            if not EVOLUTION_LOG_PATH.exists():
+                return
+            text = EVOLUTION_LOG_PATH.read_text(encoding="utf-8")
+            # Simple replacement - in production use proper parsing
+            updated = text.replace(f"ID: {proposal_id}", f"ID: {proposal_id}\n**Status:** {status}")
+            if updated != text:
+                EVOLUTION_LOG_PATH.write_text(updated, encoding="utf-8")
+        except Exception:
+            pass

@@ -25,21 +25,23 @@ SETTINGS_PATH = Path("data/settings.json")
 
 def _load_modes() -> dict:
     try:
-        with open("config/modes.yaml") as f:
-            return yaml.safe_load(f)
+        from backend.config.settings import MODES_YAML
+
+        with MODES_YAML.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {"modes": {}}
     except Exception:
         return {"modes": {}}
 
 
 @router.get("/modes")
-async def list_modes() -> dict:
+async def list_modes(_user: dict = Depends(require_auth)) -> dict:
     """List all available cognitive modes."""
     config = _load_modes()
     return {"modes": config.get("modes", {})}
 
 
 @router.get("/modes/{mode_name}")
-async def get_mode(mode_name: str) -> dict:
+async def get_mode(mode_name: str, _user: dict = Depends(require_auth)) -> dict:
     """Get details of a specific mode."""
     config = _load_modes()
     modes = config.get("modes", {})
@@ -49,7 +51,7 @@ async def get_mode(mode_name: str) -> dict:
 
 
 @router.get("/tools")
-async def list_tools() -> dict:
+async def list_tools(_user: dict = Depends(require_auth)) -> dict:
     """List all available tools and their status."""
     from backend.tools.registry import list_tools
 
@@ -91,6 +93,14 @@ class SettingsUpdate(BaseModel):
     default_mode: str | None = None
     default_model: str | None = None
     enable_telemetry: bool | None = None
+    llm_provider: str | None = None
+    openai_api_key: str | None = None
+    deepseek_api_key: str | None = None
+    kimi_api_key: str | None = None
+    groq_api_key: str | None = None
+    anthropic_api_key: str | None = None
+    gemini_api_key: str | None = None
+    openrouter_api_key: str | None = None
 
 
 def _load_settings() -> dict:
@@ -101,6 +111,14 @@ def _load_settings() -> dict:
         "default_mode": "auto",
         "default_model": "coder",
         "enable_telemetry": True,
+        "llm_provider": get_settings().llm_provider,
+        "openai_api_key": "",
+        "deepseek_api_key": "",
+        "kimi_api_key": "",
+        "groq_api_key": "",
+        "anthropic_api_key": "",
+        "gemini_api_key": "",
+        "openrouter_api_key": "",
     }
     if SETTINGS_PATH.exists():
         try:

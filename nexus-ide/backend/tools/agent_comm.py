@@ -113,8 +113,8 @@ async def consult_agent(
             from backend.orchestrator.main import app
             if hasattr(app.state, "llm_client"):
                 client = app.state.llm_client
-        except (ImportError, AttributeError):
-            pass
+        except (ImportError, AttributeError) as exc:
+            logger.debug("Could not reuse shared LLM client, will create new one: %s", exc)
 
         if client is None:
             from backend.llm import create_llm_client
@@ -167,8 +167,8 @@ async def consult_agent(
             # We created this client — close it
             try:
                 await client.aclose()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to close temporary LLM client: %s", exc)
 
         if not response_text.strip():
             return {

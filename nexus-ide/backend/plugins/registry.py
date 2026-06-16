@@ -1,21 +1,20 @@
-"""Plugin System — extensible plugin registry for NEXUS IDE.
+"""
+NEXUS IDE — Plugin Registry
 
-Provides a lightweight plugin architecture:
-- Register plugins with metadata and hooks
-- Hook system for extending agent behavior
-- Plugin lifecycle: load, enable, disable, unload
-- Sandboxed plugin execution
-- Plugin marketplace API (list, install, verify)
-
-Configuration:
-- PLUGINS_ENABLED=true/false
-- PLUGINS_DIR=data/plugins
-- PLUGINS_ALLOW_UNOFFICIAL=false
+Sistema de plugins baseado em hooks e descoberta dinâmica.
+Permite que módulos externos registrem comandos, middlewares e hooks
+de lifecycle sem modificar o core da aplicação.
 
 Usage:
-    from backend.plugins.registry import plugin_registry
-    plugin_registry.register("my_plugin", MyPluginClass)
-    plugin_registry.enable("my_plugin")
+    from backend.plugins.registry import plugin_registry, hook
+
+    @plugin_registry.register_command("/format")
+    def format_code(ctx, source: str) -> str:
+        ...
+
+    @hook("pre_save")
+    def my_pre_save_hook(file_path: str, content: str):
+        ...
 """
 
 from __future__ import annotations
@@ -23,334 +22,359 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
-import json
 import logging
-import os
-import shutil
-import sys
-from abc import ABC, abstractmethod
+import pkgutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, TypeVar
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+HookCallback = Callable[..., Any]
+CommandHandler = Callable[..., Any]
 
-@dataclass
-class PluginManifest:
-    """Plugin metadata and configuration."""
+
+class PluginProtocol(Protocol):
+    """Protocolo que todo plugin deve implementar."""
+
     name: str
     version: str
     description: str
-    author: str
-    license: str = "MIT"
-    hooks: list[str] = field(default_factory=list)
-    dependencies: list[str] = field(default_factory=list)
-    permissions: list[str] = field(default_factory=list)
-    enabled: bool = False
-    loaded: bool = False
-    error: str | None = None
+
+    def setup(self, registry: PluginRegistry) -> None:
+        ...
 
 
-class Plugin(ABC):
-    """Base class for all NEXUS IDE plugins."""
+@dataclass
+class PluginMeta:
+    """Metadados de um plugin carregado."""
 
-    @property
-    @abstractmethod
-    def manifest(self) -> PluginManifest:
-        """Return plugin metadata."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def on_load(self) -> None:
-        """Called when plugin is loaded."""
-        pass
-
-    @abstractmethod
-    def on_enable(self) -> None:
-        """Called when plugin is enabled."""
-        pass
-
-    @abstractmethod
-    def on_disable(self) -> None:
-        """Called when plugin is disabled."""
-        pass
-
-    @abstractmethod
-    def on_unload(self) -> None:
-        """Called when plugin is unloaded."""
-        pass
+    name: str
+    version: str
+    description: str
+    module_path: str
+    enabled: bool = True
+    commands: List[str] = field(default_factory=list)
+    hooks: List[str] = field(default_factory=list)
 
 
-class HookRegistry:
-    """Manages hooks for plugin extensibility."""
+@dataclass
+class RegisteredCommand:
+    """Comando registado no sistema."""
 
-    def __init__(self) -> None:
-        self._hooks: dict[str, list[Callable]] = {}
+    name: str
+    handler: CommandHandler
+    description: str = ""
+    plugin: Optional[str] = None
 
-    def register_hook(self, hook_name: str, callback: Callable) -> None:
-        """Register a callback for a hook."""
-        if hook_name not in self._hooks:
-            self._hooks[hook_name] = []
-        self._hooks[hook_name].append(callback)
-        logger.debug("Registered hook: %s", hook_name)
 
-    def unregister_hook(self, hook_name: str, callback: Callable) -> None:
-        """Unregister a callback from a hook."""
-        if hook_name in self._hooks and callback in self._hooks[hook_name]:
-            self._hooks[hook_name].remove(callback)
+@dataclass
+class RegisteredHook:
+    """Hook registado no sistema."""
 
-    def call_hook(self, hook_name: str, *args: Any, **kwargs: Any) -> list[Any]:
-        """Call all callbacks for a hook and return results."""
-        results = []
-        if hook_name in self._hooks:
-            for callback in self._hooks[hook_name]:
-                try:
-                    result = callback(*args, **kwargs)
-                    results.append(result)
-                except Exception as exc:
-                    logger.error("Hook %s callback failed: %s", hook_name, exc)
-        return results
-
-    def has_hook(self, hook_name: str) -> bool:
-        """Check if a hook has any registered callbacks."""
-        return hook_name in self._hooks and len(self._hooks[hook_name]) > 0
+    event: str
+    callback: HookCallback
+    priority: int = 0  # maior = executa primeiro
+    plugin: Optional[str] = None
 
 
 class PluginRegistry:
-    """Central registry for managing plugins."""
+    """
+    Registo central de plugins, comandos e hooks.
+
+    É um singleton acessível via `plugin_registry` no módulo.
+    """
+
+    _instance: Optional["PluginRegistry"] = None
+
+    def __new__(cls) -> "PluginRegistry":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
 
     def __init__(self) -> None:
-        self._plugins: dict[str, Plugin] = {}
-        self._manifests: dict[str, PluginManifest] = {}
-        self._hooks = HookRegistry()
-        self._enabled = os.getenv("PLUGINS_ENABLED", "false").lower() in ("true", "1", "yes", "on")
-        self._plugins_dir = Path(os.getenv("PLUGINS_DIR", "data/plugins"))
-        self._plugins_dir.mkdir(parents=True, exist_ok=True)
+        if self._initialized:
+            return
+        self._commands: Dict[str, RegisteredCommand] = {}
+        self._hooks: Dict[str, List[RegisteredHook]] = {}
+        self._plugins: Dict[str, PluginMeta] = {}
+        self._middlewares: List[Callable] = []
+        self._initialized = True
 
-    @property
-    def hooks(self) -> HookRegistry:
-        return self._hooks
+    # ── Comandos ──────────────────────────────────────────────
 
-    def is_enabled(self) -> bool:
-        return self._enabled
+    def register_command(
+        self,
+        name: str,
+        description: str = "",
+        plugin: Optional[str] = None,
+    ) -> Callable[[CommandHandler], CommandHandler]:
+        """Decorador para registar um comando."""
 
-    def register(self, name: str, plugin_class: type[Plugin]) -> dict[str, Any]:
-        """Register a plugin class.
+        def decorator(handler: CommandHandler) -> CommandHandler:
+            if name in self._commands:
+                logger.warning("Command '%s' already registered; overwriting.", name)
+            self._commands[name] = RegisteredCommand(
+                name=name,
+                handler=handler,
+                description=description,
+                plugin=plugin,
+            )
+            if plugin:
+                self._plugins[plugin].commands.append(name)
+            logger.info("Registered command: %s", name)
+            return handler
 
-        Args:
-            name: Unique plugin identifier.
-            plugin_class: Plugin class (must inherit from Plugin).
+        return decorator
 
-        Returns:
-            Registration result.
+    def execute_command(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        """Executa um comando registado."""
+        cmd = self._commands.get(name)
+        if not cmd:
+            raise KeyError(f"Command '{name}' not found.")
+        return cmd.handler(*args, **kwargs)
+
+    def list_commands(self) -> List[RegisteredCommand]:
+        """Lista todos os comandos registados."""
+        return list(self._commands.values())
+
+    # ── Hooks ─────────────────────────────────────────────────
+
+    def register_hook(
+        self,
+        event: str,
+        callback: HookCallback,
+        priority: int = 0,
+        plugin: Optional[str] = None,
+    ) -> RegisteredHook:
+        """Regista um hook para um evento."""
+        hook = RegisteredHook(
+            event=event,
+            callback=callback,
+            priority=priority,
+            plugin=plugin,
+        )
+        self._hooks.setdefault(event, []).append(hook)
+        self._hooks[event].sort(key=lambda h: h.priority, reverse=True)
+        if plugin:
+            self._plugins[plugin].hooks.append(event)
+        logger.info("Registered hook '%s' for event '%s'", callback.__name__, event)
+        return hook
+
+    def trigger(self, event: str, *args: Any, **kwargs: Any) -> List[Any]:
         """
-        if not self._enabled:
-            return {"success": False, "reason": "plugins disabled"}
-
-        if name in self._plugins:
-            return {"success": False, "reason": f"plugin '{name}' already registered"}
-
-        try:
-            instance = plugin_class()
-            manifest = instance.manifest
-            self._plugins[name] = instance
-            self._manifests[name] = manifest
-
-            # Load the plugin
-            instance.on_load()
-            manifest.loaded = True
-
-            logger.info("Plugin registered: %s v%s", name, manifest.version)
-            return {
-                "success": True,
-                "plugin": name,
-                "version": manifest.version,
-                "hooks": manifest.hooks,
-            }
-        except Exception as exc:
-            logger.error("Failed to register plugin %s: %s", name, exc)
-            return {"success": False, "reason": str(exc)}
-
-    def enable(self, name: str) -> dict[str, Any]:
-        """Enable a registered plugin."""
-        if name not in self._plugins:
-            return {"success": False, "reason": f"plugin '{name}' not found"}
-
-        try:
-            plugin = self._plugins[name]
-            plugin.on_enable()
-            self._manifests[name].enabled = True
-
-            # Register hooks
-            for hook_name in self._manifests[name].hooks:
-                if hasattr(plugin, f"on_{hook_name}"):
-                    self._hooks.register_hook(hook_name, getattr(plugin, f"on_{hook_name}"))
-
-            logger.info("Plugin enabled: %s", name)
-            return {"success": True, "plugin": name}
-        except Exception as exc:
-            logger.error("Failed to enable plugin %s: %s", name, exc)
-            return {"success": False, "reason": str(exc)}
-
-    def disable(self, name: str) -> dict[str, Any]:
-        """Disable a plugin."""
-        if name not in self._plugins:
-            return {"success": False, "reason": f"plugin '{name}' not found"}
-
-        try:
-            plugin = self._plugins[name]
-            plugin.on_disable()
-            self._manifests[name].enabled = False
-
-            # Unregister hooks
-            for hook_name in self._manifests[name].hooks:
-                if hasattr(plugin, f"on_{hook_name}"):
-                    self._hooks.unregister_hook(hook_name, getattr(plugin, f"on_{hook_name}"))
-
-            logger.info("Plugin disabled: %s", name)
-            return {"success": True, "plugin": name}
-        except Exception as exc:
-            logger.error("Failed to disable plugin %s: %s", name, exc)
-            return {"success": False, "reason": str(exc)}
-
-    def unregister(self, name: str) -> dict[str, Any]:
-        """Unload and remove a plugin."""
-        if name not in self._plugins:
-            return {"success": False, "reason": f"plugin '{name}' not found"}
-
-        try:
-            # Disable first if enabled
-            if self._manifests[name].enabled:
-                self.disable(name)
-
-            plugin = self._plugins[name]
-            plugin.on_unload()
-
-            del self._plugins[name]
-            del self._manifests[name]
-
-            logger.info("Plugin unregistered: %s", name)
-            return {"success": True, "plugin": name}
-        except Exception as exc:
-            logger.error("Failed to unregister plugin %s: %s", name, exc)
-            return {"success": False, "reason": str(exc)}
-
-    def list_plugins(self) -> list[dict[str, Any]]:
-        """List all registered plugins with their status."""
-        return [
-            {
-                "name": name,
-                "version": manifest.version,
-                "description": manifest.description,
-                "author": manifest.author,
-                "license": manifest.license,
-                "enabled": manifest.enabled,
-                "loaded": manifest.loaded,
-                "hooks": manifest.hooks,
-                "dependencies": manifest.dependencies,
-            }
-            for name, manifest in self._manifests.items()
-        ]
-
-    def get_plugin(self, name: str) -> Plugin | None:
-        """Get a plugin instance by name."""
-        return self._plugins.get(name)
-
-    def load_from_directory(self, directory: str | Path) -> list[dict[str, Any]]:
-        """Load all plugins from a directory.
-
-        Each subdirectory should contain a plugin module with a Plugin subclass.
+        Dispara todos os hooks de um evento.
+        Retorna lista de resultados de cada hook.
         """
-        dir_path = Path(directory)
-        if not dir_path.exists():
-            return []
-
-        results = []
-        for item in dir_path.iterdir():
-            if item.is_dir() and (item / "plugin.py").exists():
-                try:
-                    # Add to path and import
-                    sys.path.insert(0, str(item))
-                    spec = importlib.util.spec_from_file_location(
-                        f"plugin_{item.name}", str(item / "plugin.py")
-                    )
-                    if spec and spec.loader:
-                        module = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(module)
-
-                        # Find Plugin subclass
-                        for attr_name in dir(module):
-                            attr = getattr(module, attr_name)
-                            if (isinstance(attr, type) and issubclass(attr, Plugin)
-                                and attr is not Plugin):
-                                result = self.register(item.name, attr)
-                                results.append(result)
-                                break
-                except Exception as exc:
-                    logger.error("Failed to load plugin from %s: %s", item, exc)
-                    results.append({"success": False, "reason": str(exc), "path": str(item)})
-                finally:
-                    if str(item) in sys.path:
-                        sys.path.remove(str(item))
-
+        results: List[Any] = []
+        for hook in self._hooks.get(event, []):
+            try:
+                result = hook.callback(*args, **kwargs)
+                results.append(result)
+            except Exception as exc:
+                logger.exception("Hook '%s' failed for event '%s'", hook.callback.__name__, event)
+                results.append(exc)
         return results
 
-    def status(self) -> dict[str, Any]:
-        """Get plugin system status."""
+    def trigger_first(self, event: str, *args: Any, **kwargs: Any) -> Any:
+        """
+        Dispara hooks até um retornar um valor truthy.
+        Útil para middlewares de autorização/validação.
+        """
+        for hook in self._hooks.get(event, []):
+            try:
+                result = hook.callback(*args, **kwargs)
+                if result:
+                    return result
+            except Exception:
+                logger.exception("Hook '%s' failed for event '%s'", hook.callback.__name__, event)
+        return None
+
+    def list_hooks(self, event: Optional[str] = None) -> List[RegisteredHook]:
+        """Lista hooks registados."""
+        if event:
+            return list(self._hooks.get(event, []))
+        return [h for hooks in self._hooks.values() for h in hooks]
+
+    # ── Middleware ────────────────────────────────────────────
+
+    def add_middleware(self, mw: Callable) -> None:
+        """Adiciona middleware ao pipeline."""
+        self._middlewares.append(mw)
+
+    def run_middlewares(self, context: Any) -> Any:
+        """Executa pipeline de middlewares."""
+        for mw in self._middlewares:
+            context = mw(context)
+        return context
+
+    # ── Plugins ───────────────────────────────────────────────
+
+    def load_plugin(self, module_path: str) -> PluginMeta:
+        """
+        Carrega um plugin a partir de um module path.
+        O módulo deve expor `name`, `version`, `description` e `setup(registry)`.
+        """
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise ImportError(f"Cannot import plugin '{module_path}': {exc}")
+
+        name = getattr(module, "name", module_path)
+        version = getattr(module, "version", "0.0.0")
+        description = getattr(module, "description", "")
+        setup_fn = getattr(module, "setup", None)
+
+        meta = PluginMeta(
+            name=name,
+            version=version,
+            description=description,
+            module_path=module_path,
+        )
+        self._plugins[name] = meta
+
+        if setup_fn and callable(setup_fn):
+            setup_fn(self)
+
+        logger.info("Loaded plugin: %s v%s", name, version)
+        return meta
+
+    def load_plugins_from_directory(self, directory: Path | str) -> List[PluginMeta]:
+        """
+        Descobre e carrega todos os plugins num diretório.
+        Cada subdiretório ou ficheiro .py é tentado como plugin.
+        """
+        directory = Path(directory)
+        loaded: List[PluginMeta] = []
+
+        if not directory.exists():
+            logger.warning("Plugin directory not found: %s", directory)
+            return loaded
+
+        for item in directory.iterdir():
+            if item.is_dir() and (item / "__init__.py").exists():
+                # package: backend.plugins.nome_do_plugin
+                module_name = f"{directory.name}.{item.name}"
+                try:
+                    loaded.append(self.load_plugin(module_name))
+                except Exception as exc:
+                    logger.error("Failed to load plugin '%s': %s", module_name, exc)
+            elif item.is_file() and item.suffix == ".py" and item.stem != "__init__":
+                # single file module
+                spec = importlib.util.spec_from_file_location(item.stem, item)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    name = getattr(module, "name", item.stem)
+                    version = getattr(module, "version", "0.0.0")
+                    description = getattr(module, "description", "")
+                    setup_fn = getattr(module, "setup", None)
+                    meta = PluginMeta(
+                        name=name,
+                        version=version,
+                        description=description,
+                        module_path=str(item),
+                    )
+                    self._plugins[name] = meta
+                    if setup_fn and callable(setup_fn):
+                        setup_fn(self)
+                    loaded.append(meta)
+
+        return loaded
+
+    def list_plugins(self) -> List[PluginMeta]:
+        """Lista todos os plugins carregados."""
+        return list(self._plugins.values())
+
+    def get_plugin(self, name: str) -> Optional[PluginMeta]:
+        """Obtém metadados de um plugin."""
+        return self._plugins.get(name)
+
+    def disable_plugin(self, name: str) -> None:
+        """Desativa um plugin (soft-disable)."""
+        if name in self._plugins:
+            self._plugins[name].enabled = False
+            logger.info("Disabled plugin: %s", name)
+
+    def enable_plugin(self, name: str) -> None:
+        """Reativa um plugin."""
+        if name in self._plugins:
+            self._plugins[name].enabled = True
+            logger.info("Enabled plugin: %s", name)
+
+    # ── Health / Debug ────────────────────────────────────────
+
+    def health(self) -> Dict[str, Any]:
+        """Retorna estado do registry para health checks."""
         return {
-            "enabled": self._enabled,
-            "plugins_dir": str(self._plugins_dir),
-            "total_plugins": len(self._plugins),
-            "enabled_plugins": sum(1 for m in self._manifests.values() if m.enabled),
-            "available_hooks": list(self._hooks._hooks.keys()),
+            "plugins_loaded": len(self._plugins),
+            "commands_registered": len(self._commands),
+            "hooks_registered": sum(len(h) for h in self._hooks.values()),
+            "events": list(self._hooks.keys()),
+            "plugins": [
+                {
+                    "name": p.name,
+                    "version": p.version,
+                    "enabled": p.enabled,
+                    "commands": p.commands,
+                    "hooks": p.hooks,
+                }
+                for p in self._plugins.values()
+            ],
         }
 
 
-# Global registry instance
-_registry: PluginRegistry | None = None
+# Instância singleton global
+plugin_registry = PluginRegistry()
 
 
-def get_plugin_registry() -> PluginRegistry:
-    """Get or create the global plugin registry."""
-    global _registry
-    if _registry is None:
-        _registry = PluginRegistry()
-    return _registry
+# ── Helpers de conveniência ─────────────────────────────────
+
+def hook(event: str, priority: int = 0) -> Callable[[HookCallback], HookCallback]:
+    """
+    Decorador simplificado para registar hooks na instância global.
+
+    Usage:
+        @hook("pre_save", priority=10)
+        def validate_before_save(file_path: str, content: str):
+            ...
+    """
+
+    def decorator(callback: HookCallback) -> HookCallback:
+        plugin_registry.register_hook(event, callback, priority=priority)
+        return callback
+
+    return decorator
 
 
-# Pre-defined hooks for common extension points
-class PluginHooks:
-    """Standard hook names for plugin development."""
+def command(
+    name: str, description: str = ""
+) -> Callable[[CommandHandler], CommandHandler]:
+    """
+    Decorador simplificado para registar comandos.
 
-    PRE_AGENT_EXECUTE = "pre_agent_execute"
-    POST_AGENT_EXECUTE = "post_agent_execute"
-    PRE_TOOL_CALL = "pre_tool_call"
-    POST_TOOL_CALL = "post_tool_call"
-    PRE_FILE_WRITE = "pre_file_write"
-    POST_FILE_WRITE = "post_file_write"
-    CHAT_MESSAGE = "chat_message"
-    DASHBOARD_METRIC = "dashboard_metric"
-    AGENT_BUS_MESSAGE = "agent_bus_message"
+    Usage:
+        @command("/lint", description="Run linter on code")
+        def lint_code(ctx, source: str) -> str:
+            ...
+    """
+    return plugin_registry.register_command(name, description=description)
 
 
-# Tool registration
-from backend.tools.registry import ToolSpec, register_tool
+# ── Exemplo de plugin inline ────────────────────────────────
 
-register_tool(
-    ToolSpec(
-        name="list_plugins",
-        description="List all registered plugins and their status.",
-        schema={"type": "object", "properties": {}},
-        handler=lambda **kwargs: get_plugin_registry().list_plugins(),
-    )
-)
+if __name__ == "__main__":
+    # Demo / smoke test
+    @command("/hello", description="Say hello")
+    def hello(name: str = "World") -> str:
+        return f"Hello, {name}!"
 
-register_tool(
-    ToolSpec(
-        name="plugin_status",
-        description="Get plugin system status.",
-        schema={"type": "object", "properties": {}},
-        handler=lambda **kwargs: get_plugin_registry().status(),
-    )
-)
+    @hook("startup")
+    def on_startup():
+        print("Plugin system started!")
+
+    plugin_registry.trigger("startup")
+    print(plugin_registry.execute_command("/hello", "Nexus"))
+    print(plugin_registry.health())

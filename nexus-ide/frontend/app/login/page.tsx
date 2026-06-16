@@ -14,34 +14,34 @@ export default function LoginPage() {
   const expired = searchParams.get("expired") === "1";
 
   const autoLoginActive = isAutoLoginEnabled();
+  const autoLoginDisabled = process.env.NEXT_PUBLIC_AUTO_LOGIN === "false";
   const devEmail = process.env.NEXT_PUBLIC_DEV_EMAIL ?? "admin@nexus-ide.com";
   const devPassword = process.env.NEXT_PUBLIC_DEV_PASSWORD ?? "admin123";
 
-  const [email, setEmail] = useState(autoLoginActive ? devEmail : "");
-  const [password, setPassword] = useState(autoLoginActive ? devPassword : "");
+  const [email, setEmail] = useState(autoLoginActive && !autoLoginDisabled ? devEmail : "");
+  const [password, setPassword] = useState(autoLoginActive && !autoLoginDisabled ? devPassword : "");
   const [error, setError] = useState<string | null>(expired ? "Sessão expirada. Por favor faça login novamente." : null);
   const [loading, setLoading] = useState(false);
   const [autoLoginAttempting, setAutoLoginAttempting] = useState(false);
   const autoLoginTried = useRef(false);
 
   useEffect(() => {
-    if (autoLoginActive && !autoLoginTried.current) {
-      autoLoginTried.current = true;
-      setAutoLoginAttempting(true);
-      autoLoginDev()
-        .then((success) => {
-          if (success) {
-            router.replace("/");
-          } else {
-            setError("Login automático falhou. Verifica se o backend está online e as credenciais de teste existem.");
-          }
-        })
-        .catch(() => {
-          setError("Erro de rede no login automático. Verifica se o backend está em execução.");
-        })
-        .finally(() => setAutoLoginAttempting(false));
-    }
-  }, [router, autoLoginActive]);
+    if (!autoLoginActive || autoLoginDisabled || autoLoginTried.current) return;
+    autoLoginTried.current = true;
+    setAutoLoginAttempting(true);
+    autoLoginDev()
+      .then((success) => {
+        if (success) {
+          router.replace("/");
+        } else {
+          setError("Login automático falhou. Verifica se o backend está online e as credenciais de teste existem.");
+        }
+      })
+      .catch(() => {
+        setError("Erro de rede no login automático. Verifica se o backend está em execução.");
+      })
+      .finally(() => setAutoLoginAttempting(false));
+  }, [router, autoLoginActive, autoLoginDisabled]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -65,7 +65,7 @@ export default function LoginPage() {
           <p className="mt-2 text-sm text-[#9ca3af]">Inicie sessão para continuar</p>
         </div>
 
-        {autoLoginActive && (
+        {autoLoginActive && !autoLoginDisabled && (
           <div className="mb-4 rounded-lg border border-[#7c6afb]/30 bg-[#7c6afb]/10 px-4 py-3 text-sm text-[#b8b3ff]">
             Modo testes — login automático ativo
             {autoLoginAttempting && " (a tentar...)"}

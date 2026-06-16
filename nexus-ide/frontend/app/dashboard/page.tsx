@@ -20,6 +20,7 @@ function WidgetSkeleton({ height }: { height: string }) {
 export default function DashboardPage() {
   const metrics = useMetricsStore((s) => s.metrics);
   const backendOnline = useMetricsStore((s) => s.backendOnline);
+  const connectionStatus = useMetricsStore((s) => s.connectionStatus);
   const lastUpdate = useMetricsStore((s) => s.lastUpdate);
 
   // Initialize metrics stream once
@@ -37,6 +38,25 @@ export default function DashboardPage() {
   }, []);
 
   const m = metrics;
+  const requestTotal = m?.requests_total ?? 0;
+  const requestSuccessRate =
+    requestTotal > 0 ? ((m?.requests_successful ?? 0) / requestTotal) * 100 : null;
+  const statusLabel =
+    connectionStatus === "degraded"
+      ? "Degraded"
+      : backendOnline
+        ? "Connected"
+        : connectionStatus === "connecting"
+          ? "Connecting"
+          : "Offline";
+  const statusDotClass =
+    connectionStatus === "degraded"
+      ? "bg-yellow-500 animate-pulse"
+      : backendOnline
+        ? "bg-green-500"
+        : connectionStatus === "connecting"
+          ? "bg-yellow-500 animate-pulse"
+          : "bg-red-500 animate-pulse";
 
   return (
     <main className="flex-1 overflow-auto">
@@ -45,9 +65,22 @@ export default function DashboardPage() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4 text-xs">
             <div className="flex items-center gap-1.5">
-              <div className={`h-2 w-2 rounded-full ${backendOnline ? "bg-green-500" : "bg-red-500 animate-pulse"}`} />
-              <span className="text-gray-400">{backendOnline ? "Connected" : "Offline"}</span>
+              <div className={`h-2 w-2 rounded-full ${statusDotClass}`} />
+              <span className="text-gray-400">{statusLabel}</span>
             </div>
+            {requestSuccessRate !== null && requestSuccessRate < 100 && (
+              <>
+                <div className="h-3 w-px bg-nexus-border" />
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500">LLM OK:</span>
+                  <span
+                    className={`font-mono ${requestSuccessRate === 0 ? "text-red-400" : requestSuccessRate < 50 ? "text-yellow-400" : ""}`}
+                  >
+                    {requestSuccessRate.toFixed(0)}%
+                  </span>
+                </div>
+              </>
+            )}
             <div className="h-3 w-px bg-nexus-border" />
             <div className="flex items-center gap-1">
               <span className="text-gray-500">Model:</span>

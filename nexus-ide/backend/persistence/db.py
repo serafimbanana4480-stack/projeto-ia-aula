@@ -134,7 +134,7 @@ class SQLiteConnectionPool:
                     self._created_count -= 1
                 return self._create_connection()
         except Empty:
-            pass
+            logger.debug("Connection pool empty, will create new connection if under limit")
 
         # Pool is empty — create a new connection immediately if under limit.
         with self._lock:
@@ -168,8 +168,8 @@ class SQLiteConnectionPool:
             # Rollback any uncommitted changes
             try:
                 conn.rollback()
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                logger.warning("Rollback failed when returning connection: %s", exc)
             # Try to put the connection back in the pool
             self._pool.put_nowait(conn)
         except Exception:
@@ -179,8 +179,8 @@ class SQLiteConnectionPool:
                 with self._lock:
                     self._created_count -= 1
                     logger.debug("Closing excess connection (total: %d)", self._created_count)
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                logger.warning("Failed to close excess connection: %s", exc)
 
     def close_all(self) -> None:
         """Close all connections in the pool."""
@@ -190,8 +190,8 @@ class SQLiteConnectionPool:
                 conn.close()
             except Empty:
                 break
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                logger.warning("Failed to close pooled connection: %s", exc)
         with self._lock:
             self._created_count = 0
         logger.info("All connections closed")
@@ -393,11 +393,22 @@ def create_project(
     preferred_model: str | None = None,
     trust: bool = False,
 ) -> dict:
-    pid = _new_id()
     with get_db() as conn:
+        existing = conn.execute(
+            "SELECT * FROM projects WHERE path = ?",
+            (path,),
+        ).fetchone()
+        if existing:
+            updated_at = _now_iso()
+            conn.execute(
+                """UPDATE projects SET name = ?, description = ?, mode = ?, preferred_model = ?, trust = ?, updated_at = ? WHERE path = ?""",
+                (name, description, mode, preferred_model, 1 if trust else 0, updated_at, path),
+            )
+            row = conn.execute("SELECT * FROM projects WHERE path = ?", (path,)).fetchone()
+            return dict(row) if row else None
+        pid = _new_id()
         conn.execute(
-            """INSERT INTO projects (id, name, path, description, mode, preferred_model, trust)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO projects (id, name, path, description, mode, preferred_model, trust) VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (pid, name, path, description, mode, preferred_model, 1 if trust else 0),
         )
         row = conn.execute("SELECT * FROM projects WHERE id = ?", (pid,)).fetchone()
@@ -415,7 +426,13 @@ def get_project(project_id: str) -> dict | None:
 def list_projects() -> list[dict]:
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM projects ORDER BY updated_at DESC").fetchall()
-        return [dict(r) for r in rows]
+        projects = [dict(r) for r in rows]
+        seen: dict[str, dict] = {}
+        for project in projects:
+            path = project["path"]
+            if path not in seen:
+                seen[path] = project
+        return list(seen.values())
 
 
 def count_active_sessions() -> int:
@@ -636,6 +653,63 @@ def log_tool_execution(
             ),
         )
     return eid
+
+
+def get_agent_activity(minutes: int = 30) -> list[dict[str, Any]]:
+    """Summarise recent agent activity for the dashboard widget."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT COALESCE(m.tier_used, 'UNKNOWN') AS agent,
+                   COUNT(*) AS tasks_completed,
+                   SUM(CASE WHEN COALESCE(te.failed, 0) > 0 THEN 1 ELSE 0 END) AS tasks_failed,
+                   AVG(COALESCE(m.latency_ms, 0)) AS avg_latency_ms,
+                   MAX(m.created_at) AS last_activity
+            FROM messages m
+            LEFT JOIN (
+                SELECT session_id, COUNT(*) AS failed
+                FROM tool_executions
+                WHERE success = 0
+                  AND created_at > datetime('now', printf('-%d minutes', ?))
+                GROUP BY session_id
+            ) te ON te.session_id = m.session_id
+            WHERE m.role = 'assistant'
+              AND m.tier_used IS NOT NULL
+              AND m.created_at > datetime('now', printf('-%d minutes', ?))
+            GROUP BY m.tier_used
+            ORDER BY last_activity DESC
+            LIMIT 15
+            """,
+            (minutes, minutes),
+        ).fetchall()
+
+    now = datetime.now(UTC)
+    activity: list[dict[str, Any]] = []
+    for row in rows:
+        last = row["last_activity"] or ""
+        status = "idle"
+        try:
+            last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=UTC)
+            if (now - last_dt).total_seconds() < 120:
+                status = "active"
+        except Exception:
+            pass
+        tasks_failed = int(row["tasks_failed"] or 0)
+        if tasks_failed > 0 and status != "active":
+            status = "error"
+        activity.append(
+            {
+                "agent": row["agent"],
+                "status": status,
+                "tasks_completed": int(row["tasks_completed"] or 0),
+                "tasks_failed": tasks_failed,
+                "avg_latency_ms": float(row["avg_latency_ms"] or 0),
+                "last_activity": last or now.isoformat(),
+            }
+        )
+    return activity
 
 
 # ───── ROUTING DECISIONS ────────────────────────────────────────────────

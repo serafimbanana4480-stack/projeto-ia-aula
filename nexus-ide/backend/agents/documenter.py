@@ -25,7 +25,11 @@ class DocumenterAgent(AgentBase):
     prompt_file = "documenter"
     supported_actions = {
         AgentAction.READ_FILE,
+        AgentAction.READ_FILE_ABSOLUTE,
         AgentAction.WRITE_FILE,
+        AgentAction.WRITE_FILE_ABSOLUTE,
+        AgentAction.LIST_DIR,
+        AgentAction.LIST_DIR_ABSOLUTE,
         AgentAction.SEARCH_CODEBASE,
         AgentAction.GENERATE_REPORT,
         AgentAction.RECALL_CONTEXT,

@@ -54,7 +54,7 @@ async def recall_context(
             try:
                 mem_type = MemoryType(memory_type)
             except ValueError:
-                pass
+                logger.warning("Invalid memory_type requested: %s", memory_type)
 
         results = await store.search(
             query,

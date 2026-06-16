@@ -338,8 +338,8 @@ class SandboxExecutor:
                         stderr=subprocess.PIPE,
                         check=False,
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to kill Docker sandbox %s: %s", execution_id, exc)
 
                 duration_ms = int((time.time() - start) * 1000)
                 return SandboxResult(
@@ -437,8 +437,8 @@ class SandboxExecutor:
                         stderr=subprocess.PIPE,
                         check=False,
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to kill local process for sandbox %s: %s", execution_id, exc)
                 duration_ms = int((time.time() - start) * 1000)
                 return SandboxResult(
                     execution_id=execution_id,

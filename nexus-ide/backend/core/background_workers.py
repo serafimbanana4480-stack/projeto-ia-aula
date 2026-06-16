@@ -6,6 +6,7 @@ Provides persistent background workers that monitor the system continuously:
 - ``DEPENDENCY_WATCHER``: Scans dependency files for known vulnerabilities.
 - ``PERFORMANCE_WATCHER``: Runs benchmarks periodically and detects regressions.
 - ``MEMORY_WATCHER``:   Monitors agent state store for memory bloat and archives old data.
+- ``ESCALATION_WATCHER``: Monitors pending human-in-the-loop escalations and sends reminders.
 
 All workers publish heartbeats and events via the Agent Bus.
 """
@@ -197,7 +198,9 @@ class BackgroundWorker(ABC):
 
             # Sleep in short chunks so we respond quickly to stop/resume
             deadline = time.monotonic() + self.interval_seconds
-            while time.monotonic() < deadline and (self._stop_event is None or not self._stop_event.is_set()):
+            while time.monotonic() < deadline and (
+                self._stop_event is None or not self._stop_event.is_set()
+            ):
                 if self._status == WorkerStatus.PAUSED:
                     break
                 await asyncio.sleep(min(1.0, deadline - time.monotonic()))
@@ -221,13 +224,13 @@ class BackgroundWorker(ABC):
             except Exception:
                 logger.exception("Worker %s heartbeat failed", self.name)
             if self._stop_event is not None:
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS
-                )
+                await asyncio.wait_for(self._stop_event.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
 
     async def _wait_for_resume(self) -> None:
         """Block until the worker is resumed or stopped."""
-        while self._status == WorkerStatus.PAUSED and (self._stop_event is None or not self._stop_event.is_set()):
+        while self._status == WorkerStatus.PAUSED and (
+            self._stop_event is None or not self._stop_event.is_set()
+        ):
             await asyncio.sleep(0.5)
 
     # -- bus helper ---------------------------------------------------------
@@ -278,6 +281,7 @@ class CodeWatcher(BackgroundWorker):
     def _detect_watchdog(self) -> bool:
         try:
             import watchdog.observers  # noqa: F401
+
             return True
         except ImportError:
             return False
@@ -353,7 +357,13 @@ class CodeWatcher(BackgroundWorker):
                 triggers.add("python_change")
             elif name.endswith(".test.py"):
                 triggers.add("test_change")
-            elif name in ("requirements.txt", "package.json", "cargo.toml", "poetry.lock", "pdm.lock"):
+            elif name in (
+                "requirements.txt",
+                "package.json",
+                "cargo.toml",
+                "poetry.lock",
+                "pdm.lock",
+            ):
                 triggers.add("dependency_change")
 
         if "python_change" in triggers:
@@ -484,9 +494,7 @@ class DependencyWatcher(BackgroundWorker):
                     "timestamp": datetime.now(UTC).isoformat(),
                 },
             )
-            logger.info(
-                "DEPENDENCY_WATCHER found %d vulnerabilities", len(findings)
-            )
+            logger.info("DEPENDENCY_WATCHER found %d vulnerabilities", len(findings))
         else:
             logger.debug("DEPENDENCY_WATCHER scan completed — no vulnerabilities")
 
@@ -572,7 +580,9 @@ class PerformanceWatcher(BackgroundWorker):
             result = await asyncio.to_thread(
                 subprocess.run,
                 [
-                    "python", "-m", "pytest",
+                    "python",
+                    "-m",
+                    "pytest",
                     "--benchmark-only",
                     "--benchmark-json=benchmark.json",
                     "-q",
@@ -723,6 +733,76 @@ class PerformanceWatcher(BackgroundWorker):
 
 
 # ---------------------------------------------------------------------------
+# SELF_IMPROVEMENT_WATCHER
+# ---------------------------------------------------------------------------
+
+
+class SelfImprovementWatcher(BackgroundWorker):
+    """Periodically runs self-improvement analysis and publishes proposals."""
+
+    def __init__(
+        self,
+        interval_seconds: float = 86_400,  # 24 hours default
+    ) -> None:
+        super().__init__("SELF_IMPROVEMENT_WATCHER", interval_seconds=interval_seconds)
+        self._analyzer = None
+
+    async def _tick(self) -> None:
+        try:
+            from backend.core.self_improvement import SelfImprovementAnalyzer
+
+            if self._analyzer is None:
+                self._analyzer = SelfImprovementAnalyzer()
+
+            report = await self._analyzer.run_analysis()
+
+            if report.proposals:
+                high_conf = [p for p in report.proposals if p.confidence >= 0.6]
+                await self._publish(
+                    "self_improvement.proposals_ready",
+                    {
+                        "proposal_count": len(report.proposals),
+                        "high_confidence_count": len(high_conf),
+                        "summary": report.summary,
+                        "proposals": [p.model_dump(mode="json") for p in report.proposals],
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    },
+                )
+                logger.info(
+                    "SELF_IMPROVEMENT_WATCHER generated %d proposals (%d high confidence)",
+                    len(report.proposals),
+                    len(high_conf),
+                )
+
+                # Auto-apply approved high-confidence proposals
+                apply_results = await self._analyzer.auto_apply_approved(
+                    report,
+                    min_confidence=0.7,
+                    require_meta_approval=True,
+                )
+                if apply_results["applied"]:
+                    await self._publish(
+                        "self_improvement.applied",
+                        {
+                            "applied_count": len(apply_results["applied"]),
+                            "applied": apply_results["applied"],
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                    logger.info(
+                        "SELF_IMPROVEMENT_WATCHER auto-applied %d proposals",
+                        len(apply_results["applied"]),
+                    )
+
+            else:
+                logger.debug("SELF_IMPROVEMENT_WATCHER no proposals generated")
+
+        except Exception as exc:
+            logger.exception("SELF_IMPROVEMENT_WATCHER analysis failed: %s", exc)
+            self._error_count += 1
+
+
+# ---------------------------------------------------------------------------
 # MEMORY_WATCHER
 # ---------------------------------------------------------------------------
 
@@ -754,9 +834,7 @@ class MemoryWatcher(BackgroundWorker):
             from backend.persistence.db import get_db
 
             with get_db() as conn:
-                row = conn.execute(
-                    "SELECT COUNT(*) AS cnt FROM agent_states"
-                ).fetchone()
+                row = conn.execute("SELECT COUNT(*) AS cnt FROM agent_states").fetchone()
                 total_memories = row["cnt"] if row else 0
         except Exception:
             logger.warning("Failed to count agent states for memory maintenance")
@@ -774,6 +852,100 @@ class MemoryWatcher(BackgroundWorker):
             deleted,
             total_memories,
         )
+
+
+# ---------------------------------------------------------------------------
+# ESCALATION_WATCHER
+# ---------------------------------------------------------------------------
+
+
+class EscalationWatcher(BackgroundWorker):
+    """Monitors pending human-in-the-loop escalations and sends reminders.
+
+    Subscribes to ``human_in_the_loop.pending`` for immediate notifications
+    and also processes any queued pending escalations on each tick.
+    """
+
+    def __init__(
+        self,
+        watch_path: str | Path = ".",
+        interval_seconds: float = 300.0,
+    ) -> None:
+        super().__init__("ESCALATION_WATCHER", interval_seconds=interval_seconds)
+        self._subscribed = False
+        self._pending: list[dict[str, Any]] = []
+
+    async def start(self) -> None:
+        await super().start()
+        if not self._subscribed:
+            bus = get_agent_bus()
+            bus.subscribe("human_in_the_loop.pending", self._on_pending)
+            self._subscribed = True
+            logger.info("ESCALATION_WATCHER subscribed to human_in_the_loop.pending")
+
+    async def _on_pending(self, message: BusMessage) -> None:
+        payload = message.payload or {}
+        escalation_id = payload.get("escalation_id")
+        if escalation_id is None:
+            logger.debug("ESCALATION_WATCHER received pending message without escalation_id")
+            return
+        self._pending.append(payload)
+
+    async def _tick(self) -> None:
+        pending: list[dict[str, Any]] = []
+
+        if self._pending:
+            pending.extend(self._pending)
+            self._pending.clear()
+
+        try:
+            from backend.core.human_in_the_loop import HumanInTheLoopManager
+
+            manager = HumanInTheLoopManager()
+            pending.extend(manager.list_pending())
+        except Exception as exc:
+            logger.warning("ESCALATION_WATCHER failed to load pending escalations: %s", exc)
+
+        reminder_count = 0
+        for item in pending:
+            escalation_id = item.get("escalation_id") or item.get("request_id")
+            if escalation_id is None:
+                continue
+            reason = self._build_reason(item)
+            try:
+                from backend.core.human_in_the_loop import HumanInTheLoopManager
+
+                manager = HumanInTheLoopManager()
+                policy = manager.load_policy()
+            except Exception:
+                policy = None
+
+            if policy is None or not getattr(policy, "enabled", False):
+                continue
+
+            await self._publish(
+                "human_in_the_loop.reminder",
+                {
+                    "escalation_id": escalation_id,
+                    "reason": reason,
+                },
+            )
+            reminder_count += 1
+
+        logger.info(
+            "ESCALATION_WATCHER processed %d pending escalations, sent %d reminders",
+            len(pending),
+            reminder_count,
+        )
+
+    def _build_reason(self, item: dict[str, Any]) -> str:
+        reason = item.get("reason")
+        if reason:
+            return str(reason)
+        proposal = item.get("proposal") or {}
+        category = proposal.get("category", "unknown")
+        confidence = proposal.get("confidence", "unknown")
+        return f"Pending escalation for category={category}, confidence={confidence}"
 
 
 # ---------------------------------------------------------------------------
@@ -798,6 +970,8 @@ class BackgroundWorkerManager:
             "DEPENDENCY_WATCHER": DependencyWatcher(self.watch_path, interval_seconds=604_800),
             "PERFORMANCE_WATCHER": PerformanceWatcher(self.watch_path, interval_seconds=3_600),
             "MEMORY_WATCHER": MemoryWatcher(interval_seconds=3_600),
+            "SELF_IMPROVEMENT_WATCHER": SelfImprovementWatcher(interval_seconds=86_400),
+            "ESCALATION_WATCHER": EscalationWatcher(self.watch_path, interval_seconds=300),
         }
 
     async def start_all(self) -> None:

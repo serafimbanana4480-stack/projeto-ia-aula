@@ -18,15 +18,26 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from slowapi import _rate_limit_exceeded_handler
+from fastapi import FastAPI, Request, Depends
+from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-
-from backend.config.settings import get_settings, validate_configuration
 from backend.middleware.rate_limit import limiter
 from backend.middleware.security import SecurityHeadersMiddleware
+
+from backend.config.settings import get_settings
+
+try:
+    from backend.config.settings import validate_configuration
+except ImportError:
+
+    def validate_configuration() -> list[str]:
+        return []
+
+
 from backend.observability.health import HealthChecker
+
+from backend.middleware.auth import require_auth
+from fastapi.middleware.cors import CORSMiddleware
 from backend.observability.routes.alerts import router as alerts_router
 from backend.observability.routes.metrics import router as metrics_router
 from backend.orchestrator.routes.agent_bus import router as agent_bus_router
@@ -47,6 +58,7 @@ from backend.orchestrator.routes.overseer import router as overseer_router
 from backend.orchestrator.routes.plan import router as plan_router
 from backend.orchestrator.routes.profile import router as profile_router
 from backend.orchestrator.routes.projects import router as projects_router
+from backend.orchestrator.routes.providers import router as providers_router
 from backend.orchestrator.routes.system import router as system_router
 from backend.orchestrator.routes.terminal import router as terminal_router
 from backend.orchestrator.routes.workers import router as workers_router
@@ -176,7 +188,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await worker_manager.stop_all()
         # Wait for all background tasks to finish cleanly
         await asyncio.gather(
-            monitor_task, summary_task, guardian_task,
+            monitor_task,
+            summary_task,
+            guardian_task,
             return_exceptions=True,
         )
         await app.state.llm_client.aclose()
@@ -212,6 +226,7 @@ app.include_router(alerts_router, prefix="/api")
 app.include_router(modes_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
 app.include_router(projects_router, prefix="/api")
+app.include_router(providers_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
 app.include_router(terminal_router, prefix="/api")
 app.include_router(embeddings_router, prefix="/api")
@@ -235,27 +250,39 @@ app.include_router(skills_router, prefix="/api")
 
 # MetaOrchestrator WebSocket — mounted directly so path is ``/ws/missions/{id}``
 from backend.orchestrator.routes.meta import mission_websocket as _meta_ws  # noqa: E402
+
 app.add_api_websocket_route("/ws/missions/{mission_id}", _meta_ws)
 
 
 @app.get("/health")
 @limiter.limit("100/minute")
-async def health(request: Request, deep: bool = False) -> dict[str, Any]:
-    """Liveness probe. Returns ``200`` whenever the process is up.
+async def health(request: Request) -> dict[str, str]:
+    """Basic liveness probe — no auth required."""
+    return {"status": "ok"}
 
-    With ``?deep=true`` runs a full health check against every background
-    service and returns per-subsystem status.
+
+@app.get("/health/deep")
+@limiter.limit("30/minute")
+async def health_deep(
+    request: Request,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Deep health check — requires authentication.
+
+    Runs a full check against every background service and returns
+    per-subsystem status.
     """
-    if not deep:
-        return {"status": "ok"}
-
     checker = HealthChecker(request.app.state)
     return await checker.check_all()
 
 
 @app.get("/api/sessions/{session_id}/history")
 @limiter.limit("200/minute")
-async def get_history(request: Request, session_id: str) -> dict[str, list[dict[str, str]]]:
+async def get_history(
+    request: Request,
+    session_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, list[dict[str, str]]]:
     """Return the rolling conversation history for a session."""
     history = await app.state.context.get_history(session_id)
     return {

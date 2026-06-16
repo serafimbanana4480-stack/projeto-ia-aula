@@ -153,18 +153,18 @@ export async function autoLoginDev(): Promise<boolean> {
   if (!AUTO_LOGIN_ENABLED) return false;
   if (isTokenValid()) return true;
 
-  // NOTE: admin@nexus.local is rejected by Pydantic EmailStr as a reserved
-  // TLD, so we default to a domain that passes email validation.
-  const email =
-    process.env.NEXT_PUBLIC_DEV_EMAIL ?? "admin@nexus-ide.com";
-  const password =
-    process.env.NEXT_PUBLIC_DEV_PASSWORD ?? "admin123";
+  const email = process.env.NEXT_PUBLIC_DEV_EMAIL;
+  const password = process.env.NEXT_PUBLIC_DEV_PASSWORD;
+
+  if (!email || !password) {
+    console.warn("Dev auto-login skipped: NEXT_PUBLIC_DEV_EMAIL/PASSWORD not set");
+    return false;
+  }
 
   try {
     await login({ email, password });
     return true;
   } catch {
-    // Auto-login failed; let the user log in manually.
     return false;
   }
 }

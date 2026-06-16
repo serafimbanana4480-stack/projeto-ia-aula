@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -47,7 +48,11 @@ def _get_fernet() -> Fernet:
     global _fernet_instance
     if _fernet_instance is None:
         settings = get_settings()
-        secret = settings.secret_key.get_secret_value() if hasattr(settings.secret_key, "get_secret_value") else str(settings.secret_key)
+        secret = (
+            settings.secret_key.get_secret_value()
+            if hasattr(settings.secret_key, "get_secret_value")
+            else str(settings.secret_key)
+        )
         key_bytes = hashlib.sha256(secret.encode("utf-8")).digest()
         key_b64 = base64.urlsafe_b64encode(key_bytes)
         _fernet_instance = Fernet(key_b64)
@@ -113,7 +118,7 @@ async def create_account(
         raise HTTPException(status_code=400, detail="host, username, and password are required")
 
     try:
-        conn = connect_imap(host, port, username, password, use_ssl)
+        conn = await asyncio.to_thread(connect_imap, host, port, username, password, use_ssl)
         conn.logout()
     except ConnectionError as e:
         raise HTTPException(status_code=400, detail=f"Could not connect to IMAP: {e}") from e
@@ -165,7 +170,8 @@ async def get_inbox(
 
     config = _account_to_config(account)
     try:
-        emails = fetch_emails(
+        emails = await asyncio.to_thread(
+            fetch_emails,
             folder="INBOX",
             limit=limit,
             unread_only=unread_only,
@@ -194,7 +200,8 @@ async def search_email_endpoint(
 
     config = _account_to_config(account)
     try:
-        results = imap_search_emails(
+        results = await asyncio.to_thread(
+            imap_search_emails,
             query=q,
             folder="INBOX",
             limit=20,
@@ -222,7 +229,7 @@ async def mark_email_read(
         raise HTTPException(status_code=403, detail="Not authorized")
 
     config = _account_to_config(account)
-    success = mark_as_read(email_id, **config)
+    success = await asyncio.to_thread(mark_as_read, email_id, **config)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to mark email as read")
     return {"success": True, "email_id": email_id}
@@ -251,7 +258,8 @@ async def triage_emails(
 
     config = _account_to_config(account)
     try:
-        emails = fetch_emails(
+        emails = await asyncio.to_thread(
+            fetch_emails,
             folder="INBOX",
             limit=20,
             unread_only=True,
@@ -325,12 +333,14 @@ async def triage_emails(
                 "suggested_action": "review manually",
             }
 
-        triaged.append({
-            "email": email_item,
-            "classification": classification_data.get("classification", "normal"),
-            "reason": classification_data.get("reason", ""),
-            "suggested_action": classification_data.get("suggested_action", ""),
-        })
+        triaged.append(
+            {
+                "email": email_item,
+                "classification": classification_data.get("classification", "normal"),
+                "reason": classification_data.get("reason", ""),
+                "suggested_action": classification_data.get("suggested_action", ""),
+            }
+        )
 
     # Sort by priority: urgent > important > normal > spam
     priority_order = {"urgent": 0, "important": 1, "normal": 2, "spam": 3}

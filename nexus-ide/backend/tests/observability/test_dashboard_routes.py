@@ -4,7 +4,11 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from backend.observability.routes.metrics import get_models_status, get_request_flow
+from backend.observability.routes.metrics import (
+    _validate_stream_auth,
+    get_models_status,
+    get_request_flow,
+)
 
 
 @pytest.mark.asyncio
@@ -30,3 +34,13 @@ async def test_models_status_raises_when_ollama_unavailable(
         await get_models_status()
 
     assert exc.value.status_code == 503
+
+
+def test_dashboard_stream_requires_auth() -> None:
+    class DummyRequest:
+        headers: dict[str, str] = {}
+
+    with pytest.raises(HTTPException) as exc:
+        _validate_stream_auth(DummyRequest(), None)  # type: ignore[arg-type]
+
+    assert exc.value.status_code == 401

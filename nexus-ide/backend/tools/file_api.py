@@ -16,8 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.file_locks import DeadlockError, FileLockManager, LockError
+from backend.core.rollback_manager import RollbackManager
 from backend.core.workspace import WorkspaceManager
 from backend.core.workspace_fs import (
+    _path_for_security_check,
     delete_file_absolute,
     list_dir_absolute,
     read_file_absolute,
@@ -81,6 +83,7 @@ def _is_absolute(path: str) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 async def read(
     path: str,
     project_path: str = ".",
@@ -89,7 +92,7 @@ async def read(
 ) -> dict[str, Any]:
     """Read a file. Supports absolute and relative paths."""
     if _is_absolute(path):
-        blocked, reason = _is_blocked_path(path)
+        blocked, reason = _is_blocked_path(_path_for_security_check(path))
         if blocked:
             return {"error": reason}
         return await read_file_absolute(path)
@@ -101,9 +104,7 @@ async def read(
         return {"error": str(exc)}
 
     try:
-        await _lock_manager.acquire_read_lock(
-            str(full_path), owner, timeout=timeout_seconds
-        )
+        await _lock_manager.acquire_read_lock(str(full_path), owner, timeout=timeout_seconds)
         return await read_file_absolute(str(full_path))
     except (LockError, DeadlockError) as exc:
         return {"error": f"Lock error: {exc}"}
@@ -139,7 +140,7 @@ async def read_multiple(
     resolved_paths: list[str] = []
     for path in paths:
         if _is_absolute(path):
-            blocked, reason = _is_blocked_path(path)
+            blocked, reason = _is_blocked_path(_path_for_security_check(path))
             if blocked:
                 return {
                     "files": {},
@@ -197,36 +198,52 @@ async def write(
     those extras.
     """
     if _is_absolute(path):
-        blocked, reason = _is_blocked_path(path)
+        full_path = path
+    else:
+        try:
+            full_path = str(_validate_relative_path(project_path, path))
+        except PermissionError as exc:
+            return {"error": str(exc)}
+
+    existing_content: str | None = None
+    try:
+        existing_content = await read_file_absolute(full_path)
+    except Exception:
+        pass
+
+    try:
+        await RollbackManager().record_snapshot(
+            project_path=project_path,
+            artifact_id=owner,
+            file_path=full_path,
+            content_before=existing_content,
+            metadata={"tool": "write_file", "owner": owner},
+        )
+    except Exception as exc:
+        logger.warning("Failed to record rollback snapshot: %s", exc)
+
+    if _is_absolute(path):
+        blocked, reason = _is_blocked_path(_path_for_security_check(path))
         if blocked:
             return {"error": reason}
         if Path(path).suffix.lower() in _BLOCKED_EXTENSIONS:
             return {
                 "error": (
-                    f"Writing files with extension '{Path(path).suffix}' "
-                    "is blocked for security"
+                    f"Writing files with extension '{Path(path).suffix}' is blocked for security"
                 )
             }
         return await write_file_absolute(path, content)
 
     # Relative path — sandbox + lock + blocked ext
-    try:
-        full_path = _validate_relative_path(project_path, path)
-    except PermissionError as exc:
-        return {"error": str(exc)}
-
-    if full_path.suffix.lower() in _BLOCKED_EXTENSIONS:
+    if Path(full_path).suffix.lower() in _BLOCKED_EXTENSIONS:
         return {
             "error": (
-                f"Writing files with extension '{full_path.suffix}' "
-                "is blocked for security"
+                f"Writing files with extension '{Path(full_path).suffix}' is blocked for security"
             )
         }
 
     try:
-        await _lock_manager.acquire_write_lock(
-            str(full_path), owner, timeout=timeout_seconds
-        )
+        await _lock_manager.acquire_write_lock(str(full_path), owner, timeout=timeout_seconds)
         return await write_file_absolute(str(full_path), content)
     except (LockError, DeadlockError) as exc:
         return {"error": f"Lock error: {exc}"}
@@ -243,7 +260,7 @@ async def list_files(
 ) -> dict[str, Any]:
     """List directory contents. Supports absolute and relative paths."""
     if _is_absolute(path):
-        blocked, reason = _is_blocked_path(path)
+        blocked, reason = _is_blocked_path(_path_for_security_check(path))
         if blocked:
             return {"error": reason}
         return await list_dir_absolute(path, recursive=recursive)
@@ -265,12 +282,10 @@ async def delete(
 ) -> dict[str, Any]:
     """Delete a file. Supports absolute and relative paths."""
     if _is_absolute(path):
-        blocked, reason = _is_blocked_path(path)
+        blocked, reason = _is_blocked_path(_path_for_security_check(path))
         if blocked:
             return {"error": reason}
-        return await delete_file_absolute(
-            path, move_to_trash=move_to_trash, auth_token=auth_token
-        )
+        return await delete_file_absolute(path, move_to_trash=move_to_trash, auth_token=auth_token)
 
     # Relative path — sandbox
     try:
@@ -279,9 +294,7 @@ async def delete(
         return {"error": str(exc)}
 
     if full_path.is_dir():
-        return {
-            "error": "Path is a directory; use recursive directory deletion instead"
-        }
+        return {"error": "Path is a directory; use recursive directory deletion instead"}
 
     return await delete_file_absolute(str(full_path), move_to_trash=move_to_trash)
 
@@ -302,7 +315,7 @@ async def search(
     For absolute paths the cleaner ``workspace_fs`` format is returned.
     """
     if _is_absolute(path):
-        blocked, reason = _is_blocked_path(path)
+        blocked, reason = _is_blocked_path(_path_for_security_check(path))
         if blocked:
             return {"error": reason}
         return await search_files_absolute(query, path, max_results=max_results)

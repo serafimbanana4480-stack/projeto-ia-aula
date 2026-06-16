@@ -318,11 +318,10 @@ class AgentBase(ABC):
             models_to_try = [test_model]
 
         last_error: Exception | None = None
-        for model_id in models_to_try:
+        for attempt_idx, model_id in enumerate(models_to_try):
             collector = get_metrics_collector()
             started_at = time.monotonic()
             tokens_out = 0
-            request_success = False
 
             def _capture_final_chunk(chunk: dict[str, Any]) -> None:
                 nonlocal tokens_out
@@ -347,20 +346,22 @@ class AgentBase(ABC):
                 ):
                     tokens_out += 1
                     yield token
-                request_success = True
+                latency_ms = (time.monotonic() - started_at) * 1000.0
+                await collector.record_request(success=True, latency_ms=latency_ms)
+                if tokens_out > 0:
+                    await collector.record_token(model_id, tokens_out)
                 return  # Success — done
             except Exception as exc:
                 last_error = exc
+                latency_ms = (time.monotonic() - started_at) * 1000.0
+                is_last_model = attempt_idx >= len(models_to_try) - 1
+                if is_last_model:
+                    await collector.record_request(success=False, latency_ms=latency_ms)
                 logger.warning(
                     "Model %s failed for agent %s: %s. Trying next fallback.",
                     model_id, self.name, exc,
                 )
                 continue
-            finally:
-                latency_ms = (time.monotonic() - started_at) * 1000.0
-                await collector.record_request(success=request_success, latency_ms=latency_ms)
-                if tokens_out > 0:
-                    await collector.record_token(model_id, tokens_out)
 
         # All models exhausted
         if last_error:
@@ -482,6 +483,34 @@ class AgentBase(ABC):
         """Rough token estimate: ~4 chars per token for English/ASCII text."""
         return max(1, len(text) // 4)
 
+    _FILE_TASK_MARKERS: tuple[str, ...] = (
+        "create a file",
+        "create file",
+        "write a file",
+        "write file",
+        "criar ficheiro",
+        "criar um ficheiro",
+        "criar arquivo",
+        "escrever ficheiro",
+        "guardar ficheiro",
+        "modificar ficheiro",
+        ".txt",
+    )
+
+    def _is_file_task(self, query: str) -> bool:
+        lowered = query.lower()
+        return any(m in lowered for m in self._FILE_TASK_MARKERS) or bool(
+            re.search(r"[A-Za-z]:\\|/Users/|/home/|Desktop", query)
+        )
+
+    def _is_code_only_file_response(self, answer: str) -> bool:
+        """True when the model answered a file task with example code instead of tools."""
+        lowered = answer.lower()
+        if re.search(r"```(?:python|py|bash|shell|cmd)", answer, re.IGNORECASE):
+            return True
+        code_hints = ("with open(", "open(", "pathlib", "os.path", "writefile", "echo >")
+        return any(h in lowered for h in code_hints)
+
     def _trim_context(self, context: str, iteration: int) -> str:
         """Trim context to keep it under ~4000 tokens.
 
@@ -572,10 +601,29 @@ class AgentBase(ABC):
             logger.info("[%s] Tool calls parsed | iteration=%d | count=%d", self.name, iteration, len(tool_calls))
 
             if not tool_calls:
+                # Model sometimes returns Python "usage examples" instead of tool
+                # calls for file tasks. Nudge once before accepting the answer.
+                if (
+                    iteration == 1
+                    and self._is_file_task(request.query)
+                    and self._is_code_only_file_response(answer)
+                    and iteration < request.max_iterations
+                ):
+                    logger.warning(
+                        "[%s] File task answered with code only — nudging model to call tools",
+                        self.name,
+                    )
+                    context += (
+                        "\n[SYSTEM] The user asked to create or modify a REAL file on disk. "
+                        "Do NOT show Python or shell examples. Call write_file_absolute (for "
+                        "absolute paths like C:\\Users\\...) or write_file (for project-relative "
+                        "paths) NOW using the ```tool JSON format."
+                    )
+                    continue
+
                 # No more tools, return final answer
                 logger.info("[%s] No tool calls detected — emitting final answer | iteration=%d", self.name, iteration)
                 yield "<event>answer</event>"
-                yield answer
                 return
 
             # Detect duplicate tool-call loops (models sometimes repeat the same
@@ -590,7 +638,6 @@ class AgentBase(ABC):
                         self.name, iteration,
                     )
                     yield "<event>answer</event>"
-                    yield answer
                     return
             previous_tool_calls = tool_calls
 
@@ -657,7 +704,17 @@ class AgentBase(ABC):
 
                 # If a write succeeded, strongly signal that the task is done so
                 # the model does not loop repeating the same call.
-                if tool_name in ("write_file", "write_file_absolute") and "error" not in result:
+                inner = result.get("result")
+                write_confirmed = (
+                    isinstance(inner, dict)
+                    and inner.get("written") is True
+                    and not inner.get("error")
+                )
+                if (
+                    tool_name in ("write_file", "write_file_absolute")
+                    and "error" not in result
+                    and write_confirmed
+                ):
                     context += "\n[SYSTEM] File written successfully. STOP calling tools and provide your final answer to the user."
 
             # Continue loop with context

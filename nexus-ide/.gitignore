@@ -71,7 +71,8 @@ test_*.png
 !nexus-ide-screenshot.png
 !nexus-ide-ui.png
 
-# Raw test / agent output files
+# Runtime logs
+logs/
 test_output_online/
 test.txt
 agent_test.txt

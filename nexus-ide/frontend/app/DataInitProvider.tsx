@@ -6,7 +6,6 @@ import { useModeStore } from "../stores/modeStore";
 import { useToolsStore } from "../stores/toolsStore";
 import { useModelStore } from "../stores/modelStore";
 import { initMetricsStream } from "../stores/metricsStore";
-import { isAuthenticated } from "../lib/auth";
 
 /**
  * DataInitProvider — loads reference data once on app startup.
@@ -34,9 +33,6 @@ export default function DataInitProvider({
   useEffect(() => {
     if (initializedRef.current) return;
     initializedRef.current = true;
-
-    // Do NOT start any data fetches if the user is not authenticated.
-    if (!isAuthenticated()) return;
 
     // Start singleton metrics stream (SSE -> polling fallback)
     try {

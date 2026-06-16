@@ -1,0 +1,53 @@
+{
+  "esc_20260614011527370540": {
+    "request_id": "esc_20260614011527370540",
+    "proposal_id": "p_test1",
+    "proposal": {
+      "id": "p_test1",
+      "category": "security",
+      "confidence": 0.9,
+      "change": "update auth"
+    },
+    "reason": "High confidence security change",
+    "decision": "pending",
+    "operator": null,
+    "notes": "",
+    "decided_at": null,
+    "created_at": "2026-06-14T01:15:27.370574+00:00",
+    "resolution": null
+  },
+  "esc_20260614011657383586": {
+    "request_id": "esc_20260614011657383586",
+    "proposal_id": "p_test1",
+    "proposal": {
+      "id": "p_test1",
+      "category": "security",
+      "confidence": 0.9,
+      "change": "update auth"
+    },
+    "reason": "High confidence security change",
+    "decision": "pending",
+    "operator": null,
+    "notes": "",
+    "decided_at": null,
+    "created_at": "2026-06-14T01:16:57.383600+00:00",
+    "resolution": null
+  },
+  "esc_20260615230156873303": {
+    "request_id": "esc_20260615230156873303",
+    "proposal_id": "p_test1",
+    "proposal": {
+      "id": "p_test1",
+      "category": "security",
+      "confidence": 0.9,
+      "change": "update auth"
+    },
+    "reason": "High confidence security change",
+    "decision": "pending",
+    "operator": null,
+    "notes": "",
+    "decided_at": null,
+    "created_at": "2026-06-15T23:01:56.873325+00:00",
+    "resolution": null
+  }
+}

@@ -1,7 +1,8 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { StreamEvent } from "../lib/types";
-import { postChat } from "../lib/api";
+import { postChat, ApiError } from "../lib/api";
+import { clearAuth } from "../lib/auth";
 import { log } from "../lib/log";
 
 const STREAM_TIMEOUT_MS = 90000; // 90s timeout for the entire stream (Ollama may need time to load models)
@@ -24,7 +25,7 @@ export function useAgentStream(sessionId: string) {
   }, []);
 
   const send = useCallback(
-    async (message: string, mode = "agent", model = "", projectPath = "") => {
+    async (message: string, mode = "auto", model = "", projectPath = "", thinkingStrength?: string) => {
       // Cancel any previous request
       abortRef.current?.abort();
       clearStreamTimeout();
@@ -53,7 +54,7 @@ export function useAgentStream(sessionId: string) {
       }, STREAM_TIMEOUT_MS);
 
       try {
-        const res = await postChat(message, sessionId, mode, controller.signal, model, projectPath);
+        const res = await postChat(message, sessionId, mode, controller.signal, model, projectPath, thinkingStrength);
 
         if (!res.ok) {
           const errorText = await res.text();
@@ -149,6 +150,11 @@ export function useAgentStream(sessionId: string) {
           return;
         clearStreamTimeout();
         const msg = error instanceof Error ? error.message : "Erro desconhecido";
+        if (error instanceof ApiError && error.status === 401 && typeof window !== "undefined") {
+          clearAuth();
+          window.location.href = "/login?expired=1";
+          return;
+        }
         setError(msg);
         setEvents([
           {

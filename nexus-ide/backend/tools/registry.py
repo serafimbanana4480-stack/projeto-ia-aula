@@ -59,6 +59,21 @@ def set_tool_enabled(name: str, enabled: bool) -> None:
         _registry[name].enabled = enabled
 
 
+def _handler_result_failed(result: Any) -> str | None:
+    """Return an error message when a handler result dict indicates failure."""
+    if not isinstance(result, dict):
+        return None
+    if result.get("error"):
+        return str(result["error"])
+    if result.get("written") is False:
+        return str(result.get("error") or "Write operation failed")
+    if result.get("deleted") is False:
+        return str(result.get("error") or "Delete operation failed")
+    if result.get("moved") is False:
+        return str(result.get("error") or "Move operation failed")
+    return None
+
+
 async def execute_tool(name: str, session_id: str | None, args: dict) -> dict:
     _maybe_register()
     spec = get_tool(name)
@@ -73,6 +88,23 @@ async def execute_tool(name: str, session_id: str | None, args: dict) -> dict:
     try:
         result = await spec.handler(**args)
         duration_ms = int((time.time() - start) * 1000)
+        handler_error = _handler_result_failed(result)
+        if handler_error:
+            log_tool_execution(
+                session_id=session_id,
+                tool_name=name,
+                args=args,
+                result=result,
+                success=False,
+                error=handler_error,
+                duration_ms=duration_ms,
+            )
+            return {
+                "tool": name,
+                "error": handler_error,
+                "result": result,
+                "duration_ms": duration_ms,
+            }
         log_tool_execution(
             session_id=session_id,
             tool_name=name,

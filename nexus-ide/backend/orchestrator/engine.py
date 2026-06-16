@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -56,6 +57,13 @@ except ImportError:
     TTLCache = None
 
 logger = logging.getLogger(__name__)
+
+_INLINE_TOOL_ERROR_RE = re.compile(r"<event>tool_error\|(.+?)</event>", re.DOTALL)
+
+
+def _extract_tool_errors(output: str) -> list[str]:
+    """Return tool error messages embedded in agent ReAct output."""
+    return [msg.strip() for msg in _INLINE_TOOL_ERROR_RE.findall(output) if msg.strip()]
 
 
 async def _iterate_agent_output(output: Any) -> AsyncIterator[str]:
@@ -91,7 +99,9 @@ class ExecutionContext:
     project_path: str = "."
     shared_memory: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)  # task outputs keyed by task_id
-    _global_context_parts: list[str] = field(default_factory=list)  # accumulated context from completed tasks
+    _global_context_parts: list[str] = field(
+        default_factory=list
+    )  # accumulated context from completed tasks
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
@@ -289,7 +299,10 @@ class OrchestrationEngine:
             async with self._active_tasks_lock:
                 self._active_tasks[session_id] = []
             for _layer_idx, layer in enumerate(layers):
-                if session_id in self._cancellation_events and self._cancellation_events[session_id].is_set():
+                if (
+                    session_id in self._cancellation_events
+                    and self._cancellation_events[session_id].is_set()
+                ):
                     break
 
                 # Execute all tasks in this layer in parallel
@@ -416,7 +429,10 @@ class OrchestrationEngine:
 
         # Phase 2: EXECUTE
         result = await self.execute_plan(
-            plan, session_id, auto_approve=True, project_path=project_path,
+            plan,
+            session_id,
+            auto_approve=True,
+            project_path=project_path,
         )
 
         # Phase 3: VERIFY & ITERATE
@@ -432,7 +448,9 @@ class OrchestrationEngine:
 
             logger.info(
                 "Autonomous: verification round %d/%d — %d tasks to verify",
-                verify_round + 1, max_verify_iterations, len(verification_needed),
+                verify_round + 1,
+                max_verify_iterations,
+                len(verification_needed),
             )
 
             # Create verification tasks
@@ -447,7 +465,10 @@ class OrchestrationEngine:
             )
 
             verify_result = await self.execute_plan(
-                verify_plan, session_id, auto_approve=True, project_path=project_path,
+                verify_plan,
+                session_id,
+                auto_approve=True,
+                project_path=project_path,
             )
 
             # Check if verification found issues
@@ -459,7 +480,8 @@ class OrchestrationEngine:
             # Phase 4: ITERATE — create fix tasks for found issues
             logger.info(
                 "Autonomous: %d issues found, creating fix tasks (round %d)",
-                len(issues_found), verify_round + 1,
+                len(issues_found),
+                verify_round + 1,
             )
 
             fix_tasks = self._create_fix_tasks(issues_found, verify_tasks, session_id)
@@ -471,7 +493,10 @@ class OrchestrationEngine:
             )
 
             result = await self.execute_plan(
-                fix_plan, session_id, auto_approve=True, project_path=project_path,
+                fix_plan,
+                session_id,
+                auto_approve=True,
+                project_path=project_path,
             )
 
         # Phase 5: FINAL REVIEW with ANALYZER
@@ -483,7 +508,10 @@ class OrchestrationEngine:
             session_id=session_id,
         )
         await self.execute_plan(
-            review_plan, session_id, auto_approve=True, project_path=project_path,
+            review_plan,
+            session_id,
+            auto_approve=True,
+            project_path=project_path,
         )
 
         self._state[session_id] = OrchestrationState.COMPLETED
@@ -498,11 +526,13 @@ class OrchestrationEngine:
             agent = artifact.get("agent", "")
             status = artifact.get("status", "")
             if agent == "CODER" and status == "completed":
-                tasks_needing_verify.append({
-                    "task_id": task_id,
-                    "name": artifact.get("name", "Unknown"),
-                    "output": artifact.get("output", ""),
-                })
+                tasks_needing_verify.append(
+                    {
+                        "task_id": task_id,
+                        "name": artifact.get("name", "Unknown"),
+                        "output": artifact.get("output", ""),
+                    }
+                )
         return tasks_needing_verify
 
     def _create_verification_tasks(
@@ -543,18 +573,29 @@ class OrchestrationEngine:
                 continue
             # Heuristic: look for error indicators in DEBUGGER output
             error_indicators = [
-                "error", "bug", "issue", "problem", "fix",
-                "failed", "incorrect", "missing", "broken",
-                "erro", "problema", "falha",  # Portuguese
+                "error",
+                "bug",
+                "issue",
+                "problem",
+                "fix",
+                "failed",
+                "incorrect",
+                "missing",
+                "broken",
+                "erro",
+                "problema",
+                "falha",  # Portuguese
             ]
             output_lower = output.lower()
             if any(ind in output_lower for ind in error_indicators):
-                issues.append({
-                    "task_id": task_id,
-                    "name": artifact.get("name", "Unknown verification"),
-                    "output": output,
-                    "agent": agent,
-                })
+                issues.append(
+                    {
+                        "task_id": task_id,
+                        "name": artifact.get("name", "Unknown verification"),
+                        "output": output,
+                        "agent": agent,
+                    }
+                )
         return issues
 
     def _create_fix_tasks(
@@ -665,7 +706,10 @@ class OrchestrationEngine:
 
         for attempt in range(task.max_retries + 1):
             try:
-                if session_id in self._cancellation_events and self._cancellation_events[session_id].is_set():
+                if (
+                    session_id in self._cancellation_events
+                    and self._cancellation_events[session_id].is_set()
+                ):
                     task.status = TaskStatus.CANCELLED
                     return {"cancelled": True}
 
@@ -673,20 +717,61 @@ class OrchestrationEngine:
                     session_id=session_id,
                     query=self._build_task_prompt(task, dep_context, ctx.project_path),
                     client=self._llm_client,
-                    context={"task": task.to_dict(), "shared_memory": ctx.shared_memory, "project_path": ctx.project_path},
+                    project_path=ctx.project_path,
+                    context={
+                        "task": task.to_dict(),
+                        "shared_memory": ctx.shared_memory,
+                        "project_path": ctx.project_path,
+                    },
                     max_iterations=5,
                 )
 
                 # Stream execution with hard timeout
                 output_parts: list[str] = []
                 async with self._agent_pool.slot(task.agent):
-                    async with EventEmitter(self._events, task.agent, session_id, task.task_id) as emit:
+                    async with EventEmitter(
+                        self._events, task.agent, session_id, task.task_id
+                    ) as emit:
                         async with asyncio.timeout(self._default_timeout):
                             async for token in _iterate_agent_output(agent.run(request)):
                                 output_parts.append(token)
                                 await emit.emit(EventType.TOKEN, content=token)
 
                 output = "".join(output_parts)
+                tool_errors = _extract_tool_errors(output)
+                if tool_errors:
+                    task.output_data["content"] = output
+                    task.status = TaskStatus.FAILED
+                    task.error_message = tool_errors[0]
+                    task.completed_at = time.time()
+
+                    async with ctx._lock:
+                        ctx.artifacts[task.task_id] = {
+                            "name": task.name,
+                            "agent": task.agent,
+                            "output": output,
+                            "status": "failed",
+                            "tool_errors": tool_errors,
+                        }
+
+                    await self._events.publish(
+                        OrchestratorEvent(
+                            event_type=EventType.TASK_FAILED,
+                            source=task.agent,
+                            session_id=session_id,
+                            task_id=task.task_id,
+                            data={
+                                "error": task.error_message,
+                                "tool_errors": tool_errors,
+                            },
+                        )
+                    )
+                    return {
+                        "error": task.error_message,
+                        "tool_errors": tool_errors,
+                        "output": output,
+                    }
+
                 task.output_data["content"] = output
                 task.status = TaskStatus.COMPLETED
                 task.completed_at = time.time()
@@ -715,7 +800,12 @@ class OrchestrationEngine:
 
             except asyncio.TimeoutError as exc:
                 task.retry_count = attempt + 1
-                logger.warning("Task %s timed out (attempt %d/%d)", task.task_id, attempt + 1, task.max_retries + 1)
+                logger.warning(
+                    "Task %s timed out (attempt %d/%d)",
+                    task.task_id,
+                    attempt + 1,
+                    task.max_retries + 1,
+                )
                 if attempt < task.max_retries:
                     await self._events.publish(
                         OrchestratorEvent(
@@ -723,7 +813,11 @@ class OrchestrationEngine:
                             source=task.agent,
                             session_id=session_id,
                             task_id=task.task_id,
-                            data={"attempt": attempt + 1, "max_retries": task.max_retries, "reason": "timeout"},
+                            data={
+                                "attempt": attempt + 1,
+                                "max_retries": task.max_retries,
+                                "reason": "timeout",
+                            },
                         )
                     )
                     jitter = random.uniform(0, 1)
@@ -953,13 +1047,20 @@ Provide a clear summary of what you accomplished."""
         for i, raw in enumerate(raw_steps):
             if not isinstance(raw, dict):
                 continue
+            raw_priority = raw.get("priority", "medium")
+            if not isinstance(raw_priority, str):
+                raw_priority = "medium"
+            priority_upper = raw_priority.upper()
+            resolved_priority = (
+                TaskPriority[priority_upper]
+                if priority_upper in TaskPriority.__members__
+                else TaskPriority.MEDIUM
+            )
             task = TaskNode(
                 name=raw.get("name", f"Step {i + 1}"),
                 description=raw.get("description", ""),
                 agent=raw.get("agent", "CODER").upper(),
-                priority=TaskPriority[raw.get("priority", "medium").upper()]
-                if raw.get("priority", "medium").upper() in TaskPriority.__members__
-                else TaskPriority.MEDIUM,
+                priority=resolved_priority,
                 sandboxed=raw.get("sandboxed", False),
             )
             steps.append(task)
@@ -1031,7 +1132,7 @@ Provide a clear summary of what you accomplished."""
             # Try removing common prefixes
             for prefix in ("step ", "phase ", "task "):
                 if lowered.startswith(prefix):
-                    stripped = lowered[len(prefix):]
+                    stripped = lowered[len(prefix) :]
                     if stripped in name_to_idx:
                         return name_to_idx[stripped]
             # Try numeric string (e.g. "1", "2")
@@ -1068,7 +1169,9 @@ Provide a clear summary of what you accomplished."""
         import re
 
         # Match numbered steps: "1.", "1)", "Step 1:", etc.
-        numbered_pattern = r"(?:^|\n)\s*(?:step\s*)?(\d+)[.)]\s*(.+?)(?=(?:\n\s*(?:step\s*)?\d+[.)])|$)"
+        numbered_pattern = (
+            r"(?:^|\n)\s*(?:step\s*)?(\d+)[.)]\s*(.+?)(?=(?:\n\s*(?:step\s*)?\d+[.)])|$)"
+        )
         matches = re.findall(numbered_pattern, text, re.IGNORECASE | re.DOTALL)
 
         # If no numbered steps, try bullet points
@@ -1091,8 +1194,14 @@ Provide a clear summary of what you accomplished."""
             agent_match = re.search(r"[\[(](\w+)[\])]", content)
             agent = agent_match.group(1).upper() if agent_match else "CODER"
             if agent not in (
-                "ARCHITECT", "CODER", "ANALYZER", "DEBUGGER",
-                "RESEARCHER", "DOCUMENTER", "OPTIMIZER", "DASHBOARD",
+                "ARCHITECT",
+                "CODER",
+                "ANALYZER",
+                "DEBUGGER",
+                "RESEARCHER",
+                "DOCUMENTER",
+                "OPTIMIZER",
+                "DASHBOARD",
             ):
                 agent = "CODER"
 

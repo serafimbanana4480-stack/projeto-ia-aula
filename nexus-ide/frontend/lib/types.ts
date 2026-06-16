@@ -82,8 +82,11 @@ export interface SessionHistoryResponse {
 
 export interface ModelStatus {
   id: string;
+  name?: string;
   size_bytes: number;
   size_gb?: number;
+  parameter_size?: string;
+  provider?: string;
   modified_at?: string;
   details?: Record<string, unknown>;
   status: "available" | "loading" | "error";

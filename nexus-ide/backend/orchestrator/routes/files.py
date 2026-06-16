@@ -12,6 +12,7 @@ from backend.core.workspace_fs import (
     read_file_absolute,
     write_file_absolute,
 )
+from backend.core.workspace_security import _is_blocked_path
 
 from backend.middleware.auth import require_auth
 from backend.models.api import FileListRequest, FileReadRequest, FileTreeEntry, FileWriteRequest
@@ -212,6 +213,10 @@ async def upload_file(
     (for binary formats) magic-byte signatures before being written.
     """
     try:
+        blocked, reason = _is_blocked_path(project_path)
+        if blocked:
+            return {"error": reason}
+
         target_dir = Path(project_path).resolve()
         target_path = target_dir / (file.filename or "unnamed")
 

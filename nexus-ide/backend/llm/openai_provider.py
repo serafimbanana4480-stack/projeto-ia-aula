@@ -17,7 +17,7 @@ class OpenAIProvider:
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
-            timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0),
+            timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0),
         )
 
     async def aclose(self) -> None:
@@ -38,7 +38,13 @@ class OpenAIProvider:
             "stream": True,
         }
         if options:
-            for key in ("temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty"):
+            for key in (
+                "temperature",
+                "max_tokens",
+                "top_p",
+                "frequency_penalty",
+                "presence_penalty",
+            ):
                 if key in options:
                     payload[key] = options[key]
 

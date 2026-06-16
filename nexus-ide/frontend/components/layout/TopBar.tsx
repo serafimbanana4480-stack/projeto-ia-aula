@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Brain, ChevronDown, BookOpen, Sparkles, LogOut } from "lucide-react";
+import { Brain, BookOpen, Sparkles, LogOut } from "lucide-react";
 import { logout } from "../../lib/auth";
 import { useProjectStore } from "../../stores/projectStore";
 
@@ -43,20 +43,11 @@ export default function TopBar() {
           <span className="font-medium">
             {projectName}
           </span>
-          <ChevronDown className="h-3 w-3 text-nexus-muted" />
         </button>
       </div>
 
-      {/* Right: Costs, Docs, Profile */}
+      {/* Right: Docs, Profile */}
       <div className="flex items-center gap-2 md:gap-4">
-        <div className="hidden sm:flex items-center gap-2 rounded-lg border border-nexus-border bg-nexus-card px-3 py-1.5">
-          <span className="text-[11px] text-nexus-muted">Custos limit</span>
-          <span className="text-xs font-semibold">€2.48</span>
-          <span className="rounded bg-green-500/15 px-1 py-0.5 text-[10px] font-medium text-green-400">
-            +12%
-          </span>
-          <ChevronDown className="h-3 w-3 text-nexus-muted" />
-        </div>
 
         <button
           onClick={() => router.push("/documents")}

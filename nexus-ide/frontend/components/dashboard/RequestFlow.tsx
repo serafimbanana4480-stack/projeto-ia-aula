@@ -1,76 +1,32 @@
 "use client";
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useMemo } from "react";
 import { useMetricsStore } from "../../stores/metricsStore";
-import { getMetricsFlow } from "../../lib/api";
 import { GitBranch, CheckCircle2, XCircle, Timer, Gauge } from "lucide-react";
 
-interface FlowData {
-  available?: boolean;
-  reason?: string;
-  summary: {
-    total_requests: number;
-    successful_requests: number;
-    failed_requests: number;
-    avg_latency_ms: number;
-    throughput_tps: number;
-  };
-}
-
 export default function RequestFlow() {
-  const [flowData, setFlowData] = useState<FlowData | null>(null);
-  const [loading, setLoading] = useState(true);
-
   const metrics = useMetricsStore((s) => s.metrics);
 
-  const fetchFlowData = useCallback(async () => {
-    try {
-      setLoading(true);
-      const data = (await getMetricsFlow()) as unknown as FlowData;
-      if (data?.summary) {
-        setFlowData(data);
-      }
-    } catch {
-      /* Backend unavailable — will use metrics store data on next render */
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const summary = useMemo(() => {
+    if (!metrics) return null;
+    return {
+      total_requests: metrics.requests_total,
+      successful_requests: metrics.requests_successful,
+      failed_requests: metrics.requests_failed,
+      avg_latency_ms: metrics.avg_latency_ms,
+      throughput_tps: metrics.tokens_per_second,
+    };
+  }, [metrics]);
 
-  // Sync with metrics store when metrics change
-  useEffect(() => {
-    if (metrics && !flowData) {
-      setFlowData({
-        summary: {
-          total_requests: metrics.requests_total,
-          successful_requests: metrics.requests_successful,
-          failed_requests: metrics.requests_failed,
-          avg_latency_ms: metrics.avg_latency_ms,
-          throughput_tps: metrics.tokens_per_second,
-        },
-      });
-    }
-  }, [metrics, flowData]);
-
-  // Fetch from API every 60s
-  useEffect(() => {
-    fetchFlowData();
-    const interval = setInterval(fetchFlowData, 60000);
-    return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const formatLatency = useCallback((ms: number) => {
+  const formatLatency = (ms: number) => {
     if (ms < 1) return `${(ms * 1000).toFixed(0)}μs`;
     if (ms < 1000) return `${ms.toFixed(0)}ms`;
     return `${(ms / 1000).toFixed(1)}s`;
-  }, []);
+  };
 
   const successRate = useMemo(() => {
-    if (!flowData?.summary || flowData.summary.total_requests === 0) return "0.0";
-    return ((flowData.summary.successful_requests / flowData.summary.total_requests) * 100).toFixed(1);
-  }, [flowData]);
-
-  const summary = flowData?.summary;
+    if (!summary || summary.total_requests === 0) return "0.0";
+    return ((summary.successful_requests / summary.total_requests) * 100).toFixed(1);
+  }, [summary]);
 
   return (
     <div className="rounded border border-nexus-border bg-nexus-panel p-3">
@@ -87,14 +43,7 @@ export default function RequestFlow() {
         </div>
       </div>
 
-      {loading ? (
-        <div className="flex h-40 items-center justify-center text-xs text-gray-500">
-          <div className="flex items-center gap-2">
-            <div className="h-3 w-3 animate-spin rounded-full border-2 border-nexus-accent border-t-transparent" />
-            Carregando...
-          </div>
-        </div>
-      ) : !summary ? (
+      {!summary ? (
         <div className="flex h-32 flex-col items-center justify-center gap-2 text-center text-xs text-gray-500">
           <GitBranch className="h-8 w-8 text-gray-600" />
           <div className="font-medium text-gray-400">Dados indisponíveis</div>
@@ -128,13 +77,6 @@ export default function RequestFlow() {
               )
             )}
           </div>
-
-          {/* Status message */}
-          {flowData?.available === false && (
-            <div className="text-center text-xs text-gray-500 mb-3">
-              {flowData.reason || "Rastreamento distribuído não instrumentado"}
-            </div>
-          )}
 
           {/* Summary bar */}
           <div className="mt-2 grid grid-cols-5 gap-2 rounded border border-nexus-border/50 bg-nexus-bg/50 px-3 py-2 text-xs text-gray-400">

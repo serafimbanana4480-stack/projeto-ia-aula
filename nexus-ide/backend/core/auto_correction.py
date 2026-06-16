@@ -45,9 +45,7 @@ class AutoCorrectionLoop:
         await loop.stop_monitoring()
     """
 
-    def __init__(
-        self, lifecycle_manager: AgentLifecycleManager | None = None
-    ) -> None:
+    def __init__(self, lifecycle_manager: AgentLifecycleManager | None = None) -> None:
         self._task: asyncio.Task[Any] | None = None
         self._stop_event: asyncio.Event | None = None
         self._status: dict[str, Any] = {
@@ -150,9 +148,7 @@ class AutoCorrectionLoop:
                 self._update_tracker(tracker)
                 iteration = tracker.iterations
 
-            still_failing = await self._run_test_failure_iteration(
-                artifact_id, payload, iteration
-            )
+            still_failing = await self._run_test_failure_iteration(artifact_id, payload, iteration)
 
             if not still_failing:
                 await self._publish_status(
@@ -268,9 +264,7 @@ class AutoCorrectionLoop:
                 self._update_tracker(tracker)
                 iteration = tracker.iterations
 
-            still_broken = await self._run_critical_error_iteration(
-                artifact_id, payload, iteration
-            )
+            still_broken = await self._run_critical_error_iteration(artifact_id, payload, iteration)
 
             if not still_broken:
                 await self._publish_status(
@@ -307,13 +301,17 @@ class AutoCorrectionLoop:
 
         Returns ``True`` if the error is *still* present after this iteration.
         """
+        import backend.core.quality_metrics as qm
+
         error_report = payload.get("error_report", "N/A")
+        project_path = payload.get("project_path", ".")
+
+        before = await qm.measure(project_path)
 
         # Step 1 — CODER
         coder_id = await self._spawn_agent(
             "CODER",
-            f"Fix critical error in artifact {artifact_id}. "
-            f"Error report: {error_report}",
+            f"Fix critical error in artifact {artifact_id}. Error report: {error_report}",
             payload,
             artifact_id,
             iteration,
@@ -332,8 +330,7 @@ class AutoCorrectionLoop:
         # Step 2 — OVERSEER monitors the fix
         overseer_id = await self._spawn_agent(
             "OVERSEER",
-            f"Oversee fix for critical error in {artifact_id}. "
-            f"CODER output: {coder_output[:1500]}",
+            f"Oversee fix for critical error in {artifact_id}. CODER output: {coder_output[:1500]}",
             payload,
             artifact_id,
             iteration,
@@ -345,6 +342,17 @@ class AutoCorrectionLoop:
                 artifact_id,
                 iteration,
             )
+
+        after = await qm.measure(project_path)
+
+        if before is not None and after is not None and qm.should_reject_fix(before, after):
+            logger.warning(
+                "Fix rejected by quality metrics for artifact %s (iteration %d) — triggering rollback",
+                artifact_id,
+                iteration,
+            )
+            await self._trigger_rollback(artifact_id, project_path)
+            return True
 
         # Heuristic: if CODER claims it fixed the issue, assume success
         output_lower = coder_output.lower()
@@ -360,9 +368,26 @@ class AutoCorrectionLoop:
         )
         return not fixed
 
-    async def _handle_review_completed(
-        self, review_id: str, payload: dict[str, Any]
-    ) -> None:
+    async def _trigger_rollback(self, artifact_id: str, project_path: str) -> None:
+        """Trigger an automatic rollback when a fix is rejected by quality metrics."""
+        try:
+            from backend.core.rollback import RollbackManager
+
+            manager = RollbackManager()
+            result = await manager.auto_rollback_on_regression(
+                artifact_id=artifact_id,
+                quality_before={},
+                quality_after={},
+            )
+            logger.info(
+                "Rollback triggered for artifact %s | result=%s",
+                artifact_id,
+                result,
+            )
+        except Exception:
+            logger.exception("Failed to trigger rollback for artifact %s", artifact_id)
+
+    async def _handle_review_completed(self, review_id: str, payload: dict[str, Any]) -> None:
         from backend.core.peer_review import get_peer_review_system
 
         prs = get_peer_review_system()
@@ -401,8 +426,7 @@ class AutoCorrectionLoop:
                 )
 
         comments_str = " | ".join(
-            f"{c['reviewer']} ({c['severity']}): {c['message']}"
-            for c in all_comments
+            f"{c['reviewer']} ({c['severity']}): {c['message']}" for c in all_comments
         )
         objective = (
             f"Address review changes for {artifact_id} ({review.artifact_type}). "
@@ -448,9 +472,7 @@ class AutoCorrectionLoop:
             tracker.agents_spawned.extend(agent_types)
             tracker.status = "completed"
             self._update_tracker(tracker)
-            self.active_corrections.setdefault(artifact_id, []).extend(
-                instance_ids
-            )
+            self.active_corrections.setdefault(artifact_id, []).extend(instance_ids)
 
         await self._publish_status(
             "review_changes",
@@ -459,14 +481,10 @@ class AutoCorrectionLoop:
             f"completed {agent_types} ({instance_ids}) for {review.artifact_type}",
         )
 
-    async def _handle_performance_regression(
-        self, payload: dict[str, Any]
-    ) -> None:
+    async def _handle_performance_regression(self, payload: dict[str, Any]) -> None:
         artifact_id = payload.get("artifact_id", "unknown")
         async with self._lock:
-            tracker = self._get_or_create_tracker(
-                artifact_id, "performance_regression"
-            )
+            tracker = self._get_or_create_tracker(artifact_id, "performance_regression")
             if tracker.iterations >= MAX_ITERATIONS:
                 reason = "Max auto-correction iterations reached for performance regression"
             else:
@@ -502,16 +520,12 @@ class AutoCorrectionLoop:
             await self._wait_for_agent(instance_id)
 
         async with self._lock:
-            tracker = self._get_or_create_tracker(
-                artifact_id, "performance_regression"
-            )
+            tracker = self._get_or_create_tracker(artifact_id, "performance_regression")
             tracker.agents_spawned.append("REFACTOR_PERFORMANCE")
             tracker.status = "completed"
             self._update_tracker(tracker)
             if instance_id:
-                self.active_corrections.setdefault(artifact_id, []).append(
-                    instance_id
-                )
+                self.active_corrections.setdefault(artifact_id, []).append(instance_id)
 
         await self._publish_status(
             "performance_regression",
@@ -570,16 +584,12 @@ class AutoCorrectionLoop:
         start = time.time()
         while time.time() - start < timeout:
             if self._stop_event is not None and self._stop_event.is_set():
-                logger.info(
-                    "AutoCorrection stop requested while waiting for %s", instance_id
-                )
+                logger.info("AutoCorrection stop requested while waiting for %s", instance_id)
                 return
 
             instance = self._lifecycle.get_status(instance_id)
             if instance is None:
-                logger.warning(
-                    "Agent instance %s disappeared during monitoring", instance_id
-                )
+                logger.warning("Agent instance %s disappeared during monitoring", instance_id)
                 return
 
             if instance.is_terminal():
@@ -603,9 +613,7 @@ class AutoCorrectionLoop:
             timeout,
         )
         try:
-            await self._lifecycle.abort(
-                instance_id, reason="Auto-correction timeout"
-            )
+            await self._lifecycle.abort(instance_id, reason="Auto-correction timeout")
         except Exception:
             logger.warning("Failed to abort lifecycle for %s", instance_id)
 
@@ -652,9 +660,7 @@ class AutoCorrectionLoop:
     # Tracking helpers
     # ------------------------------------------------------------------
 
-    def _get_or_create_tracker(
-        self, artifact_id: str, trigger: str
-    ) -> _CorrectionTracker:
+    def _get_or_create_tracker(self, artifact_id: str, trigger: str) -> _CorrectionTracker:
         for c in self._status["corrections"]:
             if c["artifact_id"] == artifact_id and c["trigger"] == trigger:
                 # Rehydrate dataclass from dict for mutation
@@ -681,10 +687,7 @@ class AutoCorrectionLoop:
 
     def _update_tracker(self, tracker: _CorrectionTracker) -> None:
         for c in self._status["corrections"]:
-            if (
-                c["artifact_id"] == tracker.artifact_id
-                and c["trigger"] == tracker.trigger
-            ):
+            if c["artifact_id"] == tracker.artifact_id and c["trigger"] == tracker.trigger:
                 c["iterations"] = tracker.iterations
                 c["agents_spawned"] = tracker.agents_spawned
                 c["status"] = tracker.status
@@ -722,9 +725,7 @@ class AutoCorrectionLoop:
                 artifact_id,
             )
         except Exception:
-            logger.exception(
-                "Failed to spawn META_ANALYZER for %s", artifact_id
-            )
+            logger.exception("Failed to spawn META_ANALYZER for %s", artifact_id)
 
         try:
             overseer_id = await self._lifecycle.spawn(
@@ -744,9 +745,7 @@ class AutoCorrectionLoop:
                 artifact_id,
             )
         except Exception:
-            logger.exception(
-                "Failed to spawn OVERSEER for %s", artifact_id
-            )
+            logger.exception("Failed to spawn OVERSEER for %s", artifact_id)
 
         async with self._lock:
             self.active_corrections.setdefault(artifact_id, []).extend(instance_ids)
@@ -820,9 +819,7 @@ def get_auto_correction_loop(
     """
     global _auto_correction_loop_instance
     if _auto_correction_loop_instance is None:
-        _auto_correction_loop_instance = AutoCorrectionLoop(
-            lifecycle_manager=lifecycle_manager
-        )
+        _auto_correction_loop_instance = AutoCorrectionLoop(lifecycle_manager=lifecycle_manager)
     elif lifecycle_manager is not None:
         _auto_correction_loop_instance._lifecycle = lifecycle_manager
     return _auto_correction_loop_instance

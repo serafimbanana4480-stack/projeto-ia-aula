@@ -2,12 +2,21 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --nexus-glow: rgba(124, 106, 251, 0.4);
+  --nexus-glow-strong: rgba(124, 106, 251, 0.6);
+  --nexus-gradient-start: #7c6afb;
+  --nexus-gradient-end: #a78bfa;
+  --nexus-bg-deep: #08080f;
+  --nexus-surface: #12121e;
+}
+
 html,
 body {
   height: 100%;
 }
 body {
-  background: #0b0b14;
+  background: var(--nexus-bg-deep);
   color: #e8e8ed;
   font-family:
     ui-sans-serif,
@@ -24,6 +33,53 @@ body {
   ::selection {
     background: rgba(124, 106, 251, 0.3);
     color: #fff;
+  }
+}
+
+@keyframes pulse-subtle {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 5px var(--nexus-glow);
+  }
+  50% {
+    box-shadow: 0 0 20px var(--nexus-glow-strong);
   }
 }
 
@@ -61,5 +117,32 @@ body {
   .thin-scrollbar::-webkit-scrollbar-thumb {
     background: #2a2a3e;
     border-radius: 4px;
+  }
+
+  .glass {
+    background: rgba(18, 18, 30, 0.6);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .gradient-border {
+    position: relative;
+    border-radius: 12px;
+    background: #161622;
+  }
+  .gradient-border::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 12px;
+    padding: 1px;
+    background: linear-gradient(135deg, var(--nexus-gradient-start), var(--nexus-gradient-end));
+    -webkit-mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
   }
 }

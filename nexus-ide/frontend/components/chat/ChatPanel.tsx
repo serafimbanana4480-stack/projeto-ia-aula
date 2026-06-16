@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState, useEffect, useRef, useCallback } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { useAgentStream } from "../../hooks/useAgentStream";
 import { getSessionHistory, createPlan, approvePlan, executePlan, getPlanStatus, cancelPlan, createSession } from "../../lib/api";
 import type { PlanCreateResult, PlanStatus as PlanStatusType } from "../../lib/api";
@@ -19,7 +19,6 @@ import {
   PanelRightOpen,
   Wand2,
   Paperclip,
-  Mic,
   Send,
   StopCircle,
   RotateCcw,
@@ -31,7 +30,6 @@ import {
   Loader2,
   ListChecks,
   AlertTriangle,
-  X,
   WifiOff,
   Code,
   Bug,
@@ -43,11 +41,14 @@ import {
 } from "lucide-react";
 import type { AgentName, ChatMessage, StreamEvent } from "../../lib/types";
 import { log } from "../../lib/log";
+import { stripAnsiCodes } from "../../lib/utils";
 
 interface ChatPanelProps {
   rightOpen?: boolean;
   setRightOpen?: (open: boolean) => void;
 }
+
+type ThinkingStrength = "low" | "medium" | "high";
 
 interface ModeConfig {
   icon: React.ComponentType<{ className?: string }>;
@@ -59,13 +60,21 @@ const MODE_CONFIG: Record<string, ModeConfig> = {
   auto: { icon: Sparkles, label: "Auto", color: "text-nexus-accent bg-nexus-accent/10 border-nexus-accent/40" },
   coder: { icon: Code, label: "Coder", color: "text-emerald-400 bg-emerald-400/10 border-emerald-400/40" },
   analyst: { icon: BarChart3, label: "Analyst", color: "text-amber-400 bg-amber-400/10 border-amber-400/40" },
+  reviewer: { icon: Check, label: "Review", color: "text-lime-400 bg-lime-400/10 border-lime-400/40" },
   fast: { icon: Zap, label: "Fast", color: "text-yellow-400 bg-yellow-400/10 border-yellow-400/40" },
   deep: { icon: Brain, label: "Deep", color: "text-purple-400 bg-purple-400/10 border-purple-400/40" },
   plan: { icon: ListChecks, label: "Plano", color: "text-sky-400 bg-sky-400/10 border-sky-400/40" },
   debug: { icon: Bug, label: "Debug", color: "text-red-400 bg-red-400/10 border-red-400/40" },
   ask: { icon: MessageCircle, label: "Ask", color: "text-blue-400 bg-blue-400/10 border-blue-400/40" },
   swarm: { icon: Users, label: "Swarm", color: "text-teal-400 bg-teal-400/10 border-teal-400/40" },
+  dashboard: { icon: BarChart3, label: "Dashboard", color: "text-orange-400 bg-orange-400/10 border-orange-400/40" },
 };
+
+const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon: React.ComponentType<{ className?: string }>; description: string }[] = [
+  { value: "low", label: "Rápido", icon: Zap, description: "Low thinking" },
+  { value: "medium", label: "Médio", icon: Brain, description: "Medium thinking" },
+  { value: "high", label: "Alto", icon: Sparkles, description: "High thinking" },
+];
 
 /** Fold the raw SSE event stream into an ordered list of ChatMessages. */
 function foldEvents(
@@ -78,7 +87,6 @@ function foldEvents(
   const findRunningTool = (name?: string) => {
     if (!current?.toolCalls) return -1;
     const calls = current.toolCalls;
-    // Search backwards for a running call with matching name (if provided)
     for (let i = calls.length - 1; i >= 0; i--) {
       if (calls[i].status !== "running") continue;
       if (!name || calls[i].name === name) return i;
@@ -163,15 +171,27 @@ function foldEvents(
     }
   }
 
-  // Defensive: strip any leftover inline <event> tags and raw ```tool blocks
-  // from content so the user sees clean prose instead of JSON/tool markup.
-  const stripToolMarkup = (text: string) =>
-    text
-      .replace(/<event>[^]*?<\/event>/g, "")
-      .replace(/```tool\s*\n[\s\S]*?```/g, "");
+    const normalizeCodeBlocks = (text: string) =>
+      text
+        .replace(/```(\w*)\s*\n([\s\S]*?)```/g, (_, lang, body) => {
+          const trimmed = body.replace(/^\s+|\s+$/g, "");
+          return trimmed ? `\`\`\`${lang}\n${trimmed}\n\`\`\`` : "";
+        })
+        .replace(/```(\w*)(?:\n|$)/g, "")
+        .replace(/``+/g, "");
 
-  // Extract <thinking>...</thinking> blocks into a separate field so the UI can
-  // render them as an expandable panel instead of mixing them with the answer.
+    const stripToolMarkup = (text: string) =>
+      normalizeCodeBlocks(
+        stripAnsiCodes(
+          text
+          .replace(/<event>[^]*?<\/event>/g, "")
+          .replace(/```tool\s*[\s\S]*?```/g, "")
+          .split("\n")
+          .filter((line) => !/^```tool\s*$/.test(line.trim()))
+          .join("\n"),
+        )
+      )
+
   const extractThinking = (text: string) => {
     const thinkingParts: string[] = [];
     const cleaned = text.replace(/<thinking>([\s\S]*?)<\/thinking>/g, (_, inner) => {
@@ -212,6 +232,13 @@ export default function ChatPanel({
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [shared, setShared] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const [thinkingStrength, setThinkingStrength] = useState<ThinkingStrength>(() => {
+    if (typeof window !== "undefined") {
+      const stored = localStorage.getItem("nexus.thinkingStrength");
+      if (stored === "low" || stored === "medium" || stored === "high") return stored;
+    }
+    return "medium";
+  });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [activePlan, setActivePlan] = useState<PlanCreateResult | null>(null);
@@ -222,7 +249,12 @@ export default function ChatPanel({
   const errorLoggedRef = useRef(false);
   const planPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const loadHistory = async () => {
+
+  useEffect(() => {
+    localStorage.setItem("nexus.thinkingStrength", thinkingStrength);
+  }, [thinkingStrength]);
+
+  const loadHistory = useCallback(async () => {
     try {
       setHistoryError(null);
       const history = await getSessionHistory(sessionId);
@@ -233,7 +265,7 @@ export default function ChatPanel({
       const normalized = history.map((msg, index) => ({
         ...msg,
         id: `${msg.role}-${index}-${msg.timestamp}`,
-        content: stripToolMarkup(msg.content),
+        content: stripAnsiCodes(stripToolMarkup(msg.content)),
       }));
       setHistoryMessages(normalized);
       setPendingUser([]);
@@ -250,24 +282,19 @@ export default function ChatPanel({
       setHistoryError(
         error instanceof Error ? error.message : "Failed to load chat history",
       );
-      // Keep local pendingUser and events visible so messages don't disappear
       setHistoryLoaded(true);
     }
-  };
+  }, [sessionId, reset]);
 
   useEffect(() => {
     loadHistory();
-    // DataInitProvider already triggers mode loading, but keep a lightweight
-    // guard here in case this component is rendered outside that context.
     if (!modesLoaded) {
       void loadModes();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadHistory, loadModes, modesLoaded]);
 
   const { toggleTheme } = useThemeStore();
 
-  // Read file contents and compose message with attachments
   async function composeMessageWithAttachments(
     message: string,
     files: File[],
@@ -275,12 +302,10 @@ export default function ChatPanel({
     if (files.length === 0) return message;
     const parts: string[] = [];
     for (const file of files) {
-      // Skip files larger than 50KB to avoid hitting backend limits
       if (file.size > 50 * 1024) {
         parts.push(`\n---\n[Anexo: ${file.name} — ${(file.size / 1024).toFixed(0)}KB (ficheiro demasiado grande para incluir)]\n---\n`);
         continue;
       }
-      // Only include text-like files; skip binary/image files
       const isText = file.type.startsWith("text/") ||
         file.name.match(/\.(txt|md|py|js|ts|tsx|jsx|json|yaml|yml|toml|css|scss|html|xml|csv|sql|sh|bat|ps1|ini|cfg|env|gitignore|dockerfile)$/i);
       if (!isText) {
@@ -289,7 +314,7 @@ export default function ChatPanel({
       }
       try {
         const text = await file.text();
-        parts.push(`\n---\n[Anexo: ${file.name}]\n\n\`\`\`\n${text}\n\`\`\`\n---\n`);
+        parts.push(`\n---\n[Anexo: ${file.name}]\n\n\`\`\`\n${stripAnsiCodes(text)}\n\`\`\`\n---\n`);
       } catch {
         parts.push(`\n---\n[Anexo: ${file.name} — erro ao ler conteúdo]\n---\n`);
       }
@@ -304,21 +329,30 @@ export default function ChatPanel({
     const displayContent = hasAttachments
       ? `${trimmed}\n\n[${attachedFiles.length} ficheiro(s) anexado(s): ${attachedFiles.map(f => f.name).join(", ")}]`
       : trimmed;
-    setPendingUser((prev) => [
-      ...prev,
-      {
-        id: `u-${prev.length}-${Date.now()}`,
-        role: "user",
-        content: displayContent,
-        timestamp: new Date().toISOString(),
-      },
-    ]);
+    const pendingUserMessage: ChatMessage = {
+      id: `u-${pendingUser.length}-${Date.now()}`,
+      role: "user",
+      content: displayContent,
+      timestamp: new Date().toISOString(),
+    };
+    const previousInput = input;
+    const previousFiles = attachedFiles;
+    setPendingUser((prev) => [...prev, pendingUserMessage]);
     setInput("");
-    const messageToSend = hasAttachments
-      ? await composeMessageWithAttachments(trimmed, attachedFiles)
-      : trimmed;
-    setAttachedFiles([]); // Clear attachments after reading
-    await send(messageToSend, currentMode, activeModel, currentProject?.path ?? "");
+    try {
+      const messageToSend = stripAnsiCodes(
+        hasAttachments
+          ? await composeMessageWithAttachments(trimmed, attachedFiles)
+          : trimmed,
+      );
+      setAttachedFiles([]);
+      await send(messageToSend, currentMode, activeModel, currentProject?.path ?? "", thinkingStrength);
+    } catch {
+      setPendingUser((prev) => prev.filter((m) => m.id !== pendingUserMessage.id));
+      setInput(previousInput);
+      setAttachedFiles(previousFiles);
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 500));
     await loadHistory();
   };
@@ -406,9 +440,9 @@ export default function ChatPanel({
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files || []);
     if (files.length > 0) {
-      setAttachedFiles((prev) => [...prev, ...files].slice(0, 5)); // Max 5 files
+      setAttachedFiles((prev) => [...prev, ...files].slice(0, 5));
     }
-    e.target.value = ""; // Reset input
+    e.target.value = "";
   }
 
   function handleRemoveFile(index: number) {
@@ -418,7 +452,7 @@ export default function ChatPanel({
   function handleRegenerate() {
     if (streaming) return;
     if (!lastUserMessage) return;
-    void send(lastUserMessage, currentMode, activeModel, currentProject?.path ?? "").then(() => loadHistory());
+    void send(lastUserMessage, currentMode, activeModel, currentProject?.path ?? "", thinkingStrength).then(() => loadHistory());
   }
 
   async function handleNewChat() {
@@ -426,7 +460,6 @@ export default function ChatPanel({
       const data = await createSession("Novo Chat", currentMode);
       setSessionId(data.id as string);
     } catch {
-      // Fallback: generate a random session ID
       setSessionId(`session-${Date.now()}`);
     }
     setHistoryMessages([]);
@@ -450,13 +483,11 @@ export default function ChatPanel({
     setTimeout(() => setShared(false), 2000);
   }
 
-  // Plan execution handlers
   const handlePlanCreate = useCallback(async (objective: string) => {
     setPlanError(null);
     try {
       const plan = await createPlan(objective, sessionId);
       setActivePlan(plan);
-      // Immediately fetch status
       const status = await getPlanStatus(plan.plan_id);
       setPlanStatus(status);
     } catch (err) {
@@ -486,7 +517,6 @@ export default function ChatPanel({
     setPlanExecuting(true);
     try {
       await executePlan(activePlan.plan_id, sessionId);
-      // Start polling for status
       planPollRef.current = setInterval(async () => {
         try {
           const status = await getPlanStatus(activePlan.plan_id);
@@ -496,7 +526,6 @@ export default function ChatPanel({
             setPlanExecuting(false);
           }
         } catch {
-          // Stop polling on error
           if (planPollRef.current) clearInterval(planPollRef.current);
           setPlanExecuting(false);
         }
@@ -519,14 +548,12 @@ export default function ChatPanel({
     }
   }, [sessionId]);
 
-  // Clean up polling on unmount
   useEffect(() => {
     return () => {
       if (planPollRef.current) clearInterval(planPollRef.current);
     };
   }, []);
 
-  // When in plan mode and user sends a message, also create a plan
   useEffect(() => {
     if (currentMode === "plan" && activePlan === null && messages.length > 0) {
       const lastUser = [...messages].reverse().find((m) => m.role === "user");
@@ -547,12 +574,16 @@ export default function ChatPanel({
     <div className="flex h-full flex-col">
       {/* Chat header */}
       <div className="flex shrink-0 items-center justify-between border-b border-nexus-border px-5 py-2.5">
-        <div className="flex items-center gap-2">
-          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-nexus-accent/15 text-nexus-accent">
+        <div className="flex items-center gap-2.5">
+          <motion.div
+            whileHover={{ scale: 1.05, rotate: -3 }}
+            whileTap={{ scale: 0.95 }}
+            className="flex h-6 w-6 items-center justify-center rounded-md bg-nexus-accent/15 text-nexus-accent cursor-default"
+          >
             <Sparkles className="h-3.5 w-3.5" />
-          </div>
+          </motion.div>
           <div className="leading-tight">
-            <div className="text-sm font-semibold">Chat com IA</div>
+            <div className="text-sm font-semibold text-nexus-text">Chat com IA</div>
             <div className="text-[11px] text-nexus-muted">
               {currentProject ? (
                 <span className="flex items-center gap-1">
@@ -568,7 +599,10 @@ export default function ChatPanel({
 
         <div className="flex items-center gap-2">
           {/* Mode selector */}
-          <div className="flex items-center rounded-lg border border-nexus-border bg-nexus-card p-0.5">
+          <motion.div
+            whileTap={{ scale: 0.97 }}
+            className="flex items-center rounded-lg border border-nexus-border bg-nexus-card p-0.5"
+          >
             {(modesLoaded ? modes : ([{ id: currentMode }] as Mode[])).map((mode) => {
               const cfg = MODE_CONFIG[mode.id] || {
                 icon: Sparkles,
@@ -578,45 +612,98 @@ export default function ChatPanel({
               const Icon = cfg.icon;
               const active = mode.id === currentMode;
               return (
-                <button
+                <motion.button
                   key={mode.id}
                   type="button"
                   onClick={() => useModeStore.getState().setMode(mode.id)}
                   title={mode.description || cfg.label}
-                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                  whileTap={{ scale: 0.9 }}
+                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all duration-200 ${
                     active
-                      ? `${cfg.color} border`
-                      : "text-nexus-muted hover:text-nexus-text hover:bg-nexus-bg"
+                      ? `${cfg.color} border shadow-sm`
+                      : "text-nexus-muted hover:text-nexus-text hover:bg-nexus-bg border border-transparent"
                   }`}
                 >
                   <Icon className="h-3.5 w-3.5" />
                   <span className="hidden sm:inline">{cfg.label}</span>
-                </button>
+                </motion.button>
               );
             })}
-          </div>
+          </motion.div>
 
-          <button
+          {/* Thinking strength selector */}
+          <motion.div
+            whileTap={{ scale: 0.97 }}
+            className="flex items-center rounded-lg border border-nexus-border bg-nexus-card p-0.5"
+          >
+            {THINKING_STRENGTH_OPTIONS.map((option) => {
+              const Icon = option.icon;
+              const isActive = thinkingStrength === option.value;
+              return (
+                <motion.button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setThinkingStrength(option.value)}
+                  title={option.description}
+                  whileTap={{ scale: 0.9 }}
+                  className={`flex items-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-medium transition-all duration-200 ${
+                    isActive
+                      ? "bg-nexus-accent/15 text-nexus-accent border border-nexus-accent/30 shadow-sm shadow-nexus-accent/10"
+                      : "text-nexus-muted hover:text-nexus-text border border-transparent"
+                  }`}
+                >
+                  <Icon className="h-3 w-3" />
+                  <span className="hidden sm:inline">{option.label}</span>
+                </motion.button>
+              );
+            })}
+          </motion.div>
+
+          <motion.button
+            whileHover={{ scale: 1.03 }}
+            whileTap={{ scale: 0.95 }}
             onClick={handleNewChat}
-            className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-3 py-1.5 text-xs text-nexus-muted hover:text-nexus-text transition-colors"
+            className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-3 py-1.5 text-xs text-nexus-muted hover:text-nexus-text transition-all duration-200 hover:border-nexus-accent/30"
           >
             <Plus className="h-3.5 w-3.5" />
-            Novo Chat
-          </button>
-          <button
+            <span className="hidden sm:inline">Novo Chat</span>
+          </motion.button>
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.9 }}
             onClick={handleShare}
-            className="rounded-lg border border-nexus-border bg-nexus-card p-1.5 text-nexus-muted hover:text-nexus-text transition-colors"
+            className="rounded-lg border border-nexus-border bg-nexus-card p-1.5 text-nexus-muted hover:text-nexus-text transition-all duration-200 hover:border-nexus-accent/30"
             title="Copiar conversação"
           >
-            {shared ? (
-              <Check className="h-3.5 w-3.5 text-green-400" />
-            ) : (
-              <Share2 className="h-3.5 w-3.5" />
-            )}
-          </button>
-          <button
+            <AnimatePresence mode="wait">
+              {shared ? (
+                <motion.div
+                  key="check"
+                  initial={{ scale: 0.5, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.5, opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                >
+                  <Check className="h-3.5 w-3.5 text-green-400" />
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="share"
+                  initial={{ scale: 0.5, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.5, opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                >
+                  <Share2 className="h-3.5 w-3.5" />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </motion.button>
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.9 }}
             onClick={() => setRightOpen?.(!rightOpen)}
-            className="rounded-lg border border-nexus-border bg-nexus-card p-1.5 text-nexus-muted hover:text-nexus-text transition-colors"
+            className="rounded-lg border border-nexus-border bg-nexus-card p-1.5 text-nexus-muted hover:text-nexus-text transition-all duration-200 hover:border-nexus-accent/30"
             title="Toggle painel direito"
           >
             {rightOpen ? (
@@ -624,12 +711,18 @@ export default function ChatPanel({
             ) : (
               <PanelRightOpen className="h-3.5 w-3.5" />
             )}
-          </button>
+          </motion.button>
         </div>
       </div>
 
       {/* Messages area */}
-      <div ref={messagesContainerRef} className="min-h-0 flex-1 overflow-y-auto thin-scrollbar px-5 py-3">
+      <div
+        ref={messagesContainerRef}
+        className="min-h-0 flex-1 overflow-y-auto thin-scrollbar px-5 py-3"
+        style={{
+          background: "linear-gradient(180deg, rgba(13,17,28,0) 0%, rgba(13,17,28,0.4) 50%, rgba(13,17,28,0) 100%)",
+        }}
+      >
         {/* Stream error banner */}
         {streamError && (
           <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2">
@@ -666,14 +759,14 @@ export default function ChatPanel({
                     d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
                   />
                 </svg>
-                Error loading chat history
+                Erro ao carregar histórico
               </div>
               <p className="text-xs text-red-300">{historyError}</p>
               <button
                 onClick={() => loadHistory()}
                 className="mt-3 rounded bg-red-500/20 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-500/30 transition-colors"
               >
-                Try again
+                Tentar novamente
               </button>
             </div>
           </div>
@@ -685,22 +778,38 @@ export default function ChatPanel({
             animate={{ opacity: 1, y: 0 }}
             className="flex h-full flex-col items-center justify-center text-center"
           >
-            <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-nexus-accent/10 text-nexus-accent">
-              <Sparkles className="h-7 w-7" />
-            </div>
-            <h2 className="mb-1 text-lg font-semibold">NEXUS IDE</h2>
-            <p className="mb-6 max-w-sm text-sm text-nexus-muted">
+            <motion.div
+              animate={{
+                scale: [1, 1.08, 1],
+                opacity: [0.7, 1, 0.7],
+              }}
+              transition={{
+                duration: 3,
+                repeat: Infinity,
+                ease: "easeInOut",
+              }}
+              className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-nexus-accent/15 to-nexus-accent/5 text-nexus-accent shadow-lg shadow-nexus-accent/10"
+            >
+              <Sparkles className="h-8 w-8" />
+            </motion.div>
+            <h2 className="mb-2 text-xl font-bold tracking-tight text-nexus-text">NEXUS IDE</h2>
+            <p className="mb-8 max-w-xs text-sm text-nexus-muted leading-relaxed">
               Pergunte, analise, crie. A sua IA, os seus dados.
             </p>
-            <div className="flex flex-wrap justify-center gap-2">
+            <div className="flex flex-wrap justify-center gap-2.5">
               {suggestions.map((s) => (
-                <button
+                <motion.button
                   key={s}
                   onClick={() => setInput(s)}
-                  className="rounded-full border border-nexus-border bg-nexus-card px-3 py-1.5 text-xs text-nexus-muted hover:border-nexus-accent/30 hover:text-nexus-text transition-colors"
+                  whileHover={{ scale: 1.03, y: -1 }}
+                  whileTap={{ scale: 0.97 }}
+                  className="group rounded-full border border-nexus-border bg-nexus-card/80 px-4 py-2 text-xs text-nexus-muted hover:border-nexus-accent/40 hover:text-nexus-text transition-all duration-200 hover:shadow-md hover:shadow-nexus-accent/5"
                 >
-                  {s}
-                </button>
+                  <span className="flex items-center gap-1.5">
+                    <Wand2 className="h-3 w-3 text-nexus-accent/60 group-hover:text-nexus-accent transition-colors" />
+                    {s}
+                  </span>
+                </motion.button>
               ))}
             </div>
           </motion.div>
@@ -841,57 +950,55 @@ export default function ChatPanel({
             <span className="text-red-300">— Aguardando reconexão para enviar mensagens.</span>
           </div>
         )}
-        {/* Attached files preview */}
-        {attachedFiles.length > 0 && (
-          <div className="mb-2 flex flex-wrap gap-2">
-            {attachedFiles.map((file, idx) => (
-              <div
-                key={`${file.name}-${idx}`}
-                className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-bg px-2 py-1 text-[11px] text-nexus-muted"
-              >
-                <Paperclip className="h-3 w-3" />
-                <span className="max-w-[120px] truncate">{file.name}</span>
-                <span className="text-gray-600">({(file.size / 1024).toFixed(0)} KB)</span>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveFile(idx)}
-                  className="ml-1 text-gray-500 hover:text-red-400"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
 
-        {/* Quick suggestion chips above input */}
-        <div className="mb-2 flex flex-wrap gap-2">
-          {suggestions.map((s) => (
-            <button
-              key={s}
-              onClick={() => setInput(s)}
-              className="flex items-center gap-1.5 rounded-full border border-nexus-border bg-nexus-bg px-3 py-1 text-[11px] text-nexus-muted hover:border-nexus-accent/30 hover:text-nexus-text transition-colors"
+        <form onSubmit={handleSubmit} className="mt-2 flex flex-col gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            onChange={handleFileSelect}
+            className="hidden"
+          />
+
+          {/* Attached files preview */}
+          <AnimatePresence>
+          {attachedFiles.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mb-2 flex flex-wrap gap-2"
             >
-              <Wand2 className="h-3 w-3" />
-              {s}
-            </button>
-          ))}
-        </div>
+              {attachedFiles.map((file, idx) => (
+                <motion.div
+                  key={`${file.name}-${idx}`}
+                  initial={{ scale: 0.9, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.9, opacity: 0 }}
+                  className="flex items-center gap-1.5 rounded-lg border border-nexus-accent/20 bg-nexus-accent/5 px-2.5 py-1.5 text-[11px] text-nexus-text shadow-sm"
+                >
+                  <Paperclip className="h-3 w-3 text-nexus-accent/70" />
+                  <span className="max-w-[140px] truncate font-medium">{file.name}</span>
+                  <span className="text-nexus-muted">({(file.size / 1024).toFixed(0)} KB)</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveFile(idx)}
+                    className="ml-1 rounded-full p-0.5 text-nexus-muted hover:bg-nexus-border/50 hover:text-nexus-text"
+                    aria-label={`Remover ${file.name}`}
+                  >
+                    <XCircle className="h-3 w-3" />
+                  </button>
+                </motion.div>
+              ))}
+            </motion.div>
+          )}
+          </AnimatePresence>
 
-        <form onSubmit={handleSubmit}>
-          <div className="flex items-end gap-1.5 rounded-xl border border-nexus-border bg-nexus-card p-2 focus-within:border-nexus-accent/50 transition-colors">
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileSelect}
-              className="hidden"
-              multiple
-              accept=".txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.sql,.log"
-            />
+          <motion.div className="flex items-end gap-2 rounded-xl border border-nexus-border bg-nexus-bg/60 px-2 py-2 shadow-inner">
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="shrink-0 rounded-lg p-2 text-nexus-muted hover:text-nexus-text transition-colors"
+              className="shrink-0 rounded-lg border border-nexus-border/70 p-2 text-nexus-muted transition-colors hover:border-nexus-accent/40 hover:text-nexus-text"
               title="Anexar ficheiros"
             >
               <Paperclip className="h-4 w-4" />
@@ -908,48 +1015,49 @@ export default function ChatPanel({
               style={{ fieldSizing: "content" }}
             />
 
-            <button
-              type="button"
-              disabled
-              title="Em breve"
-              className="shrink-0 rounded-lg p-2 text-nexus-muted opacity-50 cursor-not-allowed transition-colors"
-            >
-              <Mic className="h-4 w-4" />
-            </button>
-
             {streaming ? (
-              <button
+              <motion.button
                 type="button"
                 onClick={handleCancel}
-                className="shrink-0 rounded-lg bg-red-500/15 p-2 text-red-400 hover:bg-red-500/25 transition-colors"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                className="shrink-0 rounded-lg bg-gradient-to-br from-red-500/20 to-red-500/10 p-2 text-red-400 hover:from-red-500/30 hover:to-red-500/20 transition-all duration-200 shadow-sm hover:shadow-red-500/20"
               >
                 <StopCircle className="h-4 w-4" />
-              </button>
+              </motion.button>
             ) : (
-              <button
+              <motion.button
                 type="submit"
                 disabled={!input.trim()}
-                className="shrink-0 rounded-lg bg-nexus-accent p-2 text-white hover:bg-nexus-accent/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                whileHover={{ scale: input.trim() ? 1.05 : 1 }}
+                whileTap={{ scale: 0.92 }}
+                className={`shrink-0 rounded-lg p-2 text-white transition-all duration-200 shadow-md ${
+                  input.trim()
+                    ? "bg-gradient-to-br from-nexus-accent to-nexus-accent/80 hover:shadow-nexus-accent/40 hover:from-nexus-accent hover:to-nexus-accent/90"
+                    : "bg-nexus-accent/50 cursor-not-allowed opacity-40"
+                }`}
               >
                 <Send className="h-4 w-4 pointer-events-none" />
-              </button>
+              </motion.button>
             )}
-          </div>
+          </motion.div>
         </form>
 
         <div className="mt-1.5 flex items-center justify-between text-[10px] text-nexus-muted">
           <span>
-            NEXUS IDE — Modo {currentMode}
+            NEXUS IDE — Modo {currentMode} · Força: {thinkingStrength === "low" ? "Rápido" : thinkingStrength === "medium" ? "Médio" : "Alto"}
           </span>
-          <button
+          <motion.button
             type="button"
             onClick={handleRegenerate}
             disabled={!lastUserMessage || streaming}
-            className="flex items-center gap-1 hover:text-nexus-text disabled:opacity-40 transition-colors"
+            whileHover={{ scale: lastUserMessage && !streaming ? 1.03 : 1 }}
+            whileTap={{ scale: 0.95 }}
+            className="flex items-center gap-1 hover:text-nexus-text disabled:opacity-40 transition-all duration-200"
           >
             <RotateCcw className="h-3 w-3" />
             Regenerar
-          </button>
+          </motion.button>
         </div>
       </div>
     </div>

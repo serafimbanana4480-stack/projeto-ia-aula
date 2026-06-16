@@ -44,9 +44,14 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     for key, value in env.items():
         monkeypatch.setenv(key, value)
 
-    from backend.config.settings import get_settings
+    monkeypatch.setattr("backend.llm.factory._load_runtime_overrides", lambda: {})
 
-    get_settings.cache_clear()
+    import backend.config.settings as settings_module
+
+    settings_module._settings_instance = None
+    cache_clear = getattr(settings_module.get_settings, "cache_clear", None)
+    if callable(cache_clear):
+        cache_clear()
 
 
 @pytest.fixture

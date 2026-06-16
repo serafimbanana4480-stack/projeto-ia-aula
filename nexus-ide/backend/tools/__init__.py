@@ -25,6 +25,7 @@ def _ensure_tools_registered() -> None:
     # Import order does not matter — each module calls ``register_tool``
     # as a side-effect of being imported.
     from backend.tools import advanced_templates as _advanced_templates  # noqa: F401
+    from backend.tools import append_file as _append_file  # noqa: F401
     from backend.tools import agent_bus_tools as _agent_bus_tools  # noqa: F401
     from backend.tools import agent_comm as _agent_comm  # noqa: F401
     from backend.tools import browser_automation as _browser_automation  # noqa: F401
@@ -55,13 +56,9 @@ def _ensure_tools_registered() -> None:
     from backend.tools import web_search_v2 as _web_search_v2  # noqa: F401
 
     # New features: Auto-commit, TTS, Cron, Vision
-    from backend.tools import git_auto_commit as _git_auto_commit  # noqa: F401
-    from backend.tools import cron_scheduler as _cron_scheduler  # noqa: F401
-    from backend.tools import tts as _tts  # noqa: F401
-    from backend.tools import vision as _vision  # noqa: F401
 
     _TOOLS_REGISTERED = True
-    logger.debug("Tool registration completed (%d modules)", 26)
+    logger.debug("Tool registration completed (%d modules)", 27)
 
 
 def __getattr__(name: str):

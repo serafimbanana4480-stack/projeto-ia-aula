@@ -6,7 +6,7 @@
  */
 import { create } from "zustand";
 import { apiUrl, authHeaders } from "../lib/api";
-import { isAuthenticated } from "../lib/auth";
+import { getAccessToken, isAuthenticated } from "../lib/auth";
 
 export interface SystemMetrics {
   tokens_per_second: number;
@@ -51,13 +51,15 @@ interface MetricsState {
   metrics: SystemMetrics | null;
   history: SystemMetrics[];
   backendOnline: boolean;
-  connectionStatus: "connecting" | "connected" | "offline";
+  connectionStatus: "connecting" | "connected" | "degraded" | "offline";
+  connectionMode: "none" | "sse" | "polling";
   lastUpdate: string;
 
   // Actions
   _setMetrics: (m: SystemMetrics) => void;
   _setBackendOnline: (online: boolean) => void;
   _setConnectionStatus: (status: MetricsState["connectionStatus"]) => void;
+  _setConnectionMode: (mode: MetricsState["connectionMode"]) => void;
 }
 
 export const useMetricsStore = create<MetricsState>((set) => ({
@@ -65,16 +67,29 @@ export const useMetricsStore = create<MetricsState>((set) => ({
   history: [],
   backendOnline: false,
   connectionStatus: "connecting",
+  connectionMode: "none",
   lastUpdate: "—",
 
   _setMetrics: (m) =>
-    set((state) => ({
-      metrics: m,
-      history: [...state.history.slice(-99), m],
-      lastUpdate: new Date().toLocaleTimeString(),
-    })),
+    set((state) => {
+      const total = m.requests_total ?? 0;
+      const failed = m.requests_failed ?? 0;
+      const successRate = total > 0 ? (m.requests_successful ?? 0) / total : 1;
+      let connectionStatus: MetricsState["connectionStatus"] = "connected";
+      if (total > 0 && successRate === 0) {
+        connectionStatus = "degraded";
+      }
+      return {
+        metrics: m,
+        history: [...state.history.slice(-99), m],
+        lastUpdate: new Date().toLocaleTimeString(),
+        backendOnline: true,
+        connectionStatus,
+      };
+    }),
   _setBackendOnline: (online) => set({ backendOnline: online }),
   _setConnectionStatus: (status) => set({ connectionStatus: status }),
+  _setConnectionMode: (mode) => set({ connectionMode: mode }),
 }));
 
 // ── Singleton SSE manager ────────────────────────────────────────────────
@@ -82,8 +97,34 @@ let sseInstance: EventSource | null = null;
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
 let isInitialized = false;
 let isStopped = false;
+let backoffTimer: ReturnType<typeof setTimeout> | null = null;
+let authHeartbeat: ReturnType<typeof setInterval> | null = null;
+
+function clearBackoff() {
+  if (backoffTimer) {
+    clearTimeout(backoffTimer);
+    backoffTimer = null;
+  }
+}
+
+function startAuthHeartbeat() {
+  if (authHeartbeat) return;
+  authHeartbeat = setInterval(() => {
+    if (isAuthenticated() && (!isInitialized || isStopped)) {
+      initMetricsStream();
+    }
+  }, 5000);
+}
+
+function stopAuthHeartbeat() {
+  if (authHeartbeat) {
+    clearInterval(authHeartbeat);
+    authHeartbeat = null;
+  }
+}
 
 function stopAll() {
+  clearBackoff();
   if (sseInstance) {
     sseInstance.close();
     sseInstance = null;
@@ -95,6 +136,13 @@ function stopAll() {
 }
 
 async function fetchMetrics() {
+  if (!isAuthenticated()) {
+    if (sseInstance || pollingTimer) {
+      stopAll();
+    }
+    return false;
+  }
+
   try {
     const response = await fetch(apiUrl("/api/metrics/current"), {
       headers: authHeaders(),
@@ -102,18 +150,18 @@ async function fetchMetrics() {
     });
 
     if (response.status === 401) {
-      // Stop everything on auth failure — don't retry
-      stopAll();
-      isStopped = true;
+      useMetricsStore.getState()._setBackendOnline(false);
       useMetricsStore.getState()._setConnectionStatus("offline");
+      useMetricsStore.getState()._setConnectionMode("none");
       return false;
     }
 
     if (response.ok) {
       const data = (await response.json()) as SystemMetrics;
       useMetricsStore.getState()._setMetrics(data);
-      useMetricsStore.getState()._setBackendOnline(true);
-      useMetricsStore.getState()._setConnectionStatus("connected");
+      useMetricsStore.getState()._setConnectionMode(
+        useMetricsStore.getState().connectionMode === "sse" ? "sse" : "polling",
+      );
       return true;
     }
   } catch {
@@ -121,6 +169,7 @@ async function fetchMetrics() {
   }
   useMetricsStore.getState()._setBackendOnline(false);
   useMetricsStore.getState()._setConnectionStatus("offline");
+  useMetricsStore.getState()._setConnectionMode("none");
   return false;
 }
 
@@ -129,33 +178,46 @@ function startSSE() {
 
   if (isStopped) return;
 
+  const token = getAccessToken();
+  if (!token) {
+    startPolling();
+    return;
+  }
+
   try {
-    const es = new EventSource(apiUrl("/api/dashboard/stream"), {
-      withCredentials: true,
-    });
+    const streamUrl = `${apiUrl("/api/dashboard/stream")}?token=${encodeURIComponent(token)}`;
+    const es = new EventSource(streamUrl);
     sseInstance = es;
 
     es.onopen = () => {
-      useMetricsStore.getState()._setConnectionStatus("connected");
+      useMetricsStore.getState()._setConnectionMode("sse");
     };
 
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data) as SystemMetrics;
         useMetricsStore.getState()._setMetrics(data);
-        useMetricsStore.getState()._setBackendOnline(true);
       } catch {
         /* ignore parse errors */
       }
     };
 
+    let errorHandled = false;
     es.onerror = () => {
-      useMetricsStore.getState()._setConnectionStatus("offline");
+      if (errorHandled) return;
+      errorHandled = true;
+
       es.close();
       sseInstance = null;
-      // Fallback to polling only if not explicitly stopped
+
       if (!isStopped) {
-        startPolling();
+        clearBackoff();
+        backoffTimer = setTimeout(() => {
+          backoffTimer = null;
+          if (!isStopped) {
+            startPolling();
+          }
+        }, 2000);
       }
     };
   } catch {
@@ -167,25 +229,40 @@ function startSSE() {
 
 function startPolling() {
   if (pollingTimer || isStopped) return;
+  if (!isAuthenticated()) return;
+
+  useMetricsStore.getState()._setConnectionMode("polling");
   fetchMetrics(); // immediate
   pollingTimer = setInterval(fetchMetrics, 3000);
 }
 
 /** Initialize the metrics stream (SSE → polling fallback). Idempotent. */
 export function initMetricsStream() {
+  clearBackoff();
+
   // Allow restart after an auth failure stopped the stream.
   if (isInitialized && !isStopped) return;
 
-  // Do not start if user is not authenticated
-  if (!isAuthenticated()) return;
+  // Do not start if user is not authenticated yet
+  if (!isAuthenticated()) {
+    isInitialized = false;
+    isStopped = false;
+    startAuthHeartbeat();
+    return;
+  }
 
   isInitialized = true;
   isStopped = false;
+  startAuthHeartbeat();
+  useMetricsStore.getState()._setConnectionStatus("connecting");
+  // Establish polling first so "connected" reflects a real metrics payload.
+  startPolling();
   startSSE();
 }
 
 /** Stop all metrics streaming. Call on app unmount if needed. */
 export function stopMetricsStream() {
+  stopAuthHeartbeat();
   isInitialized = false;
   isStopped = true;
   stopAll();

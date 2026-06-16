@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import logging
 import os
+import platform
 import re
 import shlex
 import sys
@@ -243,12 +244,12 @@ def _get_allowed_base_paths() -> list[Path]:
     paths.add(Path.home().resolve())
     try:
         paths.add(Path.cwd().resolve())
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not resolve current working directory: %s", exc)
     try:
         paths.add(Path(tempfile.gettempdir()).resolve())
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not resolve temp directory: %s", exc)
     return list(paths)
 
 
@@ -278,6 +279,7 @@ def _is_blocked_path(path: str) -> tuple[bool, str]:
     # These are treated as relative by pathlib but resolve to absolute system paths.
     if platform.system() == "Windows":
         import re as _re
+
         if _re.search(r"^[A-Za-z]:[^/\\]", str(raw)):
             return True, "Windows drive-relative paths are not allowed"
 
@@ -509,11 +511,7 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
 
         if isinstance(node, ast.Call):
             # Block __import__ with dangerous modules — reject dynamic args
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id == "__import__"
-                and node.args
-            ):
+            if isinstance(node.func, ast.Name) and node.func.id == "__import__" and node.args:
                 resolved = _resolve_string_arg(node.args[0])
                 if resolved is None:
                     return False, "__import__ with dynamic argument is blocked in sandbox mode"
@@ -531,7 +529,10 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
             ):
                 resolved = _resolve_string_arg(node.args[0])
                 if resolved is None:
-                    return False, "importlib.import_module with dynamic argument is blocked in sandbox mode"
+                    return (
+                        False,
+                        "importlib.import_module with dynamic argument is blocked in sandbox mode",
+                    )
                 base = resolved.split(".")[0]
                 if base in _BLOCKED_IMPORTS:
                     return False, f"importlib.import_module({resolved}) is blocked in sandbox mode"
@@ -543,7 +544,13 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
                 and len(node.args) >= 2
             ):
                 resolved = _resolve_string_arg(node.args[1])
-                if resolved and resolved.lower() in ("eval", "exec", "compile", "__import__", "import_module"):
+                if resolved and resolved.lower() in (
+                    "eval",
+                    "exec",
+                    "compile",
+                    "__import__",
+                    "import_module",
+                ):
                     return False, f"getattr targeting '{resolved}' is blocked in sandbox mode"
 
             # Block eval, exec, compile
@@ -552,11 +559,20 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
 
             # Block os.system, os.popen, os.exec*, subprocess.call, etc.
             if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-                if (
-                    node.func.value.id in _DANGEROUS_MODULES
-                    and node.func.attr in ("system", "popen", "exec", "execv", "execve", "fork", "kill", "spawn")
+                if node.func.value.id in _DANGEROUS_MODULES and node.func.attr in (
+                    "system",
+                    "popen",
+                    "exec",
+                    "execv",
+                    "execve",
+                    "fork",
+                    "kill",
+                    "spawn",
                 ):
-                    return False, f"{node.func.value.id}.{node.func.attr}() is blocked in sandbox mode"
+                    return (
+                        False,
+                        f"{node.func.value.id}.{node.func.attr}() is blocked in sandbox mode",
+                    )
 
             # Block access to __builtins__ via attribute (e.g. __builtins__['eval'])
             if isinstance(node.func, ast.Subscript):
@@ -592,8 +608,6 @@ _DANGEROUS_PIPE_TARGETS: set[str] = {
 # ---------------------------------------------------------------------------
 # Shell-command validation helpers
 # ---------------------------------------------------------------------------
-
-import platform
 
 _DISALLOWED_METACHARACTERS_BASE = (";", "&&", "||", "`", "$(", ">>", ">", "<")
 if sys.platform.startswith("win"):
@@ -810,8 +824,8 @@ def _is_path_within_project(project_path: str, target_path: str) -> tuple[bool, 
                 real.relative_to(project)
             except ValueError:
                 return False, "Symlinks pointing outside project root are not permitted"
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError) as exc:
+        logger.debug("Symlink resolution skipped: %s", exc)
 
     try:
         target.relative_to(project)

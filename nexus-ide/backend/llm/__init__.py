@@ -25,6 +25,8 @@ from backend.llm.multi_llm_manager import MultiLLMManager
 from backend.llm.ollama_provider import OllamaProvider
 from backend.llm.openai_provider import OpenAIProvider
 from backend.llm.anthropic_provider import AnthropicProvider
+from backend.llm.gemini_provider import GeminiProvider
+from backend.llm.openrouter_provider import OpenRouterProvider
 from backend.tools.ollama_client import OllamaClient
 
 __all__ = [
@@ -38,6 +40,8 @@ __all__ = [
     "DevProvider",
     "OpenAIProvider",
     "AnthropicProvider",
+    "GeminiProvider",
+    "OpenRouterProvider",
     "KimiProvider",
     "ResilientLLMProvider",
     "ChatMessage",

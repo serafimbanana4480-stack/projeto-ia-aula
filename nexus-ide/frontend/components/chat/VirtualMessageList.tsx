@@ -35,7 +35,7 @@ export default function VirtualMessageList<TMessage>({
           onClick={handleLoadMore}
           className="w-full py-2 text-xs text-nexus-muted hover:text-nexus-text transition-colors"
         >
-          Load {Math.min(initialLimit, hiddenCount)} more messages ({hiddenCount} hidden)
+          Carregar mais {Math.min(initialLimit, hiddenCount)} mensagens ({hiddenCount} ocultas)
         </button>
       )}
       <div className="space-y-4">

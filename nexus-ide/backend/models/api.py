@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 AgentName = Literal[
     "ROUTER",
@@ -66,12 +66,49 @@ class ChatRequest(BaseModel):
 
     message: str = Field(min_length=1, max_length=50_000)
     session_id: str = Field(min_length=1, max_length=128, default="default")
-    mode: str = Field(default="agent", min_length=1, max_length=32)
-    model: str = Field(default="", max_length=128, description="Model tier key (e.g. 'coder','deep','reasoning') selected by the user in the UI. Empty string means auto-route.")
-    project_path: str = Field(default="", max_length=2000, description="Absolute path to the active project directory. Empty string means no project context.")
-    provider: str = Field(default="", max_length=128, description="LLM provider to use (e.g. 'ollama', 'openai', 'kimi'). Empty string means use default.")
-    swarm_agents: list[str] = Field(default_factory=list, description="Agent names to use in swarm mode")
-    swarm_strategy: str = Field(default="divide", description="Swarm strategy: divide, ensemble, pipeline, debate")
+    mode: str = Field(default="auto", min_length=1, max_length=32)
+    model: str = Field(
+        default="",
+        max_length=128,
+        description="Model tier key (e.g. 'coder','deep','reasoning') selected by the user in the UI. Empty string means auto-route.",
+    )
+    project_path: str = Field(
+        default="",
+        max_length=2000,
+        description="Absolute path to the active project directory. Empty string means no project context.",
+    )
+    provider: str = Field(
+        default="",
+        max_length=128,
+        description="LLM provider to use (e.g. 'ollama', 'openai', 'kimi'). Empty string means use default.",
+    )
+    thinking_strength: str = Field(
+        default="",
+        max_length=32,
+        description="Thinking depth: '' (auto), 'low', 'medium', 'high'",
+    )
+    swarm_agents: list[str] = Field(
+        default_factory=list, description="Agent names to use in swarm mode"
+    )
+    swarm_strategy: str = Field(
+        default="divide", description="Swarm strategy: divide, ensemble, pipeline, debate"
+    )
+
+    @field_validator("session_id")
+    @classmethod
+    def validate_session_id(cls, v: str) -> str:
+        import re
+
+        if not re.match(r"^[a-zA-Z0-9_-]{1,128}$", v):
+            raise ValueError("session_id must be 1-128 alphanumeric/underscore/hyphen characters")
+        return v
+
+    @field_validator("project_path")
+    @classmethod
+    def validate_project_path(cls, v: str) -> str:
+        if v and ".." in v:
+            raise ValueError("project_path must not contain '..' segments")
+        return v
 
 
 class ProjectCreateRequest(BaseModel):
