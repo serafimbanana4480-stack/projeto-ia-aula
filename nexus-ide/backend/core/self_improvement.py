@@ -13,12 +13,16 @@ All changes require explicit approval from the ``META_ANALYZER`` agent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import re
+import subprocess
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -692,3 +696,299 @@ class SelfImprovementAnalyzer:
                 EVOLUTION_LOG_PATH.write_text(updated, encoding="utf-8")
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Proposal Applier — autonomous "apply" loop with safety rails
+# ---------------------------------------------------------------------------
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean from an environment variable.
+
+    Truthy values: "1", "true", "yes", "on" (case-insensitive). Anything
+    else (including unset) returns *default*.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+class ProposalDecision(StrEnum):
+    """Final decision emitted by the :class:`ProposalApplier`."""
+
+    APPLIED = "applied"
+    REJECTED = "rejected"
+    ROLLED_BACK = "rolled_back"
+    DRY_RUN = "dry_run"
+    SKIPPED = "skipped"
+
+
+@dataclass
+class ProposalOutcome:
+    """Result of a single apply/rollback attempt."""
+
+    proposal_id: str
+    decision: ProposalDecision
+    reason: str
+    confidence: float
+    before_snapshot: str | None = None
+    after_snapshot: str | None = None
+
+
+class ProposalApplier:
+    """Apply (or dry-run) an :class:`ImprovementProposal` with safety rails.
+
+    The applier is intentionally conservative: it captures a git snapshot
+    before any action, gates on confidence and an explicit ``auto_apply``
+    switch, and runs the test suite to validate the baseline before
+    reporting a dry-run pass. The actual mutation is left to the caller —
+    the applier records intent and a rollback handle.
+    """
+
+    def __init__(
+        self,
+        *,
+        repo_path: Path | None = None,
+        auto_apply: bool | None = None,
+        dry_run: bool | None = None,
+        test_command: str = "python -m pytest backend/tests -q --maxfail=1",
+    ) -> None:
+        self._repo_path = repo_path
+        self._test_command = test_command
+        self._auto_apply = (
+            _env_bool("NEXUS_AUTO_APPLY", False) if auto_apply is None else auto_apply
+        )
+        self._dry_run = (
+            _env_bool("NEXUS_AUTO_APPLY_DRY_RUN", True) if dry_run is None else dry_run
+        )
+
+    # -- git helpers --------------------------------------------------------
+
+    def _git_snapshot(self, label: str) -> str | None:
+        """Capture a rollback point via ``git stash create``.
+
+        Returns the stash ref (a commit hash) or ``None`` on failure.
+        If git is not available the call is logged and ``None`` is
+        returned so the caller can continue without a rollback handle.
+        """
+        cwd = str(self._repo_path) if self._repo_path else None
+        try:
+            rev = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            logger.warning("git not available for snapshot (%s): %s", label, exc)
+            return None
+
+        if rev.returncode != 0:
+            logger.warning(
+                "git rev-parse failed (%s): %s", label, (rev.stderr or "").strip()
+            )
+            return None
+
+        try:
+            stash = subprocess.run(
+                ["git", "stash", "create", label],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            logger.warning("git stash create failed (%s): %s", label, exc)
+            return None
+
+        if stash.returncode != 0:
+            logger.warning(
+                "git stash create failed (%s): %s", label, (stash.stderr or "").strip()
+            )
+            return None
+
+        ref = (stash.stdout or "").strip()
+        return ref or None
+
+    # -- test runner --------------------------------------------------------
+
+    def _run_tests(self) -> bool:
+        """Run the configured test command.
+
+        Returns ``True`` only when the command exits with code 0. On
+        failure the last 50 lines of combined stdout/stderr are logged.
+        """
+        cwd = str(self._repo_path) if self._repo_path else None
+        try:
+            proc = subprocess.run(
+                self._test_command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired as exc:
+            logger.warning("Test command timed out after 300s: %s", exc)
+            return False
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            logger.warning("Test command failed to start: %s", exc)
+            return False
+
+        if proc.returncode == 0:
+            return True
+
+        combined = (proc.stdout or "") + (proc.stderr or "")
+        tail = "\n".join(combined.splitlines()[-50:])
+        logger.warning(
+            "Test command exited with code %d. Last 50 lines:\n%s",
+            proc.returncode,
+            tail,
+        )
+        return False
+
+    # -- public API ---------------------------------------------------------
+
+    async def apply(self, proposal: ImprovementProposal) -> ProposalOutcome:
+        """Decide what to do with *proposal* and return a :class:`ProposalOutcome`.
+
+        Safety rails:
+          1. ``auto_apply`` must be enabled.
+          2. ``proposal.confidence`` must be at least 0.6.
+          3. In dry-run mode the test suite must pass on the current
+             baseline; otherwise the proposal is rejected.
+        """
+        if not self._auto_apply:
+            return ProposalOutcome(
+                proposal_id=proposal.id,
+                decision=ProposalDecision.SKIPPED,
+                reason="auto_apply_disabled",
+                confidence=proposal.confidence,
+            )
+
+        if proposal.confidence < 0.6:
+            return ProposalOutcome(
+                proposal_id=proposal.id,
+                decision=ProposalDecision.REJECTED,
+                reason="confidence_below_threshold",
+                confidence=proposal.confidence,
+            )
+
+        snapshot_ref = await asyncio.to_thread(
+            self._git_snapshot, f"pre_proposal_{proposal.id}"
+        )
+
+        if self._dry_run:
+            tests_ok = await asyncio.to_thread(self._run_tests)
+            if not tests_ok:
+                return ProposalOutcome(
+                    proposal_id=proposal.id,
+                    decision=ProposalDecision.REJECTED,
+                    reason="tests_failed_in_baseline",
+                    confidence=proposal.confidence,
+                    before_snapshot=snapshot_ref,
+                )
+            return ProposalOutcome(
+                proposal_id=proposal.id,
+                decision=ProposalDecision.DRY_RUN,
+                reason="dry_run_ok",
+                confidence=proposal.confidence,
+                before_snapshot=snapshot_ref,
+            )
+
+        proposal.approved = True
+        return ProposalOutcome(
+            proposal_id=proposal.id,
+            decision=ProposalDecision.APPLIED,
+            reason="applied",
+            confidence=proposal.confidence,
+            before_snapshot=snapshot_ref,
+        )
+
+    async def rollback(
+        self, proposal: ImprovementProposal, outcome: ProposalOutcome
+    ) -> bool:
+        """Roll back the change captured in *outcome* via ``git stash apply``."""
+        if not outcome.before_snapshot:
+            logger.warning(
+                "Rollback requested for %s but no snapshot is available",
+                proposal.id,
+            )
+            return False
+
+        cwd = str(self._repo_path) if self._repo_path else None
+        ref = outcome.before_snapshot
+
+        def _apply_stash() -> bool:
+            try:
+                proc = subprocess.run(
+                    ["git", "stash", "apply", ref],
+                    capture_output=True,
+                    text=True,
+                    cwd=cwd,
+                    timeout=30,
+                )
+            except (FileNotFoundError, subprocess.SubprocessError) as exc:
+                logger.warning("git stash apply failed: %s", exc)
+                return False
+            if proc.returncode != 0:
+                logger.warning(
+                    "git stash apply %s failed: %s", ref, (proc.stderr or "").strip()
+                )
+                return False
+            return True
+
+        ok = await asyncio.to_thread(_apply_stash)
+        if ok:
+            logger.info("Rolled back proposal %s using snapshot %s", proposal.id, ref)
+        return ok
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton accessor
+# ---------------------------------------------------------------------------
+
+_applier: ProposalApplier | None = None
+
+
+def get_proposal_applier() -> ProposalApplier:
+    """Return a process-wide cached :class:`ProposalApplier` instance.
+
+    Reset the cache (e.g. between tests) via
+    ``proposal_applier_mod._applier = None`` where ``proposal_applier_mod``
+    is the imported module reference.
+    """
+    global _applier
+    if _applier is None:
+        _applier = ProposalApplier()
+    return _applier
+
+
+# ---------------------------------------------------------------------------
+# Autonomy event helper
+# ---------------------------------------------------------------------------
+
+
+async def emit_autonomy_decision(
+    outcome: ProposalOutcome, session_id: str = ""
+) -> None:
+    """Publish a :class:`ProposalOutcome` on the agent bus under ``autonomy``.
+
+    Silently no-ops if the bus cannot be reached or initialised.
+    """
+    try:
+        bus = get_agent_bus()
+        payload: dict[str, Any] = {"session_id": session_id, **asdict(outcome)}
+        await bus.publish(
+            "autonomy",
+            BusMessage(
+                message_id=f"auto_{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}",
+                source_agent="SELF_IMPROVEMENT",
+                payload=payload,
+            ),
+        )
+    except Exception as exc:
+        logger.warning("Failed to emit autonomy decision: %s", exc)

@@ -152,7 +152,9 @@ export function useAgentStream(sessionId: string) {
         const msg = error instanceof Error ? error.message : "Erro desconhecido";
         if (error instanceof ApiError && error.status === 401 && typeof window !== "undefined") {
           clearAuth();
-          window.location.href = "/login?expired=1";
+          if (!window.location.pathname.startsWith("/login")) {
+            window.location.href = "/login?expired=1";
+          }
           return;
         }
         setError(msg);

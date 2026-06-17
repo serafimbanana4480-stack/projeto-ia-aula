@@ -138,9 +138,6 @@ export default function RightPanel() {
   const backendOnline = useMetricsStore((s) => s.backendOnline);
   const router = useRouter();
 
-  // Derive LLM online state from shared metrics store
-  const llmOnline = backendOnline && metrics && metrics.active_model !== "none";
-
   const models = useModelStore((s) => s.models);
 
   const activeModelData: ModelInfo = useMemo(() => {
@@ -150,7 +147,6 @@ export default function RightPanel() {
     if (!fromStore) return fallback;
 
     const sizeGB = fromStore.size_gb ?? fallback.sizeGB;
-    const displaySize = formatSizeGB(sizeGB);
     const paramSize = fromStore.parameter_size ?? fallback.parameter_size;
 
     return {
@@ -158,6 +154,7 @@ export default function RightPanel() {
       name: fromStore.name || fallback.name,
       desc: fallback.desc,
       color: fallback.color,
+      size: fallback.size,
       provider: fromStore.provider || fallback.provider,
       sizeGB,
       parameter_size: paramSize,
@@ -165,7 +162,6 @@ export default function RightPanel() {
     };
   }, [activeModel, models]);
 
-  // Real session stats from metrics
   const sessionStats = useMemo(() => {
     const msgStats = metrics?.message_stats;
     return {
@@ -173,14 +169,13 @@ export default function RightPanel() {
       tokens:
         (msgStats?.tokens_out_total ?? 0) +
         (msgStats?.tokens_in_total ?? 0),
-      cost: 0, // Cost calculation depends on model pricing
+      cost: 0,
       messages_change: 0,
       tokens_change: 0,
       cost_change: 0,
     };
   }, [metrics]);
 
-  // Real model metrics from metrics
   const modelMetrics = useMemo(() => {
     return {
       latency: metrics?.avg_latency_ms ?? 0,
@@ -198,7 +193,6 @@ export default function RightPanel() {
         await toggleToolRemote(toolName, !enabled);
       } catch (error) {
         log.error("Failed to toggle tool:", error);
-        // Revert on failure
         toggleTool(toolName);
       }
     },
@@ -207,7 +201,6 @@ export default function RightPanel() {
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto thin-scrollbar p-4">
-      {/* Active Model Card */}
       <motion.div
         initial={{ opacity: 0, x: 20 }}
         animate={{ opacity: 1, x: 0 }}
@@ -310,7 +303,6 @@ export default function RightPanel() {
         </div>
       </motion.div>
 
-      {/* Model Switcher */}
       <motion.div
         initial={{ opacity: 0, x: 20 }}
         animate={{ opacity: 1, x: 0 }}
@@ -348,7 +340,6 @@ export default function RightPanel() {
         </div>
       </motion.div>
 
-      {/* Session Performance */}
       <motion.div
         initial={{ opacity: 0, x: 20 }}
         animate={{ opacity: 1, x: 0 }}
@@ -407,7 +398,6 @@ export default function RightPanel() {
         </div>
       </motion.div>
 
-      {/* Active Tools */}
       <motion.div
         initial={{ opacity: 0, x: 20 }}
         animate={{ opacity: 1, x: 0 }}

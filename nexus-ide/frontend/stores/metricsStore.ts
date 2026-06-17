@@ -5,7 +5,7 @@
  * feeds all subscribers. Polling fallback when SSE unavailable.
  */
 import { create } from "zustand";
-import { apiUrl, authHeaders } from "../lib/api";
+import { apiUrl, authHeaders, getMetricsHistory } from "../lib/api";
 import { getAccessToken, isAuthenticated } from "../lib/auth";
 
 export interface SystemMetrics {
@@ -47,6 +47,12 @@ export interface SystemMetrics {
   }>;
 }
 
+/** A single point in an aggregated historical metric series. */
+export interface HistoryPoint {
+  t: number;
+  v: number;
+}
+
 interface MetricsState {
   metrics: SystemMetrics | null;
   history: SystemMetrics[];
@@ -55,11 +61,50 @@ interface MetricsState {
   connectionMode: "none" | "sse" | "polling";
   lastUpdate: string;
 
+  // Aggregated historical series (per metric key). Empty when offline/unavailable.
+  historySeries: Record<string, HistoryPoint[]>;
+  historyLoading: boolean;
+  historyError: string | null;
+
+  // ── Auxiliary cache for polled dashboard widgets ───────────────────────
+  // Kept loose-typed intentionally: the AlertFeed / Guardian backend payloads
+  // drift across versions and the widgets already coerce to their own local
+  // interfaces (`AlertData`, `GuardianStatus`, ...). Defaults are empty/null
+  // so a fresh store never breaks a consumer.
+  alerts: unknown[];
+  alertsError: string | null;
+  alertsLoading: boolean;
+  guardian: {
+    running?: boolean;
+    suggestions?: unknown[];
+    system_health?: unknown;
+    pending?: number;
+    total?: number;
+  } | null;
+  guardianError: string | null;
+  guardianLoading: boolean;
+
   // Actions
   _setMetrics: (m: SystemMetrics) => void;
   _setBackendOnline: (online: boolean) => void;
   _setConnectionStatus: (status: MetricsState["connectionStatus"]) => void;
   _setConnectionMode: (mode: MetricsState["connectionMode"]) => void;
+  loadHistory: (metric: string, windowSeconds?: number) => Promise<void>;
+  clearHistory: (metric?: string) => void;
+  setAlerts: (list: unknown[]) => void;
+  setAlertsError: (msg: string | null) => void;
+  setAlertsLoading: (loading: boolean) => void;
+  setGuardian: (
+    data: {
+      running?: boolean;
+      suggestions?: unknown[];
+      system_health?: unknown;
+      pending?: number;
+      total?: number;
+    } | null,
+  ) => void;
+  setGuardianError: (msg: string | null) => void;
+  setGuardianLoading: (loading: boolean) => void;
 }
 
 export const useMetricsStore = create<MetricsState>((set) => ({
@@ -69,11 +114,19 @@ export const useMetricsStore = create<MetricsState>((set) => ({
   connectionStatus: "connecting",
   connectionMode: "none",
   lastUpdate: "—",
+  historySeries: {},
+  historyLoading: false,
+  historyError: null,
+  alerts: [],
+  alertsError: null,
+  alertsLoading: false,
+  guardian: null,
+  guardianError: null,
+  guardianLoading: false,
 
-  _setMetrics: (m) =>
+    _setMetrics: (m) =>
     set((state) => {
       const total = m.requests_total ?? 0;
-      const failed = m.requests_failed ?? 0;
       const successRate = total > 0 ? (m.requests_successful ?? 0) / total : 1;
       let connectionStatus: MetricsState["connectionStatus"] = "connected";
       if (total > 0 && successRate === 0) {
@@ -90,7 +143,94 @@ export const useMetricsStore = create<MetricsState>((set) => ({
   _setBackendOnline: (online) => set({ backendOnline: online }),
   _setConnectionStatus: (status) => set({ connectionStatus: status }),
   _setConnectionMode: (mode) => set({ connectionMode: mode }),
+
+  loadHistory: async (metric, windowSeconds = 3600) => {
+    set({ historyLoading: true, historyError: null });
+    try {
+      const raw = await getMetricsHistory(windowSeconds, metric);
+      const series = normalizeHistorySeries(raw, metric);
+      set((state) => ({
+        historySeries: { ...state.historySeries, [metric]: series },
+        historyLoading: false,
+        historyError: null,
+      }));
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to load metric history";
+      set((state) => ({
+        historySeries: { ...state.historySeries, [metric]: [] },
+        historyLoading: false,
+        historyError: message,
+      }));
+    }
+  },
+
+  clearHistory: (metric) =>
+    set((state) => {
+      if (!metric) {
+        return { historySeries: {}, historyError: null };
+      }
+      const next = { ...state.historySeries };
+      delete next[metric];
+      return { historySeries: next };
+    }),
+
+  setAlerts: (list) => set({ alerts: Array.isArray(list) ? list : [], alertsError: null }),
+  setAlertsError: (msg) => set({ alertsError: msg }),
+  setAlertsLoading: (loading) => set({ alertsLoading: loading }),
+  setGuardian: (data) => set({ guardian: data, guardianError: null }),
+  setGuardianError: (msg) => set({ guardianError: msg }),
+  setGuardianLoading: (loading) => set({ guardianLoading: loading }),
 }));
+
+/**
+ * Normalize the assorted shapes returned by `/api/metrics/history` (and any
+ * future backend variants) into a stable `{ t, v }[]` series.
+ *
+ * Accepts: arrays of `{timestamp|t|time, value|v}`; or wrapper objects with a
+ * `data`/`history`/`points`/`series` array; or an object keyed by metric name
+ * whose value is one of the above. Returns `[]` for anything unparseable so a
+ * backend outage or schema drift never crashes the store or its consumers.
+ */
+function normalizeHistorySeries(
+  raw: unknown,
+  metric: string,
+): HistoryPoint[] {
+  if (!raw) return [];
+
+  const isRecord = (v: unknown): v is Record<string, unknown> =>
+    typeof v === "object" && v !== null && !Array.isArray(v);
+
+  const toPoint = (item: unknown): HistoryPoint | null => {
+    if (!isRecord(item)) return null;
+    const tRaw = item.timestamp ?? item.t ?? item.time ?? item.ts;
+    const vRaw = item.value ?? item.v ?? item[metric];
+    const t = tRaw == null ? NaN : Number(tRaw);
+    const v = vRaw == null ? NaN : Number(vRaw);
+    if (Number.isNaN(t) || Number.isNaN(v)) return null;
+    return { t, v };
+  };
+
+  const fromArray = (arr: unknown[]): HistoryPoint[] =>
+    arr
+      .map(toPoint)
+      .filter((p): p is HistoryPoint => p !== null)
+      .sort((a, b) => a.t - b.t);
+
+  if (Array.isArray(raw)) return fromArray(raw);
+
+  if (isRecord(raw)) {
+    const bucketKeys = ["data", "history", "points", "series", "values"];
+    for (const key of bucketKeys) {
+      const bucket = raw[key];
+      if (Array.isArray(bucket)) return fromArray(bucket);
+    }
+    const byMetric = raw[metric];
+    if (Array.isArray(byMetric)) return fromArray(byMetric);
+  }
+
+  return [];
+}
 
 // ── Singleton SSE manager ────────────────────────────────────────────────
 let sseInstance: EventSource | null = null;
@@ -153,6 +293,8 @@ async function fetchMetrics() {
       useMetricsStore.getState()._setBackendOnline(false);
       useMetricsStore.getState()._setConnectionStatus("offline");
       useMetricsStore.getState()._setConnectionMode("none");
+      stopAuthHeartbeat();
+      stopAll();
       return false;
     }
 
@@ -165,11 +307,12 @@ async function fetchMetrics() {
       return true;
     }
   } catch {
-    /* ignore */
+    stopAuthHeartbeat();
+    stopAll();
+    useMetricsStore.getState()._setBackendOnline(false);
+    useMetricsStore.getState()._setConnectionStatus("offline");
+    useMetricsStore.getState()._setConnectionMode("none");
   }
-  useMetricsStore.getState()._setBackendOnline(false);
-  useMetricsStore.getState()._setConnectionStatus("offline");
-  useMetricsStore.getState()._setConnectionMode("none");
   return false;
 }
 

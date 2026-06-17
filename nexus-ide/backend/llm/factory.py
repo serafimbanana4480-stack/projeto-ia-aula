@@ -6,6 +6,7 @@ environment variable or configuration.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -68,6 +69,29 @@ class MockProvider:
             "The AI service is currently unavailable. "
             "Please check that Ollama is running with the required models, or configure a cloud provider like OpenAI or DeepSeek. "
             "You can set LLM_PROVIDER=openai and OPENAI_API_KEY=sk-... in your environment."
+        )
+
+    async def batch_complete(
+        self,
+        messages_list: list[list[dict[str, str]]],
+        *,
+        model: str | None = None,
+        options: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[str]:
+        """Default sequential batch implementation.
+
+        Providers can override this for true batching; the default is
+        sequential and concurrency-safe (uses ``asyncio.gather``).
+        """
+        effective_model = model or "mock"
+        return list(
+            await asyncio.gather(
+                *(
+                    self.chat_complete(effective_model, msgs, **kwargs)
+                    for msgs in messages_list
+                )
+            )
         )
 
     async def embed(
@@ -168,6 +192,50 @@ class ResilientLLMProvider:
         **kwargs: Any,
     ) -> str:
         return await self._try_providers("chat_complete", model, messages, **kwargs)
+
+    async def batch_complete(
+        self,
+        messages_list: list[list[dict[str, str]]],
+        *,
+        model: str | None = None,
+        options: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[str]:
+        """Default sequential batch implementation.
+
+        Providers can override this for true batching; the default is
+        sequential and concurrency-safe (uses ``asyncio.gather``).  When the
+        underlying provider exposes its own ``batch_complete`` we delegate
+        to it; otherwise we call :meth:`chat_complete` once per message
+        set through the resilient fallback chain.
+        """
+        for provider in [self.primary, *self.fallbacks]:
+            try:
+                if hasattr(provider, "batch_complete"):
+                    return await provider.batch_complete(
+                        messages_list,
+                        model=model,
+                        options=options,
+                        **kwargs,
+                    )
+                return list(
+                    await asyncio.gather(
+                        *(
+                            provider.chat_complete(
+                                model or "", msgs, options=options, **kwargs
+                            )
+                            for msgs in messages_list
+                        )
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Provider %s failed for batch_complete: %s",
+                    provider.__class__.__name__,
+                    exc,
+                )
+                continue
+        raise RuntimeError("All providers failed for batch_complete")
 
     async def embed(
         self,

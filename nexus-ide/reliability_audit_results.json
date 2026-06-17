@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-06-16T00:19:13.600076+00:00",
+  "timestamp": "2026-06-17T18:40:53.577167+00:00",
   "tools": {
     "append_file": {
       "enabled": true,
@@ -883,7 +883,7 @@
           },
           "verified": true
         },
-        "duration_ms": 49
+        "duration_ms": 17
       }
     },
     {
@@ -906,12 +906,12 @@
           "size": 17,
           "backup": {
             "backed_up": true,
-            "backup_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\.nexus\\backups\\create_test.txt.20260616_001914.dcc77f5e.bak",
+            "backup_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\.nexus\\backups\\create_test.txt.20260617_184054.dcc77f5e.bak",
             "original_size": 19
           },
           "verified": true
         },
-        "duration_ms": 41
+        "duration_ms": 55
       }
     },
     {
@@ -934,12 +934,12 @@
           "size": 13,
           "backup": {
             "backed_up": true,
-            "backup_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\.nexus\\backups\\deep.txt.20260616_001914.48a9d2ed.bak",
+            "backup_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\.nexus\\backups\\deep.txt.20260617_184054.48a9d2ed.bak",
             "original_size": 13
           },
           "verified": true
         },
-        "duration_ms": 102
+        "duration_ms": 108
       }
     },
     {
@@ -962,12 +962,12 @@
           "size": 16,
           "backup": {
             "backed_up": true,
-            "backup_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\.nexus\\backups\\posix_test.txt.20260616_001914.98fcb4de.bak",
+            "backup_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\.nexus\\backups\\posix_test.txt.20260617_184054.98fcb4de.bak",
             "original_size": 16
           },
           "verified": true
         },
-        "duration_ms": 41
+        "duration_ms": 48
       }
     },
     {
@@ -990,12 +990,12 @@
           "size": 15,
           "backup": {
             "backed_up": true,
-            "backup_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\.nexus\\backups\\audit_relative.txt.20260616_001914.1dd715a6.bak",
+            "backup_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\.nexus\\backups\\audit_relative.txt.20260617_184054.1dd715a6.bak",
             "original_size": 15
           },
           "verified": true
         },
-        "duration_ms": 48
+        "duration_ms": 53
       }
     },
     {
@@ -1010,22 +1010,22 @@
         "result": {
           "path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\create_test.txt",
           "deleted": true,
-          "trash_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\.nexus\\backups\\trash\\create_test.txt.20260616_001914.dcc77f5e"
+          "trash_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\.nexus\\backups\\trash\\create_test.txt.20260617_184055.dcc77f5e"
         },
-        "duration_ms": 38
+        "duration_ms": 37
       }
     },
     {
       "id": "RENAME",
-      "requested_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\rename_src_1781569154958.txt -> C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\rename_dst_1781569154958.txt",
+      "requested_path": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\rename_src_1781721655041.txt -> C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\rename_dst_1781721655041.txt",
       "tool_reported_success": true,
       "verification_pass": true,
       "false_success": false,
       "tool_result": {
         "tool": "move_file_absolute",
         "result": {
-          "src": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\rename_src_1781569154958.txt",
-          "dest": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\rename_dst_1781569154958.txt",
+          "src": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\rename_src_1781721655041.txt",
+          "dest": "C:\\Users\\rodri\\AppData\\Local\\tmp\\nexus_reliability_audit\\rename_dst_1781721655041.txt",
           "moved": true
         },
         "duration_ms": 8
@@ -1035,19 +1035,19 @@
   "schema_issues": [],
   "metrics": {
     "/api/metrics/current": {
-      "status": 200,
-      "available": true,
-      "content_type": "application/json"
+      "status": 0,
+      "available": false,
+      "error": "All connection attempts failed"
     },
     "/api/dashboard/status": {
-      "status": 401,
+      "status": 0,
       "available": false,
-      "content_type": "application/json"
+      "error": "All connection attempts failed"
     },
     "/api/dashboard/stream": {
-      "status": 404,
+      "status": 0,
       "available": false,
-      "content_type": "application/json"
+      "error": "All connection attempts failed"
     }
   },
   "scores": {

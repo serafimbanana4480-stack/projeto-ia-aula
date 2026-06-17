@@ -23,11 +23,14 @@ Usage:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
 import os
+import shlex
 import sqlite3
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -38,6 +41,15 @@ from typing import Any
 from croniter import croniter
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_SHELL_COMMANDS: frozenset[str] = frozenset({
+    "ls", "cat", "echo", "pwd", "whoami", "date", "uptime",
+    "df", "du", "ps", "ping", "curl", "wget", "git",
+    "python3", "node", "npm", "docker",
+    "cp", "mv", "rm", "mkdir", "touch",
+    "head", "tail", "grep", "sort", "wc", "find",
+    "tar", "gzip", "unzip",
+})
 
 
 def get_db_path() -> Path:
@@ -335,26 +347,43 @@ def _execute_job(job: CronJob) -> dict[str, Any]:
             logger.info("Cron job dispatched to agent: %s", agent_name)
 
         elif job.task_type == "shell":
-            import subprocess
             cmd = job.payload.get("command", "")
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=job.payload.get("timeout", 300),
-            )
-            output = result.stdout
-            if result.returncode != 0:
-                error = result.stderr
+            tokens = shlex.split(cmd)
+            if not tokens or tokens[0] not in _ALLOWED_SHELL_COMMANDS:
+                error = f"Command '{tokens[0] if tokens else ''}' is not in the allowed shell commands whitelist"
                 status = "error"
+            else:
+                result = subprocess.run(
+                    tokens,
+                    shell=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=job.payload.get("timeout", 300),
+                )
+                output = result.stdout
+                if result.returncode != 0:
+                    error = result.stderr
+                    status = "error"
 
         elif job.task_type == "python":
             code = job.payload.get("code", "")
-            # Execute in a safe environment
-            local_vars = {}
-            exec(code, {"__builtins__": __builtins__}, local_vars)
-            output = str(local_vars)
+            try:
+                tree = ast.parse(code, mode='exec')
+                for node in ast.walk(tree):
+                    if isinstance(node, (ast.Import, ast.ImportFrom, ast.Call, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Await, ast.Yield, ast.YieldFrom)):
+                        raise ValueError(f"Node type {type(node).__name__} is not allowed in cron python tasks")
+                allowed_root = (ast.Expr, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Pass)
+                for node in tree.body:
+                    if not isinstance(node, allowed_root):
+                        raise ValueError(f"Statement type {type(node).__name__} is not allowed")
+                compiled = compile(tree, '<cron_python>', 'exec')
+                local_vars = {}
+                exec(compiled, {"__builtins__": {}}, local_vars)
+                output = str(local_vars)
+            except (SyntaxError, ValueError) as e:
+                status = "error"
+                error = str(e)
+                output = ""
 
         elif job.task_type == "function":
             # Call a registered function
@@ -486,6 +515,27 @@ def stop_scheduler() -> None:
     if _scheduler:
         _scheduler.stop()
         _scheduler = None
+
+
+def scheduler_status() -> dict[str, Any]:
+    """Get cron scheduler status and job counts."""
+    try:
+        init_db()
+        db_path = get_db_path()
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            total = conn.execute("SELECT COUNT(*) as cnt FROM cron_jobs").fetchone()["cnt"]
+            enabled = conn.execute("SELECT COUNT(*) as cnt FROM cron_jobs WHERE enabled = 1").fetchone()["cnt"]
+            running_scheduler = _scheduler is not None and _scheduler._running
+            return {
+                "success": True,
+                "scheduler_running": running_scheduler,
+                "total_jobs": total,
+                "enabled_jobs": enabled,
+                "check_interval_seconds": get_scheduler().check_interval if _scheduler else None,
+            }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------

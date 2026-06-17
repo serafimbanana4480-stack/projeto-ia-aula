@@ -118,6 +118,37 @@ async def get_current_metrics(request: Request) -> dict:
     return await _build_current_metrics_payload(request)
 
 
+@router.get("/metrics/history")
+async def get_metrics_history(
+    seconds: int = Query(3600, ge=1, description="Time window in seconds"),
+    metric: str = Query(
+        "tokens_per_second", description="Metric name to retrieve history for"
+    ),
+) -> dict:
+    """Return historical timeline data for a single metric.
+
+    Uses the in-memory metrics store (1h deque). Falls back to an empty
+    dataset on any error so callers never receive a 500.
+    """
+    try:
+        store = get_metrics_store()
+        timeline = await store.get_timeline(seconds=seconds, metric=metric)
+    except Exception as exc:
+        logger.warning(
+            "Failed to load metrics history (metric=%s, seconds=%s): %s",
+            metric,
+            seconds,
+            exc,
+        )
+        timeline = []
+
+    return {
+        "metric": metric,
+        "seconds": seconds,
+        "data": timeline,
+    }
+
+
 @router.get("/dashboard/stream")
 async def dashboard_metrics_stream(
     request: Request,

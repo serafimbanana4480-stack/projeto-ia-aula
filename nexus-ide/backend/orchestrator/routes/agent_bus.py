@@ -14,11 +14,12 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.core.agent_bus import BusMessage, get_agent_bus
+from backend.middleware.auth import require_auth
 from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ def _sse_payload(data: dict[str, Any]) -> str:
 
 @router.post("/bus/publish", response_model=BusPublishResponse)
 @limiter.limit("120/minute")
-async def bus_publish(req: BusPublishRequest, request: Request) -> Any:
+async def bus_publish(req: BusPublishRequest, request: Request, _auth: Any = Depends(require_auth)) -> Any:
     """Publish a message to the Agent Bus."""
     import uuid
 
@@ -104,6 +105,7 @@ async def bus_history(
     topic: str,
     limit: int = Query(50, ge=1, le=500),
     include_expired: bool = False,
+    _auth: Any = Depends(require_auth),
 ) -> BusHistoryResponse:
     """Replay last *limit* messages on *topic*, newest first."""
     bus = get_agent_bus()
@@ -117,7 +119,7 @@ async def bus_history(
 
 @router.get("/bus/topics")
 @limiter.limit("120/minute")
-async def bus_topics(request: Request) -> BusTopicsResponse:
+async def bus_topics(request: Request, _auth: Any = Depends(require_auth)) -> BusTopicsResponse:
     """Return all topics that currently have history or subscribers."""
     bus = get_agent_bus()
     return BusTopicsResponse(topics=bus.get_topics())
@@ -128,6 +130,7 @@ async def bus_stream(
     request: Request,
     topics: list[str] | None = Query(None),
     session_id: str | None = Query(None),
+    _auth: Any = Depends(require_auth),
 ) -> StreamingResponse:
     """Stream Agent Bus messages via Server-Sent Events.
 

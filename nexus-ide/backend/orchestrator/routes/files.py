@@ -117,15 +117,32 @@ def _validate_upload(file: UploadFile, content: bytes) -> tuple[bool, str]:
 
     # 4. Magic-byte verification for binary types
     if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf"):
+        matched = False
         for magic, expected_ext in _MAGIC_SIGNATURES.items():
-            if content.startswith(magic):
-                if expected_ext == ".webp":
-                    # RIFF header: verify WEBP fourcc at offset 8
-                    if len(content) >= 12 and content[8:12] == b"WEBP":
+            if not content.startswith(magic):
+                continue
+            if expected_ext == ".webp":
+                # RIFF header: require WEBP fourcc at offset 8
+                if len(content) >= 12 and content[8:12] == b"WEBP":
+                    if suffix == ".webp":
+                        matched = True
                         break
-                    continue
+                    return False, f"File content ({expected_ext}) does not match expected format for {suffix}"
+                # RIFF but not WEBP (e.g. WAV/AVI) — keep scanning other signatures
+                continue
+            # General case: magic matched a non-WEBP binary format
+            if expected_ext == suffix:
+                matched = True
                 break
-        else:
+            # Normalize .jpg/.jpeg aliasing
+            if expected_ext == ".jpg" and suffix == ".jpeg":
+                matched = True
+                break
+            if expected_ext == ".jpeg" and suffix == ".jpg":
+                matched = True
+                break
+            return False, f"File content ({expected_ext}) does not match expected format for {suffix}"
+        if not matched:
             return False, f"File content does not match expected format for {suffix}"
 
     return True, ""

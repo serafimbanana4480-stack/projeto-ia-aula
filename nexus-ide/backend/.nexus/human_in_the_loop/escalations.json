@@ -49,5 +49,22 @@
     "decided_at": null,
     "created_at": "2026-06-15T23:01:56.873325+00:00",
     "resolution": null
+  },
+  "esc_20260617184136734677": {
+    "request_id": "esc_20260617184136734677",
+    "proposal_id": "p_test1",
+    "proposal": {
+      "id": "p_test1",
+      "category": "security",
+      "confidence": 0.9,
+      "change": "update auth"
+    },
+    "reason": "High confidence security change",
+    "decision": "pending",
+    "operator": null,
+    "notes": "",
+    "decided_at": null,
+    "created_at": "2026-06-17T18:41:36.734697+00:00",
+    "resolution": null
   }
 }

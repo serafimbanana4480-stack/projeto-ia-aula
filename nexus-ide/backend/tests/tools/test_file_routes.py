@@ -156,3 +156,79 @@ class TestWriteFileRoute:
         )
         assert response.status_code == 200
         assert "error" in response.json()
+
+
+class TestUploadRoute:
+    def test_upload_valid_text_file(self, client: TestClient, tmp_path: Path) -> None:
+        response = client.post(
+            "/api/files/upload",
+            files={"file": ("hello.py", b"print('hi')", "text/x-python")},
+            data={"project_path": str(tmp_path)},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert "error" not in body
+        assert (tmp_path / "hello.py").read_bytes() == b"print('hi')"
+
+    def test_upload_rejects_oversize(self, client: TestClient, tmp_path: Path) -> None:
+        oversized = b"x" * (10 * 1024 * 1024 + 1)
+        response = client.post(
+            "/api/files/upload",
+            files={"file": ("big.txt", oversized, "text/plain")},
+            data={"project_path": str(tmp_path)},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert "error" in body
+        assert "size" in body["error"].lower()
+
+    def test_upload_rejects_disallowed_extension(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        response = client.post(
+            "/api/files/upload",
+            files={"file": ("malware.exe", b"MZ\x90\x00", "application/octet-stream")},
+            data={"project_path": str(tmp_path)},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert "error" in body
+        err = body["error"].lower()
+        assert "allowlist" in err or "extension" in err
+
+    def test_upload_rejects_magic_byte_mismatch(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        response = client.post(
+            "/api/files/upload",
+            files={"file": ("fake.png", b"%PDF-1.4...", "image/png")},
+            data={"project_path": str(tmp_path)},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert "error" in body
+        err = body["error"].lower()
+        assert "match" in err or "format" in err
+
+    def test_upload_rejects_path_traversal(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        response = client.post(
+            "/api/files/upload",
+            files={"file": ("../escape.txt", b"x", "text/plain")},
+            data={"project_path": str(tmp_path)},
+        )
+        assert response.status_code == 200
+        assert "error" in response.json()
+
+    def test_upload_accepts_image_with_valid_magic(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        response = client.post(
+            "/api/files/upload",
+            files={"file": ("ok.png", png_bytes, "image/png")},
+            data={"project_path": str(tmp_path)},
+        )
+        assert response.status_code == 200
+        assert "error" not in response.json()

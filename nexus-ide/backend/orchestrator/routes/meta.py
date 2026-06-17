@@ -19,10 +19,11 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.middleware.auth import require_auth
 from backend.middleware.rate_limit import limiter
 from backend.orchestrator.meta import MetaOrchestrator, Mission, MissionStatus
 from backend.orchestrator.registry import get_registry
@@ -141,7 +142,7 @@ def _mission_to_status_dict(mission: Mission) -> dict[str, Any]:
 
 @router.get("/missions")
 @limiter.limit("120/minute")
-async def list_missions(request: Request) -> dict[str, Any]:
+async def list_missions(request: Request, _auth: None = Depends(require_auth)) -> dict[str, Any]:
     """List all active missions."""
     meta = _get_meta(request)
     missions = meta.list_all_missions()
@@ -153,7 +154,7 @@ async def list_missions(request: Request) -> dict[str, Any]:
 
 @router.post("/missions")
 @limiter.limit("30/minute")
-async def create_mission(req: CreateMissionRequest, request: Request) -> CreateMissionResponse:
+async def create_mission(req: CreateMissionRequest, request: Request, _auth: None = Depends(require_auth)) -> CreateMissionResponse:
     """Create a new dynamic mission."""
     meta = _get_meta(request)
     mission = await meta.create_mission(
@@ -174,7 +175,7 @@ async def create_mission(req: CreateMissionRequest, request: Request) -> CreateM
 
 @router.get("/missions/{mission_id}")
 @limiter.limit("120/minute")
-async def get_mission(request: Request, mission_id: str) -> MissionStatusResponse:
+async def get_mission(request: Request, mission_id: str, _auth: None = Depends(require_auth)) -> MissionStatusResponse:
     """Retrieve current mission status."""
     meta = _get_meta(request)
     mission = meta.get_mission(mission_id)
@@ -189,7 +190,7 @@ async def get_mission(request: Request, mission_id: str) -> MissionStatusRespons
 
 @router.post("/missions/{mission_id}/pause")
 @limiter.limit("60/minute")
-async def pause_mission(request: Request, mission_id: str) -> MissionActionResponse:
+async def pause_mission(request: Request, mission_id: str, _auth: None = Depends(require_auth)) -> MissionActionResponse:
     """Pause all agents in the mission."""
     meta = _get_meta(request)
     mission = await meta.pause(mission_id)
@@ -207,7 +208,7 @@ async def pause_mission(request: Request, mission_id: str) -> MissionActionRespo
 
 @router.post("/missions/{mission_id}/resume")
 @limiter.limit("60/minute")
-async def resume_mission(request: Request, mission_id: str) -> MissionActionResponse:
+async def resume_mission(request: Request, mission_id: str, _auth: None = Depends(require_auth)) -> MissionActionResponse:
     """Resume a paused mission."""
     meta = _get_meta(request)
     mission = await meta.resume(mission_id)
@@ -225,7 +226,7 @@ async def resume_mission(request: Request, mission_id: str) -> MissionActionResp
 
 @router.post("/missions/{mission_id}/abort")
 @limiter.limit("60/minute")
-async def abort_mission(request: Request, mission_id: str) -> MissionActionResponse:
+async def abort_mission(request: Request, mission_id: str, _auth: None = Depends(require_auth)) -> MissionActionResponse:
     """Abort the mission and cancel all its agents."""
     meta = _get_meta(request)
     mission = await meta.abort(mission_id)
@@ -243,7 +244,7 @@ async def abort_mission(request: Request, mission_id: str) -> MissionActionRespo
 
 @router.get("/missions/{mission_id}/agents")
 @limiter.limit("120/minute")
-async def list_active_agents(request: Request, mission_id: str) -> ActiveAgentsResponse:
+async def list_active_agents(request: Request, mission_id: str, _auth: None = Depends(require_auth)) -> ActiveAgentsResponse:
     """List all active (non-terminal) agents in the mission."""
     meta = _get_meta(request)
     agents = meta.list_active_agents(mission_id)

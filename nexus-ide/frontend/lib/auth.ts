@@ -75,7 +75,6 @@ export function isTokenValid(): boolean {
     );
     const decoded = JSON.parse(jsonPayload) as { exp?: number };
     if (!decoded.exp) return false;
-    // Add a small clock skew buffer (10 seconds)
     return decoded.exp * 1000 > Date.now() + 10000;
   } catch {
     return false;
@@ -163,6 +162,10 @@ export async function autoLoginDev(): Promise<boolean> {
 
   try {
     await login({ email, password });
+    if (!isTokenValid()) {
+      clearAuth();
+      return false;
+    }
     return true;
   } catch {
     return false;

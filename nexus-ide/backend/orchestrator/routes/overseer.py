@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.agents.overseer import OverseerAgent
+from backend.middleware.auth import require_auth
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -22,7 +23,7 @@ def _get_overseer(request: Request) -> OverseerAgent | None:
 
 
 @router.get("/overseer/dashboard")
-async def overseer_dashboard(request: Request) -> dict[str, Any]:
+async def overseer_dashboard(request: Request, _auth: dict = Depends(require_auth)) -> dict[str, Any]:
     """Return the full overseer health dashboard."""
     overseer = _get_overseer(request)
     if not overseer:
@@ -31,7 +32,7 @@ async def overseer_dashboard(request: Request) -> dict[str, Any]:
 
 
 @router.get("/overseer/agents/{agent_name}")
-async def overseer_agent_status(agent_name: str, request: Request) -> dict[str, Any]:
+async def overseer_agent_status(agent_name: str, request: Request, _auth: dict = Depends(require_auth)) -> dict[str, Any]:
     """Return status for a specific agent."""
     overseer = _get_overseer(request)
     if not overseer:
@@ -48,6 +49,7 @@ async def overseer_intervene(
     request: Request,
     action: str,
     reason: str = "",
+    _auth: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """Intervene on an agent: pause, resume, abort, or escalate."""
     overseer = _get_overseer(request)
@@ -60,7 +62,7 @@ async def overseer_intervene(
 
 
 @router.get("/overseer/conflicts")
-async def overseer_conflicts(request: Request) -> dict[str, Any]:
+async def overseer_conflicts(request: Request, _auth: dict = Depends(require_auth)) -> dict[str, Any]:
     """Return current file conflicts between agents."""
     overseer = _get_overseer(request)
     if not overseer:
@@ -69,7 +71,7 @@ async def overseer_conflicts(request: Request) -> dict[str, Any]:
 
 
 @router.get("/overseer/stuck")
-async def overseer_stuck(request: Request) -> dict[str, Any]:
+async def overseer_stuck(request: Request, _auth: dict = Depends(require_auth)) -> dict[str, Any]:
     """Return agents currently marked as stuck."""
     overseer = _get_overseer(request)
     if not overseer:

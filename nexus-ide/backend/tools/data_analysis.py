@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -29,9 +30,9 @@ async def analyze_data(
 ) -> dict:
     """Analyze data files (CSV, JSON) with Python/pandas.
 
-    If `code` is provided, execute it directly.
-    If `query` is provided, generate analysis code from the query.
     If `data_path` is provided, load and summarize the data.
+    If `query` is provided, a safe analysis is generated.
+    The `code` parameter is rejected for security reasons.
     """
     # Lazy imports — pandas/numpy are heavy and only needed at runtime
     try:
@@ -40,6 +41,9 @@ async def analyze_data(
         pd = None  # type: ignore[assignment]
 
     try:
+        if code:
+            return {"error": "The 'code' parameter is no longer supported for security reasons. Use 'data_path' and 'query' instead."}
+
         # Build analysis script
         script_parts = [
             "import json",
@@ -51,20 +55,32 @@ async def analyze_data(
             "    HAS_PANDAS = False",
         ]
 
-        if code:
-            # User-provided analysis code
-            script_parts.append(code)
-        elif data_path:
+        if data_path:
             # Load and analyze a data file
-            full_path = Path(project_path).resolve() / data_path
+            sandbox = Path(project_path).resolve()
+            full_path = (sandbox / data_path).resolve()
             if not full_path.exists():
                 full_path = Path(data_path).resolve()
             if not full_path.exists():
                 return {"error": f"Data file not found: {data_path}"}
 
+            allowed = False
+            try:
+                full_path.relative_to(sandbox)
+                allowed = True
+            except ValueError:
+                temp_dir = Path(tempfile.gettempdir()).resolve()
+                try:
+                    full_path.relative_to(temp_dir)
+                    allowed = True
+                except ValueError:
+                    pass
+            if not allowed:
+                return {"error": "Access denied: file path is outside the project workspace"}
+
             ext = full_path.suffix.lower()
             if ext == ".csv":
-                script_parts.append(f'df = pd.read_csv("{full_path}")')
+                script_parts.append(f'df = pd.read_csv({repr(str(full_path))})')
                 script_parts.append('print("Shape:", df.shape)')
                 script_parts.append('print("\\nColumns:", list(df.columns))')
                 script_parts.append('print("\\nDtypes:\\n", df.dtypes)')
@@ -72,10 +88,9 @@ async def analyze_data(
                 script_parts.append('print("\\nHead:\\n", df.head(10).to_string())')
                 if query:
                     script_parts.append(f"# Query: {query}")
-                    script_parts.append(f"result = {query}")
-                    script_parts.append('print("\\nResult:", result)')
+                    script_parts.append(f"print('Query:', {repr(query)})")
             elif ext == ".json":
-                script_parts.append(f'with open("{full_path}") as f: data = json.load(f)')
+                script_parts.append(f'with open({repr(str(full_path))}) as f: data = json.load(f)')
                 script_parts.append("if isinstance(data, list) and len(data) > 0:")
                 script_parts.append("    df = pd.DataFrame(data)")
                 script_parts.append('    print("Shape:", df.shape)')
@@ -86,9 +101,9 @@ async def analyze_data(
             else:
                 return {"error": f"Unsupported file type: {ext}. Use .csv or .json"}
         elif query:
-            # General analysis query
+            # General analysis query (no data_path — informational only)
             script_parts.append(f"# Analysis query: {query}")
-            script_parts.append(f"print('Query: {query}')")
+            script_parts.append(f"print('Query:', {repr(query)})")
             script_parts.append("print('Provide a data_path to a CSV/JSON file for concrete analysis.')")
         else:
             return {"error": "Provide at least one of: data_path, query, or code"}
@@ -142,11 +157,26 @@ async def _analyze_without_pandas(
     if not data_path:
         return {"output": f"Query: {query}\n(Install pandas for full analysis: pip install pandas)"}
 
-    full_path = Path(project_path).resolve() / data_path
+    sandbox = Path(project_path).resolve()
+    full_path = (sandbox / data_path).resolve()
     if not full_path.exists():
         full_path = Path(data_path).resolve()
     if not full_path.exists():
         return {"error": f"Data file not found: {data_path}"}
+
+    allowed = False
+    try:
+        full_path.relative_to(sandbox)
+        allowed = True
+    except ValueError:
+        temp_dir = Path(tempfile.gettempdir()).resolve()
+        try:
+            full_path.relative_to(temp_dir)
+            allowed = True
+        except ValueError:
+            pass
+    if not allowed:
+        return {"error": "Access denied: file path is outside the project workspace"}
 
     ext = full_path.suffix.lower()
     try:

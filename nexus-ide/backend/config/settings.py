@@ -113,6 +113,12 @@ class Settings(BaseSettings):
     # Security
     secret_key: str = Field(default="development-secret-key-change-in-production")
 
+    # Content Security Policy
+    #   csp_enabled: when false, the CSP header is omitted entirely (dev/debug).
+    #   csp_policy:  non-empty string overrides the built-in default CSP verbatim.
+    csp_enabled: bool = Field(default=True)
+    csp_policy: str = Field(default="")
+
     # CORS - Comma-separated string for environment variable
     allowed_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000")
 

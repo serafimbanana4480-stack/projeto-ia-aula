@@ -10,6 +10,7 @@ import logging
 from functools import wraps
 from typing import Any, Callable
 
+from backend.cache_backends import NullCacheBackend
 import redis.asyncio as redis
 import redis
 
@@ -47,9 +48,12 @@ class SyncCacheClient:
             decode_responses=decode_responses,
         )
         self._client = redis.Redis(connection_pool=self._pool)
+        self._fallback = False
 
     def get(self, key: str) -> str | None:
         """Get a value from cache."""
+        if self._fallback:
+            return None
         try:
             return self._client.get(key)
         except redis.RedisError as e:
@@ -63,6 +67,8 @@ class SyncCacheClient:
         ttl: int = DEFAULT_TTL,
     ) -> bool:
         """Set a value in cache with TTL."""
+        if self._fallback:
+            return False
         try:
             self._client.setex(key, ttl, value)
             return True
@@ -72,6 +78,8 @@ class SyncCacheClient:
 
     def delete(self, key: str) -> bool:
         """Delete a key from cache."""
+        if self._fallback:
+            return False
         try:
             self._client.delete(key)
             return True
@@ -81,6 +89,8 @@ class SyncCacheClient:
 
     def delete_pattern(self, pattern: str) -> int:
         """Delete all keys matching a pattern."""
+        if self._fallback:
+            return 0
         try:
             keys = self._client.keys(pattern)
             if keys:
@@ -92,6 +102,8 @@ class SyncCacheClient:
 
     def exists(self, key: str) -> bool:
         """Check if a key exists in cache."""
+        if self._fallback:
+            return False
         try:
             return bool(self._client.exists(key))
         except redis.RedisError as e:
@@ -100,6 +112,8 @@ class SyncCacheClient:
 
     def close(self) -> None:
         """Close the Redis connection pool."""
+        if self._client is None:
+            return
         self._client.close()
 
 
@@ -107,11 +121,15 @@ class SyncCacheClient:
 _sync_cache_client: SyncCacheClient | None = None
 
 
-def get_sync_cache() -> SyncCacheClient:
+def get_sync_cache() -> "SyncCacheClient | NullCacheBackend":
     """Get or create the global sync cache client instance."""
     global _sync_cache_client
     if _sync_cache_client is None:
-        _sync_cache_client = SyncCacheClient()
+        try:
+            _sync_cache_client = SyncCacheClient()
+        except Exception as exc:
+            logger.warning("Falling back to NullCacheBackend: %s", exc)
+            return NullCacheBackend()
     return _sync_cache_client
 
 
@@ -137,9 +155,12 @@ class CacheClient:
             decode_responses=decode_responses,
         )
         self._client = redis.Redis(connection_pool=self._pool)
+        self._fallback = False
 
     async def get(self, key: str) -> str | None:
         """Get a value from cache."""
+        if self._fallback:
+            return None
         try:
             return await self._client.get(key)
         except redis.RedisError as e:
@@ -153,6 +174,8 @@ class CacheClient:
         ttl: int = DEFAULT_TTL,
     ) -> bool:
         """Set a value in cache with TTL."""
+        if self._fallback:
+            return False
         try:
             await self._client.setex(key, ttl, value)
             return True
@@ -162,6 +185,8 @@ class CacheClient:
 
     async def delete(self, key: str) -> bool:
         """Delete a key from cache."""
+        if self._fallback:
+            return False
         try:
             await self._client.delete(key)
             return True
@@ -171,6 +196,8 @@ class CacheClient:
 
     async def delete_pattern(self, pattern: str) -> int:
         """Delete all keys matching a pattern."""
+        if self._fallback:
+            return 0
         try:
             keys = []
             async for key in self._client.scan_iter(match=pattern):
@@ -184,6 +211,8 @@ class CacheClient:
 
     async def exists(self, key: str) -> bool:
         """Check if a key exists in cache."""
+        if self._fallback:
+            return False
         try:
             return bool(await self._client.exists(key))
         except redis.RedisError as e:
@@ -192,6 +221,8 @@ class CacheClient:
 
     async def close(self) -> None:
         """Close the Redis connection pool."""
+        if self._client is None:
+            return
         await self._client.close()
 
 
@@ -199,11 +230,15 @@ class CacheClient:
 _cache_client: CacheClient | None = None
 
 
-def get_cache() -> CacheClient:
+def get_cache() -> "CacheClient | NullCacheBackend":
     """Get or create the global cache client instance."""
     global _cache_client
     if _cache_client is None:
-        _cache_client = CacheClient()
+        try:
+            _cache_client = CacheClient()
+        except Exception as exc:
+            logger.warning("Falling back to NullCacheBackend: %s", exc)
+            return NullCacheBackend()
     return _cache_client
 
 

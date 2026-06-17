@@ -12,9 +12,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from backend.core.agent_state import AgentStateStore
+from backend.middleware.auth import require_auth
 from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ router = APIRouter()
 
 @router.get("/agent-states")
 @limiter.limit("100/minute")
-async def list_agent_states(request: Request) -> dict[str, list[dict[str, Any]]]:
+async def list_agent_states(request: Request, auth_user: None = Depends(require_auth)) -> dict[str, list[dict[str, Any]]]:
     """Return a summary of every agent that has persisted memories."""
     store = AgentStateStore()
     # We don't have a direct "list agents" query, so we scan the DB.
@@ -58,7 +59,7 @@ async def list_agent_states(request: Request) -> dict[str, list[dict[str, Any]]]
 
 @router.get("/agent-states/{agent_name}")
 @limiter.limit("100/minute")
-async def get_agent_brain(agent_name: str, request: Request) -> dict[str, Any]:
+async def get_agent_brain(agent_name: str, request: Request, auth_user: None = Depends(require_auth)) -> dict[str, Any]:
     """Return the complete brain (all memory tiers) for a single agent."""
     store = AgentStateStore()
     brain = store.get_agent_brain(agent_name)
@@ -84,6 +85,7 @@ async def recall_memories(
     tier: str | None = Query(None),
     project_path: str | None = Query(None),
     limit: int = Query(10, ge=1, le=100),
+    auth_user: None = Depends(require_auth),
 ) -> dict[str, Any]:
     """Search an agent's memory using simple text matching."""
     store = AgentStateStore()
@@ -124,6 +126,7 @@ async def clear_agent_brain(
     tier: str | None = Query(None),
     session_id: str | None = Query(None),
     project_path: str | None = Query(None),
+    auth_user: None = Depends(require_auth),
 ) -> dict[str, Any]:
     """Delete memories for an agent.
 

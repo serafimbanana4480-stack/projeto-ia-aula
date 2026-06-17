@@ -90,6 +90,8 @@ export interface ModelStatus {
   modified_at?: string;
   details?: Record<string, unknown>;
   status: "available" | "loading" | "error";
+  pricing?: string;
+  estimated_tokens_per_sec?: number;
 }
 
 export interface FileTreeEntry {

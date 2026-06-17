@@ -21,9 +21,9 @@ _SYSTEM = (
 class MicroAgent(AgentBase):
     name = "MICRO"
     model_key = "micro"
-    prompt_file = "router"  # unused — overridden below
+    prompt_file = "router"  # unused — kept for compatibility
 
-    def system_prompt(self) -> str:  # type: ignore[override]
+    def system_prompt(self) -> str:
         return _SYSTEM
 
     async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:

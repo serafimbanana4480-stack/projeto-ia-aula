@@ -42,11 +42,4 @@ class RefactorPerformanceAgent(AgentBase):
         AgentAction.CONSULT_AGENT,
     }
 
-    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
-        """Run the performance refactoring agent with ReAct loop.
 
-        ALWAYS uses the ReAct loop so that file operations, code execution,
-        profiling, and other tools are available for every query.
-        """
-        async for token in self._run_react_loop(request):
-            yield token

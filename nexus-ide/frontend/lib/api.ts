@@ -4,16 +4,15 @@ import type {
   FileListResponse,
   FileTreeEntry,
   MetricsData,
-  ModelStatus,
   Project,
   SessionHistoryResponse,
   TerminalExecutionResult,
   Tool,
 } from "./types";
-import { authHeaders, clearAuth, getAccessToken } from "./auth";
+import { authHeaders, clearAuth } from "./auth";
 
 // Re-export auth helpers for consumers that import them from api.ts
-export { authHeaders, getAccessToken } from "./auth";
+export { authHeaders } from "./auth";
 
 // Custom error class for API errors
 export class ApiError extends Error {
@@ -34,14 +33,11 @@ export function apiUrl(path: string): string {
   return `${API_BASE_URL}${path}`;
 }
 
-async function readJson<T>(response: Response): Promise<T> {
+async function readJson<T>(response: Response): Promise<T | null> {
+  if (response.status === 204 || response.headers.get("content-length") === "0") {
+    return null;
+  }
   if (!response.ok) {
-    if (response.status === 401 && typeof window !== "undefined") {
-      // Clear stale token and force re-login. Removing it first prevents an
-      // infinite redirect loop where AuthGuard sees a present-but-expired token.
-      clearAuth();
-      window.location.href = "/login?expired=1";
-    }
     let errorText = "";
     try {
       errorText = await response.text();
@@ -90,10 +86,6 @@ export async function postChat(
     });
 
     if (!response.ok) {
-      if (response.status === 401 && typeof window !== "undefined") {
-        clearAuth();
-        window.location.href = "/login?expired=1";
-      }
       let errorText = "";
       try {
         errorText = await response.text();
@@ -132,11 +124,21 @@ export async function getSessionHistory(id: string): Promise<ChatMessage[]> {
   return Array.isArray(data) ? data : (data.messages ?? []);
 }
 
-export async function getModelStatus(): Promise<ModelStatus[]> {
-  return readJson<ModelStatus[]>(
-    await fetch(apiUrl("/api/models/status"), { headers: authHeaders() }),
+export interface AvailableModel {
+  id: string;
+  name: string;
+  tier: string;
+  provider: string;
+  pricing: string;
+  estimated_tokens_per_sec: number;
+}
+
+export async function getAvailableModels(): Promise<AvailableModel[]> {
+  return readJson<AvailableModel[]>(
+    await fetch(apiUrl("/api/models/available"), { headers: authHeaders() }),
   );
 }
+
 
 export async function readFile(
   path: string,
@@ -662,6 +664,18 @@ export async function getMetricsFlow(): Promise<Record<string, unknown>> {
   );
 }
 
+/**
+ * Fetch an aggregated historical series for a single metric.
+ *
+ * NOTE: As of this writing the backend advertises `/api/metrics/history` in
+ * `observability/routes/metrics.py` but has not implemented the handler, so this
+ * call currently 404s. The return type is intentionally a loose
+ * `Record<string, unknown>` rather than a typed array because the response shape
+ * is not yet fixed; `metricsStore.ts#normalizeHistorySeries` coerces whatever
+ * shape arrives into `{ t, v }[]` and falls back to `[]` on any error/404 so the
+ * dashboard never breaks. Tighten this signature once the backend contract is
+ * finalized (e.g. `{ timestamp: number; value: number }[]`).
+ */
 export async function getMetricsHistory(
   seconds: number = 3600,
   metric: string = "tokens_per_second",

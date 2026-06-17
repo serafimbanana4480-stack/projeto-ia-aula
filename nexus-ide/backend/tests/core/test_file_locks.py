@@ -28,8 +28,12 @@ from backend.core.file_locks import (
     DeadlockError,
     FileLockManager,
     LockError,
+    RedisDistributedLock,
+    _RedisUnavailable,
     _cross_process_lock_path,
     _filelock_enabled,
+    _redis_lock_enabled,
+    _redis_lock_key,
     _readers_count_path,
 )
 
@@ -388,3 +392,215 @@ class TestReadersCounter:
         assert data["count"] == 2
         manager.release_lock(dummy_file, "r1")
         manager.release_lock(dummy_file, "r2")
+
+
+# ---------------------------------------------------------------------------
+# 11. Redis distributed lock (SEC-001)
+# ---------------------------------------------------------------------------
+class FakeRedisClient:
+    """Minimal in-process fake of ``redis.asyncio.Redis`` for lock tests.
+
+    Implements only the subset used by :class:`RedisDistributedLock`:
+    ``ping``, ``set`` (with ``nx``/``px``), ``eval`` (simulating the Lua
+    compare-and-delete), ``get`` and ``aclose``.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+
+    async def ping(self) -> bool:
+        return True
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        nx: bool = False,
+        px: int | None = None,
+    ) -> bool:
+        if nx and key in self._store:
+            return False
+        self._store[key] = value
+        return True
+
+    async def eval(self, script: str, numkeys: int, key: str, token: str) -> int:
+        if self._store.get(key) == token:
+            del self._store[key]
+            return 1
+        return 0
+
+    async def get(self, key: str) -> str | None:
+        return self._store.get(key)
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.fixture
+def fake_redis(monkeypatch: pytest.MonkeyPatch) -> FakeRedisClient:
+    """Patch ``_redis_lock_client`` to return a :class:`FakeRedisClient`."""
+    client = FakeRedisClient()
+
+    async def _fake_client() -> FakeRedisClient:
+        return client
+
+    monkeypatch.setattr(
+        "backend.core.file_locks._redis_lock_client", _fake_client
+    )
+    # Reset the cached singleton so the patched client is used.
+    monkeypatch.setattr("backend.core.file_locks._redis_client", None, raising=False)
+    monkeypatch.setattr(
+        "backend.core.file_locks._redis_unavailable_until", 0.0, raising=False
+    )
+    return client
+
+
+@pytest.fixture
+def redis_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch ``_redis_lock_client`` to simulate Redis being offline."""
+
+    async def _no_client() -> None:
+        return None
+
+    monkeypatch.setattr("backend.core.file_locks._redis_lock_client", _no_client)
+    monkeypatch.setattr("backend.core.file_locks._redis_client", None, raising=False)
+    monkeypatch.setattr(
+        "backend.core.file_locks._redis_unavailable_until", 0.0, raising=False
+    )
+
+
+@pytest.fixture
+def no_filelock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the filelock layer so only Redis / in-memory is exercised."""
+    monkeypatch.setenv("NEXUS_DISABLE_FILELOCK", "1")
+
+
+class TestRedisDistributedLock:
+    """Unit tests for the Redis lock helper (no real Redis required)."""
+
+    async def test_acquire_release_roundtrip(self, fake_redis: FakeRedisClient) -> None:
+        lock = RedisDistributedLock(ttl_ms=1000)
+        key = "nexus:lock:write:abc"
+        token = await lock.acquire(key, timeout=1.0)
+        assert isinstance(token, str) and len(token) > 0
+        assert await fake_redis.get(key) == token
+        released = await lock.release(key, token)
+        assert released is True
+        assert await fake_redis.get(key) is None
+
+    async def test_mutual_exclusion(self, fake_redis: FakeRedisClient) -> None:
+        lock = RedisDistributedLock(ttl_ms=10000, retry_interval=0.05)
+        key = "nexus:lock:write:mtx"
+        token1 = await lock.acquire(key, timeout=1.0)
+        assert token1
+        # A second acquisition on the same key must time out (LockError).
+        with pytest.raises(LockError):
+            await lock.acquire(key, timeout=0.2)
+        # The first holder is unaffected.
+        assert await fake_redis.get(key) == token1
+        # After release, a new acquisition succeeds with a fresh token.
+        assert await lock.release(key, token1) is True
+        token2 = await lock.acquire(key, timeout=1.0)
+        assert token2 and token2 != token1
+        await lock.release(key, token2)
+
+    async def test_safe_release_wrong_token(
+        self, fake_redis: FakeRedisClient
+    ) -> None:
+        lock = RedisDistributedLock(ttl_ms=10000)
+        key = "nexus:lock:write:safe"
+        token = await lock.acquire(key, timeout=1.0)
+        # Releasing with an alien token must NOT delete the lock.
+        released = await lock.release(key, "deadbeef" + "0" * 24)
+        assert released is False
+        assert await fake_redis.get(key) == token
+        # Releasing with the correct token succeeds.
+        assert await lock.release(key, token) is True
+        assert await fake_redis.get(key) is None
+
+    async def test_acquire_raises_when_redis_unavailable(self, redis_offline: None) -> None:
+        lock = RedisDistributedLock()
+        with pytest.raises(_RedisUnavailable):
+            await lock.acquire("nexus:lock:write:offline", timeout=1.0)
+
+    async def test_release_noop_when_redis_unavailable(self, redis_offline: None) -> None:
+        lock = RedisDistributedLock()
+        released = await lock.release("nexus:lock:write:offline", "sometoken")
+        assert released is False
+
+
+class TestManagerRedisFallback:
+    """Integration of the Redis layer into ``FileLockManager``."""
+
+    async def test_write_lock_falls_back_inmemory_when_redis_offline(
+        self,
+        manager: FileLockManager,
+        dummy_file: str,
+        redis_offline: None,
+        no_filelock: None,
+    ) -> None:
+        # Redis offline + filelock disabled → only in-memory asyncio locking.
+        lock_id = await manager.acquire_write_lock(dummy_file, "agent-a", timeout=1.0)
+        assert lock_id
+        assert manager.is_locked(dummy_file)
+        manager.release_lock(dummy_file, "agent-a")
+        assert not manager.is_locked(dummy_file)
+
+    async def test_write_lock_uses_redis_when_available(
+        self,
+        manager: FileLockManager,
+        dummy_file: str,
+        fake_redis: FakeRedisClient,
+        no_filelock: None,
+    ) -> None:
+        assert _redis_lock_enabled()
+        lock_id = await manager.acquire_write_lock(dummy_file, "agent-a", timeout=1.0)
+        assert lock_id
+        # The Redis key should be present in the fake store.
+        rkey = _redis_lock_key(dummy_file)
+        assert await fake_redis.get(rkey) is not None
+        manager.release_lock(dummy_file, "agent-a")
+        # Allow the scheduled background release task to run.
+        await asyncio.sleep(0.1)
+        assert await fake_redis.get(rkey) is None
+        assert not manager.is_locked(dummy_file)
+
+    async def test_redis_write_lock_blocks_second_holder(
+        self,
+        manager: FileLockManager,
+        dummy_file: str,
+        fake_redis: FakeRedisClient,
+        no_filelock: None,
+    ) -> None:
+        # First acquisition takes the Redis lock.
+        await manager.acquire_write_lock(dummy_file, "agent-a", timeout=1.0)
+        rkey = _redis_lock_key(dummy_file)
+        token_a = await fake_redis.get(rkey)
+        assert token_a is not None
+        # Simulate a second *process* by directly contending on the same Redis
+        # key via a fresh RedisDistributedLock instance (bypassing the in-memory
+        # singleton, which would block the second acquire in-process anyway).
+        other = RedisDistributedLock(ttl_ms=10000, retry_interval=0.05)
+        with pytest.raises(LockError):
+            await other.acquire(rkey, timeout=0.2)
+        # The first holder's token is untouched.
+        assert await fake_redis.get(rkey) == token_a
+        manager.release_lock(dummy_file, "agent-a")
+        await asyncio.sleep(0.1)
+        assert await fake_redis.get(rkey) is None
+
+    async def test_read_lock_still_works_with_redis_offline(
+        self,
+        manager: FileLockManager,
+        dummy_file: str,
+        redis_offline: None,
+        no_filelock: None,
+    ) -> None:
+        id1 = await manager.acquire_read_lock(dummy_file, "r1", timeout=1.0)
+        id2 = await manager.acquire_read_lock(dummy_file, "r2", timeout=1.0)
+        assert id1 and id2
+        assert len(manager.get_lock_status(dummy_file)["holders"]) == 2
+        manager.release_lock(dummy_file, "r1")
+        manager.release_lock(dummy_file, "r2")
+        assert not manager.is_locked(dummy_file)
+

@@ -5,17 +5,26 @@
 models:
   # MICRO — perguntas triviais (1+1, classificação rápida)
   micro:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "openrouter/auto"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.7
     use_cases: [simple_qa, formatting, summarization]
 
+  # FAST — quick responses with good quality
+  fast:
+    id: "openrouter/free"
+    fallback_id: "openai/gpt-oss-120b:free"
+    thinking_mode: false
+    max_tokens: 4096
+    temperature: 0.7
+    use_cases: [simple_qa, formatting, summarization]
+
   # CODER — geração e análise de código
   coder:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "google/gemini-2.0-flash-exp:free"
+    id: "qwen/qwen3-coder:free"
+    fallback_id: "openai/gpt-oss-120b:free"
     thinking_mode: false
     max_tokens: 8192
     temperature: 0.2
@@ -23,35 +32,35 @@ models:
 
   # REASONING — raciocínio multi-step com thinking
   reasoning:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "google/gemini-2.0-flash-exp:free"
+    id: "nousresearch/hermes-3-llama-3.1-405b:free"
+    fallback_id: "nvidia/nemotron-3-ultra-550b-a55b:free"
     thinking_mode: true
     max_tokens: 8192
     temperature: 0.5
     use_cases: [planning, multi_step_reasoning, problem_solving]
 
-  # DEEP — análises complexas, arquitetura (uses 1.5B on CPU; promote to 7B on GPU)
+  # DEEP — análises complexas, arquitetura
   deep:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "google/gemini-2.0-flash-exp:free"
+    id: "nvidia/nemotron-3-ultra-550b-a55b:free"
+    fallback_id: "deepseek/deepseek-v4-flash"
     thinking_mode: true
     max_tokens: 16384
     temperature: 0.4
     use_cases: [architecture, complex_analysis, large_codebases]
 
-  # Q3B-4BIT — alias legado mantido por compatibilidade; no Ollama usa 3B padrão
+  # Q3B-4BIT — alias legado mantido por compatibilidade
   q3b-4bit:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "google/gemini-2.0-flash-exp:free"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.5
     use_cases: [general_tasks, fast_inference, gpu_quantized]
 
-  # CODER3B-4BIT — alias legado mantido por compatibilidade; no Ollama usa 3B padrão
+  # CODER3B-4BIT — alias legado mantido por compatibilidade
   coder3b-4bit:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "google/gemini-2.0-flash-exp:free"
+    id: "qwen/qwen3-coder:free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.2
@@ -59,36 +68,36 @@ models:
 
   # Aliases retro-compatibilidade (legacy registry)
   nano:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "google/gemini-2.0-flash-exp:free"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.1
     use_cases: [routing]
   small:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "google/gemini-2.0-flash-exp:free"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.7
     use_cases: [general_tasks]
   medium:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "google/gemini-2.0-flash-exp:free"
+    id: "openai/gpt-oss-120b:free"
+    fallback_id: "nousresearch/hermes-3-llama-3.1-405b:free"
     thinking_mode: false
     max_tokens: 8192
     temperature: 0.3
     use_cases: [code_generation]
   large:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "google/gemini-2.0-flash-exp:free"
+    id: "nousresearch/hermes-3-llama-3.1-405b:free"
+    fallback_id: "nvidia/nemotron-3-ultra-550b-a55b:free"
     thinking_mode: true
     max_tokens: 8192
     temperature: 0.7
     use_cases: [reasoning]
   expert:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "google/gemini-2.0-flash-exp:free"
+    id: "nvidia/nemotron-3-ultra-550b-a55b:free"
+    fallback_id: "deepseek/deepseek-v4-flash"
     thinking_mode: true
     max_tokens: 16384
     temperature: 0.3
@@ -108,8 +117,8 @@ models:
     temperature: 0.0
     use_cases: [retrieval]
   dashboard:
-    id: "google/gemini-2.0-flash-exp:free"
-    fallback_id: "google/gemini-2.0-flash-exp:free"
+    id: "openrouter/free"
+    fallback_id: "openai/gpt-oss-120b:free"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.5
@@ -225,11 +234,14 @@ providers:
     base_url: "https://openrouter.ai/api/v1"
     requires_api_key: true
     default_models:
-      - "openai/gpt-4o"
-      - "anthropic/claude-3.5-sonnet"
-      - "google/gemini-2.0-flash"
-      - "deepseek/deepseek-chat"
-      - "meta-llama/llama-4-maverick"
+      - "openrouter/free"
+      - "qwen/qwen3-coder:free"
+      - "deepseek/deepseek-v4-flash"
+      - "openai/gpt-oss-120b:free"
+      - "nvidia/nemotron-3-ultra-550b-a55b:free"
+      - "nousresearch/hermes-3-llama-3.1-405b:free"
+      - "meta-llama/llama-3.3-70b-instruct:free"
+      - "openai/gpt-5.4-mini"
   gemini:
     name: "Google Gemini"
     base_url: "https://generativelanguage.googleapis.com/v1beta"

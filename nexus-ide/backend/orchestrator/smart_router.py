@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from backend.config.settings import get_model_config, load_models_config
 from backend.models.api import RoutingDecision
 from backend.orchestrator.router import fast_route, route_with_model
+from backend.orchestrator.routing_config import MODEL_TIER_TO_AGENT as _MODEL_TIER_TO_AGENT
 from backend.tools.ollama_client import ChatMessage
 from typing import Any
 
@@ -318,21 +319,6 @@ class SmartRouter:
     free functions remain untouched.
     """
 
-    _MODEL_TIER_TO_AGENT: dict[str, str] = {
-        "micro": "MICRO",
-        "fast": "DOCUMENTER",
-        "coder": "CODER",
-        "reasoning": "ARCHITECT",
-        "deep": "ARCHITECT",
-        # Legacy aliases
-        "small": "DOCUMENTER",
-        "medium": "CODER",
-        "large": "ANALYZER",
-        "expert": "ARCHITECT",
-        "nano": "MICRO",
-        "dashboard": "MICRO",
-    }
-
     def __init__(self, llm_client: Any = None) -> None:
         self.llm_client = llm_client
         self._decision_cache: OrderedDict[str, RoutingDecision] = OrderedDict()
@@ -404,7 +390,7 @@ class SmartRouter:
         decision: RoutingDecision | None = None
         try:
             tier = await smart_route_tier(query, self.llm_client)
-            agent_name = self._MODEL_TIER_TO_AGENT.get(tier, "CODER")
+            agent_name = _MODEL_TIER_TO_AGENT.get(tier, "CODER")
             decision = RoutingDecision(
                 primary_agent=agent_name,  # type: ignore[arg-type]
                 routing_confidence=0.8,

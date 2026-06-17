@@ -43,7 +43,4 @@ class ResearcherWebAgent(AgentBase):
         AgentAction.DEEP_RESEARCH,
     }
 
-    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
-        """Run with ReAct loop so tools are always available."""
-        async for token in self._run_react_loop(request):
-            yield token
+

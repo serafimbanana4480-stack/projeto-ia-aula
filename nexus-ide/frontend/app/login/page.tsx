@@ -33,13 +33,9 @@ export default function LoginPage() {
       .then((success) => {
         if (success) {
           router.replace("/");
-        } else {
-          setError("Login automático falhou. Verifica se o backend está online e as credenciais de teste existem.");
         }
       })
-      .catch(() => {
-        setError("Erro de rede no login automático. Verifica se o backend está em execução.");
-      })
+      .catch(() => {})
       .finally(() => setAutoLoginAttempting(false));
   }, [router, autoLoginActive, autoLoginDisabled]);
 

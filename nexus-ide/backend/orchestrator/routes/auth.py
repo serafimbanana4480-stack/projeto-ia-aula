@@ -6,7 +6,7 @@ import logging
 from datetime import timedelta
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 
 from backend.config.settings import get_settings
 from backend.middleware.auth import create_access_token, require_auth
@@ -33,7 +33,7 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 @limiter.limit("5/minute")
 async def register(request: Request, user_data: UserRegister):
     """Register a new user.
-    
+
     Rate limited to 5 requests per minute to prevent abuse.
     """
     # Check if user already exists
@@ -43,11 +43,11 @@ async def register(request: Request, user_data: UserRegister):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User with this email already exists",
         )
-    
+
     # Hash password using bcrypt directly (avoids passlib/bcrypt version issues)
     password_bytes = user_data.password.encode("utf-8")
     password_hash = bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8")
-    
+
     # Create user
     user = create_user(
         username=user_data.email.split("@")[0],
@@ -55,7 +55,7 @@ async def register(request: Request, user_data: UserRegister):
         password_hash=password_hash,
         full_name=user_data.full_name,
     )
-    
+
     # Create access token
     settings = get_settings()
     access_token_expires = timedelta(minutes=settings.jwt_expiration_minutes)
@@ -63,9 +63,9 @@ async def register(request: Request, user_data: UserRegister):
         data={"sub": user["id"], "email": user["email"]},
         expires_delta=access_token_expires,
     )
-    
+
     logger.info(f"New user registered: {user_data.email}")
-    
+
     return TokenResponse(
         access_token=access_token,
         user=UserResponse(**user),
@@ -76,7 +76,7 @@ async def register(request: Request, user_data: UserRegister):
 @limiter.limit("5/minute")
 async def login(request: Request, user_data: UserLogin):
     """Login with email and password.
-    
+
     Rate limited to 10 requests per minute to prevent brute force attacks.
     """
     # Get user with password hash
@@ -87,7 +87,7 @@ async def login(request: Request, user_data: UserLogin):
             detail="Invalid email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # Verify password using bcrypt directly
     password_bytes = user_data.password.encode("utf-8")
     hash_bytes = user["password_hash"].encode("utf-8")
@@ -97,14 +97,14 @@ async def login(request: Request, user_data: UserLogin):
             detail="Invalid email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # Check if user is active
     if not user.get("is_active", 1):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is disabled",
         )
-    
+
     # Create access token
     settings = get_settings()
     access_token_expires = timedelta(minutes=settings.jwt_expiration_minutes)
@@ -112,13 +112,13 @@ async def login(request: Request, user_data: UserLogin):
         data={"sub": user["id"], "email": user["email"]},
         expires_delta=access_token_expires,
     )
-    
+
     logger.info(f"User logged in: {user_data.email}")
-    
+
     # Remove password hash before returning
     user_dict = dict(user)
     user_dict.pop("password_hash", None)
-    
+
     return TokenResponse(
         access_token=access_token,
         user=UserResponse(**user_dict),
@@ -128,25 +128,25 @@ async def login(request: Request, user_data: UserLogin):
 @router.get("/me", response_model=UserResponse)
 async def get_current_user(current_user: dict = Depends(require_auth)):
     """Get the current authenticated user profile.
-    
+
     Requires valid JWT token.
     """
     user_id = current_user["user_id"]
     user = get_user_by_email(current_user["email"])
-    
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    
+
     return UserResponse(**user)
 
 
 @router.post("/logout")
 async def logout(current_user: dict = Depends(require_auth)):
     """Logout the current user.
-    
+
     Since we use stateless JWT tokens, the actual logout is handled
     on the client side by discarding the token. This endpoint
     primarily serves as a formal logout point and can be extended

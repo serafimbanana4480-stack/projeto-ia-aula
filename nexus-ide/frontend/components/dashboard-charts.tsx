@@ -31,6 +31,8 @@ export interface ChartSeries {
   name: string;
   color?: string;
   type?: "monotone" | "linear" | "step";
+  /** Per-data-point colors (e.g. one color per bar). Optional, keeps API stable. */
+  cells?: string[];
 }
 
 export interface DashboardChartsProps {
@@ -49,16 +51,33 @@ export interface DashboardChartsProps {
   pieOuterRadius?: number;
 }
 
-const DEFAULT_COLORS = [
-  "#38bdf8", // sky-400
-  "#34d399", // emerald-400
-  "#fbbf24", // amber-400
-  "#f87171", // red-400
-  "#a78bfa", // violet-400
-  "#fb923c", // orange-400
-  "#2dd4bf", // teal-400
-  "#f472b6", // pink-400
-];
+// Nexus design system — color tokens aligned with tailwind.config.ts (nexus.*)
+const NEXUS = {
+  accent: "#7c6afb",
+  accent2: "#5eead4",
+  accent3: "#fbbf24",
+  accent4: "#f87171",
+  bg: "#0b0b14",
+  panel: "#13131f",
+  border: "#1e1e2d",
+  muted: "#8a8a9a",
+  text: "#e8e8ed",
+} as const;
+
+// Chart palette anchored on the nexus accent ramp so every chart stays on-theme.
+export const CHART_COLORS = [
+  NEXUS.accent, // nexus.accent  #7c6afb
+  NEXUS.accent2, // nexus.accent2 #5eead4
+  NEXUS.accent3, // nexus.accent3 #fbbf24
+  NEXUS.accent4, // nexus.accent4 #f87171
+  "#a78bfa", // nexus gradient end
+  "#2dd4bf", // teal (complements accent2)
+  "#f472b6", // pink
+  "#fb923c", // orange
+] as const;
+
+// Kept for backward-compat with any external callers importing the old name.
+const DEFAULT_COLORS = CHART_COLORS;
 
 function CustomTooltip({
   active,
@@ -71,16 +90,28 @@ function CustomTooltip({
 }) {
   if (!active || !payload?.length) return null;
   return (
-    <div className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 shadow-lg">
-      <p className="text-slate-200 text-xs font-semibold mb-1">{label}</p>
+    <div
+      className="rounded-lg border px-3 py-2 shadow-lg"
+      style={{
+        background: NEXUS.panel,
+        borderColor: NEXUS.border,
+        color: NEXUS.text,
+      }}
+      role="status"
+    >
+      <p className="mb-1 text-xs font-semibold" style={{ color: NEXUS.text }}>
+        {label}
+      </p>
       {payload.map((entry, idx) => (
         <div key={idx} className="flex items-center gap-2 text-xs">
           <span
-            className="inline-block w-2 h-2 rounded-full"
+            className="inline-block h-2 w-2 rounded-full"
             style={{ background: entry.color }}
           />
-          <span className="text-slate-300">{entry.name}:</span>
-          <span className="text-white font-mono">{entry.value}</span>
+          <span style={{ color: NEXUS.muted }}>{entry.name}:</span>
+          <span className="font-mono" style={{ color: NEXUS.text }}>
+            {entry.value}
+          </span>
         </div>
       ))}
     </div>
@@ -113,14 +144,14 @@ export default function DashboardCharts({
         return (
           <LineChart {...commonProps}>
             {showGrid && (
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+              <CartesianGrid strokeDasharray="3 3" stroke={NEXUS.border} />
             )}
-            <XAxis dataKey={xKey} tick={{ fill: "#94a3b8", fontSize: 12 }} />
-            <YAxis tick={{ fill: "#94a3b8", fontSize: 12 }} />
+            <XAxis dataKey={xKey} tick={{ fill: NEXUS.muted, fontSize: 12 }} />
+            <YAxis tick={{ fill: NEXUS.muted, fontSize: 12 }} />
             {showTooltip && <Tooltip content={<CustomTooltip />} />}
             {showLegend && (
               <Legend
-                wrapperStyle={{ color: "#94a3b8", fontSize: 12 }}
+                wrapperStyle={{ color: NEXUS.muted, fontSize: 12 }}
               />
             )}
             {series.map((s, i) => (
@@ -142,13 +173,13 @@ export default function DashboardCharts({
         return (
           <AreaChart {...commonProps}>
             {showGrid && (
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+              <CartesianGrid strokeDasharray="3 3" stroke={NEXUS.border} />
             )}
-            <XAxis dataKey={xKey} tick={{ fill: "#94a3b8", fontSize: 12 }} />
-            <YAxis tick={{ fill: "#94a3b8", fontSize: 12 }} />
+            <XAxis dataKey={xKey} tick={{ fill: NEXUS.muted, fontSize: 12 }} />
+            <YAxis tick={{ fill: NEXUS.muted, fontSize: 12 }} />
             {showTooltip && <Tooltip content={<CustomTooltip />} />}
             {showLegend && (
-              <Legend wrapperStyle={{ color: "#94a3b8", fontSize: 12 }} />
+              <Legend wrapperStyle={{ color: NEXUS.muted, fontSize: 12 }} />
             )}
             {series.map((s, i) => {
               const color = s.color ?? DEFAULT_COLORS[i % DEFAULT_COLORS.length];
@@ -172,23 +203,31 @@ export default function DashboardCharts({
         return (
           <BarChart {...commonProps}>
             {showGrid && (
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+              <CartesianGrid strokeDasharray="3 3" stroke={NEXUS.border} />
             )}
-            <XAxis dataKey={xKey} tick={{ fill: "#94a3b8", fontSize: 12 }} />
-            <YAxis tick={{ fill: "#94a3b8", fontSize: 12 }} />
+            <XAxis dataKey={xKey} tick={{ fill: NEXUS.muted, fontSize: 12 }} />
+            <YAxis tick={{ fill: NEXUS.muted, fontSize: 12 }} />
             {showTooltip && <Tooltip content={<CustomTooltip />} />}
             {showLegend && (
-              <Legend wrapperStyle={{ color: "#94a3b8", fontSize: 12 }} />
+              <Legend wrapperStyle={{ color: NEXUS.muted, fontSize: 12 }} />
             )}
-            {series.map((s, i) => (
-              <Bar
-                key={s.key}
-                dataKey={s.key}
-                name={s.name}
-                fill={s.color ?? DEFAULT_COLORS[i % DEFAULT_COLORS.length]}
-                radius={[4, 4, 0, 0]}
-              />
-            ))}
+            {series.map((s, i) => {
+              const baseColor =
+                s.color ?? CHART_COLORS[i % CHART_COLORS.length];
+              return (
+                <Bar
+                  key={s.key}
+                  dataKey={s.key}
+                  name={s.name}
+                  fill={baseColor}
+                  radius={[4, 4, 0, 0]}
+                >
+                  {s.cells?.map((c, ci) => (
+                    <Cell key={ci} fill={c} />
+                  ))}
+                </Bar>
+              );
+            })}
           </BarChart>
         );
 
@@ -201,7 +240,7 @@ export default function DashboardCharts({
           <PieChart>
             {showTooltip && <Tooltip content={<CustomTooltip />} />}
             {showLegend && (
-              <Legend wrapperStyle={{ color: "#94a3b8", fontSize: 12 }} />
+              <Legend wrapperStyle={{ color: NEXUS.muted, fontSize: 12 }} />
             )}
             <Pie
               data={pieData}
@@ -231,18 +270,18 @@ export default function DashboardCharts({
       case "radar":
         return (
           <RadarChart data={data} cx="50%" cy="50%" outerRadius="70%">
-            <PolarGrid stroke="#334155" />
+            <PolarGrid stroke={NEXUS.border} />
             <PolarAngleAxis
               dataKey={xKey}
-              tick={{ fill: "#94a3b8", fontSize: 11 }}
+              tick={{ fill: NEXUS.muted, fontSize: 11 }}
             />
             <PolarRadiusAxis
-              tick={{ fill: "#94a3b8", fontSize: 10 }}
-              stroke="#334155"
+              tick={{ fill: NEXUS.muted, fontSize: 10 }}
+              stroke={NEXUS.border}
             />
             {showTooltip && <Tooltip content={<CustomTooltip />} />}
             {showLegend && (
-              <Legend wrapperStyle={{ color: "#94a3b8", fontSize: 12 }} />
+              <Legend wrapperStyle={{ color: NEXUS.muted, fontSize: 12 }} />
             )}
             {series.map((s, i) => (
               <Radar
@@ -259,18 +298,25 @@ export default function DashboardCharts({
     }
   };
 
+  const ariaLabel =
+    title ?? subtitle ?? `Gráfico nexus (${kind})`;
+
   return (
     <div
-      className={`rounded-xl border border-slate-700 bg-slate-900 p-4 ${className}`}
+      className={`min-w-0 rounded-xl border border-nexus-border bg-nexus-panel p-4 ${className}`}
       data-testid="dashboard-charts"
+      role="figure"
+      aria-label={ariaLabel}
     >
       {(title || subtitle) && (
         <div className="mb-4">
           {title && (
-            <h3 className="text-base font-semibold text-white">{title}</h3>
+            <h3 className="text-base font-semibold text-nexus-text">
+              {title}
+            </h3>
           )}
           {subtitle && (
-            <p className="text-sm text-slate-400 mt-0.5">{subtitle}</p>
+            <p className="mt-0.5 text-sm text-nexus-muted">{subtitle}</p>
           )}
         </div>
       )}

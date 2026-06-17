@@ -11,8 +11,8 @@ import {
   Save,
   TerminalSquare,
 } from "lucide-react";
+import dynamic from "next/dynamic";
 import FileExplorer from "./FileExplorer";
-import MonacoEditor from "./MonacoEditor";
 import Terminal from "./Terminal";
 import {
   executeTerminalCommand,
@@ -28,6 +28,15 @@ import {
   selectDesktopDirectory,
 } from "../../lib/desktop";
 import type { FileTreeEntry, TerminalExecutionResult } from "../../lib/types";
+
+const MonacoEditor = dynamic(() => import("./MonacoEditor"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-full items-center justify-center text-sm text-nexus-muted">
+      A carregar editor…
+    </div>
+  ),
+});
 
 function findFirstFile(nodes: FileTreeEntry[]): FileTreeEntry | null {
   for (const node of nodes) {

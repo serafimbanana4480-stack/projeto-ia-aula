@@ -98,6 +98,7 @@ class BackgroundWorker(ABC):
         self._heartbeat_count = 0
         self._error_count = 0
         self._lock = asyncio.Lock()
+        self._subscription = None
 
     # -- public lifecycle ---------------------------------------------------
 
@@ -879,9 +880,24 @@ class EscalationWatcher(BackgroundWorker):
         await super().start()
         if not self._subscribed:
             bus = get_agent_bus()
-            bus.subscribe("human_in_the_loop.pending", self._on_pending)
+            try:
+                sub = await bus.subscribe("human_in_the_loop.pending", self._on_pending)
+            except Exception as exc:
+                logger.error("ESCALATION_WATCHER failed to subscribe to human_in_the_loop.pending: %s", exc)
+                self._error_count += 1
+                return
+            self._subscription = sub
             self._subscribed = True
             logger.info("ESCALATION_WATCHER subscribed to human_in_the_loop.pending")
+
+    async def stop(self) -> None:
+        await super().stop()
+        if self._subscription is not None:
+            try:
+                bus = get_agent_bus()
+                await bus.unsubscribe(self._subscription.subscription_id)
+            except Exception as exc:
+                logger.debug("ESCALATION_WATCHER unsubscribe failed: %s", exc)
 
     async def _on_pending(self, message: BusMessage) -> None:
         payload = message.payload or {}

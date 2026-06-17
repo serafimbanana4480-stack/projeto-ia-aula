@@ -13,6 +13,16 @@ interface MetricCell {
   critical?: boolean;
 }
 
+const TREND_ARROW: Record<"up" | "down" | "neutral", string> = {
+  up: "↑",
+  down: "↓",
+  neutral: "→",
+};
+
+function trendLabel(trend: MetricCell["trend"]): string {
+  return TREND_ARROW[trend ?? "neutral"];
+}
+
 export default function MetricsGrid() {
   const metrics = useMetricsStore((s) => s.metrics);
   const history = useMetricsStore((s) => s.history);
@@ -25,7 +35,7 @@ export default function MetricsGrid() {
     if (!metrics) return {} as Record<string, string>;
     return {
       tokens_per_second: metrics.tokens_per_second.toFixed(1),
-      active_model: metrics.active_model || "none",
+      active_model: metrics.active_model || "nenhum",
       active_sessions: metrics.active_sessions.toLocaleString(),
       queue_depth: metrics.queue_depth.toString(),
       ram_used: `${(metrics.ram_used_bytes / 1e9).toFixed(2)} GB`,
@@ -66,7 +76,7 @@ export default function MetricsGrid() {
       const diff = current - base;
       const percent = base !== 0 ? ((diff / base) * 100).toFixed(1) : "0.0";
       const sign = diff >= 0 ? "+" : "";
-      return `${sign}${percent}% vs baseline`;
+      return `${sign}${percent}% vs base`;
     },
     [metrics, baseline]
   );
@@ -82,7 +92,7 @@ export default function MetricsGrid() {
         sparkline: getSparkline("tokens_per_second"),
         color: "text-nexus-accent",
       },
-      { key: "active_model", label: "Modelo Ativo", value: displayValues.active_model || "—" },
+      { key: "active_model", label: "Modelo ativo", value: displayValues.active_model || "—" },
       {
         key: "active_sessions",
         label: "Sessões",
@@ -115,7 +125,7 @@ export default function MetricsGrid() {
       },
       {
         key: "queue_depth",
-        label: "Queue",
+        label: "Fila",
         value: displayValues.queue_depth || "—",
         trend: getTrend("queue_depth"),
         warning: metrics.queue_depth > 5,
@@ -123,7 +133,7 @@ export default function MetricsGrid() {
       },
       {
         key: "requests_total",
-        label: "Requests",
+        label: "Pedidos",
         value: displayValues.requests_total || "—",
         trend: getTrend("requests_total"),
       },
@@ -135,11 +145,11 @@ export default function MetricsGrid() {
         warning: metrics.avg_latency_ms > 500,
         critical: metrics.avg_latency_ms > 1000,
       },
-      { key: "uptime_seconds", label: "Uptime", value: displayValues.uptime || "—" },
+      { key: "uptime_seconds", label: "Tempo de atividade", value: displayValues.uptime || "—" },
     ];
   }, [metrics, displayValues, getTrend, getSparkline]);
 
-  const renderSparkline = (data: number[]) => {
+  const renderSparkline = (data: number[], ariaLabel: string) => {
     if (!data || data.length < 2) return null;
     const min = Math.min(...data);
     const max = Math.max(...data);
@@ -152,7 +162,14 @@ export default function MetricsGrid() {
       })
       .join(" ");
     return (
-      <svg className="h-6 w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+      <svg
+        className="h-6 w-full"
+        viewBox="0 0 100 100"
+        preserveAspectRatio="none"
+        role="img"
+        aria-label={ariaLabel}
+      >
+        <title>{ariaLabel}</title>
         <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2" className="opacity-70" />
       </svg>
     );
@@ -186,46 +203,98 @@ export default function MetricsGrid() {
     return "text-gray-500";
   };
 
+  const handleCellKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>, key: string) => {
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        setSelectedMetric(key);
+      }
+    },
+    []
+  );
+
   if (!backendOnline && !metrics) {
     return (
-      <div className="rounded border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-400">
-        Backend offline — aguardando conexão...
+      <div
+        role="status"
+        aria-live="polite"
+        className="rounded border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-400"
+      >
+        Backend offline — a aguardar ligação…
       </div>
     );
   }
 
+  const selectedCell = cells.find((c) => c.key === selectedMetric);
+
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-10">
-        {cells.map((cell) => (
-          <div
-            key={cell.key}
-            onClick={() => setSelectedMetric(cell.key)}
-            className={`cursor-pointer rounded border p-2.5 transition-all duration-200 ${getCellBorderColor(cell)}`}
-          >
-            <div className="mb-1 flex items-center justify-between">
-              <span className="text-[10px] uppercase tracking-wider text-gray-500">{cell.label}</span>
-              {cell.trend && (
-                <span className={`text-[10px] ${getTrendColor(cell.trend, cell.key)}`}>
-                  {getTrendIcon(cell.trend)}
+    <div className="space-y-3" aria-label="Grelha de Métricas" role="group">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+        {cells.map((cell) => {
+          const sparklineAria = `${cell.label}: ${cell.value}, tendência ${trendLabel(cell.trend)}`;
+          const cellAria = `${cell.label}: ${cell.value}${
+            cell.critical ? ", Crítico" : cell.warning ? ", Aviso" : ""
+          }${cell.trend ? `, tendência ${trendLabel(cell.trend)}` : ""}`;
+          return (
+            <div
+              key={cell.key}
+              role="button"
+              tabIndex={0}
+              aria-pressed={selectedMetric === cell.key}
+              aria-label={cellAria}
+              onClick={() => setSelectedMetric(cell.key)}
+              onKeyDown={(e) => handleCellKeyDown(e, cell.key)}
+              className={`min-w-0 cursor-pointer rounded border p-2.5 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent ${getCellBorderColor(cell)}`}
+            >
+              <div className="mb-1 flex items-center justify-between gap-1">
+                <span className="truncate text-[10px] uppercase tracking-wider text-gray-500 sm:text-xs">
+                  {cell.label}
                 </span>
+                <span className="flex shrink-0 items-center gap-1">
+                  {(cell.critical || cell.warning) && (
+                    <span className="text-[10px] font-semibold sm:text-xs">
+                      {cell.critical ? (
+                        <span className="text-red-400" aria-label="Crítico">Crítico</span>
+                      ) : (
+                        <span className="text-yellow-400" aria-label="Aviso">Aviso</span>
+                      )}
+                    </span>
+                  )}
+                  {cell.trend && (
+                    <span className={`text-[10px] sm:text-xs ${getTrendColor(cell.trend, cell.key)}`} aria-hidden="true">
+                      {getTrendIcon(cell.trend)}
+                    </span>
+                  )}
+                </span>
+              </div>
+              <div className={`truncate text-sm font-bold sm:text-base ${getCellTextColor(cell)}`}>
+                {cell.value}
+              </div>
+              {cell.sparkline && (
+                <div className="mt-1 text-nexus-accent">{renderSparkline(cell.sparkline, sparklineAria)}</div>
               )}
             </div>
-            <div className={`text-base font-bold ${getCellTextColor(cell)}`}>{cell.value}</div>
-            {cell.sparkline && <div className="mt-1 text-nexus-accent">{renderSparkline(cell.sparkline)}</div>}
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      {metrics && (
-        <div className="rounded border border-nexus-border bg-nexus-panel p-3">
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-gray-400">
-              {cells.find((c) => c.key === selectedMetric)?.label} — {getBaselineComparison(selectedMetric)}
+      {metrics && selectedCell && (
+        <div
+          className="rounded border border-nexus-border bg-nexus-panel p-3"
+          aria-label="Detalhe da métrica selecionada"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs sm:text-sm">
+            <span className="min-w-0 truncate text-gray-400">
+              {selectedCell.label} — {getBaselineComparison(selectedMetric)}
             </span>
-            <span className="text-gray-500">{history.length} samples</span>
+            <span className="text-gray-500">{history.length} amostras</span>
           </div>
-          <div className="mt-2 h-16 text-nexus-accent">{renderSparkline(getSparkline(selectedMetric as keyof typeof metrics))}</div>
+          <div className="mt-2 h-16 text-nexus-accent">
+            {renderSparkline(
+              getSparkline(selectedMetric as keyof typeof metrics),
+              `${selectedCell.label}: ${selectedCell.value}, tendência ${trendLabel(selectedCell.trend)}`
+            )}
+          </div>
         </div>
       )}
     </div>

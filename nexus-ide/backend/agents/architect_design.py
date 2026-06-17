@@ -29,7 +29,4 @@ class ArchitectDesignAgent(AgentBase):
         AgentAction.WRITE_FILE,
     }
 
-    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
-        """Run with ReAct loop so tools are always available."""
-        async for token in self._run_react_loop(request):
-            yield token
+

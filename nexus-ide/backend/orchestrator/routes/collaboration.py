@@ -15,7 +15,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.core.auto_correction import get_auto_correction_loop
@@ -25,6 +25,7 @@ from backend.core.peer_review import (
     get_peer_review_system,
 )
 from backend.core.shared_memory import get_shared_memory
+from backend.middleware.auth import require_auth
 from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,7 @@ class DebateCreateRequest(BaseModel):
 @limiter.limit("120/minute")
 async def list_whiteboard(
     request: Request,
+    _auth: None = Depends(require_auth),
     topic: str | None = Query(None),
     agent: str | None = Query(None),
     tags: list[str] | None = Query(None),
@@ -127,7 +129,9 @@ async def list_whiteboard(
 @router.post("/whiteboard")
 @limiter.limit("120/minute")
 async def write_whiteboard(
-    req: WhiteboardWriteRequest, request: Request
+    req: WhiteboardWriteRequest,
+    request: Request,
+    _auth: None = Depends(require_auth),
 ) -> WhiteboardWriteResponse:
     """Write a new entry to the shared whiteboard."""
     shm = get_shared_memory()
@@ -151,6 +155,7 @@ async def write_whiteboard(
 @limiter.limit("120/minute")
 async def search_whiteboard(
     request: Request,
+    _auth: None = Depends(require_auth),
     q: str = Query(..., min_length=1, max_length=500),
     limit: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
@@ -167,7 +172,9 @@ async def search_whiteboard(
 @router.get("/whiteboard/thread/{entry_id}")
 @limiter.limit("120/minute")
 async def get_whiteboard_thread(
-    request: Request, entry_id: str
+    request: Request,
+    _auth: None = Depends(require_auth),
+    entry_id: str,
 ) -> dict[str, Any]:
     """Return an entry and all related entries recursively."""
     shm = get_shared_memory()
@@ -187,7 +194,9 @@ async def get_whiteboard_thread(
 @router.get("/reviews/{artifact_id}")
 @limiter.limit("120/minute")
 async def get_reviews(
-    request: Request, artifact_id: str
+    request: Request,
+    _auth: None = Depends(require_auth),
+    artifact_id: str,
 ) -> dict[str, Any]:
     """Return all reviews and their results for an artifact."""
     prs = get_peer_review_system()
@@ -198,7 +207,9 @@ async def get_reviews(
 @router.post("/reviews/submit")
 @limiter.limit("60/minute")
 async def submit_review(
-    req: ReviewSubmitRequest, request: Request
+    req: ReviewSubmitRequest,
+    request: Request,
+    _auth: None = Depends(require_auth),
 ) -> ReviewSubmitResponse:
     """Submit an artifact for peer review."""
     prs = get_peer_review_system()
@@ -218,7 +229,9 @@ async def submit_review(
 @router.post("/reviews/conduct")
 @limiter.limit("60/minute")
 async def conduct_review(
-    req: ReviewConductRequest, request: Request
+    req: ReviewConductRequest,
+    request: Request,
+    _auth: None = Depends(require_auth),
 ) -> dict[str, Any]:
     """Conduct a review and record the verdict."""
     prs = get_peer_review_system()
@@ -238,7 +251,9 @@ async def conduct_review(
 @router.post("/debates")
 @limiter.limit("30/minute")
 async def create_debate(
-    req: DebateCreateRequest, request: Request
+    req: DebateCreateRequest,
+    request: Request,
+    _auth: None = Depends(require_auth),
 ) -> dict[str, Any]:
     """Run a new debate session and return the result."""
     result = await run_debate(
@@ -252,7 +267,9 @@ async def create_debate(
 @router.get("/debates/{debate_id}")
 @limiter.limit("120/minute")
 async def get_debate(
-    request: Request, debate_id: str
+    request: Request,
+    _auth: None = Depends(require_auth),
+    debate_id: str,
 ) -> dict[str, Any]:
     """Retrieve the result of a previously run debate."""
     result = get_debate_result(debate_id)
@@ -266,7 +283,9 @@ async def get_debate(
 
 @router.get("/auto-correction/status")
 @limiter.limit("120/minute")
-async def auto_correction_status(request: Request) -> dict[str, Any]:
+async def auto_correction_status(
+    request: Request, _auth: None = Depends(require_auth)
+) -> dict[str, Any]:
     """Return the current auto-correction loop status."""
     loop = get_auto_correction_loop()
     return loop.get_status()

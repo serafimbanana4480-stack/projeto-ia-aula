@@ -66,7 +66,13 @@ def _path_for_security_check(path: str) -> str:
 
 
 def _verify_written(path: Path, expected_content: str) -> dict[str, Any]:
-    """Read-back verification: confirm the file content matches what was requested."""
+    """Read-back verification: confirm the file content matches what was requested.
+
+    Skips verification for files larger than 1 MB to avoid doubling I/O
+    on large writes — verification is most valuable for small config/code files.
+    """
+    if len(expected_content) > 1_048_576:  # 1 MB
+        return {"ok": True, "size": len(expected_content), "skipped": "file too large for verification"}
     try:
         actual = path.read_text(encoding="utf-8")
         if actual == expected_content:

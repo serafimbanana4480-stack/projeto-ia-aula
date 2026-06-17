@@ -28,6 +28,8 @@ beautifulsoup4==4.12.3
 
 # Embeddings / vector store
 chromadb==0.5.15
+faiss-cpu>=1.7.4
+numpy>=1.24
 
 # Observability
 prometheus-client==0.21.0

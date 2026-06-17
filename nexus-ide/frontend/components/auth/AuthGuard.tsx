@@ -6,8 +6,6 @@ import { isTokenValid, clearAuth } from "../../lib/auth";
 
 const PUBLIC_PATHS = ["/login"];
 
-// Longer timeout during dev to avoid "Authentication check timed out" while
-// Next.js is hot-reloading or the browser is under heavy load.
 const AUTH_TIMEOUT_MS =
   process.env.NODE_ENV === "development" ? 10000 : 5000;
 
@@ -16,20 +14,23 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [checked, setChecked] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const blockedLoginRedirectRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
 
     timeoutRef.current = setTimeout(() => {
       if (mounted && !checked) {
-        // If we hit the safety timeout, clear any stale token and force the
-        // user back to the login page instead of showing a dead-end error.
-        clearAuth();
-        if (!PUBLIC_PATHS.includes(pathname)) {
+        const isPublic = PUBLIC_PATHS.includes(pathname);
+        if (!isPublic) {
+          clearAuth();
           router.replace("/login?expired=1");
         }
-        setChecked(true);
+        if (mounted) {
+          setChecked(true);
+        }
       }
     }, AUTH_TIMEOUT_MS);
 
@@ -38,14 +39,17 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
       const valid = isTokenValid();
 
       if (!isPublic && !valid) {
-        // Clean expired/invalid token immediately to prevent repeated loops.
+        const alreadyBlocked = blockedLoginRedirectRef.current;
         clearAuth();
-        router.replace("/login?expired=1");
+        if (!alreadyBlocked) {
+          blockedLoginRedirectRef.current = true;
+          router.replace("/login?expired=1");
+        }
       }
     } catch (e) {
-      // On any unexpected error, clear auth and redirect rather than hanging.
       clearAuth();
-      if (!PUBLIC_PATHS.includes(pathname)) {
+      if (!PUBLIC_PATHS.includes(pathname) && !blockedLoginRedirectRef.current) {
+        blockedLoginRedirectRef.current = true;
         router.replace("/login?expired=1");
       }
       if (mounted) {
@@ -79,9 +83,7 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
   if (error) {
     return (
       <div className="flex h-screen w-screen flex-col items-center justify-center bg-[#0b0b14] text-white">
-        <h1 className="mb-2 text-xl font-semibold text-red-400">
-          Authentication Error
-        </h1>
+        <h1 className="mb-2 text-xl font-semibold text-red-400">Authentication Error</h1>
         <p className="mb-6 text-sm text-gray-400">{error}</p>
         <button
           onClick={() => window.location.reload()}

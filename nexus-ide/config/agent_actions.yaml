@@ -1,0 +1,72 @@
+# NEXUS IDE — Agent Action Registry
+# Maps each ReAct AgentAction enum to a tool name and an example arguments
+# template. Loaded by backend/agents/action_registry.py.
+# Edit this file to add/remove actions without touching agent code.
+
+actions:
+  READ_FILE:
+    tool: read_file
+    example_args: '{"path": "<file_path>"}'
+  WRITE_FILE:
+    tool: write_file
+    example_args: '{"path": "<file_path>", "content": "<file_content>"}'
+  WRITE_FILE_ABSOLUTE:
+    tool: write_file_absolute
+    example_args: '{"path": "<absolute_path>", "content": "<file_content>"}'
+  READ_FILE_ABSOLUTE:
+    tool: read_file_absolute
+    example_args: '{"path": "<absolute_path>"}'
+  LIST_DIR:
+    tool: list_dir
+    example_args: '{"path": "<directory_path>"}'
+  LIST_DIR_ABSOLUTE:
+    tool: list_dir_absolute
+    example_args: '{"path": "<absolute_directory_path>"}'
+  EXECUTE_CODE:
+    tool: execute_code
+    example_args: '{"code": "<code_string>", "language": "python"}'
+  SEARCH_CODEBASE:
+    tool: search_codebase
+    example_args: '{"query": "<search_query>", "project_path": "."}'
+  SEARCH_SYMBOLS:
+    tool: search_symbols
+    example_args: '{"query": "<symbol_name>", "kind": "function|class|variable"}'
+  INDEX_SYMBOLS:
+    tool: index_symbols
+    example_args: '{"project_path": ".", "force_reindex": false}'
+  SEARCH_WEB:
+    tool: web_search
+    example_args: '{"query": "<search_query>"}'
+  FETCH_URL:
+    tool: fetch_url
+    example_args: '{"url": "<target_url>"}'
+  CONSULT_AGENT:
+    tool: consult_agent
+    example_args: '{"agent": "<agent_name>", "question": "<question_to_ask>"}'
+  READ_DOCS:
+    tool: read_file
+    example_args: '{"path": "<doc_file>"}'
+  RECALL_CONTEXT:
+    tool: recall_context
+    example_args: '{"query": "<search_query>", "session_id": "<optional_session_id>"}'
+  STORE_MEMORY:
+    tool: store_memory
+    example_args: '{"content": "<important_fact>", "memory_type": "session|project|global", "tags": "tag1,tag2"}'
+  ANALYZE_DATA:
+    tool: data_analysis
+    example_args: '{"data_path": "<file>", "query": "<analysis_query>"}'
+  GENERATE_REPORT:
+    tool: report_generation
+    example_args: '{"title": "<title>", "sections": "<json_sections>"}'
+  SCAFFOLD_PROJECT:
+    tool: scaffold_project
+    example_args: '{"name": "<project_name>", "template": "python"}'
+  SEARCH_GITHUB:
+    tool: search_github
+    example_args: '{"query": "<query>", "language": "python", "stars_min": 100}'
+  SEARCH_DOCS:
+    tool: search_docs
+    example_args: '{"query": "<query>", "framework": "python"}'
+  DEEP_RESEARCH:
+    tool: deep_research
+    example_args: '{"query": "<research_query>", "max_results": 5}'

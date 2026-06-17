@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import math
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,16 @@ from backend.config.settings import get_settings
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
+
+# FAISS ANN index — optional; falls back to O(n) scan if unavailable
+try:
+    import faiss
+    import numpy as np
+    _HAVE_FAISS = True
+except ImportError:
+    _HAVE_FAISS = False
+    faiss = None
+    np = None
 
 # Preferred embedding models in order of preference
 _EMBED_MODELS = ["nomic-embed-text", "sentence-transformers/all-MiniLM-L6-v2"]
@@ -48,6 +59,11 @@ INDEX_META_PATH = DATA_DIR / "embeddings_index_meta.json"
 # In-memory vector store: {chunk_id: (embedding, CodeChunk)}
 _store: dict[str, tuple[list[float], "CodeChunk"]] = {}
 _store_lock: asyncio.Lock = asyncio.Lock()
+
+# FAISS index for fast ANN search (mirrors _store contents)
+_faiss_index: Any = None
+_faiss_dim: int = _EMBED_DIM
+_faiss_id_map: dict[int, str] = {}  # FAISS vector ID → chunk_id
 
 
 @dataclass
@@ -98,9 +114,24 @@ async def _get_available_model() -> str | None:
     return _EMBED_MODELS[0]
 
 
-async def _embed_batch_with_fallback(
-    texts: list[str], model: str
-) -> list[list[float] | None]:
+async def _call_embed(provider, texts: list[str], model: str) -> list[list[float] | None] | None:
+    """Call provider.embed(...) robustly.
+
+    Some provider implementations return a coroutine/awaitable instead of
+    the concrete list. Detect that case and await it once. Any failure
+    is surfaced as None so the caller can fall back cleanly.
+    """
+    try:
+        maybe_awaitable = provider.embed(texts, model=model)
+        if inspect.isawaitable(maybe_awaitable):
+            maybe_awaitable = await asyncio.ensure_future(maybe_awaitable)
+        return maybe_awaitable
+    except Exception as exc:
+        logger.warning("Embed provider call failed: %s", exc)
+        return None
+
+
+async def _embed_batch_with_fallback(texts: list[str], model: str) -> list[list[float] | None]:
     """Embed multiple texts with recursive fallback on failure.
 
     Args:
@@ -119,21 +150,24 @@ async def _embed_batch_with_fallback(
         from backend.llm.factory import create_llm_client
 
         provider = create_llm_client()
-        result = await provider.embed(texts, model=model)
-        # Guard against provider returning mismatched result lengths
-        if result and len(result) == len(texts):
-            return result
-        logger.warning(
-            "Embedding batch returned %d results for %d texts — falling back",
-            len(result) if result else 0,
-            len(texts),
-        )
-        raise RuntimeError("Embedding batch size mismatch")
+        result = await _call_embed(provider, texts, model)
+        if result is None:
+            raise RuntimeError("Embedding provider returned no result")
+        if not isinstance(result, list):
+            logger.warning("Embedding provider returned non-list result — falling back")
+            raise RuntimeError("Embedding provider returned non-list result")
+        if len(result) != len(texts):
+            logger.warning(
+                "Embedding batch returned %d results for %d texts — falling back",
+                len(result),
+                len(texts),
+            )
+            raise RuntimeError("Embedding batch size mismatch")
+        return result
     except Exception as exc:
         if len(texts) == 1:
             logger.warning("Embedding failed for single text: %s", exc)
             return [None]
-        # Split batch and retry halves in parallel
         mid = len(texts) // 2
         left_task = _embed_batch_with_fallback(texts[:mid], model)
         right_task = _embed_batch_with_fallback(texts[mid:], model)
@@ -208,7 +242,59 @@ def _detect_language(filepath: Path) -> str:
     return mapping.get(ext, "")
 
 
-def _chunk_by_lines(content: str, chunk_size: int = 100, overlap: int = 20) -> list[tuple[int, int, str]]:
+def _init_faiss_index(dim: int | None = None) -> None:
+    """Initialize or reset the FAISS index with the given dimension."""
+    global _faiss_index, _faiss_dim, _faiss_id_map
+    if not _HAVE_FAISS:
+        return
+    _faiss_dim = dim or _EMBED_DIM
+    _faiss_id_map = {}
+    quantizer = faiss.IndexFlatL2(_faiss_dim)
+    nlist = min(100, max(10, len(_store) // 10))
+    _faiss_index = faiss.IndexIVFFlat(quantizer, _faiss_dim, nlist)
+    if len(_store) >= nlist:
+        vectors = []
+        for emb, _ in _store.values():
+            if len(emb) == _faiss_dim:
+                vectors.append(emb)
+        if vectors:
+            _faiss_index.train(np.array(vectors, dtype=np.float32))
+
+
+def _rebuild_faiss_index() -> None:
+    """Rebuild the FAISS index from the current _store contents."""
+    global _faiss_index, _faiss_id_map
+    if not _HAVE_FAISS or not _store:
+        return
+
+    dims = {len(emb) for emb, _ in _store.values()}
+    if not dims:
+        return
+    dim = max(dims)
+    _init_faiss_index(dim)
+
+    if _faiss_index is None:
+        return
+
+    vectors = []
+    _faiss_id_map = {}
+    for idx, (chunk_id, (embedding, _)) in enumerate(_store.items()):
+        if len(embedding) == dim:
+            vectors.append(embedding)
+            _faiss_id_map[idx] = chunk_id
+
+    if not vectors:
+        return
+
+    vec_array = np.array(vectors, dtype=np.float32)
+    if not _faiss_index.is_trained and len(vectors) >= _faiss_index.nlist:
+        _faiss_index.train(vec_array)
+    _faiss_index.add(vec_array)
+
+
+def _chunk_by_lines(
+    content: str, chunk_size: int = 100, overlap: int = 20
+) -> list[tuple[int, int, str]]:
     """Split content into overlapping line-based chunks.
 
     Returns a list of (start_line, end_line, chunk_text).
@@ -238,10 +324,7 @@ def _chunk_python(content: str) -> list[tuple[int, int, str, str, str]]:
 
         tree = ast.parse(content)
     except SyntaxError:
-        return [
-            (start, end, text, "", "")
-            for start, end, text in _chunk_by_lines(content)
-        ]
+        return [(start, end, text, "", "") for start, end, text in _chunk_by_lines(content)]
 
     chunks: list[tuple[int, int, str, str, str]] = []
     lines = content.splitlines()
@@ -265,14 +348,9 @@ def _chunk_python(content: str) -> list[tuple[int, int, str, str, str]]:
             names = ", ".join(alias.name for alias in node.names)
             _extract(start, end, "import", f"{module}.{names}" if module else names)
 
-    # If no top-level symbols were found, fall back to line-based chunks
     if not chunks:
-        return [
-            (start, end, text, "", "")
-            for start, end, text in _chunk_by_lines(content)
-        ]
+        return [(start, end, text, "", "") for start, end, text in _chunk_by_lines(content)]
 
-    # Add an overview chunk if there are many symbols
     if len(chunks) > 1:
         overview = "\n".join(
             f"{symbol_type} {symbol_name}" if symbol_name else text.splitlines()[0]
@@ -287,8 +365,6 @@ def _chunk_file(content: str, language: str) -> list[tuple[int, int, str, str, s
     """Choose chunking strategy based on language."""
     if language == "python":
         return _chunk_python(content)
-    # For other languages, use line-based chunking with a smaller window
-    # to keep chunks focused.
     return [
         (start, end, text, "", "")
         for start, end, text in _chunk_by_lines(content, chunk_size=60, overlap=10)
@@ -313,6 +389,7 @@ def _load_index_snapshot() -> dict[str, tuple[list[float], CodeChunk]]:
             store[chunk_id] = (embedding, chunk)
 
         logger.info("Loaded %d chunks from embedding snapshot", len(store))
+        _rebuild_faiss_index()
         return store
     except Exception as exc:
         logger.warning("Failed to load embedding snapshot: %s", exc)
@@ -385,21 +462,45 @@ async def index_codebase(
 
     exclude = set(
         exclude_dirs
-        or [".git", "__pycache__", "node_modules", ".venv", "venv", ".next", "dist", "build", ".pytest_cache"]
+        or [
+            ".git",
+            "__pycache__",
+            "node_modules",
+            ".venv",
+            "venv",
+            ".next",
+            "dist",
+            "build",
+            ".pytest_cache",
+        ]
     )
 
     CODE_EXTENSIONS = {
-        ".py", ".ts", ".js", ".tsx", ".jsx", ".rs", ".go", ".java", ".kt",
-        ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".html",
-        ".css", ".sh", ".sql",
+        ".py",
+        ".ts",
+        ".js",
+        ".tsx",
+        ".jsx",
+        ".rs",
+        ".go",
+        ".java",
+        ".kt",
+        ".md",
+        ".txt",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".html",
+        ".css",
+        ".sh",
+        ".sql",
     }
 
-    # Load existing snapshot unless forcing a full reindex
     async with _store_lock:
         if force_reindex or not _store:
             _store = {} if force_reindex else _load_index_snapshot()
 
-        # Track existing chunk IDs per file for garbage collection
         existing_by_file: dict[str, set[str]] = {}
         for chunk_id, (_, chunk) in _store.items():
             existing_by_file.setdefault(chunk.file, set()).add(chunk_id)
@@ -410,7 +511,6 @@ async def index_codebase(
         current_file_chunks: set[str] = set()
 
         for filepath in root_path.rglob("*"):
-            # Skip excluded directories and hidden dirs/files
             if any(part.startswith(".") for part in filepath.parts):
                 continue
             if filepath.suffix not in CODE_EXTENSIONS:
@@ -420,7 +520,7 @@ async def index_codebase(
 
             try:
                 stat = filepath.stat()
-                if stat.st_size > 1_000_000:  # 1MB
+                if stat.st_size > 1_000_000:
                     continue
                 content = filepath.read_text(encoding="utf-8", errors="replace")
             except (OSError, UnicodeDecodeError):
@@ -436,7 +536,6 @@ async def index_codebase(
                 chunk_hash = _sha256(chunk_text)
                 chunk_id = f"{file_key}::{symbol_type}:{symbol_name or start_line}"
 
-                # Incremental update: skip unchanged chunks
                 if chunk_id in _store:
                     existing_embedding, existing_chunk = _store[chunk_id]
                     if (
@@ -470,12 +569,10 @@ async def index_codebase(
                     batch_texts = []
                     batch_meta = []
 
-            # Remove stale chunks for this file
             stale = existing_by_file.get(file_key, set()) - current_file_chunks
             for stale_id in stale:
                 _store.pop(stale_id, None)
 
-        # Flush remaining batch
         if batch_texts:
             embeddings = await _embed_batch_with_fallback(batch_texts, model)
             for emb, (cid, cc) in zip(embeddings, batch_meta):
@@ -483,8 +580,8 @@ async def index_codebase(
                     _store[cid] = (emb, cc)
                     chunk_count += 1
 
-        # Persist snapshot
         _save_index_snapshot(_store)
+        _rebuild_faiss_index()
 
     logger.info("Indexed %d new/updated chunks from %s (total %d)", chunk_count, root, len(_store))
     return chunk_count
@@ -493,8 +590,8 @@ async def index_codebase(
 async def search_codebase(query: str, k: int = 8) -> list[CodeChunk]:
     """Semantic search returning top-k code chunks.
 
-    If the store is empty, returns an empty list. Falls back to
-    keyword matching if embedding fails.
+    Uses FAISS ANN index when available (O(log n)), falls back to
+    linear scan (O(n)) when FAISS is not installed.
     """
     if not _store:
         return []
@@ -502,17 +599,39 @@ async def search_codebase(query: str, k: int = 8) -> list[CodeChunk]:
     try:
         query_embedding = await embed(query)
     except RuntimeError:
-        # Fallback: keyword search
         return _keyword_search(query, k)
 
-    # Compute similarity scores
+    # Try FAISS first (O(log n))
+    if _HAVE_FAISS and _faiss_index is not None and _faiss_index.ntotal > 0:
+        try:
+            query_vec = np.array([query_embedding], dtype=np.float32)
+            if query_vec.shape[1] != _faiss_index.d:
+                _rebuild_faiss_index()
+
+            actual_k = min(k, _faiss_index.ntotal)
+            if _faiss_index.ntotal > 0:
+                distances, indices = _faiss_index.search(query_vec, actual_k)
+
+                results = []
+                for dist, idx in zip(distances[0], indices[0]):
+                    if idx >= 0 and idx in _faiss_id_map:
+                        chunk_id = _faiss_id_map[int(idx)]
+                        embedding, chunk = _store[chunk_id]
+                        chunk.score = 1.0 / (1.0 + float(dist))
+                        results.append(chunk)
+
+                if results:
+                    return results
+        except Exception as exc:
+            logger.debug("FAISS search failed, falling back to linear scan: %s", exc)
+
+    # Fallback: linear O(n) scan (original behavior)
     scored: list[tuple[float, CodeChunk]] = []
     for chunk_id, (embedding, chunk) in _store.items():
         sim = _cosine_sim(query_embedding, embedding)
         chunk.score = sim
         scored.append((sim, chunk))
 
-    # Sort by score descending, return top-k
     scored.sort(key=lambda x: x[0], reverse=True)
     return [chunk for _, chunk in scored[:k]]
 
@@ -545,18 +664,32 @@ async def get_index_stats() -> dict[str, Any]:
                 languages[chunk.language] = languages.get(chunk.language, 0) + 1
             if chunk.symbol_type:
                 symbol_types[chunk.symbol_type] = symbol_types.get(chunk.symbol_type, 0) + 1
+
+        faiss_stats = {}
+        if _HAVE_FAISS and _faiss_index is not None:
+            faiss_stats = {
+                "faiss_available": True,
+                "faiss_ntotal": _faiss_index.ntotal,
+                "faiss_dim": _faiss_dim,
+                "faiss_trained": _faiss_index.is_trained if hasattr(_faiss_index, 'is_trained') else True,
+            }
+        else:
+            faiss_stats = {"faiss_available": False}
+
         return {
             "total_chunks": len(_store),
             "total_files": len(files),
             "by_language": languages,
             "by_symbol_type": symbol_types,
             "snapshot_path": str(INDEX_SNAPSHOT_PATH),
+            **faiss_stats,
         }
 
 
 # ---------------------------------------------------------------------------
 # Tool registry integration
 # ---------------------------------------------------------------------------
+
 
 async def _search_codebase_tool(
     query: str = "",
@@ -577,7 +710,6 @@ async def _search_codebase_tool(
         return {"error": f"Semantic search unavailable: {exc}"}
 
     if not results:
-        # Store is empty — suggest indexing first
         return {
             "query": query,
             "results": [],

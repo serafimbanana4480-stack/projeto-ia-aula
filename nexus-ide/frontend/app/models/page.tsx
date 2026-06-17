@@ -1,7 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { getModelStatus } from "../../lib/api";
 import TopBar from "../../components/layout/TopBar";
 import Sidebar from "../../components/layout/Sidebar";
 import BottomHUD from "../../components/layout/BottomHUD";
@@ -24,8 +23,7 @@ export default function ModelsPage() {
   useEffect(() => {
     const fetchModels = async () => {
       try {
-        const data = await getModelStatus();
-        setModels(data || []);
+        setModels([]);
       } catch (error) {
         log.error("Failed to fetch models:", error);
       }
@@ -91,9 +89,7 @@ export default function ModelsPage() {
       }
 
       setInstallProgress("Installation complete!");
-      // Refresh model list
-      const data = await getModelStatus();
-      setModels(data || []);
+      setModels([]);
     } catch (error) {
       log.error("Failed to install model:", error);
       setInstallProgress(

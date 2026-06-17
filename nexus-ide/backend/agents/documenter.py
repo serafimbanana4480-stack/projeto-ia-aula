@@ -36,11 +36,6 @@ class DocumenterAgent(AgentBase):
         AgentAction.STORE_MEMORY,
     }
 
-    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
-        """Run with ReAct loop so tools are always available."""
-        async for token in self._run_react_loop(request):
-            yield token
-
 
 async def generate_module_doc(
     file_path: str,

@@ -1,14 +1,16 @@
 """Tests for security middleware."""
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
 
+import httpx
 import pytest
 
+from backend.middleware import security as security_module
 from backend.middleware.security import SecurityHeadersMiddleware
 
 
-def _make_middleware():
-    """Build a SecurityHeadersMiddleware wired to a mock ASGI app."""
+def _make_app():
+    """Build a minimal ASGI app wrapped by SecurityHeadersMiddleware."""
 
     async def mock_app(scope, receive, send):
         await send({"type": "http.response.start", "status": 200, "headers": []})
@@ -17,156 +19,166 @@ def _make_middleware():
     return SecurityHeadersMiddleware(mock_app)
 
 
+def _settings(**overrides):
+    """Build a fake settings object with sensible defaults for tests."""
+    base = dict(
+        environment="development",
+        require_https=False,
+        csp_enabled=True,
+        csp_policy="",
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+@pytest.fixture
+def patch_settings(monkeypatch):
+    """Patch ``get_settings`` used by the middleware; returns a setter callable."""
+
+    def _apply(**overrides):
+        monkeypatch.setattr(
+            security_module, "get_settings", lambda: _settings(**overrides)
+        )
+
+    return _apply
+
+
 class TestSecurityHeadersMiddleware:
-    """Test security headers middleware."""
+    """Test security headers middleware via httpx ASGI transport (no network)."""
 
     @pytest.mark.asyncio
-    async def test_adds_security_headers(self) -> None:
-        """Test that middleware adds all security headers."""
-        middleware = _make_middleware()
+    async def test_adds_security_headers(self, patch_settings) -> None:
+        """Middleware adds all security headers."""
+        patch_settings()
+        app = _make_app()
 
-        captured_headers = []
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            resp = await client.get("http://testserver/")
 
-        async def capture_send(message):
-            if message["type"] == "http.response.start":
-                captured_headers.extend(message["headers"])
-            # Do NOT forward to real send in tests
-
-        scope = {"type": "http"}
-        await middleware(scope, None, capture_send)
-
-        headers = dict(captured_headers)
-        assert b"content-security-policy" in headers
-        assert b"x-frame-options" in headers
-        assert b"x-content-type-options" in headers
-        assert b"x-xss-protection" in headers
-        assert b"referrer-policy" in headers
-        assert b"permissions-policy" in headers
-        assert b"server" in headers
+        assert resp.status_code == 200
+        assert "content-security-policy" in resp.headers
+        assert resp.headers["x-frame-options"] == "DENY"
+        assert resp.headers["x-content-type-options"] == "nosniff"
+        assert resp.headers["x-xss-protection"] == "1; mode=block"
+        assert "referrer-policy" in resp.headers
+        assert "permissions-policy" in resp.headers
+        assert resp.headers["server"] == "NEXUS-IDE"
 
     @pytest.mark.asyncio
-    async def test_csp_header_value(self) -> None:
-        """Test that CSP header has correct value."""
-        middleware = _make_middleware()
+    async def test_csp_default_directives(self, patch_settings) -> None:
+        """Default CSP contains all expected directives for the NEXUS stack."""
+        patch_settings()
+        app = _make_app()
 
-        captured_headers = []
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            resp = await client.get("http://testserver/")
 
-        async def capture_send(message):
-            if message["type"] == "http.response.start":
-                captured_headers.extend(message["headers"])
-
-        await middleware({"type": "http"}, None, capture_send)
-        headers = dict(captured_headers)
-        csp = headers[b"content-security-policy"].decode()
+        csp = resp.headers["content-security-policy"]
         assert "default-src 'self'" in csp
-        assert "script-src 'self'" in csp
-        assert "style-src 'self'" in csp
+        assert "script-src 'self' 'unsafe-eval' 'unsafe-inline'" in csp
+        assert "style-src 'self' 'unsafe-inline'" in csp
+        assert "img-src 'self' data: blob:" in csp
+        assert "font-src 'self' data:" in csp
+        assert "connect-src 'self'" in csp
+        assert "worker-src 'self' blob:" in csp
         assert "frame-ancestors 'none'" in csp
+        assert "base-uri 'self'" in csp
+        assert "object-src 'none'" in csp
 
     @pytest.mark.asyncio
-    async def test_csp_connect_src_websockets(self) -> None:
-        """Test that CSP connect-src allows WebSockets (ws: wss:)."""
-        middleware = _make_middleware()
+    async def test_csp_disabled_omits_header(self, patch_settings) -> None:
+        """CSP_ENABLED=false omits the Content-Security-Policy header."""
+        patch_settings(csp_enabled=False)
+        app = _make_app()
 
-        captured_headers = []
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            resp = await client.get("http://testserver/")
 
-        async def capture_send(message):
-            if message["type"] == "http.response.start":
-                captured_headers.extend(message["headers"])
-
-        await middleware({"type": "http"}, None, capture_send)
-        headers = dict(captured_headers)
-        csp = headers[b"content-security-policy"].decode()
-        assert "ws:" in csp
-        assert "wss:" in csp
-        """Test that X-Frame-Options is set to DENY."""
-        middleware = _make_middleware()
-
-        captured_headers = []
-
-        async def capture_send(message):
-            if message["type"] == "http.response.start":
-                captured_headers.extend(message["headers"])
-
-        await middleware({"type": "http"}, None, capture_send)
-        headers = dict(captured_headers)
-        assert headers[b"x-frame-options"] == b"DENY"
+        assert "content-security-policy" not in resp.headers
+        # Other headers are still present.
+        assert resp.headers["x-frame-options"] == "DENY"
 
     @pytest.mark.asyncio
-    async def test_x_content_type_options_nosniff(self) -> None:
-        """Test that X-Content-Type-Options is set to nosniff."""
-        middleware = _make_middleware()
+    async def test_csp_policy_override(self, patch_settings) -> None:
+        """CSP_POLICY env var overrides the default CSP verbatim."""
+        custom = "default-src 'none'; script-src 'self'"
+        patch_settings(csp_policy=custom)
+        app = _make_app()
 
-        captured_headers = []
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            resp = await client.get("http://testserver/")
 
-        async def capture_send(message):
-            if message["type"] == "http.response.start":
-                captured_headers.extend(message["headers"])
-
-        await middleware({"type": "http"}, None, capture_send)
-        headers = dict(captured_headers)
-        assert headers[b"x-content-type-options"] == b"nosniff"
-
-    @pytest.mark.asyncio
-    async def test_x_xss_protection(self) -> None:
-        """Test that X-XSS-Protection is set correctly."""
-        middleware = _make_middleware()
-
-        captured_headers = []
-
-        async def capture_send(message):
-            if message["type"] == "http.response.start":
-                captured_headers.extend(message["headers"])
-
-        await middleware({"type": "http"}, None, capture_send)
-        headers = dict(captured_headers)
-        assert headers[b"x-xss-protection"] == b"1; mode=block"
+        csp = resp.headers["content-security-policy"]
+        assert csp.startswith(custom)
+        assert "worker-src" not in csp
 
     @pytest.mark.asyncio
-    async def test_referrer_policy(self) -> None:
-        """Test that Referrer-Policy is set correctly."""
-        middleware = _make_middleware()
+    async def test_csp_production_adds_upgrade(self, patch_settings) -> None:
+        """In production, upgrade-insecure-requests is appended."""
+        patch_settings(environment="production")
+        app = _make_app()
 
-        captured_headers = []
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            resp = await client.get("http://testserver/")
 
-        async def capture_send(message):
-            if message["type"] == "http.response.start":
-                captured_headers.extend(message["headers"])
-
-        await middleware({"type": "http"}, None, capture_send)
-        headers = dict(captured_headers)
-        assert headers[b"referrer-policy"] == b"strict-origin-when-cross-origin"
+        csp = resp.headers["content-security-policy"]
+        assert "upgrade-insecure-requests" in csp
 
     @pytest.mark.asyncio
-    async def test_permissions_policy(self) -> None:
-        """Test that Permissions-Policy restricts features."""
-        middleware = _make_middleware()
+    async def test_x_frame_options_deny(self, patch_settings) -> None:
+        """X-Frame-Options is set to DENY (legacy browsers)."""
+        patch_settings()
+        app = _make_app()
 
-        captured_headers = []
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            resp = await client.get("http://testserver/")
 
-        async def capture_send(message):
-            if message["type"] == "http.response.start":
-                captured_headers.extend(message["headers"])
+        assert resp.headers["x-frame-options"] == "DENY"
 
-        await middleware({"type": "http"}, None, capture_send)
-        headers = dict(captured_headers)
-        permissions = headers[b"permissions-policy"].decode()
+    @pytest.mark.asyncio
+    async def test_x_content_type_options_nosniff(self, patch_settings) -> None:
+        """X-Content-Type-Options is set to nosniff."""
+        patch_settings()
+        app = _make_app()
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            resp = await client.get("http://testserver/")
+
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+    @pytest.mark.asyncio
+    async def test_referrer_policy(self, patch_settings) -> None:
+        """Referrer-Policy is set correctly."""
+        patch_settings()
+        app = _make_app()
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            resp = await client.get("http://testserver/")
+
+        assert resp.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+
+    @pytest.mark.asyncio
+    async def test_permissions_policy(self, patch_settings) -> None:
+        """Permissions-Policy restricts features."""
+        patch_settings()
+        app = _make_app()
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            resp = await client.get("http://testserver/")
+
+        permissions = resp.headers["permissions-policy"]
         assert "geolocation=()" in permissions
         assert "microphone=()" in permissions
         assert "camera=()" in permissions
         assert "payment=()" in permissions
 
     @pytest.mark.asyncio
-    async def test_server_header_customized(self) -> None:
-        """Test that Server header is customized."""
-        middleware = _make_middleware()
+    async def test_server_header_customized(self, patch_settings) -> None:
+        """Server header is customized."""
+        patch_settings()
+        app = _make_app()
 
-        captured_headers = []
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            resp = await client.get("http://testserver/")
 
-        async def capture_send(message):
-            if message["type"] == "http.response.start":
-                captured_headers.extend(message["headers"])
-
-        await middleware({"type": "http"}, None, capture_send)
-        headers = dict(captured_headers)
-        assert headers[b"server"] == b"NEXUS-IDE"
+        assert resp.headers["server"] == "NEXUS-IDE"

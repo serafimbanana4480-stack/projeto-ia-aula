@@ -12,12 +12,16 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -61,6 +65,11 @@ class EventType(StrEnum):
     METRIC = "metric"
     HEARTBEAT = "heartbeat"
     DONE = "done"
+
+    # Autonomy / self-repair
+    AUTONOMY_DECISION = "autonomy_decision"
+    SELF_HEAL = "self_heal"
+    REPLAY_COMPLETE = "replay_complete"
 
 
 @dataclass
@@ -106,9 +115,9 @@ class EventBus:
     def __init__(self, max_queue_size: int = 1000) -> None:
         self._subscribers: dict[str, list[Subscriber]] = {}
         self._lock = asyncio.Lock()
-        self._event_log: list[OrchestratorEvent] = []
-        self._max_log_size = 10_000
+        self._event_log: deque[OrchestratorEvent] = deque(maxlen=10_000)
         self._max_queue_size = max_queue_size
+        self._store: EventStore | None = None
 
     async def subscribe(self, event_type: str, callback: Subscriber) -> None:
         """Register a subscriber for a specific event type or '*' for all."""
@@ -128,12 +137,14 @@ class EventBus:
         # Get matching subscribers and log event under the same lock
         async with self._lock:
             self._event_log.append(event)
-            if len(self._event_log) > self._max_log_size:
-                self._event_log = self._event_log[-self._max_log_size :]
 
             subscribers: list[Subscriber] = []
             subscribers.extend(self._subscribers.get(event.event_type.value, []))
             subscribers.extend(self._subscribers.get("*", []))
+
+        # Persist (offloaded to thread pool so synchronous file I/O doesn't block the event loop)
+        if self._store is not None:
+            await asyncio.to_thread(self._store.persist, event)
 
         # Notify subscribers concurrently
         if subscribers:
@@ -185,13 +196,170 @@ class EventBus:
     async def get_recent_events(self, limit: int = 100) -> list[OrchestratorEvent]:
         """Return recent events for replay/debugging."""
         async with self._lock:
-            return self._event_log[-limit:]
+            return list(self._event_log)[-limit:]
 
     async def clear(self) -> None:
         """Clear all subscribers and event log."""
         async with self._lock:
             self._subscribers.clear()
             self._event_log.clear()
+
+    def attach_store(self, store: EventStore) -> None:
+        """Attach an :class:`EventStore` so events are persisted on publish."""
+        self._store = store
+
+    async def replay(self, since: float, until: float | None = None) -> int:
+        """Replay events from the attached store within ``[since, until]``.
+
+        Re-publishes each persisted event through the bus (which will
+        also be persisted again, but the storage format is append-only and
+        idempotent readers handle duplicates via ``event_id``).
+        Emits a final :attr:`EventType.REPLAY_COMPLETE` event with the
+        replayed count.
+        Returns the number of events replayed.
+        """
+        if self._store is None:
+            logger.warning("replay() called but no EventStore is attached")
+            count = 0
+        else:
+            events = self._store.load_window(since, until)
+            for event in events:
+                await self.publish(event)
+            count = len(events)
+
+        await self.publish(
+            OrchestratorEvent(
+                event_type=EventType.REPLAY_COMPLETE,
+                source="EventBus",
+                data={"count": count, "since": since, "until": until},
+            )
+        )
+        return count
+
+
+class EventStore:
+    """Append-only persistent event store backed by daily NDJSON files.
+
+    Events are written one-per-line to ``events-YYYYMMDD.ndjson`` files
+    inside ``store_dir``. The store is best-effort: any I/O failure is
+    logged but never raised, so a disk problem won't crash the bus.
+    """
+
+    def __init__(self, store_dir: Path | None = None) -> None:
+        if store_dir is None:
+            # <repo>/nexus-ide/data/events/
+            store_dir = Path(__file__).resolve().parents[2] / "data" / "events"
+        self.store_dir: Path = store_dir
+
+    def _file_for(self, ts: float) -> Path:
+        day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y%m%d")
+        return self.store_dir / f"events-{day}.ndjson"
+
+    @staticmethod
+    def _event_to_dict(event: OrchestratorEvent) -> dict[str, Any]:
+        return {
+            "event_type": event.event_type.value,
+            "event_id": event.event_id,
+            "source": event.source,
+            "session_id": event.session_id,
+            "task_id": event.task_id,
+            "data": event.data,
+            "content": event.content,
+            "timestamp": event.timestamp,
+            "correlation_id": event.correlation_id,
+        }
+
+    @staticmethod
+    def _dict_to_event(payload: dict[str, Any]) -> OrchestratorEvent:
+        return OrchestratorEvent(
+            event_type=EventType(payload.get("event_type", EventType.DONE.value)),
+            event_id=payload.get("event_id", uuid.uuid4().hex[:12]),
+            source=payload.get("source", ""),
+            session_id=payload.get("session_id", ""),
+            task_id=payload.get("task_id", ""),
+            data=payload.get("data", {}) or {},
+            content=payload.get("content", ""),
+            timestamp=float(payload.get("timestamp", time.time())),
+            correlation_id=payload.get("correlation_id", ""),
+        )
+
+    def persist(self, event: OrchestratorEvent) -> None:
+        """Synchronously append ``event`` as a single JSON line.
+
+        Best-effort: any I/O error is logged and swallowed.
+        """
+        path = self._file_for(event.timestamp)
+        line = json.dumps(self._event_to_dict(event), ensure_ascii=False, default=str)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            logger.exception("EventStore.persist failed for %s", path)
+
+    def load_window(
+        self, since: float, until: float | None = None
+    ) -> list[OrchestratorEvent]:
+        """Return persisted events with ``timestamp`` in ``[since, until]``.
+
+        Reads every ``events-*.ndjson`` file in ``store_dir`` in name
+        order. Malformed lines and unreadable files are skipped with a
+        warning so one bad file can't poison the window.
+        Returns ``[]`` if the directory does not exist.
+        """
+        if not self.store_dir.exists():
+            return []
+
+        upper = until if until is not None else float("inf")
+        events: list[OrchestratorEvent] = []
+        for path in sorted(self.store_dir.glob("events-*.ndjson")):
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    for raw in fh:
+                        raw = raw.strip()
+                        if not raw:
+                            continue
+                        try:
+                            payload = json.loads(raw)
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "Skipping malformed line in %s", path
+                            )
+                            continue
+                        ts = float(payload.get("timestamp", 0.0))
+                        if ts < since or ts > upper:
+                            continue
+                        events.append(self._dict_to_event(payload))
+            except OSError:
+                logger.exception("EventStore.load_window failed for %s", path)
+        return events
+
+    def clear(self) -> int:
+        """Delete every ``events-*.ndjson`` file in ``store_dir``.
+
+        Returns the number of files removed.
+        """
+        if not self.store_dir.exists():
+            return 0
+        removed = 0
+        for path in self.store_dir.glob("events-*.ndjson"):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                logger.exception("EventStore.clear failed for %s", path)
+        return removed
+
+
+_event_store_singleton: EventStore | None = None
+
+
+def get_event_store() -> EventStore:
+    """Return a process-wide cached :class:`EventStore` instance."""
+    global _event_store_singleton
+    if _event_store_singleton is None:
+        _event_store_singleton = EventStore()
+    return _event_store_singleton
 
 
 class EventEmitter:

@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -65,6 +66,210 @@ def _filelock_enabled() -> bool:
     return (
         _FILELOCK_AVAILABLE
         and os.environ.get("NEXUS_DISABLE_FILELOCK", "").lower() not in ("1", "true", "yes")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Distributed lock via Redis (single-instance Redlock simplification)
+# ---------------------------------------------------------------------------
+# Acquire:  SET <key> <token> NX PX <ttl>
+# Release:  Lua script that DELs only if the stored value still equals the
+#           caller's token (prevents releasing a lock owned by another holder).
+#
+# Heartbeat / renewal is intentionally omitted for simplicity. Long-running
+# critical sections must complete within ``REDIS_LOCK_TTL_MS``; otherwise the
+# Redis key auto-expires and another worker may acquire it. Tune
+# ``NEXUS_LOCK_REDIS_TTL_MS`` if longer holds are required.
+REDIS_LOCK_TTL_MS = int(os.environ.get("NEXUS_LOCK_REDIS_TTL_MS", "30000"))
+REDIS_LOCK_KEY_PREFIX = os.environ.get("NEXUS_LOCK_REDIS_PREFIX", "nexus:lock:")
+REDIS_LOCK_CONNECT_TIMEOUT = float(os.environ.get("NEXUS_LOCK_REDIS_CONNECT_TIMEOUT", "1.0"))
+REDIS_LOCK_RETRY_INTERVAL = float(os.environ.get("NEXUS_LOCK_REDIS_RETRY", "0.1"))
+REDIS_LOCK_UNAVAILABLE_COOLDOWN = float(
+    os.environ.get("NEXUS_LOCK_REDIS_COOLDOWN", "5.0")
+)
+
+# Lua release script — atomic compare-and-delete.
+_REDIS_RELEASE_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+else
+    return 0
+end
+"""
+
+
+class _RedisUnavailable(Exception):
+    """Signals that Redis is offline/unconfigured; callers must use fallback."""
+
+
+# Module-level cached Redis client and unavailability cooldown.
+_redis_client: Any = None
+_redis_unavailable_until: float = 0.0
+
+
+def _mark_redis_unavailable(cooldown: float = REDIS_LOCK_UNAVAILABLE_COOLDOWN) -> None:
+    """Mark Redis as unavailable for *cooldown* seconds and drop the client."""
+    global _redis_client, _redis_unavailable_until
+    _redis_client = None
+    _redis_unavailable_until = time.monotonic() + cooldown
+
+
+def _redis_lock_key(file_path: str) -> str:
+    """Return the Redis key used for the distributed write lock on *file_path*."""
+    abs_path = str(Path(file_path).resolve())
+    path_hash = hashlib.sha256(abs_path.encode()).hexdigest()[:16]
+    return f"{REDIS_LOCK_KEY_PREFIX}write:{path_hash}"
+
+
+async def _redis_lock_client() -> Any:
+    """Lazily obtain a short-timeout async Redis client, or ``None`` if offline.
+
+    The client is created with a short connect/socket timeout so that a
+    down/unconfigured Redis is detected within ~1s and never blocks the caller.
+    A successful ``PING`` is required before the client is cached.
+    """
+    global _redis_client, _redis_unavailable_until
+    now = time.monotonic()
+    if _redis_client is not None:
+        return _redis_client
+    if now < _redis_unavailable_until:
+        return None
+    try:
+        import redis.asyncio as aioredis  # type: ignore[import-not-found]
+    except Exception:
+        _mark_redis_unavailable(cooldown=30.0)
+        logger.debug("redis package not importable; distributed locks disabled")
+        return None
+
+    host = os.environ.get("REDIS_HOST", "localhost")
+    port = int(os.environ.get("REDIS_PORT", "6379"))
+    db = int(os.environ.get("REDIS_DB", "0"))
+    password = os.environ.get("REDIS_PASSWORD") or None
+    client = aioredis.Redis(
+        host=host,
+        port=port,
+        db=db,
+        password=password,
+        socket_connect_timeout=REDIS_LOCK_CONNECT_TIMEOUT,
+        socket_timeout=REDIS_LOCK_CONNECT_TIMEOUT,
+        decode_responses=True,
+    )
+    try:
+        await asyncio.wait_for(client.ping(), timeout=REDIS_LOCK_CONNECT_TIMEOUT)
+    except Exception as exc:
+        _mark_redis_unavailable()
+        logger.warning(
+            "Redis unavailable for distributed file locks (%s); "
+            "using in-memory/filelock fallback",
+            exc,
+        )
+        try:
+            await client.aclose()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+        return None
+    _redis_client = client
+    return client
+
+
+class RedisDistributedLock:
+    """Redis-backed distributed lock using ``SET NX PX`` + Lua release.
+
+    This is a single-instance simplification of Redlock: it provides mutual
+    exclusion across processes/workers as long as they all talk to the same
+    Redis instance. It does *not* provide the fencing guarantees of full
+    Redlock across multiple Redis nodes.
+    """
+
+    def __init__(
+        self,
+        ttl_ms: int = REDIS_LOCK_TTL_MS,
+        retry_interval: float = REDIS_LOCK_RETRY_INTERVAL,
+    ) -> None:
+        self._ttl_ms = ttl_ms
+        self._retry_interval = retry_interval
+
+    async def acquire(self, key: str, timeout: float) -> str:
+        """Try to acquire *key* within *timeout* seconds.
+
+        Returns the unique token on success.
+
+        Raises:
+            _RedisUnavailable: if Redis is offline/unconfigured — the caller
+                must fall back to the in-memory/filelock layer.
+            LockError: if the lock could not be acquired within *timeout*
+                because another holder owns it.
+        """
+        token = uuid.uuid4().hex
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        first_attempt = True
+        while True:
+            client = await _redis_lock_client()
+            if client is None:
+                raise _RedisUnavailable()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise LockError(f"Timeout acquiring distributed lock on {key}")
+            try:
+                ok = await asyncio.wait_for(
+                    client.set(key, token, nx=True, px=self._ttl_ms),
+                    timeout=min(remaining, REDIS_LOCK_CONNECT_TIMEOUT),
+                )
+            except Exception as exc:
+                _mark_redis_unavailable()
+                logger.warning(
+                    "Redis SET failed for lock %s (%s); using fallback", key, exc
+                )
+                raise _RedisUnavailable() from exc
+            if ok:
+                return token
+            if first_attempt:
+                logger.debug("Distributed lock %s contended; retrying", key)
+                first_attempt = False
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise LockError(f"Timeout acquiring distributed lock on {key}")
+            await asyncio.sleep(min(self._retry_interval, remaining))
+
+    async def release(self, key: str, token: str) -> bool:
+        """Safely release *key* only if *token* still owns it.
+
+        Returns ``True`` if the lock was released, ``False`` otherwise (e.g.
+        the lock expired or is held by another token). Never raises on Redis
+        errors — a failed release simply lets the TTL expire the key.
+        """
+        client = await _redis_lock_client()
+        if client is None:
+            return False
+        try:
+            res = await asyncio.wait_for(
+                client.eval(_REDIS_RELEASE_SCRIPT, 1, key, token),
+                timeout=REDIS_LOCK_CONNECT_TIMEOUT,
+            )
+            return bool(res)
+        except Exception:
+            logger.debug("Redis lock release failed for %s", key, exc_info=True)
+            return False
+
+
+_redis_lock: RedisDistributedLock | None = None
+
+
+def _get_redis_lock() -> RedisDistributedLock:
+    """Return the cached :class:`RedisDistributedLock` singleton."""
+    global _redis_lock
+    if _redis_lock is None:
+        _redis_lock = RedisDistributedLock()
+    return _redis_lock
+
+
+def _redis_lock_enabled() -> bool:
+    """Return whether the Redis distributed lock layer should be attempted."""
+    return os.environ.get("NEXUS_DISABLE_REDIS_LOCK", "").lower() not in (
+        "1",
+        "true",
+        "yes",
     )
 
 
@@ -308,9 +513,8 @@ class FileLockManager:
                 lock.lock_type,
                 lock.lock_id,
             )
-            # Release cross-process resources synchronously
-            if _filelock_enabled():
-                self._release_cross_process_lock(lock)
+            # Release cross-process resources (Redis and/or filelock).
+            self._release_cross_process_lock(lock)
 
         if not locks:
             del self._locks[file_path]
@@ -416,8 +620,7 @@ class FileLockManager:
                         file_path,
                         lock.owner,
                     )
-                    if _filelock_enabled():
-                        self._release_cross_process_lock(lock)
+                    self._release_cross_process_lock(lock)
                     break
             if not locks:
                 del self._locks[file_path]
@@ -533,8 +736,7 @@ class FileLockManager:
                 file_path,
                 lock.owner,
             )
-            if _filelock_enabled():
-                self._release_cross_process_lock(lock)
+            self._release_cross_process_lock(lock)
         return count
 
     # --------------------------------------------------------------------- #
@@ -573,8 +775,7 @@ class FileLockManager:
                     file_path,
                     lock.owner,
                 )
-                if _filelock_enabled():
-                    self._release_cross_process_lock(lock)
+                self._release_cross_process_lock(lock)
             if not locks:
                 del self._locks[file_path]
 
@@ -669,14 +870,48 @@ class FileLockManager:
         _sync_release_soft_lock(mutex_lock)
         return mutex_lock, write_lock
 
+    def _schedule_redis_release(self, key: str, token: str) -> None:
+        """Best-effort async release of a Redis distributed lock.
+
+        Called from synchronous release paths. If no running event loop is
+        available the release is skipped — the Redis TTL will expire the key.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return
+        if loop.is_closed():
+            return
+        try:
+            loop.create_task(_get_redis_lock().release(key, token))
+        except RuntimeError:
+            # No running loop in the current thread — rely on TTL expiry.
+            logger.debug(
+                "No running loop to release Redis lock %s; relying on TTL", key
+            )
+
     def _release_cross_process_lock(self, lock: FileLock) -> None:
-        """Synchronously release cross-process resources held by *lock*."""
+        """Synchronously release cross-process resources held by *lock*.
+
+        Redis releases are scheduled as background tasks (best-effort): the
+        Redis key has a TTL, so a missed release simply expires the lock
+        instead of leaking it permanently.
+        """
         file_path = lock.file_path
         if lock.lock_type == "write":
+            redis_token = getattr(lock, "_redis_token", None)
+            redis_key = getattr(lock, "_redis_key", None)
+            if redis_token is not None and redis_key is not None:
+                self._schedule_redis_release(redis_key, redis_token)
+                return
+            if not _filelock_enabled():
+                return
             write_path = _cross_process_lock_path(file_path, "write")
             fl = self._filelock_map.pop(write_path, None)
             _sync_release_soft_lock(fl)
         else:
+            if not _filelock_enabled():
+                return
             # Read lock: decrement counter, release write lock if last reader
             mutex_path = _cross_process_lock_path(file_path, "readers_mutex")
             count_path = _readers_count_path(file_path)
@@ -753,23 +988,48 @@ class FileLockManager:
                     # about to really take the in-memory lock.
                     # ------------------------------------------------------
                     cross_proc_locks: list[SoftFileLock] = []
-                    if _filelock_enabled():
-                        remaining = deadline - asyncio.get_event_loop().time()
-                        if remaining <= 0:
-                            raise LockError(
-                                f"Timeout acquiring {lock_type} lock on {file_path} for {owner!r}"
-                            )
-                        if lock_type == "write":
-                            fl = await self._acquire_cross_process_write_lock(
-                                file_path, remaining
-                            )
-                            cross_proc_locks.append(fl)
-                        else:
-                            _mutex_fl, _write_fl = await self._acquire_cross_process_read_lock(
-                                file_path, remaining
-                            )
-                            if _write_fl is not None:
-                                cross_proc_locks.append(_write_fl)
+                    redis_token: str | None = None
+                    redis_key: str | None = None
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        raise LockError(
+                            f"Timeout acquiring {lock_type} lock on {file_path} for {owner!r}"
+                        )
+                    if lock_type == "write" and _redis_lock_enabled():
+                        # Prefer the Redis distributed lock for cross-worker
+                        # mutual exclusion; fall back to filelock if Redis is
+                        # offline/unconfigured.
+                        rlock = _get_redis_lock()
+                        rkey = _redis_lock_key(file_path)
+                        try:
+                            redis_token = await rlock.acquire(rkey, remaining)
+                            redis_key = rkey
+                        except _RedisUnavailable:
+                            redis_token = None
+                            redis_key = None
+                            remaining = deadline - asyncio.get_event_loop().time()
+                            if remaining <= 0:
+                                raise LockError(
+                                    f"Timeout acquiring {lock_type} lock on "
+                                    f"{file_path} for {owner!r}"
+                                )
+                        # LockError (contention timeout) propagates naturally.
+
+                    if (
+                        lock_type == "write"
+                        and redis_token is None
+                        and _filelock_enabled()
+                    ):
+                        fl = await self._acquire_cross_process_write_lock(
+                            file_path, remaining
+                        )
+                        cross_proc_locks.append(fl)
+                    elif lock_type == "read" and _filelock_enabled():
+                        _mutex_fl, _write_fl = await self._acquire_cross_process_read_lock(
+                            file_path, remaining
+                        )
+                        if _write_fl is not None:
+                            cross_proc_locks.append(_write_fl)
 
                     lock = FileLock(
                         file_path=file_path,
@@ -786,6 +1046,9 @@ class FileLockManager:
                     # Attach cross-process handles for cleanup in release_lock
                     if cross_proc_locks:
                         lock._cross_proc_locks = cross_proc_locks  # type: ignore[attr-defined]
+                    if redis_token is not None:
+                        lock._redis_token = redis_token  # type: ignore[attr-defined]
+                        lock._redis_key = redis_key  # type: ignore[attr-defined]
                     logger.debug(
                         "Lock acquired: %s %s on %s by %s",
                         lock_type,

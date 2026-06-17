@@ -42,11 +42,4 @@ class BugHunterStaticAgent(AgentBase):
         AgentAction.CONSULT_AGENT,
     }
 
-    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
-        """Run the static bug hunter with ReAct loop for autonomous execution.
 
-        ALWAYS uses the ReAct loop so that file operations, code execution,
-        search, and inter-agent consultation are available.
-        """
-        async for token in self._run_react_loop(request):
-            yield token

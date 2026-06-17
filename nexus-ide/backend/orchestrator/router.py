@@ -1,4 +1,4 @@
-"""Intelligent routing layer.
+"""Intelligent routing layer (shim).
 
 Three-level routing described in ARCHITECTURE.md §4.2:
 
@@ -6,73 +6,96 @@ Three-level routing described in ARCHITECTURE.md §4.2:
 2. ROUTER model (NANO) - JSON classification (:func:`route_with_model`).
 3. Automatic fallback - see :mod:`backend.orchestrator.fallback`.
 
+This module is a thin back-compat shim. The real implementation lives in:
+
+* :mod:`backend.orchestrator.routing_strategies` — the Strategy pattern
+  implementations (keyword, LLM, recording).
+* :mod:`backend.orchestrator.router_engine` — the :class:`Router` engine
+  that composes strategies and a cache.
+* :mod:`backend.cache_backends` — the cache backend abstractions.
+
 The public ``RoutingDecision`` type lives in :mod:`backend.models.api` and is
 re-exported here for backwards compatibility with existing imports.
 """
 
 from __future__ import annotations
 
+import asyncio
 import functools
-import hashlib
-import json
 import logging
-import re
-import time
-from typing import Final
-
-from pydantic import ValidationError
-
-from backend.config.settings import get_model_config, load_prompt
-from backend.models.api import AgentName, RoutingDecision
-from backend.tools.ollama_client import ChatMessage, OllamaError
 from typing import Any
+
+from backend.cache_backends import NullCacheBackend, TTLCacheBackend
+from backend.models.api import AgentName, RoutingDecision
+from backend.orchestrator.router_engine import (
+    DEFAULT_CACHE_TTL,
+    Router,
+    _query_hash,
+)
+from backend.orchestrator.routing_strategies import (
+    FALLBACK_DECISION,
+    KeywordRoutingStrategy,
+    LLMRoutingStrategy,
+    RoutingStrategy,
+    parse_routing_decision,
+)
+from backend.tools.ollama_client import ChatMessage
 from backend.tools.sanitizer import detect_injection
+from backend.config.settings import get_model_config, load_prompt
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Back-compat private aliases
+# ---------------------------------------------------------------------------
+# The historical module exposed a number of "private" symbols that the
+# existing test suite (and possibly other callers) import by name. Re-export
+# them here so the refactor stays non-breaking.
 
-def _query_hash(query: str) -> str:
-    """Generate a hash for caching routing decisions based on query content."""
-    return hashlib.md5(query.lower().strip().encode()).hexdigest()
+#: Cached routing cache TTL (seconds). Kept for back-compat with code that
+#: imported the previous module-level constant.
+_ROUTING_CACHE_TTL: float = DEFAULT_CACHE_TTL
 
+#: Maximum cache size. Kept for back-compat.
+_ROUTING_CACHE_MAX: int = 1000
 
-# In-memory cache for routing decisions (keyed by query hash).
-# Each entry stores (decision, timestamp) for TTL-based expiry.
-_routing_cache: dict[str, tuple[RoutingDecision, float]] = {}
-_ROUTING_CACHE_TTL = 300.0  # 5 minutes
-_ROUTING_CACHE_MAX = 1000
+#: Back-compat alias for the fallback decision used by the LLM-based path.
+_FALLBACK_DECISION: RoutingDecision = FALLBACK_DECISION
 
-
-def _get_cached_decision(query_hash: str) -> RoutingDecision | None:
-    """Return a cached routing decision if not expired, else None."""
-    entry = _routing_cache.get(query_hash)
-    if entry is None:
-        return None
-    decision, ts = entry
-    if time.time() - ts > _ROUTING_CACHE_TTL:
-        del _routing_cache[query_hash]
-        return None
-    return decision
+#: Back-compat alias for the JSON → RoutingDecision parser.
+_parse_routing_decision = parse_routing_decision
 
 
-def _store_cached_decision(query_hash: str, decision: RoutingDecision) -> None:
-    """Store a routing decision in cache with TTL timestamp."""
-    if len(_routing_cache) >= _ROUTING_CACHE_MAX:
-        # Evict oldest entries (FIFO) and expired entries
-        now = time.time()
-        expired = [k for k, (_, ts) in _routing_cache.items() if now - ts > _ROUTING_CACHE_TTL]
-        for k in expired:
-            del _routing_cache[k]
-        if len(_routing_cache) >= _ROUTING_CACHE_MAX:
-            keys_to_remove = list(_routing_cache.keys())[:100]
-            for k in keys_to_remove:
-                del _routing_cache[k]
-    _routing_cache[query_hash] = (decision, time.time())
+# ---------------------------------------------------------------------------
+# Default router — lazily instantiated so importing this module stays cheap.
+# ---------------------------------------------------------------------------
+
+_default_router: Router | None = None
 
 
-__all__ = ["RoutingDecision", "fast_route", "route_with_model", "warm_routing_cache"]
+def _get_default_router() -> Router:
+    """Return the process-wide default :class:`Router` instance.
 
+    The router is created on first access and re-used for the lifetime of
+    the process. Tests that need isolation should instantiate their own
+    :class:`Router` and pass it explicitly.
+    """
+    global _default_router
+    if _default_router is None:
+        _default_router = Router(
+            strategies=[
+                KeywordRoutingStrategy(),
+                LLMRoutingStrategy(llm_client=None),
+            ],
+            cache=TTLCacheBackend(),
+        )
+    return _default_router
+
+
+# ---------------------------------------------------------------------------
 # Common queries used to warm the routing cache at startup.
+# ---------------------------------------------------------------------------
+
 _COMMON_QUERIES: dict[str, RoutingDecision] = {
     "what is python": RoutingDecision(
         primary_agent="MICRO",
@@ -134,438 +157,28 @@ _COMMON_QUERIES: dict[str, RoutingDecision] = {
 
 def warm_routing_cache() -> None:
     """Pre-populate the routing cache with common queries at startup."""
-    for query, decision in _COMMON_QUERIES.items():
-        h = _query_hash(query)
-        _store_cached_decision(h, decision)
+    router = _get_default_router()
+    try:
+        asyncio.run(router.warm_cache(_COMMON_QUERIES))
+    except RuntimeError:
+        # Called from within a running loop — schedule the warm-up as a task
+        # so callers in async contexts can still trigger cache priming.
+        loop = asyncio.get_event_loop()
+        loop.create_task(router.warm_cache(_COMMON_QUERIES))
     logger.info("Routing cache warmed with %d common queries", len(_COMMON_QUERIES))
 
 
 # ---------------------------------------------------------------------------
-# Level 1 - fast deterministic rules
+# Level 1 - fast deterministic rules (shim)
 # ---------------------------------------------------------------------------
-
-_DEBUGGER_MARKERS: Final = (
-    "traceback",
-    "stacktrace",
-    "stack trace",
-    "error:",
-    "error in",
-    "typeerror",
-    "valueerror",
-    "keyerror",
-    "indexerror",
-    "attributeerror",
-    "importerror",
-    "filenotfounderror",
-    "zerodivisionerror",
-    "overflowerror",
-    "syntaxerror",
-    "nameerror",
-    "exception",
-    "segfault",
-    "segmentation fault",
-    "runtime error",
-    "not working",
-    "broken",
-    "bug in",
-    "fix the",
-    "fix this",
-    "debug",
-    "crash",
-    "failing",
-    "depurar",
-    "corrigir o erro",
-    "erro no",
-    "falha no",
-)
-_CODER_MARKERS: Final = (
-    "write a function",
-    "write a class",
-    "create a function",
-    "create a class",
-    "implement",
-    "refactor",
-    "build a",
-    "add a feature",
-    "write code",
-    "write a script",
-    "write a test",
-    "code this",
-    "program a",
-    "develop a",
-    "scaffold",
-    "generate code",
-    "def ",
-    "function that",
-    "class that",
-    "api endpoint",
-    "rest api",
-    "login system",
-    "authentication",
-    "web scraper",
-    "cli tool",
-    "criar uma função",
-    "criar uma classe",
-    "implementar",
-    "construir",
-    "desenvolver",
-    "gerar código",
-    "escrever código",
-)
-_FILE_OPS_MARKERS: Final = (
-    "create a file",
-    "create file",
-    "write a file",
-    "write file",
-    "save a file",
-    "save to file",
-    "make a file",
-    "criar ficheiro",
-    "criar um ficheiro",
-    "criar arquivo",
-    "criar um arquivo",
-    "escrever ficheiro",
-    "escrever um ficheiro",
-    "guardar ficheiro",
-    "modificar ficheiro",
-    "alterar ficheiro",
-    ".txt",
-    ".csv",
-    ".json",
-    ".md",
-)
-_ARCHITECT_MARKERS: Final = (
-    "design the",
-    "design a",
-    "architect",
-    "architecture",
-    "plan the",
-    "plan a",
-    "structure the",
-    "structure a",
-    "how should i",
-    "what should i",
-    "system design",
-    "database schema",
-    "microservices",
-    "tech stack",
-    "project structure",
-    "api design",
-    "projetar",
-    "arquitetar",
-    "planejar",
-    "estruturar",
-    "esquema do banco",
-)
-_REVIEWER_MARKERS: Final = (
-    "peer review",
-    "review code",
-    "review this pr",
-    "review this pull request",
-    "code review this",
-    "review my code",
-    "review the implementation",
-    "review the changes",
-    "review pr",
-    "pr review",
-    "pull request review",
-    "review the module",
-    "review the file",
-    "review for bugs",
-    "review for security",
-    "security review",
-    "performance review",
-    "style review",
-    "lint review",
-    "quality review",
-    "revisar codigo",
-    "revisar código",
-    "revisar implementacao",
-    "revisar implementação",
-    "revisar pr",
-    "revisao de codigo",
-    "revisão de código",
-    "revisao de seguranca",
-    "revisão de segurança",
-    "analise de qualidade",
-    "análise de qualidade",
-)
-_ANALYZER_MARKERS: Final = (
-    "analyze",
-    "analyse",
-    "review the",
-    "review this",
-    "audit",
-    "security check",
-    "code review",
-    "find vulnerabilities",
-    "assess",
-    "evaluate",
-    "is this secure",
-    "is this correct",
-    "analisar",
-    "revisar",
-    "auditar",
-    "avaliar",
-)
-_OPTIMIZER_MARKERS: Final = (
-    "optimize",
-    "optimise",
-    "improve performance",
-    "speed up",
-    "make faster",
-    "reduce memory",
-    "make more efficient",
-    "slow query",
-    "bottleneck",
-    "profiling",
-    "otimizar",
-    "melhorar performance",
-    "acelerar",
-    "reduzir memória",
-)
-_REFACTOR_PERF_MARKERS: Final = (
-    "refactor performance",
-    "performance refactor",
-    "profile code",
-    "cache optimization",
-    "memoize",
-    "vectorize",
-    "async optimization",
-    "parallelize",
-    "execution time",
-    "memory usage",
-    "benchmark",
-    "hot path",
-)
-_REFACTOR_CLEAN_MARKERS: Final = (
-    "clean code",
-    "clean up",
-    "cleanup",
-    "code cleanup",
-    "refactor clean",
-    "solid principles",
-    "dry violation",
-    "remove duplication",
-    "improve naming",
-    "add type hints",
-    "cognitive complexity",
-    "pep8",
-    "style guide",
-    "linting",
-    "format code",
-)
-_BUG_HUNTER_STATIC_MARKERS: Final = (
-    "static analysis",
-    "lint",
-    "linter",
-    "pylint",
-    "mypy",
-    "bandit",
-    "ruff",
-    "code smell",
-    "anti-pattern",
-    "cyclomatic complexity",
-    "security audit",
-    "vulnerability scan",
-    "find vulnerabilities",
-    "sql injection",
-    "xss",
-    "path traversal",
-    "scan code",
-    "analise estatica",
-    "analise estática",
-    "vulnerabilidade",
-    "auditoria de seguranca",
-)
-_BUG_HUNTER_RUNTIME_MARKERS: Final = (
-    "runtime error",
-    "runtime bug",
-    "test failure",
-    "fuzz test",
-    "fuzzing",
-    "edge case",
-    "stress test",
-    "malformed input",
-    "api test",
-    "integration test",
-    "e2e bug",
-    "memory leak",
-    "race condition",
-    "stack trace",
-    "exception handling",
-    "reproduce bug",
-    "runtime crash",
-    "erro em tempo de execucao",
-    "teste de stress",
-)
-_TEST_RUNNER_UNIT_MARKERS: Final = (
-    "unit test",
-    "write unit tests",
-    "create unit tests",
-    "pytest",
-    "unittest",
-    "test function",
-    "test class",
-    "mock test",
-    "fixture",
-    "parametrize",
-    "assert equal",
-    "test coverage",
-    "teste unitario",
-    "teste unitário",
-    "escrever testes",
-)
-_TEST_RUNNER_E2E_MARKERS: Final = (
-    "end to end test",
-    "e2e test",
-    "integration test",
-    "selenium",
-    "playwright",
-    "cypress",
-    "automation test",
-    "browser test",
-    "ui test",
-    "workflow test",
-    "teste e2e",
-    "teste de integracao",
-    "teste de integração",
-)
-_DOCUMENTER_MARKERS: Final = (
-    "document",
-    "documenta",
-    "docstring",
-    "readme",
-    "comment the",
-    "add comments",
-    "explain this code",
-    "write docs",
-    "api documentation",
-    "changelog",
-    "documentar",
-    "escrever documentação",
-)
-_RESEARCHER_MARKERS: Final = (
-    "latest version",
-    "current version",
-    "is x still",
-    "benchmark",
-    "released in",
-    "recent release",
-)
-_RESEARCHER_WEB_MARKERS: Final = (
-    "deep research",
-    "comprehensive research",
-    "research report",
-    "literature review",
-    "market analysis",
-    "competitive analysis",
-    "survey of",
-    "state of the art",
-    "current state of",
-    "latest developments in",
-    "recent advances",
-    "what does the research say",
-    "find all sources",
-    "cross-reference",
-    "validate this claim",
-    "fact check",
-)
-_WEB_SEARCH_MARKERS: Final = (
-    "search the web",
-    "search online",
-    "look up online",
-    "google",
-    "pesquisar na web",
-    "buscar online",
-    "latest news",
-    "current status of",
-    "find online",
-    "search for",
-    "look up",
-    "what is the latest",
-    "what are the latest",
-)
-_TRIVIAL_QUESTION = re.compile(r"^\s*(what|who|when|where|why|how)\s+is\b", re.IGNORECASE)
 
 
 @functools.lru_cache(maxsize=1000)
-def _fast_route_cached(normalized_query: str) -> AgentName | None:
-    """Cached inner implementation - operates on pre-normalized query."""
-    lowered = normalized_query
+def _keyword_classify_cached(normalized_query: str) -> AgentName | None:
+    """Cached inner keyword classifier. Delegates to the strategy helper."""
+    from backend.orchestrator.routing_strategies import _keyword_classify
 
-    # 1. DEBUGGER - error/debug patterns (most specific, check first)
-    if any(marker in lowered for marker in _DEBUGGER_MARKERS):
-        return "DEBUGGER"
-
-    # 1b. BUG_HUNTER_RUNTIME - runtime testing and reproduction patterns
-    if any(marker in lowered for marker in _BUG_HUNTER_RUNTIME_MARKERS):
-        return "BUG_HUNTER_RUNTIME"
-
-    # 2. ARCHITECT - design/planning patterns
-    if any(marker in lowered for marker in _ARCHITECT_MARKERS):
-        return "ARCHITECT"
-
-    # 3. REVIEWER - peer code review patterns (more specific than generic analyzer)
-    if any(marker in lowered for marker in _REVIEWER_MARKERS):
-        return "REVIEWER"
-
-    # 3a. ANALYZER - review/audit patterns
-    if any(marker in lowered for marker in _ANALYZER_MARKERS):
-        return "ANALYZER"
-
-    # 3b. BUG_HUNTER_STATIC - static analysis and security scan patterns
-    if any(marker in lowered for marker in _BUG_HUNTER_STATIC_MARKERS):
-        return "BUG_HUNTER_STATIC"
-
-    # 4. OPTIMIZER - performance patterns
-    if any(marker in lowered for marker in _OPTIMIZER_MARKERS):
-        return "OPTIMIZER"
-
-    # 4b. REFACTOR_PERFORMANCE - specific performance refactoring patterns
-    if any(marker in lowered for marker in _REFACTOR_PERF_MARKERS):
-        return "REFACTOR_PERFORMANCE"
-
-    # 4c. REFACTOR_CLEAN - code cleanliness refactoring patterns
-    if any(marker in lowered for marker in _REFACTOR_CLEAN_MARKERS):
-        return "REFACTOR_CLEAN"
-
-    # 4d. TEST_RUNNER_UNIT - unit testing patterns
-    if any(marker in lowered for marker in _TEST_RUNNER_UNIT_MARKERS):
-        return "TEST_RUNNER_UNIT"
-
-    # 4e. TEST_RUNNER_E2E - end-to-end testing patterns
-    if any(marker in lowered for marker in _TEST_RUNNER_E2E_MARKERS):
-        return "TEST_RUNNER_E2E"
-
-    # 4f. FILE_OPS - explicit file create/modify requests (route to CODER with tools)
-    if any(marker in lowered for marker in _FILE_OPS_MARKERS):
-        return "CODER"
-
-    # 5. CODER - code generation patterns
-    if any(marker in lowered for marker in _CODER_MARKERS):
-        return "CODER"
-
-    # 6. DOCUMENTER - documentation patterns
-    if any(marker in lowered for marker in _DOCUMENTER_MARKERS):
-        return "DOCUMENTER"
-
-    # 7. RESEARCHER_WEB - deep research patterns (check before simple researcher)
-    if any(marker in lowered for marker in _RESEARCHER_WEB_MARKERS):
-        return "RESEARCHER_WEB"
-
-    # 7b. RESEARCHER - research/web search patterns
-    if any(marker in lowered for marker in _RESEARCHER_MARKERS):
-        return "RESEARCHER"
-    if any(marker in lowered for marker in _WEB_SEARCH_MARKERS):
-        return "RESEARCHER"
-
-    # 8. MICRO - trivial factoid lookup (very short, simple questions)
-    words = lowered.split()
-    if len(words) <= 12 and _TRIVIAL_QUESTION.match(lowered):
-        return "MICRO"
-
-    return None
+    return _keyword_classify(normalized_query)
 
 
 def fast_route(query: str) -> AgentName | None:
@@ -578,29 +191,19 @@ def fast_route(query: str) -> AgentName | None:
     false positives. For example, "fix the error" should route to DEBUGGER,
     not CODER, even though "fix" could imply coding.
 
-    Results are cached with LRU (maxsize=1000) for repeated queries.
+    This is a thin shim that delegates to
+    :class:`backend.orchestrator.routing_strategies.KeywordRoutingStrategy`'s
+    internal keyword classifier. The LRU cache is preserved for performance
+    parity with the previous implementation.
     """
     if not query or not query.strip():
         return None
-
-    return _fast_route_cached(query.lower().strip())
+    return _keyword_classify_cached(query.lower().strip())
 
 
 # ---------------------------------------------------------------------------
-# Level 2 - model-based classification
+# Level 2 - model-based classification (shim)
 # ---------------------------------------------------------------------------
-
-_FALLBACK_DECISION = RoutingDecision(
-    primary_agent="CODER",
-    secondary_agents=[],
-    requires_web_search=False,
-    thinking_mode="fast",
-    estimated_complexity=3,
-    task_type="unclassified",
-    context_needed="low",
-    routing_confidence=0.2,
-    routing_reason="router-model-unavailable-or-malformed",
-)
 
 
 async def route_with_model(query: str, client: Any) -> RoutingDecision:
@@ -611,19 +214,27 @@ async def route_with_model(query: str, client: Any) -> RoutingDecision:
     decision pointing to CODER so the system always makes forward progress.
     The caller should use the ``routing_confidence`` field to decide whether
     to escalate.
+
+    This shim delegates the LLM call to
+    :class:`backend.orchestrator.routing_strategies.LLMRoutingStrategy` while
+    sharing the cache of the default :class:`Router` instance so caching
+    behaviour is preserved end-to-end.
     """
-    # Check cache first
-    hash_key = _query_hash(query)
-    cached = _get_cached_decision(hash_key)
+    if not query or not query.strip():
+        return _FALLBACK_DECISION
+
+    router = _get_default_router()
+    cache_key = _query_hash(query)
+    cached = await router.cache.get(cache_key)
     if cached is not None:
-        logger.debug("Routing decision cache hit for query hash: %s", hash_key[:8])
+        logger.debug("Routing decision cache hit for query hash: %s", cache_key[:8])
         return cached
 
     if detect_injection(query).detected:
         decision = _FALLBACK_DECISION.model_copy(
             update={"routing_reason": "prompt-injection-detected", "primary_agent": "MICRO"}
         )
-        _store_cached_decision(hash_key, decision)
+        await router.cache.set(cache_key, decision, _ROUTING_CACHE_TTL)
         return decision
 
     try:
@@ -646,42 +257,29 @@ async def route_with_model(query: str, client: Any) -> RoutingDecision:
         logger.warning("Router model call failed: %s", exc)
         return _FALLBACK_DECISION
 
-    decision = _parse_routing_decision(raw)
-    # Cache the successful routing decision
-    _store_cached_decision(hash_key, decision)
+    decision = parse_routing_decision(raw)
+    await router.cache.set(cache_key, decision, _ROUTING_CACHE_TTL)
     return decision
 
 
-def _parse_routing_decision(raw: str) -> RoutingDecision:
-    """Extract the first JSON object from ``raw`` and validate it."""
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not match:
-        logger.warning("Router output contained no JSON object: %r", raw[:200])
-        return _FALLBACK_DECISION
-    try:
-        payload = json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        logger.warning("Router JSON malformed (%s): %r", exc, match.group(0)[:200])
-        return _FALLBACK_DECISION
-
-    # Fix common model errors: convert string values to expected types
-    if "routing_confidence" in payload and isinstance(payload["routing_confidence"], str):
-        try:
-            # Convert string like "high" to a reasonable float value
-            if payload["routing_confidence"].lower() == "high":
-                payload["routing_confidence"] = 0.8
-            elif payload["routing_confidence"].lower() == "low":
-                payload["routing_confidence"] = 0.2
-            elif payload["routing_confidence"].lower() == "medium":
-                payload["routing_confidence"] = 0.5
-            else:
-                # Try to parse as float
-                payload["routing_confidence"] = float(payload["routing_confidence"])
-        except (ValueError, AttributeError):
-            payload["routing_confidence"] = 0.5  # Default fallback
-
-    try:
-        return RoutingDecision.model_validate(payload)
-    except ValidationError as exc:
-        logger.warning("Router decision failed validation: %s", exc)
-        return _FALLBACK_DECISION
+__all__ = [
+    "RoutingDecision",
+    "AgentName",
+    "fast_route",
+    "route_with_model",
+    "warm_routing_cache",
+    # New public API re-exported for back-compat with the strategy refactor.
+    "Router",
+    "RoutingStrategy",
+    "KeywordRoutingStrategy",
+    "LLMRoutingStrategy",
+    "TTLCacheBackend",
+    "NullCacheBackend",
+    # Private back-compat aliases. Re-exported so tests that import them
+    # by their historical names keep working.
+    "_FALLBACK_DECISION",
+    "_parse_routing_decision",
+    "_ROUTING_CACHE_TTL",
+    "_ROUTING_CACHE_MAX",
+    "_query_hash",
+]

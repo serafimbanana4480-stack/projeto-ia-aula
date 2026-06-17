@@ -116,6 +116,9 @@ class DashboardAgent(AgentBase):
         self._history: deque[dict[str, Any]] = deque(maxlen=1000)
         self._alerts: deque[Alert] = deque(maxlen=100)
         self._rolling_minutes = 5
+        self._last_alert_time: dict[str, float] = {}
+
+    ALERT_DEBOUNCE_SECONDS = 900  # 15 minutes
 
     async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
         """On-demand Q&A about metrics using the ReAct loop.
@@ -294,6 +297,15 @@ class DashboardAgent(AgentBase):
     # Anomaly detection
     # ------------------------------------------------------------------
 
+    def _should_alert(self, metric: str, severity: str) -> bool:
+        key = f"{severity}:{metric}"
+        now = time.time()
+        last = self._last_alert_time.get(key, 0.0)
+        if now - last < self.ALERT_DEBOUNCE_SECONDS:
+            return False
+        self._last_alert_time[key] = now
+        return True
+
     def _detect_anomalies(self, snapshot: dict[str, Any], history: list[dict[str, Any]]) -> list[Alert]:
         """Detect anomalies in the current snapshot."""
         alerts: list[Alert] = []
@@ -301,38 +313,39 @@ class DashboardAgent(AgentBase):
 
         # Threshold-based alerts
         cpu = snapshot.get("cpu_percent", 0) or 0
-        if cpu > 90:
+        if cpu > 90 and self._should_alert("cpu_percent", "critical"):
             alerts.append(self._make_alert("critical", "cpu_percent", cpu, 90, "CPU usage critically high", now))
-        elif cpu > 75:
+        elif cpu > 75 and self._should_alert("cpu_percent", "alert"):
             alerts.append(self._make_alert("alert", "cpu_percent", cpu, 75, "CPU usage elevated", now))
 
         ram = snapshot.get("ram_percent", 0) or 0
-        if ram > 90:
+        if ram > 90 and self._should_alert("ram_percent", "critical"):
             alerts.append(self._make_alert("critical", "ram_percent", ram, 90, "Memory usage critically high", now))
-        elif ram > 80:
+        elif ram > 80 and self._should_alert("ram_percent", "alert"):
             alerts.append(self._make_alert("alert", "ram_percent", ram, 80, "Memory usage elevated", now))
 
         disk = snapshot.get("disk_percent", 0) or 0
-        if disk > 90:
+        if disk > 90 and self._should_alert("disk_percent", "critical"):
             alerts.append(self._make_alert("critical", "disk_percent", disk, 90, "Disk usage critically high", now))
-        elif disk > 80:
+        elif disk > 80 and self._should_alert("disk_percent", "alert"):
             alerts.append(self._make_alert("alert", "disk_percent", disk, 80, "Disk usage elevated", now))
 
         # Latency alert
         latency = snapshot.get("avg_latency_ms", 0) or 0
-        if latency > 5000:
+        if latency > 5000 and self._should_alert("avg_latency_ms", "alert"):
             alerts.append(self._make_alert("alert", "avg_latency_ms", latency, 5000, "Average latency very high", now))
 
         # Error rate alert
         error_rate = snapshot.get("db_stats", {}).get("tool_error_rate", 0) or 0
-        if error_rate > 0.25:
+        if error_rate > 0.25 and self._should_alert("tool_error_rate", "alert"):
             alerts.append(self._make_alert("alert", "tool_error_rate", error_rate, 0.25, "Tool error rate elevated", now))
 
         # Statistical anomaly: z-score over rolling window
         for metric in ("cpu_percent", "ram_percent", "avg_latency_ms"):
-            z_alert = self._zscore_alert(metric, snapshot, history, now)
-            if z_alert:
-                alerts.append(z_alert)
+            if self._should_alert(metric, "warning"):
+                z_alert = self._zscore_alert(metric, snapshot, history, now)
+                if z_alert:
+                    alerts.append(z_alert)
 
         # Determine overall status
         if any(a.severity == "critical" for a in alerts):

@@ -69,6 +69,7 @@ from backend.orchestrator.routes.collaboration import router as collaboration_ro
 from backend.orchestrator.routes.second_brain import router as second_brain_router
 from backend.orchestrator.routes.orchestrator import router as orchestrator_router
 from backend.orchestrator.routes.skills import router as skills_router
+from backend.orchestrator.routes.models_ui import router as models_ui_router
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +248,7 @@ app.include_router(system_router, prefix="/api")
 app.include_router(second_brain_router, prefix="/api")
 app.include_router(orchestrator_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")
+app.include_router(models_ui_router, prefix="/api")
 
 # MetaOrchestrator WebSocket — mounted directly so path is ``/ws/missions/{id}``
 from backend.orchestrator.routes.meta import mission_websocket as _meta_ws  # noqa: E402

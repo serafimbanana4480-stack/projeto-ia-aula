@@ -6,12 +6,44 @@ from starlette.datastructures import MutableHeaders
 
 from backend.config.settings import get_settings
 
+# Default Content-Security-Policy used when ``CSP_POLICY`` is not set and
+# ``CSP_ENABLED`` is true (default).
+#
+# Pragmatic production CSP tuned for the NEXUS IDE frontend stack:
+#   - Next.js 15 (hydration injects inline scripts/styles)
+#   - Monaco editor (web workers spawned from blob URLs + eval-based AMD loader)
+#   - Tailwind (inline styles) / recharts / xterm
+#
+# ``'unsafe-eval'`` and ``'unsafe-inline'`` are required for Monaco/Next to
+# function. In a stricter production setup these would be replaced by
+# per-request nonces (``'nonce-<random>'``) generated server-side and applied
+# to whitelisted <script>/<style> tags. That is documented as a follow-up; the
+# current policy is intentionally permissive-but-bounded.
+#
+# Note on ``frame-ancestors 'none'`` vs ``X-Frame-Options: DENY``:
+#   In modern browsers CSP ``frame-ancestors`` takes precedence and
+#   ``X-Frame-Options`` is ignored when both are present. We keep
+#   ``X-Frame-Options: DENY`` purely for legacy browsers (old IE / old
+#   Safari) that do not implement CSP frame-ancestors.
+DEFAULT_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-eval' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self'; "
+    "worker-src 'self' blob:; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "object-src 'none'"
+)
+
 
 class SecurityHeadersMiddleware:
     """ASGI middleware to add security headers to all responses.
 
     Adds headers for:
-    - Content Security Policy (CSP)
+    - Content Security Policy (CSP) — configurable via ``CSP_ENABLED`` / ``CSP_POLICY``
     - X-Frame-Options
     - X-Content-Type-Options
     - X-XSS-Protection
@@ -32,35 +64,23 @@ class SecurityHeadersMiddleware:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
 
-                # Content Security Policy - Restricts sources of content
                 settings = get_settings()
                 is_prod = getattr(settings, "environment", "development") == "production"
 
-                # In production we drop 'unsafe-eval' and tighten connect-src.
-                # 'unsafe-inline' is kept because Next.js hydration requires it.
-                script_src = "script-src 'self' 'unsafe-inline'" + ("" if is_prod else " 'unsafe-eval'")
-                connect_src = (
-                    "connect-src 'self' ws: wss:"
-                    if is_prod
-                    else "connect-src 'self' http://localhost:* ws://localhost:* ws: wss:"
-                )
-                csp_parts = [
-                    "default-src 'self'",
-                    script_src,
-                    "style-src 'self' 'unsafe-inline'",
-                    "img-src 'self' data: https:",
-                    "font-src 'self' data:",
-                    connect_src,
-                    "frame-ancestors 'none'",
-                    "base-uri 'self'",
-                    "form-action 'self'",
-                    "object-src 'none'",
-                ]
-                if is_prod:
-                    csp_parts.append("upgrade-insecure-requests")
-                headers["Content-Security-Policy"] = "; ".join(csp_parts) + ";"
+                # Content Security Policy — configurable.
+                #   CSP_ENABLED=false -> header omitted entirely (dev/debug).
+                #   CSP_POLICY=<string> -> used verbatim, overriding the default.
+                #   otherwise -> DEFAULT_CSP (pragmatic production policy).
+                csp_enabled = bool(getattr(settings, "csp_enabled", True))
+                if csp_enabled:
+                    csp_policy = getattr(settings, "csp_policy", "") or ""
+                    csp = csp_policy.strip() if csp_policy.strip() else DEFAULT_CSP
+                    if is_prod:
+                        csp = csp + "; upgrade-insecure-requests"
+                    headers["Content-Security-Policy"] = csp
 
-                # X-Frame-Options - Prevent clickjacking
+                # X-Frame-Options - Prevent clickjacking (legacy browsers).
+                # CSP frame-ancestors 'none' takes precedence in modern browsers.
                 headers["X-Frame-Options"] = "DENY"
 
                 # X-Content-Type-Options - Prevent MIME type sniffing

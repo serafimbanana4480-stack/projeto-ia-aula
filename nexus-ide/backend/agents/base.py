@@ -27,10 +27,34 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+from backend.agents.action_registry import get_action_registry
 from backend.config.settings import get_model_config, load_prompt
 from backend.observability.metrics_collector import get_metrics_collector
 from backend.tools.ollama_client import ChatMessage
 from backend.tools.registry import execute_tool
+from backend.token_management import (
+    count_tokens,
+    deduplicate_context_blocks,
+    validate_total_budget,
+    ContextOverflowError,
+    dynamic_threshold,
+    MODEL_CONTEXT_LIMITS,
+    trim_context_structured,
+)
+
+# Cache modules — best-effort; system works without them
+try:
+    from backend.cache.semantic_cache import get_semantic_cache
+    from backend.cache.tool_result_cache import get_tool_cache
+    _HAVE_CACHE = True
+except ImportError:
+    _HAVE_CACHE = False
+
+try:
+    from backend.observability.metrics import get_cost_tracker
+    _HAVE_COST_TRACKER = True
+except ImportError:
+    _HAVE_COST_TRACKER = False
 
 logger = logging.getLogger(__name__)
 
@@ -117,32 +141,6 @@ class AgentBase(ABC):
         """Return the cached system prompt for this agent."""
         return load_prompt(self.prompt_file)
 
-    # Action-to-tool mapping for ReAct loop
-    _ACTION_TOOLS: dict[AgentAction, tuple[str, str]] = {
-        AgentAction.READ_FILE: ("read_file", '{"path": "<file_path>"}'),
-        AgentAction.WRITE_FILE: ("write_file", '{"path": "<file_path>", "content": "<file_content>"}'),
-        AgentAction.WRITE_FILE_ABSOLUTE: ("write_file_absolute", '{"path": "<absolute_path>", "content": "<file_content>"}'),
-        AgentAction.READ_FILE_ABSOLUTE: ("read_file_absolute", '{"path": "<absolute_path>"}'),
-        AgentAction.LIST_DIR: ("list_dir", '{"path": "<directory_path>"}'),
-        AgentAction.LIST_DIR_ABSOLUTE: ("list_dir_absolute", '{"path": "<absolute_directory_path>"}'),
-        AgentAction.EXECUTE_CODE: ("execute_code", '{"code": "<code_string>", "language": "python"}'),
-        AgentAction.SEARCH_CODEBASE: ("search_codebase", '{"query": "<search_query>", "project_path": "."}'),
-        AgentAction.SEARCH_SYMBOLS: ("search_symbols", '{"query": "<symbol_name>", "kind": "function|class|variable"}'),
-        AgentAction.INDEX_SYMBOLS: ("index_symbols", '{"project_path": ".", "force_reindex": false}'),
-        AgentAction.SEARCH_WEB: ("web_search", '{"query": "<search_query>"}'),
-        AgentAction.FETCH_URL: ("fetch_url", '{"url": "<target_url>"}'),
-        AgentAction.CONSULT_AGENT: ("consult_agent", '{"agent": "<agent_name>", "question": "<question_to_ask>"}'),
-        AgentAction.READ_DOCS: ("read_file", '{"path": "<doc_file>"}'),
-        AgentAction.RECALL_CONTEXT: ("recall_context", '{"query": "<search_query>", "session_id": "<optional_session_id>"}'),
-        AgentAction.STORE_MEMORY: ("store_memory", '{"content": "<important_fact>", "memory_type": "session|project|global", "tags": "tag1,tag2"}'),
-        AgentAction.ANALYZE_DATA: ("data_analysis", '{"data_path": "<file>", "query": "<analysis_query>"}'),
-        AgentAction.GENERATE_REPORT: ("report_generation", '{"title": "<title>", "sections": "<json_sections>"}'),
-        AgentAction.SCAFFOLD_PROJECT: ("scaffold_project", '{"name": "<project_name>", "template": "python"}'),
-        AgentAction.SEARCH_GITHUB: ("search_github", '{"query": "<query>", "language": "python", "stars_min": 100}'),
-        AgentAction.SEARCH_DOCS: ("search_docs", '{"query": "<query>", "framework": "python"}'),
-        AgentAction.DEEP_RESEARCH: ("deep_research", '{"query": "<research_query>", "max_results": 5}'),
-    }
-
     async def abuild_messages(
         self, request: AgentRequest, context: str = ""
     ) -> list[dict[str, str]]:
@@ -200,6 +198,16 @@ class AgentBase(ABC):
         for msg in request.history:
             messages.append({"role": msg.role, "content": msg.content})
         messages.append({"role": "user", "content": request.query})
+
+        # Deduplicate context blocks before sending to LLM
+        # This prevents repeated instructions from inflating the context
+        if len(messages) > 2:
+            text_blocks = [m.get("content", "") for m in messages]
+            if text_blocks:
+                deduped_contents = deduplicate_context_blocks(text_blocks)
+                for i, m in enumerate(messages):
+                    if i < len(deduped_contents):
+                        m["content"] = deduped_contents[i]
         return messages
 
     def build_messages(self, request: AgentRequest, context: str = "") -> list[dict[str, str]]:
@@ -244,9 +252,10 @@ class AgentBase(ABC):
             "Available tools:",
         ]
         for action in self.supported_actions:
-            mapping = self._ACTION_TOOLS.get(action)
+            mapping = get_action_registry().get(action.name)
             if mapping:
-                tool_name, example_args = mapping
+                tool_name = mapping.tool
+                example_args = mapping.example_args
                 lines.append(f'  - {tool_name}: {example_args}')
 
         lines.extend([
@@ -303,6 +312,33 @@ class AgentBase(ABC):
         }
         messages = await self.abuild_messages(request, context)
 
+        # Validate total token budget before sending to LLM
+        try:
+            total_input = sum(count_tokens(str(m), self.model_key) for m in messages)
+            validate_total_budget(
+                system_tokens=total_input,
+                model_tier=self.model_key,
+                output_reserve=max_tokens,
+            )
+        except ContextOverflowError as e:
+            # If overflow, try trimming context and retry
+            logger.warning("[%s] %s. Attempting context compression...", self.name, e)
+            # Compress history by keeping only last 3 turns
+            compressed_messages = [messages[0]]  # Keep system
+            if len(messages) > 4:
+                # Keep system, last 2 user/assistant pairs, current query
+                compressed_messages.extend(messages[-3:])
+            else:
+                compressed_messages = messages[:3] + [messages[-1]]
+            messages = compressed_messages
+            # Re-validate
+            total_input = sum(count_tokens(str(m), self.model_key) for m in messages)
+            validate_total_budget(
+                system_tokens=total_input,
+                model_tier=self.model_key,
+                output_reserve=max_tokens,
+            )
+
         # Try primary model, then fallback
         fallback_id = model_cfg.get("fallback_id")
         models_to_try = [model_cfg["id"]]
@@ -350,6 +386,21 @@ class AgentBase(ABC):
                 await collector.record_request(success=True, latency_ms=latency_ms)
                 if tokens_out > 0:
                     await collector.record_token(model_id, tokens_out)
+                # Record cost tracking
+                if _HAVE_COST_TRACKER:
+                    try:
+                        tracker = get_cost_tracker()
+                        # Estimate input tokens
+                        input_tokens = sum(count_tokens(str(m), self.model_key) for m in messages)
+                        tracker.record(
+                            model=model_id,
+                            input_tokens=input_tokens,
+                            output_tokens=tokens_out,
+                            session_id=request.session_id,
+                            agent=self.name,
+                        )
+                    except Exception:
+                        pass  # Cost tracking is best-effort
                 return  # Success — done
             except Exception as exc:
                 last_error = exc
@@ -445,27 +496,63 @@ class AgentBase(ABC):
             except json.JSONDecodeError:
                 logger.warning("Failed to parse legacy tool args: %s", match.group(2)[:120])
 
-        # Format 4: Inline JSON objects / arrays that look like tool calls.
-        # We scan for likely starting points and greedily extend until valid JSON.
-        for start_marker in ('{"name":', '{"tool":', '{"function":', '[{"name":', '[{"tool":'):
-            idx = 0
-            while True:
-                idx = content.find(start_marker, idx)
-                if idx == -1:
-                    break
-                # Try increasing slice lengths
-                for length in (128, 256, 512, 1024, 2048, 4096, 8192, 16384):
-                    snippet = content[idx:idx + length]
-                    try:
-                        _extract_from_json(json.loads(snippet))
-                        idx += length
-                        break
-                    except json.JSONDecodeError:
-                        continue
-                    except Exception:
-                        break
+        def _extract_json_objects(text: str):
+            """Single-pass JSON object/array extractor using brace counting.
+            Yields parsed JSON objects found in the text.
+            """
+            i = 0
+            text_len = len(text)
+            while i < text_len:
+                if text[i] not in ('{', '['):
+                    i += 1
+                    continue
+
+                start = i
+                depth = 0
+                in_string = False
+                is_array = text[i] == '['
+                opening = text[i]
+                closing = ']' if is_array else '}'
+
+                while i < text_len:
+                    ch = text[i]
+                    if in_string:
+                        if ch == '\\':
+                            i += 2
+                            continue
+                        elif ch == '"':
+                            in_string = False
+                    else:
+                        if ch == '"':
+                            in_string = True
+                        elif ch == opening:
+                            depth += 1
+                        elif ch == closing:
+                            depth -= 1
+                            if depth == 0:
+                                snippet = text[start:i + 1]
+                                try:
+                                    yield json.loads(snippet)
+                                except json.JSONDecodeError:
+                                    pass
+                                break
+                    i += 1
                 else:
-                    idx += 1
+                    snippet = text[start:]
+                    try:
+                        yield json.loads(snippet)
+                    except json.JSONDecodeError:
+                        pass
+                    break
+
+                i += 1
+
+        # Format 4: Scan for inline JSON objects using efficient brace-counting
+        for obj in _extract_json_objects(content):
+            try:
+                _extract_from_json(obj)
+            except Exception:
+                continue
 
         return calls
 
@@ -480,8 +567,8 @@ class AgentBase(ABC):
         return "", content
 
     def _estimate_tokens(self, text: str) -> int:
-        """Rough token estimate: ~4 chars per token for English/ASCII text."""
-        return max(1, len(text) // 4)
+        """Token estimate: uses tiktoken if available, falls back to len//4."""
+        return count_tokens(text, self.model_key)
 
     _FILE_TASK_MARKERS: tuple[str, ...] = (
         "create a file",
@@ -512,39 +599,71 @@ class AgentBase(ABC):
         return any(h in lowered for h in code_hints)
 
     def _trim_context(self, context: str, iteration: int) -> str:
-        """Trim context to keep it under ~4000 tokens.
+        """Trim context using structured iteration compression.
 
-        Keeps the most recent 3 iterations in full detail.
-        Summarizes older iterations into a memory digest.
+        Falls back to simple truncation if structured data is not available.
         """
+        # Try to use structured trimming
+        try:
+            # Parse iterations from context
+            import json
+            iterations_raw = context.split("\nTool ")
+            iterations = []
+            for i, raw in enumerate(iterations_raw):
+                if raw.strip():
+                    iterations.append({
+                        "thought": raw[:200],
+                        "tool": "",
+                        "result": raw,
+                        "iteration": i,
+                    })
+
+            if len(iterations) > 3:
+                trimmed = trim_context_structured(iterations, self.model_key, self.model_key)
+                if trimmed:
+                    result = "\n".join(
+                        it.get("result", it.get("content", str(it)))
+                        for it in trimmed
+                    )
+                    # Log reduction
+                    before_tok = count_tokens(context, self.model_key)
+                    after_tok = count_tokens(result, self.model_key)
+                    reduction = (1 - after_tok / max(1, before_tok)) * 100
+                    logger.debug(
+                        "[%s] Context trimmed: %d \u2192 %d tokens (%.0f%% reduction)",
+                        self.name, before_tok, after_tok, reduction,
+                    )
+                    return result
+        except Exception as exc:
+            logger.debug("[%s] Structured trimming failed: %s", self.name, exc)
+
+        # Fallback: simple truncation (original behavior)
         token_count = self._estimate_tokens(context)
-        if token_count <= 4000:
+        if token_count <= dynamic_threshold(self.model_key):
             return context
 
-        # Split by iteration markers
-        iterations = context.split("\nTool ")
-        if len(iterations) <= 4:
-            # Not enough structure — simple truncation of oldest content
-            excess = token_count - 3500
-            chars_to_remove = excess * 4
-            return context[chars_to_remove:]
+        iterations_raw = context.split("\nTool ")
+        if len(iterations_raw) > 3:
+            summary_parts = []
+            keep_start = max(0, len(iterations_raw) - 3)
+            for i, it in enumerate(iterations_raw[:keep_start]):
+                first_line = it.split("\n")[0] if "\n" in it else it[:60]
+                summary_parts.append(f"[Iteration {i+1}] {first_line}")
+            digest = "\n".join(summary_parts)
+            recent = "\nTool ".join(iterations_raw[keep_start:])
+            trimmed = f"[Memory digest of earlier steps]\n{digest}\n\n[Recent steps]\n{recent}"
 
-        # Keep last 3 iterations in full, summarize the rest
-        keep_start = max(1, len(iterations) - 3)
-        summary_parts: list[str] = []
-        for i, part in enumerate(iterations[1:keep_start], start=1):
-            # Extract just the tool name and success/failure
-            first_line = part.split(":", 1)[0] if ":" in part else part[:60]
-            summary_parts.append(f"[Iteration {i}] {first_line}...")
+            before_tok = self._estimate_tokens(context)
+            after_tok = self._estimate_tokens(trimmed)
+            logger.debug(
+                "[%s] Context trimmed (fallback): %d \u2192 %d tokens",
+                self.name, before_tok, after_tok,
+            )
+            return trimmed
 
-        digest = "\n".join(summary_parts)
-        recent = "\nTool ".join(iterations[keep_start:])
-        trimmed = f"[Memory digest of earlier steps]\n{digest}\n\n[Recent steps]\n{recent}"
-        logger.info(
-            "[%s] Context trimmed | before=%d tokens | after=%d tokens | iterations=%d -> %d recent",
-            self.name, token_count, self._estimate_tokens(trimmed), len(iterations) - 1, len(iterations) - keep_start,
-        )
-        return trimmed
+        # Very short context — just truncate
+        excess = self._estimate_tokens(context) - dynamic_threshold(self.model_key)
+        return context[excess * 4:]
 
     async def _run_react_loop(
         self,
@@ -781,12 +900,14 @@ class AgentBase(ABC):
         return await bus.subscribe(topic, callback)
 
     # ------------------------------------------------------------------
-    # Required override
+    # Default implementation — can be overridden by agents that need
+    # custom behavior (e.g. RouterAgent, MicroAgent, SupervisorAgent).
+    # Previously ~16 agents duplicated this same 4-line body.
     # ------------------------------------------------------------------
-    @abstractmethod
     async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
-        """Agent-specific execution logic — subclasses implement this."""
-        raise NotImplementedError
+        """Run the ReAct loop. Override for custom execution logic."""
+        async for token in self._run_react_loop(request):
+            yield token
 
     # ------------------------------------------------------------------
     # State-aware entry point

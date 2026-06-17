@@ -4,6 +4,7 @@ import ast
 import hashlib
 import importlib.util
 import logging
+import math
 import os
 import subprocess
 from dataclasses import dataclass, field
@@ -168,11 +169,12 @@ async def _measure_complexity(project_path: str) -> float:
 
 async def _measure_maintainability(cyclomatic_complexity: float, duplication_ratio: float) -> float:
     try:
+        cc = cyclomatic_complexity if cyclomatic_complexity > 0 else 1.0
         raw = (
             171
-            - 5.2 * (cyclomatic_complexity if cyclomatic_complexity > 0 else 1.0)
-            - 0.23 * cyclomatic_complexity
-            - 16.2 * (cyclomatic_complexity if cyclomatic_complexity > 0 else 1.0)
+            - 5.2 * math.log(cc)
+            - 0.23 * cc
+            - 16.2 * math.log(cc)
             - 50 * duplication_ratio
         )
         return round(max(0.0, min(100.0, raw)), 2)

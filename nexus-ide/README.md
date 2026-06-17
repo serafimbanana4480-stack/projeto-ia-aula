@@ -154,6 +154,27 @@ Configuração de modelos: `config/models.yaml`. Prompts: `config/prompts/`.
 
 ---
 
+## Configuração
+
+O ficheiro `.env` (copiado a partir de `.env.example`) controla o comportamento
+do backend. As flags abaixo são todas **conservadoras por omissão** — todas as
+capacidades autónomas estão desligadas até o operador as activar
+explicitamente.
+
+| Variável | Default | Efeito |
+|----------|---------|--------|
+| `NEXUS_AUTO_APPLY` | `false` | Quando `true`, o `ProposalApplier` pode aplicar propostas do `SelfImprovementAnalyzer` automaticamente. |
+| `NEXUS_AUTO_APPLY_DRY_RUN` | `true` | Quando `true`, exige um dry-run + suite de testes antes de aplicar. |
+| `NEXUS_EVENT_REPLAY` | `false` | Quando `true`, o `EventBus` reproduz eventos persistidos no arranque. |
+| `NEXUS_EVENT_RETENTION_HOURS` | `24` | Janela de retenção do `EventStore`. |
+| `NEXUS_MEMORY_DECAY` | `false` | Quando `true`, o `MemoryBank` corre uma varredura periódica de decay. |
+| `NEXUS_MEMORY_DECAY_THRESHOLD` | `0.2` | Importância mínima para uma memória sobreviver. |
+| `NEXUS_MEMORY_DECAY_INTERVAL_HOURS` | `24` | Intervalo entre varreduras de decay. |
+| `NEXUS_SELF_HEAL_MAX_PER_HOUR` | `5` | Circuit-breaker para o re-planner do `AutoCorrectionLoop`. |
+| `NEXUS_PROPOSAL_TEST_CMD` | `python -m pytest backend/tests -q --maxfail=1` | Comando que o `ProposalApplier` corre antes de declarar dry-run OK. |
+
+---
+
 ## Documentação adicional
 
 | Documento | Conteúdo |
@@ -181,9 +202,46 @@ Configuração de modelos: `config/models.yaml`. Prompts: `config/prompts/`.
 
 ---
 
+## Testes
+
+Correr a partir da **raiz do projeto `nexus-ide/`** (carrega `pyproject.toml` para cobertura):
+
+```bash
+# Backend (pytest + coverage) — a partir de nexus-ide/
+python -m pytest backend/tests/ --cov=backend -q
+
+# Ou via Makefile
+make test-backend
+
+# Frontend (Vitest)
+cd frontend && npm test
+
+# Lint completo
+make lint      # ruff + mypy + eslint
+
+# Tudo
+make test
+```
+
+Notas:
+- Testes marcados `@integration` requerem Ollama em execução e são ignorados por omissão.
+- `faiss` é opcional: `TestFAISSVectorStore` é saltado automaticamente (`pytest.importorskip`) se `faiss-cpu` não estiver instalado.
+- Os comandos devem ser executados num ambiente com shell; este repositório é editado sem bash.
+
+---
+
 ## Segurança
 
-Múltiplas camadas: path traversal protection, file locks, trust system, shell validation, rate limiting (10 req/min), JWT auth, CSP headers, sandbox Docker isolado.
+Múltiplas camadas de defense-in-depth:
+
+- **Path traversal protection** e **shell validation** nos ferramentais ReAct.
+- **Rate limiting** (10 req/min por IP) e **JWT auth** em todos os endpoints protegidos.
+- **Sandbox Docker isolado** para execução de código (fallback Python AST quando Docker indisponível).
+- **Locks distribuídos via Redis (SEC-001):** `backend/core/file_locks.py` — `SET NX PX` + libertação Lua segura (verifica owner antes do `DEL`), TTL 30s configurável (`NEXUS_LOCK_REDIS_TTL_MS`). Fallback `filelock → asyncio.Lock` quando Redis indisponível. Kill-switch `NEXUS_DISABLE_REDIS_LOCK`.
+- **Content-Security-Policy configurável (SEC-002):** `backend/middleware/security.py` com `DEFAULT_CSP` afinado para Next.js + Monaco + Tailwind; toggle `CSP_ENABLED`, override `CSP_POLICY`. Defense-in-depth no frontend via `headers()` CSP em `frontend/next.config.mjs`.
+- **Validação de upload (SEC-003):** `backend/orchestrator/routes/files.py` — limite 10 MB, allowlist de extensões, verificação de magic bytes com detecção de mismatch (extensão vs conteúdo), guard contra path traversal.
+
+Os 3 gaps de segurança identificados no audit (SEC-001/002/003) estão **fechados**.
 
 ---
 
@@ -198,4 +256,4 @@ Ver [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ---
 
-**Última atualização:** 2026-06-13
+**Última atualização:** 2026-06-18

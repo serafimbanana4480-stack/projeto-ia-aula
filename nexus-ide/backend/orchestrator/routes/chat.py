@@ -35,6 +35,7 @@ from backend.models.api import ChatRequest, RoutingDecision, StreamEvent
 from backend.orchestrator.fallback import invoke_with_fallback
 from backend.orchestrator.registry import get_registry, resolve
 from backend.orchestrator.router import fast_route, route_with_model
+from backend.orchestrator.routing_config import MODEL_TIER_TO_AGENT as _MODEL_TIER_TO_AGENT
 from backend.orchestrator.smart_router import smart_route_tier
 from backend.persistence.db import add_message, create_session, get_session
 from backend.tools.ollama_client import ChatMessage
@@ -133,23 +134,6 @@ def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
 
     return events
 
-
-# Map model tier keys (from frontend) to the agent that should handle them.
-# When the user explicitly selects a model, we route to the corresponding agent.
-_MODEL_TIER_TO_AGENT: dict[str, str] = {
-    "micro": "MICRO",
-    "fast": "DOCUMENTER",
-    "coder": "CODER",
-    "reasoning": "ARCHITECT",
-    "deep": "ARCHITECT",
-    # Legacy aliases (kept for backward compatibility)
-    "small": "DOCUMENTER",
-    "medium": "CODER",
-    "large": "ANALYZER",
-    "expert": "ARCHITECT",
-    "nano": "MICRO",
-    "dashboard": "MICRO",
-}
 
 
 # ---------------------------------------------------------------------------

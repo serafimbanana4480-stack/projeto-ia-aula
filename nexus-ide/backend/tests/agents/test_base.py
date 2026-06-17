@@ -178,9 +178,14 @@ class TestAgentBaseContract:
 
     def test_action_tools_mapping_uses_registered_tool_names(self) -> None:
         """Verify _ACTION_TOOLS maps to actual registered tool names, not stale names."""
-        from backend.agents.base import AgentBase
+        from backend.agents.action_registry import get_action_registry
+        from backend.agents.base import AgentAction
 
-        for action, (tool_name, _example) in AgentBase._ACTION_TOOLS.items():
+        registry = get_action_registry()
+        for action in AgentAction:
+            spec = registry.get(action.name)
+            assert spec is not None, f"Action {action.name} missing from registry"
+            tool_name = spec.tool
             assert tool_name == action.value or tool_name in {
                 "read_file", "write_file", "execute_code", "web_search",
                 "fetch_url", "consult_agent", "recall_context", "store_memory",
@@ -189,29 +194,37 @@ class TestAgentBaseContract:
 
     def test_search_codebase_maps_to_search_codebase_tool(self) -> None:
         """Regression: SEARCH_CODEBASE must map to 'search_codebase', not 'search_in_files'."""
-        from backend.agents.base import AgentBase, AgentAction
+        from backend.agents.action_registry import get_action_registry
+        from backend.agents.base import AgentAction
 
-        tool_name, _ = AgentBase._ACTION_TOOLS[AgentAction.SEARCH_CODEBASE]
-        assert tool_name == "search_codebase"
+        spec = get_action_registry().get(AgentAction.SEARCH_CODEBASE.name)
+        assert spec is not None
+        assert spec.tool == "search_codebase"
 
     def test_fetch_url_maps_to_fetch_url_tool(self) -> None:
         """FETCH_URL must map to 'fetch_url', not 'web_search'."""
-        from backend.agents.base import AgentBase, AgentAction
+        from backend.agents.action_registry import get_action_registry
+        from backend.agents.base import AgentAction
 
-        tool_name, _ = AgentBase._ACTION_TOOLS[AgentAction.FETCH_URL]
-        assert tool_name == "fetch_url"
+        spec = get_action_registry().get(AgentAction.FETCH_URL.name)
+        assert spec is not None
+        assert spec.tool == "fetch_url"
 
     def test_analyze_data_maps_to_data_analysis_tool(self) -> None:
-        from backend.agents.base import AgentBase, AgentAction
+        from backend.agents.action_registry import get_action_registry
+        from backend.agents.base import AgentAction
 
-        tool_name, _ = AgentBase._ACTION_TOOLS[AgentAction.ANALYZE_DATA]
-        assert tool_name == "data_analysis"
+        spec = get_action_registry().get(AgentAction.ANALYZE_DATA.name)
+        assert spec is not None
+        assert spec.tool == "data_analysis"
 
     def test_generate_report_maps_to_report_generation_tool(self) -> None:
-        from backend.agents.base import AgentBase, AgentAction
+        from backend.agents.action_registry import get_action_registry
+        from backend.agents.base import AgentAction
 
-        tool_name, _ = AgentBase._ACTION_TOOLS[AgentAction.GENERATE_REPORT]
-        assert tool_name == "report_generation"
+        spec = get_action_registry().get(AgentAction.GENERATE_REPORT.name)
+        assert spec is not None
+        assert spec.tool == "report_generation"
 
     async def test_stream_llm_yields_all_tokens(self, ollama_client) -> None:
         class T(AgentBase):

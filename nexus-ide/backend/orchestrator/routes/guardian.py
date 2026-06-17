@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from backend.middleware.auth import require_auth
 
 from backend.agents.guardian import NexusGuardianAgent
 from backend.observability.advanced_logging import get_structured_logger
@@ -20,7 +22,7 @@ def _get_guardian(request: Request) -> NexusGuardianAgent | None:
 
 
 @router.get("/guardian/status")
-async def guardian_status(request: Request) -> dict[str, Any]:
+async def guardian_status(request: Request, auth_user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     """Get current guardian and system status."""
     guardian = _get_guardian(request)
     if not guardian:
@@ -31,6 +33,7 @@ async def guardian_status(request: Request) -> dict[str, Any]:
 @router.get("/guardian/suggestions")
 async def guardian_suggestions(
     request: Request,
+    auth_user: dict[str, Any] = Depends(require_auth),
     limit: int = 10,
     category: str | None = None,
     priority: str | None = None,
@@ -51,7 +54,7 @@ async def guardian_suggestions(
 
 
 @router.post("/guardian/suggestions/{suggestion_id}/apply")
-async def apply_suggestion(suggestion_id: str, request: Request) -> dict[str, Any]:
+async def apply_suggestion(suggestion_id: str, request: Request, auth_user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     """Apply a guardian suggestion."""
     guardian = _get_guardian(request)
     if not guardian:
@@ -63,7 +66,7 @@ async def apply_suggestion(suggestion_id: str, request: Request) -> dict[str, An
 
 
 @router.post("/guardian/suggestions/{suggestion_id}/dismiss")
-async def dismiss_suggestion(suggestion_id: str, request: Request) -> dict[str, Any]:
+async def dismiss_suggestion(suggestion_id: str, request: Request, auth_user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     """Dismiss a guardian suggestion."""
     guardian = _get_guardian(request)
     if not guardian:
@@ -77,6 +80,7 @@ async def dismiss_suggestion(suggestion_id: str, request: Request) -> dict[str, 
 @router.get("/guardian/logs")
 async def guardian_logs(
     request: Request,
+    auth_user: dict[str, Any] = Depends(require_auth),
     session_id: str | None = None,
     agent: str | None = None,
     level: str | None = None,
@@ -95,7 +99,7 @@ async def guardian_logs(
 
 
 @router.get("/guardian/metrics")
-async def guardian_metrics(request: Request) -> dict[str, Any]:
+async def guardian_metrics(request: Request, auth_user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     """Get real-time guardian metrics."""
     guardian = _get_guardian(request)
     slog = get_structured_logger()
@@ -110,7 +114,7 @@ async def guardian_metrics(request: Request) -> dict[str, Any]:
 
 
 @router.get("/guardian/health-trend")
-async def health_trend(request: Request, points: int = 10) -> dict[str, Any]:
+async def health_trend(request: Request, auth_user: dict[str, Any] = Depends(require_auth), points: int = 10) -> dict[str, Any]:
     """Get system health trend."""
     guardian = _get_guardian(request)
     if not guardian:

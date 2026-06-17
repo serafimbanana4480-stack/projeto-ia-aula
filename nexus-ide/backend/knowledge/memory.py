@@ -67,6 +67,7 @@ class Memory:
     last_accessed_at: float = field(default_factory=time.time)
     access_count: int = 0
     importance: float = 0.5  # 0.0-1.0, affects retention
+    kind: str = "semantic"  # episodic | semantic | procedural
 
     # Relations
     related_memory_ids: list[str] = field(default_factory=list)
@@ -84,6 +85,7 @@ class Memory:
             "file_path": self.file_path,
             "language": self.language,
             "importance": self.importance,
+            "kind": self.kind,
             "created_at": self.created_at,
             "last_accessed_at": self.last_accessed_at,
             "access_count": self.access_count,
@@ -193,6 +195,7 @@ class MemoryStore:
         importance: float = 0.5,
         file_path: str = "",
         language: str = "",
+        kind: str = "semantic",
         related_memory_ids: list[str] | None = None,
     ) -> Memory:
         """Store a new memory with automatic embedding generation."""
@@ -212,6 +215,7 @@ class MemoryStore:
             tags=tags or [],
             source=source,
             importance=max(0.0, min(1.0, importance)),
+            kind=kind,
             file_path=file_path,
             language=language,
             related_memory_ids=related_memory_ids or [],
@@ -416,6 +420,14 @@ class MemoryStore:
             self._memories.values(), key=lambda m: m.created_at, reverse=True
         )
         return memories[:limit]
+
+    def get(self, memory_id: str) -> Memory | None:
+        """Return a memory by ID, or None when missing."""
+        return self._memories.get(memory_id)
+
+    def all_memories(self) -> list[Memory]:
+        """Return all stored memories (unsorted snapshot)."""
+        return list(self._memories.values())
 
     async def delete(self, memory_id: str) -> bool:
         """Delete a memory by ID."""

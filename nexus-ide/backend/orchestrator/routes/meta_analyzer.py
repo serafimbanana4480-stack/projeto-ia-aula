@@ -13,10 +13,11 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from backend.agents.base import AgentRequest
+from backend.middleware.auth import require_auth
 from backend.middleware.rate_limit import limiter
 from backend.models.api import StreamEvent
 
@@ -35,7 +36,7 @@ def _get_meta_analyzer(request: Request):
     return registry.get("META_ANALYZER")
 
 
-@router.post("/meta/analyze")
+@router.post("/meta/analyze", dependencies=[Depends(require_auth)])
 @limiter.limit("30/minute")
 async def meta_analyze(request: Request) -> StreamingResponse:
     """Run META_ANALYZER on the current session state and stream results via SSE."""
@@ -79,7 +80,7 @@ async def meta_analyze(request: Request) -> StreamingResponse:
     )
 
 
-@router.get("/meta/evolution-log")
+@router.get("/meta/evolution-log", dependencies=[Depends(require_auth)])
 @limiter.limit("60/minute")
 async def meta_evolution_log(request: Request) -> dict[str, Any]:
     """Return the contents of the evolution log."""
@@ -93,7 +94,7 @@ async def meta_evolution_log(request: Request) -> dict[str, Any]:
     }
 
 
-@router.get("/meta/criteria")
+@router.get("/meta/criteria", dependencies=[Depends(require_auth)])
 @limiter.limit("120/minute")
 async def meta_criteria(request: Request) -> dict[str, Any]:
     """Return the current quality criteria thresholds."""
@@ -124,7 +125,7 @@ async def meta_criteria(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/meta/approve")
+@router.post("/meta/approve", dependencies=[Depends(require_auth)])
 @limiter.limit("30/minute")
 async def meta_approve(request: Request) -> dict[str, Any]:
     """Submit metrics for a formal META_ANALYZER approval evaluation.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -34,6 +35,23 @@ class _CorrectionTracker:
     started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
+@dataclass
+class SelfHealEvent:
+    """Record of a triggered self-heal re-plan event.
+
+    Emitted when the auto-correction loop exceeds ``MAX_ITERATIONS`` for an
+    artifact and both META_ANALYZER and OVERSEER have signed off on the
+    re-plan.  Consumed by the orchestration layer to kick off a fresh
+    autonomous cycle.
+    """
+
+    event_id: str
+    artifact_id: str
+    trigger: str
+    decided_at: str
+    replan_count: int
+
+
 class AutoCorrectionLoop:
     """Closed-loop self-healing monitor.
 
@@ -51,11 +69,20 @@ class AutoCorrectionLoop:
         self._status: dict[str, Any] = {
             "monitoring": False,
             "corrections": [],
+            "overseer_signoff": {},
+            "meta_signoff": {},
         }
         self._lock = asyncio.Lock()
         self._lifecycle = lifecycle_manager or AgentLifecycleManager()
         self.active_corrections: dict[str, list[str]] = {}
         self._monitor_tasks: list[asyncio.Task[Any]] = []
+
+        # Self-heal circuit breaker
+        self._self_heal_history: list[float] = []
+        self._max_self_heals_per_hour: int = int(
+            os.getenv("NEXUS_SELF_HEAL_MAX_PER_HOUR", "5")
+        )
+        self._replan_counts: dict[str, int] = {}
 
     async def start_monitoring(self) -> None:
         """Start the background bus-monitoring task."""
@@ -68,6 +95,9 @@ class AutoCorrectionLoop:
         self._stop_event.clear()
         self._task = asyncio.create_task(self._monitor())
         self._status["monitoring"] = True
+        # Ensure signoff dicts are present so signoff recordings are idempotent
+        self._status.setdefault("overseer_signoff", {})
+        self._status.setdefault("meta_signoff", {})
         logger.info("Auto-correction loop started")
 
     async def stop_monitoring(self) -> None:
@@ -800,6 +830,161 @@ class AutoCorrectionLoop:
             "corrections": list(self._status["corrections"]),
         }
 
+    # ------------------------------------------------------------------
+    # Self-heal
+    # ------------------------------------------------------------------
+
+    def _circuit_open(self) -> bool:
+        """Return True when the self-heal circuit breaker is open.
+
+        The breaker trips when there are at least
+        ``_max_self_heals_per_hour`` self-heal decisions recorded in the
+        last 3600 seconds.
+        """
+        now = time.time()
+        # Drop entries older than one hour
+        self._self_heal_history = [t for t in self._self_heal_history if now - t < 3600]
+        return len(self._self_heal_history) >= self._max_self_heals_per_hour
+
+    def self_heal_for(
+        self, artifact_id: str, *, trigger: str
+    ) -> SelfHealEvent | None:
+        """Record a self-heal decision if all preconditions are met.
+
+        Returns the resulting :class:`SelfHealEvent` when a re-plan is
+        permitted, otherwise ``None``.  Preconditions:
+
+        1. The circuit breaker must be closed.
+        2. ``MAX_ITERATIONS`` must have been reached for this artifact.
+        3. Both META_ANALYZER and OVERSEER must have signed off.
+        """
+        if self._circuit_open():
+            logger.warning(
+                "Self-heal circuit breaker open; skipping re-plan for %s",
+                artifact_id,
+            )
+            return None
+
+        # Determine whether MAX_ITERATIONS has been hit for this artifact.
+        # We look in active_corrections for membership and in _status
+        # for the per-trigger iteration counts.
+        has_active = artifact_id in self.active_corrections
+        max_iters_hit = False
+        for c in self._status.get("corrections", []):
+            if (
+                c.get("artifact_id") == artifact_id
+                and c.get("iterations", 0) >= MAX_ITERATIONS
+            ):
+                max_iters_hit = True
+                break
+        if not (has_active and max_iters_hit):
+            logger.info(
+                "Self-heal skipped for %s: MAX_ITERATIONS not reached "
+                "(active=%s, max_iters_hit=%s)",
+                artifact_id,
+                has_active,
+                max_iters_hit,
+            )
+            return None
+
+        overseer_ok = bool(
+            self._status.get("overseer_signoff", {}).get(artifact_id)
+        )
+        meta_ok = bool(
+            self._status.get("meta_signoff", {}).get(artifact_id)
+        )
+        if not (overseer_ok and meta_ok):
+            logger.info(
+                "Self-heal skipped for %s: signoff incomplete "
+                "(overseer=%s, meta=%s)",
+                artifact_id,
+                overseer_ok,
+                meta_ok,
+            )
+            return None
+
+        # All conditions met — record the decision.
+        self._self_heal_history.append(time.time())
+        self._replan_counts[artifact_id] = self._replan_counts.get(artifact_id, 0) + 1
+        event = SelfHealEvent(
+            event_id=str(uuid.uuid4()),
+            artifact_id=artifact_id,
+            trigger=trigger,
+            decided_at=datetime.now(UTC).isoformat(),
+            replan_count=self._replan_counts[artifact_id],
+        )
+        logger.info(
+            "Self-heal event emitted | event_id=%s artifact_id=%s trigger=%s replan_count=%d",
+            event.event_id,
+            event.artifact_id,
+            event.trigger,
+            event.replan_count,
+        )
+        return event
+
+    async def replan_for(
+        self, artifact_id: str, original_objective: str, session_id: str
+    ) -> Any | None:
+        """Re-purpose the orchestration engine for a self-heal re-plan.
+
+        Returns the new :class:`OrchestrationResult` on success, or ``None``
+        if the engine is not available.
+        """
+        try:
+            from backend.orchestrator.engine import OrchestrationEngine
+        except Exception:
+            logger.warning(
+                "OrchestrationEngine unavailable; cannot replan for %s",
+                artifact_id,
+            )
+            return None
+
+        new_objective = (
+            f"Re-attempt failed artifact {artifact_id}: {original_objective}"
+        )
+        try:
+            engine: OrchestrationEngine = OrchestrationEngine()
+        except Exception:
+            logger.exception(
+                "Failed to construct OrchestrationEngine for self-heal of %s",
+                artifact_id,
+            )
+            return None
+
+        try:
+            result = await engine.execute_autonomous(
+                objective=new_objective,
+                session_id=session_id,
+            )
+            logger.info(
+                "Self-heal replan complete | artifact_id=%s session_id=%s state=%s",
+                artifact_id,
+                session_id,
+                getattr(result, "state", None),
+            )
+            return result
+        except Exception:
+            logger.exception(
+                "Self-heal replan failed for artifact %s (session %s)",
+                artifact_id,
+                session_id,
+            )
+            return None
+
+    def record_overseer_signoff(self, artifact_id: str) -> None:
+        """Mark the OVERSEER signoff for a self-heal decision."""
+        self._status.setdefault("overseer_signoff", {})[artifact_id] = True
+        logger.info("OVERSEER signoff recorded for %s", artifact_id)
+
+    def record_meta_signoff(self, artifact_id: str) -> None:
+        """Mark the META_ANALYZER signoff for a self-heal decision."""
+        self._status.setdefault("meta_signoff", {})[artifact_id] = True
+        logger.info("META_ANALYZER signoff recorded for %s", artifact_id)
+
+    def circuit_open(self) -> bool:
+        """Public accessor exposing the circuit-breaker state."""
+        return self._circuit_open()
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Singleton accessor
@@ -823,3 +1008,14 @@ def get_auto_correction_loop(
     elif lifecycle_manager is not None:
         _auto_correction_loop_instance._lifecycle = lifecycle_manager
     return _auto_correction_loop_instance
+
+
+def get_self_heal_circuit() -> AutoCorrectionLoop:
+    """Return the singleton accessor for the self-heal circuit breaker.
+
+    Wraps :func:`get_auto_correction_loop` and exposes ``circuit_open`` on
+    the returned instance so callers can probe the breaker state without
+    touching the rest of the auto-correction surface area.
+    """
+    loop = get_auto_correction_loop()
+    return loop

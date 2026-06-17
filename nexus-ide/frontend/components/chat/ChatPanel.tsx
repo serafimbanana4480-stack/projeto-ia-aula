@@ -6,7 +6,6 @@ import { getSessionHistory, createPlan, approvePlan, executePlan, getPlanStatus,
 import type { PlanCreateResult, PlanStatus as PlanStatusType } from "../../lib/api";
 import { useModeStore, type Mode } from "../../stores/modeStore";
 import { useModelStore } from "../../stores/modelStore";
-import { useProjectStore } from "../../stores/projectStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import MessageBubble from "./MessageBubble";
@@ -38,6 +37,7 @@ import {
   Brain,
   Zap,
   BarChart3,
+  ChevronDown,
 } from "lucide-react";
 import type { AgentName, ChatMessage, StreamEvent } from "../../lib/types";
 import { log } from "../../lib/log";
@@ -222,8 +222,7 @@ export default function ChatPanel({
 }: ChatPanelProps) {
   const [sessionId, setSessionId] = useState("default");
   const { currentMode, modes, modesLoaded, loadModes } = useModeStore();
-  const { activeModel } = useModelStore();
-  const { currentProject } = useProjectStore();
+  const { activeModel, models, modelsLoaded, loadModels, setActiveModel } = useModelStore();
   const { events, streaming, error: streamError, send, cancel, reset } = useAgentStream(sessionId);
   const [input, setInput] = useState("");
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
@@ -232,6 +231,7 @@ export default function ChatPanel({
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [shared, setShared] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const [modelSelectorOpen, setModelSelectorOpen] = useState(false);
   const [thinkingStrength, setThinkingStrength] = useState<ThinkingStrength>(() => {
     if (typeof window !== "undefined") {
       const stored = localStorage.getItem("nexus.thinkingStrength");
@@ -291,7 +291,10 @@ export default function ChatPanel({
     if (!modesLoaded) {
       void loadModes();
     }
-  }, [loadHistory, loadModes, modesLoaded]);
+    if (!modelsLoaded) {
+      void loadModels();
+    }
+  }, [loadHistory, loadModes, modesLoaded, loadModels, modelsLoaded]);
 
   const { toggleTheme } = useThemeStore();
 
@@ -346,7 +349,7 @@ export default function ChatPanel({
           : trimmed,
       );
       setAttachedFiles([]);
-      await send(messageToSend, currentMode, activeModel, currentProject?.path ?? "", thinkingStrength);
+      await send(messageToSend, currentMode, activeModel, "", thinkingStrength);
     } catch {
       setPendingUser((prev) => prev.filter((m) => m.id !== pendingUserMessage.id));
       setInput(previousInput);
@@ -452,7 +455,7 @@ export default function ChatPanel({
   function handleRegenerate() {
     if (streaming) return;
     if (!lastUserMessage) return;
-    void send(lastUserMessage, currentMode, activeModel, currentProject?.path ?? "", thinkingStrength).then(() => loadHistory());
+    void send(lastUserMessage, currentMode, activeModel, "", thinkingStrength).then(() => loadHistory());
   }
 
   async function handleNewChat() {
@@ -584,16 +587,9 @@ export default function ChatPanel({
           </motion.div>
           <div className="leading-tight">
             <div className="text-sm font-semibold text-nexus-text">Chat com IA</div>
-            <div className="text-[11px] text-nexus-muted">
-              {currentProject ? (
-                <span className="flex items-center gap-1">
-                  <span className="text-nexus-accent">●</span>
-                  {currentProject.name}
-                </span>
-              ) : (
-                "Sem projeto ativo — seleciona um projeto para usar ferramentas"
-              )}
-            </div>
+              <div className="text-[11px] text-nexus-muted">
+                {"Sem projeto ativo — seleciona um projeto para usar ferramentas"}
+              </div>
           </div>
         </div>
 
@@ -630,6 +626,56 @@ export default function ChatPanel({
               );
             })}
           </motion.div>
+
+          {/* Model selector */}
+          <div className="relative">
+            <motion.button
+              type="button"
+              onClick={() => setModelSelectorOpen((open) => !open)}
+              whileTap={{ scale: 0.97 }}
+              className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-2.5 py-1.5 text-[11px] font-medium text-nexus-muted hover:text-nexus-text transition-all duration-200"
+            >
+              <Sparkles className="h-3.5 w-3.5 text-nexus-accent/70" />
+              <span className="hidden sm:inline max-w-[120px] truncate">{modelsLoaded ? models.find((m) => m.id === activeModel)?.name || activeModel : activeModel}</span>
+              <ChevronDown className="h-3 w-3 text-nexus-muted" />
+            </motion.button>
+            {modelSelectorOpen && (
+              <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-lg border border-nexus-border bg-nexus-card shadow-xl">
+                <div className="max-h-72 overflow-y-auto py-1 thin-scrollbar">
+                  {(modelsLoaded ? models : []).length === 0 && (
+                    <div className="px-3 py-2 text-[11px] text-nexus-muted">No models available</div>
+                  )}
+                  {(modelsLoaded ? models : []).map((model) => {
+                    const active = model.id === activeModel;
+                    const label = model.name || model.id;
+                    return (
+                      <button
+                        key={model.id}
+                        type="button"
+                        onClick={() => {
+                          setActiveModel(model.id);
+                          setModelSelectorOpen(false);
+                        }}
+                        className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors ${
+                          active ? "bg-nexus-accent/10 text-nexus-text" : "text-nexus-muted hover:bg-nexus-bg hover:text-nexus-text"
+                        }`}
+                      >
+                        <span className="truncate text-xs">{label}</span>
+                        <span className="flex items-center gap-2">
+                          {model.pricing === "free" && (
+                            <span className="rounded bg-green-500/15 px-1.5 py-0.5 text-[10px] font-medium text-green-400">FREE</span>
+                          )}
+                          {typeof model.estimated_tokens_per_sec === "number" && model.estimated_tokens_per_sec > 0 && (
+                            <span className="text-[10px] text-nexus-muted">{model.estimated_tokens_per_sec} t/s</span>
+                          )}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Thinking strength selector */}
           <motion.div

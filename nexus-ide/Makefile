@@ -9,38 +9,41 @@
 
 test: test-backend test-frontend
 
+# NOTE: pytest targets run from the nexus-ide root (where pyproject.toml lives)
+# so that testpaths/pythonpath/asyncio_mode/markers/filterwarnings are applied.
+
 test-backend:
-	cd backend && python -m pytest tests/ --cov=. --cov-report=term-missing --cov-fail-under=70 -v
+	python -m pytest backend/tests/ --cov=backend --cov-report=term-missing --cov-fail-under=70 -v
 
 test-frontend:
 	cd frontend && npm test
 
 test-unit:
-	cd backend && python -m pytest tests/ -m "not integration and not e2e" --cov=. --cov-report=term-missing -v
+	python -m pytest backend/tests/ -m "not integration and not e2e" --cov=backend --cov-report=term-missing -v
 
 test-integration:
-	cd backend && python -m pytest tests/ -m "integration" -v
+	python -m pytest backend/tests/ -m "integration" -v
 
 test-e2e:
 	cd frontend && npx playwright test
 
 test-agents:
-	cd backend && python -m pytest tests/agents/ -v
+	python -m pytest backend/tests/agents/ -v
 
 test-tools:
-	cd backend && python -m pytest tests/tools/ -v
+	python -m pytest backend/tests/tools/ -v
 
 test-memory:
-	cd backend && python -m pytest tests/knowledge/ -v
+	python -m pytest backend/tests/knowledge/ -v
 
 test-orchestrator:
-	cd backend && python -m pytest tests/orchestrator/ -v
+	python -m pytest backend/tests/orchestrator/ -v
 
 test-contracts:
-	cd backend && python -m pytest tests/contracts/ -m "contract" -v
+	python -m pytest backend/tests/contracts/ -m "contract" -v
 
 test-middleware:
-	cd backend && python -m pytest tests/middleware/ -v
+	python -m pytest backend/tests/middleware/ -v
 
 # ─── Quality ───────────────────────────────────────────────────────────
 
@@ -57,12 +60,12 @@ lint: lint-backend lint-frontend
 coverage: test-backend
 
 coverage-html:
-	cd backend && python -m pytest tests/ --cov=. --cov-report=html --cov-report=term-missing -v
-	@echo "Coverage report generated at backend/htmlcov/index.html"
+	python -m pytest backend/tests/ --cov=backend --cov-report=html --cov-report=term-missing -v
+	@echo "Coverage report generated at htmlcov/index.html"
 
 coverage-xml:
-	cd backend && python -m pytest tests/ --cov=. --cov-report=xml --cov-report=term-missing -v
-	@echo "Coverage XML report generated at backend/coverage.xml"
+	python -m pytest backend/tests/ --cov=backend --cov-report=xml --cov-report=term-missing -v
+	@echo "Coverage XML report generated at coverage.xml"
 
 format:
 	cd backend && ruff format .

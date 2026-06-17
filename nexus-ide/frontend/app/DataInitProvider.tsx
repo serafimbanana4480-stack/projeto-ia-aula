@@ -7,17 +7,6 @@ import { useToolsStore } from "../stores/toolsStore";
 import { useModelStore } from "../stores/modelStore";
 import { initMetricsStream } from "../stores/metricsStore";
 
-/**
- * DataInitProvider — loads reference data once on app startup.
- *
- * Centralizes initial fetches so components don't trigger duplicate
- * requests when they mount:
- *   - /api/projects   (projectStore)
- *   - /api/modes      (modeStore)
- *   - /api/tools      (toolsStore)
- *   - /api/models/status (modelStore)
- *   - /api/metrics/current via SSE/polling (metricsStore)
- */
 export default function DataInitProvider({
   children,
 }: {
@@ -34,46 +23,35 @@ export default function DataInitProvider({
     if (initializedRef.current) return;
     initializedRef.current = true;
 
-    // Start singleton metrics stream (SSE -> polling fallback)
+    let authenticated = false;
+    if (typeof window !== "undefined") {
+      try {
+        const token = window.localStorage.getItem("nexus.access_token");
+        authenticated = !!token;
+      } catch {
+        authenticated = false;
+      }
+    }
+
     try {
-      initMetricsStream();
+      if (authenticated) {
+        initMetricsStream();
+      }
     } catch {
       /* ignore metrics stream init errors */
     }
 
-    // Load reference data in parallel; failures are handled inside each store
+    if (!authenticated) {
+      return;
+    }
+
     void Promise.allSettled([
-      (async () => {
-        try {
-          await loadProjects();
-        } catch {
-          /* ignore */
-        }
-      })(),
-      (async () => {
-        try {
-          await loadModes();
-        } catch {
-          /* ignore */
-        }
-      })(),
-      (async () => {
-        try {
-          await loadTools();
-        } catch {
-          /* ignore */
-        }
-      })(),
-      (async () => {
-        try {
-          await loadModels();
-        } catch {
-          /* ignore */
-        }
-      })(),
+      (async () => { try { await loadProjects(); } catch { /* ignore */ } })(),
+      (async () => { try { await loadModes(); } catch { /* ignore */ } })(),
+      (async () => { try { await loadTools(); } catch { /* ignore */ } })(),
+      (async () => { try { await loadModels(); } catch { /* ignore */ } })(),
     ]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadProjects, loadModes, loadTools, loadModels]);
 
   return <>{children}</>;
 }

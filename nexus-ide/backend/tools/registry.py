@@ -10,6 +10,13 @@ from typing import Any
 
 from backend.persistence.db import log_tool_execution
 
+# Tool result cache — best-effort; system works without it
+try:
+    from backend.cache.tool_result_cache import get_tool_cache
+    _HAVE_TOOL_CACHE = True
+except ImportError:
+    _HAVE_TOOL_CACHE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,6 +82,17 @@ def _handler_result_failed(result: Any) -> str | None:
 
 
 async def execute_tool(name: str, session_id: str | None, args: dict) -> dict:
+    # Check cache for idempotent tools
+    if _HAVE_TOOL_CACHE:
+        try:
+            cache = get_tool_cache()
+            cached = cache.get(name, args)
+            if cached is not None:
+                logger.debug("[TOOL CACHE] Hit for %s: %s", name, cached.get("_cached_preview", ""))
+                return {**cached, "_from_cache": True, "_cache_hit": True}
+        except Exception:
+            pass  # Cache is best-effort
+
     _maybe_register()
     spec = get_tool(name)
     if not spec:
@@ -113,7 +131,15 @@ async def execute_tool(name: str, session_id: str | None, args: dict) -> dict:
             success=True,
             duration_ms=duration_ms,
         )
-        return {"tool": name, "result": result, "duration_ms": duration_ms}
+        response = {"tool": name, "result": result, "duration_ms": duration_ms}
+        # Store in cache after successful execution
+        if _HAVE_TOOL_CACHE:
+            try:
+                cache = get_tool_cache()
+                cache.store(name, args, response)
+            except Exception:
+                pass  # Cache is best-effort
+        return response
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
         log_tool_execution(

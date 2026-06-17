@@ -1,0 +1,186 @@
+"use client";
+import { useEffect, useMemo, Suspense } from "react";
+import dynamic from "next/dynamic";
+import { useMetricsStore, initMetricsStream } from "../../stores/metricsStore";
+
+// Lazy load all dashboard widgets for better performance
+const MetricsGrid = dynamic(() => import("../../components/dashboard/MetricsGrid"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-32" />,
+});
+const SystemHealth = dynamic(() => import("../../components/dashboard/SystemHealth"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-64" />,
+});
+const AgentActivity = dynamic(() => import("../../components/dashboard/AgentActivity"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-64" />,
+});
+const TokenTimeline = dynamic(() => import("../../components/dashboard/TokenTimeline"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-64" />,
+});
+const ModelComparison = dynamic(() => import("../../components/dashboard/ModelComparison"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-64" />,
+});
+const RequestFlow = dynamic(() => import("../../components/dashboard/RequestFlow"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-48" />,
+});
+const AlertFeed = dynamic(() => import("../../components/dashboard/AlertFeed"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-48" />,
+});
+const GuardianWidget = dynamic(() => import("../../components/dashboard/GuardianWidget"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-64" />,
+});
+
+function WidgetSkeleton({ height }: { height: string }) {
+  return <div className={`${height} animate-pulse rounded bg-nexus-border/20`} />;
+}
+
+export default function DashboardClient() {
+  const metrics = useMetricsStore((s) => s.metrics);
+  const backendOnline = useMetricsStore((s) => s.backendOnline);
+  const connectionStatus = useMetricsStore((s) => s.connectionStatus);
+  const lastUpdate = useMetricsStore((s) => s.lastUpdate);
+
+  // Initialize metrics stream once
+  useEffect(() => {
+    initMetricsStream();
+  }, []);
+
+  const formatUptime = useMemo(() => {
+    return (seconds: number): string => {
+      if (seconds < 60) return `${Math.floor(seconds)}s`;
+      if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+      if (seconds < 86400) return `${(seconds / 3600).toFixed(1)}h`;
+      return `${(seconds / 86400).toFixed(1)}d`;
+    };
+  }, []);
+
+  const m = metrics;
+  const requestTotal = m?.requests_total ?? 0;
+  const requestSuccessRate =
+    requestTotal > 0 ? ((m?.requests_successful ?? 0) / requestTotal) * 100 : null;
+  const statusLabel =
+    connectionStatus === "degraded"
+      ? "Degraded"
+      : backendOnline
+        ? "Connected"
+        : connectionStatus === "connecting"
+          ? "Connecting"
+          : "Offline";
+  const statusDotClass =
+    connectionStatus === "degraded"
+      ? "bg-yellow-500 animate-pulse"
+      : backendOnline
+        ? "bg-green-500"
+        : connectionStatus === "connecting"
+          ? "bg-yellow-500 animate-pulse"
+          : "bg-red-500 animate-pulse";
+
+  return (
+    <main className="flex-1 overflow-auto">
+      {/* ── Quick Status Bar (VS Code style) ─────────────────────── */}
+      <div className="sticky top-0 z-10 border-b border-nexus-border bg-nexus-panel/90 px-4 py-2 backdrop-blur">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4 text-xs">
+            <div className="flex items-center gap-1.5">
+              <div className={`h-2 w-2 rounded-full ${statusDotClass}`} />
+              <span className="text-gray-400">{statusLabel}</span>
+            </div>
+            {requestSuccessRate !== null && requestSuccessRate < 100 && (
+              <>
+                <div className="h-3 w-px bg-nexus-border" />
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500">LLM OK:</span>
+                  <span
+                    className={`font-mono ${requestSuccessRate === 0 ? "text-red-400" : requestSuccessRate < 50 ? "text-yellow-400" : ""}`}
+                  >
+                    {requestSuccessRate.toFixed(0)}%
+                  </span>
+                </div>
+              </>
+            )}
+            <div className="h-3 w-px bg-nexus-border" />
+            <div className="flex items-center gap-1">
+              <span className="text-gray-500">Model:</span>
+              <span className="font-mono text-nexus-accent">{m?.active_model || "none"}</span>
+            </div>
+            <div className="h-3 w-px bg-nexus-border" />
+            <div className="flex items-center gap-1">
+              <span className="text-gray-500">Tokens/s:</span>
+              <span className="font-mono">{m?.tokens_per_second.toFixed(1) ?? "—"}</span>
+            </div>
+            <div className="h-3 w-px bg-nexus-border" />
+            <div className="flex items-center gap-1">
+              <span className="text-gray-500">CPU:</span>
+              <span className={`font-mono ${(m?.cpu_percent ?? 0) > 80 ? "text-red-400" : (m?.cpu_percent ?? 0) > 50 ? "text-yellow-400" : ""}`}>
+                {m?.cpu_percent.toFixed(0) ?? "—"}%
+              </span>
+            </div>
+            <div className="h-3 w-px bg-nexus-border" />
+            <div className="flex items-center gap-1">
+              <span className="text-gray-500">RAM:</span>
+              <span className={`font-mono ${(m?.ram_percent ?? 0) > 80 ? "text-red-400" : (m?.ram_percent ?? 0) > 60 ? "text-yellow-400" : ""}`}>
+                {m ? `${(m.ram_used_bytes / 1e9).toFixed(1)}/${(m.ram_total_bytes / 1e9).toFixed(0)} GB` : "—"}
+              </span>
+            </div>
+            <div className="h-3 w-px bg-nexus-border" />
+            <div className="flex items-center gap-1">
+              <span className="text-gray-500">Disk:</span>
+              <span className={`font-mono ${(m?.disk_percent ?? 0) > 90 ? "text-red-400" : (m?.disk_percent ?? 0) > 75 ? "text-yellow-400" : ""}`}>
+                {m?.disk_percent.toFixed(0) ?? "—"}%
+              </span>
+            </div>
+            <div className="h-3 w-px bg-nexus-border" />
+            <div className="flex items-center gap-1">
+              <span className="text-gray-500">Sessions:</span>
+              <span className="font-mono">{m?.active_sessions ?? "—"}</span>
+            </div>
+            <div className="h-3 w-px bg-nexus-border" />
+            <div className="flex items-center gap-1">
+              <span className="text-gray-500">Latency:</span>
+              <span className={`font-mono ${(m?.avg_latency_ms ?? 0) > 1000 ? "text-red-400" : (m?.avg_latency_ms ?? 0) > 500 ? "text-yellow-400" : ""}`}>
+                {m?.avg_latency_ms.toFixed(0) ?? "—"}ms
+              </span>
+            </div>
+            <div className="h-3 w-px bg-nexus-border" />
+            <div className="flex items-center gap-1">
+              <span className="text-gray-500">Uptime:</span>
+              <span className="font-mono">{m ? formatUptime(m.uptime_seconds) : "—"}</span>
+            </div>
+          </div>
+          <div className="text-xs text-gray-500">Updated {lastUpdate}</div>
+        </div>
+      </div>
+
+      <div className="p-4 space-y-4">
+        {/* ── Metrics Grid (full width) ─────────────────────── */}
+        <MetricsGrid />
+
+        {/* ── Two-column: Health + Agents + Guardian | Timeline + Models ── */}
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          <div className="space-y-4">
+            <SystemHealth />
+            <GuardianWidget />
+            <AgentActivity />
+          </div>
+          <div className="space-y-4">
+            <TokenTimeline />
+            <ModelComparison />
+          </div>
+        </div>
+
+        {/* ── Request Flow (full width) ─────────────────────── */}
+        <RequestFlow />
+
+        {/* ── Alerts (full width) ───────────────────────────── */}
+        <AlertFeed />
+      </div>
+    </main>
+  );
+}

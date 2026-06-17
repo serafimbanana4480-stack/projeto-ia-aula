@@ -48,11 +48,4 @@ class CoderAgent(AgentBase):
         AgentAction.FETCH_URL,
     }
 
-    async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
-        """Run the coder agent with ReAct loop for autonomous execution.
 
-        ALWAYS uses the ReAct loop so that file operations, code execution,
-        and other tools are available for every query.
-        """
-        async for token in self._run_react_loop(request):
-            yield token

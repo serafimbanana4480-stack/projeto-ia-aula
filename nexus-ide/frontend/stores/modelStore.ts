@@ -1,11 +1,12 @@
 import { create } from "zustand";
-import { getModelStatus } from "../lib/api";
-import type { ModelStatus } from "../lib/types";
+import { getAvailableModels } from "../lib/api";
 
 interface Model {
   id: string;
   name?: string;
   tier: string;
+  pricing?: string;
+  estimated_tokens_per_sec?: number;
   size_gb: number;
   provider?: string;
   parameter_size?: string;
@@ -15,7 +16,6 @@ interface Model {
 interface ModelStore {
   activeModel: string;
   models: Model[];
-  rawModelStatus: ModelStatus[];
   modelsLoaded: boolean;
   modelsLoading: boolean;
   modelsError: string | null;
@@ -25,9 +25,8 @@ interface ModelStore {
 }
 
 export const useModelStore = create<ModelStore>((set, get) => ({
-  activeModel: "coder",
+  activeModel: "qwen/qwen3-coder:free",
   models: [],
-  rawModelStatus: [],
   modelsLoaded: false,
   modelsLoading: false,
   modelsError: null,
@@ -37,31 +36,27 @@ export const useModelStore = create<ModelStore>((set, get) => ({
     if (get().modelsLoaded || get().modelsLoading) return;
     set({ modelsLoading: true, modelsError: null });
     try {
-      const data = await getModelStatus();
+      const data = await getAvailableModels();
       const mapped = data.map((m) => ({
-        id: m.id.split(":")[0] || m.id,
-        name: m.details?.name || m.id,
-        tier: m.details?.parameter_size
-          ? `${m.details.parameter_size}B`
-          : m.id.toUpperCase(),
-        size_gb: m.size_bytes ? m.size_bytes / 1e9 : 0,
-        provider: m.details?.provider || (m.id.includes(":") ? m.id.split(":")[0] : "ollama"),
-        parameter_size: typeof m.details?.parameter_size === "number" ? `${m.details.parameter_size}B` : undefined,
-        status: (m.status || "available") as Model["status"],
+        id: m.id,
+        name: m.name || m.id,
+        tier: m.tier,
+        pricing: m.pricing,
+        estimated_tokens_per_sec: m.estimated_tokens_per_sec,
+        size_gb: 0,
+        provider: m.provider,
+        status: "available" as const,
       }));
       set({
-        rawModelStatus: data,
         models: mapped,
         modelsLoaded: true,
         modelsLoading: false,
       });
     } catch (error) {
+      // keep error silent so UI doesn't break if endpoint is unavailable
       set({
-        modelsError: error instanceof Error ? error.message : "Failed to load models",
         modelsLoading: false,
       });
-      // Do NOT re-throw — prevents unhandled rejections and retry loops
-      // when called from DataInitProvider or other orchestrators.
     }
   },
 }));
