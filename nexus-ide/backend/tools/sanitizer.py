@@ -28,7 +28,6 @@ INJECTION_PATTERNS = [
     r"DAN mode",
     r"bypass (filter|safety|security|restriction)",
     r"reveal (your|the|system) (prompt|instructions|rules)",
-
     # Portuguese patterns
     r"ignore .{0,15}instru",
     r"voc[eê] agora [eé]",

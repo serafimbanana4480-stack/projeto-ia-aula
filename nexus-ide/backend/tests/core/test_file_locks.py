@@ -14,33 +14,27 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
-import tempfile
-import time
-from multiprocessing import Process
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from backend.core.file_locks import (
-    DeadlockError,
     FileLockManager,
     LockError,
     RedisDistributedLock,
-    _RedisUnavailable,
     _cross_process_lock_path,
     _filelock_enabled,
+    _readers_count_path,
     _redis_lock_enabled,
     _redis_lock_key,
-    _readers_count_path,
+    _RedisUnavailable,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def manager() -> FileLockManager:
@@ -64,24 +58,33 @@ def dummy_file(tmp_path: Path) -> str:
 # 1. Basic acquire / release
 # ---------------------------------------------------------------------------
 
+
 class TestBasicAcquireRelease:
-    async def test_acquire_read_lock_returns_id(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_acquire_read_lock_returns_id(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         lock_id = await manager.acquire_read_lock(dummy_file, "agent-a")
         assert isinstance(lock_id, str) and len(lock_id) > 0
         manager.release_lock(dummy_file, "agent-a")
 
-    async def test_acquire_write_lock_returns_id(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_acquire_write_lock_returns_id(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         lock_id = await manager.acquire_write_lock(dummy_file, "agent-b")
         assert isinstance(lock_id, str) and len(lock_id) > 0
         manager.release_lock(dummy_file, "agent-b")
 
-    async def test_release_lock_removes_holder(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_release_lock_removes_holder(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         await manager.acquire_read_lock(dummy_file, "agent-c")
         assert manager.is_locked(dummy_file)
         manager.release_lock(dummy_file, "agent-c")
         assert not manager.is_locked(dummy_file)
 
-    async def test_release_lock_unknown_is_noop(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_release_lock_unknown_is_noop(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         # Should not raise
         manager.release_lock(dummy_file, "nobody")
 
@@ -99,10 +102,13 @@ class TestBasicAcquireRelease:
 # 2. Multiple readers (shared locks)
 # ---------------------------------------------------------------------------
 
+
 class TestSharedReaders:
-    async def test_multiple_readers_allowed(self, manager: FileLockManager, dummy_file: str) -> None:
-        id1 = await manager.acquire_read_lock(dummy_file, "r1")
-        id2 = await manager.acquire_read_lock(dummy_file, "r2")
+    async def test_multiple_readers_allowed(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
+        await manager.acquire_read_lock(dummy_file, "r1")
+        await manager.acquire_read_lock(dummy_file, "r2")
         status = manager.get_lock_status(dummy_file)
         assert status["locked"] is True
         assert len(status["holders"]) == 2
@@ -121,8 +127,11 @@ class TestSharedReaders:
 # 3. Writer exclusivity
 # ---------------------------------------------------------------------------
 
+
 class TestWriterExclusivity:
-    async def test_writer_blocks_other_writer(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_writer_blocks_other_writer(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         await manager.acquire_write_lock(dummy_file, "w1")
         with pytest.raises(LockError):
             await manager.acquire_write_lock(dummy_file, "w2", timeout=0.2)
@@ -134,7 +143,9 @@ class TestWriterExclusivity:
             await manager.acquire_read_lock(dummy_file, "r1", timeout=0.2)
         manager.release_lock(dummy_file, "w1")
 
-    async def test_writer_blocks_then_allows_reader_after_release(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_writer_blocks_then_allows_reader_after_release(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         await manager.acquire_write_lock(dummy_file, "w1")
         with pytest.raises(LockError):
             await manager.acquire_read_lock(dummy_file, "r1", timeout=0.2)
@@ -149,8 +160,11 @@ class TestWriterExclusivity:
 # 4. Cross-process exclusivity (real concurrency)
 # ---------------------------------------------------------------------------
 
+
 class TestCrossProcess:
-    async def test_write_lock_blocks_subprocess_writer(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_write_lock_blocks_subprocess_writer(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         """A write lock held by this process must block a subprocess trying
         to acquire the same cross-process SoftFileLock."""
         if not _filelock_enabled():
@@ -174,7 +188,9 @@ class TestCrossProcess:
         )
 
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", script,
+            sys.executable,
+            "-c",
+            script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -184,7 +200,9 @@ class TestCrossProcess:
         manager.release_lock(dummy_file, "main")
         assert result == "BLOCKED", f"Expected BLOCKED, got {result!r} stderr={stderr.decode()!r}"
 
-    async def test_read_lock_allows_subprocess_reader(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_read_lock_allows_subprocess_reader(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         """Multiple readers (this process + subprocess) should both succeed."""
         if not _filelock_enabled():
             pytest.skip("filelock not available")
@@ -231,7 +249,9 @@ class TestCrossProcess:
         )
 
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", script,
+            sys.executable,
+            "-c",
+            script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -247,14 +267,19 @@ class TestCrossProcess:
 # 5. Timeout
 # ---------------------------------------------------------------------------
 
+
 class TestTimeout:
-    async def test_read_timeout_waiting_on_write(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_read_timeout_waiting_on_write(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         await manager.acquire_write_lock(dummy_file, "w1")
         with pytest.raises(LockError):
             await manager.acquire_read_lock(dummy_file, "r1", timeout=0.1)
         manager.release_lock(dummy_file, "w1")
 
-    async def test_write_timeout_waiting_on_read(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_write_timeout_waiting_on_read(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         await manager.acquire_read_lock(dummy_file, "r1")
         with pytest.raises(LockError):
             await manager.acquire_write_lock(dummy_file, "w1", timeout=0.1)
@@ -265,13 +290,18 @@ class TestTimeout:
 # 6. Context managers & legacy API
 # ---------------------------------------------------------------------------
 
+
 class TestContextManagers:
-    async def test_read_lock_context_manager(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_read_lock_context_manager(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         async with manager.read_lock(dummy_file, "ctx-r", timeout=1.0):
             assert manager.is_locked(dummy_file)
         assert not manager.is_locked(dummy_file)
 
-    async def test_write_lock_context_manager(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_write_lock_context_manager(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         async with manager.write_lock(dummy_file, "ctx-w", timeout=1.0):
             assert manager.is_locked(dummy_file)
         assert not manager.is_locked(dummy_file)
@@ -290,6 +320,7 @@ class TestContextManagers:
 # ---------------------------------------------------------------------------
 # 7. Deadlock detection
 # ---------------------------------------------------------------------------
+
 
 class TestDeadlock:
     async def test_deadlock_detected(self, manager: FileLockManager, dummy_file: str) -> None:
@@ -313,8 +344,11 @@ class TestDeadlock:
 # 8. Force release & wait
 # ---------------------------------------------------------------------------
 
+
 class TestForceRelease:
-    async def test_force_release_clears_all(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_force_release_clears_all(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         await manager.acquire_read_lock(dummy_file, "r1")
         await manager.acquire_read_lock(dummy_file, "r2")
         assert manager.get_lock_status(dummy_file)["holders"].__len__() == 2
@@ -345,16 +379,19 @@ class TestForceRelease:
 # 9. Auto-expiry
 # ---------------------------------------------------------------------------
 
+
 class TestAutoExpiry:
     async def test_lock_expires(self, manager: FileLockManager, dummy_file: str) -> None:
-        lock_id = await manager.acquire_write_lock(dummy_file, "w1", timeout=0.2)
+        await manager.acquire_write_lock(dummy_file, "w1", timeout=0.2)
         assert manager.is_locked(dummy_file)
         await asyncio.sleep(0.3)
         # After prune, lock should be gone
         manager._prune_expired()
         assert not manager.is_locked(dummy_file)
 
-    async def test_acquire_reuses_path_after_expiry(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_acquire_reuses_path_after_expiry(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         await manager.acquire_write_lock(dummy_file, "w1", timeout=0.2)
         await asyncio.sleep(0.3)
         # Should succeed because previous lock expired
@@ -367,8 +404,11 @@ class TestAutoExpiry:
 # 10. Cross-process readers counter file
 # ---------------------------------------------------------------------------
 
+
 class TestReadersCounter:
-    async def test_counter_file_created_for_read_lock(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_counter_file_created_for_read_lock(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         if not _filelock_enabled():
             pytest.skip("filelock not available")
 
@@ -381,7 +421,9 @@ class TestReadersCounter:
         # Counter file may be cleaned up on last release
         assert not Path(count_path).exists()
 
-    async def test_counter_increments_for_multiple_readers(self, manager: FileLockManager, dummy_file: str) -> None:
+    async def test_counter_increments_for_multiple_readers(
+        self, manager: FileLockManager, dummy_file: str
+    ) -> None:
         if not _filelock_enabled():
             pytest.skip("filelock not available")
 
@@ -444,14 +486,10 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> FakeRedisClient:
     async def _fake_client() -> FakeRedisClient:
         return client
 
-    monkeypatch.setattr(
-        "backend.core.file_locks._redis_lock_client", _fake_client
-    )
+    monkeypatch.setattr("backend.core.file_locks._redis_lock_client", _fake_client)
     # Reset the cached singleton so the patched client is used.
     monkeypatch.setattr("backend.core.file_locks._redis_client", None, raising=False)
-    monkeypatch.setattr(
-        "backend.core.file_locks._redis_unavailable_until", 0.0, raising=False
-    )
+    monkeypatch.setattr("backend.core.file_locks._redis_unavailable_until", 0.0, raising=False)
     return client
 
 
@@ -464,9 +502,7 @@ def redis_offline(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("backend.core.file_locks._redis_lock_client", _no_client)
     monkeypatch.setattr("backend.core.file_locks._redis_client", None, raising=False)
-    monkeypatch.setattr(
-        "backend.core.file_locks._redis_unavailable_until", 0.0, raising=False
-    )
+    monkeypatch.setattr("backend.core.file_locks._redis_unavailable_until", 0.0, raising=False)
 
 
 @pytest.fixture
@@ -504,9 +540,7 @@ class TestRedisDistributedLock:
         assert token2 and token2 != token1
         await lock.release(key, token2)
 
-    async def test_safe_release_wrong_token(
-        self, fake_redis: FakeRedisClient
-    ) -> None:
+    async def test_safe_release_wrong_token(self, fake_redis: FakeRedisClient) -> None:
         lock = RedisDistributedLock(ttl_ms=10000)
         key = "nexus:lock:write:safe"
         token = await lock.acquire(key, timeout=1.0)
@@ -603,4 +637,3 @@ class TestManagerRedisFallback:
         manager.release_lock(dummy_file, "r1")
         manager.release_lock(dummy_file, "r2")
         assert not manager.is_locked(dummy_file)
-

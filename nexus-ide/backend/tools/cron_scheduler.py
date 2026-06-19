@@ -24,7 +24,6 @@ Usage:
 from __future__ import annotations
 
 import ast
-import asyncio
 import json
 import logging
 import os
@@ -33,8 +32,8 @@ import sqlite3
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,14 +41,42 @@ from croniter import croniter
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED_SHELL_COMMANDS: frozenset[str] = frozenset({
-    "ls", "cat", "echo", "pwd", "whoami", "date", "uptime",
-    "df", "du", "ps", "ping", "curl", "wget", "git",
-    "python3", "node", "npm", "docker",
-    "cp", "mv", "rm", "mkdir", "touch",
-    "head", "tail", "grep", "sort", "wc", "find",
-    "tar", "gzip", "unzip",
-})
+_ALLOWED_SHELL_COMMANDS: frozenset[str] = frozenset(
+    {
+        "ls",
+        "cat",
+        "echo",
+        "pwd",
+        "whoami",
+        "date",
+        "uptime",
+        "df",
+        "du",
+        "ps",
+        "ping",
+        "curl",
+        "wget",
+        "git",
+        "python3",
+        "node",
+        "npm",
+        "docker",
+        "cp",
+        "mv",
+        "rm",
+        "mkdir",
+        "touch",
+        "head",
+        "tail",
+        "grep",
+        "sort",
+        "wc",
+        "find",
+        "tar",
+        "gzip",
+        "unzip",
+    }
+)
 
 
 def get_db_path() -> Path:
@@ -132,7 +159,9 @@ def _row_to_job(row: sqlite3.Row) -> CronJob:
     )
 
 
-def _calculate_next_run(schedule_type: str, schedule_expr: str, from_time: float | None = None) -> float:
+def _calculate_next_run(
+    schedule_type: str, schedule_expr: str, from_time: float | None = None
+) -> float:
     """Calculate the next run time for a job."""
     now = from_time or time.time()
 
@@ -208,7 +237,16 @@ def schedule_task(
                     enabled=excluded.enabled,
                     next_run=excluded.next_run
                 """,
-                (name, description, schedule_type, schedule_expr, task_type, json.dumps(payload), int(enabled), next_run),
+                (
+                    name,
+                    description,
+                    schedule_type,
+                    schedule_expr,
+                    task_type,
+                    json.dumps(payload),
+                    int(enabled),
+                    next_run,
+                ),
             )
             conn.commit()
             job_id = cursor.lastrowid
@@ -234,26 +272,34 @@ def list_tasks(enabled_only: bool = False) -> list[dict[str, Any]]:
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             if enabled_only:
-                rows = conn.execute("SELECT * FROM cron_jobs WHERE enabled = 1 ORDER BY next_run").fetchall()
+                rows = conn.execute(
+                    "SELECT * FROM cron_jobs WHERE enabled = 1 ORDER BY next_run"
+                ).fetchall()
             else:
                 rows = conn.execute("SELECT * FROM cron_jobs ORDER BY created_at DESC").fetchall()
 
             jobs = []
             for row in rows:
                 job = _row_to_job(row)
-                jobs.append({
-                    "id": job.id,
-                    "name": job.name,
-                    "description": job.description,
-                    "schedule_type": job.schedule_type,
-                    "schedule_expr": job.schedule_expr,
-                    "task_type": job.task_type,
-                    "enabled": job.enabled,
-                    "next_run": datetime.fromtimestamp(job.next_run, UTC).isoformat() if job.next_run else None,
-                    "last_run": datetime.fromtimestamp(job.last_run, UTC).isoformat() if job.last_run else None,
-                    "run_count": job.run_count,
-                    "error_count": job.error_count,
-                })
+                jobs.append(
+                    {
+                        "id": job.id,
+                        "name": job.name,
+                        "description": job.description,
+                        "schedule_type": job.schedule_type,
+                        "schedule_expr": job.schedule_expr,
+                        "task_type": job.task_type,
+                        "enabled": job.enabled,
+                        "next_run": datetime.fromtimestamp(job.next_run, UTC).isoformat()
+                        if job.next_run
+                        else None,
+                        "last_run": datetime.fromtimestamp(job.last_run, UTC).isoformat()
+                        if job.last_run
+                        else None,
+                        "run_count": job.run_count,
+                        "error_count": job.error_count,
+                    }
+                )
             return jobs
     except Exception as exc:
         logger.error("Failed to list tasks: %s", exc)
@@ -289,7 +335,10 @@ def enable_task(name: str, enabled: bool = True) -> dict[str, Any]:
             )
             conn.commit()
             if cursor.rowcount > 0:
-                return {"success": True, "message": f"Task '{name}' {'enabled' if enabled else 'disabled'}"}
+                return {
+                    "success": True,
+                    "message": f"Task '{name}' {'enabled' if enabled else 'disabled'}",
+                }
             return {"success": False, "error": f"Task '{name}' not found"}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
@@ -321,7 +370,9 @@ def get_task_logs(name: str, limit: int = 50) -> list[dict[str, Any]]:
                     "output": row["output"],
                     "error": row["error"],
                     "started_at": datetime.fromtimestamp(row["started_at"], UTC).isoformat(),
-                    "finished_at": datetime.fromtimestamp(row["finished_at"], UTC).isoformat() if row["finished_at"] else None,
+                    "finished_at": datetime.fromtimestamp(row["finished_at"], UTC).isoformat()
+                    if row["finished_at"]
+                    else None,
                 }
                 for row in rows
             ]
@@ -368,15 +419,30 @@ def _execute_job(job: CronJob) -> dict[str, Any]:
         elif job.task_type == "python":
             code = job.payload.get("code", "")
             try:
-                tree = ast.parse(code, mode='exec')
+                tree = ast.parse(code, mode="exec")
                 for node in ast.walk(tree):
-                    if isinstance(node, (ast.Import, ast.ImportFrom, ast.Call, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Await, ast.Yield, ast.YieldFrom)):
-                        raise ValueError(f"Node type {type(node).__name__} is not allowed in cron python tasks")
+                    if isinstance(
+                        node,
+                        (
+                            ast.Import,
+                            ast.ImportFrom,
+                            ast.Call,
+                            ast.ClassDef,
+                            ast.FunctionDef,
+                            ast.AsyncFunctionDef,
+                            ast.Await,
+                            ast.Yield,
+                            ast.YieldFrom,
+                        ),
+                    ):
+                        raise ValueError(
+                            f"Node type {type(node).__name__} is not allowed in cron python tasks"
+                        )
                 allowed_root = (ast.Expr, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Pass)
                 for node in tree.body:
                     if not isinstance(node, allowed_root):
                         raise ValueError(f"Statement type {type(node).__name__} is not allowed")
-                compiled = compile(tree, '<cron_python>', 'exec')
+                compiled = compile(tree, "<cron_python>", "exec")
                 local_vars = {}
                 exec(compiled, {"__builtins__": {}}, local_vars)
                 output = str(local_vars)
@@ -525,7 +591,9 @@ def scheduler_status() -> dict[str, Any]:
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             total = conn.execute("SELECT COUNT(*) as cnt FROM cron_jobs").fetchone()["cnt"]
-            enabled = conn.execute("SELECT COUNT(*) as cnt FROM cron_jobs WHERE enabled = 1").fetchone()["cnt"]
+            enabled = conn.execute(
+                "SELECT COUNT(*) as cnt FROM cron_jobs WHERE enabled = 1"
+            ).fetchone()["cnt"]
             running_scheduler = _scheduler is not None and _scheduler._running
             return {
                 "success": True,
@@ -552,9 +620,16 @@ register_tool(
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Unique task name"},
-                "schedule": {"type": "string", "description": "Cron expression, interval dict, or ISO timestamp"},
+                "schedule": {
+                    "type": "string",
+                    "description": "Cron expression, interval dict, or ISO timestamp",
+                },
                 "payload": {"type": "object", "description": "Task payload JSON"},
-                "task_type": {"type": "string", "description": "agent|shell|python|function", "default": "agent"},
+                "task_type": {
+                    "type": "string",
+                    "description": "agent|shell|python|function",
+                    "default": "agent",
+                },
                 "description": {"type": "string"},
                 "enabled": {"type": "boolean", "default": True},
             },

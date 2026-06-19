@@ -45,6 +45,7 @@ EventType = Literal[
     "routing",
     "agent_started",
     "token",
+    "thinking",
     "tool_call",
     "tool_result",
     "tool_error",
@@ -91,7 +92,16 @@ class ChatRequest(BaseModel):
         default_factory=list, description="Agent names to use in swarm mode"
     )
     swarm_strategy: str = Field(
-        default="divide", description="Swarm strategy: divide, ensemble, pipeline, debate"
+        default="adaptive",
+        description="Swarm strategy: divide, ensemble, pipeline, debate, adaptive",
+    )
+    swarm_operational_mode: str = Field(
+        default="",
+        max_length=32,
+        description=(
+            "Optional SWARM operational mode: architecture, investigation, "
+            "implementation, review, bugfix, planning, research"
+        ),
     )
 
     @field_validator("session_id")

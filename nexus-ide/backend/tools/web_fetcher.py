@@ -55,9 +55,7 @@ def _init_cache_db() -> None:
             )
             """
         )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_web_cache_expires ON web_cache(expires_at)"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_web_cache_expires ON web_cache(expires_at)")
         conn.commit()
 
 
@@ -131,7 +129,7 @@ async def _request_with_retry(
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (429, 500, 502, 503, 504):
                 last_exception = e
-                delay = BASE_DELAY * (2 ** attempt)
+                delay = BASE_DELAY * (2**attempt)
                 logger.warning(
                     "Request failed (attempt %d/%d), retrying in %.1fs: %s",
                     attempt + 1,
@@ -144,7 +142,7 @@ async def _request_with_retry(
                 raise
         except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as e:
             last_exception = e
-            delay = BASE_DELAY * (2 ** attempt)
+            delay = BASE_DELAY * (2**attempt)
             logger.warning(
                 "Request failed (attempt %d/%d), retrying in %.1fs: %s",
                 attempt + 1,
@@ -195,10 +193,9 @@ def _extract_text_bs4(html: str, base_url: str) -> tuple[str, str, list[str]]:
         href = a["href"]
         full = urljoin(base_url, href)
         parsed = urlparse(full)
-        if parsed.scheme in ("http", "https"):
-            if full not in seen:
-                seen.add(full)
-                links.append(full)
+        if parsed.scheme in ("http", "https") and full not in seen:
+            seen.add(full)
+            links.append(full)
 
     return title, text, links[:50]
 
@@ -207,9 +204,7 @@ async def _fetch_via_jina(url: str) -> dict[str, Any] | None:
     """Try fetching via Jina AI Reader API."""
     jina_url = f"https://r.jina.ai/{url}"
     try:
-        async with httpx.AsyncClient(
-            timeout=FETCH_TIMEOUT, follow_redirects=True
-        ) as client:
+        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
             response = await _request_with_retry(client, "GET", jina_url)
             text = response.text
             lines = text.splitlines()
@@ -225,9 +220,7 @@ async def _fetch_via_jina(url: str) -> dict[str, Any] | None:
                 elif line:
                     content_lines.append(line)
                     # Extract markdown links
-                    for match in re.finditer(
-                        r"\[([^\]]+)\]\((https?://[^\)]+)\)", line
-                    ):
+                    for match in re.finditer(r"\[([^\]]+)\]\((https?://[^\)]+)\)", line):
                         links.append(match.group(2))
             summary = "\n".join(content_lines)
             return {
@@ -270,9 +263,7 @@ async def fetch_and_summarize(url: str) -> dict[str, Any]:
 
     # Fallback to direct fetch + BeautifulSoup
     try:
-        async with httpx.AsyncClient(
-            timeout=FETCH_TIMEOUT, follow_redirects=True
-        ) as client:
+        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
             response = await _request_with_retry(
                 client,
                 "GET",

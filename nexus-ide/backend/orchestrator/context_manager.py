@@ -112,7 +112,9 @@ class ContextStore:
             try:
                 db_messages = get_messages(session_id, limit=self._max_history)
             except Exception as exc:
-                logger.warning("Failed to load messages from DB for session %s: %s", session_id, exc)
+                logger.warning(
+                    "Failed to load messages from DB for session %s: %s", session_id, exc
+                )
                 return 0
 
             if not db_messages:
@@ -123,14 +125,13 @@ class ContextStore:
                 role = row.get("role", "user")
                 content = row.get("content", "")
                 timestamp = row.get("created_at", "")
-                messages.append(
-                    ChatMessage(role=role, content=content, timestamp=timestamp)
-                )
+                messages.append(ChatMessage(role=role, content=content, timestamp=timestamp))
 
             self._history[session_id] = messages
             logger.info(
                 "Reloaded %d messages from DB for session %s",
-                len(messages), session_id,
+                len(messages),
+                session_id,
             )
             return len(messages)
 

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 import sys
+
+import pytest
 
 from backend.tools.shell_runner import run_shell
 

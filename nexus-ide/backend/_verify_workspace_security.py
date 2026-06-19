@@ -6,8 +6,8 @@ Run from anywhere using:
 No extra PYTHONPATH setup required — sys.path is configured below.
 """
 
-import sys
 import os
+import sys
 
 # Make `backend` package importable even when running from a different CWD.
 # The backend/ directory lives at <project-root>/nexus-ide/backend/.
@@ -17,6 +17,7 @@ if PARENT_OF_BACKEND not in sys.path:
     sys.path.insert(0, PARENT_OF_BACKEND)
 
 import asyncio
+import contextlib
 import tempfile
 from pathlib import Path
 
@@ -90,10 +91,8 @@ async def run_file_ops():
     r = await read_file_absolute(test_path)
     read_ok = r.get("content") == content and "error" not in r
 
-    try:
+    with contextlib.suppress(OSError):
         os.remove(test_path)
-    except OSError:
-        pass
 
     return write_ok, read_ok, w, r
 

@@ -9,35 +9,13 @@ modes:
     router: "smart"
     tools_enabled: ["all"]
     enable_thinking: true
-    max_iterations: 12
+    max_iterations: 6
     supports_subagents: true
     system_prompt_addon: |
-      You are in AUTONOMOUS AGENT MODE. You are a senior engineer who owns the FULL request lifecycle.
-      You MUST act, not describe. Use tools immediately and aggressively.
-
-      MANDATORY WORKFLOW:
-        1. PLAN (think before acting): Break the objective into clear steps. For complex tasks, list the steps mentally.
-        2. EXPLORE: Use list_dir and read_file to understand the codebase before modifying anything.
-        3. RECALL: Call recall_context to retrieve relevant past decisions and project facts.
-        4. EXECUTE: Implement with write_file / write_file_absolute. NEVER output code in chat — always write to files.
-        5. VERIFY: After writing, re-read the file and/or execute_code to confirm correctness.
-        6. CONSULT: When you need specialised expertise, call consult_agent immediately:
-           - ARCHITECT → design, architecture, trade-offs, API contracts
-           - REVIEWER → code review, security audit, quality assessment
-           - ANALYZER → deep analysis, complex assessment, root cause
-           - DEBUGGER → bug diagnosis, test failures, error traces
-           - RESEARCHER → external APIs, libraries, current best practices, docs
-           - OPTIMIZER → performance bottlenecks, profiling, optimisation
-        7. STORE: Use store_memory for important decisions, constraints, and findings.
-        8. SUMMARISE: End with a concise professional summary: what was done, what files were created/modified, next steps.
-
-      RULES:
-        - NEVER ask for permission. Act immediately.
-        - NEVER just describe what you "would" do — DO IT.
-        - If uncertain about design, consult ARCHITECT first, then proceed.
-        - Prefer absolute paths (write_file_absolute) when you know the full path.
-        - After each tool result, evaluate if the goal is achieved or if more steps are needed.
-        - For large projects: break into phases, complete each phase fully before the next.
+      1. Usa tools imediatamente, não descrevas.
+      2. Após write_file com sucesso, resposta final curta.
+      3. Consulta outros agentes quando precisares.
+      4. Resposta final: o que fizeste + ficheiros (2-3 linhas max).
 
   coder:
     description: "Modo focado em geração e análise de código com autonomia total de ferramentas"
@@ -45,6 +23,7 @@ modes:
     default_model: "coder"
     router: "none"
     tools_enabled: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code", "consult_agent"]
+    max_iterations: 4
     supports_subagents: true
     system_prompt_addon: |
       Focus on clean, idiomatic, production-ready code.
@@ -61,7 +40,7 @@ modes:
     router: "none"
     tools_enabled: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code", "consult_agent"]
     enable_thinking: true
-    max_iterations: 10
+    max_iterations: 5
     supports_subagents: true
     system_prompt_addon: |
       You are in CODE REVIEW mode. Your sole focus is comprehensive peer review of code.
@@ -79,7 +58,7 @@ modes:
     router: "none"
     tools_enabled: ["execute_code", "web_search", "web_scraper", "sql_query", "read_file", "consult_agent"]
     enable_thinking: true
-    max_iterations: 10
+    max_iterations: 5
     supports_subagents: true
     system_prompt_addon: |
       Focus on data analysis, web scraping, and generating structured reports.
@@ -107,7 +86,7 @@ modes:
     router: "none"
     tools_enabled: ["all"]
     enable_thinking: true
-    max_iterations: 10
+    max_iterations: 6
     supports_subagents: true
     system_prompt_addon: |
       Think deeply about the problem. Show your reasoning in thinking blocks.
@@ -123,7 +102,7 @@ modes:
     router: "none"
     tools_enabled: ["read_file", "list_dir", "search_in_files", "consult_agent"]
     enable_thinking: true
-    max_iterations: 8
+    max_iterations: 4
     supports_subagents: true
     system_prompt_addon: |
       Create a structured execution plan with clear steps, agents, dependencies, and deliverables.
@@ -138,7 +117,7 @@ modes:
     router: "none"
     tools_enabled: ["read_file", "execute_code", "search_codebase", "consult_agent"]
     enable_thinking: true
-    max_iterations: 10
+    max_iterations: 5
     supports_subagents: true
     system_prompt_addon: |
       Investigate bugs, errors, and failures systematically.
@@ -165,7 +144,7 @@ modes:
     router: "smart"
     tools_enabled: ["all"]
     enable_thinking: false
-    max_iterations: 7
+    max_iterations: 4
     supports_subagents: true
     system_prompt_addon: |
       You are the SWARM coordinator. Multiple expert agents are working in parallel on the same objective.
@@ -176,6 +155,61 @@ modes:
         - debate: let agents propose competing solutions and have a moderator pick and integrate the best.
       Each agent may consult sub-agents (CONSULT_AGENT) and recall memories.
       Final output must be a single coherent, professional answer that resolves contradictions, cites agent contributions, and lists concrete next actions.
+
+# ---------------------------------------------------------------------------
+# SWARM Operational Modes (v2 — see backend/swarm/modes/mode_registry.py)
+# ---------------------------------------------------------------------------
+
+swarm_modes:
+  architecture:
+    description: "Design system structure, evaluate trade-offs, emit ADRs."
+    default_strategy: "debate"
+    agents: ["COORDINATOR", "INVESTIGATOR", "ARCHITECT", "REVIEWER"]
+    uses_rag: true
+    uses_research: false
+    max_iterations: 5
+  investigation:
+    description: "Read the codebase via RAG, summarise what exists, surface constraints."
+    default_strategy: "ensemble"
+    agents: ["COORDINATOR", "INVESTIGATOR", "ARCHITECT"]
+    uses_rag: true
+    uses_research: false
+    max_iterations: 4
+  implementation:
+    description: "Plan and emit a proposal for code changes, with safe approval flow."
+    default_strategy: "pipeline"
+    agents: ["COORDINATOR", "INVESTIGATOR", "ARCHITECT", "IMPLEMENTER", "REVIEWER"]
+    uses_rag: true
+    uses_research: false
+    max_iterations: 6
+  review:
+    description: "Independently review code or text and produce findings + scores."
+    default_strategy: "ensemble"
+    agents: ["COORDINATOR", "INVESTIGATOR", "REVIEWER"]
+    uses_rag: true
+    uses_research: false
+    max_iterations: 3
+  bugfix:
+    description: "Investigate → propose a fix → reviewer validates → approved patch."
+    default_strategy: "pipeline"
+    agents: ["COORDINATOR", "INVESTIGATOR", "IMPLEMENTER", "REVIEWER"]
+    uses_rag: true
+    uses_research: false
+    max_iterations: 5
+  planning:
+    description: "Produce a structured execution plan, no code changes."
+    default_strategy: "divide"
+    agents: ["COORDINATOR", "INVESTIGATOR", "ARCHITECT"]
+    uses_rag: true
+    uses_research: false
+    max_iterations: 4
+  research:
+    description: "External research with multiple authoritative sources."
+    default_strategy: "ensemble"
+    agents: ["COORDINATOR", "RESEARCHER", "ARCHITECT"]
+    uses_rag: false
+    uses_research: true
+    max_iterations: 4
 
   dashboard:
     description: "Monitorização contínua, alertas e interpretação de métricas do sistema"

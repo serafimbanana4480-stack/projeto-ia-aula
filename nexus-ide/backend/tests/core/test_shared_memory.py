@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from backend.core.shared_memory import SharedMemory, WhiteboardEntry, get_shared_memory
+from backend.core.shared_memory import SharedMemory, get_shared_memory
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +19,7 @@ def reset_shared_memory_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestSharedMemory:
     def setup_method(self):
         from backend.persistence.db import close_pool
+
         close_pool()
 
     @pytest.mark.asyncio
@@ -46,7 +47,9 @@ class TestSharedMemory:
     async def test_read_entries_with_filters(self, tmp_path, monkeypatch):
         # Clean tables to avoid test pollution
         import sqlite3
+
         from backend.persistence.db import DB_PATH
+
         conn = sqlite3.connect(str(DB_PATH))
         conn.execute("DELETE FROM whiteboard_entries")
         conn.execute("DELETE FROM whiteboard_entry_links")
@@ -54,6 +57,7 @@ class TestSharedMemory:
         conn.close()
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         from backend.persistence.db import init_db
+
         init_db()
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         from backend.persistence.db import init_db
@@ -115,7 +119,9 @@ class TestSharedMemory:
     async def test_archive_old_entries(self, tmp_path, monkeypatch):
         # Clean tables to avoid test pollution
         import sqlite3
+
         from backend.persistence.db import DB_PATH
+
         conn = sqlite3.connect(str(DB_PATH))
         conn.execute("DELETE FROM whiteboard_entries")
         conn.execute("DELETE FROM whiteboard_entry_links")
@@ -123,6 +129,7 @@ class TestSharedMemory:
         conn.close()
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         from backend.persistence.db import init_db
+
         init_db()
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         from backend.persistence.db import init_db

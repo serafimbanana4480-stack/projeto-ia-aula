@@ -18,17 +18,35 @@ logger = logging.getLogger(__name__)
 
 # Blocked git commands that could cause data loss
 _BLOCKED_COMMANDS = {
-    "push", "pushf", "push-force", "force-push",
-    "reset", "reset-hard", "clean",
-    "checkout", "branch-d", "branch-D", "branch-delete",
-    "rebase", "cherry-pick",
+    "push",
+    "pushf",
+    "push-force",
+    "force-push",
+    "reset",
+    "reset-hard",
+    "clean",
+    "checkout",
+    "branch-d",
+    "branch-D",
+    "branch-delete",
+    "rebase",
+    "cherry-pick",
 }
 
 # Allowed safe git commands
 _SAFE_COMMANDS = {
-    "status", "diff", "log", "show", "blame",
-    "branch", "tag", "remote", "stash",
-    "add", "commit", "restore",
+    "status",
+    "diff",
+    "log",
+    "show",
+    "blame",
+    "branch",
+    "tag",
+    "remote",
+    "stash",
+    "add",
+    "commit",
+    "restore",
 }
 
 
@@ -94,9 +112,7 @@ async def git_operation(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=30.0
-        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
 
         output = stdout.decode("utf-8", errors="replace")
         errors = stderr.decode("utf-8", errors="replace")
@@ -114,7 +130,7 @@ async def git_operation(
             "exit_code": 0,
         }
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"error": f"Git command timed out: {command}"}
     except FileNotFoundError:
         return {"error": "Git is not installed or not in PATH"}

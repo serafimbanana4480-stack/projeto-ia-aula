@@ -6,7 +6,7 @@ import logging
 from datetime import timedelta
 
 import bcrypt
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from backend.config.settings import get_settings
 from backend.middleware.auth import create_access_token, require_auth
@@ -21,7 +21,6 @@ from backend.persistence.db import (
     create_user,
     get_user_by_email,
     get_user_with_password,
-    update_user_password,
 )
 
 logger = logging.getLogger(__name__)
@@ -131,7 +130,7 @@ async def get_current_user(current_user: dict = Depends(require_auth)):
 
     Requires valid JWT token.
     """
-    user_id = current_user["user_id"]
+    current_user["user_id"]
     user = get_user_by_email(current_user["email"])
 
     if not user:

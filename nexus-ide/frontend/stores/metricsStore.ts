@@ -240,6 +240,10 @@ let isStopped = false;
 let backoffTimer: ReturnType<typeof setTimeout> | null = null;
 let authHeartbeat: ReturnType<typeof setInterval> | null = null;
 
+// SSE throttle: prevent re-render storms by limiting updates to one per 300ms
+let lastSseUpdate = 0;
+const SSE_THROTTLE_MS = 300;
+
 function clearBackoff() {
   if (backoffTimer) {
     clearTimeout(backoffTimer);
@@ -337,6 +341,9 @@ function startSSE() {
     };
 
     es.onmessage = (e) => {
+      const now = Date.now();
+      if (now - lastSseUpdate < SSE_THROTTLE_MS) return;
+      lastSseUpdate = now;
       try {
         const data = JSON.parse(e.data) as SystemMetrics;
         useMetricsStore.getState()._setMetrics(data);

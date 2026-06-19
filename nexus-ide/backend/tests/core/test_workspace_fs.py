@@ -217,9 +217,7 @@ class TestReadMultipleFilesAbsolute:
         a.write_text("aa", encoding="utf-8")
         b.write_text("bbb", encoding="utf-8")
 
-        result = await read_multiple_files_absolute(
-            [str(a), str(b)], max_total_bytes=2
-        )
+        result = await read_multiple_files_absolute([str(a), str(b)], max_total_bytes=2)
 
         assert result["read_count"] == 1
         assert result["total_bytes"] == 2
@@ -238,9 +236,7 @@ class TestListDirAbsoluteFilters:
         (tmp_path / "file.txt").write_text("x", encoding="utf-8")
         (tmp_path / "subdir").mkdir()
 
-        result = await list_dir_absolute(
-            str(tmp_path), include_files=True, include_dirs=False
-        )
+        result = await list_dir_absolute(str(tmp_path), include_files=True, include_dirs=False)
 
         names = {i["name"] for i in result["items"]}
         assert "file.txt" in names
@@ -250,9 +246,7 @@ class TestListDirAbsoluteFilters:
         (tmp_path / "file.txt").write_text("x", encoding="utf-8")
         (tmp_path / "subdir").mkdir()
 
-        result = await list_dir_absolute(
-            str(tmp_path), include_files=False, include_dirs=True
-        )
+        result = await list_dir_absolute(str(tmp_path), include_files=False, include_dirs=True)
 
         names = {i["name"] for i in result["items"]}
         assert "subdir" in names
@@ -309,9 +303,7 @@ class TestListDirRecursiveGlob:
         (sub / "a.py").write_text("x", encoding="utf-8")
         (sub / "b.txt").write_text("x", encoding="utf-8")
 
-        result = await list_dir_absolute(
-            str(tmp_path), recursive=True, glob_pattern="*.py"
-        )
+        result = await list_dir_absolute(str(tmp_path), recursive=True, glob_pattern="*.py")
 
         names = {i["name"] for i in result["items"]}
         assert "a.py" in names

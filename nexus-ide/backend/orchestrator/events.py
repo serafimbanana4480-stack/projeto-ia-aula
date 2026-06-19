@@ -19,7 +19,7 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -252,7 +252,7 @@ class EventStore:
         self.store_dir: Path = store_dir
 
     def _file_for(self, ts: float) -> Path:
-        day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y%m%d")
+        day = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y%m%d")
         return self.store_dir / f"events-{day}.ndjson"
 
     @staticmethod
@@ -297,9 +297,7 @@ class EventStore:
         except OSError:
             logger.exception("EventStore.persist failed for %s", path)
 
-    def load_window(
-        self, since: float, until: float | None = None
-    ) -> list[OrchestratorEvent]:
+    def load_window(self, since: float, until: float | None = None) -> list[OrchestratorEvent]:
         """Return persisted events with ``timestamp`` in ``[since, until]``.
 
         Reads every ``events-*.ndjson`` file in ``store_dir`` in name
@@ -322,9 +320,7 @@ class EventStore:
                         try:
                             payload = json.loads(raw)
                         except json.JSONDecodeError:
-                            logger.warning(
-                                "Skipping malformed line in %s", path
-                            )
+                            logger.warning("Skipping malformed line in %s", path)
                             continue
                         ts = float(payload.get("timestamp", 0.0))
                         if ts < since or ts > upper:

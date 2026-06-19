@@ -1,8 +1,10 @@
 # backend/tools/append_file.py
 """Append content to a file safely with lock handling."""
+
 from __future__ import annotations
+
 import logging
-from pathlib import Path
+
 from backend.core.file_locks import FileLockManager, LockError
 from backend.core.workspace import WorkspaceManager
 from backend.tools.registry import ToolSpec, register_tool
@@ -29,13 +31,22 @@ async def append_file(
         return {"error": str(exc)}
 
     # security – block dangerous extensions
-    if full_path.suffix.lower() in {".exe", ".dll", ".bat", ".cmd", ".com", ".scr",
-                                   ".msi", ".vbs", ".wsf", ".jar"}:
+    if full_path.suffix.lower() in {
+        ".exe",
+        ".dll",
+        ".bat",
+        ".cmd",
+        ".com",
+        ".scr",
+        ".msi",
+        ".vbs",
+        ".wsf",
+        ".jar",
+    }:
         return {"error": f"Appending to '{full_path.suffix}' files is blocked"}
 
     try:
-        await _lock_manager.acquire_write_lock(str(full_path), owner,
-                                              timeout=timeout_seconds)
+        await _lock_manager.acquire_write_lock(str(full_path), owner, timeout=timeout_seconds)
         # open in append‑binary mode to avoid encoding surprises
         with open(full_path, "ab") as fp:
             fp.write(content.encode("utf-8"))

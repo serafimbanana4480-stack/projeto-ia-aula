@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, UTC
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
 from backend.config.settings import get_settings
@@ -17,7 +16,7 @@ logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
 
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     """Create a JWT access token."""
     to_encode = data.copy()
     if expires_delta:
@@ -25,7 +24,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     else:
         expire = datetime.now(UTC) + timedelta(minutes=30)
     to_encode.update({"exp": expire})
-    
+
     settings = get_settings()
     encoded_jwt = jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
     return encoded_jwt
@@ -47,20 +46,20 @@ def decode_access_token(token: str) -> dict:
 
 
 async def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict:
     """Get the current authenticated user from JWT token.
-    
+
     This dependency can be used to protect endpoints that require authentication.
     If no token is provided, it returns None (for optional auth).
     If an invalid token is provided, it raises an HTTP 401 exception.
     """
     if credentials is None:
         return None
-    
+
     token = credentials.credentials
     payload = decode_access_token(token)
-    
+
     user_id: str = payload.get("sub")
     if user_id is None:
         raise HTTPException(
@@ -68,7 +67,7 @@ async def get_current_user(
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     return {
         "user_id": user_id,
         "email": payload.get("email"),
@@ -78,7 +77,7 @@ async def get_current_user(
 
 async def require_auth(current_user: dict = Depends(get_current_user)) -> dict:
     """Require authentication for an endpoint.
-    
+
     Use this dependency for endpoints that MUST have authentication.
     Raises HTTP 401 if no valid token is provided.
     """

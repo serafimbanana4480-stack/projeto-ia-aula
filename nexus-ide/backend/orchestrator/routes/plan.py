@@ -162,13 +162,15 @@ async def get_plan_status(
     state = engine.get_state(plan.session_id)
     steps_info = []
     for step in plan.steps:
-        steps_info.append({
-            "task_id": step.task_id,
-            "name": step.name,
-            "agent": step.agent,
-            "status": step.status.value,
-            "error_message": step.error_message,
-        })
+        steps_info.append(
+            {
+                "task_id": step.task_id,
+                "name": step.name,
+                "agent": step.agent,
+                "status": step.status.value,
+                "error_message": step.error_message,
+            }
+        )
 
     return {
         "plan_id": plan_id,

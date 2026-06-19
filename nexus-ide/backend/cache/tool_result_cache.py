@@ -6,12 +6,12 @@ the same session. Shell commands, writes, and code execution are never cached.
 
 Usage:
     from backend.cache import tool_cache
-    
+
     # Before executing tool
     cached = tool_cache.get(tool_name, arguments)
     if cached:
         return cached
-    
+
     # After executing tool
     tool_cache.store(tool_name, arguments, result)
 """
@@ -22,19 +22,19 @@ import hashlib
 import json
 import logging
 import time
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 # TTL per tool type (seconds). 0 = never cache.
 TOOL_TTL_CONFIG: dict[str, int] = {
-    "search_codebase": 300,       # 5 min — codebase changes rarely
+    "search_codebase": 300,  # 5 min — codebase changes rarely
     "search_in_files": 300,
-    "list_files": 60,             # 1 min — filesystem can change
+    "list_files": 60,  # 1 min — filesystem can change
     "list_dir": 60,
-    "read_file": 120,             # 2 min — file may be edited
+    "read_file": 120,  # 2 min — file may be edited
     "read_multiple_files": 120,
-    "web_search": 600,            # 10 min — web is stable short-term
+    "web_search": 600,  # 10 min — web is stable short-term
     "search_web_v2": 600,
     "fetch_url": 300,
     "fetch_and_summarize": 600,
@@ -79,7 +79,7 @@ class ToolResultCache:
         content = f"{tool_name}:{args_normalized}"
         return hashlib.md5(content.encode("utf-8")).hexdigest()
 
-    def get(self, tool_name: str, arguments: dict) -> Optional[Any]:
+    def get(self, tool_name: str, arguments: dict) -> Any | None:
         """Return cached result or None if miss/expired."""
         ttl = TOOL_TTL_CONFIG.get(tool_name, 0)
         if ttl == 0:

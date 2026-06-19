@@ -42,7 +42,7 @@ describe("MetricsGrid", () => {
   it("mostra o aviso PT de backend offline quando não há métricas nem backend", () => {
     render(<MetricsGrid />);
     expect(
-      screen.getByText("Backend offline — aguardando conexão..."),
+      screen.getByText("Backend offline — a aguardar ligação…"),
     ).toBeDefined();
   });
 
@@ -53,7 +53,7 @@ describe("MetricsGrid", () => {
     });
     render(<MetricsGrid />);
     expect(screen.getByText("Tokens/s")).toBeDefined();
-    expect(screen.getByText("Modelo Ativo")).toBeDefined();
+    expect(screen.getByText("Modelo ativo")).toBeDefined();
     expect(screen.getByText("CPU")).toBeDefined();
     expect(screen.getByText("RAM")).toBeDefined();
     expect(screen.getByText("Latência")).toBeDefined();

@@ -24,8 +24,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import tempfile
-import warnings
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +42,7 @@ def _get_provider(name: str):
     if name == "pyttsx3":
         try:
             import pyttsx3
+
             engine = pyttsx3.init()
             _tts_providers[name] = engine
             return engine
@@ -57,6 +56,7 @@ def _get_provider(name: str):
     elif name == "edge-tts":
         try:
             import edge_tts
+
             _tts_providers[name] = edge_tts
             return edge_tts
         except ImportError:
@@ -66,6 +66,7 @@ def _get_provider(name: str):
     elif name == "gtts":
         try:
             from gtts import gTTS
+
             _tts_providers[name] = gTTS
             return gTTS
         except ImportError:
@@ -75,6 +76,7 @@ def _get_provider(name: str):
     elif name == "elevenlabs":
         try:
             from elevenlabs import generate, set_api_key
+
             _tts_providers[name] = (generate, set_api_key)
             return _tts_providers[name]
         except ImportError:
@@ -139,7 +141,9 @@ async def _speak_edge_tts(text: str, config: TTSConfig) -> None:
         return
 
     # Voice mapping for Portuguese
-    voice = config.voice_id or "pt-PT-DiaNeural" if config.language == "pt-PT" else "en-US-GuyNeural"
+    voice = (
+        config.voice_id or "pt-PT-DiaNeural" if config.language == "pt-PT" else "en-US-GuyNeural"
+    )
     if config.language == "pt-PT":
         voice = "pt-PT-DiaNeural"
     elif config.language == "en-US":
@@ -165,7 +169,6 @@ async def _play_audio(file_path: str) -> None:
     system = platform.system()
     try:
         if system == "Windows":
-            import winsound
             # winsound only supports WAV, so we need a different approach for MP3
             # Use start command to play with default player
             os.system(f'start "" "{file_path}"')
@@ -190,6 +193,7 @@ def _speak_gtts(text: str, config: TTSConfig) -> None:
 
         # Play
         import asyncio
+
         asyncio.run(_play_audio(str(output_file)))
     except Exception as exc:
         logger.warning("gTTS failed: %s", exc)
@@ -217,6 +221,7 @@ def _speak_elevenlabs(text: str, config: TTSConfig) -> None:
             f.write(audio)
 
         import asyncio
+
         asyncio.run(_play_audio(str(output_file)))
     except Exception as exc:
         logger.warning("ElevenLabs failed: %s", exc)
@@ -297,6 +302,28 @@ async def speak_async(text: str, provider: str | None = None) -> dict[str, Any]:
         return {"success": False, "reason": str(exc)}
 
 
+def tts_status() -> dict[str, Any]:
+    """Return the TTS subsystem status and a small voice sample.
+
+    Safe to call even if no TTS provider is installed.
+    """
+    config = TTSConfig()
+    voices: list[dict[str, str]] = []
+    try:
+        voices = get_available_voices()
+    except Exception:
+        voices = []
+    return {
+        "provider": config.provider,
+        "rate": config.rate,
+        "volume": config.volume,
+        "voice_id": config.voice_id,
+        "available_providers": ["pyttsx3", "gtts", "elevenlabs"],
+        "voices": voices,
+        "ready": bool(voices),
+    }
+
+
 def get_available_voices() -> list[dict[str, str]]:
     """Get list of available voices for the current provider."""
     config = TTSConfig()
@@ -307,11 +334,15 @@ def get_available_voices() -> list[dict[str, str]]:
         engine = _get_provider("pyttsx3")
         if engine:
             for voice in engine.getProperty("voices"):
-                voices.append({
-                    "id": voice.id,
-                    "name": voice.name,
-                    "language": getattr(voice, "languages", ["unknown"])[0] if hasattr(voice, "languages") else "unknown",
-                })
+                voices.append(
+                    {
+                        "id": voice.id,
+                        "name": voice.name,
+                        "language": getattr(voice, "languages", ["unknown"])[0]
+                        if hasattr(voice, "languages")
+                        else "unknown",
+                    }
+                )
     elif provider == "edge-tts":
         # Common Edge voices
         voices = [
@@ -324,6 +355,7 @@ def get_available_voices() -> list[dict[str, str]]:
             {"id": "fr-FR-HenriNeural", "name": "Henri (French)"},
             {"id": "de-DE-KatjaNeural", "name": "Katja (German)"},
         ]
+
 
 # ---------------------------------------------------------------------------
 # Tool Registration

@@ -21,16 +21,27 @@ export default function ModelsPage() {
   const [installProgress, setInstallProgress] = useState<string>("");
 
   useEffect(() => {
+    let mounted = true;
     const fetchModels = async () => {
       try {
-        setModels([]);
+        const response = await fetch("/api/models/status", {
+          headers: {
+            "Authorization": `Bearer ${localStorage.getItem("nexus.access_token")}`,
+          },
+        });
+        if (response.ok) {
+          const data = await response.json() as Model[];
+          if (mounted && Array.isArray(data)) {
+            setModels(data);
+          }
+        }
       } catch (error) {
         log.error("Failed to fetch models:", error);
       }
     };
     fetchModels();
-    const interval = setInterval(fetchModels, 10000);
-    return () => clearInterval(interval);
+    const interval = setInterval(fetchModels, 30000);
+    return () => { mounted = false; clearInterval(interval); };
   }, []);
 
   const formatSize = (bytes: number) => {

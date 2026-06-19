@@ -26,8 +26,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from backend.tools.ollama_client import ChatMessage
-
 from .base import AgentAction, AgentBase, AgentRequest
 
 logger = logging.getLogger(__name__)
@@ -76,8 +74,7 @@ class _CircuitBreaker:
         if self._consecutive_failures >= self._failure_threshold:
             self._open = True
             logger.warning(
-                "Circuit breaker OPEN after %d consecutive failures "
-                "(will retry in %.0fs)",
+                "Circuit breaker OPEN after %d consecutive failures (will retry in %.0fs)",
                 self._consecutive_failures,
                 self._reset_timeout,
             )
@@ -131,8 +128,7 @@ class DashboardAgent(AgentBase):
         # Enrich the user query with current metrics so the ReAct loop has the
         # latest snapshot available even if it does not call any tools.
         enriched_query = (
-            f"CURRENT SYSTEM METRICS:\n{metrics_context}\n\n"
-            f"USER QUESTION:\n{request.query}"
+            f"CURRENT SYSTEM METRICS:\n{metrics_context}\n\nUSER QUESTION:\n{request.query}"
         )
         enriched_request = AgentRequest(
             session_id=request.session_id,
@@ -212,28 +208,32 @@ class DashboardAgent(AgentBase):
 
         try:
             from backend.observability.metrics_collector import get_metrics_collector
+
             collector = get_metrics_collector()
             ms = await collector.get_snapshot()
-            snapshot.update({
-                "cpu_percent": ms.cpu_percent,
-                "ram_percent": ms.ram_percent,
-                "disk_percent": ms.disk_percent,
-                "tokens_per_second": ms.tokens_per_second,
-                "active_model": ms.active_model,
-                "active_sessions": ms.active_sessions,
-                "queue_depth": ms.queue_depth,
-                "requests_total": ms.requests_total,
-                "requests_successful": ms.requests_successful,
-                "requests_failed": ms.requests_failed,
-                "avg_latency_ms": ms.avg_latency_ms,
-                "uptime_seconds": ms.uptime_seconds,
-            })
+            snapshot.update(
+                {
+                    "cpu_percent": ms.cpu_percent,
+                    "ram_percent": ms.ram_percent,
+                    "disk_percent": ms.disk_percent,
+                    "tokens_per_second": ms.tokens_per_second,
+                    "active_model": ms.active_model,
+                    "active_sessions": ms.active_sessions,
+                    "queue_depth": ms.queue_depth,
+                    "requests_total": ms.requests_total,
+                    "requests_successful": ms.requests_successful,
+                    "requests_failed": ms.requests_failed,
+                    "avg_latency_ms": ms.avg_latency_ms,
+                    "uptime_seconds": ms.uptime_seconds,
+                }
+            )
         except Exception as exc:
             logger.warning("Failed to collect system metrics: %s", exc)
             snapshot["collector_error"] = str(exc)
 
         try:
             from backend.persistence.db import get_message_statistics
+
             stats = await asyncio.to_thread(get_message_statistics)
             snapshot["message_stats"] = stats
         except Exception as exc:
@@ -306,7 +306,9 @@ class DashboardAgent(AgentBase):
         self._last_alert_time[key] = now
         return True
 
-    def _detect_anomalies(self, snapshot: dict[str, Any], history: list[dict[str, Any]]) -> list[Alert]:
+    def _detect_anomalies(
+        self, snapshot: dict[str, Any], history: list[dict[str, Any]]
+    ) -> list[Alert]:
         """Detect anomalies in the current snapshot."""
         alerts: list[Alert] = []
         now = snapshot.get("timestamp", datetime.now(UTC).isoformat())
@@ -314,31 +316,57 @@ class DashboardAgent(AgentBase):
         # Threshold-based alerts
         cpu = snapshot.get("cpu_percent", 0) or 0
         if cpu > 90 and self._should_alert("cpu_percent", "critical"):
-            alerts.append(self._make_alert("critical", "cpu_percent", cpu, 90, "CPU usage critically high", now))
+            alerts.append(
+                self._make_alert(
+                    "critical", "cpu_percent", cpu, 90, "CPU usage critically high", now
+                )
+            )
         elif cpu > 75 and self._should_alert("cpu_percent", "alert"):
-            alerts.append(self._make_alert("alert", "cpu_percent", cpu, 75, "CPU usage elevated", now))
+            alerts.append(
+                self._make_alert("alert", "cpu_percent", cpu, 75, "CPU usage elevated", now)
+            )
 
         ram = snapshot.get("ram_percent", 0) or 0
         if ram > 90 and self._should_alert("ram_percent", "critical"):
-            alerts.append(self._make_alert("critical", "ram_percent", ram, 90, "Memory usage critically high", now))
+            alerts.append(
+                self._make_alert(
+                    "critical", "ram_percent", ram, 90, "Memory usage critically high", now
+                )
+            )
         elif ram > 80 and self._should_alert("ram_percent", "alert"):
-            alerts.append(self._make_alert("alert", "ram_percent", ram, 80, "Memory usage elevated", now))
+            alerts.append(
+                self._make_alert("alert", "ram_percent", ram, 80, "Memory usage elevated", now)
+            )
 
         disk = snapshot.get("disk_percent", 0) or 0
         if disk > 90 and self._should_alert("disk_percent", "critical"):
-            alerts.append(self._make_alert("critical", "disk_percent", disk, 90, "Disk usage critically high", now))
+            alerts.append(
+                self._make_alert(
+                    "critical", "disk_percent", disk, 90, "Disk usage critically high", now
+                )
+            )
         elif disk > 80 and self._should_alert("disk_percent", "alert"):
-            alerts.append(self._make_alert("alert", "disk_percent", disk, 80, "Disk usage elevated", now))
+            alerts.append(
+                self._make_alert("alert", "disk_percent", disk, 80, "Disk usage elevated", now)
+            )
 
         # Latency alert
         latency = snapshot.get("avg_latency_ms", 0) or 0
         if latency > 5000 and self._should_alert("avg_latency_ms", "alert"):
-            alerts.append(self._make_alert("alert", "avg_latency_ms", latency, 5000, "Average latency very high", now))
+            alerts.append(
+                self._make_alert(
+                    "alert", "avg_latency_ms", latency, 5000, "Average latency very high", now
+                )
+            )
 
         # Error rate alert
         error_rate = snapshot.get("db_stats", {}).get("tool_error_rate", 0) or 0
         if error_rate > 0.25 and self._should_alert("tool_error_rate", "alert"):
-            alerts.append(self._make_alert("alert", "tool_error_rate", error_rate, 0.25, "Tool error rate elevated", now))
+            alerts.append(
+                self._make_alert(
+                    "alert", "tool_error_rate", error_rate, 0.25, "Tool error rate elevated", now
+                )
+            )
 
         # Statistical anomaly: z-score over rolling window
         for metric in ("cpu_percent", "ram_percent", "avg_latency_ms"):
@@ -439,6 +467,7 @@ class DashboardAgent(AgentBase):
         """Produce a 5-minute session and routing quality summary."""
         try:
             from backend.persistence.db import get_message_statistics
+
             stats = await asyncio.to_thread(get_message_statistics)
         except Exception:
             stats = {}
@@ -590,12 +619,16 @@ class DashboardAgent(AgentBase):
             ram_values = [h.get("ram_percent") for h in recent if h.get("ram_percent") is not None]
             if cpu_values:
                 with contextlib.suppress(Exception):
-                    parts.extend([
-                        "",
-                        "TRENDS (last ~5 min)",
-                        f"CPU avg: {statistics.mean(cpu_values):.1f}%, max: {max(cpu_values):.1f}%",
-                        f"RAM avg: {statistics.mean(ram_values):.1f}%, max: {max(ram_values):.1f}%" if ram_values else "",
-                    ])
+                    parts.extend(
+                        [
+                            "",
+                            "TRENDS (last ~5 min)",
+                            f"CPU avg: {statistics.mean(cpu_values):.1f}%, max: {max(cpu_values):.1f}%",
+                            f"RAM avg: {statistics.mean(ram_values):.1f}%, max: {max(ram_values):.1f}%"
+                            if ram_values
+                            else "",
+                        ]
+                    )
 
         return "\n".join(parts)
 

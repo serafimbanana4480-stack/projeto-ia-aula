@@ -20,13 +20,11 @@ New tools exposed to agents:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from dataclasses import dataclass
-from html import unescape
 from typing import Any
-from urllib.parse import quote_plus, unquote, urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -100,7 +98,7 @@ async def _request_with_retry(
             # Retry on rate-limit or transient server errors
             if e.response.status_code in (429, 500, 502, 503, 504):
                 last_exception = e
-                delay = base_delay * (2 ** attempt)
+                delay = base_delay * (2**attempt)
                 logger.warning(
                     "Request failed (attempt %d/%d), retrying in %.1fs: %s",
                     attempt + 1,
@@ -113,7 +111,7 @@ async def _request_with_retry(
                 raise
         except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as e:
             last_exception = e
-            delay = base_delay * (2 ** attempt)
+            delay = base_delay * (2**attempt)
             logger.warning(
                 "Request failed (attempt %d/%d), retrying in %.1fs: %s",
                 attempt + 1,
@@ -304,9 +302,7 @@ async def _search_duckduckgo(
 
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
         try:
-            response = await _request_with_retry(
-                client, "POST", url, data=data, headers=headers
-            )
+            response = await _request_with_retry(client, "POST", url, data=data, headers=headers)
             soup = BeautifulSoup(response.text, "html.parser")
             hits: list[SearchHit] = []
             for result in soup.select(".result"):
@@ -358,9 +354,7 @@ async def search_web(query: str, max_results: int = 10) -> dict[str, Any]:
     clean_query, site = _extract_site_filter(query)
     hits = await _search_brave(clean_query, max_results=max_results, site_filter=site)
     if not hits:
-        hits = await _search_duckduckgo(
-            clean_query, max_results=max_results, site_filter=site
-        )
+        hits = await _search_duckduckgo(clean_query, max_results=max_results, site_filter=site)
     hits = _rank_hits(clean_query, hits)
     return {
         "query": query,
@@ -411,13 +405,9 @@ async def search_and_answer(query: str, max_results: int = 3) -> dict[str, Any]:
     clean_query, site = _extract_site_filter(query)
 
     # 1. Search
-    hits = await _search_brave(
-        clean_query, max_results=max_results * 2, site_filter=site
-    )
+    hits = await _search_brave(clean_query, max_results=max_results * 2, site_filter=site)
     if not hits:
-        hits = await _search_duckduckgo(
-            clean_query, max_results=max_results * 2, site_filter=site
-        )
+        hits = await _search_duckduckgo(clean_query, max_results=max_results * 2, site_filter=site)
 
     if not hits:
         return {
@@ -434,7 +424,7 @@ async def search_and_answer(query: str, max_results: int = 3) -> dict[str, Any]:
     fetched_list = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
     fetched: list[dict[str, Any]] = []
-    for hit, content in zip(hits, fetched_list):
+    for hit, content in zip(hits, fetched_list, strict=False):
         if isinstance(content, Exception):
             logger.warning("Fetch failed for %s: %s", hit.url, content)
             continue
@@ -452,18 +442,14 @@ async def search_and_answer(query: str, max_results: int = 3) -> dict[str, Any]:
     # 3. Synthesize answer
     synthesis_parts = [f"## Answer for: {query}\n"]
     for i, item in enumerate(fetched, 1):
-        synthesis_parts.append(
-            f"\n### Source {i}: [{item['title']}]({item['url']})\n"
-        )
+        synthesis_parts.append(f"\n### Source {i}: [{item['title']}]({item['url']})\n")
         # Include both snippet and first part of summary
         synthesis_parts.append(item["snippet"])
         if item["summary"] and item["summary"] != item["snippet"]:
             synthesis_parts.append(f"\n{item['summary'][:800]}")
 
     answer = "\n".join(synthesis_parts)
-    confidence = (
-        round(sum(h.score for h in hits) / len(hits), 2) if hits else 0.0
-    )
+    confidence = round(sum(h.score for h in hits) / len(hits), 2) if hits else 0.0
 
     return {
         "query": query,
@@ -534,9 +520,7 @@ register_tool(
 register_tool(
     ToolSpec(
         name="search_and_answer",
-        description=(
-            "Search the web and synthesize a coherent answer from top results."
-        ),
+        description=("Search the web and synthesize a coherent answer from top results."),
         schema={
             "type": "object",
             "properties": {

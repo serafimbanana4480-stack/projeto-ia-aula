@@ -120,10 +120,7 @@ def connect_imap(
         ConnectionError: If connection or login fails.
     """
     try:
-        if use_ssl:
-            conn = imaplib.IMAP4_SSL(host, port)
-        else:
-            conn = imaplib.IMAP4(host, port)
+        conn = imaplib.IMAP4_SSL(host, port) if use_ssl else imaplib.IMAP4(host, port)
         conn.login(username, password)
         logger.info("Connected to IMAP server %s:%s as %s", host, port, username)
         return conn
@@ -147,7 +144,9 @@ def _ensure_conn(
     if conn is not None:
         return conn, False
     if not all([host, port is not None, username, password]):
-        raise ValueError("Connection or full credentials (host, port, username, password) are required")
+        raise ValueError(
+            "Connection or full credentials (host, port, username, password) are required"
+        )
     return connect_imap(host, port, username, password, use_ssl), True
 
 
@@ -223,19 +222,18 @@ def fetch_emails(
             date = msg.get("Date", "")
             body_preview = _get_body_preview(msg)
 
-            if unread_only:
-                unread = True
-            else:
-                unread = msg_id in unread_ids
+            unread = True if unread_only else msg_id in unread_ids
 
-            emails.append({
-                "id": msg_id.decode("utf-8") if isinstance(msg_id, bytes) else str(msg_id),
-                "subject": subject,
-                "from": from_addr,
-                "date": date,
-                "body_preview": body_preview,
-                "unread": unread,
-            })
+            emails.append(
+                {
+                    "id": msg_id.decode("utf-8") if isinstance(msg_id, bytes) else str(msg_id),
+                    "subject": subject,
+                    "from": from_addr,
+                    "date": date,
+                    "body_preview": body_preview,
+                    "unread": unread,
+                }
+            )
 
     except Exception as e:
         logger.error("Failed to fetch emails: %s", e)
@@ -332,14 +330,16 @@ def search_emails(
             body_preview = _get_body_preview(msg)
             unread = msg_id in unread_ids
 
-            results.append({
-                "id": msg_id.decode("utf-8") if isinstance(msg_id, bytes) else str(msg_id),
-                "subject": subject,
-                "from": from_addr,
-                "date": date,
-                "body_preview": body_preview,
-                "unread": unread,
-            })
+            results.append(
+                {
+                    "id": msg_id.decode("utf-8") if isinstance(msg_id, bytes) else str(msg_id),
+                    "subject": subject,
+                    "from": from_addr,
+                    "date": date,
+                    "body_preview": body_preview,
+                    "unread": unread,
+                }
+            )
 
     except Exception as e:
         logger.error("Failed to search emails: %s", e)

@@ -124,5 +124,8 @@ async def test_swarm_adaptive_selects_strategy(fake_registry):
 def test_pick_agent_for_task():
     swarm = SwarmOrchestrator(FakeLLM(), {}, None, max_agents=3)
     assert swarm._pick_agent_for_task("Implement the auth module", ["CODER", "ANALYZER"]) == "CODER"
-    assert swarm._pick_agent_for_task("Security audit and code review", ["CODER", "ANALYZER"]) == "ANALYZER"
+    assert (
+        swarm._pick_agent_for_task("Security audit and code review", ["CODER", "ANALYZER"])
+        == "ANALYZER"
+    )
     assert swarm._pick_agent_for_task("Debug the failing test", ["CODER", "DEBUGGER"]) == "DEBUGGER"

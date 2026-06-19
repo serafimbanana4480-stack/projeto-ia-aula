@@ -21,6 +21,7 @@ def reset_peer_review_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestPeerReview:
     def setup_method(self):
         from backend.persistence.db import close_pool
+
         close_pool()
 
     @pytest.mark.asyncio
@@ -127,7 +128,9 @@ class TestPeerReview:
     async def test_list_pending_reviews(self, tmp_path, monkeypatch):
         # Clean tables to avoid test pollution
         import sqlite3
+
         from backend.persistence.db import DB_PATH
+
         conn = sqlite3.connect(str(DB_PATH))
         conn.execute("DELETE FROM peer_review_requests")
         conn.execute("DELETE FROM peer_review_results")
@@ -135,6 +138,7 @@ class TestPeerReview:
         conn.close()
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         from backend.persistence.db import init_db
+
         init_db()
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         from backend.persistence.db import init_db

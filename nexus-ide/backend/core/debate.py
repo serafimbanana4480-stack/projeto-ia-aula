@@ -9,8 +9,6 @@ from __future__ import annotations
 import logging
 import uuid
 from collections import Counter
-from datetime import UTC, datetime
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -141,15 +139,12 @@ class DebateSession:
         else:
             counts = Counter(positions)
             winning_position = counts.most_common(1)[0][0]
-            dissenting = [
-                o for o in self.opinions if o.position != winning_position
-            ]
+            dissenting = [o for o in self.opinions if o.position != winning_position]
 
         meta_decision = ""
         if not consensus:
             meta_decision = (
-                f"META_ANALYZER decides: adopt '{winning_position}' "
-                "after weighing all arguments."
+                f"META_ANALYZER decides: adopt '{winning_position}' after weighing all arguments."
             )
 
         result = DebateResult(

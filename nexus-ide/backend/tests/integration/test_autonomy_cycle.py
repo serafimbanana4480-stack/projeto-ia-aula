@@ -8,7 +8,6 @@ from backend.orchestrator.dependency_graph import (
     DependencyGraph,
     ExecutionPlan,
     TaskNode,
-    TaskPriority,
     TaskStatus,
 )
 from backend.orchestrator.engine import OrchestrationEngine
@@ -20,8 +19,8 @@ class TestAutonomyCycle:
     @pytest.mark.asyncio
     async def test_create_plan_generates_structured_steps(self) -> None:
         """Test that OrchestrationEngine.create_plan returns a valid structured plan."""
-        from unittest.mock import AsyncMock, MagicMock
-        from backend.orchestrator.engine import OrchestrationEngine
+        from unittest.mock import MagicMock
+
         from backend.orchestrator.events import EventBus
 
         async def _mock_stream(*args, **kwargs):
@@ -124,8 +123,8 @@ class TestAutonomyCycle:
     @pytest.mark.asyncio
     async def test_full_cycle_end_to_end(self) -> None:
         """Test a simplified full cycle from query to completion."""
-        from unittest.mock import AsyncMock, MagicMock
-        from backend.orchestrator.engine import OrchestrationEngine
+        from unittest.mock import MagicMock
+
         from backend.orchestrator.events import EventBus
 
         async def _mock_stream(*args, **kwargs):

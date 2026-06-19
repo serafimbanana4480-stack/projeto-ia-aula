@@ -95,8 +95,7 @@ class MetaAnalyzerAgent(AgentBase):
         synthesis_context = await self._gather_agent_outputs(request.session_id)
         if synthesis_context:
             enriched_query = (
-                f"{request.query}\n\n"
-                f"### Context from other agents:\n{synthesis_context}"
+                f"{request.query}\n\n### Context from other agents:\n{synthesis_context}"
             )
         else:
             enriched_query = request.query
@@ -131,13 +130,9 @@ class MetaAnalyzerAgent(AgentBase):
                 for msg in messages:
                     if msg.source_agent in self._OBSERVED_AGENTS:
                         payload = json.dumps(msg.payload, default=str)
-                        contexts.append(
-                            f"[{msg.source_agent} @ {topic}] {payload}"
-                        )
+                        contexts.append(f"[{msg.source_agent} @ {topic}] {payload}")
             except Exception as exc:
-                logger.debug(
-                    "Failed to gather bus history for %s: %s", topic, exc
-                )
+                logger.debug("Failed to gather bus history for %s: %s", topic, exc)
 
         if not contexts:
             return ""
@@ -256,18 +251,14 @@ class MetaAnalyzerAgent(AgentBase):
 
         # Documentation
         missing_docs = metrics.get("missing_docstrings", 0)
-        doc_pass = (
-            missing_docs == 0 if QualityCriteria.DOCSTRING_REQUIRED_PUBLIC else True
-        )
+        doc_pass = missing_docs == 0 if QualityCriteria.DOCSTRING_REQUIRED_PUBLIC else True
         verdict["categories"]["documentation"] = {
             "pass": doc_pass,
             "missing_docstrings": missing_docs,
         }
         if not doc_pass:
             verdict["overall"] = "FAIL"
-            verdict["violations"].append(
-                f"Missing docstrings on {missing_docs} public functions"
-            )
+            verdict["violations"].append(f"Missing docstrings on {missing_docs} public functions")
 
         return verdict
 
@@ -301,12 +292,8 @@ class MetaAnalyzerAgent(AgentBase):
             texts[agent] = content.lower()
 
         for pos_set, neg_set in oppositions:
-            pos_agents = [
-                a for a, t in texts.items() if any(p in t for p in pos_set)
-            ]
-            neg_agents = [
-                a for a, t in texts.items() if any(n in t for n in neg_set)
-            ]
+            pos_agents = [a for a, t in texts.items() if any(p in t for p in pos_set)]
+            neg_agents = [a for a, t in texts.items() if any(n in t for n in neg_set)]
             if pos_agents and neg_agents:
                 contradictions.append(
                     {
@@ -320,17 +307,9 @@ class MetaAnalyzerAgent(AgentBase):
 
         # Check for direct conflict in metrics
         if "ARCHITECT" in agent_outputs and "ANALYZER" in agent_outputs:
-            arch_complexity = agent_outputs["ARCHITECT"].get(
-                "estimated_complexity", 0
-            )
-            anal_complexity = agent_outputs["ANALYZER"].get(
-                "estimated_complexity", 0
-            )
-            if (
-                arch_complexity
-                and anal_complexity
-                and abs(arch_complexity - anal_complexity) >= 4
-            ):
+            arch_complexity = agent_outputs["ARCHITECT"].get("estimated_complexity", 0)
+            anal_complexity = agent_outputs["ANALYZER"].get("estimated_complexity", 0)
+            if arch_complexity and anal_complexity and abs(arch_complexity - anal_complexity) >= 4:
                 contradictions.append(
                     {
                         "type": "complexity_mismatch",
@@ -364,9 +343,7 @@ class MetaAnalyzerAgent(AgentBase):
             f"- **Rationale:** {rationale}",
         ]
         if quality_verdict:
-            entry.append(
-                f"- **Quality verdict:** {quality_verdict.get('overall', 'UNKNOWN')}"
-            )
+            entry.append(f"- **Quality verdict:** {quality_verdict.get('overall', 'UNKNOWN')}")
             if quality_verdict.get("violations"):
                 entry.append("- **Violations:**")
                 for v in quality_verdict["violations"]:

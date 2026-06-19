@@ -97,8 +97,11 @@ describe("RequestFlow", () => {
     expect(screen.getByText("LLM")).toBeDefined();
     expect(screen.getByText("Resposta")).toBeDefined();
     expect(screen.getByText("80.0% sucesso")).toBeDefined();
+    // The agent name ``CODER`` is rendered both in the active-agents list
+    // and in the request flow node, so multiple elements match. Use
+    // ``getAllByText`` to assert the agent label is present at least once.
     await waitFor(() => {
-      expect(screen.getByText("CODER")).toBeDefined();
+      expect(screen.getAllByText("CODER").length).toBeGreaterThan(0);
     });
   });
 });

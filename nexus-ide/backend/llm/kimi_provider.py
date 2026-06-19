@@ -72,9 +72,7 @@ class KimiProvider:
                 resp = await self._client.post(path, json=json_payload)
                 if resp.status_code < 500:
                     return resp
-                last_exc = RuntimeError(
-                    f"Kimi API error {resp.status_code}: {resp.text}"
-                )
+                last_exc = RuntimeError(f"Kimi API error {resp.status_code}: {resp.text}")
             except (httpx.NetworkError, httpx.TimeoutException) as exc:
                 last_exc = exc
             if attempt < max_retries:
@@ -134,9 +132,7 @@ class KimiProvider:
                             )
                             await asyncio.sleep(wait)
                             continue
-                        raise RuntimeError(
-                            f"Kimi API error {resp.status_code}: {text.decode()}"
-                        )
+                        raise RuntimeError(f"Kimi API error {resp.status_code}: {text.decode()}")
                     async for line in resp.aiter_lines():
                         line = line.strip()
                         if not line or line == "data: [DONE]":

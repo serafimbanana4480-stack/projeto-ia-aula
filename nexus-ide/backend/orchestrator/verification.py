@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.orchestrator.dependency_graph import ExecutionPlan, TaskNode, TaskPriority
+from backend.orchestrator.dependency_graph import TaskNode, TaskPriority
 from backend.orchestrator.types import OrchestrationResult
 
 __all__ = [

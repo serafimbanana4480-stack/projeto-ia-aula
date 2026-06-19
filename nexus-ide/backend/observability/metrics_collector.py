@@ -164,9 +164,9 @@ class MetricsCollector:
     ) -> None:
         """Record completion of an agent run."""
         from backend.observability.metrics import (
+            agent_duration_seconds,
             agent_runs_total,
             agent_tokens_used,
-            agent_duration_seconds,
         )
 
         agent_runs_total.labels(agent=agent, status=status).inc()

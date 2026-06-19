@@ -16,12 +16,13 @@ Supports:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
 import time
-from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from abc import ABC
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -30,28 +31,29 @@ from typing import Any
 from backend.agents.action_registry import get_action_registry
 from backend.config.settings import get_model_config, load_prompt
 from backend.observability.metrics_collector import get_metrics_collector
-from backend.tools.ollama_client import ChatMessage
-from backend.tools.registry import execute_tool
 from backend.token_management import (
+    ContextOverflowError,
     count_tokens,
     deduplicate_context_blocks,
-    validate_total_budget,
-    ContextOverflowError,
     dynamic_threshold,
-    MODEL_CONTEXT_LIMITS,
     trim_context_structured,
+    validate_total_budget,
 )
+from backend.tools.ollama_client import ChatMessage
+from backend.tools.registry import execute_tool
 
 # Cache modules — best-effort; system works without them
 try:
     from backend.cache.semantic_cache import get_semantic_cache
     from backend.cache.tool_result_cache import get_tool_cache
+
     _HAVE_CACHE = True
 except ImportError:
     _HAVE_CACHE = False
 
 try:
     from backend.observability.metrics import get_cost_tracker
+
     _HAVE_COST_TRACKER = True
 except ImportError:
     _HAVE_COST_TRACKER = False
@@ -100,7 +102,7 @@ class AgentRequest:
     client: Any  # LLM provider — OllamaProvider, OpenAIProvider, etc.
     history: list[ChatMessage] = field(default_factory=list)
     context: dict[str, Any] = field(default_factory=dict)
-    max_iterations: int = 7
+    max_iterations: int = 4
     enable_thinking: bool = False
     project_path: str = ""
 
@@ -159,9 +161,18 @@ class AgentBase(ABC):
 
         # Allow the orchestrator to inject mode-specific instructions cleanly
         # via the request context instead of polluting the user message.
-        system_addon = request.context.get("_system_addon") or request.context.get("system_prompt_addon")
+        system_addon = request.context.get("_system_addon") or request.context.get(
+            "system_prompt_addon"
+        )
         if system_addon:
-            system_content += "\n\n" + "=" * 60 + "\nMODE-SPECIFIC INSTRUCTIONS\n" + "=" * 60 + "\n" + str(system_addon)
+            system_content += (
+                "\n\n"
+                + "=" * 60
+                + "\nMODE-SPECIFIC INSTRUCTIONS\n"
+                + "=" * 60
+                + "\n"
+                + str(system_addon)
+            )
 
         messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
 
@@ -239,9 +250,9 @@ class AgentBase(ABC):
             "Use EXACTLY ONE of these formats (Format 1 is preferred):",
             "",
             "Format 1 (JSON code block - preferred):",
-            '```tool',
+            "```tool",
             '{"name": "tool_name", "arguments": {"arg1": "value1"}}',
-            '```',
+            "```",
             "",
             "Format 2 (inline XML tags):",
             '<tool_call>{"name": "tool_name", "arguments": {"arg1": "value1"}}</tool_call>',
@@ -256,34 +267,36 @@ class AgentBase(ABC):
             if mapping:
                 tool_name = mapping.tool
                 example_args = mapping.example_args
-                lines.append(f'  - {tool_name}: {example_args}')
+                lines.append(f"  - {tool_name}: {example_args}")
 
-        lines.extend([
-            "",
-            "CRITICAL RULES:",
-            "1. When asked to create or modify files, IMMEDIATELY call write_file or write_file_absolute.",
-            "2. Use write_file for paths relative to the project root.",
-            "3. Use write_file_absolute for absolute paths outside the project (e.g. C:\\Users\\...).",
-            "4. Use read_file before modifying an existing file.",
-            "5. Use execute_code or execute_terminal to verify your work when applicable.",
-            "6. You may emit MULTIPLE tool calls in a single response.",
-            "7. After each tool result, decide the next action or give your final answer.",
-            "8. NEVER apologise for not being able to act - just call the tool.",
-            "9. Use CONSULT_AGENT when you need specialised expertise you do not have.",
-            "   Examples: consult ARCHITECT for design, ANALYZER for review, DEBUGGER for bugs, RESEARCHER for external info.",
-            "10. In MODO AUTÓNOMO / auto mode, act with maximum autonomy: plan, explore, consult, execute, verify, and summarise.",
-            "",
-            "EXAMPLE - create a file with an absolute path:",
-            '```tool',
-            '{"name": "write_file_absolute", "arguments": {"path": "C:\\\\Users\\\\rodri\\\\Desktop\\\\desligar\\\\teste.txt", "content": "Ola Mundo"}}',
-            '```',
-            "",
-            "EXAMPLE - consult another agent:",
-            '```tool',
-            '{"name": "consult_agent", "arguments": {"agent": "ARCHITECT", "question": "What is the best design for a plugin registry?"}}',
-            '```',
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "CRITICAL RULES:",
+                "1. When asked to create or modify files, IMMEDIATELY call write_file or write_file_absolute.",
+                "2. Use write_file for paths relative to the project root.",
+                "3. Use write_file_absolute for absolute paths outside the project (e.g. C:\\Users\\...).",
+                "4. Use read_file before modifying an existing file.",
+                "5. Use execute_code or execute_terminal to verify your work when applicable.",
+                "6. You may emit MULTIPLE tool calls in a single response.",
+                "7. After each tool result, decide the next action or give your final answer.",
+                "8. NEVER apologise for not being able to act - just call the tool.",
+                "9. Use CONSULT_AGENT when you need specialised expertise you do not have.",
+                "   Examples: consult ARCHITECT for design, ANALYZER for review, DEBUGGER for bugs, RESEARCHER for external info.",
+                "10. In MODO AUTÓNOMO / auto mode, act with maximum autonomy: plan, explore, consult, execute, verify, and summarise.",
+                "",
+                "EXAMPLE - create a file with an absolute path:",
+                "```tool",
+                '{"name": "write_file_absolute", "arguments": {"path": "C:\\\\Users\\\\rodri\\\\Desktop\\\\desligar\\\\teste.txt", "content": "Ola Mundo"}}',
+                "```",
+                "",
+                "EXAMPLE - consult another agent:",
+                "```tool",
+                '{"name": "consult_agent", "arguments": {"agent": "ARCHITECT", "question": "What is the best design for a plugin registry?"}}',
+                "```",
+                "",
+            ]
+        )
         return "\n".join(lines)
 
     async def stream_llm(
@@ -349,6 +362,7 @@ class AgentBase(ABC):
         # to use a smaller, CPU-friendly model regardless of models.yaml.
         # Useful for CI / dev machines without GPU.
         import os
+
         test_model = os.environ.get("NEXUS_TEST_MODEL", "").strip()
         if test_model:
             models_to_try = [test_model]
@@ -372,7 +386,9 @@ class AgentBase(ABC):
                 if model_id != models_to_try[0]:
                     logger.warning(
                         "Primary model %s failed, falling back to %s for agent %s",
-                        models_to_try[0], model_id, self.name,
+                        models_to_try[0],
+                        model_id,
+                        self.name,
                     )
                 async for token in request.client.chat_stream(
                     model=model_id,
@@ -410,7 +426,9 @@ class AgentBase(ABC):
                     await collector.record_request(success=False, latency_ms=latency_ms)
                 logger.warning(
                     "Model %s failed for agent %s: %s. Trying next fallback.",
-                    model_id, self.name, exc,
+                    model_id,
+                    self.name,
+                    exc,
                 )
                 continue
 
@@ -471,7 +489,9 @@ class AgentBase(ABC):
 
         # Format 1: JSON code blocks ```tool ... ``` or any code block that
         # contains a tool call (some models wrap it in ```bash or ```json).
-        for match in re.finditer(r"```(?:tool|bash|json|shell|cmd)?\s*\n(.*?)```", content, re.DOTALL):
+        for match in re.finditer(
+            r"```(?:tool|bash|json|shell|cmd)?\s*\n(.*?)```", content, re.DOTALL
+        ):
             raw = match.group(1).strip()
             # If the block contains a <tool_call> tag, parse that instead
             if "<tool_call>" in raw:
@@ -503,21 +523,21 @@ class AgentBase(ABC):
             i = 0
             text_len = len(text)
             while i < text_len:
-                if text[i] not in ('{', '['):
+                if text[i] not in ("{", "["):
                     i += 1
                     continue
 
                 start = i
                 depth = 0
                 in_string = False
-                is_array = text[i] == '['
+                is_array = text[i] == "["
                 opening = text[i]
-                closing = ']' if is_array else '}'
+                closing = "]" if is_array else "}"
 
                 while i < text_len:
                     ch = text[i]
                     if in_string:
-                        if ch == '\\':
+                        if ch == "\\":
                             i += 2
                             continue
                         elif ch == '"':
@@ -530,19 +550,15 @@ class AgentBase(ABC):
                         elif ch == closing:
                             depth -= 1
                             if depth == 0:
-                                snippet = text[start:i + 1]
-                                try:
+                                snippet = text[start : i + 1]
+                                with contextlib.suppress(json.JSONDecodeError):
                                     yield json.loads(snippet)
-                                except json.JSONDecodeError:
-                                    pass
                                 break
                     i += 1
                 else:
                     snippet = text[start:]
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError):
                         yield json.loads(snippet)
-                    except json.JSONDecodeError:
-                        pass
                     break
 
                 i += 1
@@ -606,24 +622,24 @@ class AgentBase(ABC):
         # Try to use structured trimming
         try:
             # Parse iterations from context
-            import json
             iterations_raw = context.split("\nTool ")
             iterations = []
             for i, raw in enumerate(iterations_raw):
                 if raw.strip():
-                    iterations.append({
-                        "thought": raw[:200],
-                        "tool": "",
-                        "result": raw,
-                        "iteration": i,
-                    })
+                    iterations.append(
+                        {
+                            "thought": raw[:200],
+                            "tool": "",
+                            "result": raw,
+                            "iteration": i,
+                        }
+                    )
 
             if len(iterations) > 3:
                 trimmed = trim_context_structured(iterations, self.model_key, self.model_key)
                 if trimmed:
                     result = "\n".join(
-                        it.get("result", it.get("content", str(it)))
-                        for it in trimmed
+                        it.get("result", it.get("content", str(it))) for it in trimmed
                     )
                     # Log reduction
                     before_tok = count_tokens(context, self.model_key)
@@ -631,7 +647,10 @@ class AgentBase(ABC):
                     reduction = (1 - after_tok / max(1, before_tok)) * 100
                     logger.debug(
                         "[%s] Context trimmed: %d \u2192 %d tokens (%.0f%% reduction)",
-                        self.name, before_tok, after_tok, reduction,
+                        self.name,
+                        before_tok,
+                        after_tok,
+                        reduction,
                     )
                     return result
         except Exception as exc:
@@ -648,7 +667,7 @@ class AgentBase(ABC):
             keep_start = max(0, len(iterations_raw) - 3)
             for i, it in enumerate(iterations_raw[:keep_start]):
                 first_line = it.split("\n")[0] if "\n" in it else it[:60]
-                summary_parts.append(f"[Iteration {i+1}] {first_line}")
+                summary_parts.append(f"[Iteration {i + 1}] {first_line}")
             digest = "\n".join(summary_parts)
             recent = "\nTool ".join(iterations_raw[keep_start:])
             trimmed = f"[Memory digest of earlier steps]\n{digest}\n\n[Recent steps]\n{recent}"
@@ -657,13 +676,15 @@ class AgentBase(ABC):
             after_tok = self._estimate_tokens(trimmed)
             logger.debug(
                 "[%s] Context trimmed (fallback): %d \u2192 %d tokens",
-                self.name, before_tok, after_tok,
+                self.name,
+                before_tok,
+                after_tok,
             )
             return trimmed
 
         # Very short context — just truncate
         excess = self._estimate_tokens(context) - dynamic_threshold(self.model_key)
-        return context[excess * 4:]
+        return context[excess * 4 :]
 
     async def _run_react_loop(
         self,
@@ -673,13 +694,24 @@ class AgentBase(ABC):
         context = ""
         iteration = 0
         previous_tool_calls: list[tuple[str, dict]] | None = None
+        previous_thinking = ""  # Track to avoid repeating identical thinking blocks
         logger.info(
             "[%s] ReAct loop started | session=%s | query=%.80s | project=%s | max_iter=%d",
-            self.name, request.session_id, request.query, request.project_path, request.max_iterations,
+            self.name,
+            request.session_id,
+            request.query,
+            request.project_path,
+            request.max_iterations,
         )
         while iteration < request.max_iterations:
             iteration += 1
-            logger.info("[%s] ReAct iteration %d/%d | session=%s", self.name, iteration, request.max_iterations, request.session_id)
+            logger.info(
+                "[%s] ReAct iteration %d/%d | session=%s",
+                self.name,
+                iteration,
+                request.max_iterations,
+                request.session_id,
+            )
 
             # Trim context before each iteration to prevent unbounded growth
             context = self._trim_context(context, iteration)
@@ -698,26 +730,45 @@ class AgentBase(ABC):
                     token_count += 1
                     yield token
             except Exception as exc:
-                logger.error("[%s] LLM stream failed on iteration %d: %s", self.name, iteration, exc, exc_info=True)
+                logger.error(
+                    "[%s] LLM stream failed on iteration %d: %s",
+                    self.name,
+                    iteration,
+                    exc,
+                    exc_info=True,
+                )
                 yield f"<event>error|LLM stream failed: {exc}</event>"
                 return
             stream_elapsed = time.monotonic() - stream_start
             logger.info(
                 "[%s] LLM response received | iteration=%d | tokens=%d | elapsed_ms=%.1f",
-                self.name, iteration, token_count, stream_elapsed * 1000,
+                self.name,
+                iteration,
+                token_count,
+                stream_elapsed * 1000,
             )
 
             # Extract thinking and final answer
             thinking, answer = self._extract_thinking(full_response)
 
             if thinking:
-                logger.debug("[%s] Thinking block extracted | len=%d", self.name, len(thinking))
-                yield "<event>thinking_end</event>"
-                yield f"<thinking>{thinking}</thinking>"
+                # Skip if thinking block is identical to previous iteration
+                if thinking == previous_thinking:
+                    logger.debug("[%s] Skipping duplicate thinking block", self.name)
+                else:
+                    logger.debug("[%s] Thinking block extracted | len=%d", self.name, len(thinking))
+                    yield "<event>thinking_end</event>"
+                    yield f"<thinking>{thinking}</thinking>"
+                    previous_thinking = thinking
 
             # Parse tool calls
             tool_calls = self._parse_tool_calls(answer)
-            logger.info("[%s] Tool calls parsed | iteration=%d | count=%d", self.name, iteration, len(tool_calls))
+            logger.info(
+                "[%s] Tool calls parsed | iteration=%d | count=%d",
+                self.name,
+                iteration,
+                len(tool_calls),
+            )
 
             if not tool_calls:
                 # Model sometimes returns Python "usage examples" instead of tool
@@ -741,7 +792,11 @@ class AgentBase(ABC):
                     continue
 
                 # No more tools, return final answer
-                logger.info("[%s] No tool calls detected — emitting final answer | iteration=%d", self.name, iteration)
+                logger.info(
+                    "[%s] No tool calls detected — emitting final answer | iteration=%d",
+                    self.name,
+                    iteration,
+                )
                 yield "<event>answer</event>"
                 return
 
@@ -754,7 +809,8 @@ class AgentBase(ABC):
                 if current_key == previous_key:
                     logger.warning(
                         "[%s] Detected repeated identical tool calls — breaking loop | iteration=%d",
-                        self.name, iteration,
+                        self.name,
+                        iteration,
                     )
                     yield "<event>answer</event>"
                     return
@@ -762,7 +818,13 @@ class AgentBase(ABC):
 
             # Execute tools
             for tool_name, args in tool_calls:
-                logger.info("[%s] Executing tool | iteration=%d | tool=%s | args=%s", self.name, iteration, tool_name, args)
+                logger.info(
+                    "[%s] Executing tool | iteration=%d | tool=%s | args=%s",
+                    self.name,
+                    iteration,
+                    tool_name,
+                    args,
+                )
                 yield f"<event>tool_call|{tool_name}|{json.dumps(args)}</event>"
 
                 # Inject project_path from the request only if the tool schema accepts it.
@@ -773,11 +835,17 @@ class AgentBase(ABC):
 
                     spec = get_tool(tool_name)
                     schema_props = (
-                        spec.schema.get("properties", {}) if spec and isinstance(spec.schema, dict) else {}
+                        spec.schema.get("properties", {})
+                        if spec and isinstance(spec.schema, dict)
+                        else {}
                     )
                     if "project_path" in schema_props:
                         args["project_path"] = request.project_path
-                        logger.debug("[%s] Injected project_path=%s into tool args", self.name, request.project_path)
+                        logger.debug(
+                            "[%s] Injected project_path=%s into tool args",
+                            self.name,
+                            request.project_path,
+                        )
 
                 # Auto-upgrade relative file tools to absolute variants when the
                 # supplied path is absolute. Local models often pick the wrong tool.
@@ -785,12 +853,36 @@ class AgentBase(ABC):
                 if isinstance(path_arg, str):
                     norm_path = path_arg.replace("/", "\\")
                     if (
-                        (tool_name == "write_file" and (norm_path.startswith("\\\\") or (len(norm_path) > 1 and norm_path[1] == ":")))
-                        or (tool_name == "read_file" and (norm_path.startswith("\\\\") or (len(norm_path) > 1 and norm_path[1] == ":")))
-                        or (tool_name == "list_dir" and (norm_path.startswith("\\\\") or (len(norm_path) > 1 and norm_path[1] == ":")))
+                        (
+                            tool_name == "write_file"
+                            and (
+                                norm_path.startswith("\\\\")
+                                or (len(norm_path) > 1 and norm_path[1] == ":")
+                            )
+                        )
+                        or (
+                            tool_name == "read_file"
+                            and (
+                                norm_path.startswith("\\\\")
+                                or (len(norm_path) > 1 and norm_path[1] == ":")
+                            )
+                        )
+                        or (
+                            tool_name == "list_dir"
+                            and (
+                                norm_path.startswith("\\\\")
+                                or (len(norm_path) > 1 and norm_path[1] == ":")
+                            )
+                        )
                     ):
                         upgraded = tool_name + "_absolute"
-                        logger.info("[%s] Auto-upgraded %s -> %s for absolute path %s", self.name, tool_name, upgraded, path_arg)
+                        logger.info(
+                            "[%s] Auto-upgraded %s -> %s for absolute path %s",
+                            self.name,
+                            tool_name,
+                            upgraded,
+                            path_arg,
+                        )
                         tool_name = upgraded
                         # Absolute tools do not accept project_path; remove it if
                         # it was injected above.
@@ -800,7 +892,11 @@ class AgentBase(ABC):
                 # consulted agent knows who is calling and A2A traceability is complete.
                 if tool_name == "consult_agent" and "source_agent" not in args:
                     args["source_agent"] = self.name
-                    logger.debug("[%s] Injected source_agent=%s into consult_agent args", self.name, self.name)
+                    logger.debug(
+                        "[%s] Injected source_agent=%s into consult_agent args",
+                        self.name,
+                        self.name,
+                    )
 
                 tool_start = time.monotonic()
                 result = await execute_tool(tool_name, request.session_id, args)
@@ -809,13 +905,20 @@ class AgentBase(ABC):
                 if "error" in result:
                     logger.warning(
                         "[%s] Tool error | iteration=%d | tool=%s | error=%s | elapsed_ms=%.1f",
-                        self.name, iteration, tool_name, result['error'], tool_elapsed * 1000,
+                        self.name,
+                        iteration,
+                        tool_name,
+                        result["error"],
+                        tool_elapsed * 1000,
                     )
                     yield f"<event>tool_error|{result['error']}</event>"
                 else:
                     logger.info(
                         "[%s] Tool success | iteration=%d | tool=%s | elapsed_ms=%.1f",
-                        self.name, iteration, tool_name, tool_elapsed * 1000,
+                        self.name,
+                        iteration,
+                        tool_name,
+                        tool_elapsed * 1000,
                     )
                     yield f"<event>tool_result|{tool_name}|{json.dumps(result.get('result', ''))}</event>"
 
@@ -834,14 +937,20 @@ class AgentBase(ABC):
                     and "error" not in result
                     and write_confirmed
                 ):
-                    context += "\n[SYSTEM] File written successfully. STOP calling tools and provide your final answer to the user."
+                    yield "<event>answer</event>"
+                    return
 
             # Continue loop with context
 
-        logger.warning("[%s] ReAct loop reached max iterations (%d) | session=%s", self.name, request.max_iterations, request.session_id)
+        logger.warning(
+            "[%s] ReAct loop reached max iterations (%d) | session=%s",
+            self.name,
+            request.max_iterations,
+            request.session_id,
+        )
         yield f"<event>warning|Reached maximum iterations ({request.max_iterations})</event>"
         yield "<event>answer</event>"
-        yield f"I reached the maximum of {request.max_iterations} iterations. Here's what I accomplished so far:\n{context}"
+        yield f"Concluído com {request.max_iterations} passos."
 
     # ------------------------------------------------------------------
     # Agent Bus helpers (pub/sub inter-agent communication)

@@ -14,7 +14,6 @@ Supports autonomous execution via ReAct loop:
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -44,7 +43,9 @@ class ReviewIssue:
             "severity": self.severity,
             "category": self.category,
             "file": self.file_path,
-            "lines": f"{self.line_start}" if self.line_end == 0 or self.line_end == self.line_start else f"{self.line_start}-{self.line_end}",
+            "lines": f"{self.line_start}"
+            if self.line_end == 0 or self.line_end == self.line_start
+            else f"{self.line_start}-{self.line_end}",
             "description": self.description,
             "impact": self.impact,
             "fix_suggestion": self.fix_suggestion,
@@ -67,7 +68,14 @@ class ReviewReport:
 
     def summary(self) -> dict[str, Any]:
         severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
-        category_counts = {"BUG": 0, "SECURITY": 0, "PERFORMANCE": 0, "STYLE": 0, "MAINTAINABILITY": 0, "TESTING": 0}
+        category_counts = {
+            "BUG": 0,
+            "SECURITY": 0,
+            "PERFORMANCE": 0,
+            "STYLE": 0,
+            "MAINTAINABILITY": 0,
+            "TESTING": 0,
+        }
         for issue in self.issues:
             severity_counts[issue.severity] = severity_counts.get(issue.severity, 0) + 1
             category_counts[issue.category] = category_counts.get(issue.category, 0) + 1
@@ -103,14 +111,18 @@ class ReviewReport:
             lines.append("## Detailed Findings")
             lines.append("")
             for idx, issue in enumerate(self.issues, 1):
-                lines.extend([
-                    f"### Issue #{idx}",
-                    f"- **Severity**: {issue.severity}",
-                    f"- **Category**: {issue.category}",
-                    f"- **File**: `{issue.file_path}`",
-                    f"- **Line(s)**: {issue.line_start}" if issue.line_end == 0 or issue.line_end == issue.line_start else f"- **Line(s)**: {issue.line_start}-{issue.line_end}",
-                    f"- **Description**: {issue.description}",
-                ])
+                lines.extend(
+                    [
+                        f"### Issue #{idx}",
+                        f"- **Severity**: {issue.severity}",
+                        f"- **Category**: {issue.category}",
+                        f"- **File**: `{issue.file_path}`",
+                        f"- **Line(s)**: {issue.line_start}"
+                        if issue.line_end == 0 or issue.line_end == issue.line_start
+                        else f"- **Line(s)**: {issue.line_start}-{issue.line_end}",
+                        f"- **Description**: {issue.description}",
+                    ]
+                )
                 if issue.impact:
                     lines.append(f"- **Impact**: {issue.impact}")
                 if issue.fix_suggestion:
@@ -217,7 +229,9 @@ class ReviewerAgent(AgentBase):
         ext = Path(file_path).suffix.lower()
         return self.LANGUAGE_EXTENSIONS.get(ext, "Unknown")
 
-    def extract_issues_from_response(self, response_text: str, file_path: str = "") -> list[ReviewIssue]:
+    def extract_issues_from_response(
+        self, response_text: str, file_path: str = ""
+    ) -> list[ReviewIssue]:
         """Parse structured issues from LLM response text.
 
         Attempts to extract issues marked with severity/category patterns.
@@ -236,7 +250,10 @@ class ReviewerAgent(AgentBase):
         import re
 
         # Split response into potential issue blocks (look for headers like ### Issue or numbered lists)
-        blocks = re.split(r"(?:\n#{1,3}\s*Issue\s*#?\d+|\n\d+\.\s*\*\*.*\*\*|\n-?\s*\*\*Severity\*\*)", response_text)
+        blocks = re.split(
+            r"(?:\n#{1,3}\s*Issue\s*#?\d+|\n\d+\.\s*\*\*.*\*\*|\n-?\s*\*\*Severity\*\*)",
+            response_text,
+        )
 
         for block in blocks:
             if not block.strip():
@@ -252,7 +269,9 @@ class ReviewerAgent(AgentBase):
 
             if sev_match and cat_match and desc_match:
                 line_start = int(line_match.group(1)) if line_match else 0
-                line_end = int(line_match.group(2)) if line_match and line_match.group(2) else line_start
+                line_end = (
+                    int(line_match.group(2)) if line_match and line_match.group(2) else line_start
+                )
 
                 issue = ReviewIssue(
                     severity=sev_match.group(1).upper(),
@@ -278,9 +297,7 @@ class ReviewerAgent(AgentBase):
             "LOW": 1,
             "INFO": 0,
         }
-        total_deduction = sum(
-            severity_weights.get(issue.severity, 0) for issue in issues
-        )
+        total_deduction = sum(severity_weights.get(issue.severity, 0) for issue in issues)
         # Cap at 100 points deduction
         return max(0, 100 - min(total_deduction, 100))
 
@@ -327,7 +344,9 @@ class ReviewerAgent(AgentBase):
         elif "test" in query:
             context_parts.append("Focus: Test coverage review")
         else:
-            context_parts.append("Focus: Comprehensive review (quality, security, performance, style)")
+            context_parts.append(
+                "Focus: Comprehensive review (quality, security, performance, style)"
+            )
 
         # Project path context
         if request.project_path:
@@ -350,7 +369,9 @@ class ReviewerAgent(AgentBase):
 
         logger.info(
             "[REVIEWER] Starting review | session=%s | query=%.80s | project=%s",
-            request.session_id, request.query, request.project_path,
+            request.session_id,
+            request.query,
+            request.project_path,
         )
 
         # Run the standard ReAct loop

@@ -34,6 +34,7 @@ async def create_skill(data: dict[str, Any], _user: dict = Depends(require_auth)
     skill_id = data.get("id", "")
     if not skill_id:
         from uuid import uuid4
+
         skill_id = str(uuid4()).replace("-", "")[:16]
     data["id"] = skill_id
     _skills[skill_id] = data
@@ -41,7 +42,9 @@ async def create_skill(data: dict[str, Any], _user: dict = Depends(require_auth)
 
 
 @router.put("/skills/{skill_id}")
-async def update_skill(skill_id: str, data: dict[str, Any], _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def update_skill(
+    skill_id: str, data: dict[str, Any], _user: dict = Depends(require_auth)
+) -> dict[str, Any]:
     if skill_id not in _skills:
         return {"error": "Skill not found"}
     _skills[skill_id].update(data)

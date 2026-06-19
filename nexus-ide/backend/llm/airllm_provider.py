@@ -26,13 +26,11 @@ import gc
 import logging
 import os
 import re
-import sys
 import threading
 import time
 import warnings
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +105,7 @@ class LocalLLMModelError(LocalLLMError):
 # Circuit breaker (kept for resilience parity with old OllamaProvider)
 # ---------------------------------------------------------------------------
 
+import contextlib
 from enum import Enum
 
 
@@ -213,10 +212,7 @@ def _resolve_local_path(model_id: str) -> str | None:
                                     size = target.stat().st_size
                         except OSError:
                             size = 0
-                        if (
-                            f.suffix in (".safetensors", ".bin")
-                            and size > 1024
-                        ):
+                        if f.suffix in (".safetensors", ".bin") and size > 1024:
                             return str(rev)
     return None
 
@@ -284,12 +280,15 @@ _MODEL_CACHE_TTL_SECONDS = 3600  # 1 hour
 # Embedding model cache
 _embedding_model_cache: dict[str, Any] = {}
 
+
 def _detect_device() -> str:
     try:
         import torch
+
         return "cuda:0" if torch.cuda.is_available() else "cpu"
     except Exception:
         return "cpu"
+
 
 _DEFAULT_DEVICE = _detect_device()
 logger.info("AirLLM default device: %s", _DEFAULT_DEVICE)
@@ -326,6 +325,7 @@ def _resolve_model_id(model: str, registry: dict[str, str] | None = None) -> str
 def _get_dtype(device: str) -> Any:
     """Pick appropriate dtype for the device."""
     import torch
+
     if device.startswith("cuda"):
         return torch.float16
     return torch.float32
@@ -334,6 +334,7 @@ def _get_dtype(device: str) -> Any:
 # ---------------------------------------------------------------------------
 # AirLLM model loader
 # ---------------------------------------------------------------------------
+
 
 class _DirectHFModel:
     """Wrapper for direct HuggingFace transformers loading (no layer sharding).
@@ -349,8 +350,9 @@ class _DirectHFModel:
         device: str = "cpu",
         compression: str | None = None,
     ) -> None:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
         self.device = device
         self.compression = (compression or "").lower() or None
         is_cuda = device.startswith("cuda")
@@ -367,7 +369,9 @@ class _DirectHFModel:
                 logger.warning(
                     "Compression=%s requested but device=%s is CPU. "
                     "bitsandbytes quantization requires CUDA — falling back to %s.",
-                    self.compression, device, self.dtype,
+                    self.compression,
+                    device,
+                    self.dtype,
                 )
             else:
                 try:
@@ -390,16 +394,18 @@ class _DirectHFModel:
                     logger.warning(
                         "bitsandbytes not installed — cannot use %s compression. "
                         "Falling back to %s.",
-                        self.compression, self.dtype,
+                        self.compression,
+                        self.dtype,
                     )
 
         logger.info(
             "Loading model directly via transformers: %s (device=%s, dtype=%s, compression=%s)",
-            model_path, device, self.dtype, self.compression or "none",
+            model_path,
+            device,
+            self.dtype,
+            self.compression or "none",
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=self.dtype,
@@ -414,24 +420,31 @@ class _DirectHFModel:
 
     def generate(self, input_ids, **kwargs):
         import torch
+
         input_ids = input_ids.to(self.device)
         with torch.inference_mode():
             return self.model.generate(input_ids, **kwargs)
 
 
-def _load_airllm_model(model_path: str, device: str = _DEFAULT_DEVICE, compression: str | None = None) -> Any:
+def _load_airllm_model(
+    model_path: str, device: str = _DEFAULT_DEVICE, compression: str | None = None
+) -> Any:
     """Synchronous model loader used inside asyncio.to_thread().
 
     Tries AirLLM first, falls back to direct transformers loading if the model
     is not sharded (missing model.safetensors.index.json).
     """
     if not AIRLLM_AVAILABLE or AirAutoModel is None:
-        raise LocalLLMConnectionError(
-            "AirLLM is not installed. Run: pip install airllm"
-        )
+        raise LocalLLMConnectionError("AirLLM is not installed. Run: pip install airllm")
 
     dtype = _get_dtype(device)
-    logger.info("Loading AirLLM model: %s (device=%s, dtype=%s, compression=%s)", model_path, device, dtype, compression)
+    logger.info(
+        "Loading AirLLM model: %s (device=%s, dtype=%s, compression=%s)",
+        model_path,
+        device,
+        dtype,
+        compression,
+    )
 
     kwargs: dict[str, Any] = {
         "device": device,
@@ -491,7 +504,8 @@ def _load_airllm_model(model_path: str, device: str = _DEFAULT_DEVICE, compressi
         ):
             logger.warning(
                 "AirLLM failed for %s (%s). Falling back to direct transformers loading.",
-                model_path, type(exc).__name__,
+                model_path,
+                type(exc).__name__,
             )
             return _DirectHFModel(model_path, device=device, compression=compression)
         raise
@@ -503,13 +517,12 @@ def _unload_model(model_id: str) -> None:
         entry = _model_cache.pop(model_id, None)
         _model_cache_times.pop(model_id, None)
     if entry is not None:
-        try:
+        with contextlib.suppress(Exception):
             del entry
-        except Exception:
-            pass
         gc.collect()
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception:
@@ -517,17 +530,16 @@ def _unload_model(model_id: str) -> None:
         logger.info("Unloaded model: %s", model_id)
 
 
-def _get_cached_model(model_id: str, device: str = _DEFAULT_DEVICE, compression: str | None = None) -> Any:
+def _get_cached_model(
+    model_id: str, device: str = _DEFAULT_DEVICE, compression: str | None = None
+) -> Any:
     """Get or create a cached AirLLM model with LRU eviction."""
     cache_key = f"{model_id}:{device}:{compression or 'none'}"
     now = time.time()
 
     with _model_lock:
         # Evict expired entries
-        expired = [
-            k for k, t in _model_cache_times.items()
-            if now - t > _MODEL_CACHE_TTL_SECONDS
-        ]
+        expired = [k for k, t in _model_cache_times.items() if now - t > _MODEL_CACHE_TTL_SECONDS]
         for k in expired:
             _model_cache.pop(k, None)
             _model_cache_times.pop(k, None)
@@ -556,6 +568,7 @@ def _get_cached_model(model_id: str, device: str = _DEFAULT_DEVICE, compression:
 # Embedding model loader
 # ---------------------------------------------------------------------------
 
+
 def _load_embedding_model(model_path: str, device: str = _DEFAULT_DEVICE) -> Any:
     """Load a sentence-transformers model for embeddings."""
     if SENTENCE_TRANSFORMERS_AVAILABLE and SentenceTransformer is not None:
@@ -563,10 +576,11 @@ def _load_embedding_model(model_path: str, device: str = _DEFAULT_DEVICE) -> Any
         return SentenceTransformer(model_path, device=device)
 
     # Fallback: use HuggingFace AutoModel directly
-    from transformers import AutoModel as HFAutoModel, AutoTokenizer as HFAutoTokenizer
+    from transformers import AutoModel as HFAutoModel
+    from transformers import AutoTokenizer as HFAutoTokenizer
+
     tokenizer = HFAutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     model = HFAutoModel.from_pretrained(model_path, trust_remote_code=True)
-    import torch
     model.to(device)
     model.eval()
     return {"model": model, "tokenizer": tokenizer, "device": device}
@@ -586,6 +600,7 @@ def _get_cached_embedding_model(model_id: str, device: str = _DEFAULT_DEVICE) ->
 # ---------------------------------------------------------------------------
 # Generation helpers (sync, run inside thread)
 # ---------------------------------------------------------------------------
+
 
 def _sync_chat_complete(
     model: Any,
@@ -623,6 +638,7 @@ def _sync_chat_complete(
 
     input_ids = input_tokens["input_ids"]
     import torch
+
     if hasattr(model, "running_device") and str(model.running_device).startswith("cuda"):
         input_ids = input_ids.cuda()
     else:
@@ -643,7 +659,6 @@ def _sync_chat_complete(
         gen_kwargs.pop("top_p")
 
     # Generate
-    import torch
     try:
         with torch.inference_mode():
             generation_output = model.generate(input_ids, **gen_kwargs)
@@ -651,13 +666,14 @@ def _sync_chat_complete(
         if "_is_stateful" in str(exc):
             logger.warning(
                 "AirLLM generate failed for %s (%s). Falling back to direct transformers.",
-                getattr(model, "model_local_path", "unknown"), exc,
+                getattr(model, "model_local_path", "unknown"),
+                exc,
             )
             # Create direct model and retry generation
             direct = _DirectHFModel(
                 getattr(model, "model_local_path", ""),
                 device=str(input_ids.device),
-                compression=compression,
+                compression=getattr(model, "compression", None),
             )
             with torch.inference_mode():
                 generation_output = direct.model.generate(input_ids, **gen_kwargs)
@@ -676,6 +692,7 @@ def _sync_chat_complete(
 # ---------------------------------------------------------------------------
 # AirLLMProvider
 # ---------------------------------------------------------------------------
+
 
 class AirLLMProvider:
     """Provider for local AirLLM inference with circuit breaker protection.
@@ -720,6 +737,7 @@ class AirLLMProvider:
         gc.collect()
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception:
@@ -737,7 +755,9 @@ class AirLLMProvider:
     def _resolve(self, model: str) -> str:
         return _resolve_model_id(model, self._registry)
 
-    def _inject_thinking_disable(self, model: str, options: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _inject_thinking_disable(
+        self, model: str, options: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
         """Auto-disable thinking mode for qwen models to prevent JSON routing failures."""
         if options is None:
             options = {}
@@ -766,6 +786,7 @@ class AirLLMProvider:
         try:
             if str(self._device).startswith("cuda"):
                 import torch
+
                 return torch.cuda.is_available()
             return True
         except Exception:
@@ -793,8 +814,7 @@ class AirLLMProvider:
 
         # Normalize messages
         dict_messages = [
-            m if isinstance(m, dict) else {"role": m.role, "content": m.content}
-            for m in messages
+            m if isinstance(m, dict) else {"role": m.role, "content": m.content} for m in messages
         ]
 
         resolved = self._resolve(model)
@@ -825,7 +845,7 @@ class AirLLMProvider:
             )
 
             self._circuit.record_success()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._circuit.record_failure()
             logger.error("AirLLM stream timed out after %ds for model %s", timeout, model)
             raise LocalLLMError(
@@ -860,8 +880,7 @@ class AirLLMProvider:
         options = self._inject_thinking_disable(model, options)
 
         dict_messages = [
-            m if isinstance(m, dict) else {"role": m.role, "content": m.content}
-            for m in messages
+            m if isinstance(m, dict) else {"role": m.role, "content": m.content} for m in messages
         ]
 
         resolved = self._resolve(model)
@@ -889,7 +908,7 @@ class AirLLMProvider:
             )
             self._circuit.record_success()
             return text
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._circuit.record_failure()
             logger.error("AirLLM completion timed out after %ds for model %s", timeout, model)
             raise LocalLLMError(
@@ -962,7 +981,7 @@ class AirLLMProvider:
 
             self._circuit.record_success()
             return results
-        except Exception as exc:
+        except Exception:
             self._circuit.record_failure()
             logger.exception("AirLLM embedding failed for model %s", model)
             # Return deterministic hash-based embeddings as fallback
@@ -972,6 +991,7 @@ class AirLLMProvider:
         """Deterministic fallback embedding using SHA-256 hash."""
         import hashlib
         import math
+
         h = hashlib.sha256(text.encode()).digest()
         # Use multiple rounds of the hash to fill the dimension
         vec = []
@@ -981,7 +1001,7 @@ class AirLLMProvider:
             vec.extend(((b / 255.0) - 0.5) * 2.0 for b in round_hash)
             round_num += 1
         # Normalize to unit sphere for cosine similarity
-        vec = vec[:self._embed_fallback_dim]
+        vec = vec[: self._embed_fallback_dim]
         norm = math.sqrt(sum(v * v for v in vec))
         if norm > 0:
             vec = [v / norm for v in vec]

@@ -9,7 +9,6 @@ Uses SandboxExecutor which provides:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -55,13 +54,12 @@ def _get_executor():
     global _executor
     if _executor is None:
         from backend.sandbox.executor import SandboxExecutor
+
         _executor = SandboxExecutor()
     return _executor
 
 
-async def execute_code(
-    code: str, language: str = "python", timeout: int = 30
-) -> dict[str, Any]:
+async def execute_code(code: str, language: str = "python", timeout: int = 30) -> dict[str, Any]:
     """Run code in a sandboxed environment.
 
     Uses SandboxExecutor which provides Docker isolation when available,
@@ -81,8 +79,7 @@ async def execute_code(
     """
     if language not in LANGUAGE_CONFIG:
         raise ValueError(
-            f"Unsupported language: {language}. "
-            f"Supported: {', '.join(LANGUAGE_CONFIG.keys())}"
+            f"Unsupported language: {language}. Supported: {', '.join(LANGUAGE_CONFIG.keys())}"
         )
 
     try:

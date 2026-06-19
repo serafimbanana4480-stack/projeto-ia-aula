@@ -29,6 +29,7 @@ export interface GuardianStatus {
   running: boolean;
   pending_suggestions: number;
   total_suggestions: number;
+  suggestions?: GuardianSuggestion[];
   system_health?: {
     cpu_percent: number;
     memory_percent: number;
@@ -179,7 +180,7 @@ export default function GuardianWidget() {
 
   const health = useMemo(() => getHealthIndicator(guardian), [guardian]);
   const suggestions = (guardian?.suggestions ?? []) as GuardianSuggestion[];
-  const pendingCount = guardian?.pending ?? 0;
+  const pendingCount = guardian?.pending_suggestions ?? 0;
 
   return (
     <section

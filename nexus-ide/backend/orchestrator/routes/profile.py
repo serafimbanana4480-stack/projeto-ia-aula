@@ -14,11 +14,11 @@ from backend.models.api import (
     UserPreferencesUpdateRequest,
 )
 from backend.persistence.profile_db import (
+    create_memory,
+    create_routine,
     ensure_user_profile,
     get_memories,
     get_routines,
-    create_memory,
-    create_routine,
     update_preferences,
 )
 

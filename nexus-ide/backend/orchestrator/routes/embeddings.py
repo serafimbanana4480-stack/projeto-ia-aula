@@ -21,8 +21,12 @@ router = APIRouter()
 
 
 class IndexRequest(BaseModel):
-    project_path: str = Field(min_length=1, max_length=2000, description="Absolute path to the project root to index")
-    force_reindex: bool = Field(default=False, description="Ignore the existing snapshot and rebuild the index")
+    project_path: str = Field(
+        min_length=1, max_length=2000, description="Absolute path to the project root to index"
+    )
+    force_reindex: bool = Field(
+        default=False, description="Ignore the existing snapshot and rebuild the index"
+    )
 
 
 class IndexResponse(BaseModel):

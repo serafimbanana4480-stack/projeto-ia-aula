@@ -59,9 +59,7 @@ def _bank_with_embeddings(
 
 class TestMemoryBankAdd:
     @pytest.mark.asyncio
-    async def test_add_episodic_sets_kind(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_add_episodic_sets_kind(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bank = MemoryBank(_make_store(monkeypatch))
         mem = await bank.add_episodic("User opened the settings panel at 10:00")
         assert mem.kind == MemoryKind.EPISODIC.value
@@ -69,27 +67,19 @@ class TestMemoryBankAdd:
         assert bank.get(mem.memory_id) is mem
 
     @pytest.mark.asyncio
-    async def test_add_semantic_sets_kind(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_add_semantic_sets_kind(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bank = MemoryBank(_make_store(monkeypatch))
         mem = await bank.add_semantic("Python is dynamically typed")
         assert mem.kind == MemoryKind.SEMANTIC.value
 
     @pytest.mark.asyncio
-    async def test_add_procedural_sets_kind(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_add_procedural_sets_kind(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bank = MemoryBank(_make_store(monkeypatch))
-        mem = await bank.add_procedural(
-            "To deploy: 1) build, 2) test, 3) push to staging"
-        )
+        mem = await bank.add_procedural("To deploy: 1) build, 2) test, 3) push to staging")
         assert mem.kind == MemoryKind.PROCEDURAL.value
 
     @pytest.mark.asyncio
-    async def test_add_propagates_kwargs(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_add_propagates_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bank = MemoryBank(_make_store(monkeypatch))
         mem = await bank.add_semantic(
             "SQLite stores the relational data",
@@ -104,9 +94,7 @@ class TestMemoryBankAdd:
 
 class TestListByKind:
     @pytest.mark.asyncio
-    async def test_list_by_kind_filters(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_list_by_kind_filters(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bank = MemoryBank(_make_store(monkeypatch))
         await bank.add_episodic("User clicked the submit button")
         await bank.add_episodic("Server returned a 500 error")
@@ -164,15 +152,11 @@ class TestConsolidate:
             },
         )
 
-        keeper = await bank.add_semantic(
-            "Python uses indentation for blocks", importance=0.6
-        )
+        keeper = await bank.add_semantic("Python uses indentation for blocks", importance=0.6)
         duplicate = await bank.add_semantic(
             "Python uses indentation for code blocks", importance=0.4
         )
-        await bank.add_semantic(
-            "The sky appears blue during the day", importance=0.7
-        )
+        await bank.add_semantic("The sky appears blue during the day", importance=0.7)
 
         merges = await bank.consolidate(similarity_threshold=0.92)
         assert merges == 1
@@ -184,14 +168,10 @@ class TestConsolidate:
         assert duplicate.memory_id not in remaining_ids
         assert keeper.memory_id in remaining_ids
         # The unrelated fact must survive untouched.
-        assert any(
-            m.content == "The sky appears blue during the day" for m in remaining
-        )
+        assert any(m.content == "The sky appears blue during the day" for m in remaining)
 
     @pytest.mark.asyncio
-    async def test_consolidate_skips_dissimilar(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_consolidate_skips_dissimilar(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bank = _bank_with_embeddings(
             monkeypatch,
             {
@@ -208,9 +188,7 @@ class TestConsolidate:
 
 
 class TestGetMemoryBank:
-    def test_singleton_returns_same_instance(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_singleton_returns_same_instance(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Reset module-level cache so the test is hermetic.
         import backend.knowledge.memory_bank as bank_mod
 

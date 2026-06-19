@@ -24,6 +24,7 @@ Typical usage::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sqlite3
 from types import TracebackType
@@ -49,9 +50,7 @@ class UnitOfWork:
             pool: Optional custom connection pool. When ``None`` the global
                 pool from :mod:`backend.persistence.db` is used.
         """
-        self._pool: db.SQLiteConnectionPool = (
-            pool if pool is not None else db.get_connection_pool()
-        )
+        self._pool: db.SQLiteConnectionPool = pool if pool is not None else db.get_connection_pool()
         self._conn: sqlite3.Connection | None = None
         self._finalised: bool = False
 
@@ -59,7 +58,7 @@ class UnitOfWork:
     # Context manager protocol
     # ------------------------------------------------------------------
 
-    async def __aenter__(self) -> "UnitOfWork":
+    async def __aenter__(self) -> UnitOfWork:
         """Acquire a connection and start a transaction."""
         if self._conn is not None:
             raise RuntimeError("UnitOfWork is already active")
@@ -97,25 +96,19 @@ class UnitOfWork:
                     logger.debug("UnitOfWork: transaction committed")
                 except sqlite3.Error as commit_exc:
                     logger.warning("UnitOfWork: commit failed: %s", commit_exc)
-                    try:
+                    with contextlib.suppress(sqlite3.Error):
                         await asyncio.to_thread(conn.rollback)
-                    except sqlite3.Error:
-                        pass
             else:
                 try:
                     await asyncio.to_thread(conn.rollback)
-                    logger.debug(
-                        "UnitOfWork: transaction rolled back due to %s", exc_type.__name__
-                    )
+                    logger.debug("UnitOfWork: transaction rolled back due to %s", exc_type.__name__)
                 except sqlite3.Error as rollback_exc:
                     logger.warning("UnitOfWork: rollback failed: %s", rollback_exc)
         finally:
             try:
                 await asyncio.to_thread(self._pool.return_connection, conn)
             except Exception as release_exc:  # pragma: no cover - defensive
-                logger.warning(
-                    "UnitOfWork: failed to return connection to pool: %s", release_exc
-                )
+                logger.warning("UnitOfWork: failed to return connection to pool: %s", release_exc)
             self._conn = None
             self._finalised = True
 
@@ -123,7 +116,7 @@ class UnitOfWork:
     # Transaction control
     # ------------------------------------------------------------------
 
-    async def transaction(self) -> "UnitOfWork":
+    async def transaction(self) -> UnitOfWork:
         """Return ``self`` to support explicit ``async with`` chaining.
 
         The transaction is already opened in ``__aenter__``; this method
@@ -143,8 +136,7 @@ class UnitOfWork:
         conn = self._conn
         if conn is None:
             raise RuntimeError(
-                "UnitOfWork must be used as an async context manager "
-                "(no active connection)"
+                "UnitOfWork must be used as an async context manager (no active connection)"
             )
         return conn
 
@@ -167,9 +159,7 @@ class UnitOfWork:
             return int(cursor.lastrowid)
         return int(cursor.rowcount or 0)
 
-    async def executemany(
-        self, sql: str, params_list: list[tuple[Any, ...]]
-    ) -> int:
+    async def executemany(self, sql: str, params_list: list[tuple[Any, ...]]) -> int:
         """Execute a parameterised statement once per parameter tuple.
 
         Returns the total ``rowcount`` across all invocations.
@@ -180,9 +170,7 @@ class UnitOfWork:
         cursor = await asyncio.to_thread(conn.executemany, sql, params_list)
         return int(cursor.rowcount or 0)
 
-    async def fetch_one(
-        self, sql: str, params: tuple[Any, ...] = ()
-    ) -> dict[str, Any] | None:
+    async def fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
         """Execute a query and return a single row as a dict (or ``None``)."""
         conn = self._require_connection()
         cursor = await asyncio.to_thread(conn.execute, sql, params)
@@ -191,9 +179,7 @@ class UnitOfWork:
             return None
         return dict(row)
 
-    async def fetch_all(
-        self, sql: str, params: tuple[Any, ...] = ()
-    ) -> list[dict[str, Any]]:
+    async def fetch_all(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         """Execute a query and return all rows as a list of dicts."""
         conn = self._require_connection()
         cursor = await asyncio.to_thread(conn.execute, sql, params)

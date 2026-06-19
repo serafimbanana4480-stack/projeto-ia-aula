@@ -14,7 +14,7 @@ Configuration via environment variables:
 
 Usage:
     from backend.tools.git_auto_commit import auto_commit_after_write, get_commit_history
-    
+
     # Hook after file write
     result = await auto_commit_after_write(
         file_path="backend/api.py",
@@ -25,13 +25,12 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +38,7 @@ from backend.tools.git_tools import git_commit_safe, git_operation
 from backend.tools.registry import ToolSpec, register_tool
 
 try:
-    from backend.persistence.db import get_db, _new_id, _now_iso
+    from backend.persistence.db import _new_id, _now_iso, get_db
 except ImportError:
     get_db = None
     _new_id = None
@@ -62,39 +61,42 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-class CommitStrategy(str, Enum):
+
+class CommitStrategy(StrEnum):
     """Auto-commit strategy modes."""
-    ALWAYS = "always"      # Commit every change automatically
-    REVIEW = "review"      # Generate commit message but require review
+
+    ALWAYS = "always"  # Commit every change automatically
+    REVIEW = "review"  # Generate commit message but require review
     DISABLED = "disabled"  # No automatic commits
 
 
-class ConventionalCommitType(str, Enum):
+class ConventionalCommitType(StrEnum):
     """Conventional commit types per specification."""
-    FEAT = "feat"           # New feature
-    FIX = "fix"             # Bug fix
-    DOCS = "docs"           # Documentation only
-    STYLE = "style"         # Formatting, no code change
-    REFACTOR = "refactor"   # Code refactoring
-    PERF = "perf"           # Performance improvement
-    TEST = "test"           # Adding tests
-    CHORE = "chore"         # Build/process/tooling changes
-    CI = "ci"               # CI/CD changes
-    BUILD = "build"         # Build system changes
+
+    FEAT = "feat"  # New feature
+    FIX = "fix"  # Bug fix
+    DOCS = "docs"  # Documentation only
+    STYLE = "style"  # Formatting, no code change
+    REFACTOR = "refactor"  # Code refactoring
+    PERF = "perf"  # Performance improvement
+    TEST = "test"  # Adding tests
+    CHORE = "chore"  # Build/process/tooling changes
+    CI = "ci"  # CI/CD changes
+    BUILD = "build"  # Build system changes
 
 
 def _get_config() -> dict[str, Any]:
     """Load auto-commit configuration from environment/settings."""
     enabled = os.environ.get("AUTO_COMMIT_ENABLED", "false").lower() in ("true", "1", "yes", "on")
     strategy = os.environ.get("AUTO_COMMIT_STRATEGY", "disabled").lower()
-    
+
     # Validate strategy
     if strategy not in {s.value for s in CommitStrategy}:
         logger.warning("Invalid AUTO_COMMIT_STRATEGY=%s, defaulting to disabled", strategy)
         strategy = CommitStrategy.DISABLED.value
-    
+
     model = os.environ.get("AUTO_COMMIT_MODEL", "auto")
-    
+
     # Try to get from pydantic settings if available
     if get_settings:
         try:
@@ -108,7 +110,7 @@ def _get_config() -> dict[str, Any]:
                 model = settings.auto_commit_model
         except Exception:
             pass
-    
+
     return {
         "enabled": enabled,
         "strategy": strategy,
@@ -121,9 +123,11 @@ def _get_config() -> dict[str, Any]:
 # Commit Message Generation
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class CommitAnalysis:
     """Result of LLM analysis of a git diff."""
+
     commit_type: str
     scope: str
     description: str
@@ -165,14 +169,14 @@ Do NOT include markdown formatting, explanations, or quotes. Just the raw commit
 
 async def _call_llm(prompt: str, model: str = "auto") -> str:
     """Call LLM to generate commit message."""
-    
+
     # Try Ollama first if available
     if OllamaClient is not None:
         try:
             client = OllamaClient()
             # Use a small/fast model for commit messages
             preferred_model = "qwen2.5:1.5b" if model == "auto" else model
-            
+
             response = await client.generate(
                 model=preferred_model,
                 prompt=prompt,
@@ -181,13 +185,13 @@ async def _call_llm(prompt: str, model: str = "auto") -> str:
             return response.get("response", "").strip()
         except Exception as e:
             logger.warning("Ollama commit message generation failed: %s", e)
-    
+
     # Fallback: try settings-based provider
     if get_settings:
         try:
             settings = get_settings()
             provider = settings.llm_provider.lower()
-            
+
             if provider == "openai":
                 return await _call_openai(prompt, settings)
             elif provider == "anthropic":
@@ -198,7 +202,7 @@ async def _call_llm(prompt: str, model: str = "auto") -> str:
                 return await _call_groq(prompt, settings)
         except Exception as e:
             logger.warning("Provider %s commit generation failed: %s", provider, e)
-    
+
     # Final fallback: heuristic-based commit message
     return ""
 
@@ -206,6 +210,7 @@ async def _call_llm(prompt: str, model: str = "auto") -> str:
 async def _call_openai(prompt: str, settings: Any) -> str:
     """Call OpenAI API for commit message."""
     import httpx
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             "https://api.openai.com/v1/chat/completions",
@@ -227,6 +232,7 @@ async def _call_openai(prompt: str, settings: Any) -> str:
 async def _call_anthropic(prompt: str, settings: Any) -> str:
     """Call Anthropic API for commit message."""
     import httpx
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             "https://api.anthropic.com/v1/messages",
@@ -248,6 +254,7 @@ async def _call_anthropic(prompt: str, settings: Any) -> str:
 async def _call_kimi(prompt: str, settings: Any) -> str:
     """Call Kimi API for commit message."""
     import httpx
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             "https://api.moonshot.cn/v1/chat/completions",
@@ -266,6 +273,7 @@ async def _call_kimi(prompt: str, settings: Any) -> str:
 async def _call_groq(prompt: str, settings: Any) -> str:
     """Call Groq API for commit message."""
     import httpx
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -292,18 +300,18 @@ def _parse_commit_message(raw: str) -> CommitAnalysis:
             body="",
             breaking=False,
         )
-    
+
     # Parse header line: type[(scope)][!]: description
     header = lines[0].strip()
-    
+
     # Remove common markdown artifacts
-    header = re.sub(r'^["\']+|["\']+$', '', header)
-    header = re.sub(r'^`+|`+$', '', header)
-    
+    header = re.sub(r'^["\']+|["\']+$', "", header)
+    header = re.sub(r"^`+|`+$", "", header)
+
     # Match conventional commit pattern
-    pattern = r'^(\w+)(?:\(([^)]+)\))?(!)?\s*:\s*(.+)$'
+    pattern = r"^(\w+)(?:\(([^)]+)\))?(!)?\s*:\s*(.+)$"
     match = re.match(pattern, header)
-    
+
     if match:
         commit_type = match.group(1).lower()
         scope = match.group(2) or ""
@@ -315,12 +323,12 @@ def _parse_commit_message(raw: str) -> CommitAnalysis:
         scope = ""
         breaking = False
         description = header[:72]
-    
+
     # Validate type
     valid_types = {t.value for t in ConventionalCommitType}
     if commit_type not in valid_types:
         commit_type = "chore"
-    
+
     # Body is everything after header
     body_lines = []
     for line in lines[1:]:
@@ -328,7 +336,7 @@ def _parse_commit_message(raw: str) -> CommitAnalysis:
         if stripped and not stripped.startswith("```"):
             body_lines.append(stripped)
     body = "\n".join(body_lines) if body_lines else ""
-    
+
     return CommitAnalysis(
         commit_type=commit_type,
         scope=scope,
@@ -341,7 +349,7 @@ def _parse_commit_message(raw: str) -> CommitAnalysis:
 def _infer_commit_type(text: str) -> str:
     """Infer commit type from keywords in the text."""
     text_lower = text.lower()
-    
+
     keywords = {
         "fix": ["fix", "corrige", "bug", "erro", "repair", "patch"],
         "feat": ["feat", "feature", "adiciona", "add", "novo", "new", "implementa"],
@@ -353,11 +361,11 @@ def _infer_commit_type(text: str) -> str:
         "build": ["build", "compile", "package", "dependency", "deps"],
         "style": ["style", "format", "lint", "prettier", "black"],
     }
-    
+
     for commit_type, words in keywords.items():
         if any(word in text_lower for word in words):
             return commit_type
-    
+
     return "chore"
 
 
@@ -366,7 +374,7 @@ def _format_commit_message(analysis: CommitAnalysis) -> str:
     scope_part = f"({analysis.scope})" if analysis.scope else ""
     breaking_part = "!" if analysis.breaking else ""
     header = f"{analysis.commit_type}{scope_part}{breaking_part}: {analysis.description}"
-    
+
     if analysis.body:
         return f"{header}\n\n{analysis.body}"
     return header
@@ -391,16 +399,16 @@ async def generate_commit_message(
     max_diff_len = 8000
     if len(diff) > max_diff_len:
         diff = diff[:max_diff_len] + "\n... [diff truncated]"
-    
+
     # Add file context if available
     if file_path:
         scope_hint = f"\n\nFile modified: {file_path}"
         diff = diff + scope_hint
-    
+
     prompt = PROMPT_GENERATE_COMMIT.format(diff=diff)
-    
+
     raw_message = await _call_llm(prompt, model=model)
-    
+
     if not raw_message:
         # Fallback: heuristic-based message
         commit_type = _infer_commit_type(diff)
@@ -413,13 +421,14 @@ async def generate_commit_message(
             body="",
             breaking=False,
         )
-    
+
     return _parse_commit_message(raw_message)
 
 
 # ---------------------------------------------------------------------------
 # Core Auto-Commit Logic
 # ---------------------------------------------------------------------------
+
 
 async def auto_commit_after_write(
     file_path: str,
@@ -452,25 +461,25 @@ async def auto_commit_after_write(
         "file_path": file_path,
         "error": None,
     }
-    
+
     # Check if auto-commit is enabled
     if not config["enabled"] or config["strategy"] == CommitStrategy.DISABLED.value:
         result["message"] = "Auto-commit disabled"
         return result
-    
+
     # Check if inside a git repo
     git_check = await git_operation("git rev-parse --git-dir", project_path)
     if "error" in git_check:
         result["error"] = "Not a git repository"
         return result
-    
+
     # Get the diff for the specific file
     diff_result = await git_operation(
         f'git diff -- "{file_path}"',
         project_path,
     )
     diff = diff_result.get("output", "")
-    
+
     if not diff.strip():
         # Check if file is newly staged
         staged_result = await git_operation(
@@ -478,11 +487,11 @@ async def auto_commit_after_write(
             project_path,
         )
         diff = staged_result.get("output", "")
-        
+
         if not diff.strip():
             result["message"] = "No changes to commit"
             return result
-    
+
     # Generate commit message
     try:
         analysis = await generate_commit_message(
@@ -505,14 +514,13 @@ async def auto_commit_after_write(
         commit_message = f"chore: atualiza {file_name}"
         result["message"] = commit_message
         result["error"] = f"LLM generation failed: {e}"
-    
+
     # Determine if we should commit
     strategy = config["strategy"]
-    should_commit = (
-        strategy == CommitStrategy.ALWAYS.value
-        or (force and strategy == CommitStrategy.REVIEW.value)
+    should_commit = strategy == CommitStrategy.ALWAYS.value or (
+        force and strategy == CommitStrategy.REVIEW.value
     )
-    
+
     if not should_commit:
         result["status"] = "pending_review"
         result["message"] = f"[PENDING REVIEW] {commit_message}"
@@ -528,7 +536,7 @@ async def auto_commit_after_write(
             diff_preview=diff[:500] if diff else "",
         )
         return result
-    
+
     # Stage the file and commit
     try:
         # Stage specific file
@@ -539,19 +547,21 @@ async def auto_commit_after_write(
         if "error" in stage_result and stage_result.get("exit_code", 0) != 0:
             result["error"] = f"Failed to stage: {stage_result.get('error')}"
             return result
-        
+
         # Commit
         commit_result = await git_commit_safe(
             message=commit_message,
             project_path=project_path,
             add_all=False,  # Already staged specific file
         )
-        
+
         commit_output = commit_result.get("commit", {}).get("output", "")
         commit_exit = commit_result.get("commit", {}).get("exit_code", 0)
-        
+
         if commit_exit != 0 and "nothing to commit" not in commit_output.lower():
-            result["error"] = f"Commit failed: {commit_result.get('commit', {}).get('error', 'unknown')}"
+            result["error"] = (
+                f"Commit failed: {commit_result.get('commit', {}).get('error', 'unknown')}"
+            )
             result["status"] = "failed"
             _record_commit(
                 session_id=session_id,
@@ -565,15 +575,15 @@ async def auto_commit_after_write(
                 error=result["error"],
             )
             return result
-        
+
         # Extract commit hash
         hash_result = await git_operation("git rev-parse HEAD", project_path)
         commit_hash = hash_result.get("output", "").strip()
-        
+
         result["committed"] = True
         result["hash"] = commit_hash
         result["status"] = "committed"
-        
+
         # Record in database
         _record_commit(
             session_id=session_id,
@@ -585,19 +595,19 @@ async def auto_commit_after_write(
             status="committed",
             diff_preview=diff[:500] if diff else "",
         )
-        
+
         logger.info(
             "Auto-committed %s: %s (hash: %s)",
             file_path,
             commit_message.split("\n")[0],
             commit_hash[:8] if commit_hash else "n/a",
         )
-        
+
     except Exception as e:
         result["error"] = f"Auto-commit failed: {e}"
         result["status"] = "failed"
         logger.error("Auto-commit failed for %s: %s", file_path, e)
-    
+
     return result
 
 
@@ -672,17 +682,17 @@ def _record_commit(
     """
     if get_db is None or _new_id is None:
         return None
-    
+
     _ensure_git_commits_table()
-    
+
     # Parse commit type from message
     commit_type = "chore"
     scope = ""
-    match = re.match(r'^(\w+)(?:\(([^)]+)\))?(!)?\s*:', commit_message)
+    match = re.match(r"^(\w+)(?:\(([^)]+)\))?(!)?\s*:", commit_message)
     if match:
         commit_type = match.group(1)
         scope = match.group(2) or ""
-    
+
     cid = _new_id()
     try:
         with get_db() as conn:
@@ -717,6 +727,7 @@ def _record_commit(
 # Public API
 # ---------------------------------------------------------------------------
 
+
 async def get_commit_history(
     session_id: str | None = None,
     project_id: str | None = None,
@@ -736,12 +747,12 @@ async def get_commit_history(
     """
     if get_db is None:
         return []
-    
+
     _ensure_git_commits_table()
-    
+
     conditions = []
     params: list[Any] = []
-    
+
     if session_id:
         conditions.append("session_id = ?")
         params.append(session_id)
@@ -751,9 +762,9 @@ async def get_commit_history(
     if status:
         conditions.append("status = ?")
         params.append(status)
-    
+
     where_clause = " AND ".join(conditions) if conditions else "1=1"
-    
+
     try:
         with get_db() as conn:
             rows = conn.execute(
@@ -780,23 +791,23 @@ async def approve_pending_commit(commit_id: str) -> dict[str, Any]:
     """
     if get_db is None:
         return {"error": "Database not available"}
-    
+
     _ensure_git_commits_table()
-    
+
     try:
         with get_db() as conn:
             row = conn.execute(
                 "SELECT * FROM git_commits WHERE id = ? AND status = 'pending_review'",
                 (commit_id,),
             ).fetchone()
-            
+
             if not row:
                 return {"error": "Pending commit not found"}
-            
+
             commit_data = dict(row)
     except Exception as e:
         return {"error": f"Database error: {e}"}
-    
+
     # Execute the commit
     project_path = "."  # Default; could be enhanced with project path lookup
     if commit_data.get("project_id"):
@@ -811,7 +822,7 @@ async def approve_pending_commit(commit_id: str) -> dict[str, Any]:
                     project_path = proj["path"]
         except Exception:
             pass
-    
+
     # Stage and commit
     stage_result = await git_operation(
         f'git add -- "{commit_data["file_path"]}"',
@@ -819,21 +830,21 @@ async def approve_pending_commit(commit_id: str) -> dict[str, Any]:
     )
     if "error" in stage_result and stage_result.get("exit_code", 0) != 0:
         return {"error": f"Stage failed: {stage_result.get('error')}"}
-    
+
     commit_result = await git_commit_safe(
         message=commit_data["commit_message"],
         project_path=project_path,
         add_all=False,
     )
-    
+
     commit_output = commit_result.get("commit", {}).get("output", "")
     if "nothing to commit" in commit_output.lower():
         return {"error": "Nothing to commit"}
-    
+
     # Get hash
     hash_result = await git_operation("git rev-parse HEAD", project_path)
     commit_hash = hash_result.get("output", "").strip()
-    
+
     # Update record
     try:
         with get_db() as conn:
@@ -845,7 +856,7 @@ async def approve_pending_commit(commit_id: str) -> dict[str, Any]:
             )
     except Exception as e:
         logger.warning("Failed to update commit record: %s", e)
-    
+
     return {
         "committed": True,
         "hash": commit_hash,
@@ -866,9 +877,9 @@ async def reject_pending_commit(commit_id: str, reason: str = "") -> dict[str, A
     """
     if get_db is None:
         return {"error": "Database not available"}
-    
+
     _ensure_git_commits_table()
-    
+
     try:
         with get_db() as conn:
             conn.execute(
@@ -894,21 +905,21 @@ async def get_commit_statistics(
     """
     if get_db is None:
         return {}
-    
+
     _ensure_git_commits_table()
-    
+
     conditions = []
     params: list[Any] = []
-    
+
     if project_id:
         conditions.append("project_id = ?")
         params.append(project_id)
     if session_id:
         conditions.append("session_id = ?")
         params.append(session_id)
-    
+
     where_clause = " AND ".join(conditions) if conditions else "1=1"
-    
+
     try:
         with get_db() as conn:
             # Total counts by status
@@ -919,7 +930,7 @@ async def get_commit_statistics(
                     GROUP BY status""",
                 params,
             ).fetchall()
-            
+
             # Total counts by type
             type_rows = conn.execute(
                 f"""SELECT commit_type, COUNT(*) as count
@@ -928,7 +939,7 @@ async def get_commit_statistics(
                     GROUP BY commit_type""",
                 params,
             ).fetchall()
-            
+
             # Recent activity (last 24h)
             recent_row = conn.execute(
                 f"""SELECT COUNT(*) as count
@@ -937,14 +948,14 @@ async def get_commit_statistics(
                     AND created_at > datetime('now', '-1 day')""",
                 params,
             ).fetchone()
-            
+
             total_row = conn.execute(
                 f"""SELECT COUNT(*) as count
                     FROM git_commits
                     WHERE {where_clause}""",
                 params,
             ).fetchone()
-            
+
             return {
                 "total": total_row["count"] if total_row else 0,
                 "last_24h": recent_row["count"] if recent_row else 0,

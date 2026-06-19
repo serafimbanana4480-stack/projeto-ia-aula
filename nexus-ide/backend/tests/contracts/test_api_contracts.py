@@ -4,18 +4,12 @@ These tests verify that the API contracts (Pydantic models) are correctly define
 and can be serialized/deserialized properly.
 """
 
-import json
-
 import pytest
 
 from backend.models.api import (
     ChatRequest,
-    FileListRequest,
-    FileReadRequest,
     FileTreeEntry,
-    FileWriteRequest,
     ProjectCreateRequest,
-    ProjectUpdateRequest,
     RoutingDecision,
     StreamEvent,
     TerminalExecuteRequest,
@@ -135,9 +129,7 @@ class TestFileTreeEntryContract:
     def test_nested_structure(self) -> None:
         """Test that nested FileTreeEntry structures work."""
         child = FileTreeEntry(path="/dir/file.txt", name="file.txt", type="file")
-        entry = FileTreeEntry(
-            path="/dir", name="dir", type="directory", children=[child]
-        )
+        entry = FileTreeEntry(path="/dir", name="dir", type="directory", children=[child])
         json_str = entry.model_dump_json()
         parsed = FileTreeEntry.model_validate_json(json_str)
         assert len(parsed.children) == 1

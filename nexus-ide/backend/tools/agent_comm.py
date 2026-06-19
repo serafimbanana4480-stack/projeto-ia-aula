@@ -10,20 +10,26 @@ validation, and audit purposes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
-import asyncio
 from typing import Any
 
-from backend.contracts.a2a import A2AMessage, TaskType, MessagePriority
+from backend.contracts.a2a import A2AMessage, MessagePriority, TaskType
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
 
 # Valid agent names that can be consulted
 _CONSULTABLE_AGENTS = {
-    "ARCHITECT", "RESEARCHER", "CODER", "ANALYZER",
-    "DEBUGGER", "DOCUMENTER", "OPTIMIZER", "MICRO",
+    "ARCHITECT",
+    "RESEARCHER",
+    "CODER",
+    "ANALYZER",
+    "DEBUGGER",
+    "DOCUMENTER",
+    "OPTIMIZER",
+    "MICRO",
 }
 
 # Map agent names to A2A task types
@@ -98,19 +104,24 @@ async def consult_agent(
 
     logger.info(
         "A2A: %s → %s (task=%s, priority=%s, msg_id=%s, timeout=%ds)",
-        source_upper, agent_upper, task_type.value, priority_enum.value, a2a_msg.message_id, timeout_seconds,
+        source_upper,
+        agent_upper,
+        task_type.value,
+        priority_enum.value,
+        a2a_msg.message_id,
+        timeout_seconds,
     )
 
     try:
-        from backend.orchestrator.registry import build_default_registry, resolve
         from backend.agents.base import AgentRequest
-        from backend.config.settings import get_settings
+        from backend.orchestrator.registry import build_default_registry, resolve
 
         # Reuse the shared LLM client from the FastAPI app state when available,
         # otherwise create one via the factory.
         client = None
         try:
             from backend.orchestrator.main import app
+
             if hasattr(app.state, "llm_client"):
                 client = app.state.llm_client
         except (ImportError, AttributeError) as exc:
@@ -118,6 +129,7 @@ async def consult_agent(
 
         if client is None:
             from backend.llm import create_llm_client
+
             client = create_llm_client()
 
         # Get the target agent from the registry
@@ -148,10 +160,13 @@ async def consult_agent(
 
         try:
             parts = await asyncio.wait_for(_collect(), timeout=timeout_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "A2A consultation timed out | %s → %s | timeout=%ds | msg_id=%s",
-                source_upper, agent_upper, timeout_seconds, a2a_msg.message_id,
+                source_upper,
+                agent_upper,
+                timeout_seconds,
+                a2a_msg.message_id,
             )
             return {
                 "error": f"Consultation with {agent_upper} timed out after {timeout_seconds}s",

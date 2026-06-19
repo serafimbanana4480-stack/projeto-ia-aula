@@ -77,18 +77,10 @@ def _init_whiteboard_db() -> None:
             )
             """
         )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_wb_topic ON whiteboard_entries(topic)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_wb_author ON whiteboard_entries(author_agent)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_wb_timestamp ON whiteboard_entries(timestamp)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_wb_archived ON whiteboard_entries(archived)"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wb_topic ON whiteboard_entries(topic)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wb_author ON whiteboard_entries(author_agent)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wb_timestamp ON whiteboard_entries(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wb_archived ON whiteboard_entries(archived)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_wb_links_1 ON whiteboard_entry_links(entry_id_1)"
         )
@@ -202,9 +194,8 @@ class SharedMemory:
         results: list[WhiteboardEntry] = []
         for row in rows:
             entry = self._row_to_entry(row)
-            if tags:
-                if not any(t in entry.tags for t in tags):
-                    continue
+            if tags and not any(t in entry.tags for t in tags):
+                continue
             results.append(entry)
         return results[:limit]
 
@@ -286,13 +277,9 @@ class SharedMemory:
         await self._ensure_init()
         if entry_id_1 == entry_id_2:
             return False
-        return await asyncio.to_thread(
-            self._do_link_entries, entry_id_1, entry_id_2, relation_type
-        )
+        return await asyncio.to_thread(self._do_link_entries, entry_id_1, entry_id_2, relation_type)
 
-    def _do_link_entries(
-        self, entry_id_1: str, entry_id_2: str, relation_type: str
-    ) -> bool:
+    def _do_link_entries(self, entry_id_1: str, entry_id_2: str, relation_type: str) -> bool:
         e1, e2 = sorted([entry_id_1, entry_id_2])
         with get_db() as conn:
             try:
@@ -397,9 +384,7 @@ class SharedMemory:
             timestamp=datetime.fromisoformat(row["timestamp"]),
             importance=row["importance"],
             tags=json.loads(row["tags"]) if row["tags"] else [],
-            related_entries=json.loads(row["related_entries"])
-            if row["related_entries"]
-            else [],
+            related_entries=json.loads(row["related_entries"]) if row["related_entries"] else [],
         )
 
     def _get_entry_by_id_sync(self, entry_id: str) -> WhiteboardEntry | None:
@@ -426,11 +411,7 @@ class SharedMemory:
             ).fetchall()
         results: list[str] = []
         for row in rows:
-            other = (
-                row["entry_id_2"]
-                if row["entry_id_1"] == entry_id
-                else row["entry_id_1"]
-            )
+            other = row["entry_id_2"] if row["entry_id_1"] == entry_id else row["entry_id_1"]
             results.append(other)
         return results
 

@@ -10,9 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -114,9 +115,9 @@ def setup_tracing(service_name: str = "nexus-orchestrator") -> None:
     """
     try:
         from opentelemetry import trace
+        from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
-        from opentelemetry.sdk.resources import Resource
 
         endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
         if endpoint:
@@ -131,7 +132,9 @@ def setup_tracing(service_name: str = "nexus-orchestrator") -> None:
             trace.set_tracer_provider(provider)
             logger.info("OTel tracing configured with endpoint %s", endpoint)
         else:
-            logger.info("OTel SDK available but no OTEL_EXPORTER_OTLP_ENDPOINT set — using in-memory tracing")
+            logger.info(
+                "OTel SDK available but no OTEL_EXPORTER_OTLP_ENDPOINT set — using in-memory tracing"
+            )
 
     except ImportError:
         logger.info("opentelemetry-sdk not installed — using in-memory tracing")

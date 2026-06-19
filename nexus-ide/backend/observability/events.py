@@ -7,6 +7,7 @@ swap in Redis Pub/Sub.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -49,10 +50,8 @@ class EventBus:
             try:
                 # Use put_nowait to avoid blocking; drop oldest if full
                 if queue.full():
-                    try:
+                    with contextlib.suppress(asyncio.QueueEmpty):
                         queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        pass
                 queue.put_nowait(event)
             except asyncio.QueueFull:
                 logger.warning("Event queue full for topic %s, dropping event", topic)
@@ -74,10 +73,8 @@ class EventBus:
         finally:
             # Cleanup on unsubscribe
             if topic in self._subscribers:
-                try:
+                with contextlib.suppress(ValueError):
                     self._subscribers[topic].remove(queue)
-                except ValueError:
-                    pass
 
     def subscribe_queue(self, topic: str = "*") -> asyncio.Queue[Event]:
         """Get a queue for the given topic (alternative to async generator)."""

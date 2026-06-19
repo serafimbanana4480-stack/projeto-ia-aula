@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,9 +22,7 @@ def fresh_loop() -> AutoCorrectionLoop:
 @pytest.fixture
 def bus(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """Provide a fresh AgentBus backed by a temp DB."""
-    monkeypatch.setattr(
-        "backend.core.agent_bus.DB_PATH", tmp_path / "agent_bus.db"
-    )
+    monkeypatch.setattr("backend.core.agent_bus.DB_PATH", tmp_path / "agent_bus.db")
     from backend.core.agent_bus import AgentBus
 
     monkeypatch.setattr(AgentBus, "_instance", None)
@@ -34,7 +32,9 @@ def bus(monkeypatch: pytest.MonkeyPatch, tmp_path):
 class FakeInstance:
     """Fake agent instance for mocking lifecycle manager."""
 
-    def __init__(self, instance_id: str, agent_type: str, status: str = AgentInstanceStatus.RUNNING.value):
+    def __init__(
+        self, instance_id: str, agent_type: str, status: str = AgentInstanceStatus.RUNNING.value
+    ):
         self.instance_id = instance_id
         self.agent_type = agent_type
         self.status = status
@@ -197,9 +197,7 @@ class TestAutoCorrection:
         await loop.stop_monitoring()
 
     @pytest.mark.asyncio
-    async def test_critical_error_handler_spawns_coder_then_overseer(
-        self, bus, fresh_loop
-    ):
+    async def test_critical_error_handler_spawns_coder_then_overseer(self, bus, fresh_loop):
         mock_lifecycle = MockLifecycleManager(
             outputs={"CODER": "Fixed the null pointer exception. Bug resolved."}
         )
@@ -290,8 +288,8 @@ class TestAutoCorrection:
     @pytest.mark.asyncio
     async def test_review_changes_handler(self, bus, fresh_loop, tmp_path, monkeypatch):
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
-        from backend.persistence.db import init_db
         from backend.core.peer_review import PeerReviewSystem, get_peer_review_system
+        from backend.persistence.db import init_db
 
         init_db()
         monkeypatch.setattr(PeerReviewSystem, "_instance", None)

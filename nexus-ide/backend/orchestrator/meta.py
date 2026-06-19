@@ -21,25 +21,20 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.agents.base import AgentBase, AgentRequest
-from backend.config.settings import get_model_config, load_prompt
-from backend.core.agent_bus import AgentBus, BusMessage, get_agent_bus
+from backend.agents.base import AgentBase
+from backend.config.settings import get_model_config
 from backend.core.agent_state import AgentStateStore
 from backend.orchestrator.dependency_graph import (
-    DependencyGraph,
-    ExecutionPlan,
-    TaskNode,
-    TaskPriority,
     TaskStatus,
 )
 from backend.orchestrator.engine import OrchestrationEngine, OrchestrationState
-from backend.orchestrator.events import EventBus, EventEmitter, EventType, OrchestratorEvent
+from backend.orchestrator.events import EventBus, EventType, OrchestratorEvent
 from backend.tools.ollama_client import ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -621,9 +616,7 @@ class MetaOrchestrator:
                 mission_id=mission.id,
             )
 
-    async def _trigger_peer_review(
-        self, mission: Mission, phase: MissionPhase
-    ) -> None:
+    async def _trigger_peer_review(self, mission: Mission, phase: MissionPhase) -> None:
         """Submit phase artifacts for mandatory peer review."""
         from backend.core.peer_review import get_peer_review_system
 
@@ -659,7 +652,9 @@ class MetaOrchestrator:
             raw = await self._llm_client.chat_complete(
                 model=model_id,
                 messages=[
-                    ChatMessage(role="system", content="You are a complexity analyzer. Be concise."),
+                    ChatMessage(
+                        role="system", content="You are a complexity analyzer. Be concise."
+                    ),
                     ChatMessage(role="user", content=prompt),
                 ],
                 options={"temperature": 0.1, "num_predict": 16},

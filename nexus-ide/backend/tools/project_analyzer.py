@@ -40,9 +40,21 @@ _DEPENDENCY_FILES = {
 }
 
 _EXCLUDED_DIRS = {
-    ".git", ".venv", "venv", "node_modules", "__pycache__",
-    ".pytest_cache", ".mypy_cache", "dist", "build", ".next",
-    "out", "target", ".idea", ".vscode", "coverage",
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    "dist",
+    "build",
+    ".next",
+    "out",
+    "target",
+    ".idea",
+    ".vscode",
+    "coverage",
     ".gitignore",  # not a dir but safe to include
 }
 
@@ -79,7 +91,13 @@ def _detect_framework(project: Path, files: list[Path]) -> dict:
 
     sorted_frameworks = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     primary = sorted_frameworks[0][0] if sorted_frameworks else "unknown"
-    confidence = "high" if (sorted_frameworks and sorted_frameworks[0][1] >= 3) else "medium" if sorted_frameworks else "low"
+    confidence = (
+        "high"
+        if (sorted_frameworks and sorted_frameworks[0][1] >= 3)
+        else "medium"
+        if sorted_frameworks
+        else "low"
+    )
 
     return {
         "primary": primary,
@@ -121,6 +139,7 @@ def _find_dependencies(project: Path, files: list[Path]) -> dict:
                 elif key == "cargo.toml":
                     try:
                         import tomllib
+
                         data = tomllib.loads(content)
                         packages.extend(data.get("dependencies", {}).keys())
                         packages.extend(data.get("dev-dependencies", {}).keys())
@@ -129,13 +148,21 @@ def _find_dependencies(project: Path, files: list[Path]) -> dict:
                 elif key == "go.mod":
                     for line in content.splitlines():
                         line = line.strip()
-                        if line and not line.startswith("(") and not line.startswith(")") and not line.startswith("module") and not line.startswith("go ") and not line.startswith("require"):
+                        if (
+                            line
+                            and not line.startswith("(")
+                            and not line.startswith(")")
+                            and not line.startswith("module")
+                            and not line.startswith("go ")
+                            and not line.startswith("require")
+                        ):
                             parts = line.split()
                             if parts:
                                 packages.append(parts[0])
                 elif key == "pubspec.yaml":
                     try:
                         import yaml
+
                         data = yaml.safe_load(content)
                         packages.extend(data.get("dependencies", {}).keys())
                         packages.extend(data.get("dev_dependencies", {}).keys())
@@ -184,9 +211,15 @@ def _count_loc(project: Path, files: list[Path]) -> dict:
 
 def _find_test_coverage(project: Path, files: list[Path]) -> dict:
     """Detect test coverage if available."""
-    coverage_files = [f for f in files if f.name.lower() in {".coverage", "coverage.xml", "coverage.json", "lcov.info"}]
+    coverage_files = [
+        f
+        for f in files
+        if f.name.lower() in {".coverage", "coverage.xml", "coverage.json", "lcov.info"}
+    ]
     test_dirs = any(
-        "/test" in str(f.relative_to(project)).lower().replace("\\", "/") or str(f.relative_to(project)).lower().replace("\\", "/").startswith("test/") or str(f.relative_to(project)).lower().replace("\\", "/").startswith("tests/")
+        "/test" in str(f.relative_to(project)).lower().replace("\\", "/")
+        or str(f.relative_to(project)).lower().replace("\\", "/").startswith("test/")
+        or str(f.relative_to(project)).lower().replace("\\", "/").startswith("tests/")
         for f in files
     )
 
@@ -216,50 +249,60 @@ def _detect_issues(project: Path, files: list[Path]) -> list[dict]:
     dir_paths = {str(f.relative_to(project)).lower() for f in files if f.is_dir()}
 
     if ".gitignore" not in file_names:
-        issues.append({
-            "type": "missing_file",
-            "severity": "medium",
-            "message": "No .gitignore found — sensitive files may be committed",
-            "recommendation": "Create a .gitignore file for your project stack",
-        })
+        issues.append(
+            {
+                "type": "missing_file",
+                "severity": "medium",
+                "message": "No .gitignore found — sensitive files may be committed",
+                "recommendation": "Create a .gitignore file for your project stack",
+            }
+        )
 
     if "readme.md" not in file_names and "readme.rst" not in file_names:
-        issues.append({
-            "type": "missing_file",
-            "severity": "low",
-            "message": "No README found",
-            "recommendation": "Add a README.md with project description and setup instructions",
-        })
+        issues.append(
+            {
+                "type": "missing_file",
+                "severity": "low",
+                "message": "No README found",
+                "recommendation": "Add a README.md with project description and setup instructions",
+            }
+        )
 
     has_tests = any("test" in d for d in dir_paths) or any("test_" in fn for fn in file_names)
     if not has_tests:
-        issues.append({
-            "type": "missing_tests",
-            "severity": "high",
-            "message": "No test files or test directories found",
-            "recommendation": "Add tests (pytest, jest, cargo test, etc.)",
-        })
+        issues.append(
+            {
+                "type": "missing_tests",
+                "severity": "high",
+                "message": "No test files or test directories found",
+                "recommendation": "Add tests (pytest, jest, cargo test, etc.)",
+            }
+        )
 
     if "license" not in file_names and "license.md" not in file_names:
-        issues.append({
-            "type": "missing_file",
-            "severity": "low",
-            "message": "No LICENSE file found",
-            "recommendation": "Add a LICENSE file to clarify usage rights",
-        })
+        issues.append(
+            {
+                "type": "missing_file",
+                "severity": "low",
+                "message": "No LICENSE file found",
+                "recommendation": "Add a LICENSE file to clarify usage rights",
+            }
+        )
 
     large_files = []
     for f in files:
         if f.is_file() and f.stat().st_size > 1_000_000:
             large_files.append(str(f.relative_to(project)))
     if large_files:
-        issues.append({
-            "type": "large_files",
-            "severity": "medium",
-            "message": f"Found {len(large_files)} file(s) larger than 1MB",
-            "files": large_files[:5],
-            "recommendation": "Consider adding large files to .gitignore or using Git LFS",
-        })
+        issues.append(
+            {
+                "type": "large_files",
+                "severity": "medium",
+                "message": f"Found {len(large_files)} file(s) larger than 1MB",
+                "files": large_files[:5],
+                "recommendation": "Consider adding large files to .gitignore or using Git LFS",
+            }
+        )
 
     secret_patterns = ["password=", "secret=", "api_key=", "token=", "aws_access_key_id"]
     for f in files:
@@ -270,13 +313,15 @@ def _detect_issues(project: Path, files: list[Path]) -> list[dict]:
                 content = f.read_text(encoding="utf-8", errors="ignore").lower()
                 for pattern in secret_patterns:
                     if pattern in content:
-                        issues.append({
-                            "type": "potential_secret",
-                            "severity": "high",
-                            "message": f"Potential secret pattern '{pattern}' found in {f.name}",
-                            "file": str(f.relative_to(project)),
-                            "recommendation": "Verify no secrets are committed; use environment variables",
-                        })
+                        issues.append(
+                            {
+                                "type": "potential_secret",
+                                "severity": "high",
+                                "message": f"Potential secret pattern '{pattern}' found in {f.name}",
+                                "file": str(f.relative_to(project)),
+                                "recommendation": "Verify no secrets are committed; use environment variables",
+                            }
+                        )
                         break
             except Exception:
                 pass
@@ -322,10 +367,21 @@ async def analyze_project(project_path: str = ".") -> dict:
             "test_coverage": coverage_info,
             "issues": issues,
             "issue_count": len(issues),
-            "health_score": max(0, 100 - len([i for i in issues if i["severity"] == "high"]) * 20 - len([i for i in issues if i["severity"] == "medium"]) * 10 - len([i for i in issues if i["severity"] == "low"]) * 5),
+            "health_score": max(
+                0,
+                100
+                - len([i for i in issues if i["severity"] == "high"]) * 20
+                - len([i for i in issues if i["severity"] == "medium"]) * 10
+                - len([i for i in issues if i["severity"] == "low"]) * 5,
+            ),
         }
 
-        logger.info("Analyzed project at %s: %d files, framework=%s", project, len(files), framework_info["primary"])
+        logger.info(
+            "Analyzed project at %s: %d files, framework=%s",
+            project,
+            len(files),
+            framework_info["primary"],
+        )
         return report
 
     except Exception as e:

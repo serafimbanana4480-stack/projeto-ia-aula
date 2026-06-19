@@ -74,19 +74,21 @@ async def recall_context(
 
         memories = []
         for mem, similarity in results:
-            memories.append({
-                "id": mem.memory_id[:8],
-                "type": mem.memory_type.value,
-                "content": mem.content[:500],
-                "summary": mem.summary,
-                "relevance": round(similarity, 3),
-                "source": mem.source,
-                "tags": mem.tags,
-                "file_path": mem.file_path,
-                "language": mem.language,
-                "session_id": mem.session_id,
-                "project_id": mem.project_id,
-            })
+            memories.append(
+                {
+                    "id": mem.memory_id[:8],
+                    "type": mem.memory_type.value,
+                    "content": mem.content[:500],
+                    "summary": mem.summary,
+                    "relevance": round(similarity, 3),
+                    "source": mem.source,
+                    "tags": mem.tags,
+                    "file_path": mem.file_path,
+                    "language": mem.language,
+                    "session_id": mem.session_id,
+                    "project_id": mem.project_id,
+                }
+            )
 
         return {
             "query": query,

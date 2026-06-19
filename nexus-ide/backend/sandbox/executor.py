@@ -27,7 +27,6 @@ import asyncio
 import logging
 import os
 import re
-import sys
 import tempfile
 import time
 import uuid
@@ -40,10 +39,12 @@ logger = logging.getLogger(__name__)
 # Lazy imports to avoid circular deps at module load time
 _workspace_security = None
 
+
 def _get_security():
     global _workspace_security
     if _workspace_security is None:
         from backend.core import workspace_security as _ws
+
         _workspace_security = _ws
     return _workspace_security
 
@@ -165,6 +166,7 @@ class SandboxExecutor:
             # Use asyncio.to_thread + subprocess.run for Windows compatibility
             # asyncio.create_subprocess_exec can raise NotImplementedError on Windows
             import subprocess
+
             result = await asyncio.to_thread(
                 subprocess.run,
                 ["docker", "info"],
@@ -307,6 +309,7 @@ class SandboxExecutor:
             try:
                 # Use asyncio.to_thread + subprocess.run for Windows compatibility
                 import subprocess
+
                 result = await asyncio.wait_for(
                     asyncio.to_thread(
                         subprocess.run,
@@ -380,6 +383,7 @@ class SandboxExecutor:
         try:
             if language == "python":
                 import sys
+
                 cmd = [sys.executable, "-c", code]
             elif language == "javascript":
                 cmd = ["node", "-e", code]
@@ -403,11 +407,11 @@ class SandboxExecutor:
 
             # Use asyncio.to_thread + subprocess.run for Windows compatibility
             import subprocess
+
             def _run_subprocess():
                 return subprocess.run(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    capture_output=True,
                     cwd=cwd or tempfile.gettempdir(),
                     env={**os.environ, **env} if env else None,
                 )
@@ -438,7 +442,9 @@ class SandboxExecutor:
                         check=False,
                     )
                 except Exception as exc:
-                    logger.debug("Failed to kill local process for sandbox %s: %s", execution_id, exc)
+                    logger.debug(
+                        "Failed to kill local process for sandbox %s: %s", execution_id, exc
+                    )
                 duration_ms = int((time.time() - start) * 1000)
                 return SandboxResult(
                     execution_id=execution_id,

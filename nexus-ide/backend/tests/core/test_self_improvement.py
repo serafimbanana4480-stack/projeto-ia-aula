@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -12,10 +10,7 @@ from backend.core.self_improvement import (
     ImprovementProposal,
     SelfImprovementAnalyzer,
     SelfImprovementReport,
-    EVOLUTION_LOG_PATH,
-    REPORT_PATH,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -28,9 +23,7 @@ def _clean_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "backend.core.self_improvement.EVOLUTION_LOG_PATH", tmp_path / "evolution_log.md"
     )
-    monkeypatch.setattr(
-        "backend.core.self_improvement.REPORT_PATH", tmp_path / "report.json"
-    )
+    monkeypatch.setattr("backend.core.self_improvement.REPORT_PATH", tmp_path / "report.json")
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +144,7 @@ class TestSelfImprovementAnalyzer:
 
     async def test_compare_to_baseline(self) -> None:
         from backend.core.background_workers import PerformanceWatcher
+
         watcher = PerformanceWatcher(interval_seconds=0.05)
         baseline = {"custom": {"elapsed_ms": 100}}
         results = {"custom": {"elapsed_ms": 120}}

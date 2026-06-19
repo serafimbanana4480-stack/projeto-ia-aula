@@ -25,7 +25,7 @@ interface ModelStore {
 }
 
 export const useModelStore = create<ModelStore>((set, get) => ({
-  activeModel: "qwen/qwen3-coder:free",
+  activeModel: "deepseek-v4-flash",
   models: [],
   modelsLoaded: false,
   modelsLoading: false,

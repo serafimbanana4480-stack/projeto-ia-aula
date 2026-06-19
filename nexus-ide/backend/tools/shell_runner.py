@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable
+from typing import Any
 
 from backend.tools.registry import ToolSpec, register_tool
 
@@ -30,7 +31,9 @@ def _tool_rate_limit(func: Callable[..., Any]) -> Callable[..., Any]:
         while bucket and now - bucket[0] > _TOOL_RATE_WINDOW:
             bucket.pop(0)
         if len(bucket) >= _TOOL_RATE_LIMIT:
-            return {"error": f"Rate limit exceeded for {func.__name__}: {_TOOL_RATE_LIMIT} calls per {_TOOL_RATE_WINDOW}s"}
+            return {
+                "error": f"Rate limit exceeded for {func.__name__}: {_TOOL_RATE_LIMIT} calls per {_TOOL_RATE_WINDOW}s"
+            }
         bucket.append(now)
         return await func(*args, **kwargs)
 
@@ -54,6 +57,7 @@ async def run_shell(
         Dict with stdout, stderr, return code, and command info.
     """
     from backend.core.workspace import WorkspaceManager
+
     manager = WorkspaceManager(project_path)
     # Explicitly pass empty additional env so workspace.py sanitization
     # handles the full merged environment
@@ -68,6 +72,7 @@ async def run_python_script(
 ) -> dict:
     """Run a Python script string in the project directory."""
     from backend.core.workspace import WorkspaceManager
+
     manager = WorkspaceManager(project_path)
     return await manager.execute_python(code, cwd=project_path, timeout=timeout)
 

@@ -143,8 +143,7 @@ class TestRouteWithModel:
             nonlocal call_count
             call_count += 1
             return make_single_response(
-                '{"primary_agent": "CODER", "routing_confidence": 0.9, '
-                '"routing_reason": "cached"}'
+                '{"primary_agent": "CODER", "routing_confidence": 0.9, "routing_reason": "cached"}'
             )
 
         client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))

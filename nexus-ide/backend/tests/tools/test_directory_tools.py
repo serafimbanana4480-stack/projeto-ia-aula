@@ -80,9 +80,7 @@ async def test_delete_directory_permanent(tmp_path):
     target = tmp_path / "to_delete"
     target.mkdir()
 
-    result = await delete_directory(
-        "to_delete", project_path=str(tmp_path), move_to_trash=False
-    )
+    result = await delete_directory("to_delete", project_path=str(tmp_path), move_to_trash=False)
     assert result["deleted"] is True
     assert result["trash_path"] is None
     assert not target.exists()

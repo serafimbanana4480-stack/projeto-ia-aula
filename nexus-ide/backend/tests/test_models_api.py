@@ -4,10 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from backend.models.api import (
-    AgentName,
     ChatRequest,
-    ContextNeed,
-    EventType,
     FileListRequest,
     FileReadRequest,
     FileTreeEntry,
@@ -18,7 +15,6 @@ from backend.models.api import (
     StreamEvent,
     TerminalExecuteRequest,
     TerminalExecuteResponse,
-    ThinkingMode,
 )
 
 
@@ -36,9 +32,7 @@ class TestChatRequest:
 
     def test_chat_request_with_model(self) -> None:
         """Test creating a ChatRequest with explicit model selection."""
-        request = ChatRequest(
-            message="Hello", session_id="test-session", model="deep"
-        )
+        request = ChatRequest(message="Hello", session_id="test-session", model="deep")
         assert request.model == "deep"
 
     def test_chat_request_with_project_path(self) -> None:
@@ -79,9 +73,7 @@ class TestProjectCreateRequest:
 
     def test_valid_project_create_request(self) -> None:
         """Test creating a valid ProjectCreateRequest."""
-        request = ProjectCreateRequest(
-            name="Test Project", path="/path/to/project"
-        )
+        request = ProjectCreateRequest(name="Test Project", path="/path/to/project")
         assert request.name == "Test Project"
         assert request.path == "/path/to/project"
         assert request.description == ""
@@ -167,9 +159,7 @@ class TestFileTreeEntry:
     def test_directory_with_children(self) -> None:
         """Test creating a directory with children."""
         child = FileTreeEntry(path="/dir/file.txt", name="file.txt", type="file")
-        entry = FileTreeEntry(
-            path="/dir", name="dir", type="directory", children=[child]
-        )
+        entry = FileTreeEntry(path="/dir", name="dir", type="directory", children=[child])
         assert len(entry.children) == 1
 
 

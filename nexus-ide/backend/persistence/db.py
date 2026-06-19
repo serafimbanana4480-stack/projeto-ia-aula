@@ -11,9 +11,9 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
-from datetime import UTC, datetime
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
+from datetime import UTC, datetime, timezone
 from functools import wraps
 from pathlib import Path
 from queue import Empty, Queue
@@ -22,27 +22,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Import cache for performance optimization
-try:
-    from backend.cache import (
-        sync_cache_result,
-        sync_cache_invalidate_pattern,
-        SHORT_TTL,
-    )
-except ImportError:
-    # Fallback for when cache is not available
-    SHORT_TTL = 300  # Default TTL in seconds
-
-    def sync_cache_result(key_prefix: str, ttl: int = 300, serialize: bool = True):
-        def decorator(func):
-            return func
-        return decorator
-
-    def sync_cache_invalidate_pattern(pattern: str):
-        def decorator(func):
-            return func
-        return decorator
-
-    logger.warning("Redis cache not available, running without caching")
+from backend.redis_cache import (
+    SHORT_TTL,
+    sync_cache_invalidate_pattern,
+    sync_cache_result,
+)
 
 # Query performance monitoring
 SLOW_QUERY_THRESHOLD_MS = 100  # Log queries slower than 100ms
@@ -65,14 +49,9 @@ def monitor_query_performance(func: Callable) -> Callable:
                     func.__name__,
                     elapsed_ms,
                 )
-            elif logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "Query %s took %.2fms",
-                    func.__name__,
-                    elapsed_ms,
-                )
 
     return wrapper
+
 
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "nexus.db"
 SCHEMA_PATH = Path(__file__).resolve().parent / "schemas.sql"
@@ -286,6 +265,9 @@ def init_db(run_migrations: bool = False) -> None:
             conn.commit()
         logger.info("DB initialized at %s", DB_PATH)
 
+        # Seed default admin user for fresh databases
+        _seed_default_user()
+
         # Try to stamp with alembic if available
         _stamp_alembic()
     else:
@@ -303,16 +285,58 @@ def init_db(run_migrations: bool = False) -> None:
                     if row is None:
                         logger.debug("No alembic_version table found, skipping migrations")
                     else:
-                        logger.debug("Alembic tracked DB found, migrations skipped (use run_migrations=True to force)")
+                        logger.debug(
+                            "Alembic tracked DB found, migrations skipped (use run_migrations=True to force)"
+                        )
             except Exception:
                 logger.debug("Alembic check failed, continuing", exc_info=True)
+
+
+def _seed_default_user() -> None:
+    """Create a default admin user if the users table is empty.
+
+    Uses credentials from the ``NEXUS_DEFAULT_EMAIL`` and
+    ``NEXUS_DEFAULT_PASSWORD`` environment variables, falling back to
+    ``admin@nexus-ide.com`` / ``admin123`` in development.
+    """
+    import os
+
+    import bcrypt
+
+    try:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
+            if row and row["count"] > 0:
+                logger.debug("Users already exist, skipping default user seed")
+                return
+
+        email = os.environ.get("NEXUS_DEFAULT_EMAIL", "admin@nexus-ide.com")
+        password = os.environ.get("NEXUS_DEFAULT_PASSWORD", "admin123")
+        password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+        uid = _new_id()
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            conn.execute(
+                "INSERT INTO users (id, username, email, password_hash, full_name) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (uid, "admin", email, password_hash, "Admin"),
+            )
+            conn.commit()
+
+        logger.info(
+            "Default admin user created (email=%s, password=%s) — CHANGE IN PRODUCTION",
+            email,
+            password,
+        )
+    except Exception as exc:
+        logger.warning("Failed to seed default user: %s", exc)
 
 
 def _stamp_alembic() -> None:
     """Stamp a fresh database with the current alembic head."""
     try:
-        from alembic.config import Config
         from alembic import command
+        from alembic.config import Config
 
         alembic_dir = Path(__file__).resolve().parent.parent / "migrations"
         alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
@@ -332,8 +356,8 @@ def _stamp_alembic() -> None:
 def _run_alembic_migrations() -> None:
     """Run alembic migrations on an existing database."""
     try:
-        from alembic.config import Config
         from alembic import command
+        from alembic.config import Config
 
         alembic_dir = Path(__file__).resolve().parent.parent / "migrations"
         alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
@@ -516,6 +540,102 @@ def touch_session(session_id: str) -> None:
         )
 
 
+def _invalidate_session_cache(session_id: str | None = None) -> None:
+    """Invalidate the Redis cache for a session (best-effort, silent)."""
+    try:
+        from backend.redis_cache import get_sync_cache
+
+        cache = get_sync_cache()
+        if session_id:
+            with suppress(Exception):
+                cache.delete(f"session:{session_id}")
+        # Also bust the list cache
+        with suppress(Exception):
+            cache.delete_pattern("session:*")
+    except Exception:
+        pass
+
+
+def update_session(
+    session_id: str, *, title: str | None = None, mode: str | None = None
+) -> dict | None:
+    """Update mutable fields on a session. Returns the updated row."""
+    fields: list[str] = []
+    values: list[Any] = []
+    if title is not None:
+        fields.append("title = ?")
+        values.append(title[:120])
+    if mode is not None:
+        fields.append("mode = ?")
+        values.append(mode)
+    if not fields:
+        return get_session(session_id)
+    fields.append("last_active_at = ?")
+    values.append(_now_iso())
+    values.append(session_id)
+    with get_db() as conn:
+        conn.execute(
+            f"UPDATE sessions SET {', '.join(fields)} WHERE id = ?",
+            values,
+        )
+        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    _invalidate_session_cache(session_id)
+    return dict(row) if row else None
+
+
+def delete_session(session_id: str) -> bool:
+    """Delete a session and all its messages. Returns True if the session existed."""
+    with get_db() as conn:
+        cursor = conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+    deleted = cursor.rowcount > 0
+    if deleted:
+        _invalidate_session_cache(session_id)
+    return deleted
+
+
+def get_session_message_count(session_id: str) -> int:
+    """Return the number of messages in a session (for the session list)."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    return int(row["cnt"]) if row else 0
+
+
+def list_sessions_with_counts(project_id: str | None = None, limit: int = 100) -> list[dict]:
+    """Same as ``list_sessions`` but with a ``message_count`` and ``status`` column attached.
+
+    ``status`` is derived from ``last_active_at``:
+      * ``active``  — last activity within the last 5 minutes
+      * ``idle``    — last activity 5 min to 24 h ago
+      * ``closed``  — last activity more than 24 h ago
+    """
+    sessions = list_sessions(project_id=project_id, limit=limit)
+    now = datetime.now(timezone.utc)
+    for s in sessions:
+        try:
+            s["message_count"] = get_session_message_count(s["id"])
+        except Exception:
+            s["message_count"] = 0
+        try:
+            last = s.get("last_active_at")
+            if last:
+                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                age = now - last_dt
+                if age < timedelta(minutes=5):
+                    s["status"] = "active"
+                elif age < timedelta(hours=24):
+                    s["status"] = "idle"
+                else:
+                    s["status"] = "closed"
+            else:
+                s["status"] = "closed"
+        except Exception:
+            s["status"] = "closed"
+    return sessions
+
+
 # ───── MESSAGES ─────────────────────────────────────────────────────────
 
 
@@ -556,7 +676,11 @@ def add_message(
             (_now_iso(), session_id),
         )
         row = conn.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
-    return dict(row) if row else {"id": mid, "session_id": session_id, "role": role, "content": content}
+    return (
+        dict(row)
+        if row
+        else {"id": mid, "session_id": session_id, "role": role, "content": content}
+    )
 
 
 @monitor_query_performance
@@ -831,9 +955,7 @@ def mark_change_applied(change_id: str) -> None:
 # ───── USERS (AUTHENTICATION) ──────────────────────────────────────────────
 
 
-def create_user(
-    username: str, email: str, password_hash: str, full_name: str = ""
-) -> dict:
+def create_user(username: str, email: str, password_hash: str, full_name: str = "") -> dict:
     """Create a new user in the database."""
     uid = _new_id()
     with get_db() as conn:
@@ -1000,7 +1122,13 @@ def create_permission(name: str, resource: str, action: str, description: str = 
             "INSERT INTO permissions (id, name, description, resource, action) VALUES (?, ?, ?, ?, ?)",
             (pid, name, description, resource, action),
         )
-    return {"id": pid, "name": name, "description": description, "resource": resource, "action": action}
+    return {
+        "id": pid,
+        "name": name,
+        "description": description,
+        "resource": resource,
+        "action": action,
+    }
 
 
 def assign_permission_to_role(role_id: str, permission_id: str) -> None:
@@ -1040,8 +1168,20 @@ def record_git_commit(
                    (id, session_id, project_id, file_path, commit_message, commit_hash,
                     commit_type, scope, strategy, status, diff_preview, error)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (cid, session_id, project_id, file_path, commit_message, commit_hash,
-                 commit_type, scope, strategy, status, diff_preview[:1000], error),
+                (
+                    cid,
+                    session_id,
+                    project_id,
+                    file_path,
+                    commit_message,
+                    commit_hash,
+                    commit_type,
+                    scope,
+                    strategy,
+                    status,
+                    diff_preview[:1000],
+                    error,
+                ),
             )
             row = conn.execute("SELECT * FROM git_commits WHERE id = ?", (cid,)).fetchone()
             return dict(row) if row else None
@@ -1085,7 +1225,9 @@ def get_git_commit(commit_id: str) -> dict | None:
         return dict(row) if row else None
 
 
-def update_git_commit_status(commit_id: str, status: str, commit_hash: str | None = None) -> dict | None:
+def update_git_commit_status(
+    commit_id: str, status: str, commit_hash: str | None = None
+) -> dict | None:
     """Update the status of a git commit record."""
     with get_db() as conn:
         if commit_hash:
@@ -1102,7 +1244,9 @@ def update_git_commit_status(commit_id: str, status: str, commit_hash: str | Non
 
 
 @monitor_query_performance
-def get_git_commit_statistics(project_id: str | None = None, session_id: str | None = None) -> dict[str, Any]:
+def get_git_commit_statistics(
+    project_id: str | None = None, session_id: str | None = None
+) -> dict[str, Any]:
     """Get statistics about auto-commits."""
     conditions = []
     params: list[Any] = []
@@ -1219,7 +1363,9 @@ def update_email_account(account_id: str, **fields: Any) -> dict | None:
     fields.pop("id", None)
     cols = ", ".join(f"{k} = ?" for k in fields)
     with get_db() as conn:
-        conn.execute(f"UPDATE email_accounts SET {cols} WHERE id = ?", (*fields.values(), account_id))
+        conn.execute(
+            f"UPDATE email_accounts SET {cols} WHERE id = ?", (*fields.values(), account_id)
+        )
     return get_email_account(account_id)
 
 

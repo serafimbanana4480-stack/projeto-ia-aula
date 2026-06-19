@@ -13,24 +13,22 @@ No real LLM or Ollama instance is required — everything is mocked.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from backend.core.agent_bus import AgentBus, BusMessage, get_agent_bus
 from backend.core.agent_lifecycle import AgentInstanceStatus
 from backend.core.auto_correction import (
-    AGENT_TIMEOUT_SECONDS,
     AutoCorrectionLoop,
-    get_auto_correction_loop,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 class FakeInstance:
     """Fake agent instance compatible with lifecycle manager expectations."""
@@ -104,9 +102,7 @@ class MockLifecycleManager:
 @pytest.fixture
 def fresh_bus(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """Provide a completely fresh AgentBus backed by a temp DB."""
-    monkeypatch.setattr(
-        "backend.core.agent_bus.DB_PATH", tmp_path / "agent_bus_e2e.db"
-    )
+    monkeypatch.setattr("backend.core.agent_bus.DB_PATH", tmp_path / "agent_bus_e2e.db")
     monkeypatch.setattr(AgentBus, "_instance", None)
     return get_agent_bus()
 
@@ -114,15 +110,14 @@ def fresh_bus(monkeypatch: pytest.MonkeyPatch, tmp_path):
 @pytest.fixture
 def fresh_loop(monkeypatch: pytest.MonkeyPatch):
     """Provide a fresh AutoCorrectionLoop and reset the singleton."""
-    monkeypatch.setattr(
-        "backend.core.auto_correction._auto_correction_loop_instance", None
-    )
+    monkeypatch.setattr("backend.core.auto_correction._auto_correction_loop_instance", None)
     return AutoCorrectionLoop()
 
 
 # ---------------------------------------------------------------------------
 # E2E tests
 # ---------------------------------------------------------------------------
+
 
 class TestAutoCorrectionE2E:
     @pytest.mark.asyncio
@@ -225,9 +220,7 @@ class TestAutoCorrectionE2E:
 
         # Verify escalation message was published on the bus
         history = await fresh_bus.get_history("auto_correction.status", limit=10)
-        escalation_msgs = [
-            m for m in history if m.payload.get("status") == "escalated"
-        ]
+        escalation_msgs = [m for m in history if m.payload.get("status") == "escalated"]
         assert len(escalation_msgs) >= 1
         assert escalation_msgs[0].payload["artifact_id"] == "loop.py"
         assert "META_ANALYZER" in escalation_msgs[0].payload["escalation_targets"]
@@ -235,7 +228,9 @@ class TestAutoCorrectionE2E:
         await loop.stop_monitoring()
 
     @pytest.mark.asyncio
-    async def test_timeout_respected_and_aborts_stuck_agent(self, fresh_bus, fresh_loop, monkeypatch):
+    async def test_timeout_respected_and_aborts_stuck_agent(
+        self, fresh_bus, fresh_loop, monkeypatch
+    ):
         """If an agent never becomes terminal, _wait_for_agent must abort it after the timeout."""
         mock_lifecycle = MockLifecycleManager(never_terminal=True)
         loop = fresh_loop
@@ -252,10 +247,8 @@ class TestAutoCorrectionE2E:
                     return
                 await asyncio.sleep(0.01)
             # Timeout reached — abort the stuck agent
-            try:
+            with contextlib.suppress(Exception):
                 await loop._lifecycle.abort(instance_id, reason="Auto-correction timeout")
-            except Exception:
-                pass
 
         monkeypatch.setattr(loop, "_wait_for_agent", _fast_wait_for_agent)
         await loop.start_monitoring()
@@ -283,7 +276,11 @@ class TestAutoCorrectionE2E:
         assert "OVERSEER" in spawned
 
         # Ensure abort was called for the stuck agents
-        aborted = [iid for iid, inst in mock_lifecycle._instances.items() if inst.status == AgentInstanceStatus.ABORTED.value]
+        aborted = [
+            iid
+            for iid, inst in mock_lifecycle._instances.items()
+            if inst.status == AgentInstanceStatus.ABORTED.value
+        ]
         assert len(aborted) >= 3  # DEBUGGER, CODER, TEST_RUNNER_UNIT per iteration
 
         await loop.stop_monitoring()
@@ -325,8 +322,8 @@ class TestAutoCorrectionE2E:
     async def test_review_changes_handler_e2e(self, fresh_bus, fresh_loop, tmp_path, monkeypatch):
         """Publish a review.completed event and verify REFACTOR_CLEAN (+ CODER for code) are spawned."""
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test_review_e2e.db")
-        from backend.persistence.db import init_db
         from backend.core.peer_review import PeerReviewSystem, get_peer_review_system
+        from backend.persistence.db import init_db
 
         init_db()
         monkeypatch.setattr(PeerReviewSystem, "_instance", None)

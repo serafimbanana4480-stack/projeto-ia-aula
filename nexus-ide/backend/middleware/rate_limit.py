@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 import os
 
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import Limiter
 from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ limiter = Limiter(
 
 def get_rate_limit_config() -> dict[str, str]:
     """Get rate limit configuration for different endpoint types.
-    
+
     Returns a dictionary with rate limit configurations for different
     types of endpoints (auth, chat, etc.).
     """

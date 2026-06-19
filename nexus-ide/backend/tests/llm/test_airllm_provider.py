@@ -10,12 +10,11 @@ import pytest
 
 from backend.llm.airllm_provider import (
     AIRLLM_AVAILABLE,
+    DEFAULT_MODEL_REGISTRY,
     AirLLMProvider,
     ChatMessage,
     CircuitBreaker,
     CircuitState,
-    DEFAULT_MODEL_REGISTRY,
-    LocalLLMError,
     _DirectHFModel,
     _load_airllm_model,
     _resolve_model_id,
@@ -30,7 +29,7 @@ class TestModelRegistry:
         assert _resolve_model_id("custom/model") == "custom/model"
 
     def test_all_aliases_have_values(self) -> None:
-        for alias, repo in DEFAULT_MODEL_REGISTRY.items():
+        for _alias, repo in DEFAULT_MODEL_REGISTRY.items():
             assert repo and isinstance(repo, str)
 
 
@@ -106,6 +105,7 @@ class TestAirLLMProviderAsync:
         p = AirLLMProvider(device="cuda:0")
         # Should return False if CUDA is not available
         import torch
+
         expected = torch.cuda.is_available()
         assert await p.health_check() == expected
 
@@ -128,39 +128,37 @@ class TestAirLLMQuantization:
         """The compression arg must be forwarded to _DirectHFModel."""
         from unittest.mock import patch
 
-        with patch(
-            "backend.llm.airllm_provider._resolve_local_path",
-            return_value="C:/fake/local/path",
+        with (
+            patch(
+                "backend.llm.airllm_provider._resolve_local_path",
+                return_value="C:/fake/local/path",
+            ),
+            patch("backend.llm.airllm_provider._DirectHFModel") as mock_direct,
         ):
-            with patch(
-                "backend.llm.airllm_provider._DirectHFModel"
-            ) as mock_direct:
-                mock_direct.return_value = "model"
-                result = _load_airllm_model(
-                    "Qwen/Qwen2.5-3B-Instruct",
-                    device="cuda:0",
-                    compression="4bit",
-                )
-                assert result == "model"
-                # Ensure compression was forwarded
-                call_kwargs = mock_direct.call_args.kwargs
-                assert call_kwargs.get("compression") == "4bit"
-                assert call_kwargs.get("device") == "cuda:0"
+            mock_direct.return_value = "model"
+            result = _load_airllm_model(
+                "Qwen/Qwen2.5-3B-Instruct",
+                device="cuda:0",
+                compression="4bit",
+            )
+            assert result == "model"
+            # Ensure compression was forwarded
+            call_kwargs = mock_direct.call_args.kwargs
+            assert call_kwargs.get("compression") == "4bit"
+            assert call_kwargs.get("device") == "cuda:0"
 
     def test_direct_model_passes_quant_kwargs_on_cuda(self) -> None:
         """_DirectHFModel must set load_in_4bit when compression=4bit on CUDA."""
         from unittest.mock import MagicMock, patch
 
-        with patch(
-            "transformers.AutoModelForCausalLM"
-        ) as mock_cls, patch(
-            "transformers.AutoTokenizer"
-        ) as mock_tok, patch.dict(
-            "sys.modules", {"bitsandbytes": MagicMock()}
+        with (
+            patch("transformers.AutoModelForCausalLM") as mock_cls,
+            patch("transformers.AutoTokenizer") as mock_tok,
+            patch.dict("sys.modules", {"bitsandbytes": MagicMock()}),
         ):
             mock_tok.from_pretrained.return_value = MagicMock()
             mock_cls.from_pretrained.return_value = MagicMock()
-            m = _DirectHFModel("Qwen/Qwen2.5-3B-Instruct", device="cuda:0", compression="4bit")
+            _DirectHFModel("Qwen/Qwen2.5-3B-Instruct", device="cuda:0", compression="4bit")
             # Verify load_in_4bit was passed
             call_kwargs = mock_cls.from_pretrained.call_args.kwargs
             assert call_kwargs.get("load_in_4bit") is True
@@ -170,14 +168,13 @@ class TestAirLLMQuantization:
         """Compression on CPU should be a no-op (bitsandbytes needs CUDA)."""
         from unittest.mock import MagicMock, patch
 
-        with patch(
-            "transformers.AutoModelForCausalLM"
-        ) as mock_cls, patch(
-            "transformers.AutoTokenizer"
-        ) as mock_tok:
+        with (
+            patch("transformers.AutoModelForCausalLM") as mock_cls,
+            patch("transformers.AutoTokenizer") as mock_tok,
+        ):
             mock_tok.from_pretrained.return_value = MagicMock()
             mock_cls.from_pretrained.return_value = MagicMock()
-            m = _DirectHFModel("Qwen/Qwen2.5-0.5B-Instruct", device="cpu", compression="4bit")
+            _DirectHFModel("Qwen/Qwen2.5-0.5B-Instruct", device="cpu", compression="4bit")
             # Verify load_in_4bit was NOT passed (CPU is unsupported)
             call_kwargs = mock_cls.from_pretrained.call_args.kwargs
             assert "load_in_4bit" not in call_kwargs
@@ -191,15 +188,11 @@ class TestAirLLMFallbackTriggers:
         """NotEnoughSpaceException must trigger the direct-HF fallback."""
         from unittest.mock import patch
 
-        with patch(
-            "backend.llm.airllm_provider.AirAutoModel"
-        ) as mock_airllm:
+        with patch("backend.llm.airllm_provider.AirAutoModel") as mock_airllm:
             mock_airllm.from_pretrained.side_effect = Exception(
                 "Not enough space. Free space under /cache: 0.10GB"
             )
-            with patch(
-                "backend.llm.airllm_provider._DirectHFModel"
-            ) as mock_direct:
+            with patch("backend.llm.airllm_provider._DirectHFModel") as mock_direct:
                 mock_direct.return_value = "direct-model"
                 result = _load_airllm_model("Qwen/Qwen2.5-0.5B-Instruct", device="cpu")
                 assert result == "direct-model"
@@ -209,15 +202,11 @@ class TestAirLLMFallbackTriggers:
         """Missing safetensors index triggers the direct-HF fallback."""
         from unittest.mock import patch
 
-        with patch(
-            "backend.llm.airllm_provider.AirAutoModel"
-        ) as mock_airllm:
+        with patch("backend.llm.airllm_provider.AirAutoModel") as mock_airllm:
             mock_airllm.from_pretrained.side_effect = Exception(
                 "model.safetensors.index.json should exist"
             )
-            with patch(
-                "backend.llm.airllm_provider._DirectHFModel"
-            ) as mock_direct:
+            with patch("backend.llm.airllm_provider._DirectHFModel") as mock_direct:
                 mock_direct.return_value = "direct-model"
                 result = _load_airllm_model("Qwen/Qwen2.5-0.5B-Instruct", device="cpu")
                 assert result == "direct-model"
@@ -226,21 +215,15 @@ class TestAirLLMFallbackTriggers:
         """Errors unrelated to sharding must NOT trigger the fallback."""
         from unittest.mock import patch
 
-        with patch(
-            "backend.llm.airllm_provider._resolve_local_path",
-            return_value=None,
+        with (
+            patch(
+                "backend.llm.airllm_provider._resolve_local_path",
+                return_value=None,
+            ),
+            patch("backend.llm.airllm_provider.AirAutoModel") as mock_airllm,
         ):
-            with patch(
-                "backend.llm.airllm_provider.AirAutoModel"
-            ) as mock_airllm:
-                mock_airllm.from_pretrained.side_effect = ValueError(
-                    "completely unrelated error"
-                )
-                with patch(
-                    "backend.llm.airllm_provider._DirectHFModel"
-                ) as mock_direct:
-                    with pytest.raises(ValueError, match="completely unrelated"):
-                        _load_airllm_model(
-                            "Qwen/Qwen2.5-0.5B-Instruct", device="cpu"
-                        )
-                    mock_direct.assert_not_called()
+            mock_airllm.from_pretrained.side_effect = ValueError("completely unrelated error")
+            with patch("backend.llm.airllm_provider._DirectHFModel") as mock_direct:
+                with pytest.raises(ValueError, match="completely unrelated"):
+                    _load_airllm_model("Qwen/Qwen2.5-0.5B-Instruct", device="cpu")
+                mock_direct.assert_not_called()

@@ -61,18 +61,22 @@ async def list_providers(_user: dict = Depends(require_auth)) -> dict:
             key_attr = f"{key}_api_key"
             api_key_set = bool(getattr(settings, key_attr, ""))
 
-        health_data = health if isinstance(health, dict) else {"status": "error", "error": str(health)}
+        health_data = (
+            health if isinstance(health, dict) else {"status": "error", "error": str(health)}
+        )
 
-        result.append({
-            "id": key,
-            "name": pcfg.get("name", key),
-            "base_url": pcfg.get("base_url", ""),
-            "default_models": pcfg.get("default_models", []),
-            "requires_api_key": requires_key,
-            "api_key_set": api_key_set,
-            "active": key == active_provider,
-            "health": health_data,
-        })
+        result.append(
+            {
+                "id": key,
+                "name": pcfg.get("name", key),
+                "base_url": pcfg.get("base_url", ""),
+                "default_models": pcfg.get("default_models", []),
+                "requires_api_key": requires_key,
+                "api_key_set": api_key_set,
+                "active": key == active_provider,
+                "health": health_data,
+            }
+        )
 
     return {
         "providers": result,

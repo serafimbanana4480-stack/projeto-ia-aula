@@ -23,13 +23,10 @@ import json
 import logging
 import math
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import httpx
-
-from backend.config.settings import get_settings
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
@@ -38,6 +35,7 @@ logger = logging.getLogger(__name__)
 try:
     import faiss
     import numpy as np
+
     _HAVE_FAISS = True
 except ImportError:
     _HAVE_FAISS = False
@@ -57,7 +55,7 @@ INDEX_SNAPSHOT_PATH = DATA_DIR / "embeddings_index.json"
 INDEX_META_PATH = DATA_DIR / "embeddings_index_meta.json"
 
 # In-memory vector store: {chunk_id: (embedding, CodeChunk)}
-_store: dict[str, tuple[list[float], "CodeChunk"]] = {}
+_store: dict[str, tuple[list[float], CodeChunk]] = {}
 _store_lock: asyncio.Lock = asyncio.Lock()
 
 # FAISS index for fast ANN search (mirrors _store contents)
@@ -94,7 +92,7 @@ class CodeChunk:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CodeChunk":
+    def from_dict(cls, data: dict[str, Any]) -> CodeChunk:
         return cls(
             file=data["file"],
             start_line=data["start_line"],
@@ -125,6 +123,21 @@ async def _call_embed(provider, texts: list[str], model: str) -> list[list[float
         maybe_awaitable = provider.embed(texts, model=model)
         if inspect.isawaitable(maybe_awaitable):
             maybe_awaitable = await asyncio.ensure_future(maybe_awaitable)
+        # Some providers (e.g. sentence-transformers, ONNX runtime) return
+        # numpy arrays with a leading batch dimension even for single texts.
+        # Normalise to list[list[float]] so the FAISS indexer always sees a
+        # 2-D array of shape (n, dim).
+        try:
+            import numpy as _np
+            if isinstance(maybe_awaitable, _np.ndarray):
+                arr = maybe_awaitable
+                if arr.ndim == 3:
+                    arr = arr.squeeze(axis=0)
+                if arr.ndim == 1:
+                    arr = arr.reshape(1, -1)
+                maybe_awaitable = arr.tolist()
+        except Exception:
+            pass
         return maybe_awaitable
     except Exception as exc:
         logger.warning("Embed provider call failed: %s", exc)
@@ -202,7 +215,7 @@ async def embed(text: str, model: str | None = None) -> list[float]:
 
 def _cosine_sim(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors."""
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
     if norm_a == 0 or norm_b == 0:
@@ -250,7 +263,13 @@ def _init_faiss_index(dim: int | None = None) -> None:
     _faiss_dim = dim or _EMBED_DIM
     _faiss_id_map = {}
     quantizer = faiss.IndexFlatL2(_faiss_dim)
-    nlist = min(100, max(10, len(_store) // 10))
+    # FAISS IndexIVFFlat requires at least nlist training vectors. With a
+    # very small corpus (e.g. 1 chunk during unit tests) the default
+    # ``max(10, len(_store) // 10)`` produces nlist > corpus, so the index
+    # is never trained and ``add`` fails with "is_trained failed".
+    # Clamp nlist to never exceed the available training data.
+    requested = max(1, len(_store) // 10)
+    nlist = max(1, min(100, requested, max(1, len(_store))))
     _faiss_index = faiss.IndexIVFFlat(quantizer, _faiss_dim, nlist)
     if len(_store) >= nlist:
         vectors = []
@@ -287,7 +306,10 @@ def _rebuild_faiss_index() -> None:
         return
 
     vec_array = np.array(vectors, dtype=np.float32)
-    if not _faiss_index.is_trained and len(vectors) >= _faiss_index.nlist:
+    if not _faiss_index.is_trained:
+        # FAISS IVF needs at least nlist training points. With a tiny
+        # corpus the training step is harmless — we just expose the
+        # current batch as the training set so add() does not fail.
         _faiss_index.train(vec_array)
     _faiss_index.add(vec_array)
 
@@ -562,8 +584,20 @@ async def index_codebase(
 
                 if len(batch_texts) >= EMBED_BATCH_SIZE:
                     embeddings = await _embed_batch_with_fallback(batch_texts, model)
-                    for emb, (cid, cc) in zip(embeddings, batch_meta):
-                        if emb is not None:
+                    for emb, (cid, cc) in zip(embeddings, batch_meta, strict=False):
+                        if emb is None:
+                            continue
+                        # Normalise provider output to a flat list[float] so
+                        # the FAISS indexer always sees 2-D arrays.
+                        try:
+                            import numpy as _np
+                            if isinstance(emb, _np.ndarray):
+                                arr = emb
+                                while arr.ndim > 1:
+                                    arr = arr[0]
+                                emb = arr.tolist()
+                        except Exception:
+                            pass
                             _store[cid] = (emb, cc)
                             chunk_count += 1
                     batch_texts = []
@@ -575,10 +609,22 @@ async def index_codebase(
 
         if batch_texts:
             embeddings = await _embed_batch_with_fallback(batch_texts, model)
-            for emb, (cid, cc) in zip(embeddings, batch_meta):
-                if emb is not None:
-                    _store[cid] = (emb, cc)
-                    chunk_count += 1
+            for emb, (cid, cc) in zip(embeddings, batch_meta, strict=False):
+                if emb is None:
+                    continue
+                # Normalise provider output to a flat list[float] so the
+                # FAISS indexer always sees 2-D arrays.
+                try:
+                    import numpy as _np
+                    if isinstance(emb, _np.ndarray):
+                        arr = emb
+                        while arr.ndim > 1:
+                            arr = arr[0]
+                        emb = arr.tolist()
+                except Exception:
+                    pass
+                _store[cid] = (emb, cc)
+                chunk_count += 1
 
         _save_index_snapshot(_store)
         _rebuild_faiss_index()
@@ -613,7 +659,7 @@ async def search_codebase(query: str, k: int = 8) -> list[CodeChunk]:
                 distances, indices = _faiss_index.search(query_vec, actual_k)
 
                 results = []
-                for dist, idx in zip(distances[0], indices[0]):
+                for dist, idx in zip(distances[0], indices[0], strict=False):
                     if idx >= 0 and idx in _faiss_id_map:
                         chunk_id = _faiss_id_map[int(idx)]
                         embedding, chunk = _store[chunk_id]
@@ -641,7 +687,7 @@ def _keyword_search(query: str, k: int = 8) -> list[CodeChunk]:
     terms = set(query.lower().split())
     results: list[CodeChunk] = []
 
-    for chunk_id, (_, chunk) in _store.items():
+    for _chunk_id, (_, chunk) in _store.items():
         content_lower = chunk.content.lower()
         matches = sum(1 for t in terms if t in content_lower)
         if matches > 0:
@@ -671,7 +717,9 @@ async def get_index_stats() -> dict[str, Any]:
                 "faiss_available": True,
                 "faiss_ntotal": _faiss_index.ntotal,
                 "faiss_dim": _faiss_dim,
-                "faiss_trained": _faiss_index.is_trained if hasattr(_faiss_index, 'is_trained') else True,
+                "faiss_trained": _faiss_index.is_trained
+                if hasattr(_faiss_index, "is_trained")
+                else True,
             }
         else:
             faiss_stats = {"faiss_available": False}

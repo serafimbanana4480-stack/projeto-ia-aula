@@ -104,6 +104,7 @@ class TestChatEndpoint:
 
     def test_history_is_persisted(self, client_with_mocked_ollama: TestClient) -> None:
         import uuid
+
         sid = f"t-history-{uuid.uuid4().hex[:8]}"
         client_with_mocked_ollama.post(
             "/api/chat", json={"message": "what is DNS?", "session_id": sid}

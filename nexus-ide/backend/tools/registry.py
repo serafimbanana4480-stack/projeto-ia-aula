@@ -13,6 +13,7 @@ from backend.persistence.db import log_tool_execution
 # Tool result cache — best-effort; system works without it
 try:
     from backend.cache.tool_result_cache import get_tool_cache
+
     _HAVE_TOOL_CACHE = True
 except ImportError:
     _HAVE_TOOL_CACHE = False

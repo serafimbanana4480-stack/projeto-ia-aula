@@ -1,7 +1,7 @@
 """Task Spawner tool - allows agents to dynamically spawn new tasks in the orchestrator.
 
-This is a core autonomy feature. If an agent realizes that the current task 
-requires additional steps (e.g., refactoring before implementation), 
+This is a core autonomy feature. If an agent realizes that the current task
+requires additional steps (e.g., refactoring before implementation),
 it can spawn new tasks that the orchestrator will then schedule.
 """
 
@@ -13,6 +13,7 @@ from typing import Any, get_args
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
+
 
 async def spawn_task(
     name: str,
@@ -65,6 +66,7 @@ async def spawn_task(
         "depends_on": depends_on or [],
     }
 
+
 register_tool(
     ToolSpec(
         name="spawn_task",
@@ -86,7 +88,17 @@ register_tool(
                 },
                 "agent": {
                     "type": "string",
-                    "enum": ["ARCHITECT", "RESEARCHER", "CODER", "ANALYZER", "DEBUGGER", "DOCUMENTER", "OPTIMIZER", "REFACTOR_PERFORMANCE", "REFACTOR_CLEAN"],
+                    "enum": [
+                        "ARCHITECT",
+                        "RESEARCHER",
+                        "CODER",
+                        "ANALYZER",
+                        "DEBUGGER",
+                        "DOCUMENTER",
+                        "OPTIMIZER",
+                        "REFACTOR_PERFORMANCE",
+                        "REFACTOR_CLEAN",
+                    ],
                     "description": "Agent type to execute the task",
                 },
                 "priority": {

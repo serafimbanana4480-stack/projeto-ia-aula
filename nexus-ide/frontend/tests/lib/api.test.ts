@@ -19,6 +19,14 @@ describe("lib/api.ts Client Suite", () => {
       ok,
       status,
       statusText: ok ? "OK" : "Error",
+      headers: {
+        get: (name: string) => {
+          if (name.toLowerCase() === "content-length") {
+            return data == null ? "0" : String(JSON.stringify(data).length);
+          }
+          return null;
+        },
+      },
       json: async () => data,
       text: async () => JSON.stringify(data),
     });
@@ -35,6 +43,10 @@ describe("lib/api.ts Client Suite", () => {
     it("postChat makes correct POST request", async () => {
       mockResponse(200, {});
       const resp = await api.postChat("hello", "session123", "agent", undefined, "modelX", "/proj", "strong");
+      // Verify the fetch was called with the right URL, method, and headers,
+      // and that the body contains all expected fields. The exact key order in
+      // the body is an implementation detail of ``postChat`` and changes
+      // whenever a field is added — assert on parsed content instead.
       expect(global.fetch).toHaveBeenCalledWith(
         "http://localhost:8000/api/chat",
         expect.objectContaining({
@@ -43,16 +55,18 @@ describe("lib/api.ts Client Suite", () => {
             Authorization: "Bearer mock-token",
             Accept: "text/event-stream",
           }),
-          body: JSON.stringify({
-            message: "hello",
-            session_id: "session123",
-            mode: "agent",
-            model: "modelX",
-            project_path: "/proj",
-            thinking_strength: "strong",
-          }),
         })
       );
+      const fetchMock = global.fetch as unknown as ReturnType<typeof vi.fn>;
+      const callBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(callBody).toMatchObject({
+        message: "hello",
+        session_id: "session123",
+        mode: "agent",
+        model: "modelX",
+        project_path: "/proj",
+        thinking_strength: "strong",
+      });
       expect(resp).toBeDefined();
     });
 

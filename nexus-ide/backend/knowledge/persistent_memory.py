@@ -85,10 +85,7 @@ class PersistentMemoryStore(MemoryStore):
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
         """Add columns that may be missing from older schemas."""
         columns = {
-            row[1]
-            for row in conn.execute(
-                "PRAGMA table_info(persistent_memories)"
-            ).fetchall()
+            row[1] for row in conn.execute("PRAGMA table_info(persistent_memories)").fetchall()
         }
         additions = [
             ("session_id", "TEXT"),
@@ -99,9 +96,7 @@ class PersistentMemoryStore(MemoryStore):
         ]
         for col, dtype in additions:
             if col not in columns:
-                conn.execute(
-                    f"ALTER TABLE persistent_memories ADD COLUMN {col} {dtype}"
-                )
+                conn.execute(f"ALTER TABLE persistent_memories ADD COLUMN {col} {dtype}")
                 logger.info("Migrated persistent_memories: added %s", col)
 
     def _save_memory(self, memory: Memory, user_id: str = "") -> None:
@@ -167,52 +162,26 @@ class PersistentMemoryStore(MemoryStore):
         return Memory(
             memory_id=row["id"],
             memory_type=(
-                MemoryType(row["memory_type"])
-                if row["memory_type"]
-                else MemoryType.GLOBAL
+                MemoryType(row["memory_type"]) if row["memory_type"] else MemoryType.GLOBAL
             ),
             session_id=row["session_id"] or "",
             project_id=row["project_id"] or "",
             content=row["content"] or "",
             summary=row["summary"] or "",
-            embedding=(
-                json.loads(row["embedding_json"])
-                if row["embedding_json"]
-                else []
-            ),
-            tags=(
-                json.loads(row["tags"])
-                if row["tags"]
-                else []
-            ),
+            embedding=(json.loads(row["embedding_json"]) if row["embedding_json"] else []),
+            tags=(json.loads(row["tags"]) if row["tags"] else []),
             source=row["source"] or "",
             file_path=row["file_path"] or "",
             language=row["language"] or "",
             related_memory_ids=(
-                json.loads(row["related_memory_ids"])
-                if row["related_memory_ids"]
-                else []
+                json.loads(row["related_memory_ids"]) if row["related_memory_ids"] else []
             ),
-            importance=(
-                row["importance"]
-                if row["importance"] is not None
-                else 0.5
-            ),
-            created_at=(
-                row["created_at"]
-                if row["created_at"] is not None
-                else time.time()
-            ),
+            importance=(row["importance"] if row["importance"] is not None else 0.5),
+            created_at=(row["created_at"] if row["created_at"] is not None else time.time()),
             last_accessed_at=(
-                row["last_accessed_at"]
-                if row["last_accessed_at"] is not None
-                else time.time()
+                row["last_accessed_at"] if row["last_accessed_at"] is not None else time.time()
             ),
-            access_count=(
-                row["access_count"]
-                if row["access_count"] is not None
-                else 0
-            ),
+            access_count=(row["access_count"] if row["access_count"] is not None else 0),
         )
 
     # ------------------------------------------------------------------

@@ -36,9 +36,7 @@ def patch_settings(monkeypatch):
     """Patch ``get_settings`` used by the middleware; returns a setter callable."""
 
     def _apply(**overrides):
-        monkeypatch.setattr(
-            security_module, "get_settings", lambda: _settings(**overrides)
-        )
+        monkeypatch.setattr(security_module, "get_settings", lambda: _settings(**overrides))
 
     return _apply
 

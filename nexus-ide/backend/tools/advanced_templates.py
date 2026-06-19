@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
-from backend.persistence.db import propose_change
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
@@ -117,7 +117,10 @@ jobs:
         "name": "FastAPI Project",
         "description": "Production-ready FastAPI with SQLModel, JWT auth, and Docker",
         "tags": ["python", "fastapi", "api", "backend"],
-        "setup_commands": ["pip install -r requirements.txt", "uvicorn src.{name}.main:app --reload"],
+        "setup_commands": [
+            "pip install -r requirements.txt",
+            "uvicorn src.{name}.main:app --reload",
+        ],
         "files": {
             "README.md": """# {name}
 
@@ -232,7 +235,10 @@ where = ["src"]
         "name": "Fullstack Next.js + FastAPI",
         "description": "Modern fullstack app with Next.js 15 frontend and FastAPI backend",
         "tags": ["fullstack", "nextjs", "fastapi", "react", "typescript"],
-        "setup_commands": ["cd backend && pip install -r requirements.txt", "cd frontend && npm install"],
+        "setup_commands": [
+            "cd backend && pip install -r requirements.txt",
+            "cd frontend && npm install",
+        ],
         "files": {
             "README.md": """# {name}
 
@@ -330,7 +336,9 @@ python bot.py
         "name": "Chrome Extension",
         "description": "Manifest V3 Chrome extension with popup and content script",
         "tags": ["javascript", "chrome", "extension", "frontend"],
-        "setup_commands": ["Open chrome://extensions, enable Developer mode, click Load unpacked and select this folder"],
+        "setup_commands": [
+            "Open chrome://extensions, enable Developer mode, click Load unpacked and select this folder"
+        ],
         "files": {
             "README.md": """# {name}
 
@@ -481,7 +489,6 @@ async def generate_project(
     project_path: str = ".",
 ) -> dict[str, Any]:
     """Generate a complete project from a template."""
-    from pathlib import Path
 
     if template_id not in TEMPLATES:
         available = ", ".join(TEMPLATES.keys())
@@ -504,7 +511,9 @@ async def generate_project(
 
     logger.info(
         "Generated %s project '%s' with %d files",
-        template_id, name, len(files_created),
+        template_id,
+        name,
+        len(files_created),
     )
 
     return {
@@ -531,7 +540,11 @@ register_tool(
                     "description": "Template to use",
                 },
                 "name": {"type": "string", "description": "Project name"},
-                "description": {"type": "string", "default": "", "description": "Project description"},
+                "description": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Project description",
+                },
                 "project_path": {"type": "string", "default": ".", "description": "Base directory"},
             },
             "required": ["template_id", "name"],

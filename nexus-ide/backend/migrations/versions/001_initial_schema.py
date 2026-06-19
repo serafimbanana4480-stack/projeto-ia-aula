@@ -5,11 +5,10 @@ Revises:
 Create Date: 2025-01-12
 
 """
+
 from __future__ import annotations
 
 from alembic import op
-import sqlalchemy as sa
-
 
 # revision identifiers, used by Alembic.
 revision = "001_initial"
@@ -76,7 +75,9 @@ def upgrade() -> None:
     """)
 
     # Create indexes for messages
-    op.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at)"
+    )
 
     # Create tool_executions table
     op.execute("""
@@ -95,7 +96,9 @@ def upgrade() -> None:
     """)
 
     # Create indexes for tool_executions
-    op.execute("CREATE INDEX IF NOT EXISTS idx_tool_session ON tool_executions(session_id, created_at)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tool_session ON tool_executions(session_id, created_at)"
+    )
 
     # Create routing_decisions table
     op.execute("""
@@ -114,7 +117,9 @@ def upgrade() -> None:
     """)
 
     # Create indexes for routing_decisions
-    op.execute("CREATE INDEX IF NOT EXISTS idx_routing_session ON routing_decisions(session_id, created_at)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_routing_session ON routing_decisions(session_id, created_at)"
+    )
 
     # Create proposed_changes table
     op.execute("""
@@ -135,8 +140,12 @@ def upgrade() -> None:
     """)
 
     # Create indexes for proposed_changes
-    op.execute("CREATE INDEX IF NOT EXISTS idx_changes_session ON proposed_changes(session_id, created_at)")
-    op.execute("CREATE INDEX IF NOT EXISTS idx_changes_pending ON proposed_changes(applied) WHERE applied = 0")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_changes_session ON proposed_changes(session_id, created_at)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_changes_pending ON proposed_changes(applied) WHERE applied = 0"
+    )
 
 
 def downgrade() -> None:

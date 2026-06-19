@@ -41,8 +41,6 @@ from backend.orchestrator.events import EventBus, EventType, OrchestratorEvent
 from backend.orchestrator.plan_creator import PlanCreator
 from backend.orchestrator.plan_executor import (
     PlanExecutor,
-    _extract_tool_errors,
-    _iterate_agent_output,
     extract_tool_errors,
     iterate_agent_output,
 )
@@ -167,9 +165,7 @@ class OrchestrationEngine:
             self._agent_pool,
             default_timeout=default_timeout,
         )
-        self._retry_manager = retry_manager or RetryManager(
-            base_delay=1.0, max_retries=max_retries
-        )
+        self._retry_manager = retry_manager or RetryManager(base_delay=1.0, max_retries=max_retries)
         self._cancellation = cancellation_registry or CancellationRegistry()
 
     # ------------------------------------------------------------------
@@ -244,9 +240,7 @@ class OrchestrationEngine:
         """Cancel an active orchestration run."""
         cancelled = self._cancellation.cancel(session_id)
         self._state[session_id] = OrchestrationState.CANCELLED
-        logger.info(
-            "Cancelled orchestration for session %s (%d task(s))", session_id, cancelled
-        )
+        logger.info("Cancelled orchestration for session %s (%d task(s))", session_id, cancelled)
 
     async def execute_autonomous(
         self,

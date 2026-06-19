@@ -2,11 +2,11 @@ import asyncio
 import json
 import logging
 import shutil
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ async def _load_json(path: Path) -> dict[str, Any]:
     def _read(p: Path) -> dict[str, Any]:
         if not p.exists():
             return {}
-        with open(p, "r", encoding="utf-8") as f:
+        with open(p, encoding="utf-8") as f:
             return json.load(f)
 
     return await asyncio.to_thread(_read, path)
@@ -236,7 +236,7 @@ class RollbackManager:
 
         rolled: list[str] = []
         reasons: list[str] = []
-        project_path = self._snapshots.get(snapshot_ids[0], {}).get("project_path")
+        self._snapshots.get(snapshot_ids[0], {}).get("project_path")
         for snapshot_id in snapshot_ids:
             try:
                 result = await self.rollback_snapshot(snapshot_id)
@@ -259,13 +259,11 @@ class RollbackManager:
 
     def _detect_regression(self, before: dict[str, Any], after: dict[str, Any]) -> str | None:
         for key in ("score", "coverage", "pass_rate"):
-            if key in before and key in after:
-                if before[key] > after[key]:
-                    return f"Metric {key} dropped from {before[key]} to {after[key]}."
+            if key in before and key in after and before[key] > after[key]:
+                return f"Metric {key} dropped from {before[key]} to {after[key]}."
         for key in ("errors", "failures", "warnings"):
-            if key in before and key in after:
-                if after[key] > before[key]:
-                    return f"Metric {key} increased from {before[key]} to {after[key]}."
+            if key in before and key in after and after[key] > before[key]:
+                return f"Metric {key} increased from {before[key]} to {after[key]}."
         return None
 
     async def _persist_snapshot(self, path: Path, data: dict[str, Any]) -> None:

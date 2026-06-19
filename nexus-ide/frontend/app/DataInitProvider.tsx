@@ -6,6 +6,7 @@ import { useModeStore } from "../stores/modeStore";
 import { useToolsStore } from "../stores/toolsStore";
 import { useModelStore } from "../stores/modelStore";
 import { initMetricsStream } from "../stores/metricsStore";
+import { isAuthenticated, autoLoginDev } from "../lib/auth";
 
 export default function DataInitProvider({
   children,
@@ -23,34 +24,29 @@ export default function DataInitProvider({
     if (initializedRef.current) return;
     initializedRef.current = true;
 
-    let authenticated = false;
-    if (typeof window !== "undefined") {
-      try {
-        const token = window.localStorage.getItem("nexus.access_token");
-        authenticated = !!token;
-      } catch {
-        authenticated = false;
+    const init = async () => {
+      // Try dev auto-login first
+      if (!isAuthenticated() && process.env.NODE_ENV === "development") {
+        try {
+          await autoLoginDev();
+        } catch {
+          // silent
+        }
       }
-    }
 
-    try {
-      if (authenticated) {
+      if (isAuthenticated()) {
         initMetricsStream();
+
+        void Promise.allSettled([
+          (async () => { try { await loadProjects(); } catch { /* ignore */ } })(),
+          (async () => { try { await loadModes(); } catch { /* ignore */ } })(),
+          (async () => { try { await loadTools(); } catch { /* ignore */ } })(),
+          (async () => { try { await loadModels(); } catch { /* ignore */ } })(),
+        ]);
       }
-    } catch {
-      /* ignore metrics stream init errors */
-    }
+    };
 
-    if (!authenticated) {
-      return;
-    }
-
-    void Promise.allSettled([
-      (async () => { try { await loadProjects(); } catch { /* ignore */ } })(),
-      (async () => { try { await loadModes(); } catch { /* ignore */ } })(),
-      (async () => { try { await loadTools(); } catch { /* ignore */ } })(),
-      (async () => { try { await loadModels(); } catch { /* ignore */ } })(),
-    ]);
+    init();
   }, [loadProjects, loadModes, loadTools, loadModels]);
 
   return <>{children}</>;

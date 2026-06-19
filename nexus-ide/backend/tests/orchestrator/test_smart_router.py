@@ -172,7 +172,9 @@ class TestClassifyByHeuristics:
             "smart_router": {"trivial_keywords": []},
         }
         # A query that doesn't match any heuristic
-        decision = _classify_by_heuristics("tell me about something moderately complex here", config)
+        decision = _classify_by_heuristics(
+            "tell me about something moderately complex here", config
+        )
         # This should fall through to None, triggering LLM fallback
         # But based on the implementation, moderate queries (<=50 words) default to coder
         # So we need a longer query without code/reasoning/deep markers
@@ -204,6 +206,7 @@ class TestTierDecision:
 # ---------------------------------------------------------------------------
 # SmartRouter class tests
 # ---------------------------------------------------------------------------
+
 
 class TestSmartRouterInit:
     def test_init_without_client(self) -> None:
@@ -248,6 +251,7 @@ class TestSmartRouterRouteCache:
 
         # First call — must hit tier/LLM path; patch smart_route_tier to avoid real LLM
         from unittest.mock import AsyncMock
+
         router.llm_client = AsyncMock()
         router.llm_client.chat_complete = AsyncMock(return_value="coder")
 
@@ -284,6 +288,7 @@ class TestSmartRouterRouteTier:
 
     async def test_tier_routing_with_llm_fallback(self) -> None:
         from unittest.mock import AsyncMock
+
         from backend.orchestrator.smart_router import _tier_cache
 
         # Clear global tier cache so this test is isolated
@@ -314,17 +319,18 @@ class TestSmartRouterRouteFallback:
         # Use a query that does NOT match any fast_route markers
         query = "totally ambiguous query with no markers at all"
 
-        with patch("backend.orchestrator.smart_router.smart_route_tier", side_effect=RuntimeError("boom")):
-            with patch("backend.orchestrator.smart_router.route_with_model") as mock_route:
-                mock_route.return_value = RoutingDecision(
-                    primary_agent="ANALYZER",
-                    routing_confidence=0.85,
-                    routing_reason="model-fallback",
-                )
-                decision = await router.route(query)
-                assert decision.primary_agent == "ANALYZER"
-                assert decision.routing_reason == "model-fallback"
-                mock_route.assert_awaited_once()
+        with patch(
+            "backend.orchestrator.smart_router.smart_route_tier", side_effect=RuntimeError("boom")
+        ), patch("backend.orchestrator.smart_router.route_with_model") as mock_route:
+            mock_route.return_value = RoutingDecision(
+                primary_agent="ANALYZER",
+                routing_confidence=0.85,
+                routing_reason="model-fallback",
+            )
+            decision = await router.route(query)
+            assert decision.primary_agent == "ANALYZER"
+            assert decision.routing_reason == "model-fallback"
+            mock_route.assert_awaited_once()
 
     async def test_total_fallback_when_everything_fails(self) -> None:
         """When both tier and route_with_model fail, return hard fallback."""
@@ -335,12 +341,16 @@ class TestSmartRouterRouteFallback:
 
         router = SmartRouter(llm_client=client)
 
-        with patch("backend.orchestrator.smart_router.smart_route_tier", side_effect=RuntimeError("boom")):
-            with patch("backend.orchestrator.smart_router.route_with_model", side_effect=RuntimeError("also boom")):
-                decision = await router.route("something something")
-                assert decision.primary_agent == "CODER"
-                assert decision.routing_confidence == 0.5
-                assert decision.routing_reason == "fallback-chain-failure"
+        with patch(
+            "backend.orchestrator.smart_router.smart_route_tier", side_effect=RuntimeError("boom")
+        ), patch(
+            "backend.orchestrator.smart_router.route_with_model",
+            side_effect=RuntimeError("also boom"),
+        ):
+            decision = await router.route("something something")
+            assert decision.primary_agent == "CODER"
+            assert decision.routing_confidence == 0.5
+            assert decision.routing_reason == "fallback-chain-failure"
 
 
 class TestSmartRouterIntegration:
@@ -360,4 +370,3 @@ class TestSmartRouterIntegration:
             assert "smart-tier:coder" in decision.routing_reason
         finally:
             await client.aclose()
-

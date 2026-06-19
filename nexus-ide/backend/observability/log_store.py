@@ -290,7 +290,7 @@ class LogStore:
     async def prune_old_logs(self, days: int = 30) -> int:
         """Remove logs older than N days. Returns number of rows deleted."""
         await self._init()
-        cutoff = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        datetime.now(UTC).isoformat().replace("+00:00", "Z")
         # Simple date math: we rely on SQLite for the actual comparison
         from datetime import timedelta
 

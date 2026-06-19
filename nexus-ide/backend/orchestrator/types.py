@@ -7,13 +7,13 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
 
 def _structured_log(level: str, msg: str, **extra: Any) -> None:
-    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    ts = datetime.now(UTC).isoformat(timespec="seconds")
     payload: dict[str, Any] = {"ts": ts, "level": level, "msg": msg}
     payload.update(extra)
     print(json.dumps(payload, ensure_ascii=False, default=str))

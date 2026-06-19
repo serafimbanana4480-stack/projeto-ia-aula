@@ -25,11 +25,12 @@ import tempfile
 import time
 import uuid
 from collections import defaultdict
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, AsyncGenerator, ClassVar
+from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +64,10 @@ def _readers_count_path(file_path: str) -> str:
 
 def _filelock_enabled() -> bool:
     """Return whether the cross-process filelock layer should be used."""
-    return (
-        _FILELOCK_AVAILABLE
-        and os.environ.get("NEXUS_DISABLE_FILELOCK", "").lower() not in ("1", "true", "yes")
+    return _FILELOCK_AVAILABLE and os.environ.get("NEXUS_DISABLE_FILELOCK", "").lower() not in (
+        "1",
+        "true",
+        "yes",
     )
 
 
@@ -84,9 +86,7 @@ REDIS_LOCK_TTL_MS = int(os.environ.get("NEXUS_LOCK_REDIS_TTL_MS", "30000"))
 REDIS_LOCK_KEY_PREFIX = os.environ.get("NEXUS_LOCK_REDIS_PREFIX", "nexus:lock:")
 REDIS_LOCK_CONNECT_TIMEOUT = float(os.environ.get("NEXUS_LOCK_REDIS_CONNECT_TIMEOUT", "1.0"))
 REDIS_LOCK_RETRY_INTERVAL = float(os.environ.get("NEXUS_LOCK_REDIS_RETRY", "0.1"))
-REDIS_LOCK_UNAVAILABLE_COOLDOWN = float(
-    os.environ.get("NEXUS_LOCK_REDIS_COOLDOWN", "5.0")
-)
+REDIS_LOCK_UNAVAILABLE_COOLDOWN = float(os.environ.get("NEXUS_LOCK_REDIS_COOLDOWN", "5.0"))
 
 # Lua release script — atomic compare-and-delete.
 _REDIS_RELEASE_SCRIPT = """
@@ -159,8 +159,7 @@ async def _redis_lock_client() -> Any:
     except Exception as exc:
         _mark_redis_unavailable()
         logger.warning(
-            "Redis unavailable for distributed file locks (%s); "
-            "using in-memory/filelock fallback",
+            "Redis unavailable for distributed file locks (%s); using in-memory/filelock fallback",
             exc,
         )
         try:
@@ -218,9 +217,7 @@ class RedisDistributedLock:
                 )
             except Exception as exc:
                 _mark_redis_unavailable()
-                logger.warning(
-                    "Redis SET failed for lock %s (%s); using fallback", key, exc
-                )
+                logger.warning("Redis SET failed for lock %s (%s); using fallback", key, exc)
                 raise _RedisUnavailable() from exc
             if ok:
                 return token
@@ -313,7 +310,7 @@ class FileLock:
 
     def is_expired(self) -> bool:
         """Return ``True`` if the lock has passed its expiry time."""
-        return datetime.now(timezone.utc) >= self.expires_at
+        return datetime.now(UTC) >= self.expires_at
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +323,7 @@ def _cleanup_stale_lock(lock_path: str, timeout: float) -> None:
         return
     try:
         mtime = path.stat().st_mtime
-        age = datetime.now(timezone.utc).timestamp() - mtime
+        age = datetime.now(UTC).timestamp() - mtime
         if age > timeout * 2:
             logger.warning("Removing stale lock file %s (age=%.1fs)", lock_path, age)
             path.unlink(missing_ok=True)
@@ -337,7 +334,7 @@ def _cleanup_stale_lock(lock_path: str, timeout: float) -> None:
 def _read_readers_count(count_path: str) -> int:
     """Read the current reader count from disk."""
     try:
-        with open(count_path, "r", encoding="utf-8") as f:
+        with open(count_path, encoding="utf-8") as f:
             data = json.load(f)
             return int(data.get("count", 0))
     except (FileNotFoundError, json.JSONDecodeError, ValueError):
@@ -350,7 +347,7 @@ def _write_readers_count(count_path: str, count: int) -> None:
         json.dump(
             {
                 "count": count,
-                "updated": datetime.now(timezone.utc).isoformat(),
+                "updated": datetime.now(UTC).isoformat(),
             },
             f,
         )
@@ -812,9 +809,7 @@ class FileLockManager:
         try:
             await asyncio.to_thread(lock.acquire, timeout=timeout)
         except Timeout as exc:
-            raise LockError(
-                f"Timeout acquiring cross-process write lock on {file_path}"
-            ) from exc
+            raise LockError(f"Timeout acquiring cross-process write lock on {file_path}") from exc
         return lock
 
     async def _acquire_cross_process_read_lock(
@@ -837,9 +832,7 @@ class FileLockManager:
         try:
             await asyncio.to_thread(mutex_lock.acquire, timeout=timeout)
         except Timeout as exc:
-            raise LockError(
-                f"Timeout waiting for readers mutex on {file_path}"
-            ) from exc
+            raise LockError(f"Timeout waiting for readers mutex on {file_path}") from exc
 
         write_lock: SoftFileLock | None = None
         try:
@@ -849,9 +842,7 @@ class FileLockManager:
                 write_lock = self._get_or_create_soft_lock(write_path)
                 remaining = deadline - asyncio.get_event_loop().time()
                 if remaining <= 0:
-                    raise LockError(
-                        f"Timeout acquiring cross-process read lock on {file_path}"
-                    )
+                    raise LockError(f"Timeout acquiring cross-process read lock on {file_path}")
                 try:
                     await asyncio.to_thread(write_lock.acquire, timeout=remaining)
                 except Timeout as exc:
@@ -886,9 +877,7 @@ class FileLockManager:
             loop.create_task(_get_redis_lock().release(key, token))
         except RuntimeError:
             # No running loop in the current thread — rely on TTL expiry.
-            logger.debug(
-                "No running loop to release Redis lock %s; relying on TTL", key
-            )
+            logger.debug("No running loop to release Redis lock %s; relying on TTL", key)
 
     def _release_cross_process_lock(self, lock: FileLock) -> None:
         """Synchronously release cross-process resources held by *lock*.
@@ -943,7 +932,9 @@ class FileLockManager:
                     try:
                         Path(count_path).unlink(missing_ok=True)
                     except OSError:
-                        logger.debug("Failed to unlink readers count file %s", count_path, exc_info=True)
+                        logger.debug(
+                            "Failed to unlink readers count file %s", count_path, exc_info=True
+                        )
             finally:
                 _sync_release_soft_lock(mutex_lock)
 
@@ -978,9 +969,7 @@ class FileLockManager:
                 deadlocked = self.detect_deadlock()
                 if deadlocked and owner in deadlocked:
                     self._wait_graph[owner].discard(file_path)
-                    raise DeadlockError(
-                        f"Deadlock detected for agent {owner!r} on {file_path}"
-                    )
+                    raise DeadlockError(f"Deadlock detected for agent {owner!r} on {file_path}")
 
                 if self._can_acquire(file_path, lock_type, owner):
                     # ------------------------------------------------------
@@ -1015,14 +1004,8 @@ class FileLockManager:
                                 )
                         # LockError (contention timeout) propagates naturally.
 
-                    if (
-                        lock_type == "write"
-                        and redis_token is None
-                        and _filelock_enabled()
-                    ):
-                        fl = await self._acquire_cross_process_write_lock(
-                            file_path, remaining
-                        )
+                    if lock_type == "write" and redis_token is None and _filelock_enabled():
+                        fl = await self._acquire_cross_process_write_lock(file_path, remaining)
                         cross_proc_locks.append(fl)
                     elif lock_type == "read" and _filelock_enabled():
                         _mutex_fl, _write_fl = await self._acquire_cross_process_read_lock(
@@ -1035,9 +1018,8 @@ class FileLockManager:
                         file_path=file_path,
                         lock_type=lock_type,
                         owner=owner,
-                        acquired_at=datetime.now(timezone.utc),
-                        expires_at=datetime.now(timezone.utc)
-                        + timedelta(seconds=timeout_seconds),
+                        acquired_at=datetime.now(UTC),
+                        expires_at=datetime.now(UTC) + timedelta(seconds=timeout_seconds),
                     )
                     self._locks[file_path].append(lock)
                     lock_id = lock.lock_id
@@ -1072,7 +1054,7 @@ class FileLockManager:
                         self._wait_for_predicate(file_path, lock_type, owner),
                         timeout=remaining,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     async with self._mutex:
                         self._wait_graph[owner].discard(file_path)
                     raise LockError(

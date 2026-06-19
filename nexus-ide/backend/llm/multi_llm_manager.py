@@ -131,12 +131,10 @@ class MultiLLMManager:
         names_to_try = [target] + [n for n in self.providers if n != target]
         for name in names_to_try:
             started = time.time()
-            success = False
             try:
                 result = await self.providers[name].chat_complete(
                     model=model, messages=messages, options=options, **kwargs
                 )
-                success = True
                 self._update_health(name, True, (time.time() - started) * 1000)
                 logger.info("Provider '%s' succeeded for chat_complete", name)
                 return result
@@ -164,13 +162,11 @@ class MultiLLMManager:
         names_to_try = [target] + [n for n in self.providers if n != target]
         for name in names_to_try:
             started = time.time()
-            success = False
             try:
                 async for token in self.providers[name].chat_stream(
                     model=model, messages=messages, options=options, **kwargs
                 ):
                     yield token
-                success = True
                 self._update_health(name, True, (time.time() - started) * 1000)
                 logger.info("Provider '%s' succeeded for chat_stream", name)
                 return

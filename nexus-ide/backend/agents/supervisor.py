@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
-from backend.persistence.db import get_session, list_sessions
+from backend.persistence.db import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class SupervisorAgent(AgentBase):
 
         # Gather session statistics
         stats = self._gather_session_stats(request.session_id)
-        context = f"Session statistics:\n{json.dumps(stats, indent=2, default=str)}\n\nUser query: {request.query}"
+        f"Session statistics:\n{json.dumps(stats, indent=2, default=str)}\n\nUser query: {request.query}"
 
         async for token in self._run_react_loop(request):
             yield token

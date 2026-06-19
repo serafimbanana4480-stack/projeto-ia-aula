@@ -187,14 +187,9 @@ class CostTracker:
             Cost in USD for this call.
         """
         pricing = MODEL_PRICING.get(model, MODEL_PRICING["default"])
-        cost = (
-            input_tokens * pricing["input"]
-            + output_tokens * pricing["output"]
-        ) / 1_000_000
+        cost = (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
 
-        self._session_costs[session_id] = (
-            self._session_costs.get(session_id, 0.0) + cost
-        )
+        self._session_costs[session_id] = self._session_costs.get(session_id, 0.0) + cost
         self._agent_costs[agent] = self._agent_costs.get(agent, 0.0) + cost
         self._total_cost += cost
 
@@ -218,11 +213,16 @@ class CostTracker:
         """Get comprehensive cost report."""
         return {
             "total_cost_usd": round(self._total_cost, 6),
-            "by_agent": {k: round(v, 6) for k, v in sorted(self._agent_costs.items(), key=lambda x: x[1], reverse=True)},
+            "by_agent": {
+                k: round(v, 6)
+                for k, v in sorted(self._agent_costs.items(), key=lambda x: x[1], reverse=True)
+            },
             "by_session_count": len(self._session_costs),
             "top_5_sessions": [
                 {"session_id": sid, "cost_usd": round(cost, 6)}
-                for sid, cost in sorted(self._session_costs.items(), key=lambda x: x[1], reverse=True)[:5]
+                for sid, cost in sorted(
+                    self._session_costs.items(), key=lambda x: x[1], reverse=True
+                )[:5]
             ],
         }
 

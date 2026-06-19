@@ -1,40 +1,41 @@
-# NEXUS IDE — Architecture v1.0
+# NEXUS IDE — Architecture v2.0
 
-This document is the authoritative architecture reference for NEXUS IDE. The scaffold files in this repo map 1:1 to the sections below. See the original planning document for full rationale.
+This document is the authoritative architecture reference for NEXUS IDE. The scaffold files in this repo map 1:1 to the sections below.
 
 ## 1. Philosophy
 
+- **Cloud-first, local-fallback** — DeepSeek-v4-flash via OpenRouter as primary provider; Ollama local as fallback.
 - **Specialization over generalism** — 9 agents, each with a surgical system prompt.
 - **Iterative ReAct loop** — Reason → Act → Observe → Reason.
-- **Right-sized models** — smallest viable model per task.
-- **Dashboard as first-class citizen** — dedicated agent on separate Ollama instance (port 11435).
-- **Privacy total** — everything runs locally via Ollama.
+- **Dashboard as first-class citizen** — dedicated agent with background monitoring loops.
+- **Observability total** — JSON structured logs, Prometheus metrics, deep health checks.
 
-## 2. Model Matrix
+## 2. Provider Model
 
-| Internal ID | Ollama model            | VRAM   | Primary use                          |
-|-------------|-------------------------|--------|--------------------------------------|
-| NANO        | qwen3.5:2b              | ~2.7GB | Routing, classification              |
-| MICRO       | qwen3.5:4b              | ~3.4GB | Quick Q&A, formatting                |
-| SMALL       | qwen3.5:9b              | ~6.6GB | Analysis, general tasks              |
-| MEDIUM      | qwen3-coder:7b          | ~5.2GB | Focused code generation              |
-| LARGE       | qwen3.5:27b             | ~17GB  | Complex reasoning, architecture      |
-| EXPERT      | qwen3-coder:30b (MoE)   | ~20GB  | Advanced engineering                 |
-| VISION      | qwen3-vl:7b             | ~8GB   | Image/UI analysis                    |
-| EMBED       | qwen3-embedding:4b      | ~3.0GB | Semantic search, RAG                 |
-| DASHBOARD   | qwen3.5:4b (port 11435) | ~3.4GB | Continuous monitoring (dedicated)    |
+```
+OpenRouter (primary) ── deepseek/deepseek-v4-flash
+    ↓ fallback
+DeepSeek API         ── deepseek-chat / deepseek-reasoner
+    ↓ fallback
+Ollama (local)       ── qwen2.5:0.5b, qwen2.5:1.5b, llama3.1:8b, etc.
+    ↓ fallback
+MockProvider         ── graceful degradation message
+```
+
+All model tiers (micro, fast, coder, reasoning, deep, etc.) use `deepseek/deepseek-v4-flash` on OpenRouter.
+Local Ollama models serve as offline fallback and for embeddings (nomic-embed-text).
 
 ## 3. Agents
 
-1. **ROUTER** — NANO — intent classification, JSON output.
-2. **ARCHITECT** — LARGE + thinking — system design.
-3. **RESEARCHER** — SMALL + web search — current info.
-4. **CODER** — EXPERT — production code generation.
-5. **ANALYZER** — LARGE + thinking — critical review.
-6. **DEBUGGER** — MEDIUM — root cause analysis.
-7. **DOCUMENTER** — SMALL — technical writing.
-8. **OPTIMIZER** — SMALL — performance tuning.
-9. **DASHBOARD AGENT** — MICRO on :11435 — always-on monitor.
+1. **ROUTER** — intent classification, JSON output.
+2. **ARCHITECT** — system design.
+3. **RESEARCHER** — web search.
+4. **CODER** — production code generation.
+5. **ANALYZER** — critical review.
+6. **DEBUGGER** — root cause analysis.
+7. **DOCUMENTER** — technical writing.
+8. **OPTIMIZER** — performance tuning.
+9. **DASHBOARD AGENT** — always-on system monitor.
 
 Full system prompts live in [`config/prompts/`](./config/prompts/).
 
@@ -44,10 +45,8 @@ FastAPI service that owns routing, agent pool, fallback and context. See `backen
 
 Three-level routing:
 1. **Fast rules** (deterministic, no model).
-2. **ROUTER model** (NANO/2B) emits JSON decision.
+2. **ROUTER model** emits JSON decision.
 3. **Automatic fallback** on timeout/OOM/error.
-
-Fallback matrix: EXPERT → LARGE → SMALL → MICRO+warning.
 
 ## 5. ReAct & Web Search
 

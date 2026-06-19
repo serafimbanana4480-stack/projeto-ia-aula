@@ -10,7 +10,6 @@ The responses are structured to look realistic while being fast and zero-cost.
 
 from __future__ import annotations
 
-import json
 import random
 from collections.abc import AsyncIterator
 from typing import Any
@@ -95,8 +94,7 @@ class DevProvider:
         **kwargs: Any,
     ) -> str:
         dict_messages = [
-            m if isinstance(m, dict) else {"role": m.role, "content": m.content}
-            for m in messages
+            m if isinstance(m, dict) else {"role": m.role, "content": m.content} for m in messages
         ]
         intent = self._classify(dict_messages)
         candidates = self._RESPONSES.get(intent, self._RESPONSES["default"])

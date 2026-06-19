@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from pathlib import Path
 from typing import Any
-
-import pytest
 
 from backend.core.background_workers import (
     BackgroundWorker,
@@ -18,7 +15,6 @@ from backend.core.background_workers import (
     PerformanceWatcher,
     WorkerStatus,
 )
-
 
 # ---------------------------------------------------------------------------
 # Dummy worker for testing base class behaviour

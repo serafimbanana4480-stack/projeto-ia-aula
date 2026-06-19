@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from backend.observability.metrics_collector import MetricsCollector, get_metrics_collector
 from backend.observability import metrics
+from backend.observability.metrics_collector import MetricsCollector, get_metrics_collector
 
 
 class TestMetricsCollector:
@@ -22,23 +22,33 @@ class TestMetricsCollector:
 
         await collector.record_agent_run("CODER", "success", tokens=512, duration_seconds=2.5)
 
-        assert metrics.agent_runs_total.labels(agent="CODER", status="success")._value.get() == before_runs + 1
+        assert (
+            metrics.agent_runs_total.labels(agent="CODER", status="success")._value.get()
+            == before_runs + 1
+        )
         assert metrics.agent_tokens_used.labels(agent="CODER")._sum.get() == before_tokens + 512
-        assert metrics.agent_duration_seconds.labels(agent="CODER")._sum.get() == before_duration + 2.5
+        assert (
+            metrics.agent_duration_seconds.labels(agent="CODER")._sum.get() == before_duration + 2.5
+        )
 
     @pytest.mark.asyncio
     async def test_record_agent_run_failure(self, collector: MetricsCollector) -> None:
         """Failed agent runs should be recorded with a different status label."""
         before = metrics.agent_runs_total.labels(agent="DEBUGGER", status="failed")._value.get()
         await collector.record_agent_run("DEBUGGER", "failed", tokens=0, duration_seconds=0.5)
-        assert metrics.agent_runs_total.labels(agent="DEBUGGER", status="failed")._value.get() == before + 1
+        assert (
+            metrics.agent_runs_total.labels(agent="DEBUGGER", status="failed")._value.get()
+            == before + 1
+        )
 
     @pytest.mark.asyncio
     async def test_record_mission(self, collector: MetricsCollector) -> None:
         """Recording a mission should update the mission duration histogram."""
         before = metrics.mission_duration_seconds.labels(status="completed")._sum.get()
         await collector.record_mission("completed", duration_seconds=120.0)
-        assert metrics.mission_duration_seconds.labels(status="completed")._sum.get() == before + 120.0
+        assert (
+            metrics.mission_duration_seconds.labels(status="completed")._sum.get() == before + 120.0
+        )
 
     @pytest.mark.asyncio
     async def test_record_bus_message(self, collector: MetricsCollector) -> None:

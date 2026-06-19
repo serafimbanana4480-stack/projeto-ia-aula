@@ -19,9 +19,8 @@ import logging
 import os
 import re
 import subprocess
-from collections import Counter
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timedelta
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -101,7 +100,7 @@ class SelfImprovementAnalyzer:
         report = SelfImprovementReport()
 
         # 1. Read evolution log
-        evolution_entries = self._read_evolution_log()
+        self._read_evolution_log()
 
         # 2. Analyze agent success rates
         agent_rates = self._analyze_agent_success_rates()
@@ -531,7 +530,7 @@ class SelfImprovementAnalyzer:
                 lines.append("")
                 lines.append(f"**Confidence:** {proposal.confidence}")
                 lines.append("")
-                lines.append(f"**Status:** PENDING_APPROVAL")
+                lines.append("**Status:** PENDING_APPROVAL")
                 lines.append("")
                 entries_added += 1
 
@@ -760,9 +759,7 @@ class ProposalApplier:
         self._auto_apply = (
             _env_bool("NEXUS_AUTO_APPLY", False) if auto_apply is None else auto_apply
         )
-        self._dry_run = (
-            _env_bool("NEXUS_AUTO_APPLY_DRY_RUN", True) if dry_run is None else dry_run
-        )
+        self._dry_run = _env_bool("NEXUS_AUTO_APPLY_DRY_RUN", True) if dry_run is None else dry_run
 
     # -- git helpers --------------------------------------------------------
 
@@ -787,9 +784,7 @@ class ProposalApplier:
             return None
 
         if rev.returncode != 0:
-            logger.warning(
-                "git rev-parse failed (%s): %s", label, (rev.stderr or "").strip()
-            )
+            logger.warning("git rev-parse failed (%s): %s", label, (rev.stderr or "").strip())
             return None
 
         try:
@@ -805,9 +800,7 @@ class ProposalApplier:
             return None
 
         if stash.returncode != 0:
-            logger.warning(
-                "git stash create failed (%s): %s", label, (stash.stderr or "").strip()
-            )
+            logger.warning("git stash create failed (%s): %s", label, (stash.stderr or "").strip())
             return None
 
         ref = (stash.stdout or "").strip()
@@ -877,9 +870,7 @@ class ProposalApplier:
                 confidence=proposal.confidence,
             )
 
-        snapshot_ref = await asyncio.to_thread(
-            self._git_snapshot, f"pre_proposal_{proposal.id}"
-        )
+        snapshot_ref = await asyncio.to_thread(self._git_snapshot, f"pre_proposal_{proposal.id}")
 
         if self._dry_run:
             tests_ok = await asyncio.to_thread(self._run_tests)
@@ -908,9 +899,7 @@ class ProposalApplier:
             before_snapshot=snapshot_ref,
         )
 
-    async def rollback(
-        self, proposal: ImprovementProposal, outcome: ProposalOutcome
-    ) -> bool:
+    async def rollback(self, proposal: ImprovementProposal, outcome: ProposalOutcome) -> bool:
         """Roll back the change captured in *outcome* via ``git stash apply``."""
         if not outcome.before_snapshot:
             logger.warning(
@@ -935,9 +924,7 @@ class ProposalApplier:
                 logger.warning("git stash apply failed: %s", exc)
                 return False
             if proc.returncode != 0:
-                logger.warning(
-                    "git stash apply %s failed: %s", ref, (proc.stderr or "").strip()
-                )
+                logger.warning("git stash apply %s failed: %s", ref, (proc.stderr or "").strip())
                 return False
             return True
 
@@ -972,9 +959,7 @@ def get_proposal_applier() -> ProposalApplier:
 # ---------------------------------------------------------------------------
 
 
-async def emit_autonomy_decision(
-    outcome: ProposalOutcome, session_id: str = ""
-) -> None:
+async def emit_autonomy_decision(outcome: ProposalOutcome, session_id: str = "") -> None:
     """Publish a :class:`ProposalOutcome` on the agent bus under ``autonomy``.
 
     Silently no-ops if the bus cannot be reached or initialised.

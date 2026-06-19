@@ -1,7 +1,5 @@
 """Tests for rate limiting middleware."""
 
-import pytest
-
 from backend.middleware.rate_limit import get_rate_limit_config, limiter
 
 

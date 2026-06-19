@@ -189,9 +189,7 @@ register_tool(
 register_tool(
     ToolSpec(
         name="recall_user_memories",
-        description=(
-            "Search persistent user memories using keyword and semantic similarity."
-        ),
+        description=("Search persistent user memories using keyword and semantic similarity."),
         schema={
             "type": "object",
             "properties": {

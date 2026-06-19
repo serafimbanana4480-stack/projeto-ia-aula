@@ -261,14 +261,14 @@ class PlanExecutor:
 
                 # Stream execution with hard timeout
                 output_parts: list[str] = []
-                async with self._agent_pool.slot(task.agent):
-                    async with EventEmitter(
-                        self._events, task.agent, session_id, task.task_id
-                    ) as emit:
-                        async with asyncio.timeout(self._default_timeout):
-                            async for token in iterate_agent_output(agent.run(request)):
-                                output_parts.append(token)
-                                await emit.emit(EventType.TOKEN, content=token)
+                async with (
+                    self._agent_pool.slot(task.agent),
+                    EventEmitter(self._events, task.agent, session_id, task.task_id) as emit,
+                ):
+                    async with asyncio.timeout(self._default_timeout):
+                        async for token in iterate_agent_output(agent.run(request)):
+                            output_parts.append(token)
+                            await emit.emit(EventType.TOKEN, content=token)
 
                 output = "".join(output_parts)
                 tool_errors = extract_tool_errors(output)
@@ -331,7 +331,7 @@ class PlanExecutor:
 
                 return {"success": True, "output": output, "tokens": len(output_parts)}
 
-            except asyncio.TimeoutError as exc:
+            except TimeoutError:
                 task.retry_count = attempt + 1
                 logger.warning(
                     "Task %s timed out (attempt %d/%d)",

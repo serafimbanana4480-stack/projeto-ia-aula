@@ -1,30 +1,30 @@
 # NEXUS / LUSO AI IDE — Multi-Model Configuration
-# Ollama is the primary local provider. AirLLM remains experimental and can be
-# enabled explicitly through environment configuration when needed.
+# OpenCode Go is the primary cloud provider.
+# All model IDs below are resolved by OpenCodeGoProvider.resolve_model().
 
 models:
   # MICRO — perguntas triviais (1+1, classificação rápida)
   micro:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "minimax-m3"
+    fallback_id: "deepseek-v4-flash"
+    thinking_mode: false
+    max_tokens: 512
+    temperature: 0.3
+    use_cases: [trivial_qa, routing, classification]
+
+  # FAST — respostas rápidas, formatação leve
+  fast:
+    id: "minimax-m3"
+    fallback_id: "deepseek-v4-flash"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.7
     use_cases: [simple_qa, formatting, summarization]
 
-  # FAST — quick responses with good quality
-  fast:
-    id: "openrouter/free"
-    fallback_id: "openai/gpt-oss-120b:free"
-    thinking_mode: false
-    max_tokens: 4096
-    temperature: 0.7
-    use_cases: [simple_qa, formatting, summarization]
-
   # CODER — geração e análise de código
   coder:
-    id: "qwen/qwen3-coder:free"
-    fallback_id: "openai/gpt-oss-120b:free"
+    id: "kimi-k2.7-code"
+    fallback_id: "minimax-m3"
     thinking_mode: false
     max_tokens: 8192
     temperature: 0.2
@@ -32,8 +32,8 @@ models:
 
   # REASONING — raciocínio multi-step com thinking
   reasoning:
-    id: "nousresearch/hermes-3-llama-3.1-405b:free"
-    fallback_id: "nvidia/nemotron-3-ultra-550b-a55b:free"
+    id: "deepseek-v4-pro"
+    fallback_id: "glm-5.2"
     thinking_mode: true
     max_tokens: 8192
     temperature: 0.5
@@ -41,88 +41,74 @@ models:
 
   # DEEP — análises complexas, arquitetura
   deep:
-    id: "nvidia/nemotron-3-ultra-550b-a55b:free"
-    fallback_id: "deepseek/deepseek-v4-flash"
+    id: "deepseek-v4-pro"
+    fallback_id: "glm-5.2"
     thinking_mode: true
     max_tokens: 16384
     temperature: 0.4
     use_cases: [architecture, complex_analysis, large_codebases]
 
-  # Q3B-4BIT — alias legado mantido por compatibilidade
+  # Aliases retro-compatibilidade (legacy registry)
   q3b-4bit:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "deepseek-v4-flash"
+    fallback_id: "minimax-m3"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.5
-    use_cases: [general_tasks, fast_inference, gpu_quantized]
-
-  # CODER3B-4BIT — alias legado mantido por compatibilidade
   coder3b-4bit:
-    id: "qwen/qwen3-coder:free"
-    fallback_id: "openrouter/free"
+    id: "kimi-k2.7-code"
+    fallback_id: "minimax-m3"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.2
-    use_cases: [code_generation, refactor, gpu_quantized]
-
-  # Aliases retro-compatibilidade (legacy registry)
   nano:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "deepseek-v4-flash"
+    fallback_id: "minimax-m3"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.1
-    use_cases: [routing]
   small:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "minimax-m3"
+    fallback_id: "deepseek-v4-flash"
     thinking_mode: false
     max_tokens: 4096
     temperature: 0.7
-    use_cases: [general_tasks]
   medium:
-    id: "openai/gpt-oss-120b:free"
-    fallback_id: "nousresearch/hermes-3-llama-3.1-405b:free"
+    id: "minimax-m3"
+    fallback_id: "kimi-k2.7-code"
     thinking_mode: false
     max_tokens: 8192
     temperature: 0.3
-    use_cases: [code_generation]
   large:
-    id: "nousresearch/hermes-3-llama-3.1-405b:free"
-    fallback_id: "nvidia/nemotron-3-ultra-550b-a55b:free"
+    id: "deepseek-v4-pro"
+    fallback_id: "glm-5.2"
     thinking_mode: true
     max_tokens: 8192
     temperature: 0.7
-    use_cases: [reasoning]
   expert:
-    id: "nvidia/nemotron-3-ultra-550b-a55b:free"
-    fallback_id: "deepseek/deepseek-v4-flash"
+    id: "deepseek-v4-pro"
+    fallback_id: "glm-5.2"
     thinking_mode: true
     max_tokens: 16384
     temperature: 0.3
-    use_cases: [architecture]
   vision:
-    id: "qwen2.5-coder:1.5b"
-    fallback_id: "qwen2.5-coder:1.5b"
+    id: "minimax-m3"
+    fallback_id: "glm-5.2"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.7
-    use_cases: [image_analysis]
   embed:
-    id: "openai/text-embedding-3-small"
-    fallback_id: "llama3.1:8b"
+    id: "minimax-m3"
+    fallback_id: "deepseek-v4-flash"
     thinking_mode: false
     max_tokens: 512
     temperature: 0.0
-    use_cases: [retrieval]
   dashboard:
-    id: "openrouter/free"
-    fallback_id: "openai/gpt-oss-120b:free"
+    id: "glm-5.2"
+    fallback_id: "minimax-m3"
     thinking_mode: false
     max_tokens: 2048
     temperature: 0.5
-    use_cases: [metrics_interpretation]
 
 concurrency:
   NANO: 5
@@ -130,7 +116,6 @@ concurrency:
   FAST: 4
   SMALL: 3
   CODER: 2
-  REVIEWER: 2
   MEDIUM: 2
   REASONING: 1
   LARGE: 1
@@ -141,7 +126,7 @@ concurrency:
 
 routing:
   fast_threshold_words: 20
-  trivial_threshold_words: 6      # "1+1", "que horas são"
+  trivial_threshold_words: 6
   complexity_thresholds:
     deep_thinking: 7
     iterative_react: 6
@@ -159,7 +144,6 @@ smart_router:
 fallback:
   ARCHITECT:  [ANALYZER, CODER, MICRO]
   CODER:      [DEBUGGER, MICRO]
-  REVIEWER:   [ANALYZER, CODER, MICRO]
   ANALYZER:   [CODER, MICRO]
   DEBUGGER:   [CODER, MICRO]
   RESEARCHER: [MICRO]
@@ -179,9 +163,18 @@ code_execution:
   max_memory_mb: 512
   allowed_languages: [python, javascript, typescript, bash, rust, go]
 
-# Configured LLM providers.  Used by /api/providers to show available backends
-# and to let the user pick which API keys to configure in settings.
+# Configured LLM providers. Used by /api/providers to show available backends.
 providers:
+  opencode_go:
+    name: "OpenCode Go"
+    base_url: "http://127.0.0.1:11434"
+    requires_api_key: false
+    default_models:
+      - "minimax-m3"
+      - "deepseek-v4-flash"
+      - "deepseek-v4-pro"
+      - "glm-5.2"
+      - "kimi-k2.7-code"
   ollama:
     name: "Ollama (local)"
     base_url: "http://localhost:11434"
@@ -189,67 +182,6 @@ providers:
     default_models:
       - "qwen2.5:0.5b"
       - "qwen2.5:1.5b"
-      - "qwen2.5-coder:1.5b"
-      - "nomic-embed-text"
-  openai:
-    name: "OpenAI"
-    base_url: "https://api.openai.com/v1"
-    requires_api_key: true
-    default_models:
-      - "gpt-4o"
-      - "gpt-4o-mini"
-      - "gpt-3.5-turbo"
-  deepseek:
-    name: "DeepSeek"
-    base_url: "https://api.deepseek.com/v1"
-    requires_api_key: true
-    default_models:
-      - "deepseek-chat"
-      - "deepseek-reasoner"
-  anthropic:
-    name: "Anthropic Claude"
-    base_url: "https://api.anthropic.com"
-    requires_api_key: true
-    default_models:
-      - "claude-3-5-sonnet-20241022"
-      - "claude-3-opus-20240229"
-      - "claude-3-haiku-20240307"
-  kimi:
-    name: "Kimi (Moonshot)"
-    base_url: "https://api.moonshot.cn/v1"
-    requires_api_key: true
-    default_models:
-      - "moonshot-v1-8k"
-      - "moonshot-v1-32k"
-      - "kimi-k2.5"
-  groq:
-    name: "Groq"
-    base_url: "https://api.groq.com/openai/v1"
-    requires_api_key: true
-    default_models:
-      - "llama-3.1-70b-versatile"
-      - "mixtral-8x7b-32768"
-  openrouter:
-    name: "OpenRouter"
-    base_url: "https://openrouter.ai/api/v1"
-    requires_api_key: true
-    default_models:
-      - "openrouter/free"
-      - "qwen/qwen3-coder:free"
-      - "deepseek/deepseek-v4-flash"
-      - "openai/gpt-oss-120b:free"
-      - "nvidia/nemotron-3-ultra-550b-a55b:free"
-      - "nousresearch/hermes-3-llama-3.1-405b:free"
-      - "meta-llama/llama-3.3-70b-instruct:free"
-      - "openai/gpt-5.4-mini"
-  gemini:
-    name: "Google Gemini"
-    base_url: "https://generativelanguage.googleapis.com/v1beta"
-    requires_api_key: true
-    default_models:
-      - "gemini-2.0-flash"
-      - "gemini-1.5-pro"
-      - "gemini-1.5-flash-lite"
 
 rate_limits:
   requests_per_minute: 60

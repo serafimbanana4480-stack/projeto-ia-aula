@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any
 
-from backend.persistence.db import get_db, _new_id, _now_iso
+from backend.persistence.db import _new_id, _now_iso, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +27,7 @@ def _dump_json(value: Any) -> str:
 def ensure_user_profile(user_id: str) -> dict:
     """Return the user profile, creating a default row if absent."""
     with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)).fetchone()
         if row:
             return _hydrate_profile(row)
         conn.execute(
@@ -39,9 +37,7 @@ def ensure_user_profile(user_id: str) -> dict:
             ) VALUES (?, ?, ?, ?, ?, ?)""",
             (user_id, "{}", "[]", "[]", "[]", ""),
         )
-        row = conn.execute(
-            "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)).fetchone()
     return _hydrate_profile(row)
 
 
@@ -56,9 +52,7 @@ def _hydrate_profile(row: Any) -> dict:
 
 def get_user_profile(user_id: str) -> dict | None:
     with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)).fetchone()
         if not row:
             return None
         return _hydrate_profile(row)
@@ -137,9 +131,7 @@ def create_routine(
 
 def get_routine(routine_id: str) -> dict | None:
     with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM user_routines WHERE id = ?", (routine_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM user_routines WHERE id = ?", (routine_id,)).fetchone()
         return dict(row) if row else None
 
 
@@ -193,9 +185,7 @@ def create_memory(
 
 def get_memory(memory_id: str) -> dict | None:
     with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM user_memories WHERE id = ?", (memory_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM user_memories WHERE id = ?", (memory_id,)).fetchone()
         return dict(row) if row else None
 
 
@@ -227,9 +217,7 @@ def search_memories(user_id: str, query: str, limit: int = 10) -> list[dict]:
 
     conditions = []
     for _ in terms:
-        conditions.append(
-            "CASE WHEN LOWER(content) LIKE '%' || ? || '%' THEN 1 ELSE 0 END"
-        )
+        conditions.append("CASE WHEN LOWER(content) LIKE '%' || ? || '%' THEN 1 ELSE 0 END")
     score_expr = " + ".join(conditions)
 
     sql = f"""

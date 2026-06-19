@@ -9,13 +9,12 @@ from typing import Any
 import pytest
 
 from backend.core.agent_lifecycle import (
-    AgentInstanceStatus,
-    AgentLifecycleManager,
     DEFAULT_TOKEN_BUDGET,
     MAX_CONCURRENT_AGENTS_GLOBAL,
     MAX_CONCURRENT_AGENTS_PER_TYPE,
+    AgentInstanceStatus,
+    AgentLifecycleManager,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -66,9 +65,7 @@ class TestSpawn:
 
     async def test_spawn_custom_budgets(self, manager: AgentLifecycleManager) -> None:
         before = time.time()
-        iid = await manager.spawn(
-            "CODER", "Write tests", token_budget=500, time_budget_seconds=30
-        )
+        iid = await manager.spawn("CODER", "Write tests", token_budget=500, time_budget_seconds=30)
         inst = manager.get_status(iid)
         assert inst is not None
         assert inst.token_budget == 500
@@ -103,10 +100,7 @@ class TestSpawn:
         self, manager_with_overseer: AgentLifecycleManager, overseer_log: list[dict[str, Any]]
     ) -> None:
         iid = await manager_with_overseer.spawn("CODER", "Write tests", mission_id="m1")
-        assert any(
-            e["event"] == "agent_started" and e["instance_id"] == iid
-            for e in overseer_log
-        )
+        assert any(e["event"] == "agent_started" and e["instance_id"] == iid for e in overseer_log)
 
 
 # ---------------------------------------------------------------------------
@@ -154,10 +148,7 @@ class TestLifecycleTransitions:
     ) -> None:
         iid = await manager_with_overseer.spawn("CODER", "Write tests")
         await manager_with_overseer.abort(iid, reason="test")
-        assert any(
-            e["event"] == "agent_aborted" and e["instance_id"] == iid
-            for e in overseer_log
-        )
+        assert any(e["event"] == "agent_aborted" and e["instance_id"] == iid for e in overseer_log)
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +188,7 @@ class TestQueries:
     async def test_list_by_mission(self, manager: AgentLifecycleManager) -> None:
         iid1 = await manager.spawn("CODER", "task1", mission_id="m1")
         iid2 = await manager.spawn("DEBUGGER", "task2", mission_id="m1")
-        iid3 = await manager.spawn("CODER", "task3", mission_id="m2")
+        await manager.spawn("CODER", "task3", mission_id="m2")
 
         m1 = manager.list_by_mission("m1")
         assert len(m1) == 2
@@ -211,7 +202,7 @@ class TestQueries:
         assert manager.get_status("bogus") is None
 
     async def test_get_stats(self, manager: AgentLifecycleManager) -> None:
-        iid = await manager.spawn("CODER", "task")
+        await manager.spawn("CODER", "task")
         stats = manager.get_stats()
         assert stats["total_instances"] == 1
         assert stats["active_instances"] == 1

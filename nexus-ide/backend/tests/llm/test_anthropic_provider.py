@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -160,7 +159,7 @@ class _MockStreamResponse:
     async def aread(self) -> bytes:
         return b"error"
 
-    def aiter_lines(self) -> "_MockLineIterator":
+    def aiter_lines(self) -> _MockLineIterator:
         return _MockLineIterator(self._lines)
 
 

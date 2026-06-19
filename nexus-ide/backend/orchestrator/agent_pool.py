@@ -10,9 +10,9 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import yaml
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,9 @@ class AgentPool:
         if agent_id in self.semaphores:
             self.semaphores[agent_id].release()
             self._active[agent_id] = max(0, self._active.get(agent_id, 0) - 1)
-            logger.debug("Released slot for %s (active: %d)", agent_id, self._active.get(agent_id, 0))
+            logger.debug(
+                "Released slot for %s (active: %d)", agent_id, self._active.get(agent_id, 0)
+            )
 
     @asynccontextmanager
     async def slot(self, agent_id: str):

@@ -49,6 +49,7 @@ class VisionConfig:
         # Check if PIL is available
         try:
             import PIL
+
             return True
         except ImportError:
             return False
@@ -140,7 +141,9 @@ async def _call_vision_llm(image_b64: str, prompt: str, model: str | None = None
         return f"Error analyzing image: {exc}"
 
 
-async def analyze_image(image_path: str | Path, prompt: str | None = None, model: str | None = None) -> dict[str, Any]:
+async def analyze_image(
+    image_path: str | Path, prompt: str | None = None, model: str | None = None
+) -> dict[str, Any]:
     """Analyze an image using a vision-capable LLM.
 
     Args:
@@ -310,6 +313,7 @@ Image 2 description:
 
         # Use a text model for comparison
         import httpx
+
         ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
         text_model = os.getenv("FAST_MODEL", "qwen2.5:1.5b")
 
@@ -379,6 +383,23 @@ def get_image_info(image_path: str | Path) -> dict[str, Any]:
 
 from backend.tools.registry import ToolSpec, register_tool
 
+
+def vision_status() -> dict[str, Any]:
+    """Return the vision subsystem status."""
+    return {
+        "ready": True,
+        "supported_formats": [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"],
+        "max_size": 2048,
+        "default_model": "llava:7b",
+        "tools": [
+            "analyze_image",
+            "extract_text_from_image",
+            "compare_images",
+            "vision_status",
+        ],
+    }
+
+
 register_tool(
     ToolSpec(
         name="analyze_image",
@@ -388,7 +409,10 @@ register_tool(
             "properties": {
                 "image_path": {"type": "string", "description": "Path to the image file"},
                 "prompt": {"type": "string", "description": "Custom analysis prompt"},
-                "model": {"type": "string", "description": "Override vision model (default: llava:7b)"},
+                "model": {
+                    "type": "string",
+                    "description": "Override vision model (default: llava:7b)",
+                },
             },
             "required": ["image_path"],
         },
@@ -404,7 +428,10 @@ register_tool(
             "type": "object",
             "properties": {
                 "image_path": {"type": "string", "description": "Path to the screenshot"},
-                "context": {"type": "string", "description": "Optional context (e.g., 'Error screen')"},
+                "context": {
+                    "type": "string",
+                    "description": "Optional context (e.g., 'Error screen')",
+                },
             },
             "required": ["image_path"],
         },

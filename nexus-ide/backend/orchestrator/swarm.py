@@ -118,15 +118,25 @@ class SwarmOrchestrator:
         }
 
         if selected_strategy == "divide":
-            result = await self._divide_and_conquer(objective, session_id, available_agents, project_path, **strategy_kwargs)
+            result = await self._divide_and_conquer(
+                objective, session_id, available_agents, project_path, **strategy_kwargs
+            )
         elif selected_strategy == "ensemble":
-            result = await self._ensemble(objective, session_id, available_agents, project_path, **strategy_kwargs)
+            result = await self._ensemble(
+                objective, session_id, available_agents, project_path, **strategy_kwargs
+            )
         elif selected_strategy == "pipeline":
-            result = await self._pipeline(objective, session_id, available_agents, project_path, **strategy_kwargs)
+            result = await self._pipeline(
+                objective, session_id, available_agents, project_path, **strategy_kwargs
+            )
         elif selected_strategy == "debate":
-            result = await self._debate(objective, session_id, available_agents, project_path, **strategy_kwargs)
+            result = await self._debate(
+                objective, session_id, available_agents, project_path, **strategy_kwargs
+            )
         else:
-            result = await self._divide_and_conquer(objective, session_id, available_agents, project_path, **strategy_kwargs)
+            result = await self._divide_and_conquer(
+                objective, session_id, available_agents, project_path, **strategy_kwargs
+            )
 
         result.duration_ms = int((time.time() - start) * 1000)
         result.strategy_used = selected_strategy
@@ -157,8 +167,13 @@ class SwarmOrchestrator:
     ) -> SwarmResult:
         """Split objective into subtasks, assign each to the best agent in parallel."""
         subtasks = await self._create_subtasks(
-            objective, agents, session_id, project_path,
-            history=history, max_iterations=max_iterations, enable_thinking=enable_thinking,
+            objective,
+            agents,
+            session_id,
+            project_path,
+            history=history,
+            max_iterations=max_iterations,
+            enable_thinking=enable_thinking,
         )
 
         # Map each subtask to the most capable available agent
@@ -168,11 +183,19 @@ class SwarmOrchestrator:
             tasks.append((agent, subtask, f"subtask-{i + 1}"))
 
         results = await asyncio.gather(
-            *[self._run_agent(
-                agent, subtask, session_id, project_path, subtask_id=subtask_id,
-                history=history, max_iterations=max_iterations, enable_thinking=enable_thinking,
-              )
-              for agent, subtask, subtask_id in tasks],
+            *[
+                self._run_agent(
+                    agent,
+                    subtask,
+                    session_id,
+                    project_path,
+                    subtask_id=subtask_id,
+                    history=history,
+                    max_iterations=max_iterations,
+                    enable_thinking=enable_thinking,
+                )
+                for agent, subtask, subtask_id in tasks
+            ],
             return_exceptions=True,
         )
 
@@ -181,9 +204,7 @@ class SwarmOrchestrator:
             if isinstance(res, AgentResult):
                 agent_results.append(res)
             else:
-                agent_results.append(
-                    AgentResult(agent=agent, error=str(res), success=False)
-                )
+                agent_results.append(AgentResult(agent=agent, error=str(res), success=False))
 
         # LLM synthesis instead of simple concatenation
         merged = await self._merge_with_llm(
@@ -214,11 +235,19 @@ class SwarmOrchestrator:
     ) -> SwarmResult:
         """All agents work on the same objective, merge results intelligently."""
         results = await asyncio.gather(
-            *[self._run_agent(
-                agent, objective, session_id, project_path, subtask_id="ensemble",
-                history=history, max_iterations=max_iterations, enable_thinking=enable_thinking,
-              )
-              for agent in agents],
+            *[
+                self._run_agent(
+                    agent,
+                    objective,
+                    session_id,
+                    project_path,
+                    subtask_id="ensemble",
+                    history=history,
+                    max_iterations=max_iterations,
+                    enable_thinking=enable_thinking,
+                )
+                for agent in agents
+            ],
             return_exceptions=True,
         )
 
@@ -273,8 +302,14 @@ class SwarmOrchestrator:
                 f"Build on the previous output and produce the next deliverable."
             )
             result = await self._run_agent(
-                agent, stage_prompt, session_id, project_path, subtask_id=f"stage-{idx + 1}",
-                history=history, max_iterations=max_iterations, enable_thinking=enable_thinking,
+                agent,
+                stage_prompt,
+                session_id,
+                project_path,
+                subtask_id=f"stage-{idx + 1}",
+                history=history,
+                max_iterations=max_iterations,
+                enable_thinking=enable_thinking,
             )
             agent_results.append(result)
             if result.success:
@@ -323,18 +358,20 @@ class SwarmOrchestrator:
         """Agents propose solutions, then a moderator picks and integrates the best."""
         # Phase 1: Each agent proposes a solution
         proposals = await asyncio.gather(
-            *[self._run_agent(
-                agent,
-                f"Propose a concrete solution or answer for: {objective}\n\n"
-                "Be specific. Include rationale, trade-offs, and implementation steps if applicable.",
-                session_id,
-                project_path,
-                subtask_id=f"proposal-{agent}",
-                history=history,
-                max_iterations=max_iterations,
-                enable_thinking=enable_thinking,
-              )
-              for agent in agents],
+            *[
+                self._run_agent(
+                    agent,
+                    f"Propose a concrete solution or answer for: {objective}\n\n"
+                    "Be specific. Include rationale, trade-offs, and implementation steps if applicable.",
+                    session_id,
+                    project_path,
+                    subtask_id=f"proposal-{agent}",
+                    history=history,
+                    max_iterations=max_iterations,
+                    enable_thinking=enable_thinking,
+                )
+                for agent in agents
+            ],
             return_exceptions=True,
         )
 
@@ -370,17 +407,23 @@ class SwarmOrchestrator:
         debate_prompt = (
             f"You are moderating a debate on: {objective}\n\n"
             "Evaluate the following proposals. Select the BEST proposal and explain why. "
-            "Then produce a FINAL, INTEGRATED answer that:")
+            "Then produce a FINAL, INTEGRATED answer that:"
+        )
 
         for agent, proposal in valid_proposals:
             debate_prompt += f"\n\n## {agent}\n{proposal[:800]}"
 
-        debate_prompt += (
-            "\n\nYour final answer should:")
+        debate_prompt += "\n\nYour final answer should:"
 
         final = await self._run_agent(
-            moderator, debate_prompt, session_id, project_path, subtask_id="debate-moderator",
-            history=history, max_iterations=max_iterations, enable_thinking=True,
+            moderator,
+            debate_prompt,
+            session_id,
+            project_path,
+            subtask_id="debate-moderator",
+            history=history,
+            max_iterations=max_iterations,
+            enable_thinking=True,
         )
         agent_results.append(final)
 
@@ -412,13 +455,25 @@ class SwarmOrchestrator:
                 if cap in lowered:
                     scores[agent] += 1
         # Prefer ANALYZER for review tasks, CODER for implementation tasks
-        if any(k in lowered for k in ("review", "audit", "analyze", "security")) and "ANALYZER" in available:
+        if (
+            any(k in lowered for k in ("review", "audit", "analyze", "security"))
+            and "ANALYZER" in available
+        ):
             scores["ANALYZER"] += 2
-        if any(k in lowered for k in ("implement", "write", "create", "build", "code")) and "CODER" in available:
+        if (
+            any(k in lowered for k in ("implement", "write", "create", "build", "code"))
+            and "CODER" in available
+        ):
             scores["CODER"] += 2
-        if any(k in lowered for k in ("debug", "fix", "test", "verify")) and "DEBUGGER" in available:
+        if (
+            any(k in lowered for k in ("debug", "fix", "test", "verify"))
+            and "DEBUGGER" in available
+        ):
             scores["DEBUGGER"] += 2
-        if any(k in lowered for k in ("design", "architecture", "plan")) and "ARCHITECT" in available:
+        if (
+            any(k in lowered for k in ("design", "architecture", "plan"))
+            and "ARCHITECT" in available
+        ):
             scores["ARCHITECT"] += 2
 
         best = max(scores, key=lambda a: scores[a])
@@ -439,22 +494,44 @@ class SwarmOrchestrator:
         lowered = objective.lower()
 
         debate_markers = (
-            "compare", "debate", "best approach", "trade-off", "tradeoff",
-            "pros and cons", "advantages", "vs", "versus", "choose between",
+            "compare",
+            "debate",
+            "best approach",
+            "trade-off",
+            "tradeoff",
+            "pros and cons",
+            "advantages",
+            "vs",
+            "versus",
+            "choose between",
         )
         if any(m in lowered for m in debate_markers) and len(agents) >= 2:
             return "debate"
 
         pipeline_markers = (
-            "implement", "build", "create", "develop", "write", "refactor",
-            "design and implement", "step by step",
+            "implement",
+            "build",
+            "create",
+            "develop",
+            "write",
+            "refactor",
+            "design and implement",
+            "step by step",
         )
         if any(m in lowered for m in pipeline_markers) and len(agents) >= 2:
             return "pipeline"
 
         ensemble_markers = (
-            "review", "audit", "analyze", "assess", "evaluate", "security",
-            "quality", "check", "verify", "examine",
+            "review",
+            "audit",
+            "analyze",
+            "assess",
+            "evaluate",
+            "security",
+            "quality",
+            "check",
+            "verify",
+            "examine",
         )
         if any(m in lowered for m in ensemble_markers):
             return "ensemble"
@@ -496,8 +573,14 @@ class SwarmOrchestrator:
         )
 
         result = await self._run_agent(
-            planner_agent, prompt, session_id, project_path, subtask_id="planner",
-            history=history, max_iterations=max_iterations, enable_thinking=enable_thinking,
+            planner_agent,
+            prompt,
+            session_id,
+            project_path,
+            subtask_id="planner",
+            history=history,
+            max_iterations=max_iterations,
+            enable_thinking=enable_thinking,
         )
         if not result.success:
             return [objective]
@@ -511,7 +594,7 @@ class SwarmOrchestrator:
             # Remove numbering like "1. " or "- "
             for prefix in ("1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.", "0.", "-"):
                 if line.startswith(prefix):
-                    line = line[len(prefix):].strip()
+                    line = line[len(prefix) :].strip()
                     break
             if line:
                 subtasks.append(line)
@@ -586,7 +669,9 @@ class SwarmOrchestrator:
             logger.warning("LLM swarm synthesis failed: %s", exc)
 
         # Fallback to structured concatenation
-        fallback_parts = [f"# Swarm Results ({style.title()} strategy)\n\n**Objective:** {objective}\n"]
+        fallback_parts = [
+            f"# Swarm Results ({style.title()} strategy)\n\n**Objective:** {objective}\n"
+        ]
         for r in successful:
             fallback_parts.append(f"\n## {r.agent}\n{r.output[:800]}")
         return "\n".join(fallback_parts)
@@ -594,6 +679,7 @@ class SwarmOrchestrator:
     def _fast_model_id(self) -> str:
         """Return a fast model id for lightweight synthesis."""
         from backend.config.settings import get_model_config
+
         try:
             return get_model_config("fast")["id"]
         except Exception:
@@ -616,7 +702,9 @@ class SwarmOrchestrator:
         """Run a single agent and capture metrics."""
         agent = self.registry.get(agent_name)
         if not agent:
-            return AgentResult(agent=agent_name, error=f"Agent {agent_name} not found", success=False)
+            return AgentResult(
+                agent=agent_name, error=f"Agent {agent_name} not found", success=False
+            )
 
         start = time.time()
         tokens = 0

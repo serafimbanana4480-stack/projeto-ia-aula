@@ -100,9 +100,7 @@ class EmbeddingService:
     with a deterministic fallback when the local model is unavailable.
     """
 
-    def __init__(
-        self, model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    ) -> None:
+    def __init__(self, model: str = "sentence-transformers/all-MiniLM-L6-v2") -> None:
         self._model = model
         self._dimension = 384  # default for all-MiniLM-L6-v2
 
@@ -114,6 +112,7 @@ class EmbeddingService:
         """
         try:
             from backend.tools.embeddings import embed as _shared_embed
+
             result = await _shared_embed(text, model=self._model)
             if result:
                 self._dimension = len(result)
@@ -131,7 +130,9 @@ class EmbeddingService:
                 self._dimension = len(result[0])
                 return result[0]
         except Exception as exc:
-            logger.warning("Direct embedding provider failed, using deterministic fallback: %s", exc)
+            logger.warning(
+                "Direct embedding provider failed, using deterministic fallback: %s", exc
+            )
 
         # Final deterministic fallback
         return self._fallback_embed(text)
@@ -309,9 +310,7 @@ class MemoryStore:
                     continue
                 if project_id and mem.project_id and mem.project_id != project_id:
                     continue
-                content_terms = set(
-                    __import__("re").findall(r"[A-Za-z0-9_]+", mem.content.lower())
-                )
+                content_terms = set(__import__("re").findall(r"[A-Za-z0-9_]+", mem.content.lower()))
                 overlap = len(query_terms & content_terms)
                 if overlap:
                     keyword_matches.append((mem, min(1.0, 0.3 + overlap * 0.2)))
@@ -416,9 +415,7 @@ class MemoryStore:
 
     async def list_all(self, limit: int = 1000) -> list[Memory]:
         """Return all memories ordered by creation time (newest first)."""
-        memories = sorted(
-            self._memories.values(), key=lambda m: m.created_at, reverse=True
-        )
+        memories = sorted(self._memories.values(), key=lambda m: m.created_at, reverse=True)
         return memories[:limit]
 
     def get(self, memory_id: str) -> Memory | None:

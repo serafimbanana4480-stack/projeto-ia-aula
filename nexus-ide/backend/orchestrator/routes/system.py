@@ -8,7 +8,7 @@ Endpoints:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -27,6 +27,7 @@ router = APIRouter()
 async def get_system_health(request: Request) -> dict[str, Any]:
     """Return overall system health snapshot."""
     import httpx
+
     from backend.config.settings import get_settings
 
     settings = get_settings()

@@ -11,6 +11,7 @@ inside the NEXUS tool layer.  Legacy modules such as
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -206,10 +207,8 @@ async def write(
             return {"error": str(exc)}
 
     existing_content: str | None = None
-    try:
+    with contextlib.suppress(Exception):
         existing_content = await read_file_absolute(full_path)
-    except Exception:
-        pass
 
     try:
         await RollbackManager().record_snapshot(

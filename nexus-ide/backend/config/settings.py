@@ -6,7 +6,6 @@ See ARCHITECTURE.md §7 (Backend stack) and `config/models.yaml` for the schema.
 from __future__ import annotations
 
 import logging
-import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -68,7 +67,12 @@ class Settings(BaseSettings):
     gemini_base_url: str = Field(default="https://generativelanguage.googleapis.com/v1beta")
     # OpenRouter
     openrouter_api_key: str = Field(default="")
-    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
+    openrouter_base_url: str = Field(default="https://openrouter.ai/api")
+    deepseek_base_url: str = Field(default="https://api.deepseek.com/v1")
+
+    # OpenCode Go (https://opencode.ai/zen/go/v1)
+    opencode_go_api_key: str = Field(default="")
+    opencode_go_base_url: str = Field(default="https://opencode.ai/zen/go/v1")
 
     # Multi-LLM Manager
     multi_llm_enabled: bool = Field(default=False)
@@ -128,7 +132,7 @@ class Settings(BaseSettings):
     jwt_expiration_minutes: int = Field(default=30)
 
     # Database
-    database_url: str = Field(default="sqlite:///./data/nexus.db")
+    database_url: str = Field(default=f"sqlite:///{REPO_ROOT.as_posix()}/data/nexus.db")
 
     # Rate limiting
     rate_limit_enabled: bool = Field(default=True)
@@ -167,8 +171,15 @@ class Settings(BaseSettings):
 _settings_instance: Settings | None = None
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Get the settings singleton instance."""
+    """Get the cached settings singleton instance.
+
+    Uses ``functools.lru_cache`` so that the same ``Settings`` instance is
+    returned across calls within a process. Tests can call
+    ``get_settings.cache_clear()`` to force re-instantiation after mutating
+    environment variables.
+    """
     global _settings_instance
     if _settings_instance is None:
         _settings_instance = Settings()
@@ -297,18 +308,18 @@ def validate_configuration() -> list[str]:
                     "SECRET_KEY is set to default value in production. This is a security risk."
                 )
             elif len(settings.secret_key) < 32:
-                warnings_list.append(
-                    "SECRET_KEY is shorter than 32 characters. "
-                    "Consider using a longer, more secure key."
+                errors.append(
+                    "SECRET_KEY is shorter than 32 characters in production. "
+                    "Use a longer, cryptographically random key (e.g. `python -c 'import secrets; print(secrets.token_urlsafe(48))'`)."
                 )
             if settings.jwt_secret == "development-jwt-secret-change-in-production":
                 errors.append(
                     "JWT_SECRET is set to default value in production. This is a security risk."
                 )
             elif len(settings.jwt_secret) < 32:
-                warnings_list.append(
-                    "JWT_SECRET is shorter than 32 characters. "
-                    "Consider using a longer, more secure key."
+                errors.append(
+                    "JWT_SECRET is shorter than 32 characters in production. "
+                    "Use a longer, cryptographically random key."
                 )
         else:
             if settings.secret_key == "development-secret-key-change-in-production":

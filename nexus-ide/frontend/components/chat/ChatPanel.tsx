@@ -2,7 +2,9 @@
 import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAgentStream } from "../../hooks/useAgentStream";
-import { getSessionHistory, createPlan, approvePlan, executePlan, getPlanStatus, cancelPlan, createSession } from "../../lib/api";
+import { useChatSessions } from "../../hooks/useChatSessions";
+import { useToast } from "./Toast";
+import { getSessionHistory, createPlan, approvePlan, executePlan, getPlanStatus, cancelPlan } from "../../lib/api";
 import type { PlanCreateResult, PlanStatus as PlanStatusType } from "../../lib/api";
 import { useModeStore, type Mode } from "../../stores/modeStore";
 import { useModelStore } from "../../stores/modelStore";
@@ -10,6 +12,7 @@ import { useThemeStore } from "../../stores/themeStore";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import MessageBubble from "./MessageBubble";
 import VirtualMessageList from "./VirtualMessageList";
+import SessionList from "./SessionList";
 import {
   Sparkles,
   Plus,
@@ -28,6 +31,7 @@ import {
   Clock,
   Loader2,
   ListChecks,
+  AlertCircle,
   AlertTriangle,
   WifiOff,
   Code,
@@ -38,6 +42,7 @@ import {
   Zap,
   BarChart3,
   ChevronDown,
+  X,
 } from "lucide-react";
 import type { AgentName, ChatMessage, StreamEvent } from "../../lib/types";
 import { log } from "../../lib/log";
@@ -77,99 +82,150 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
 ];
 
 /** Fold the raw SSE event stream into an ordered list of ChatMessages. */
-function foldEvents(
-  pendingUser: ChatMessage[],
-  events: StreamEvent[],
-): ChatMessage[] {
-  const out: ChatMessage[] = [...pendingUser];
-  let current: ChatMessage | null = null;
+  function foldEvents(
+    pendingUser: ChatMessage[],
+    events: StreamEvent[],
+    lastUserMessage: string = "",
+  ): ChatMessage[] {
+    const out: ChatMessage[] = [...pendingUser];
+    let current: ChatMessage | null = null;
+    // Track the latest agent_started so we can attach tool calls
+    // that arrive without a fresh agent_started (e.g. legacy events).
+    let currentAgent: AgentName = "CODER";
+    let lastThinkingIteration = 0;
 
-  const findRunningTool = (name?: string) => {
-    if (!current?.toolCalls) return -1;
-    const calls = current.toolCalls;
-    for (let i = calls.length - 1; i >= 0; i--) {
-      if (calls[i].status !== "running") continue;
-      if (!name || calls[i].name === name) return i;
-    }
-    return -1;
-  };
+    const findRunningTool = (name?: string) => {
+      if (!current?.toolCalls) return -1;
+      const calls = current.toolCalls;
+      for (let i = calls.length - 1; i >= 0; i--) {
+        if (calls[i].status !== "running") continue;
+        if (!name || calls[i].name === name) return i;
+      }
+      return -1;
+    };
 
-  for (const e of events) {
-    switch (e.type) {
-      case "agent_started": {
-        current = {
-          id: `a-${out.length}-${e.timestamp}`,
-          role: "assistant",
-          agent: (e.agent ?? "CODER") as AgentName,
-          content: "",
-          timestamp: e.timestamp,
-          toolCalls: [],
-        };
-        out.push(current);
-        break;
-      }
-      case "token": {
-        if (current) current.content += e.content ?? "";
-        break;
-      }
-      case "tool_call": {
-        if (!current) {
+    for (const e of events) {
+      switch (e.type) {
+        case "agent_started": {
+          currentAgent = (e.agent ?? "CODER") as AgentName;
           current = {
             id: `a-${out.length}-${e.timestamp}`,
             role: "assistant",
-            agent: (e.agent ?? "CODER") as AgentName,
+            agent: currentAgent,
             content: "",
             timestamp: e.timestamp,
             toolCalls: [],
           };
           out.push(current);
+          break;
         }
-        current.toolCalls = current.toolCalls || [];
-        current.toolCalls.push({
-          id: `tc-${current.toolCalls.length}-${e.timestamp}`,
-          name: e.tool_name || "tool",
-          args: e.tool_args || {},
-          status: "running",
-          timestamp: e.timestamp,
-        });
-        break;
-      }
-      case "tool_result": {
-        const idx = findRunningTool(e.tool_name);
-        if (idx >= 0 && current) {
-          current.toolCalls![idx].status = "success";
-          current.toolCalls![idx].result = e.tool_result;
+        case "token": {
+          // Skip if this is an embedded thinking iteration marker
+          if (e.content && e.content.startsWith("<event>thinking|iteration:")) {
+            break;
+          }
+          if (!current) {
+            current = {
+              id: `a-${out.length}-${e.timestamp}`,
+              role: "assistant",
+              agent: currentAgent,
+              content: "",
+              timestamp: e.timestamp,
+              toolCalls: [],
+            };
+            out.push(current);
+          }
+          current.content += e.content ?? "";
+          break;
         }
-        break;
-      }
-      case "tool_error": {
-        const idx = findRunningTool();
-        if (idx >= 0 && current) {
-          current.toolCalls![idx].status = "error";
-          current.toolCalls![idx].error = e.tool_error;
+        case "thinking": {
+          // Parse iteration number to detect and skip duplicates
+          const iterMatch = (e.content ?? "").match(/thinking\|iteration:(\d+)/);
+          if (iterMatch) {
+            const iteration = parseInt(iterMatch[1], 10);
+            if (iteration <= lastThinkingIteration) {
+              break; // Skip duplicate thinking iteration marker
+            }
+            lastThinkingIteration = iteration;
+          }
+          if (!current) {
+            current = {
+              id: `a-${out.length}-${e.timestamp}`,
+              role: "assistant",
+              agent: currentAgent,
+              content: "",
+              timestamp: e.timestamp,
+              toolCalls: [],
+            };
+            out.push(current);
+          }
+          current.thinking = (current.thinking ?? "") + (e.content ?? "");
+          break;
         }
-        break;
+        case "tool_call": {
+          if (!current) {
+            current = {
+              id: `a-${out.length}-${e.timestamp}`,
+              role: "assistant",
+              agent: currentAgent,
+              content: "",
+              timestamp: e.timestamp,
+              toolCalls: [],
+            };
+            out.push(current);
+          }
+          current.toolCalls = current.toolCalls || [];
+          current.toolCalls.push({
+            id: `tc-${current.toolCalls.length}-${e.timestamp}`,
+            name: e.tool_name || "tool",
+            args: e.tool_args || {},
+            status: "running",
+            timestamp: e.timestamp,
+          });
+          break;
+        }
+        case "tool_result": {
+          const idx = findRunningTool(e.tool_name);
+          if (idx >= 0 && current) {
+            current.toolCalls![idx].status = "success";
+            current.toolCalls![idx].result = e.tool_result;
+          }
+          break;
+        }
+        case "tool_error": {
+          const idx = findRunningTool();
+          if (idx >= 0 && current) {
+            current.toolCalls![idx].status = "error";
+            current.toolCalls![idx].error = e.tool_error;
+          }
+          break;
+        }
+        case "error": {
+          out.push({
+            id: `err-${out.length}-${e.timestamp}`,
+            role: "assistant",
+            agent: "CODER",
+            content: `⚠ ${e.content || "Erro desconhecido (sem mensagem do servidor)"}`,
+            timestamp: e.timestamp,
+            metadata: { kind: "error", canRetry: true, prompt: lastUserMessage },
+          });
+          current = null;
+          break;
+        }
+        case "routing": {
+          // Routing decisions are metadata; ignore null content. The user
+          // will see the agent badge on the first token event.
+          break;
+        }
+        case "agent_finished":
+        case "done": {
+          current = null;
+          break;
+        }
+        default:
+          break;
       }
-      case "error": {
-        out.push({
-          id: `err-${out.length}-${e.timestamp}`,
-          role: "assistant",
-          agent: "CODER",
-          content: `⚠ ${e.content ?? "unknown error"}`,
-          timestamp: e.timestamp,
-        });
-        current = null;
-        break;
-      }
-      case "agent_finished":
-      case "done": {
-        current = null;
-        break;
-      }
-      default:
-        break;
     }
-  }
 
     const normalizeCodeBlocks = (text: string) =>
       text
@@ -220,9 +276,28 @@ export default function ChatPanel({
   rightOpen = true,
   setRightOpen,
 }: ChatPanelProps) {
-  const [sessionId, setSessionId] = useState("default");
+  const [sessionId, setSessionId] = useState<string>("default");
+  const sessions = useChatSessions();
+  const toast = useToast();
   const { currentMode, modes, modesLoaded, loadModes } = useModeStore();
   const { activeModel, models, modelsLoaded, loadModels, setActiveModel } = useModelStore();
+  // Map an OpenCode Go model id to a tier name that the backend accepts.
+  // The chat route validates the model field against ALLOWED_MODEL_TIERS,
+  // so we cannot send raw OpenCode Go model ids (e.g. "minimax-m3").
+  const MODEL_TO_TIER: Record<string, string> = {
+    "minimax-m3": "fast",
+    "deepseek-v4-flash": "fast",
+    "deepseek-v4-pro": "deep",
+    "glm-5.2": "reasoning",
+    "kimi-k2.7-code": "coder",
+    "qwen3.7-max": "large",
+    "mimo-v2-pro": "medium",
+  };
+  const resolveActiveTier = (): string => {
+    if (!activeModel) return "";
+    return MODEL_TO_TIER[activeModel] || "";
+  };
+
   const { events, streaming, error: streamError, send, cancel, reset } = useAgentStream(sessionId);
   const [input, setInput] = useState("");
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
@@ -232,6 +307,7 @@ export default function ChatPanel({
   const [shared, setShared] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [modelSelectorOpen, setModelSelectorOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [thinkingStrength, setThinkingStrength] = useState<ThinkingStrength>(() => {
     if (typeof window !== "undefined") {
       const stored = localStorage.getItem("nexus.thinkingStrength");
@@ -248,6 +324,26 @@ export default function ChatPanel({
   const [backendOffline, setBackendOffline] = useState(false);
   const errorLoggedRef = useRef(false);
   const planPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastUserMessageRef = useRef<string>("");
+
+  // Sync the session list's currentId with local sessionId state
+  useEffect(() => {
+    if (sessions.currentId && sessions.currentId !== sessionId) {
+      setSessionId(sessions.currentId);
+    }
+  }, [sessions.currentId]);
+
+  // Push stream / history errors to the global toast so they don't disappear
+  useEffect(() => {
+    if (streamError) {
+      toast.error("Falha no chat", streamError, undefined);
+    }
+  }, [streamError]);
+  useEffect(() => {
+    if (historyError) {
+      toast.error("Não foi possível carregar o histórico", historyError, undefined);
+    }
+  }, [historyError]);
 
 
   useEffect(() => {
@@ -332,6 +428,7 @@ export default function ChatPanel({
     const displayContent = hasAttachments
       ? `${trimmed}\n\n[${attachedFiles.length} ficheiro(s) anexado(s): ${attachedFiles.map(f => f.name).join(", ")}]`
       : trimmed;
+    lastUserMessageRef.current = trimmed;
     const pendingUserMessage: ChatMessage = {
       id: `u-${pendingUser.length}-${Date.now()}`,
       role: "user",
@@ -349,11 +446,12 @@ export default function ChatPanel({
           : trimmed,
       );
       setAttachedFiles([]);
-      await send(messageToSend, currentMode, activeModel, "", thinkingStrength);
-    } catch {
+      await send(messageToSend, currentMode, resolveActiveTier(), "", thinkingStrength);
+    } catch (err) {
       setPendingUser((prev) => prev.filter((m) => m.id !== pendingUserMessage.id));
       setInput(previousInput);
       setAttachedFiles(previousFiles);
+      toast.error("Falha ao enviar", err instanceof Error ? err.message : String(err));
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -379,7 +477,10 @@ export default function ChatPanel({
   ]);
 
   const messages = useMemo(
-    () => [...historyMessages, ...foldEvents(pendingUser, events)],
+    () => [
+      ...historyMessages,
+      ...foldEvents(pendingUser, events, lastUserMessageRef.current),
+    ],
     [historyMessages, pendingUser, events],
   );
 
@@ -454,22 +555,34 @@ export default function ChatPanel({
 
   function handleRegenerate() {
     if (streaming) return;
-    if (!lastUserMessage) return;
-    void send(lastUserMessage, currentMode, activeModel, "", thinkingStrength).then(() => loadHistory());
+    const last = lastUserMessage || lastUserMessageRef.current;
+    if (!last) return;
+    void send(last, currentMode, resolveActiveTier(), "", thinkingStrength).then(() => loadHistory());
   }
 
+  // Retry the prompt from an error bubble (passed to MessageBubble)
+  const handleRetryFromError = useCallback(
+    (prompt: string) => {
+      if (streaming || !prompt.trim()) return;
+      setInput(prompt);
+      toast.info("Mensagem pronta para reenvio", "Clique em Enviar para tentar novamente");
+    },
+    [streaming, toast],
+  );
+
   async function handleNewChat() {
-    try {
-      const data = await createSession("Novo Chat", currentMode);
-      setSessionId(data.id as string);
-    } catch {
-      setSessionId(`session-${Date.now()}`);
+    const title = `Chat ${new Date().toLocaleString("pt-PT")}`;
+    const created = await sessions.create(title, currentMode);
+    if (created) {
+      sessions.setCurrentId(created.id);
+      setSessionId(created.id);
     }
     setHistoryMessages([]);
     setPendingUser([]);
     setHistoryLoaded(true);
     setHistoryError(null);
     reset();
+    toast.info("Nova sessão criada", created?.title);
   }
 
   function handleShare() {
@@ -574,7 +687,12 @@ export default function ChatPanel({
   ];
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full">
+      <SessionList
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed((c) => !c)}
+      />
+      <div className="flex h-full min-w-0 flex-1 flex-col">
       {/* Chat header */}
       <div className="flex shrink-0 items-center justify-between border-b border-nexus-border px-5 py-2.5">
         <div className="flex items-center gap-2.5">
@@ -978,6 +1096,7 @@ export default function ChatPanel({
               key={m.id}
               message={m}
               isStreaming={streaming && idx === messages.length - 1}
+              onRetry={handleRetryFromError}
             />
           )}
           initialLimit={50}
@@ -994,6 +1113,25 @@ export default function ChatPanel({
             <WifiOff className="h-3.5 w-3.5 shrink-0" />
             <span className="font-medium">Backend offline</span>
             <span className="text-red-300">— Aguardando reconexão para enviar mensagens.</span>
+          </div>
+        )}
+
+        {/* Persistent error banner — stays until user dismisses or sends a new message */}
+        {streamError && !streaming && (
+          <div className="mb-2 flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/15 px-3 py-2 text-xs text-red-300 shadow-sm">
+            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="font-semibold text-red-200">Erro no chat</div>
+              <div className="mt-0.5 break-words leading-relaxed text-red-300/90">{streamError}</div>
+            </div>
+            <button
+              type="button"
+              onClick={reset}
+              className="rounded p-0.5 text-red-300/70 hover:bg-red-500/20 hover:text-red-200"
+              title="Fechar erro"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
           </div>
         )}
 
@@ -1105,6 +1243,7 @@ export default function ChatPanel({
             Regenerar
           </motion.button>
         </div>
+      </div>
       </div>
     </div>
   );

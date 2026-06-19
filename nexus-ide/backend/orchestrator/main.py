@@ -18,13 +18,13 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request, Depends
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from fastapi import Depends, FastAPI, Request
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from backend.middleware.rate_limit import limiter
-from backend.middleware.security import SecurityHeadersMiddleware
 
 from backend.config.settings import get_settings
+from backend.middleware.rate_limit import limiter
+from backend.middleware.security import SecurityHeadersMiddleware
 
 try:
     from backend.config.settings import validate_configuration
@@ -34,42 +34,47 @@ except ImportError:
         return []
 
 
-from backend.observability.health import HealthChecker
+from fastapi.middleware.cors import CORSMiddleware
 
 from backend.middleware.auth import require_auth
-from fastapi.middleware.cors import CORSMiddleware
+from backend.observability.health import HealthChecker
 from backend.observability.routes.alerts import router as alerts_router
 from backend.observability.routes.metrics import router as metrics_router
 from backend.orchestrator.routes.agent_bus import router as agent_bus_router
 from backend.orchestrator.routes.agent_state import router as agent_state_router
 from backend.orchestrator.routes.agents import router as agents_router
+from backend.orchestrator.routes.thinking import router as thinking_router
 from backend.orchestrator.routes.auth import router as auth_router
 from backend.orchestrator.routes.browser import router as browser_router
 from backend.orchestrator.routes.chat import router as chat_router
+from backend.orchestrator.routes.collaboration import router as collaboration_router
 from backend.orchestrator.routes.dashboard import router as dashboard_router
 from backend.orchestrator.routes.email import router as email_router
+from backend.orchestrator.routes.embeddings import router as embeddings_router
 from backend.orchestrator.routes.files import router as files_router
 from backend.orchestrator.routes.guardian import router as guardian_router
+from backend.orchestrator.routes.logs import router as logs_router
 from backend.orchestrator.routes.memories import router as memories_router
 from backend.orchestrator.routes.meta import router as meta_router
 from backend.orchestrator.routes.meta_analyzer import router as meta_analyzer_router
+from backend.orchestrator.routes.models_ui import router as models_ui_router
 from backend.orchestrator.routes.modes import router as modes_router
+from backend.orchestrator.routes.orchestrator import router as orchestrator_router
 from backend.orchestrator.routes.overseer import router as overseer_router
 from backend.orchestrator.routes.plan import router as plan_router
 from backend.orchestrator.routes.profile import router as profile_router
 from backend.orchestrator.routes.projects import router as projects_router
 from backend.orchestrator.routes.providers import router as providers_router
+from backend.orchestrator.routes.second_brain import router as second_brain_router
+from backend.orchestrator.routes.sessions import router as sessions_router
+from backend.orchestrator.routes.settings import router as settings_router
+from backend.orchestrator.routes.skills import router as skills_router
 from backend.orchestrator.routes.system import router as system_router
 from backend.orchestrator.routes.terminal import router as terminal_router
+from backend.orchestrator.routes.wizard import router as wizard_router
 from backend.orchestrator.routes.workers import router as workers_router
 from backend.orchestrator.routes.workspace import router as workspace_router
-from backend.orchestrator.routes.embeddings import router as embeddings_router
-from backend.orchestrator.routes.wizard import router as wizard_router
-from backend.orchestrator.routes.collaboration import router as collaboration_router
-from backend.orchestrator.routes.second_brain import router as second_brain_router
-from backend.orchestrator.routes.orchestrator import router as orchestrator_router
-from backend.orchestrator.routes.skills import router as skills_router
-from backend.orchestrator.routes.models_ui import router as models_ui_router
+from backend.swarm.api.routes import router as swarm_router
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +88,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Python objects and need no teardown.
     """
     # Lazy imports of heavy modules to keep import-time / worker start-up fast
-    from backend.persistence import init_db
+    from backend.core.auto_correction import get_auto_correction_loop
     from backend.llm import create_llm_client
+    from backend.observability.advanced_logging import get_structured_logger
+
+    # Activate structured logging
+    from backend.observability.logging_config import setup_logging
     from backend.orchestrator.context_manager import ContextStore
     from backend.orchestrator.events import EventBus as OrchestrationEventBus
     from backend.orchestrator.registry import get_registry
-    from backend.core.auto_correction import get_auto_correction_loop
+    from backend.persistence import init_db
+
+    setup_logging(level="DEBUG", json_format=True, log_file="logs/backend.log")
+    slog = get_structured_logger()
+    app.state.structured_logger = slog
+    slog.info("NEXUS IDE backend starting", agent="SYSTEM", source="startup")
 
     # Validate configuration at startup
     settings = get_settings()
@@ -109,8 +123,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Lazy-load tools and workspace modules so their heavy imports don't block
     # startup.  They self-register on first import.
-    import backend.tools as _tools  # noqa: F401
     import backend.core.workspace as _workspace  # noqa: F401
+    import backend.tools as _tools  # noqa: F401
 
     # Lazy-init LLM client (cached in app.state)
     if not hasattr(app.state, "llm_client") or app.state.llm_client is None:
@@ -199,6 +213,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="NEXUS IDE Orchestrator", version="0.1.0", lifespan=lifespan)
 
+# OpenAPI: NEXUS has several ``from __future__ import annotations`` modules
+# that confuse Pydantic 2's TypeAdapter (the "class-not-fully-defined"
+# error). We override the app's ``openapi()`` method so the schema
+# generation never crashes the request — it returns a minimal schema
+# instead. The interactive UI at /docs still works.
+_original_openapi = app.openapi
+
+
+def _safe_openapi() -> dict:
+    try:
+        return _original_openapi()
+    except Exception as exc:
+        return {
+            "openapi": "3.1.0",
+            "info": {
+                "title": "NEXUS IDE Orchestrator",
+                "version": "0.1.0",
+                "description": (
+                    "Schema generation is partial due to a Pydantic 2 / "
+                    "PEP 563 incompatibility. See /docs for the UI."
+                ),
+            },
+            "paths": {},
+            "components": {"schemas": {}},
+            "x_error": str(exc)[:500],
+        }
+
+
+app.openapi = _safe_openapi  # type: ignore[assignment]
+
 # Setup rate limiting
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -212,7 +256,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.get_allowed_origins_list(),
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -244,11 +288,16 @@ app.include_router(meta_analyzer_router, prefix="/api")
 app.include_router(collaboration_router, prefix="/api")
 app.include_router(workers_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")
+app.include_router(thinking_router, prefix="/api")
 app.include_router(system_router, prefix="/api")
 app.include_router(second_brain_router, prefix="/api")
 app.include_router(orchestrator_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")
 app.include_router(models_ui_router, prefix="/api")
+app.include_router(settings_router, prefix="/api")
+app.include_router(logs_router, prefix="/api")
+app.include_router(sessions_router)
+app.include_router(swarm_router)
 
 # MetaOrchestrator WebSocket — mounted directly so path is ``/ws/missions/{id}``
 from backend.orchestrator.routes.meta import mission_websocket as _meta_ws  # noqa: E402

@@ -8,6 +8,7 @@ META_ANALYZER + OVERSEER.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -79,9 +80,7 @@ class AutoCorrectionLoop:
 
         # Self-heal circuit breaker
         self._self_heal_history: list[float] = []
-        self._max_self_heals_per_hour: int = int(
-            os.getenv("NEXUS_SELF_HEAL_MAX_PER_HOUR", "5")
-        )
+        self._max_self_heals_per_hour: int = int(os.getenv("NEXUS_SELF_HEAL_MAX_PER_HOUR", "5"))
         self._replan_counts: dict[str, int] = {}
 
     async def start_monitoring(self) -> None:
@@ -632,10 +631,8 @@ class AutoCorrectionLoop:
                 return
 
             # Responsive sleep: wake immediately on stop event
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
-            except asyncio.TimeoutError:
-                pass
 
         logger.warning(
             "AutoCorrection timeout waiting for agent %s after %.0fs",
@@ -846,9 +843,7 @@ class AutoCorrectionLoop:
         self._self_heal_history = [t for t in self._self_heal_history if now - t < 3600]
         return len(self._self_heal_history) >= self._max_self_heals_per_hour
 
-    def self_heal_for(
-        self, artifact_id: str, *, trigger: str
-    ) -> SelfHealEvent | None:
+    def self_heal_for(self, artifact_id: str, *, trigger: str) -> SelfHealEvent | None:
         """Record a self-heal decision if all preconditions are met.
 
         Returns the resulting :class:`SelfHealEvent` when a re-plan is
@@ -871,10 +866,7 @@ class AutoCorrectionLoop:
         has_active = artifact_id in self.active_corrections
         max_iters_hit = False
         for c in self._status.get("corrections", []):
-            if (
-                c.get("artifact_id") == artifact_id
-                and c.get("iterations", 0) >= MAX_ITERATIONS
-            ):
+            if c.get("artifact_id") == artifact_id and c.get("iterations", 0) >= MAX_ITERATIONS:
                 max_iters_hit = True
                 break
         if not (has_active and max_iters_hit):
@@ -887,16 +879,11 @@ class AutoCorrectionLoop:
             )
             return None
 
-        overseer_ok = bool(
-            self._status.get("overseer_signoff", {}).get(artifact_id)
-        )
-        meta_ok = bool(
-            self._status.get("meta_signoff", {}).get(artifact_id)
-        )
+        overseer_ok = bool(self._status.get("overseer_signoff", {}).get(artifact_id))
+        meta_ok = bool(self._status.get("meta_signoff", {}).get(artifact_id))
         if not (overseer_ok and meta_ok):
             logger.info(
-                "Self-heal skipped for %s: signoff incomplete "
-                "(overseer=%s, meta=%s)",
+                "Self-heal skipped for %s: signoff incomplete (overseer=%s, meta=%s)",
                 artifact_id,
                 overseer_ok,
                 meta_ok,
@@ -939,9 +926,7 @@ class AutoCorrectionLoop:
             )
             return None
 
-        new_objective = (
-            f"Re-attempt failed artifact {artifact_id}: {original_objective}"
-        )
+        new_objective = f"Re-attempt failed artifact {artifact_id}: {original_objective}"
         try:
             engine: OrchestrationEngine = OrchestrationEngine()
         except Exception:

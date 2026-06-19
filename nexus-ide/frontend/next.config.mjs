@@ -13,7 +13,7 @@ const nextConfig = {
   reactStrictMode: true,
   typedRoutes: true,
   devIndicators: false,
-  swcMinify: true,
+
   compiler: {
     removeConsole:
       process.env.NODE_ENV === "production"
@@ -29,14 +29,20 @@ const nextConfig = {
   // (web workers + eval-based AMD loader) and Next.js hydration require
   // 'unsafe-eval' / 'unsafe-inline'; tighter nonce-based policy is a
   // documented follow-up.
+  //
+  // connect-src includes the backend API URL so browser fetch/XHR/WS to the
+  // backend is not blocked by CSP. Without this, the browser silently fails
+  // with "Failed to fetch" / TypeError: Failed to fetch.
   async headers() {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+    const wsUrl = apiUrl.replace(/^http/, "ws");
     const csp = [
       "default-src 'self'",
       "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
       "font-src 'self' data:",
-      "connect-src 'self'",
+      `connect-src 'self' ${apiUrl} ${wsUrl}`,
       "worker-src 'self' blob:",
       "frame-ancestors 'none'",
       "base-uri 'self'",

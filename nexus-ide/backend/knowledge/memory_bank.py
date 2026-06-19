@@ -39,7 +39,7 @@ def _cos(a: list[float], b: list[float]) -> float:
     """Cosine similarity fallback used when ``EmbeddingService`` is unavailable."""
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     na = sum(x * x for x in a) ** 0.5
     nb = sum(x * x for x in b) ** 0.5
     return dot / (na * nb) if na and nb else 0.0
@@ -65,9 +65,7 @@ class MemoryBank:
 
     async def add_procedural(self, procedure: str, **kwargs: object) -> Memory:
         """Store a procedural memory (how-to / workflow)."""
-        return await self.store.store(
-            procedure, kind=MemoryKind.PROCEDURAL.value, **kwargs
-        )
+        return await self.store.store(procedure, kind=MemoryKind.PROCEDURAL.value, **kwargs)
 
     def list_by_kind(self, kind: MemoryKind) -> list[Memory]:
         """Return all stored memories matching the given kind."""

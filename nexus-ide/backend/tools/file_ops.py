@@ -90,10 +90,7 @@ async def write_file(
     # Block dangerous executable extensions
     if full_path.suffix.lower() in _BLOCKED_EXTENSIONS:
         return {
-            "error": (
-                f"Writing files with extension '{full_path.suffix}' "
-                "is blocked for security"
-            )
+            "error": (f"Writing files with extension '{full_path.suffix}' is blocked for security")
         }
 
     # Trust verification — block writes to untrusted projects
@@ -148,16 +145,12 @@ async def read_multiple_files(
     )
 
 
-async def list_dir(
-    path: str = ".", project_path: str = ".", recursive: bool = False
-) -> dict:
+async def list_dir(path: str = ".", project_path: str = ".", recursive: bool = False) -> dict:
     """List directory contents. Backward-compatible wrapper."""
     return await _list(path, project_path=project_path, recursive=recursive)
 
 
-async def search_in_files(
-    query: str, project_path: str = ".", file_pattern: str = "*.py"
-) -> dict:
+async def search_in_files(query: str, project_path: str = ".", file_pattern: str = "*.py") -> dict:
     """Search for text in files. Backward-compatible wrapper."""
     return await _search(
         query,

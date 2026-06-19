@@ -346,9 +346,7 @@ def _register_code_intelligence_tools() -> None:
         matches: list[Symbol]
         if kind:
             matches = [
-                sym
-                for sym in indexer.search_by_kind(kind)
-                if query.lower() in sym.name.lower()
+                sym for sym in indexer.search_by_kind(kind) if query.lower() in sym.name.lower()
             ]
         else:
             matches = [

@@ -53,7 +53,7 @@ class HealthChecker:
         for name, coro in coros.items():
             try:
                 results[name] = await asyncio.wait_for(coro, timeout=_CHECK_TIMEOUT)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 results[name] = {"status": "timeout", "healthy": False}
                 logger.warning("Health check timeout: %s", name)
             except Exception as exc:
@@ -61,7 +61,9 @@ class HealthChecker:
                 logger.warning("Health check error: %s — %s", name, exc)
 
         elapsed_ms = round((time.monotonic() - started) * 1000, 2)
-        overall = "healthy" if all(r.get("healthy", False) for r in results.values()) else "degraded"
+        overall = (
+            "healthy" if all(r.get("healthy", False) for r in results.values()) else "degraded"
+        )
 
         return {
             "status": overall,
@@ -93,7 +95,7 @@ class HealthChecker:
             try:
                 ok = await asyncio.wait_for(client.health_check(), timeout=_CHECK_TIMEOUT)
                 return {"status": "reachable" if ok else "unreachable", "healthy": ok}
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return {"status": "timeout", "healthy": False}
         # Fallback: if the client has no health_check, assume healthy when present
         return {"status": "present", "healthy": True}
@@ -142,13 +144,13 @@ class HealthChecker:
         manager = FileLockManager()
         tmp_file = Path(tempfile.gettempdir()) / f"nexus_health_lock_{time.time()}.tmp"
         try:
-            lock_id = await asyncio.wait_for(
+            await asyncio.wait_for(
                 manager.acquire_write_lock(str(tmp_file), "health-check", timeout=2.0),
                 timeout=_CHECK_TIMEOUT,
             )
             manager.release_lock(str(tmp_file), "health-check")
             return {"status": "functional", "healthy": True}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"status": "timeout", "healthy": False}
         except Exception as exc:
             return {"status": f"error: {exc}", "healthy": False}

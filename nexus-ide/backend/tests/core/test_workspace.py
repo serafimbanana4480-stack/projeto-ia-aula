@@ -10,15 +10,10 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
-import platform
 import subprocess
-import sys
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from backend.core import workspace as workspace_mod
 from backend.core.workspace import (
@@ -30,10 +25,10 @@ from backend.core.workspace import (
     get_project_info,
 )
 
-
 # ---------------------------------------------------------------------------
 # 1. Git detection via subprocess
 # ---------------------------------------------------------------------------
+
 
 class TestGitDetection:
     async def test_is_git_repo_detects_parent_git(self, tmp_path: Path) -> None:
@@ -73,6 +68,7 @@ class TestGitDetection:
 # ---------------------------------------------------------------------------
 # 2. Deduplication in discover_projects
 # ---------------------------------------------------------------------------
+
 
 class TestDiscoverDeduplication:
     async def test_child_project_skips_descendants(self, tmp_path: Path) -> None:
@@ -125,6 +121,7 @@ class TestDiscoverDeduplication:
 # ---------------------------------------------------------------------------
 # 3. Performance — skip dirs, max_depth, cache
 # ---------------------------------------------------------------------------
+
 
 class TestDiscoverPerformance:
     async def test_skip_dirs_ignored(self, tmp_path: Path) -> None:
@@ -211,6 +208,7 @@ class TestDiscoverPerformance:
 # 4. Windows python command
 # ---------------------------------------------------------------------------
 
+
 class TestWindowsPythonFallback:
     def test_py_in_whitelist(self) -> None:
         assert "py" in workspace_mod._SHELL_WHITELIST
@@ -237,6 +235,7 @@ class TestWindowsPythonFallback:
 # 5. Error handling
 # ---------------------------------------------------------------------------
 
+
 class TestErrorHandling:
     async def test_get_project_info_permission_error_on_rglob(self, tmp_path: Path) -> None:
         """PermissionError during rglob should not crash get_project_info."""
@@ -259,9 +258,7 @@ class TestErrorHandling:
         req = proj / "requirements.txt"
         req.write_text("requests\n")
 
-        with patch.object(
-            Path, "read_text", side_effect=PermissionError("denied")
-        ):
+        with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
             deps = await _get_dependencies(proj, "python")
         assert deps == []
 
@@ -270,30 +267,24 @@ class TestErrorHandling:
         script = tmp_path / "script"
         script.write_text("#!/bin/bash\necho hello")
 
-        with patch.object(
-            Path, "read_text", side_effect=PermissionError("denied")
-        ):
+        with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
             result = await execute_script(str(script))
 
         assert "error" in result
         assert (
-            "permission" in result["error"].lower()
-            or "failed to access" in result["error"].lower()
+            "permission" in result["error"].lower() or "failed to access" in result["error"].lower()
         ) or "failed" in result["error"].lower()
 
     async def test_discover_projects_permission_denied_root(self, tmp_path: Path) -> None:
         """A root path that raises PermissionError returns a structured error."""
-        with patch(
-            "backend.core.workspace._is_blocked_path", return_value=(False, "")
+        with (
+            patch("backend.core.workspace._is_blocked_path", return_value=(False, "")),
+            patch.object(Path, "resolve", side_effect=PermissionError("denied")),
         ):
-            with patch.object(
-                Path, "resolve", side_effect=PermissionError("denied")
-            ):
-                result = await discover_projects("/some/path")
+            result = await discover_projects("/some/path")
         assert "error" in result
         assert (
-            "permission" in result["error"].lower()
-            or "failed to access" in result["error"].lower()
+            "permission" in result["error"].lower() or "failed to access" in result["error"].lower()
         )
 
     async def test_discover_projects_not_a_directory(self, tmp_path: Path) -> None:
@@ -308,6 +299,7 @@ class TestErrorHandling:
 # ---------------------------------------------------------------------------
 # 6. get_project_info git parent detection
 # ---------------------------------------------------------------------------
+
 
 class TestGetProjectInfoGit:
     async def test_git_info_from_parent_directory(self, tmp_path: Path) -> None:

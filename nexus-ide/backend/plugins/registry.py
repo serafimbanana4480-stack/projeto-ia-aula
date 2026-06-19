@@ -21,12 +21,11 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import inspect
 import logging
-import pkgutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, TypeVar
+from typing import Any, Protocol, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +41,7 @@ class PluginProtocol(Protocol):
     version: str
     description: str
 
-    def setup(self, registry: PluginRegistry) -> None:
-        ...
+    def setup(self, registry: PluginRegistry) -> None: ...
 
 
 @dataclass
@@ -55,8 +53,8 @@ class PluginMeta:
     description: str
     module_path: str
     enabled: bool = True
-    commands: List[str] = field(default_factory=list)
-    hooks: List[str] = field(default_factory=list)
+    commands: list[str] = field(default_factory=list)
+    hooks: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -66,7 +64,7 @@ class RegisteredCommand:
     name: str
     handler: CommandHandler
     description: str = ""
-    plugin: Optional[str] = None
+    plugin: str | None = None
 
 
 @dataclass
@@ -76,7 +74,7 @@ class RegisteredHook:
     event: str
     callback: HookCallback
     priority: int = 0  # maior = executa primeiro
-    plugin: Optional[str] = None
+    plugin: str | None = None
 
 
 class PluginRegistry:
@@ -86,9 +84,9 @@ class PluginRegistry:
     É um singleton acessível via `plugin_registry` no módulo.
     """
 
-    _instance: Optional["PluginRegistry"] = None
+    _instance: PluginRegistry | None = None
 
-    def __new__(cls) -> "PluginRegistry":
+    def __new__(cls) -> PluginRegistry:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
@@ -97,10 +95,10 @@ class PluginRegistry:
     def __init__(self) -> None:
         if self._initialized:
             return
-        self._commands: Dict[str, RegisteredCommand] = {}
-        self._hooks: Dict[str, List[RegisteredHook]] = {}
-        self._plugins: Dict[str, PluginMeta] = {}
-        self._middlewares: List[Callable] = []
+        self._commands: dict[str, RegisteredCommand] = {}
+        self._hooks: dict[str, list[RegisteredHook]] = {}
+        self._plugins: dict[str, PluginMeta] = {}
+        self._middlewares: list[Callable] = []
         self._initialized = True
 
     # ── Comandos ──────────────────────────────────────────────
@@ -109,7 +107,7 @@ class PluginRegistry:
         self,
         name: str,
         description: str = "",
-        plugin: Optional[str] = None,
+        plugin: str | None = None,
     ) -> Callable[[CommandHandler], CommandHandler]:
         """Decorador para registar um comando."""
 
@@ -136,7 +134,7 @@ class PluginRegistry:
             raise KeyError(f"Command '{name}' not found.")
         return cmd.handler(*args, **kwargs)
 
-    def list_commands(self) -> List[RegisteredCommand]:
+    def list_commands(self) -> list[RegisteredCommand]:
         """Lista todos os comandos registados."""
         return list(self._commands.values())
 
@@ -147,7 +145,7 @@ class PluginRegistry:
         event: str,
         callback: HookCallback,
         priority: int = 0,
-        plugin: Optional[str] = None,
+        plugin: str | None = None,
     ) -> RegisteredHook:
         """Regista um hook para um evento."""
         hook = RegisteredHook(
@@ -163,12 +161,12 @@ class PluginRegistry:
         logger.info("Registered hook '%s' for event '%s'", callback.__name__, event)
         return hook
 
-    def trigger(self, event: str, *args: Any, **kwargs: Any) -> List[Any]:
+    def trigger(self, event: str, *args: Any, **kwargs: Any) -> list[Any]:
         """
         Dispara todos os hooks de um evento.
         Retorna lista de resultados de cada hook.
         """
-        results: List[Any] = []
+        results: list[Any] = []
         for hook in self._hooks.get(event, []):
             try:
                 result = hook.callback(*args, **kwargs)
@@ -192,7 +190,7 @@ class PluginRegistry:
                 logger.exception("Hook '%s' failed for event '%s'", hook.callback.__name__, event)
         return None
 
-    def list_hooks(self, event: Optional[str] = None) -> List[RegisteredHook]:
+    def list_hooks(self, event: str | None = None) -> list[RegisteredHook]:
         """Lista hooks registados."""
         if event:
             return list(self._hooks.get(event, []))
@@ -241,13 +239,13 @@ class PluginRegistry:
         logger.info("Loaded plugin: %s v%s", name, version)
         return meta
 
-    def load_plugins_from_directory(self, directory: Path | str) -> List[PluginMeta]:
+    def load_plugins_from_directory(self, directory: Path | str) -> list[PluginMeta]:
         """
         Descobre e carrega todos os plugins num diretório.
         Cada subdiretório ou ficheiro .py é tentado como plugin.
         """
         directory = Path(directory)
-        loaded: List[PluginMeta] = []
+        loaded: list[PluginMeta] = []
 
         if not directory.exists():
             logger.warning("Plugin directory not found: %s", directory)
@@ -284,11 +282,11 @@ class PluginRegistry:
 
         return loaded
 
-    def list_plugins(self) -> List[PluginMeta]:
+    def list_plugins(self) -> list[PluginMeta]:
         """Lista todos os plugins carregados."""
         return list(self._plugins.values())
 
-    def get_plugin(self, name: str) -> Optional[PluginMeta]:
+    def get_plugin(self, name: str) -> PluginMeta | None:
         """Obtém metadados de um plugin."""
         return self._plugins.get(name)
 
@@ -306,7 +304,7 @@ class PluginRegistry:
 
     # ── Health / Debug ────────────────────────────────────────
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         """Retorna estado do registry para health checks."""
         return {
             "plugins_loaded": len(self._plugins),
@@ -332,6 +330,7 @@ plugin_registry = PluginRegistry()
 
 # ── Helpers de conveniência ─────────────────────────────────
 
+
 def hook(event: str, priority: int = 0) -> Callable[[HookCallback], HookCallback]:
     """
     Decorador simplificado para registar hooks na instância global.
@@ -349,9 +348,7 @@ def hook(event: str, priority: int = 0) -> Callable[[HookCallback], HookCallback
     return decorator
 
 
-def command(
-    name: str, description: str = ""
-) -> Callable[[CommandHandler], CommandHandler]:
+def command(name: str, description: str = "") -> Callable[[CommandHandler], CommandHandler]:
     """
     Decorador simplificado para registar comandos.
 

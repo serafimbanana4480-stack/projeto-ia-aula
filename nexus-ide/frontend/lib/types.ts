@@ -33,6 +33,7 @@ export interface RoutingDecision {
 export interface StreamEvent {
   type:
     | "token"
+    | "thinking"
     | "agent_started"
     | "agent_finished"
     | "tool_call"
@@ -54,6 +55,16 @@ export interface StreamEvent {
   timestamp: string;
 }
 
+export interface ChatMessageMetadata {
+  /** Marker for error messages — surfaces a retry button. */
+  kind?: "error" | "warning" | "info";
+  canRetry?: boolean;
+  /** The original user prompt (for retry). */
+  prompt?: string;
+  /** Free-form extra data. */
+  [key: string]: unknown;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -63,6 +74,7 @@ export interface ChatMessage {
   metrics?: Record<string, number | string>;
   timestamp: string;
   toolCalls?: ToolCallItem[];
+  metadata?: ChatMessageMetadata;
 }
 
 export interface ToolCallItem {

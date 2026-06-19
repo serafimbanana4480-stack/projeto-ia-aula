@@ -17,12 +17,11 @@ Threshold recomendado:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +48,7 @@ class CacheEntry:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "CacheEntry":
+    def from_dict(cls, data: dict) -> CacheEntry:
         return cls(**data)
 
 
@@ -85,7 +84,7 @@ class SemanticCache:
         """Compute cosine similarity between two vectors."""
         if len(a) != len(b):
             return 0.0
-        dot = sum(ax * bx for ax, bx in zip(a, b))
+        dot = sum(ax * bx for ax, bx in zip(a, b, strict=False))
         norm_a = math.sqrt(sum(ax * ax for ax in a))
         norm_b = math.sqrt(sum(bx * bx for bx in b))
         if norm_a == 0 or norm_b == 0:
@@ -98,7 +97,7 @@ class SemanticCache:
         model: str,
         system_prompt: str,
         embed_fn: Callable | None = None,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Return cached response if semantically similar query exists."""
         fn = embed_fn or self._embed_fn
         if fn is None:
@@ -134,7 +133,9 @@ class SemanticCache:
                     best_entry.hit_count += 1
                 logger.debug(
                     "[SEMANTIC CACHE HIT] similarity=%.3f threshold=%.3f model=%s",
-                    best_similarity, self.similarity_threshold, model,
+                    best_similarity,
+                    self.similarity_threshold,
+                    model,
                 )
                 return best_response
 
@@ -180,10 +181,8 @@ class SemanticCache:
             # Eviction: keep only max_entries per namespace
             if len(self._entries[namespace]) > self.max_entries:
                 # Remove oldest entries (by hit_count, then timestamp)
-                self._entries[namespace].sort(
-                    key=lambda e: (e.hit_count, e.timestamp)
-                )
-                self._entries[namespace] = self._entries[namespace][-self.max_entries:]
+                self._entries[namespace].sort(key=lambda e: (e.hit_count, e.timestamp))
+                self._entries[namespace] = self._entries[namespace][-self.max_entries :]
 
             self._stores += 1
             return True

@@ -83,9 +83,7 @@ class AgentManifest(BaseModel):
 
     @field_validator("capabilities")
     @classmethod
-    def capabilities_must_be_unique(
-        cls, value: list[AgentCapability]
-    ) -> list[AgentCapability]:
+    def capabilities_must_be_unique(cls, value: list[AgentCapability]) -> list[AgentCapability]:
         if len(value) != len(set(value)):
             raise ValueError("capabilities must be unique")
         return value

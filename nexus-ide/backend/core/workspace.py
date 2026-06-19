@@ -20,50 +20,13 @@ import logging
 import os
 import platform
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
-# Re-export security layer --------------------------------------------------
-from backend.core.workspace_security import (
-    MAX_FILE_SIZE_BYTES,
-    _BLOCKED_COMMAND_PATTERNS,
-    _BLOCKED_PATH_COMPONENTS,
-    _BLOCKED_SENSITIVE_PATHS,
-    _BLOCKED_SYSTEM_PATHS,
-    _DANGEROUS_MODULES,
-    _DANGEROUS_PIPE_TARGETS,
-    _DISALLOWED_METACHARACTERS,
-    _GIT_BLOCKED_FLAGS,
-    _GIT_BLOCKED_SUBCOMMANDS,
-    _SAFE_GIT_HOSTS,
-    _SHELL_WHITELIST,
-    _check_file_size_limit,
-    _check_python_sandbox,
-    _get_allowed_base_paths,
-    _has_unquoted_metacharacters,
-    _is_allowed_path,
-    _is_blocked_path,
-    _is_path_within_project,
-    _is_safe_git_remote,
-    _log_operation,
-    _remove_quoted_parts,
-    _split_on_pipes,
-    _validate_path,
-    _validate_shell_command,
-    _validate_single_command,
-    _verify_auth_token,
-)
-
 # Re-export backup layer ----------------------------------------------------
 from backend.core.workspace_backup import (
-    _backup_dir_for,
-    _create_backup,
-    _get_git_root,
     _is_git_repo,
-    _list_backups,
-    _restore_backup,
     list_backups,
     restore_backup,
 )
@@ -83,9 +46,16 @@ from backend.core.workspace_fs import (
     write_file_absolute,
 )
 
+# Re-export security layer --------------------------------------------------
+from backend.core.workspace_security import (
+    _check_file_size_limit,
+    _is_blocked_path,
+    _is_path_within_project,
+    _is_safe_git_remote,
+)
+
 # Re-export shell layer -----------------------------------------------------
 from backend.core.workspace_shell import (
-    _windows_python_fixup,
     execute_python,
     execute_script,
     execute_shell,
@@ -96,6 +66,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Git integration
 # ---------------------------------------------------------------------------
+
 
 async def _git_raw(args: list[str], cwd: str, timeout: int = 60) -> dict[str, Any]:
     """Run a raw git command and return structured output."""
@@ -113,10 +84,14 @@ async def _git_raw(args: list[str], cwd: str, timeout: int = 60) -> dict[str, An
         err = stderr.decode("utf-8", errors="replace").strip()
 
         if proc.returncode != 0:
-            return {"exit_code": proc.returncode, "error": err or out, "command": f"git {' '.join(args)}"}
+            return {
+                "exit_code": proc.returncode,
+                "error": err or out,
+                "command": f"git {' '.join(args)}",
+            }
 
         return {"output": out, "command": f"git {' '.join(args)}", "exit_code": 0}
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"error": f"Git command timed out: git {' '.join(args)}"}
     except FileNotFoundError:
         return {"error": "Git is not installed or not in PATH"}
@@ -166,9 +141,7 @@ async def git_commit_all(
     return {"add": add_res, "commit": commit_res}
 
 
-async def git_push(
-    path: str, remote: str = "origin", branch: str | None = None
-) -> dict[str, Any]:
+async def git_push(path: str, remote: str = "origin", branch: str | None = None) -> dict[str, Any]:
     """Push commits from *path*. Only safe remotes are permitted."""
     logger.info("git_push: %s remote=%s branch=%s", path, remote, branch)
     blocked, reason = _is_blocked_path(path)
@@ -281,7 +254,9 @@ async def _get_dependencies(project_path: Path, language: str) -> list[str]:
             req_file = project_path / "requirements.txt"
             if await asyncio.to_thread(req_file.exists):
                 try:
-                    text = await asyncio.to_thread(req_file.read_text, encoding="utf-8", errors="ignore")
+                    text = await asyncio.to_thread(
+                        req_file.read_text, encoding="utf-8", errors="ignore"
+                    )
                 except (PermissionError, FileNotFoundError):
                     text = ""
                 for line in text.splitlines():
@@ -307,7 +282,11 @@ async def _get_dependencies(project_path: Path, language: str) -> list[str]:
             if await asyncio.to_thread((project_path / "go.mod").exists):
                 deps.append("go.mod")
     except (PermissionError, FileNotFoundError):
-        logger.debug("Permission or file not found error reading dependencies in %s", project_path, exc_info=True)
+        logger.debug(
+            "Permission or file not found error reading dependencies in %s",
+            project_path,
+            exc_info=True,
+        )
     return deps[:50]
 
 
@@ -451,7 +430,10 @@ async def get_project_info(path: str) -> dict[str, Any]:
         if await _is_git_repo(project):
             try:
                 branch_proc = await asyncio.create_subprocess_exec(
-                    "git", "rev-parse", "--abbrev-ref", "HEAD",
+                    "git",
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "HEAD",
                     cwd=str(project),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL,
@@ -460,7 +442,10 @@ async def get_project_info(path: str) -> dict[str, Any]:
                 branch = branch_stdout.decode("utf-8", errors="replace").strip()
 
                 remote_proc = await asyncio.create_subprocess_exec(
-                    "git", "remote", "get-url", "origin",
+                    "git",
+                    "remote",
+                    "get-url",
+                    "origin",
                     cwd=str(project),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL,
@@ -503,6 +488,7 @@ async def get_project_info(path: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # System info & process management
 # ---------------------------------------------------------------------------
+
 
 async def get_system_info() -> dict[str, Any]:
     """Get CPU, RAM, disk, and GPU information."""
@@ -591,9 +577,7 @@ async def find_processes(name: str = "") -> dict[str, Any]:
                         "name": proc_name,
                         "cmdline": cmdline,
                         "cpu_percent": proc.info.get("cpu_percent"),
-                        "memory_percent": round(
-                            proc.info.get("memory_percent") or 0, 2
-                        ),
+                        "memory_percent": round(proc.info.get("memory_percent") or 0, 2),
                     }
                 )
     except ImportError:
@@ -680,6 +664,7 @@ async def kill_process(pid: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # WorkspaceManager class — backward-compatible wrapper
 # ---------------------------------------------------------------------------
+
 
 class WorkspaceManager:
     """Central manager for filesystem and shell operations.
@@ -777,6 +762,7 @@ class WorkspaceManager:
 
         if session_id and "error" not in result:
             from backend.persistence.db import propose_change
+
             propose_change(
                 session_id=session_id,
                 project_id=project_id,
@@ -790,9 +776,7 @@ class WorkspaceManager:
     async def list_directory(self, path: str, recursive: bool = False) -> dict[str, Any]:
         return await list_dir_absolute(self._resolve(path), recursive=recursive)
 
-    async def search_files(
-        self, path: str, pattern: str, glob: str = "*.py"
-    ) -> dict[str, Any]:
+    async def search_files(self, path: str, pattern: str, glob: str = "*.py") -> dict[str, Any]:
         # The legacy signature expects path + pattern + glob.
         # We perform a content search under *path* and filter by glob.
         search_root = self._resolve(path)
@@ -808,7 +792,9 @@ class WorkspaceManager:
                 if not ok:
                     continue
                 try:
-                    content = await asyncio.to_thread(file_path.read_text, encoding="utf-8", errors="ignore")
+                    content = await asyncio.to_thread(
+                        file_path.read_text, encoding="utf-8", errors="ignore"
+                    )
                 except Exception:
                     continue
                 if pattern.lower() in content.lower():
@@ -833,7 +819,11 @@ class WorkspaceManager:
         return {"query": pattern, "results": results, "count": count}
 
     async def execute_shell(
-        self, command: str, cwd: str | None = None, timeout: int = 120, env: dict[str, str] | None = None
+        self,
+        command: str,
+        cwd: str | None = None,
+        timeout: int = 120,
+        env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         resolved_cwd = self._resolve(cwd) if cwd else str(self.project_path)
         return await execute_shell(command, cwd=resolved_cwd, timeout=timeout, env=env)
@@ -1027,7 +1017,11 @@ register_tool(
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Absolute directory path"},
-                "recursive": {"type": "boolean", "default": False, "description": "Recursive listing"},
+                "recursive": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Recursive listing",
+                },
             },
             "required": ["path"],
         },
@@ -1145,7 +1139,10 @@ register_tool(
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "Text pattern to search for"},
-                "root_path": {"type": "string", "description": "Absolute root directory to search in"},
+                "root_path": {
+                    "type": "string",
+                    "description": "Absolute root directory to search in",
+                },
                 "max_results": {
                     "type": "integer",
                     "default": 100,
@@ -1181,7 +1178,10 @@ register_tool(
             "type": "object",
             "properties": {
                 "backup_path": {"type": "string", "description": "Absolute backup file path"},
-                "target_path": {"type": "string", "description": "Absolute target path to restore to"},
+                "target_path": {
+                    "type": "string",
+                    "description": "Absolute target path to restore to",
+                },
             },
             "required": ["backup_path", "target_path"],
         },

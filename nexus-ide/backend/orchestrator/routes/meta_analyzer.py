@@ -151,9 +151,7 @@ async def meta_approve(request: Request) -> dict[str, Any]:
 
     metrics = body.get("metrics", {})
     verdict = agent.evaluate_quality(metrics)
-    report = agent.build_approval_report(
-        verdict, [], body.get("recommendations", [])
-    )
+    report = agent.build_approval_report(verdict, [], body.get("recommendations", []))
 
     if body.get("log_decision"):
         agent.log_evolution_entry(

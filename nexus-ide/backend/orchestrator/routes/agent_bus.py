@@ -11,7 +11,6 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -75,7 +74,9 @@ def _sse_payload(data: dict[str, Any]) -> str:
 
 @router.post("/bus/publish", response_model=BusPublishResponse)
 @limiter.limit("120/minute")
-async def bus_publish(req: BusPublishRequest, request: Request, _auth: Any = Depends(require_auth)) -> Any:
+async def bus_publish(
+    req: BusPublishRequest, request: Request, _auth: Any = Depends(require_auth)
+) -> Any:
     """Publish a message to the Agent Bus."""
     import uuid
 
@@ -173,16 +174,18 @@ async def bus_stream(
                 # Check if client disconnected
                 if await request.is_disconnected():
                     break
-                yield _sse_payload({
-                    "type": "bus_message",
-                    "topic": msg.topic,
-                    "message_id": msg.message_id,
-                    "source_agent": msg.source_agent,
-                    "target_agents": msg.target_agents,
-                    "payload": msg.payload,
-                    "timestamp": msg.timestamp.isoformat(),
-                    "priority": msg.priority,
-                })
+                yield _sse_payload(
+                    {
+                        "type": "bus_message",
+                        "topic": msg.topic,
+                        "message_id": msg.message_id,
+                        "source_agent": msg.source_agent,
+                        "target_agents": msg.target_agents,
+                        "payload": msg.payload,
+                        "timestamp": msg.timestamp.isoformat(),
+                        "priority": msg.priority,
+                    }
+                )
         except asyncio.CancelledError:
             logger.debug("Agent Bus SSE stream cancelled")
         finally:
@@ -191,7 +194,9 @@ async def bus_stream(
                 try:
                     await bus.unsubscribe(sub.subscription_id)
                 except Exception:
-                    logger.debug("Failed to unsubscribe %s from bus", sub.subscription_id, exc_info=True)
+                    logger.debug(
+                        "Failed to unsubscribe %s from bus", sub.subscription_id, exc_info=True
+                    )
             # Signal queue to drain
             try:
                 queue.put_nowait(None)

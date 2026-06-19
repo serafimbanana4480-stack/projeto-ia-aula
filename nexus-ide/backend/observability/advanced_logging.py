@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import threading
-import time
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -95,10 +95,8 @@ class StructuredLogger:
         """Store and broadcast a log entry."""
         self._buffer.append(entry)
         for listener in self._listeners:
-            try:
+            with contextlib.suppress(Exception):
                 listener(entry)
-            except Exception:
-                pass
 
     def _now(self) -> str:
         return datetime.now(UTC).isoformat()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -93,13 +93,11 @@ class HumanInTheLoopManager:
             return False
         if category in policy.require_approval_for:
             return True
-        if confidence >= policy.require_approval_above_confidence:
-            return True
-        return False
+        return confidence >= policy.require_approval_above_confidence
 
     def create_escalation_request(self, proposal_id: str, proposal: dict, reason: str) -> dict:
-        policy = self.load_policy()
-        request_id = f"esc_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+        self.load_policy()
+        request_id = f"esc_{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
         record: dict[str, Any] = {
             "request_id": request_id,
             "proposal_id": proposal_id,
@@ -109,7 +107,7 @@ class HumanInTheLoopManager:
             "operator": None,
             "notes": "",
             "decided_at": None,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "resolution": None,
         }
         self._escalations[request_id] = record
@@ -136,7 +134,7 @@ class HumanInTheLoopManager:
         record["decision"] = decision
         record["operator"] = operator
         record["notes"] = notes
-        record["decided_at"] = datetime.now(timezone.utc).isoformat()
+        record["decided_at"] = datetime.now(UTC).isoformat()
         resolution: dict[str, Any] = {
             "request_id": request_id,
             "decision": decision,

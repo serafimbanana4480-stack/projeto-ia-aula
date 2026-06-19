@@ -25,7 +25,18 @@ export function useAgentStream(sessionId: string) {
   }, []);
 
   const send = useCallback(
-    async (message: string, mode = "auto", model = "", projectPath = "", thinkingStrength?: string) => {
+    async (
+      message: string,
+      mode = "auto",
+      model = "",
+      projectPath = "",
+      thinkingStrength?: string,
+      swarmOptions?: {
+        agents?: string[];
+        strategy?: string;
+        operationalMode?: string;
+      },
+    ) => {
       // Cancel any previous request
       abortRef.current?.abort();
       clearStreamTimeout();
@@ -35,7 +46,9 @@ export function useAgentStream(sessionId: string) {
 
       setStreaming(true);
       setError(null);
-      setEvents([]);
+      // Intentionally do NOT clear events here so previous errors stay
+      // visible in the chat history. The new request will append tokens
+      // on top of the existing events.
 
       // Auto-timeout if stream takes too long
       timeoutRef.current = setTimeout(() => {
@@ -54,7 +67,7 @@ export function useAgentStream(sessionId: string) {
       }, STREAM_TIMEOUT_MS);
 
       try {
-        const res = await postChat(message, sessionId, mode, controller.signal, model, projectPath, thinkingStrength);
+        const res = await postChat(message, sessionId, mode, controller.signal, model, projectPath, thinkingStrength, swarmOptions);
 
         if (!res.ok) {
           const errorText = await res.text();

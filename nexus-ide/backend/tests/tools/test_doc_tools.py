@@ -32,7 +32,7 @@ class TestDocTools:
         src.write_text("def hello():\n    pass\n", encoding="utf-8")
         out = tmp_path / "docs" / "module.md"
 
-        result = await generate_module_doc(str(src), output_path=str(out), project_path=str(tmp_path))
+        await generate_module_doc(str(src), output_path=str(out), project_path=str(tmp_path))
         assert out.exists()
         assert "hello" in out.read_text(encoding="utf-8")
 

@@ -24,9 +24,11 @@ router = APIRouter()
 
 @router.get("/agent-states")
 @limiter.limit("100/minute")
-async def list_agent_states(request: Request, auth_user: None = Depends(require_auth)) -> dict[str, list[dict[str, Any]]]:
+async def list_agent_states(
+    request: Request, auth_user: None = Depends(require_auth)
+) -> dict[str, list[dict[str, Any]]]:
     """Return a summary of every agent that has persisted memories."""
-    store = AgentStateStore()
+    AgentStateStore()
     # We don't have a direct "list agents" query, so we scan the DB.
     from backend.persistence.db import get_db
 
@@ -59,7 +61,9 @@ async def list_agent_states(request: Request, auth_user: None = Depends(require_
 
 @router.get("/agent-states/{agent_name}")
 @limiter.limit("100/minute")
-async def get_agent_brain(agent_name: str, request: Request, auth_user: None = Depends(require_auth)) -> dict[str, Any]:
+async def get_agent_brain(
+    agent_name: str, request: Request, auth_user: None = Depends(require_auth)
+) -> dict[str, Any]:
     """Return the complete brain (all memory tiers) for a single agent."""
     store = AgentStateStore()
     brain = store.get_agent_brain(agent_name)

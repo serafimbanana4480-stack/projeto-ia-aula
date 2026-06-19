@@ -17,20 +17,17 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from backend.core.agent_bus import BusMessage, get_agent_bus
 
@@ -125,9 +122,8 @@ class BackgroundWorker(ABC):
             self._status = WorkerStatus.STOPPED
             if self._stop_event is not None:
                 self._stop_event.set()
-            if self._pause_event is not None:
-                if self._pause_event is not None:
-                    self._pause_event.set()  # unblock any paused wait
+            if self._pause_event is not None and self._pause_event is not None:
+                self._pause_event.set()  # unblock any paused wait
 
         if self._task and not self._task.done():
             self._task.cancel()
@@ -163,7 +159,7 @@ class BackgroundWorker(ABC):
 
     def info(self) -> WorkerInfo:
         """Return a snapshot of this worker's state."""
-        now = datetime.now(UTC)
+        datetime.now(UTC)
         next_run = ""
         if self._last_run and self._status == WorkerStatus.RUNNING:
             next_dt = self._last_run + timedelta(seconds=self.interval_seconds)
@@ -297,8 +293,8 @@ class CodeWatcher(BackgroundWorker):
         """Process queued filesystem events from the watchdog observer."""
         # Lazy-start observer on first tick
         if self._observer is None:
-            from watchdog.observers import Observer
             from watchdog.events import FileSystemEventHandler
+            from watchdog.observers import Observer
 
             class _Handler(FileSystemEventHandler):
                 def __init__(self, queue: asyncio.Queue[list[Path]]) -> None:
@@ -578,7 +574,7 @@ class PerformanceWatcher(BackgroundWorker):
     async def _run_pytest_benchmark(self) -> dict[str, Any]:
         """Run pytest-benchmark and parse JSON output."""
         try:
-            result = await asyncio.to_thread(
+            await asyncio.to_thread(
                 subprocess.run,
                 [
                     "python",
@@ -883,7 +879,9 @@ class EscalationWatcher(BackgroundWorker):
             try:
                 sub = await bus.subscribe("human_in_the_loop.pending", self._on_pending)
             except Exception as exc:
-                logger.error("ESCALATION_WATCHER failed to subscribe to human_in_the_loop.pending: %s", exc)
+                logger.error(
+                    "ESCALATION_WATCHER failed to subscribe to human_in_the_loop.pending: %s", exc
+                )
                 self._error_count += 1
                 return
             self._subscription = sub

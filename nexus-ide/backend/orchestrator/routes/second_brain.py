@@ -18,6 +18,7 @@ router = APIRouter()
 
 def _get_db(request: Request):
     from backend.persistence.db import get_db
+
     return get_db()
 
 
@@ -73,16 +74,18 @@ async def search_brain(
         rows = cursor.fetchall()
     memories = []
     for r in rows:
-        memories.append({
-            "id": r[0],
-            "content_preview": (r[1] or "")[:200],
-            "summary": r[2],
-            "type": r[3],
-            "tags": json.loads(r[4]) if r[4] else [],
-            "source": r[5],
-            "importance": r[6],
-            "created_at": r[7],
-        })
+        memories.append(
+            {
+                "id": r[0],
+                "content_preview": (r[1] or "")[:200],
+                "summary": r[2],
+                "type": r[3],
+                "tags": json.loads(r[4]) if r[4] else [],
+                "source": r[5],
+                "importance": r[6],
+                "created_at": r[7],
+            }
+        )
     return {"query": q, "memories": memories, "count": len(memories)}
 
 
@@ -105,16 +108,18 @@ async def list_memories(
         rows = cursor.fetchall()
     memories = []
     for r in rows:
-        memories.append({
-            "id": r[0],
-            "content_preview": (r[1] or "")[:200],
-            "summary": r[2],
-            "type": r[3],
-            "tags": json.loads(r[4]) if r[4] else [],
-            "source": r[5],
-            "importance": r[6],
-            "created_at": r[7],
-        })
+        memories.append(
+            {
+                "id": r[0],
+                "content_preview": (r[1] or "")[:200],
+                "summary": r[2],
+                "type": r[3],
+                "tags": json.loads(r[4]) if r[4] else [],
+                "source": r[5],
+                "importance": r[6],
+                "created_at": r[7],
+            }
+        )
     return {"memories": memories, "count": len(memories)}
 
 

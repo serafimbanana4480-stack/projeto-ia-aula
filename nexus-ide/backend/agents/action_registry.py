@@ -52,9 +52,7 @@ class ActionRegistry:
         """Read the YAML file and return the parsed action map."""
         path = self._default_config_path()
         if not path.is_file():
-            raise FileNotFoundError(
-                f"Agent action registry file not found: {path}"
-            )
+            raise FileNotFoundError(f"Agent action registry file not found: {path}")
 
         raw: Any
         if yaml is not None:
@@ -73,15 +71,11 @@ class ActionRegistry:
         specs: dict[str, ActionSpec] = {}
         for name, spec in actions_raw.items():
             if not isinstance(spec, dict):
-                raise ValueError(
-                    f"Invalid spec for action {name!r} in {path}: expected mapping."
-                )
+                raise ValueError(f"Invalid spec for action {name!r} in {path}: expected mapping.")
             tool = str(spec.get("tool", "")).strip()
             example_args = str(spec.get("example_args", "")).strip()
             if not tool:
-                raise ValueError(
-                    f"Invalid spec for action {name!r} in {path}: 'tool' is required."
-                )
+                raise ValueError(f"Invalid spec for action {name!r} in {path}: 'tool' is required.")
             specs[str(name)] = ActionSpec(
                 action=str(name),
                 tool=tool,

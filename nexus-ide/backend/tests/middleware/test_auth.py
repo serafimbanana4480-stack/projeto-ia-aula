@@ -1,12 +1,11 @@
 """Tests for authentication middleware."""
 
 from datetime import timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException, status
 
-from backend.config.settings import get_settings
 from backend.middleware.auth import (
     create_access_token,
     decode_access_token,
@@ -52,9 +51,7 @@ class TestDecodeAccessToken:
         assert payload["sub"] == "user123"
         assert payload["email"] == "user@example.com"
 
-    def test_decode_invalid_token_raises_http_exception(
-        self, mock_settings: MagicMock
-    ) -> None:
+    def test_decode_invalid_token_raises_http_exception(self, mock_settings: MagicMock) -> None:
         """Test that decoding an invalid token raises HTTPException."""
         with pytest.raises(HTTPException) as exc_info:
             decode_access_token("invalid-token")
@@ -66,17 +63,13 @@ class TestGetCurrentUser:
     """Test get_current_user dependency."""
 
     @pytest.mark.asyncio
-    async def test_no_credentials_returns_none(
-        self, mock_settings: MagicMock
-    ) -> None:
+    async def test_no_credentials_returns_none(self, mock_settings: MagicMock) -> None:
         """Test that missing credentials returns None."""
         user = await get_current_user(credentials=None)
         assert user is None
 
     @pytest.mark.asyncio
-    async def test_valid_token_returns_user(
-        self, mock_settings: MagicMock
-    ) -> None:
+    async def test_valid_token_returns_user(self, mock_settings: MagicMock) -> None:
         """Test that valid token returns user data."""
         data = {"sub": "user123", "email": "user@example.com"}
         token = create_access_token(data)
@@ -94,9 +87,7 @@ class TestGetCurrentUser:
         assert user["email"] == "user@example.com"
 
     @pytest.mark.asyncio
-    async def test_invalid_token_raises_http_exception(
-        self, mock_settings: MagicMock
-    ) -> None:
+    async def test_invalid_token_raises_http_exception(self, mock_settings: MagicMock) -> None:
         """Test that invalid token raises HTTPException."""
         from fastapi.security import HTTPAuthorizationCredentials
 
@@ -110,9 +101,7 @@ class TestGetCurrentUser:
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
 
     @pytest.mark.asyncio
-    async def test_token_without_sub_raises_http_exception(
-        self, mock_settings: MagicMock
-    ) -> None:
+    async def test_token_without_sub_raises_http_exception(self, mock_settings: MagicMock) -> None:
         """Test that token without sub claim raises HTTPException."""
         data = {"email": "user@example.com"}  # Missing sub
         token = create_access_token(data)

@@ -21,6 +21,7 @@ async def execute_terminal_command(
     cwd = None
     if req.project_path and req.project_path != ".":
         from pathlib import Path
+
         project = Path(req.project_path).resolve()
         if project.is_dir():
             cwd = str(project)

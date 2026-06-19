@@ -9,10 +9,8 @@ Endpoints:
     GET  /auto-correction/status     — view auto-correction status
 """
 
-
-
 import logging
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -173,8 +171,8 @@ async def search_whiteboard(
 @limiter.limit("120/minute")
 async def get_whiteboard_thread(
     request: Request,
-    _auth: None = Depends(require_auth),
     entry_id: str,
+    _auth: None = Depends(require_auth),
 ) -> dict[str, Any]:
     """Return an entry and all related entries recursively."""
     shm = get_shared_memory()
@@ -195,8 +193,8 @@ async def get_whiteboard_thread(
 @limiter.limit("120/minute")
 async def get_reviews(
     request: Request,
-    _auth: None = Depends(require_auth),
     artifact_id: str,
+    _auth: None = Depends(require_auth),
 ) -> dict[str, Any]:
     """Return all reviews and their results for an artifact."""
     prs = get_peer_review_system()
@@ -268,8 +266,8 @@ async def create_debate(
 @limiter.limit("120/minute")
 async def get_debate(
     request: Request,
-    _auth: None = Depends(require_auth),
     debate_id: str,
+    _auth: None = Depends(require_auth),
 ) -> dict[str, Any]:
     """Retrieve the result of a previously run debate."""
     result = get_debate_result(debate_id)

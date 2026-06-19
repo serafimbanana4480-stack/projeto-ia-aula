@@ -14,7 +14,17 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
+from backend.config.settings import get_settings as _get_settings
 from backend.middleware.auth import decode_access_token
+
+
+def _is_dev_mode() -> bool:
+    try:
+        return _get_settings().environment == "development"
+    except Exception:
+        return True
+
+
 from backend.observability.metrics_collector import get_metrics_collector
 from backend.observability.metrics_store import get_metrics_store
 from backend.persistence.db import (
@@ -89,9 +99,7 @@ def _validate_stream_auth(request: Request, token: str | None) -> None:
     """Authenticate SSE clients that cannot send Authorization headers."""
     auth_header = request.headers.get("Authorization", "")
     bearer = (
-        auth_header.removeprefix("Bearer ").strip()
-        if auth_header.startswith("Bearer ")
-        else None
+        auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else None
     )
     jwt_token = bearer or token
     if not jwt_token:
@@ -114,16 +122,44 @@ async def get_metrics_index(request: Request) -> dict:
 
 @router.get("/metrics/current")
 async def get_current_metrics(request: Request) -> dict:
-    """Get current metrics snapshot."""
+    """Get current metrics snapshot. No auth required in dev mode."""
     return await _build_current_metrics_payload(request)
+
+
+@router.get("/dashboard/stream")
+async def dashboard_metrics_stream(
+    request: Request,
+    token: str | None = None,
+) -> StreamingResponse:
+    """Stream metrics snapshots over SSE for the dashboard.
+
+    In development mode, no auth is required. In production, requires
+    a valid JWT token as query parameter or Authorization header.
+    """
+    if not _is_dev_mode():
+        _validate_stream_auth(request, token)
+
+    async def event_stream() -> AsyncIterator[str]:
+        while True:
+            payload = await _build_current_metrics_payload(request)
+            yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+            await asyncio.sleep(3)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("/metrics/history")
 async def get_metrics_history(
     seconds: int = Query(3600, ge=1, description="Time window in seconds"),
-    metric: str = Query(
-        "tokens_per_second", description="Metric name to retrieve history for"
-    ),
+    metric: str = Query("tokens_per_second", description="Metric name to retrieve history for"),
 ) -> dict:
     """Return historical timeline data for a single metric.
 
@@ -147,31 +183,6 @@ async def get_metrics_history(
         "seconds": seconds,
         "data": timeline,
     }
-
-
-@router.get("/dashboard/stream")
-async def dashboard_metrics_stream(
-    request: Request,
-    token: str | None = Query(None, description="JWT for EventSource clients"),
-) -> StreamingResponse:
-    """Stream metrics snapshots over SSE for the dashboard."""
-    _validate_stream_auth(request, token)
-
-    async def event_stream() -> AsyncIterator[str]:
-        while True:
-            payload = await _build_current_metrics_payload(request)
-            yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
-            await asyncio.sleep(3)
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
 
 
 @router.get("/models/status")

@@ -233,7 +233,7 @@ def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_file = tmp_path / "test_nexus.db"
     monkeypatch.setattr("backend.persistence.db.DB_PATH", db_file)
     monkeypatch.setattr("backend.persistence.db.MAX_POOL_SIZE", 100)
-    from backend.persistence.db import init_db, close_pool
+    from backend.persistence.db import close_pool, init_db
 
     close_pool()
     init_db()

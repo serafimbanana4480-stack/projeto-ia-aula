@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
-
-from backend.observability.tracing import setup_tracing, trace_span, get_recent_spans, get_active_spans
+from backend.observability.tracing import (
+    get_active_spans,
+    get_recent_spans,
+    setup_tracing,
+    trace_span,
+)
 
 
 class TestSetupTracing:
@@ -34,7 +37,7 @@ class TestTraceSpan:
     def test_error_span(self) -> None:
         """Test that errors are captured in span status."""
         try:
-            with trace_span("test.error_span_check") as span:
+            with trace_span("test.error_span_check"):
                 raise ValueError("test error")
         except ValueError:
             pass
@@ -46,7 +49,7 @@ class TestTraceSpan:
 
     def test_active_spans(self) -> None:
         """Test that active spans are tracked while running."""
-        with trace_span("test.active_span_check") as span:
+        with trace_span("test.active_span_check"):
             active = get_active_spans()
             assert "test.active_span_check" in active
             assert active["test.active_span_check"]["name"] == "test.active_span_check"

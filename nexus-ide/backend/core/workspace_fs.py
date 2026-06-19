@@ -24,7 +24,6 @@ from backend.core.workspace_security import (
     logger,
 )
 
-
 _WINDOWS_TMP = None
 
 
@@ -72,7 +71,11 @@ def _verify_written(path: Path, expected_content: str) -> dict[str, Any]:
     on large writes — verification is most valuable for small config/code files.
     """
     if len(expected_content) > 1_048_576:  # 1 MB
-        return {"ok": True, "size": len(expected_content), "skipped": "file too large for verification"}
+        return {
+            "ok": True,
+            "size": len(expected_content),
+            "skipped": "file too large for verification",
+        }
     try:
         actual = path.read_text(encoding="utf-8")
         if actual == expected_content:

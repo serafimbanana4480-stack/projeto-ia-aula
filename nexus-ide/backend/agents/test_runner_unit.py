@@ -14,9 +14,7 @@ Supports autonomous execution via ReAct loop:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-
-from .base import AgentAction, AgentBase, AgentRequest
+from .base import AgentAction, AgentBase
 
 
 class TestRunnerUnitAgent(AgentBase):
@@ -41,5 +39,3 @@ class TestRunnerUnitAgent(AgentBase):
         AgentAction.WRITE_FILE,
         AgentAction.CONSULT_AGENT,
     }
-
-

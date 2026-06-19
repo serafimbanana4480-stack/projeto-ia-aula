@@ -7,7 +7,7 @@ import time
 import pytest
 
 from backend.agents.base import AgentAction
-from backend.agents.overseer import AgentHealthRecord, MissionRecord, OverseerAgent
+from backend.agents.overseer import OverseerAgent
 
 
 @pytest.fixture
@@ -55,9 +55,7 @@ class TestOverseerHealthTracking:
     @pytest.mark.asyncio
     async def test_detect_conflicts(self, overseer):
         await overseer.record_agent_event("CODER", "file_locked", {"path": "/src/main.py"})
-        await overseer.record_agent_event(
-            "DEBUGGER", "iteration", {"current_file": "/src/main.py"}
-        )
+        await overseer.record_agent_event("DEBUGGER", "iteration", {"current_file": "/src/main.py"})
         dashboard = overseer.get_dashboard()
         conflicts = dashboard["file_conflicts"]
         assert len(conflicts) == 1

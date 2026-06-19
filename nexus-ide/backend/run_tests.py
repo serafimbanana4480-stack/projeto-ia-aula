@@ -219,7 +219,7 @@ def test_5_file_api_integration():
         if spec is None:
             found_any = False
             locations = []
-            for root, dirs, files in os.walk(str(BACKEND_ROOT)):
+            for root, _dirs, files in os.walk(str(BACKEND_ROOT)):
                 for f in files:
                     if f == "file_api.py":
                         locations.append(os.path.join(root, f))

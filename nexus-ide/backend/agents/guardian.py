@@ -7,6 +7,7 @@ Runs every 30 seconds in a background task.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -85,10 +86,8 @@ class NexusGuardianAgent:
         self._running = False
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
         logger.info("Nexus Guardian stopped")
 
     async def monitor_loop(self) -> None:
@@ -300,7 +299,9 @@ class NexusGuardianAgent:
                 "cpu_percent": latest.cpu_percent if latest else 0,
                 "memory_percent": latest.memory_percent if latest else 0,
                 "disk_percent": latest.disk_percent if latest else 0,
-            } if latest else None,
+            }
+            if latest
+            else None,
             "suggestion_count": len(self._suggestions),
             "pending_suggestions": len([s for s in self._suggestions if not s.applied]),
             "health_history_count": len(self._health_history),
@@ -322,17 +323,19 @@ class NexusGuardianAgent:
                 continue
             if priority and s.priority != priority:
                 continue
-            results.append({
-                "id": s.id,
-                "category": s.category,
-                "priority": s.priority,
-                "title": s.title,
-                "description": s.description,
-                "action": s.action,
-                "auto_fixable": s.auto_fixable,
-                "created_at": datetime.fromtimestamp(s.created_at, UTC).isoformat(),
-                "applied": s.applied,
-            })
+            results.append(
+                {
+                    "id": s.id,
+                    "category": s.category,
+                    "priority": s.priority,
+                    "title": s.title,
+                    "description": s.description,
+                    "action": s.action,
+                    "auto_fixable": s.auto_fixable,
+                    "created_at": datetime.fromtimestamp(s.created_at, UTC).isoformat(),
+                    "applied": s.applied,
+                }
+            )
             if len(results) >= limit:
                 break
         return results

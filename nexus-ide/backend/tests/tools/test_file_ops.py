@@ -18,9 +18,7 @@ from backend.tools.file_ops import (
 @pytest.fixture(autouse=True)
 def mock_propose_change(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mock propose_change to avoid database dependency."""
-    monkeypatch.setattr(
-        "backend.tools.file_ops.propose_change", MagicMock()
-    )
+    monkeypatch.setattr("backend.tools.file_ops.propose_change", MagicMock())
 
 
 class TestValidatePath:
@@ -41,9 +39,7 @@ class TestValidatePath:
         result = _validate_path(str(project), str(target))
         assert result == target.resolve()
 
-    def test_path_outside_project_raises_permission_error(
-        self, tmp_path: Path
-    ) -> None:
+    def test_path_outside_project_raises_permission_error(self, tmp_path: Path) -> None:
         """Test that path outside project raises PermissionError."""
         project = tmp_path / "project"
         project.mkdir()
@@ -113,9 +109,7 @@ class TestWriteFile:
         test_file = tmp_path / "existing.txt"
         test_file.write_text("Old content", encoding="utf-8")
 
-        result = await write_file(
-            "existing.txt", "New content", str(tmp_path)
-        )
+        result = await write_file("existing.txt", "New content", str(tmp_path))
         assert "error" not in result
 
         # Verify file was overwritten
@@ -124,9 +118,7 @@ class TestWriteFile:
     @pytest.mark.asyncio
     async def test_write_creates_parent_directories(self, tmp_path: Path) -> None:
         """Test that write_file creates parent directories."""
-        result = await write_file(
-            "subdir/nested/file.txt", "Content", str(tmp_path)
-        )
+        result = await write_file("subdir/nested/file.txt", "Content", str(tmp_path))
         assert result["written"] is True
 
         # Verify directories were created
@@ -235,6 +227,7 @@ class TestSearchInFiles:
         assert "preview" in result["results"][0]
         assert len(result["results"][0]["preview"]) > 0
 
+
 class TestReadMultipleFiles:
     """Test reading multiple files in one call."""
 
@@ -243,9 +236,7 @@ class TestReadMultipleFiles:
         (tmp_path / "a.txt").write_text("content a", encoding="utf-8")
         (tmp_path / "b.txt").write_text("content b", encoding="utf-8")
 
-        result = await read_multiple_files(
-            ["a.txt", "b.txt"], project_path=str(tmp_path)
-        )
+        result = await read_multiple_files(["a.txt", "b.txt"], project_path=str(tmp_path))
 
         assert result["read_count"] == 2
         assert result["files"][str(tmp_path / "a.txt")] == "content a"
@@ -255,18 +246,14 @@ class TestReadMultipleFiles:
     async def test_read_multiple_files_with_missing(self, tmp_path: Path) -> None:
         (tmp_path / "a.txt").write_text("content a", encoding="utf-8")
 
-        result = await read_multiple_files(
-            ["a.txt", "missing.txt"], project_path=str(tmp_path)
-        )
+        result = await read_multiple_files(["a.txt", "missing.txt"], project_path=str(tmp_path))
 
         assert result["read_count"] == 1
         assert "File not found" in result["errors"][str(tmp_path / "missing.txt")]
 
     @pytest.mark.asyncio
     async def test_read_multiple_files_outside_project(self, tmp_path: Path) -> None:
-        result = await read_multiple_files(
-            ["../etc/passwd"], project_path=str(tmp_path)
-        )
+        result = await read_multiple_files(["../etc/passwd"], project_path=str(tmp_path))
 
         assert result["read_count"] == 0
         assert "not allowed" in result["errors"]["../etc/passwd"]

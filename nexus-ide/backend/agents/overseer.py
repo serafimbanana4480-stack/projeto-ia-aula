@@ -200,14 +200,10 @@ class OverseerAgent(AgentBase):
         """Return the full overseer dashboard."""
         return {
             "timestamp": datetime.now(UTC).isoformat(),
-            "agents": {
-                name: self._record_to_dict(r) for name, r in self._health.items()
-            },
+            "agents": {name: self._record_to_dict(r) for name, r in self._health.items()},
             "file_conflicts": self._detect_conflicts_sync(),
             "stuck_agents": self._detect_stuck_sync(),
-            "missions": [
-                self._mission_to_dict(m) for m in self._missions.values()
-            ],
+            "missions": [self._mission_to_dict(m) for m in self._missions.values()],
             "interventions": list(self._intervention_log),
         }
 
@@ -235,9 +231,7 @@ class OverseerAgent(AgentBase):
         """
         valid_actions = {"pause", "resume", "abort", "escalate"}
         if action not in valid_actions:
-            return {
-                "error": f"Invalid action '{action}'. Valid: {valid_actions}"
-            }
+            return {"error": f"Invalid action '{action}'. Valid: {valid_actions}"}
 
         async with self._lock:
             record = self._health.get(agent_name)
@@ -290,9 +284,7 @@ class OverseerAgent(AgentBase):
             "timestamp": time.time(),
         }
 
-    def check_quality_gate(
-        self, agent_name: str, file_path: str
-    ) -> dict[str, Any]:
+    def check_quality_gate(self, agent_name: str, file_path: str) -> dict[str, Any]:
         """Check whether code can be marked done."""
         record = self._quality_gate_records.get(file_path)
         if not record:
@@ -307,9 +299,7 @@ class OverseerAgent(AgentBase):
     # ------------------------------------------------------------------
     # Mission tracking
     # ------------------------------------------------------------------
-    def start_mission(
-        self, mission_id: str, name: str, agents: list[str]
-    ) -> None:
+    def start_mission(self, mission_id: str, name: str, agents: list[str]) -> None:
         """Track a new autonomous mission."""
         self._missions[mission_id] = MissionRecord(
             mission_id=mission_id,

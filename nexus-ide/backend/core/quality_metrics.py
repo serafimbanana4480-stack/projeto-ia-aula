@@ -7,9 +7,8 @@ import logging
 import math
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ class QualityMetrics:
     technical_debt_ratio: float = 0.0
 
 
-def _run_cmd(cmd: list[str], cwd: Optional[str] = None) -> tuple[int, str, str]:
+def _run_cmd(cmd: list[str], cwd: str | None = None) -> tuple[int, str, str]:
     try:
         result = subprocess.run(
             cmd,
@@ -170,13 +169,7 @@ async def _measure_complexity(project_path: str) -> float:
 async def _measure_maintainability(cyclomatic_complexity: float, duplication_ratio: float) -> float:
     try:
         cc = cyclomatic_complexity if cyclomatic_complexity > 0 else 1.0
-        raw = (
-            171
-            - 5.2 * math.log(cc)
-            - 0.23 * cc
-            - 16.2 * math.log(cc)
-            - 50 * duplication_ratio
-        )
+        raw = 171 - 5.2 * math.log(cc) - 0.23 * cc - 16.2 * math.log(cc) - 50 * duplication_ratio
         return round(max(0.0, min(100.0, raw)), 2)
     except Exception:
         return 100.0
@@ -221,7 +214,7 @@ async def _measure_lint(project_path: str) -> float:
                 issue_indicators += 1
             if "import *" in stripped:
                 issue_indicators += 1
-            if "except:" == stripped:
+            if stripped == "except:":
                 issue_indicators += 1
     issue_indicators += sum(
         1
@@ -376,7 +369,7 @@ def _compare_single(prev_value, new_value, metric_name: str) -> str:
     return "unchanged"
 
 
-def compare(project_path: str, baseline: Optional[QualityMetrics] = None) -> dict:
+def compare(project_path: str, baseline: QualityMetrics | None = None) -> dict:
     import asyncio
 
     current = asyncio.get_event_loop().run_until_complete(measure(project_path))

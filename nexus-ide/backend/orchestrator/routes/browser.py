@@ -11,13 +11,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.middleware.auth import require_auth
 from backend.tools.browser_automation import (
-    browser_navigate,
     browser_click,
-    browser_fill,
-    browser_extract_text,
-    browser_screenshot,
-    browser_get_links,
     browser_close,
+    browser_extract_text,
+    browser_fill,
+    browser_get_links,
+    browser_navigate,
+    browser_screenshot,
 )
 
 router = APIRouter()

@@ -194,9 +194,7 @@ async def delete_file(path: str, project_path: str = ".") -> dict:
         return {"error": f"Failed to delete file: {e}"}
 
 
-async def delete_directory(
-    path: str, project_path: str = ".", move_to_trash: bool = True
-) -> dict:
+async def delete_directory(path: str, project_path: str = ".", move_to_trash: bool = True) -> dict:
     """Delete a directory recursively with optional trash backup.
 
     Args:
@@ -221,8 +219,7 @@ async def delete_directory(
         if full_path.name.lower() in critical_dirs:
             return {
                 "error": (
-                    f"Deletion of protected directory '{full_path.name}' "
-                    "is blocked for safety"
+                    f"Deletion of protected directory '{full_path.name}' is blocked for safety"
                 )
             }
 
@@ -260,7 +257,10 @@ register_tool(
         schema={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Directory path relative to project root"},
+                "path": {
+                    "type": "string",
+                    "description": "Directory path relative to project root",
+                },
                 "project_path": {
                     "type": "string",
                     "default": ".",
@@ -280,7 +280,10 @@ register_tool(
         schema={
             "type": "object",
             "properties": {
-                "src": {"type": "string", "description": "Source file path relative to project root"},
+                "src": {
+                    "type": "string",
+                    "description": "Source file path relative to project root",
+                },
                 "dest": {
                     "type": "string",
                     "description": "Destination file path relative to project root",
@@ -304,7 +307,10 @@ register_tool(
         schema={
             "type": "object",
             "properties": {
-                "src": {"type": "string", "description": "Source file path relative to project root"},
+                "src": {
+                    "type": "string",
+                    "description": "Source file path relative to project root",
+                },
                 "dest": {
                     "type": "string",
                     "description": "Destination file path relative to project root",
@@ -348,7 +354,10 @@ register_tool(
         schema={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Directory path relative to project root"},
+                "path": {
+                    "type": "string",
+                    "description": "Directory path relative to project root",
+                },
                 "project_path": {
                     "type": "string",
                     "default": ".",
@@ -385,5 +394,3 @@ register_tool(
         handler=get_file_info,
     )
 )
-
-

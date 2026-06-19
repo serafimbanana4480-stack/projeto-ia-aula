@@ -1,7 +1,5 @@
 """Tests for backend exceptions."""
 
-import pytest
-
 from backend.exceptions import (
     AgentError,
     ConfigurationError,

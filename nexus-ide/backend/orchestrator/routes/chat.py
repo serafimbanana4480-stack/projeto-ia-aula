@@ -22,12 +22,14 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from backend.agents.base import AgentRequest
-from backend.config.settings import get_mode_config, get_settings, load_models_config, resolve_project_path
+from backend.config.settings import (
+    get_mode_config,
+    resolve_project_path,
+)
 from backend.llm.multi_llm_manager import MultiLLMManager
 from backend.middleware.auth import require_auth
 from backend.middleware.rate_limit import limiter
@@ -37,6 +39,7 @@ from backend.orchestrator.registry import get_registry, resolve
 from backend.orchestrator.router import fast_route, route_with_model
 from backend.orchestrator.routing_config import MODEL_TIER_TO_AGENT as _MODEL_TIER_TO_AGENT
 from backend.orchestrator.smart_router import smart_route_tier
+from backend.orchestrator.swarm import SwarmOrchestrator
 from backend.persistence.db import add_message, create_session, get_session
 from backend.tools.ollama_client import ChatMessage
 from backend.tools.sanitizer import detect_injection
@@ -59,12 +62,24 @@ _INLINE_EVENT_RE = re.compile(r"<event>([^|>]+)(?:\|(.*?))?</event>", re.DOTALL)
 def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
     """Parse <event>...</event> tags produced by agents into structured events.
 
+    Also extracts ``<think>...</think>`` blocks (e.g. from DeepSeek / Qwen)
+    and emits them as proper ``thinking`` events for the dashboard feed.
+
     Returns a list of StreamEvents. Any non-event text is returned as a token
     event. Multiple inline events in one token are supported.
     """
     events: list[StreamEvent] = []
     last_end = 0
     has_event = False
+
+    # First pass: extract <think>...</think> blocks and emit them as thinking events.
+    think_re = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+    for m in think_re.finditer(token):
+        content = m.group(1).strip()
+        if content:
+            events.append(StreamEvent(type="thinking", agent=agent, content=content))
+        # Replace the <think> block with a marker so the event scanner skips it
+        token = token.replace(m.group(0), "", 1)
 
     for match in _INLINE_EVENT_RE.finditer(token):
         has_event = True
@@ -133,7 +148,6 @@ def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
             events.append(StreamEvent(type="token", agent=agent, content=plain))
 
     return events
-
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +289,12 @@ async def _stream_autonomous_execution(
                     yield _sse(StreamEvent(type="token", agent=agent, content=content))
                 elif et == EventType.THINKING and content:
                     yield _sse(StreamEvent(type="thinking", agent=agent, content=content))
+                    # Also publish to the dashboard thinking feed (non-blocking)
+                    try:
+                        from backend.orchestrator.routes.thinking import publish_thought
+                        publish_thought(agent=agent, phase="thinking", text=content, model=data.get("model"))
+                    except Exception:
+                        pass
                 elif et in (
                     EventType.TASK_STARTED,
                     EventType.TASK_COMPLETED,
@@ -338,7 +358,7 @@ async def _stream_autonomous_execution(
                 yield ev
             except StopAsyncIteration:
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
         result = await engine_result_future
@@ -532,7 +552,7 @@ async def _run_pipeline(
         yield _sse(
             StreamEvent(
                 type="error",
-                content=f"Unknown model tier '{user_model}'. Allowed: {', '.join(sorted(ALLOWED_MODEL_TIERS))}",
+                content=f"Tier de modelo desconhecido '{user_model}'. Permitidos: {', '.join(sorted(ALLOWED_MODEL_TIERS))}",
             )
         )
         yield _sse(StreamEvent(type="done"))
@@ -555,7 +575,7 @@ async def _run_pipeline(
         yield _sse(
             StreamEvent(
                 type="error",
-                content=f"Unknown provider '{req_provider}'. Allowed: {', '.join(sorted(ALLOWED_PROVIDERS))}",
+                content=f"Provider desconhecido '{req_provider}'. Permitidos: {', '.join(sorted(ALLOWED_PROVIDERS))}",
             )
         )
         yield _sse(StreamEvent(type="done"))
@@ -784,10 +804,8 @@ async def _run_pipeline(
         )
     elif mode == "swarm":
         try:
-            from backend.orchestrator.swarm import SwarmOrchestrator
-
             swarm_agents = getattr(req, "swarm_agents", []) or []
-            swarm_strategy = getattr(req, "swarm_strategy", "divide") or "divide"
+            swarm_strategy = getattr(req, "swarm_strategy", "adaptive") or "adaptive"
 
             if not swarm_agents:
                 swarm_agents = ["ARCHITECT", "CODER", "ANALYZER"]
@@ -899,9 +917,7 @@ async def _run_pipeline(
             StreamEvent(
                 type="token",
                 agent=decision.primary_agent,  # type: ignore[arg-type]
-                content=(
-                    f"⚠ Nenhum projeto selecionado — a usar diretório raiz: {project_path}\n"
-                ),
+                content=(f"⚠ Nenhum projeto selecionado — a usar diretório raiz: {project_path}\n"),
             )
         )
 
@@ -963,13 +979,24 @@ async def _run_pipeline(
         )
     except Exception as exc:
         logger.exception("All fallbacks exhausted: %s", exc)
-        yield _sse(
-            StreamEvent(
-                type="error",
-                content="Upstream unavailable: all LLM providers failed. Please try again later.",
-            )
-        )
+        err_text = "Upstream unavailable: all LLM providers failed. Please try again later."
+        yield _sse(StreamEvent(type="error", content=err_text))
         yield _sse(StreamEvent(type="done"))
+        # Persist the user message + an explicit error assistant message so
+        # the error stays visible after a refresh.
+        try:
+            err_now = datetime.now(UTC).isoformat()
+            await context.append_message(
+                req.session_id, ChatMessage(role="user", content=req.message, timestamp=err_now)
+            )
+            await context.append_message(
+                req.session_id,
+                ChatMessage(role="assistant", content=f"⚠ {err_text}", timestamp=err_now),
+            )
+            add_message(req.session_id, "user", req.message)
+            add_message(req.session_id, "assistant", f"⚠ {err_text}")
+        except Exception as persist_exc:  # pragma: no cover
+            logger.debug("Failed to persist error to DB: %s", persist_exc)
         return
 
     yield _sse(StreamEvent(type="agent_started", agent=outcome.used_agent))  # type: ignore[arg-type]
@@ -977,24 +1004,89 @@ async def _run_pipeline(
     # 5. Stream tokens and accumulate full response for history.
     parts: list[str] = []
     MAX_RESPONSE_LENGTH = 100_000  # ~100k chars to prevent memory DoS
+    think_buffer: str = ""  # accumulates <think>...</think> blocks that may span multiple tokens
     try:
         async for token in token_stream:
-            # Convert inline <event> tags from the agent into structured SSE
-            # events (tool_call / tool_result / tool_error) while keeping plain
-            # text as regular tokens.
-            parsed_events = _parse_inline_events(token, outcome.used_agent)  # type: ignore[arg-type]
-            for evt in parsed_events:
-                if evt.type == "token":
-                    parts.append(evt.content or "")
-                yield _sse(evt)
+            # Detect streaming <think>...</think> blocks. Some providers (DeepSeek,
+            # Qwen) emit the open/close tags in different SSE chunks, so we need
+            # to buffer the chunks until we either see the close tag or determine
+            # this is a regular text token.
+            think_buffer += token
+            think_match = re.search(r"<think>(.*?)</think>", think_buffer, re.DOTALL)
+            if think_match:
+                # Flush the thinking block as a proper "thinking" SSE event.
+                content = think_match.group(1).strip()
+                if content:
+                    yield _sse(StreamEvent(type="thinking", agent=outcome.used_agent, content=content))
+                    try:
+                        from backend.orchestrator.routes.thinking import publish_thought
+                        publish_thought(agent=outcome.used_agent, phase="thinking", text=content, model=None)
+                    except Exception:
+                        pass
+                # Anything before the open tag and after the close tag is plain text.
+                before = think_buffer[: think_match.start()]
+                after = think_buffer[think_match.end() :]
+                # Reset the buffer with the trailing plain text (if any).
+                think_buffer = after
+                # Emit the leading plain text as a token.
+                if before:
+                    parsed_before = _parse_inline_events(before, outcome.used_agent)
+                    for evt in parsed_before:
+                        if evt.type == "token":
+                            parts.append(evt.content or "")
+                        yield _sse(evt)
+            elif "<think>" in think_buffer and "</think>" not in think_buffer:
+                # Open tag seen, close not yet. Keep buffering; emit nothing yet.
+                continue
+            elif "<think>" not in think_buffer and "</think>" not in think_buffer:
+                # No thinking tags at all. Parse and emit as usual.
+                parsed_events = _parse_inline_events(think_buffer, outcome.used_agent)
+                for evt in parsed_events:
+                    if evt.type == "token":
+                        parts.append(evt.content or "")
+                    yield _sse(evt)
+                think_buffer = ""
+            else:
+                # Close tag without open? Emit as text and reset.
+                parsed_events = _parse_inline_events(think_buffer, outcome.used_agent)
+                for evt in parsed_events:
+                    if evt.type == "token":
+                        parts.append(evt.content or "")
+                    yield _sse(evt)
+                think_buffer = ""
             # Prevent unbounded memory growth
             if sum(len(p) for p in parts) > MAX_RESPONSE_LENGTH:
                 logger.warning("Response exceeded max length, truncating")
                 break
+        # Flush any leftover think_buffer at end of stream.
+        if think_buffer:
+            parsed_events = _parse_inline_events(think_buffer, outcome.used_agent)
+            for evt in parsed_events:
+                if evt.type == "token":
+                    parts.append(evt.content or "")
+                yield _sse(evt)
+            think_buffer = ""
     except Exception as exc:
         logger.exception("Stream interrupted: %s", exc)
+        err_text = f"Stream interrupted: {exc}"
         yield _sse(StreamEvent(type="error", content="Stream interrupted. Please try again."))
         yield _sse(StreamEvent(type="done"))
+        # Persist the user message + an explicit error assistant message so
+        # the error stays visible after a refresh (otherwise it would be
+        # silently lost when getSessionHistory loads from the DB).
+        try:
+            err_now = datetime.now(UTC).isoformat()
+            await context.append_message(
+                req.session_id, ChatMessage(role="user", content=req.message, timestamp=err_now)
+            )
+            await context.append_message(
+                req.session_id,
+                ChatMessage(role="assistant", content=f"⚠ {err_text}", timestamp=err_now),
+            )
+            add_message(req.session_id, "user", req.message)
+            add_message(req.session_id, "assistant", f"⚠ {err_text}")
+        except Exception as persist_exc:  # pragma: no cover - best-effort
+            logger.debug("Failed to persist error to DB: %s", persist_exc)
         return
 
     # 6. Persist exchange.

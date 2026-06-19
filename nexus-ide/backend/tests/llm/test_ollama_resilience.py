@@ -4,27 +4,37 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from backend.llm.factory import MockProvider, ResilientLLMProvider, _build_fallback_chain
-from backend.llm.airllm_provider import AIRLLM_AVAILABLE, CircuitBreaker, CircuitState, AirLLMProvider, LocalLLMError
+from backend.llm.airllm_provider import (
+    AIRLLM_AVAILABLE,
+    AirLLMProvider,
+    CircuitBreaker,
+    CircuitState,
+)
 from backend.llm.dev_provider import DevProvider
+from backend.llm.factory import MockProvider, ResilientLLMProvider, _build_fallback_chain
+
 OllamaProvider = AirLLMProvider  # backwards-compat alias for existing tests
 from backend.tests.conftest import make_stream_response
 from backend.tools.ollama_client import ChatMessage, OllamaClient, OllamaError
-
 
 # ---------------------------------------------------------------------------
 # Retry logic tests
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="OllamaClient is now a shim over AirLLMProvider; HTTP retry logic is no longer applicable")
+@pytest.mark.skip(
+    reason="OllamaClient is now a shim over AirLLMProvider; HTTP retry logic is no longer applicable"
+)
 class TestRetryLogic:
-    async def test_retry_on_connect_error_then_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_retry_on_connect_error_then_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Transport errors should be retried up to 3 times with backoff."""
         sleeps: list[float] = []
 
@@ -218,7 +228,9 @@ class TestHealthCheckAirLLM:
         finally:
             await client.aclose()
 
-    async def test_health_check_failure_when_airllm_not_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_health_check_failure_when_airllm_not_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Should return False when AirLLM is not available."""
         monkeypatch.setattr("backend.llm.airllm_provider.AIRLLM_AVAILABLE", False)
         client = AirLLMProvider()
@@ -233,7 +245,9 @@ class TestHealthCheckAirLLM:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="OllamaClient embed via HTTP is obsolete; AirLLMProvider uses local sentence-transformers")
+@pytest.mark.skip(
+    reason="OllamaClient embed via HTTP is obsolete; AirLLMProvider uses local sentence-transformers"
+)
 class TestEmbed:
     async def test_embed_success(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:

@@ -15,12 +15,9 @@ New capabilities over web_search.py v1:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from html import unescape
 from typing import Any
 from urllib.parse import quote_plus, unquote, urlparse
 
@@ -97,7 +94,7 @@ async def _request_with_retry(
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (429, 500, 502, 503, 504):
                 last_exception = e
-                delay = BASE_DELAY * (2 ** attempt)
+                delay = BASE_DELAY * (2**attempt)
                 logger.warning(
                     "Request failed (attempt %d/%d), retrying in %.1fs: %s",
                     attempt + 1,
@@ -110,7 +107,7 @@ async def _request_with_retry(
                 raise
         except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as e:
             last_exception = e
-            delay = BASE_DELAY * (2 ** attempt)
+            delay = BASE_DELAY * (2**attempt)
             logger.warning(
                 "Request failed (attempt %d/%d), retrying in %.1fs: %s",
                 attempt + 1,
@@ -173,7 +170,10 @@ def _parse_age_hint(age_hint: str) -> float:
         return 0.5  # neutral
     age_lower = age_hint.lower()
     # Very recent
-    if any(x in age_lower for x in ("just now", "minute ago", "minutes ago", "hour ago", "hours ago", "today")):
+    if any(
+        x in age_lower
+        for x in ("just now", "minute ago", "minutes ago", "hour ago", "hours ago", "today")
+    ):
         return 1.0
     # Recent
     if any(x in age_lower for x in ("day ago", "days ago", "yesterday")):
@@ -374,12 +374,16 @@ async def _search_duckduckgo(
                     if match:
                         href = unquote(match.group(1))
 
-                snippet_tag = result.select_one(".result__snippet") or result.select_one(".result__snippet")
+                snippet_tag = result.select_one(".result__snippet") or result.select_one(
+                    ".result__snippet"
+                )
                 snippet = snippet_tag.get_text(strip=True) if snippet_tag else ""
 
                 # Try to extract age hint
                 age_hint = ""
-                age_tag = result.select_one(".result__timestamp") or result.select_one(".result__date")
+                age_tag = result.select_one(".result__timestamp") or result.select_one(
+                    ".result__date"
+                )
                 if age_tag:
                     age_hint = age_tag.get_text(strip=True)
 
@@ -426,9 +430,13 @@ async def search_web(
     clean_query, site_from_query = _extract_site_filter(query)
     site_filter = site or site_from_query
 
-    hits = await _search_brave(clean_query, max_results=max_results, site_filter=site_filter, recency_days=recency_days)
+    hits = await _search_brave(
+        clean_query, max_results=max_results, site_filter=site_filter, recency_days=recency_days
+    )
     if not hits:
-        hits = await _search_duckduckgo(clean_query, max_results=max_results, site_filter=site_filter, recency_days=recency_days)
+        hits = await _search_duckduckgo(
+            clean_query, max_results=max_results, site_filter=site_filter, recency_days=recency_days
+        )
 
     hits = _rank_hits(clean_query, hits)
     return {
@@ -622,7 +630,7 @@ async def fetch_and_summarize(url: str, max_length: int = 500) -> dict[str, Any]
         return {
             "url": url,
             "title": "",
-            "summary": f"Error fetching URL: unable to retrieve content",
+            "summary": "Error fetching URL: unable to retrieve content",
             "content": "",
             "published_date": "",
             "content_length": 0,
@@ -713,7 +721,7 @@ async def search_and_answer(query: str, max_results: int = 5) -> dict[str, Any]:
     fetched_list = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
     fetched: list[dict[str, Any]] = []
-    for hit, content in zip(hits, fetched_list):
+    for hit, content in zip(hits, fetched_list, strict=False):
         if isinstance(content, Exception):
             logger.warning("Fetch failed for %s: %s", hit.url, content)
             continue
@@ -735,14 +743,14 @@ async def search_and_answer(query: str, max_results: int = 5) -> dict[str, Any]:
 
     # 4. Synthesize answer
     synthesis_parts = [f"# Research: {query}\n"]
-    synthesis_parts.append(f"\n*Confidence: {consensus['consensus_score']:.0%} consensus across sources*\n")
+    synthesis_parts.append(
+        f"\n*Confidence: {consensus['consensus_score']:.0%} consensus across sources*\n"
+    )
 
     synthesis_parts.append("\n## Sources\n")
     for i, item in enumerate(fetched, 1):
         date_str = f" ({item['published_date']})" if item.get("published_date") else ""
-        synthesis_parts.append(
-            f"{i}. [{item['title']}]({item['url']}){date_str}\n"
-        )
+        synthesis_parts.append(f"{i}. [{item['title']}]({item['url']}){date_str}\n")
 
     synthesis_parts.append("\n## Key Findings\n")
     for i, item in enumerate(fetched, 1):
@@ -1023,9 +1031,7 @@ register_tool(
 register_tool(
     ToolSpec(
         name="search_github",
-        description=(
-            "Search GitHub repositories by query, language, and minimum stars."
-        ),
+        description=("Search GitHub repositories by query, language, and minimum stars."),
         schema={
             "type": "object",
             "properties": {

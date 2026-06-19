@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -38,11 +37,13 @@ async def analyze_data(
     try:
         import pandas as pd  # noqa: F811
     except ImportError:
-        pd = None  # type: ignore[assignment]
+        pass  # type: ignore[assignment]
 
     try:
         if code:
-            return {"error": "The 'code' parameter is no longer supported for security reasons. Use 'data_path' and 'query' instead."}
+            return {
+                "error": "The 'code' parameter is no longer supported for security reasons. Use 'data_path' and 'query' instead."
+            }
 
         # Build analysis script
         script_parts = [
@@ -80,7 +81,7 @@ async def analyze_data(
 
             ext = full_path.suffix.lower()
             if ext == ".csv":
-                script_parts.append(f'df = pd.read_csv({repr(str(full_path))})')
+                script_parts.append(f"df = pd.read_csv({repr(str(full_path))})")
                 script_parts.append('print("Shape:", df.shape)')
                 script_parts.append('print("\\nColumns:", list(df.columns))')
                 script_parts.append('print("\\nDtypes:\\n", df.dtypes)')
@@ -90,21 +91,23 @@ async def analyze_data(
                     script_parts.append(f"# Query: {query}")
                     script_parts.append(f"print('Query:', {repr(query)})")
             elif ext == ".json":
-                script_parts.append(f'with open({repr(str(full_path))}) as f: data = json.load(f)')
+                script_parts.append(f"with open({repr(str(full_path))}) as f: data = json.load(f)")
                 script_parts.append("if isinstance(data, list) and len(data) > 0:")
                 script_parts.append("    df = pd.DataFrame(data)")
                 script_parts.append('    print("Shape:", df.shape)')
                 script_parts.append('    print("\\nColumns:", list(df.columns))')
                 script_parts.append('    print("\\nDescribe:\\n", df.describe().to_string())')
                 script_parts.append("else:")
-                script_parts.append('    print(json.dumps(data, indent=2)[:2000])')
+                script_parts.append("    print(json.dumps(data, indent=2)[:2000])")
             else:
                 return {"error": f"Unsupported file type: {ext}. Use .csv or .json"}
         elif query:
             # General analysis query (no data_path — informational only)
             script_parts.append(f"# Analysis query: {query}")
             script_parts.append(f"print('Query:', {repr(query)})")
-            script_parts.append("print('Provide a data_path to a CSV/JSON file for concrete analysis.')")
+            script_parts.append(
+                "print('Provide a data_path to a CSV/JSON file for concrete analysis.')"
+            )
         else:
             return {"error": "Provide at least one of: data_path, query, or code"}
 
@@ -124,14 +127,13 @@ async def analyze_data(
 
         try:
             result = await asyncio.create_subprocess_exec(
-                venv_python, tmp_path,
+                venv_python,
+                tmp_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(Path(project_path).resolve()),
             )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                result.communicate(), timeout=30
-            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(result.communicate(), timeout=30)
             output = stdout_bytes.decode("utf-8", errors="replace")
             if result.returncode != 0:
                 error = stderr_bytes.decode("utf-8", errors="replace")
@@ -148,9 +150,7 @@ async def analyze_data(
         return {"error": f"Analysis error: {e}"}
 
 
-async def _analyze_without_pandas(
-    data_path: str, query: str, project_path: str
-) -> dict:
+async def _analyze_without_pandas(data_path: str, query: str, project_path: str) -> dict:
     """Fallback analysis when pandas is not available."""
     import csv as csv_mod
 
@@ -189,7 +189,7 @@ async def _analyze_without_pandas(
             output = f"CSV: {full_path.name}\n"
             output += f"Columns ({len(headers)}): {', '.join(headers)}\n"
             output += f"Rows: {len(data_rows)}\n"
-            output += f"First 5 rows:\n"
+            output += "First 5 rows:\n"
             for row in data_rows[:5]:
                 output += f"  {row}\n"
             return {"output": output, "data_path": data_path}

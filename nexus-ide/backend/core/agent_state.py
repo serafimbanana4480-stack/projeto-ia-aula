@@ -167,8 +167,18 @@ class AgentStateStore:
                        value = excluded.value,
                        updated_at = excluded.updated_at,
                        importance_score = excluded.importance_score""",
-                (agent_name, session_id, project_path, tier, key, value_json,
-                 now, now, 0, importance),
+                (
+                    agent_name,
+                    session_id,
+                    project_path,
+                    tier,
+                    key,
+                    value_json,
+                    now,
+                    now,
+                    0,
+                    importance,
+                ),
             )
 
         logger.debug("Saved state %s/%s/%s/%s", agent_name, session_id, tier, key)
@@ -202,14 +212,15 @@ class AgentStateStore:
                    SET access_count = ?, importance_score = ?
                    WHERE agent_name = ? AND session_id = ? AND project_path = ?
                      AND memory_tier = ? AND key = ?""",
-                (new_access, new_importance, agent_name, session_id,
-                 project_path, tier, key),
+                (new_access, new_importance, agent_name, session_id, project_path, tier, key),
             )
 
         mem = _row_to_agent_state(row)
         mem.access_count = new_access
         mem.importance_score = new_importance
-        logger.debug("Loaded state %s/%s/%s/%s (access=%d)", agent_name, session_id, tier, key, new_access)
+        logger.debug(
+            "Loaded state %s/%s/%s/%s (access=%d)", agent_name, session_id, tier, key, new_access
+        )
         return mem
 
     def forget(
@@ -372,8 +383,9 @@ class AgentStateStore:
 
             deleted = cursor.rowcount
 
-        logger.info("Decayed memories for %s, deleted %d below floor",
-                    agent_name or "all agents", deleted)
+        logger.info(
+            "Decayed memories for %s, deleted %d below floor", agent_name or "all agents", deleted
+        )
         return deleted
 
     def clear_tier(

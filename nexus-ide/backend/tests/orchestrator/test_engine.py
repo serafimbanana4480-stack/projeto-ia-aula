@@ -26,7 +26,9 @@ from backend.orchestrator.engine import (
     ExecutionContext,
     OrchestrationEngine,
     OrchestrationState,
-    _extract_tool_errors,
+)
+from backend.orchestrator.engine import (
+    extract_tool_errors as _extract_tool_errors,
 )
 from backend.orchestrator.events import (
     EventBus,
@@ -428,7 +430,9 @@ class TestOrchestrationEngine:
         engine._registry["CODER"] = tool_fail_agent
 
         t1 = TaskNode(name="Write file", agent="CODER")
-        plan = ExecutionPlan.from_steps("Tool fail", "Should fail on tool error", [t1], session_id="s1")
+        plan = ExecutionPlan.from_steps(
+            "Tool fail", "Should fail on tool error", [t1], session_id="s1"
+        )
         plan.approved = True
 
         result = await engine.execute_plan(plan, "s1", auto_approve=True)

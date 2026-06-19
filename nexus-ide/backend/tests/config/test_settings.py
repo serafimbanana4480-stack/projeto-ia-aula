@@ -24,9 +24,11 @@ class TestSettingsDefaults:
         types and well-formedness, not specific default values.
         """
         s = Settings()
-        # Primary provider defaults to Ollama, while AirLLM stays experimental.
+        # Primary provider defaults to OpenRouter in current NEXUS IDE config;
+        # Ollama serves as the local fallback. The default is overridable via
+        # LLM_PROVIDER env var, so we only assert the value is a known provider.
         assert isinstance(s.llm_provider, str)
-        assert s.llm_provider == "ollama"
+        assert s.llm_provider in {"ollama", "openrouter", "openai", "anthropic", "deepseek", "kimi", "gemini"}
         assert isinstance(s.local_llm_device, str)
         assert s.local_llm_device
         assert isinstance(s.local_llm_dashboard_device, str)
@@ -82,9 +84,17 @@ class TestLoadModelsConfig:
         config = load_models_config()
         nano = config["models"]["nano"]
         # We verify structure + purpose, not a specific tag — the registry is
-        # configurable by design.
+        # configurable by design. The current NEXUS IDE routes all tiers to
+        # deepseek-v4-flash on OpenRouter; the assertion checks for a known
+        # model family without locking to a specific version.
         assert isinstance(nano["id"], str) and nano["id"]
-        assert "llama3.1" in nano["id"] or "Llama" in nano["id"] or "qwen" in nano["id"] or "Qwen" in nano["id"]
+        assert (
+            "llama3.1" in nano["id"]
+            or "Llama" in nano["id"]
+            or "qwen" in nano["id"]
+            or "Qwen" in nano["id"]
+            or "deepseek" in nano["id"].lower()
+        )
         assert nano["temperature"] == 0.1
         assert "routing" in nano["use_cases"]
 

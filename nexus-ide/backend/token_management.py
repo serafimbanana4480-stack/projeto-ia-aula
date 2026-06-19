@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +37,7 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
 
 class ContextOverflowError(ValueError):
     """Raised when the assembled context exceeds the model's context window capacity."""
+
     pass
 
 
@@ -57,6 +57,7 @@ def _get_tiktoken_encoding(model: str) -> object:
     if not _HAVE_TIKTOKEN:
         try:
             import tiktoken  # noqa: F811
+
             _HAVE_TIKTOKEN = True
         except ImportError:
             _HAVE_TIKTOKEN = False
@@ -76,10 +77,12 @@ def _get_tiktoken_encoding(model: str) -> object:
     if enc_key not in _TOKENIZER_CACHE:
         try:
             import tiktoken
+
             _TOKENIZER_CACHE[enc_key] = tiktoken.encoding_for_model(enc_key)
         except (KeyError, ValueError):
             try:
                 import tiktoken
+
                 _TOKENIZER_CACHE[enc_key] = tiktoken.get_encoding("cl100k_base")
             except Exception:
                 return None
@@ -120,7 +123,7 @@ def count_tokens_for_messages(messages: list[dict], model: str = "cl100k_base") 
     total = 0
     for msg in messages:
         total += 4  # Per-message overhead
-        for key, value in msg.items():
+        for _key, value in msg.items():
             if isinstance(value, str):
                 total += count_tokens(value, model)
             elif isinstance(value, list):
@@ -137,6 +140,7 @@ def count_tokens_for_messages(messages: list[dict], model: str = "cl100k_base") 
 # ---------------------------------------------------------------------------
 # Dynamic threshold (85% of model's true context window)
 # ---------------------------------------------------------------------------
+
 
 def dynamic_threshold(model_tier: str, safety_margin: float = 0.85) -> int:
     """Calculate dynamic context threshold based on model tier.
@@ -155,6 +159,7 @@ def dynamic_threshold(model_tier: str, safety_margin: float = 0.85) -> int:
 # ---------------------------------------------------------------------------
 # Context deduplication
 # ---------------------------------------------------------------------------
+
 
 def deduplicate_context_blocks(blocks: list[str]) -> list[str]:
     """Remove duplicate blocks from context before sending to the LLM.
@@ -188,6 +193,7 @@ def deduplicate_context_blocks(blocks: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 # Total budget validation
 # ---------------------------------------------------------------------------
+
 
 def validate_total_budget(
     system_tokens: int = 0,
@@ -236,6 +242,7 @@ def validate_total_budget(
 # Token waste estimation
 # ---------------------------------------------------------------------------
 
+
 def estimate_token_waste(
     cache_hit_rate: float = 0.0,
     dedup_savings: float = 0.0,
@@ -261,7 +268,6 @@ def estimate_token_waste(
 
 def _get_dedup_savings() -> float:
     """Get current deduplication savings (for metrics dashboard)."""
-    from backend.token_management import deduplicate_context_blocks
 
     # This would be tracked by a global counter in production
     return 0.0
@@ -270,6 +276,7 @@ def _get_dedup_savings() -> float:
 # ---------------------------------------------------------------------------
 # Trimming utilities
 # ---------------------------------------------------------------------------
+
 
 def trim_context_structured(
     iterations: list[dict],
@@ -301,7 +308,7 @@ def trim_context_structured(
     if len(iterations) <= min_iterations + 1:
         return iterations
 
-    protected = [iterations[0]] + iterations[-min_iterations:]
+    [iterations[0]] + iterations[-min_iterations:]
     compressible = iterations[1:-min_iterations]
 
     if not compressible:
@@ -341,15 +348,15 @@ def _compress_iterations(iterations: list[dict], model: str) -> list[dict]:
         thought = str(it.get("thought", ""))[:100]
         tool = it.get("tool", "")
         result_preview = str(it.get("result", ""))[:100]
-        summary_lines.append(
-            f"[Step {i+1}] {tool}: {thought} → {result_preview}"
-        )
+        summary_lines.append(f"[Step {i + 1}] {tool}: {thought} → {result_preview}")
 
     summary_text = "\n".join(summary_lines)
 
-    return [{
-        "type": "compressed_history",
-        "content": summary_text,
-        "original_count": len(iterations),
-        "role": "system",
-    }]
+    return [
+        {
+            "type": "compressed_history",
+            "content": summary_text,
+            "original_count": len(iterations),
+            "role": "system",
+        }
+    ]

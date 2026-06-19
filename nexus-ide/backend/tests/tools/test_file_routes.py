@@ -73,9 +73,7 @@ class TestListFilesRoute:
         assert {"a.py", "b.py", "sub"}.issubset(names)
         assert body["count"] >= 3
 
-    def test_list_directory_recursive_builds_tree(
-        self, client: TestClient, tmp_path: Path
-    ) -> None:
+    def test_list_directory_recursive_builds_tree(self, client: TestClient, tmp_path: Path) -> None:
         (tmp_path / "root.txt").write_text("root")
         sub = tmp_path / "sub"
         sub.mkdir()
@@ -117,9 +115,7 @@ class TestWriteFileRoute:
         assert body.get("written") is True
         assert (tmp_path / "new.py").read_text(encoding="utf-8") == "x = 1"
 
-    def test_write_creates_parent_directories(
-        self, client: TestClient, tmp_path: Path
-    ) -> None:
+    def test_write_creates_parent_directories(self, client: TestClient, tmp_path: Path) -> None:
         response = client.post(
             "/api/files/write",
             json={
@@ -131,9 +127,7 @@ class TestWriteFileRoute:
         assert response.status_code == 200
         assert (tmp_path / "src" / "utils" / "helpers.py").exists()
 
-    def test_write_blocked_executable_extension(
-        self, client: TestClient, tmp_path: Path
-    ) -> None:
+    def test_write_blocked_executable_extension(self, client: TestClient, tmp_path: Path) -> None:
         response = client.post(
             "/api/files/write",
             json={
@@ -182,9 +176,7 @@ class TestUploadRoute:
         assert "error" in body
         assert "size" in body["error"].lower()
 
-    def test_upload_rejects_disallowed_extension(
-        self, client: TestClient, tmp_path: Path
-    ) -> None:
+    def test_upload_rejects_disallowed_extension(self, client: TestClient, tmp_path: Path) -> None:
         response = client.post(
             "/api/files/upload",
             files={"file": ("malware.exe", b"MZ\x90\x00", "application/octet-stream")},
@@ -196,9 +188,7 @@ class TestUploadRoute:
         err = body["error"].lower()
         assert "allowlist" in err or "extension" in err
 
-    def test_upload_rejects_magic_byte_mismatch(
-        self, client: TestClient, tmp_path: Path
-    ) -> None:
+    def test_upload_rejects_magic_byte_mismatch(self, client: TestClient, tmp_path: Path) -> None:
         response = client.post(
             "/api/files/upload",
             files={"file": ("fake.png", b"%PDF-1.4...", "image/png")},
@@ -210,9 +200,7 @@ class TestUploadRoute:
         err = body["error"].lower()
         assert "match" in err or "format" in err
 
-    def test_upload_rejects_path_traversal(
-        self, client: TestClient, tmp_path: Path
-    ) -> None:
+    def test_upload_rejects_path_traversal(self, client: TestClient, tmp_path: Path) -> None:
         response = client.post(
             "/api/files/upload",
             files={"file": ("../escape.txt", b"x", "text/plain")},

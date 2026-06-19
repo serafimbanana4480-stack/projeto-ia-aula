@@ -14,7 +14,6 @@ import re
 import shlex
 import sys
 import tempfile
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -192,6 +191,7 @@ def _verify_auth_token(token: str | None) -> tuple[bool, str]:
         return False, "Authentication required"
     try:
         from jose import JWTError, jwt
+
         from backend.config.settings import get_settings
 
         settings = get_settings()
@@ -632,10 +632,7 @@ def _has_unquoted_metacharacters(command: str) -> bool:
     """Return ``True`` if *command* contains dangerous shell operators
     outside of quoted regions."""
     cleaned = _remove_quoted_parts(command)
-    for op in _DISALLOWED_METACHARACTERS:
-        if op in cleaned:
-            return True
-    return False
+    return any(op in cleaned for op in _DISALLOWED_METACHARACTERS)
 
 
 def _split_on_pipes(command: str) -> list[str]:
@@ -683,15 +680,12 @@ def _validate_single_command(command: str) -> tuple[bool, str]:
         return True, ""
 
     # Block inline code execution flags that enable arbitrary code execution
-    if base_cmd in ("python", "python3", "py"):
-        if any(t == "-c" for t in tokens[1:]):
-            return False, f"{base_cmd} -c (inline code execution) is blocked for safety"
-    if base_cmd == "node":
-        if any(t == "-e" for t in tokens[1:]):
-            return False, "node -e (inline code execution) is blocked for safety"
-    if base_cmd in ("bash", "sh", "zsh", "fish"):
-        if any(t == "-c" for t in tokens[1:]):
-            return False, f"{base_cmd} -c (inline code execution) is blocked for safety"
+    if base_cmd in ("python", "python3", "py") and any(t == "-c" for t in tokens[1:]):
+        return False, f"{base_cmd} -c (inline code execution) is blocked for safety"
+    if base_cmd == "node" and any(t == "-e" for t in tokens[1:]):
+        return False, "node -e (inline code execution) is blocked for safety"
+    if base_cmd in ("bash", "sh", "zsh", "fish") and any(t == "-c" for t in tokens[1:]):
+        return False, f"{base_cmd} -c (inline code execution) is blocked for safety"
 
     if base_cmd not in _SHELL_WHITELIST:
         return False, f"Command '{base_cmd}' is not in the safe command whitelist"
@@ -779,10 +773,7 @@ def _validate_path(project_path: str, target_path: str) -> Path:
 def _is_safe_git_remote(url: str) -> bool:
     """Return True if *url* points to a known-safe host."""
     url_lower = url.lower()
-    for host in _SAFE_GIT_HOSTS:
-        if host in url_lower:
-            return True
-    return False
+    return any(host in url_lower for host in _SAFE_GIT_HOSTS)
 
 
 def _is_allowed_path(path: str) -> bool:

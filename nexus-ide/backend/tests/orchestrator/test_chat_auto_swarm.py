@@ -16,7 +16,6 @@ from backend.agents.base import AgentBase, AgentRequest
 from backend.middleware.auth import create_access_token
 from backend.models.api import AgentName
 from backend.orchestrator import main as main_module
-from backend.orchestrator.registry import _LazyRegistry, _registry_instance
 from backend.tests.conftest import make_stream_response
 from backend.tools.ollama_client import OllamaClient
 
@@ -103,9 +102,7 @@ def _iter_sse_events(body: bytes) -> list[dict]:
 
 
 class TestAutoMode:
-    def test_auto_mode_routes_and_streams(
-        self, client_with_fake_agents: TestClient
-    ) -> None:
+    def test_auto_mode_routes_and_streams(self, client_with_fake_agents: TestClient) -> None:
         response = client_with_fake_agents.post(
             "/api/chat",
             json={
@@ -145,9 +142,7 @@ class TestAutoMode:
         assert routing["primary_agent"] == "CODER"
         assert "auto:upgraded" in routing["routing_reason"]
 
-    def test_auto_mode_persists_history(
-        self, client_with_fake_agents: TestClient
-    ) -> None:
+    def test_auto_mode_persists_history(self, client_with_fake_agents: TestClient) -> None:
         sid = "t-auto-history"
         client_with_fake_agents.post(
             "/api/chat",
@@ -162,9 +157,7 @@ class TestAutoMode:
 
 
 class TestSwarmMode:
-    def test_swarm_mode_routes_and_streams(
-        self, client_with_fake_agents: TestClient
-    ) -> None:
+    def test_swarm_mode_routes_and_streams(self, client_with_fake_agents: TestClient) -> None:
         response = client_with_fake_agents.post(
             "/api/chat",
             json={
@@ -186,9 +179,7 @@ class TestSwarmMode:
         agents_started = {e["agent"] for e in events if e["type"] == "agent_started"}
         assert "SWARM" in agents_started
 
-    def test_swarm_mode_uses_default_agents(
-        self, client_with_fake_agents: TestClient
-    ) -> None:
+    def test_swarm_mode_uses_default_agents(self, client_with_fake_agents: TestClient) -> None:
         response = client_with_fake_agents.post(
             "/api/chat",
             json={
@@ -201,9 +192,7 @@ class TestSwarmMode:
         events = _iter_sse_events(response.content)
         assert any(e["type"] == "done" for e in events)
 
-    def test_swarm_mode_persists_history(
-        self, client_with_fake_agents: TestClient
-    ) -> None:
+    def test_swarm_mode_persists_history(self, client_with_fake_agents: TestClient) -> None:
         sid = "t-swarm-history"
         client_with_fake_agents.post(
             "/api/chat",

@@ -23,7 +23,9 @@ def _get_overseer(request: Request) -> OverseerAgent | None:
 
 
 @router.get("/overseer/dashboard")
-async def overseer_dashboard(request: Request, _auth: dict = Depends(require_auth)) -> dict[str, Any]:
+async def overseer_dashboard(
+    request: Request, _auth: dict = Depends(require_auth)
+) -> dict[str, Any]:
     """Return the full overseer health dashboard."""
     overseer = _get_overseer(request)
     if not overseer:
@@ -32,7 +34,9 @@ async def overseer_dashboard(request: Request, _auth: dict = Depends(require_aut
 
 
 @router.get("/overseer/agents/{agent_name}")
-async def overseer_agent_status(agent_name: str, request: Request, _auth: dict = Depends(require_auth)) -> dict[str, Any]:
+async def overseer_agent_status(
+    agent_name: str, request: Request, _auth: dict = Depends(require_auth)
+) -> dict[str, Any]:
     """Return status for a specific agent."""
     overseer = _get_overseer(request)
     if not overseer:
@@ -62,7 +66,9 @@ async def overseer_intervene(
 
 
 @router.get("/overseer/conflicts")
-async def overseer_conflicts(request: Request, _auth: dict = Depends(require_auth)) -> dict[str, Any]:
+async def overseer_conflicts(
+    request: Request, _auth: dict = Depends(require_auth)
+) -> dict[str, Any]:
     """Return current file conflicts between agents."""
     overseer = _get_overseer(request)
     if not overseer:

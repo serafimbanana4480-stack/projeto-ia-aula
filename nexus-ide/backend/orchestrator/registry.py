@@ -148,6 +148,7 @@ class _LazyRegistry(dict):
 
     def __init__(self, classes: dict[AgentName, Any]) -> None:
         import threading
+
         self._classes = classes
         self._instances: dict[AgentName, AgentBase] = {}
         self._lock = threading.Lock()

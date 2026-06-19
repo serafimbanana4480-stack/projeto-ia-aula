@@ -12,14 +12,10 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-
-from backend.core.agent_bus import BusMessage, get_agent_bus
 
 logger = logging.getLogger(__name__)
 
@@ -198,9 +194,7 @@ class AgentLifecycleManager:
 
             # Actually execute the agent if registry + LLM client are wired
             if self._registry is not None and self._llm_client is not None:
-                task = asyncio.create_task(
-                    self._execute_agent(instance)
-                )
+                task = asyncio.create_task(self._execute_agent(instance))
                 self._tasks[instance.instance_id] = task
 
             return instance.instance_id
@@ -326,9 +320,7 @@ class AgentLifecycleManager:
 
     def list_by_mission(self, mission_id: str) -> list[AgentInstance]:
         """Return all agent instances associated with a mission."""
-        return [
-            i for i in self._instances.values() if i.mission_id == mission_id
-        ]
+        return [i for i in self._instances.values() if i.mission_id == mission_id]
 
     async def garbage_collect(self) -> list[str]:
         """Remove completed/failed/aborted agents older than 1 hour.
@@ -400,7 +392,7 @@ class AgentLifecycleManager:
                 output=output,
                 tokens_used=len(output),
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await self.fail(
                 instance.instance_id,
                 error=f"Agent exceeded time budget of {instance.deadline - instance.start_time:.0f}s",

@@ -5,11 +5,10 @@ Revises: 002_add_rbac
 Create Date: 2025-01-12
 
 """
+
 from __future__ import annotations
 
 from alembic import op
-import sqlalchemy as sa
-
 
 # revision identifiers, used by Alembic.
 revision = "003_user_profile"
@@ -65,8 +64,12 @@ def upgrade() -> None:
     op.execute("CREATE INDEX IF NOT EXISTS idx_user_routines_user ON user_routines(user_id)")
     op.execute("CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id)")
     op.execute("CREATE INDEX IF NOT EXISTS idx_user_memories_type ON user_memories(memory_type)")
-    op.execute("CREATE INDEX IF NOT EXISTS idx_user_memories_importance ON user_memories(importance DESC)")
-    op.execute("CREATE INDEX IF NOT EXISTS idx_user_memories_created ON user_memories(created_at DESC)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_memories_importance ON user_memories(importance DESC)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_memories_created ON user_memories(created_at DESC)"
+    )
 
 
 def downgrade() -> None:

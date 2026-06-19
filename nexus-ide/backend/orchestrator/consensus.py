@@ -83,10 +83,7 @@ class ConsensusEngine:
             # Parse winner index
             winner_idx = 0
             for i in range(len(proposals)):
-                if (
-                    f"proposal {i + 1}" in response.lower()
-                    or f"#{i + 1}" in response
-                ):
+                if f"proposal {i + 1}" in response.lower() or f"#{i + 1}" in response:
                     winner_idx = i
                     break
 
@@ -97,7 +94,9 @@ class ConsensusEngine:
                     conf_str = response.lower().split("confidence:")[1].split()[0]
                     confidence = float(conf_str)
                 except (ValueError, IndexError):
-                    logger.debug("Failed to parse confidence from consensus response", exc_info=True)
+                    logger.debug(
+                        "Failed to parse confidence from consensus response", exc_info=True
+                    )
 
             return ConsensusResult(
                 winner=f"proposal_{winner_idx + 1}",

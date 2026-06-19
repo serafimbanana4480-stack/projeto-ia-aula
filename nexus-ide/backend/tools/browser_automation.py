@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import async_playwright, BrowserContext, Page
+from playwright.async_api import Page, async_playwright
 
 from backend.tools.registry import ToolSpec, register_tool
 
@@ -117,7 +117,9 @@ async def browser_fill(selector: str, text: str, session_id: str = "default") ->
         return _result(success=False, error=str(exc), selector=selector, session_id=session_id)
 
 
-async def browser_extract_text(selector: str | None = None, session_id: str = "default") -> dict[str, Any]:
+async def browser_extract_text(
+    selector: str | None = None, session_id: str = "default"
+) -> dict[str, Any]:
     """Extract text from the page or from a specific CSS selector."""
     try:
         page = await _ensure_page(session_id)
@@ -148,7 +150,9 @@ async def browser_extract_text(selector: str | None = None, session_id: str = "d
         return _result(success=False, error=str(exc), selector=selector, session_id=session_id)
 
 
-async def browser_screenshot(session_id: str = "default", full_page: bool = False) -> dict[str, Any]:
+async def browser_screenshot(
+    session_id: str = "default", full_page: bool = False
+) -> dict[str, Any]:
     """Take a screenshot and save it to data/screenshots/."""
     try:
         page = await _ensure_page(session_id)
@@ -189,7 +193,9 @@ async def browser_close(session_id: str = "default") -> dict[str, Any]:
     """Close the browser context for a session and remove it from the pool."""
     session = _pool.pop(session_id, None)
     if not session:
-        return _result(success=True, message="Session not found, nothing to close", session_id=session_id)
+        return _result(
+            success=True, message="Session not found, nothing to close", session_id=session_id
+        )
 
     errors = []
     try:
@@ -225,7 +231,11 @@ register_tool(
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "URL to navigate to"},
-                "session_id": {"type": "string", "default": "default", "description": "Browser session identifier"},
+                "session_id": {
+                    "type": "string",
+                    "default": "default",
+                    "description": "Browser session identifier",
+                },
             },
             "required": ["url"],
         },
@@ -240,8 +250,15 @@ register_tool(
         schema={
             "type": "object",
             "properties": {
-                "selector": {"type": "string", "description": "CSS selector of the element to click"},
-                "session_id": {"type": "string", "default": "default", "description": "Browser session identifier"},
+                "selector": {
+                    "type": "string",
+                    "description": "CSS selector of the element to click",
+                },
+                "session_id": {
+                    "type": "string",
+                    "default": "default",
+                    "description": "Browser session identifier",
+                },
             },
             "required": ["selector"],
         },
@@ -258,7 +275,11 @@ register_tool(
             "properties": {
                 "selector": {"type": "string", "description": "CSS selector of the input field"},
                 "text": {"type": "string", "description": "Text to type into the field"},
-                "session_id": {"type": "string", "default": "default", "description": "Browser session identifier"},
+                "session_id": {
+                    "type": "string",
+                    "default": "default",
+                    "description": "Browser session identifier",
+                },
             },
             "required": ["selector", "text"],
         },
@@ -273,8 +294,15 @@ register_tool(
         schema={
             "type": "object",
             "properties": {
-                "selector": {"type": "string", "description": "Optional CSS selector to restrict extraction"},
-                "session_id": {"type": "string", "default": "default", "description": "Browser session identifier"},
+                "selector": {
+                    "type": "string",
+                    "description": "Optional CSS selector to restrict extraction",
+                },
+                "session_id": {
+                    "type": "string",
+                    "default": "default",
+                    "description": "Browser session identifier",
+                },
             },
             "required": [],
         },
@@ -289,8 +317,16 @@ register_tool(
         schema={
             "type": "object",
             "properties": {
-                "session_id": {"type": "string", "default": "default", "description": "Browser session identifier"},
-                "full_page": {"type": "boolean", "default": False, "description": "Capture the full scrollable page"},
+                "session_id": {
+                    "type": "string",
+                    "default": "default",
+                    "description": "Browser session identifier",
+                },
+                "full_page": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Capture the full scrollable page",
+                },
             },
             "required": [],
         },
@@ -305,7 +341,11 @@ register_tool(
         schema={
             "type": "object",
             "properties": {
-                "session_id": {"type": "string", "default": "default", "description": "Browser session identifier"},
+                "session_id": {
+                    "type": "string",
+                    "default": "default",
+                    "description": "Browser session identifier",
+                },
             },
             "required": [],
         },
@@ -320,7 +360,11 @@ register_tool(
         schema={
             "type": "object",
             "properties": {
-                "session_id": {"type": "string", "default": "default", "description": "Browser session identifier"},
+                "session_id": {
+                    "type": "string",
+                    "default": "default",
+                    "description": "Browser session identifier",
+                },
             },
             "required": [],
         },

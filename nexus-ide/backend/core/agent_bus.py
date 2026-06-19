@@ -29,7 +29,7 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -146,12 +146,8 @@ def _init_bus_db(db_path: Path) -> None:
                 "ALTER TABLE bus_messages ADD COLUMN target_agents TEXT NOT NULL DEFAULT '[]'"
             )
         if "priority" not in columns:
-            conn.execute(
-                "ALTER TABLE bus_messages ADD COLUMN priority INTEGER NOT NULL DEFAULT 3"
-            )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_bus_messages_topic ON bus_messages(topic)"
-        )
+            conn.execute("ALTER TABLE bus_messages ADD COLUMN priority INTEGER NOT NULL DEFAULT 3")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bus_messages_topic ON bus_messages(topic)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_bus_messages_timestamp ON bus_messages(timestamp)"
         )
@@ -379,9 +375,7 @@ class AgentBus:
         now = datetime.now(UTC)
         async with self._lock:
             for topic in list(self._history.keys()):
-                self._history[topic] = [
-                    m for m in self._history[topic] if not m.is_expired(now)
-                ]
+                self._history[topic] = [m for m in self._history[topic] if not m.is_expired(now)]
 
         rows_deleted = await asyncio.to_thread(self._delete_expired_from_db, now)
         logger.info("Bus purge_expired | deleted=%d", rows_deleted)
@@ -462,9 +456,7 @@ class AgentBus:
         """Remove all rows for a topic (synchronous)."""
         try:
             with sqlite3.connect(str(self._db_path), check_same_thread=False) as conn:
-                cur = conn.execute(
-                    "DELETE FROM bus_messages WHERE topic = ?", (topic,)
-                )
+                cur = conn.execute("DELETE FROM bus_messages WHERE topic = ?", (topic,))
                 conn.commit()
                 return cur.rowcount
         except sqlite3.Error:
@@ -502,6 +494,7 @@ def get_agent_bus() -> AgentBus:
 # ──────────────────────────────────────────────────────────────────────────────
 # Example / self-test
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 async def _example() -> None:
     """Demonstrate two agents communicating over the bus."""
@@ -550,7 +543,9 @@ async def _example() -> None:
     await asyncio.sleep(0.05)
 
     assert len(received_by_reviewer) == 1, "Reviewer should see exactly 1 code.changes"
-    assert len(received_by_architect) == 2, "Architect should see 1 code.changes + 1 architecture.proposals"
+    assert len(received_by_architect) == 2, (
+        "Architect should see 1 code.changes + 1 architecture.proposals"
+    )
 
     # History replay
     history = await bus.get_history("code.changes", limit=10)

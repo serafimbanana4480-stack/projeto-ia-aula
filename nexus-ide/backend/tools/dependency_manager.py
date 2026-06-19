@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shlex
 from pathlib import Path
 
 from backend.tools.registry import ToolSpec, register_tool
@@ -45,8 +44,10 @@ def _update_requirements_file(package: str, project_path: Path, manager: str) ->
             lines = content.splitlines()
             pkg_base = package.split("==")[0].split(">=")[0].split("<")[0].strip()
             already_present = any(
-                line.strip().split("==")[0].split(">=")[0].split("<")[0].strip().lower() == pkg_base.lower()
-                for line in lines if line.strip() and not line.strip().startswith("#")
+                line.strip().split("==")[0].split(">=")[0].split("<")[0].strip().lower()
+                == pkg_base.lower()
+                for line in lines
+                if line.strip() and not line.strip().startswith("#")
             )
             if not already_present:
                 lines.append(package)
@@ -73,6 +74,7 @@ def _update_requirements_file(package: str, project_path: Path, manager: str) ->
         if cargo_file.exists():
             try:
                 import tomllib
+
                 data = tomllib.loads(cargo_file.read_text(encoding="utf-8"))
                 if package not in data.get("dependencies", {}):
                     # tomllib is read-only; append manually
@@ -171,7 +173,7 @@ async def install_dependency(
             "files_updated": update_info["files"],
         }
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Dependency install timed out: %s", sanitized)
         return {
             "package": sanitized,
@@ -196,14 +198,18 @@ async def install_dependency(
 async def list_dependencies(project_path: str = ".") -> dict:
     """List dependencies found in the project."""
     from pathlib import Path
+
     project = Path(project_path).resolve()
     result = {}
     req = project / "requirements.txt"
     if req.exists():
-        result["pip"] = [l.strip() for l in req.read_text().splitlines() if l.strip() and not l.startswith("#")]
+        result["pip"] = [
+            l.strip() for l in req.read_text().splitlines() if l.strip() and not l.startswith("#")
+        ]
     pkg = project / "package.json"
     if pkg.exists():
         import json
+
         data = json.loads(pkg.read_text())
         result["npm_dependencies"] = list(data.get("dependencies", {}).keys())
         result["npm_dev_dependencies"] = list(data.get("devDependencies", {}).keys())
@@ -257,7 +263,11 @@ register_tool(
         schema={
             "type": "object",
             "properties": {
-                "project_path": {"type": "string", "default": ".", "description": "Project root path"},
+                "project_path": {
+                    "type": "string",
+                    "default": ".",
+                    "description": "Project root path",
+                },
             },
         },
         handler=list_dependencies,

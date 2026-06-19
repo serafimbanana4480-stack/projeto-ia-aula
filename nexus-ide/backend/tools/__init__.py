@@ -25,24 +25,22 @@ def _ensure_tools_registered() -> None:
     # Import order does not matter — each module calls ``register_tool``
     # as a side-effect of being imported.
     from backend.tools import advanced_templates as _advanced_templates  # noqa: F401
-    from backend.tools import append_file as _append_file  # noqa: F401
     from backend.tools import agent_bus_tools as _agent_bus_tools  # noqa: F401
     from backend.tools import agent_comm as _agent_comm  # noqa: F401
+    from backend.tools import append_file as _append_file  # noqa: F401
     from backend.tools import browser_automation as _browser_automation  # noqa: F401
     from backend.tools import code_executor as _code_executor  # noqa: F401
+    from backend.tools import cron_scheduler as _cron_scheduler  # noqa: F401
     from backend.tools import data_analysis as _data_analysis  # noqa: F401
     from backend.tools import dependency_manager as _dependency_manager  # noqa: F401
-    from backend.tools import doc_tools as _doc_tools  # noqa: F401
     from backend.tools import directory_tools as _directory_tools  # noqa: F401
+    from backend.tools import doc_tools as _doc_tools  # noqa: F401
     from backend.tools import email_tools as _email_tools  # noqa: F401
     from backend.tools import embeddings as _embeddings  # noqa: F401
     from backend.tools import file_manager as _file_manager  # noqa: F401
     from backend.tools import file_ops as _file_ops  # noqa: F401
-    from backend.tools import git_tools as _git_tools  # noqa: F401
     from backend.tools import git_auto_commit as _git_auto_commit  # noqa: F401
-    from backend.tools import cron_scheduler as _cron_scheduler  # noqa: F401
-    from backend.tools import tts as _tts  # noqa: F401
-    from backend.tools import vision as _vision  # noqa: F401
+    from backend.tools import git_tools as _git_tools  # noqa: F401
     from backend.tools import memory_tools as _memory_tools  # noqa: F401
     from backend.tools import profile_tools as _profile_tools  # noqa: F401
     from backend.tools import project_analyzer as _project_analyzer  # noqa: F401
@@ -51,6 +49,8 @@ def _ensure_tools_registered() -> None:
     from backend.tools import shell_runner as _shell_runner  # noqa: F401
     from backend.tools import task_spawner as _task_spawner  # noqa: F401
     from backend.tools import test_generator as _test_generator  # noqa: F401
+    from backend.tools import tts as _tts  # noqa: F401
+    from backend.tools import vision as _vision  # noqa: F401
     from backend.tools import web_fetcher as _web_fetcher  # noqa: F401
     from backend.tools import web_search as _web_search  # noqa: F401
     from backend.tools import web_search_v2 as _web_search_v2  # noqa: F401

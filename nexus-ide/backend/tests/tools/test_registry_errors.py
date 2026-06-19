@@ -22,7 +22,6 @@ async def test_execute_tool_surfaces_handler_error_dict() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_tool_allows_verified_write() -> None:
-    import os
     import tempfile
     from pathlib import Path
 

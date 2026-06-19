@@ -1,26 +1,25 @@
 """Cognitive modes endpoint - manage AI thinking modes (Auto, Coder, Analyst, etc.).
 
-Also includes settings and session management endpoints.
+Also includes database statistics (read-only) and a tool toggle.
+
+NOTE: ``/api/settings`` and ``/api/sessions`` live in their own modules
+(``backend.orchestrator.routes.settings`` and ``...sessions``). This
+file intentionally does NOT register duplicates — those would shadow
+the canonical endpoints and silently drop the JSON body.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 
-from backend.config.settings import get_settings
 from backend.middleware.auth import require_auth
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-SETTINGS_PATH = Path("data/settings.json")
 
 
 def _load_modes() -> dict:
@@ -83,103 +82,8 @@ async def toggle_tool(
 
 
 # ---------------------------------------------------------------------------
-# Settings endpoints
+# Database stats (read-only, no session/message creation here)
 # ---------------------------------------------------------------------------
-
-
-class SettingsUpdate(BaseModel):
-    local_llm_device: str | None = None
-    backend_host: str | None = None
-    default_mode: str | None = None
-    default_model: str | None = None
-    enable_telemetry: bool | None = None
-    llm_provider: str | None = None
-    openai_api_key: str | None = None
-    deepseek_api_key: str | None = None
-    kimi_api_key: str | None = None
-    groq_api_key: str | None = None
-    anthropic_api_key: str | None = None
-    gemini_api_key: str | None = None
-    openrouter_api_key: str | None = None
-
-
-def _load_settings() -> dict:
-    """Load settings from JSON file, falling back to config defaults."""
-    defaults = {
-        "local_llm_device": get_settings().local_llm_device,
-        "backend_host": f"http://localhost:{get_settings().backend_port}",
-        "default_mode": "auto",
-        "default_model": "coder",
-        "enable_telemetry": True,
-        "llm_provider": get_settings().llm_provider,
-        "openai_api_key": "",
-        "deepseek_api_key": "",
-        "kimi_api_key": "",
-        "groq_api_key": "",
-        "anthropic_api_key": "",
-        "gemini_api_key": "",
-        "openrouter_api_key": "",
-    }
-    if SETTINGS_PATH.exists():
-        try:
-            with SETTINGS_PATH.open("r", encoding="utf-8") as f:
-                saved = json.load(f)
-            defaults.update(saved)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Failed to load settings file: %s", e)
-    return defaults
-
-
-def _save_settings(settings: dict) -> None:
-    """Persist settings to JSON file."""
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with SETTINGS_PATH.open("w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2)
-
-
-@router.get("/settings")
-async def get_app_settings(_user: dict = Depends(require_auth)) -> dict:
-    """Get current application settings."""
-    return _load_settings()
-
-
-@router.put("/settings")
-async def update_app_settings(
-    update: SettingsUpdate,
-    _user: dict = Depends(require_auth),
-) -> dict:
-    """Update application settings."""
-    current = _load_settings()
-    updates = update.model_dump(exclude_none=True)
-    current.update(updates)
-    _save_settings(current)
-    return current
-
-
-# ---------------------------------------------------------------------------
-# Session endpoints
-# ---------------------------------------------------------------------------
-
-
-@router.post("/sessions")
-async def create_session(
-    title: str = "Nova sessão",
-    mode: str = "auto",
-    _user: dict = Depends(require_auth),
-) -> dict:
-    """Create a new chat session."""
-    from backend.persistence.db import create_session as db_create_session
-
-    session = db_create_session(title=title[:60], mode=mode)
-    return session
-
-
-@router.get("/sessions")
-async def list_sessions(_user: dict = Depends(require_auth)) -> list[dict]:
-    """List all chat sessions."""
-    from backend.persistence.db import list_sessions as db_list_sessions
-
-    return db_list_sessions()
 
 
 @router.get("/db/stats")

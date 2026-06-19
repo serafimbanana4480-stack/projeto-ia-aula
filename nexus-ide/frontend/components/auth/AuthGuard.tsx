@@ -2,12 +2,12 @@
 
 import { useEffect, useState, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { isTokenValid, clearAuth } from "../../lib/auth";
+import { isTokenValid, clearAuth, autoLoginDev } from "../../lib/auth";
 
 const PUBLIC_PATHS = ["/login"];
 
 const AUTH_TIMEOUT_MS =
-  process.env.NODE_ENV === "development" ? 10000 : 5000;
+  process.env.NODE_ENV === "development" ? 15000 : 5000;
 
 export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -17,60 +17,66 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blockedLoginRedirectRef = useRef(false);
+  const autoLoginAttempted = useRef(false);
 
   useEffect(() => {
     let mounted = true;
 
-    timeoutRef.current = setTimeout(() => {
-      if (mounted && !checked) {
-        const isPublic = PUBLIC_PATHS.includes(pathname);
-        if (!isPublic) {
-          clearAuth();
-          router.replace("/login?expired=1");
-        }
-        if (mounted) {
-          setChecked(true);
+    const doCheck = async () => {
+      // Try auto-login in dev mode on first run
+      if (!autoLoginAttempted.current && process.env.NODE_ENV === "development") {
+        autoLoginAttempted.current = true;
+        try {
+          await autoLoginDev();
+        } catch {
+          // auto-login failed silently
         }
       }
-    }, AUTH_TIMEOUT_MS);
 
-    try {
-      const isPublic = PUBLIC_PATHS.includes(pathname);
-      const valid = isTokenValid();
+      timeoutRef.current = setTimeout(() => {
+        if (mounted && !checked) {
+          const isPublic = PUBLIC_PATHS.includes(pathname);
+          if (!isPublic) {
+            clearAuth();
+            router.replace("/login?expired=1");
+          }
+          if (mounted) setChecked(true);
+        }
+      }, AUTH_TIMEOUT_MS);
 
-      if (!isPublic && !valid) {
-        const alreadyBlocked = blockedLoginRedirectRef.current;
+      try {
+        const isPublic = PUBLIC_PATHS.includes(pathname);
+        const valid = isTokenValid();
+
+        if (!isPublic && !valid) {
+          const alreadyBlocked = blockedLoginRedirectRef.current;
+          clearAuth();
+          if (!alreadyBlocked) {
+            blockedLoginRedirectRef.current = true;
+            router.replace("/login?expired=1");
+          }
+        }
+      } catch (e) {
         clearAuth();
-        if (!alreadyBlocked) {
+        if (!PUBLIC_PATHS.includes(pathname) && !blockedLoginRedirectRef.current) {
           blockedLoginRedirectRef.current = true;
           router.replace("/login?expired=1");
         }
+        if (mounted) {
+          setError(e instanceof Error ? e.message : "Authentication check failed.");
+        }
+      } finally {
+        if (mounted) setChecked(true);
       }
-    } catch (e) {
-      clearAuth();
-      if (!PUBLIC_PATHS.includes(pathname) && !blockedLoginRedirectRef.current) {
-        blockedLoginRedirectRef.current = true;
-        router.replace("/login?expired=1");
-      }
-      if (mounted) {
-        setError(
-          e instanceof Error ? e.message : "Authentication check failed."
-        );
-      }
-    } finally {
-      if (mounted) {
-        setChecked(true);
-      }
-    }
+    };
+
+    doCheck();
 
     return () => {
       mounted = false;
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname, router]);
+  }, [pathname, router, checked]);
 
   if (!checked && !error) {
     return (

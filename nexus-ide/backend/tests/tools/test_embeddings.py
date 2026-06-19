@@ -74,7 +74,7 @@ class TestIndexPersistence:
         (src / "math.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
 
         emb._store.clear()
-        first = await emb.index_codebase(str(tmp_path), force_reindex=True)
+        await emb.index_codebase(str(tmp_path), force_reindex=True)
         second = await emb.index_codebase(str(tmp_path))
         assert second == 0
 
@@ -84,9 +84,7 @@ class TestKeywordSearch:
     async def test_keyword_search_fallback(self, tmp_path: Path) -> None:
         src = tmp_path / "src"
         src.mkdir()
-        (src / "math.py").write_text(
-            "def multiply(a, b):\n    return a * b\n", encoding="utf-8"
-        )
+        (src / "math.py").write_text("def multiply(a, b):\n    return a * b\n", encoding="utf-8")
         # Inject a fake chunk without embeddings
         emb._store.clear()
         chunk = emb.CodeChunk(

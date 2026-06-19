@@ -24,13 +24,12 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import Any
 
-from backend.config.settings import get_model_config, load_models_config
+from backend.config.settings import load_models_config
 from backend.models.api import RoutingDecision
 from backend.orchestrator.router import fast_route, route_with_model
 from backend.orchestrator.routing_config import MODEL_TIER_TO_AGENT as _MODEL_TIER_TO_AGENT
-from backend.tools.ollama_client import ChatMessage
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -57,24 +56,71 @@ def _word_count(text: str) -> int:
 
 def _contains_code(text: str) -> bool:
     code_indicators = [
-        "function", "class", "def ", "import ", "const ",
-        "let ", "var ", "=>", "return", "implement", "create a",
-        "write a", "build a", "refactor", "api", "endpoint",
-        "function that", "class that", "login", "authentication",
-        "scraper", "cli", "script",
+        "function",
+        "class",
+        "def ",
+        "import ",
+        "const ",
+        "let ",
+        "var ",
+        "=>",
+        "return",
+        "implement",
+        "create a",
+        "write a",
+        "build a",
+        "refactor",
+        "api",
+        "endpoint",
+        "function that",
+        "class that",
+        "login",
+        "authentication",
+        "scraper",
+        "cli",
+        "script",
     ]
     return any(ind in text.lower() for ind in code_indicators)
 
 
 # Action verbs that indicate a non-trivial task regardless of word count.
-_ACTION_VERBS = frozenset({
-    "create", "build", "implement", "write", "develop", "design",
-    "refactor", "optimize", "fix", "debug", "analyze", "review",
-    "add", "remove", "update", "modify", "generate", "scaffold",
-    "configure", "set up", "install", "deploy", "test",
-    "criar", "construir", "implementar", "escrever", "desenvolver",
-    "projetar", "otimizar", "corrigir", "depurar", "analisar",
-})
+_ACTION_VERBS = frozenset(
+    {
+        "create",
+        "build",
+        "implement",
+        "write",
+        "develop",
+        "design",
+        "refactor",
+        "optimize",
+        "fix",
+        "debug",
+        "analyze",
+        "review",
+        "add",
+        "remove",
+        "update",
+        "modify",
+        "generate",
+        "scaffold",
+        "configure",
+        "set up",
+        "install",
+        "deploy",
+        "test",
+        "criar",
+        "construir",
+        "implementar",
+        "escrever",
+        "desenvolver",
+        "projetar",
+        "otimizar",
+        "corrigir",
+        "depurar",
+        "analisar",
+    }
+)
 
 
 def _is_trivial(text: str, config: dict) -> bool:
@@ -119,10 +165,7 @@ def _is_trivial_cached(text: str, trivial_keywords: tuple[str, ...] = ()) -> boo
 
     # Trivial keyword matches (e.g. "what is X", "quanto é X") with short length
     has_keyword = any(kw in lowered for kw in trivial_keywords)
-    if has_keyword and word_count <= 4:
-        return True
-
-    return False
+    return bool(has_keyword and word_count <= 4)
 
 
 def _classify_by_heuristics(user_input: str, config: dict) -> TierDecision | None:
@@ -150,8 +193,17 @@ def _classify_by_heuristics(user_input: str, config: dict) -> TierDecision | Non
     # Reasoning → reasoning
     reasoning_keywords = config.get("smart_router", {}).get("reasoning_keywords", [])
     # Also add common reasoning patterns not in config
-    extra_reasoning = ["plan", "step by step", "explain why", "compare", "analyze",
-                       "think through", "reason about", "evaluate", "decide"]
+    extra_reasoning = [
+        "plan",
+        "step by step",
+        "explain why",
+        "compare",
+        "analyze",
+        "think through",
+        "reason about",
+        "evaluate",
+        "decide",
+    ]
     all_reasoning = list(reasoning_keywords) + extra_reasoning
     if any(kw in user_input.lower() for kw in all_reasoning):
         return TierDecision(
@@ -165,8 +217,15 @@ def _classify_by_heuristics(user_input: str, config: dict) -> TierDecision | Non
     # Deep → deep
     deep_keywords = config.get("smart_router", {}).get("deep_keywords", [])
     # Also add common deep analysis patterns
-    extra_deep = ["architecture", "design system", "scalable", "trade-off",
-                  "comprehensive", "in-depth", "thorough analysis"]
+    extra_deep = [
+        "architecture",
+        "design system",
+        "scalable",
+        "trade-off",
+        "comprehensive",
+        "in-depth",
+        "thorough analysis",
+    ]
     all_deep = list(deep_keywords) + extra_deep
     if any(kw in user_input.lower() for kw in all_deep) or word_count > 100:
         return TierDecision(
@@ -215,7 +274,7 @@ async def _classify_by_llm(user_input: str, client: Any, config: dict) -> TierDe
         micro_id = models.get("micro", {}).get("id", "qwen2.5:0.5b")
         response = await client.chat_complete(
             model=micro_id,
-            messages=[ChatMessage(role="user", content=prompt)],
+            messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0.1, "num_predict": 10},
         )
 
@@ -300,7 +359,10 @@ async def smart_route_tier(query: str, client: Any) -> str:
 
     logger.info(
         "SmartRouter: tier=%s confidence=%.2f reason=%s (%dms)",
-        decision.tier, decision.confidence, decision.reason, decision.decision_ms,
+        decision.tier,
+        decision.confidence,
+        decision.reason,
+        decision.decision_ms,
     )
 
     return decision.tier
@@ -413,4 +475,3 @@ class SmartRouter:
 
         self._store_cache(normalized, decision)
         return decision
-

@@ -60,8 +60,9 @@ export default function SystemHealth() {
       if (!mounted) return;
 
       const now = new Date().toISOString();
-      const currentModelsLoaded = useModelStore.getState().modelsLoaded;
-      const currentRawModelStatus: string[] = useModelStore.getState().models.map((m) => m.id);
+      const hasMetrics = useMetricsStore.getState().metrics !== null;
+      const modelsLoaded = useModelStore.getState().modelsLoaded;
+      const modelCount = useModelStore.getState().models.length;
 
       const healthChecks: HealthCheck[] = [
         {
@@ -82,8 +83,8 @@ export default function SystemHealth() {
         },
         {
           name: "Métricas",
-          status: currentModelsLoaded ? "healthy" : "unhealthy",
-          message: currentModelsLoaded ? undefined : "Sem métricas recebidas",
+          status: hasMetrics ? "healthy" : "unhealthy",
+          message: hasMetrics ? undefined : "Sem métricas recebidas",
           last_check: now,
           icon: <Activity className="h-3.5 w-3.5" />,
         },
@@ -104,8 +105,8 @@ export default function SystemHealth() {
         },
         {
           name: "Registo de modelos",
-          status: currentModelsLoaded && currentRawModelStatus.length > 0 ? "healthy" : currentModelsLoaded ? "degraded" : "unknown",
-          message: currentModelsLoaded ? undefined : "Modelos ainda não carregados",
+          status: modelsLoaded && modelCount > 0 ? "healthy" : modelsLoaded ? "degraded" : "unknown",
+          message: modelsLoaded ? undefined : "Modelos ainda não carregados",
           last_check: now,
           icon: <Cpu className="h-3.5 w-3.5" />,
         },

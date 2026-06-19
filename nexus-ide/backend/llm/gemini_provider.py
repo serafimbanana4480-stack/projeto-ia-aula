@@ -147,9 +147,7 @@ class GeminiProvider:
             for key in ("temperature", "max_output_tokens", "top_p", "top_k"):
                 if key in options:
                     # Map common option names to Gemini equivalents
-                    if key == "max_output_tokens":
-                        gen_config[key] = options[key]
-                    elif key == "top_k":
+                    if key == "max_output_tokens" or key == "top_k":
                         gen_config[key] = options[key]
                     else:
                         gen_config[key] = options[key]

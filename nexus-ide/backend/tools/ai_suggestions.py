@@ -11,17 +11,17 @@ Integra-se com o LLM backend existente via interface genérica.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
 
 # ── Models ──────────────────────────────────────────────────
+
 
 @dataclass
 class CursorContext:
@@ -37,10 +37,10 @@ class CursorContext:
 class SuggestionRequest:
     """Pedido de sugestão vindo do editor."""
 
-    prefix: str          # código antes do cursor
-    suffix: str          # código depois do cursor
+    prefix: str  # código antes do cursor
+    suffix: str  # código depois do cursor
     cursor: CursorContext
-    recent_edits: List[str] = field(default_factory=list)
+    recent_edits: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -48,7 +48,7 @@ class CodeSuggestion:
     """Uma sugestão individual gerada."""
 
     text: str
-    confidence: float          # 0.0–1.0
+    confidence: float  # 0.0–1.0
     kind: Literal["completion", "inline", "block"]
     language: str
     start_line: int
@@ -60,14 +60,14 @@ class CodeSuggestion:
 class SuggestionResponse:
     """Resposta ao pedido de sugestão."""
 
-    suggestions: List[CodeSuggestion]
+    suggestions: list[CodeSuggestion]
     model_used: str = ""
     latency_ms: float = 0.0
 
 
 # ── Language Detection ─────────────────────────────────────
 
-_EXTENSION_MAP: Dict[str, str] = {
+_EXTENSION_MAP: dict[str, str] = {
     ".py": "python",
     ".js": "javascript",
     ".ts": "typescript",
@@ -136,9 +136,9 @@ def build_prompt(req: SuggestionRequest, max_prefix: int = 2000, max_suffix: int
     return "\n".join(prompt_parts)
 
 
-def parse_suggestions(raw: str, req: SuggestionRequest) -> List[CodeSuggestion]:
+def parse_suggestions(raw: str, req: SuggestionRequest) -> list[CodeSuggestion]:
     """Extrai sugestões estruturadas do output do LLM."""
-    suggestions: List[CodeSuggestion] = []
+    suggestions: list[CodeSuggestion] = []
     lang = req.cursor.language or detect_language(req.cursor.filename)
 
     # Split by common separators
@@ -165,14 +165,15 @@ def parse_suggestions(raw: str, req: SuggestionRequest) -> List[CodeSuggestion]:
 
 # ── Suggestion Engine ───────────────────────────────────────
 
+
 class AISuggestionEngine:
     """
     Motor de sugestões de código com caching e rate limiting básico.
     """
 
-    def __init__(self, model_backend: Optional[Any] = None):
+    def __init__(self, model_backend: Any | None = None):
         self.model = model_backend
-        self._cache: Dict[str, SuggestionResponse] = {}
+        self._cache: dict[str, SuggestionResponse] = {}
         self._cache_hits = 0
         self._cache_misses = 0
 
@@ -195,6 +196,7 @@ class AISuggestionEngine:
         retorna sugestões baseadas em heurísticas simples.
         """
         import time
+
         start = time.perf_counter()
 
         key = self._cache_key(req)
@@ -223,7 +225,7 @@ class AISuggestionEngine:
             raw_output = await self._call_llm(prompt, temperature)
             suggestions = parse_suggestions(raw_output, req)
             suggestions = suggestions[:max_suggestions]
-        except Exception as exc:
+        except Exception:
             logger.exception("LLM suggestion failed, falling back to heuristic")
             suggestions = self._heuristic_suggestions(req)
 
@@ -253,17 +255,17 @@ class AISuggestionEngine:
             return await self.model.chat(messages, temperature=temperature)
         raise RuntimeError("LLM backend has no 'generate' or 'chat' method")
 
-    def _heuristic_suggestions(self, req: SuggestionRequest) -> List[CodeSuggestion]:
+    def _heuristic_suggestions(self, req: SuggestionRequest) -> list[CodeSuggestion]:
         """Sugestões baseadas em heurísticas quando LLM não está disponível."""
         lang = req.cursor.language or detect_language(req.cursor.filename)
         prefix = req.prefix
-        suggestions: List[CodeSuggestion] = []
+        suggestions: list[CodeSuggestion] = []
 
         # Python: complete function/class/if/try/else/elif
         if lang == "python":
             stripped = prefix.rstrip()
             if stripped.endswith(":"):
-                indent = len(prefix) - len(prefix.lstrip())
+                len(prefix) - len(prefix.lstrip())
                 next_indent = "    " if stripped.startswith((" ", "\t")) else "    "
                 suggestions.append(
                     CodeSuggestion(
@@ -324,7 +326,7 @@ class AISuggestionEngine:
         self._cache_hits = 0
         self._cache_misses = 0
 
-    def cache_stats(self) -> Dict[str, Any]:
+    def cache_stats(self) -> dict[str, Any]:
         """Estatísticas do cache."""
         total = self._cache_hits + self._cache_misses
         return {
@@ -343,7 +345,7 @@ try:
     from fastapi.responses import JSONResponse
 
     router = APIRouter(prefix="/ai/suggestions", tags=["AI Suggestions"])
-    _engine: Optional[AISuggestionEngine] = None
+    _engine: AISuggestionEngine | None = None
 
     def set_engine(engine: AISuggestionEngine) -> None:
         global _engine
@@ -356,13 +358,13 @@ try:
         return await _engine.generate(request)
 
     @router.get("/cache/stats")
-    async def cache_stats() -> Dict[str, Any]:
+    async def cache_stats() -> dict[str, Any]:
         if _engine is None:
             raise HTTPException(status_code=503, detail="Suggestion engine not initialized")
         return _engine.cache_stats()
 
     @router.delete("/cache")
-    async def clear_cache() -> Dict[str, str]:
+    async def clear_cache() -> dict[str, str]:
         if _engine is None:
             raise HTTPException(status_code=503, detail="Suggestion engine not initialized")
         _engine.clear_cache()

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path

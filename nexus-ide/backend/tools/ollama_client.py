@@ -32,6 +32,10 @@ _MODEL_ALIASES = {
     # Preserve historical aliases that existed in the AirLLM-only phase.
     "q3b-4bit": "qwen2.5:3b",
     "coder3b-4bit": "qwen2.5-coder:3b",
+    # Map legacy cloud model IDs to local Ollama fallbacks
+    "deepseek/deepseek-v4-flash": "qwen2.5:1.5b",
+    "deepseek/deepseek-chat": "qwen2.5:1.5b",
+    "deepseek-chat": "qwen2.5:1.5b",
 }
 
 
@@ -93,10 +97,7 @@ class OllamaClient:
     def _normalize_messages(
         messages: list[dict[str, str]] | list[ChatMessage],
     ) -> list[dict[str, str]]:
-        return [
-            m.to_dict() if isinstance(m, ChatMessage) else dict(m)
-            for m in messages
-        ]
+        return [m.to_dict() if isinstance(m, ChatMessage) else dict(m) for m in messages]
 
     @staticmethod
     def _format_attempt_failure(

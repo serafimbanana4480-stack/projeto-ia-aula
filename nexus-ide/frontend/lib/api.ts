@@ -9,7 +9,7 @@ import type {
   TerminalExecutionResult,
   Tool,
 } from "./types";
-import { authHeaders, clearAuth } from "./auth";
+import { authHeaders } from "./auth";
 
 // Re-export auth helpers for consumers that import them from api.ts
 export { authHeaders } from "./auth";
@@ -33,9 +33,15 @@ export function apiUrl(path: string): string {
   return `${API_BASE_URL}${path}`;
 }
 
-async function readJson<T>(response: Response): Promise<T | null> {
+async function readJson<T>(response: Response): Promise<T> {
   if (response.status === 204 || response.headers.get("content-length") === "0") {
-    return null;
+    // The endpoint returned no body. The callers explicitly opt into
+    // ``T | null`` via ``readJsonOptional``; here we throw so that
+    // ``Promise<T>`` stays accurate at the call sites.
+    throw new ApiError(
+      `Endpoint returned no body (status ${response.status})`,
+      response.status,
+    );
   }
   if (!response.ok) {
     let errorText = "";
@@ -51,15 +57,15 @@ async function readJson<T>(response: Response): Promise<T | null> {
     );
   }
   try {
-    return (await response.json()) as Promise<T>;
+    return (await response.json()) as T;
   } catch (e) {
     throw new ApiError(
       "Failed to parse JSON response",
       response.status,
-      e instanceof Error ? e.message : "Unknown error",
     );
   }
 }
+
 
 export async function postChat(
   message: string,
@@ -69,11 +75,25 @@ export async function postChat(
   model: string = "",
   projectPath: string = ".",
   thinkingStrength?: string,
+  swarmOptions?: {
+    agents?: string[];
+    strategy?: string;
+    operationalMode?: string;
+  },
 ): Promise<Response> {
   try {
-    const body: Record<string, string> = { message, session_id: sessionId, mode, project_path: projectPath };
+    const body: Record<string, unknown> = { message, session_id: sessionId, mode, project_path: projectPath };
     if (model) body.model = model;
     if (thinkingStrength) body.thinking_strength = thinkingStrength;
+    if (swarmOptions?.agents && swarmOptions.agents.length > 0) {
+      body.swarm_agents = swarmOptions.agents;
+    }
+    if (swarmOptions?.strategy) {
+      body.swarm_strategy = swarmOptions.strategy;
+    }
+    if (swarmOptions?.operationalMode) {
+      body.swarm_operational_mode = swarmOptions.operationalMode;
+    }
     const response = await fetch(apiUrl("/api/chat"), {
       method: "POST",
       headers: {
@@ -138,7 +158,6 @@ export async function getAvailableModels(): Promise<AvailableModel[]> {
     await fetch(apiUrl("/api/models/available"), { headers: authHeaders() }),
   );
 }
-
 
 export async function readFile(
   path: string,
@@ -568,7 +587,6 @@ export interface SelfImprovementProposal {
   created_at: string;
 }
 
-
 export async function getAgentInstances(): Promise<AgentInstance[]> {
   const data = await readJson<{ agents?: AgentInstance[] }>(
     await fetch(apiUrl("/api/agents/instances"), { headers: authHeaders() }),
@@ -602,8 +620,6 @@ export async function getBusMessages(topic?: string, limit: number = 50): Promis
   );
   return data.messages ?? [];
 }
-
-
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Settings, Scraping, Database, Alerts, Metrics helpers (JWT-unified)
@@ -1518,7 +1534,7 @@ export async function getProfile(): Promise<Record<string, unknown>> {
 
 export async function updatePreferences(preferences: Record<string, unknown>): Promise<Record<string, unknown>> {
   return readJson<Record<string, unknown>>(
-    await fetch(apiUrl("/api/preferences"), {
+    await fetch(apiUrl("/api/profile/preferences"), {
       method: "PUT",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify(preferences),
@@ -1528,13 +1544,13 @@ export async function updatePreferences(preferences: Record<string, unknown>): P
 
 export async function getRoutines(): Promise<Record<string, unknown>[]> {
   return readJson<Record<string, unknown>[]>(
-    await fetch(apiUrl("/api/routines"), { headers: authHeaders() }),
+    await fetch(apiUrl("/api/profile/routines"), { headers: authHeaders() }),
   );
 }
 
 export async function createRoutine(routine: Record<string, unknown>): Promise<Record<string, unknown>> {
   return readJson<Record<string, unknown>>(
-    await fetch(apiUrl("/api/routines"), {
+    await fetch(apiUrl("/api/profile/routines"), {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify(routine),
@@ -1544,13 +1560,13 @@ export async function createRoutine(routine: Record<string, unknown>): Promise<R
 
 export async function getProfileMemories(): Promise<Record<string, unknown>[]> {
   return readJson<Record<string, unknown>[]>(
-    await fetch(apiUrl("/api/memories"), { headers: authHeaders() }),
+    await fetch(apiUrl("/api/profile/memories"), { headers: authHeaders() }),
   );
 }
 
 export async function createProfileMemory(memory: Record<string, unknown>): Promise<Record<string, unknown>> {
   return readJson<Record<string, unknown>>(
-    await fetch(apiUrl("/api/memories"), {
+    await fetch(apiUrl("/api/profile/memories"), {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify(memory),

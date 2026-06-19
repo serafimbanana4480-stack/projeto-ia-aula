@@ -16,11 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import pickle
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -39,9 +37,7 @@ def _require_faiss():
     try:
         import faiss  # type: ignore
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on env
-        raise RuntimeError(
-            "faiss-cpu não instalado — instale com: pip install faiss-cpu"
-        ) from exc
+        raise RuntimeError("faiss-cpu não instalado — instale com: pip install faiss-cpu") from exc
     return faiss
 
 
@@ -89,12 +85,13 @@ class FAISSEmbeddingStore:
         if idx_file.exists() and meta_file.exists():
             try:
                 self._index = faiss.read_index(str(idx_file))
-                with open(meta_file, "r", encoding="utf-8") as f:
+                with open(meta_file, encoding="utf-8") as f:
                     self._metadata = [json.loads(line) for line in f if line.strip()]
                 self._id_counter = len(self._metadata)
                 logger.info(
                     "Loaded FAISS index: %d vectors, %d dims",
-                    len(self._metadata), self.dimension,
+                    len(self._metadata),
+                    self.dimension,
                 )
                 return
             except Exception as e:
@@ -152,11 +149,13 @@ class FAISSEmbeddingStore:
             self._index.add(vec)
 
         vector_id = self._id_counter
-        self._metadata.append({
-            "id": vector_id,
-            **metadata,
-            "added_at": time.time(),
-        })
+        self._metadata.append(
+            {
+                "id": vector_id,
+                **metadata,
+                "added_at": time.time(),
+            }
+        )
         self._id_counter += 1
         return vector_id
 
@@ -173,7 +172,9 @@ class FAISSEmbeddingStore:
         faiss = _require_faiss()
 
         if len(embeddings) != len(metadatas):
-            raise ValueError(f"embeddings ({len(embeddings)}) and metadatas ({len(metadatas)}) must match")
+            raise ValueError(
+                f"embeddings ({len(embeddings)}) and metadatas ({len(metadatas)}) must match"
+            )
 
         vectors = np.array(embeddings, dtype=np.float32)
 
@@ -185,13 +186,15 @@ class FAISSEmbeddingStore:
             self._index.add(vectors)
 
         ids = []
-        for i, meta in enumerate(metadatas):
+        for _i, meta in enumerate(metadatas):
             vector_id = self._id_counter
-            self._metadata.append({
-                "id": vector_id,
-                **meta,
-                "added_at": time.time(),
-            })
+            self._metadata.append(
+                {
+                    "id": vector_id,
+                    **meta,
+                    "added_at": time.time(),
+                }
+            )
             ids.append(vector_id)
             self._id_counter += 1
 
@@ -221,7 +224,7 @@ class FAISSEmbeddingStore:
         start = time.monotonic()
 
         # Set probe count for accuracy/speed tradeoff
-        if hasattr(self._index, 'nprobe'):
+        if hasattr(self._index, "nprobe"):
             self._index.nprobe = nprobe
 
         query_vec = np.array([query_embedding], dtype=np.float32)
@@ -230,7 +233,7 @@ class FAISSEmbeddingStore:
         distances, indices = self._index.search(query_vec, actual_k)
 
         results = []
-        for dist, idx in zip(distances[0], indices[0]):
+        for dist, idx in zip(distances[0], indices[0], strict=False):
             if 0 <= idx < len(self._metadata):
                 # Convert L2 distance to similarity score (0-1)
                 # score = 1 / (1 + distance)
@@ -278,7 +281,7 @@ class FAISSEmbeddingStore:
         """Rebuild the FAISS index, removing marked vectors.
         Should be called periodically to clean up removed vectors.
         """
-        faiss = _require_faiss()
+        _require_faiss()
 
         active = [m for m in self._metadata if not m.get("_removed", False)]
         if len(active) == 0:
@@ -286,7 +289,9 @@ class FAISSEmbeddingStore:
 
         # Extract vectors from stored data — need original embeddings
         # This requires re-embedding. For now, log the rebuild.
-        logger.info("Rebuild requested: %d active of %d total vectors", len(active), len(self._metadata))
+        logger.info(
+            "Rebuild requested: %d active of %d total vectors", len(active), len(self._metadata)
+        )
 
         # In a production system, store embeddings alongside metadata
         # and recreate the index from scratch
@@ -305,11 +310,9 @@ class FAISSEmbeddingStore:
             "removed_vectors": len(self._metadata) - active,
             "dimension": self.dimension,
             "nlist": self.nlist,
-            "index_trained": self._index.is_trained if hasattr(self._index, 'is_trained') else True,
+            "index_trained": self._index.is_trained if hasattr(self._index, "is_trained") else True,
             "total_searches": self._total_searches,
-            "avg_search_time_ms": (
-                self._total_search_time_ms / max(1, self._total_searches)
-            ),
+            "avg_search_time_ms": (self._total_search_time_ms / max(1, self._total_searches)),
         }
 
     def clear(self) -> None:

@@ -20,7 +20,7 @@ class TestMemoryTools:
         monkeypatch.setattr(svc, "embed", _fast_embed)
         store = MemoryStore(embedding_service=svc, max_memories=100)
         monkeypatch.setattr(
-            "backend.tools.memory_tools._get_memory_store",
+            "backend.tools.memory_tools.get_memory_store",
             lambda: store,
         )
 

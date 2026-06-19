@@ -6,7 +6,6 @@ import pytest
 
 from backend.agents.base import AgentAction, AgentRequest
 from backend.agents.meta_analyzer import (
-    EVOLUTION_LOG_PATH,
     MetaAnalyzerAgent,
     QualityCriteria,
 )
@@ -16,9 +15,7 @@ from backend.agents.meta_analyzer import (
 def meta_agent(monkeypatch: pytest.MonkeyPatch, tmp_path) -> MetaAnalyzerAgent:
     """Return a MetaAnalyzerAgent with an isolated evolution log."""
     test_path = tmp_path / "evolution_log.md"
-    monkeypatch.setattr(
-        "backend.agents.meta_analyzer.EVOLUTION_LOG_PATH", test_path
-    )
+    monkeypatch.setattr("backend.agents.meta_analyzer.EVOLUTION_LOG_PATH", test_path)
     return MetaAnalyzerAgent()
 
 
@@ -110,13 +107,9 @@ class TestMetaAnalyzerAgent:
         }
         contradictions = meta_agent.detect_contradictions(outputs)
         assert len(contradictions) >= 1
-        assert any(
-            c["type"] == "complexity_mismatch" for c in contradictions
-        )
+        assert any(c["type"] == "complexity_mismatch" for c in contradictions)
 
-    def test_detect_contradictions_complexity_mismatch(
-        self, meta_agent: MetaAnalyzerAgent
-    ) -> None:
+    def test_detect_contradictions_complexity_mismatch(self, meta_agent: MetaAnalyzerAgent) -> None:
         outputs = {
             "ARCHITECT": {
                 "content": "Build a distributed event bus",
@@ -138,9 +131,7 @@ class TestMetaAnalyzerAgent:
             },
             "violations": [],
         }
-        report = meta_agent.build_approval_report(
-            verdict, [], ["Merge PR #42"]
-        )
+        report = meta_agent.build_approval_report(verdict, [], ["Merge PR #42"])
         assert "APPROVED" in report
         assert "Merge PR #42" in report
 
@@ -152,9 +143,7 @@ class TestMetaAnalyzerAgent:
             },
             "violations": ["Coverage too low"],
         }
-        report = meta_agent.build_approval_report(
-            verdict, [], ["Refactor module X"]
-        )
+        report = meta_agent.build_approval_report(verdict, [], ["Refactor module X"])
         assert "DENIED" in report
         assert "Coverage too low" in report
         assert "Refactor module X" in report

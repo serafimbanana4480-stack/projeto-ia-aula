@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from backend.tests.conftest import make_stream_response
-from backend.tools.ollama_client import ChatMessage, OllamaClient, OllamaError, DEFAULT_LIMITS
+from backend.tools.ollama_client import DEFAULT_LIMITS, ChatMessage, OllamaClient, OllamaError
 
 
 class TestChatMessage:
@@ -225,7 +225,6 @@ class TestHealthCheck:
             await client.aclose()
 
     async def test_health_check_custom_timeout(self) -> None:
-        captured_timeouts: list[float] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
             # httpx MockTransport doesn't expose timeout directly,

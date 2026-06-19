@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, Suspense } from "react";
+import { useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
 import { useMetricsStore, initMetricsStream } from "../../stores/metricsStore";
 
@@ -36,6 +36,22 @@ const GuardianWidget = dynamic(() => import("../../components/dashboard/Guardian
   ssr: false,
   loading: () => <WidgetSkeleton height="h-64" />,
 });
+const SwarmWidget = dynamic(() => import("../../components/dashboard/SwarmWidget"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-64" />,
+});
+const SessionsWidget = dynamic(() => import("../../components/dashboard/SessionsWidget"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-48" />,
+});
+const ModesWidget = dynamic(() => import("../../components/dashboard/ModesWidget"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-32" />,
+});
+const ThinkingInsights = dynamic(() => import("../../components/dashboard/ThinkingInsights"), {
+  ssr: false,
+  loading: () => <WidgetSkeleton height="h-96" />,
+});
 
 function WidgetSkeleton({ height }: { height: string }) {
   return <div className={`${height} animate-pulse rounded bg-nexus-border/20`} />;
@@ -62,9 +78,6 @@ export default function DashboardClient() {
   }, []);
 
   const m = metrics;
-  const requestTotal = m?.requests_total ?? 0;
-  const requestSuccessRate =
-    requestTotal > 0 ? ((m?.requests_successful ?? 0) / requestTotal) * 100 : null;
   const statusLabel =
     connectionStatus === "degraded"
       ? "Degraded"
@@ -87,24 +100,11 @@ export default function DashboardClient() {
       {/* ── Quick Status Bar (VS Code style) ─────────────────────── */}
       <div className="sticky top-0 z-10 border-b border-nexus-border bg-nexus-panel/90 px-4 py-2 backdrop-blur">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4 text-xs">
+          <div className="flex items-center gap-3 text-xs">
             <div className="flex items-center gap-1.5">
               <div className={`h-2 w-2 rounded-full ${statusDotClass}`} />
               <span className="text-gray-400">{statusLabel}</span>
             </div>
-            {requestSuccessRate !== null && requestSuccessRate < 100 && (
-              <>
-                <div className="h-3 w-px bg-nexus-border" />
-                <div className="flex items-center gap-1">
-                  <span className="text-gray-500">LLM OK:</span>
-                  <span
-                    className={`font-mono ${requestSuccessRate === 0 ? "text-red-400" : requestSuccessRate < 50 ? "text-yellow-400" : ""}`}
-                  >
-                    {requestSuccessRate.toFixed(0)}%
-                  </span>
-                </div>
-              </>
-            )}
             <div className="h-3 w-px bg-nexus-border" />
             <div className="flex items-center gap-1">
               <span className="text-gray-500">Model:</span>
@@ -113,39 +113,13 @@ export default function DashboardClient() {
             <div className="h-3 w-px bg-nexus-border" />
             <div className="flex items-center gap-1">
               <span className="text-gray-500">Tokens/s:</span>
-              <span className="font-mono">{m?.tokens_per_second.toFixed(1) ?? "—"}</span>
-            </div>
-            <div className="h-3 w-px bg-nexus-border" />
-            <div className="flex items-center gap-1">
-              <span className="text-gray-500">CPU:</span>
-              <span className={`font-mono ${(m?.cpu_percent ?? 0) > 80 ? "text-red-400" : (m?.cpu_percent ?? 0) > 50 ? "text-yellow-400" : ""}`}>
-                {m?.cpu_percent.toFixed(0) ?? "—"}%
-              </span>
+              <span className="font-mono">{m?.tokens_per_second?.toFixed(1) ?? "—"}</span>
             </div>
             <div className="h-3 w-px bg-nexus-border" />
             <div className="flex items-center gap-1">
               <span className="text-gray-500">RAM:</span>
               <span className={`font-mono ${(m?.ram_percent ?? 0) > 80 ? "text-red-400" : (m?.ram_percent ?? 0) > 60 ? "text-yellow-400" : ""}`}>
                 {m ? `${(m.ram_used_bytes / 1e9).toFixed(1)}/${(m.ram_total_bytes / 1e9).toFixed(0)} GB` : "—"}
-              </span>
-            </div>
-            <div className="h-3 w-px bg-nexus-border" />
-            <div className="flex items-center gap-1">
-              <span className="text-gray-500">Disk:</span>
-              <span className={`font-mono ${(m?.disk_percent ?? 0) > 90 ? "text-red-400" : (m?.disk_percent ?? 0) > 75 ? "text-yellow-400" : ""}`}>
-                {m?.disk_percent.toFixed(0) ?? "—"}%
-              </span>
-            </div>
-            <div className="h-3 w-px bg-nexus-border" />
-            <div className="flex items-center gap-1">
-              <span className="text-gray-500">Sessions:</span>
-              <span className="font-mono">{m?.active_sessions ?? "—"}</span>
-            </div>
-            <div className="h-3 w-px bg-nexus-border" />
-            <div className="flex items-center gap-1">
-              <span className="text-gray-500">Latency:</span>
-              <span className={`font-mono ${(m?.avg_latency_ms ?? 0) > 1000 ? "text-red-400" : (m?.avg_latency_ms ?? 0) > 500 ? "text-yellow-400" : ""}`}>
-                {m?.avg_latency_ms.toFixed(0) ?? "—"}ms
               </span>
             </div>
             <div className="h-3 w-px bg-nexus-border" />
@@ -162,14 +136,21 @@ export default function DashboardClient() {
         {/* ── Metrics Grid (full width) ─────────────────────── */}
         <MetricsGrid />
 
-        {/* ── Two-column: Health + Agents + Guardian | Timeline + Models ── */}
+        {/* ── SWARM (new, full width) ──────────────────────────── */}
+        <SwarmWidget />
+
+        {/* ── Modes (compact, full width) ── */}
+        <ModesWidget />
+
+        {/* ── Two-column: Health+Sessions+Guardian | AgentActivity+Timeline+Models ── */}
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           <div className="space-y-4">
             <SystemHealth />
+            <SessionsWidget />
             <GuardianWidget />
-            <AgentActivity />
           </div>
           <div className="space-y-4">
+            <AgentActivity />
             <TokenTimeline />
             <ModelComparison />
           </div>

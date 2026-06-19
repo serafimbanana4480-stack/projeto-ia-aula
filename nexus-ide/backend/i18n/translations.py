@@ -18,9 +18,7 @@ Usage:
 from __future__ import annotations
 
 import logging
-import re
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Protocol, Union
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +30,7 @@ SUPPORTED_LOCALES = {"pt", "en", "es"}
 
 # ── Dicionário de traduções ─────────────────────────────────
 
-_TRANSLATIONS: Dict[str, Dict[str, Any]] = {
+_TRANSLATIONS: dict[str, dict[str, Any]] = {
     "en": {
         # Geral
         "welcome": "Welcome, {name}!",
@@ -221,6 +219,7 @@ _TRANSLATIONS: Dict[str, Dict[str, Any]] = {
 
 # ── I18n Engine ─────────────────────────────────────────────
 
+
 class I18n:
     """
     Motor de internacionalização com fallback e pluralização.
@@ -230,7 +229,7 @@ class I18n:
         self,
         locale: str = DEFAULT_LOCALE,
         fallback_locale: str = DEFAULT_LOCALE,
-        custom_translations: Optional[Dict[str, Dict[str, Any]]] = None,
+        custom_translations: dict[str, dict[str, Any]] | None = None,
     ):
         self.locale = locale.lower() if locale.lower() in SUPPORTED_LOCALES else fallback_locale
         self.fallback_locale = fallback_locale
@@ -293,12 +292,12 @@ class I18n:
         self._translations.setdefault(locale, {})[key] = value
         SUPPORTED_LOCALES.add(locale)
 
-    def list_keys(self, locale: Optional[str] = None) -> List[str]:
+    def list_keys(self, locale: str | None = None) -> list[str]:
         """Lista todas as chaves disponíveis para um locale."""
         loc = locale or self.locale
         return list(self._translations.get(loc, {}).keys())
 
-    def missing_keys(self, locale: str, reference_locale: Optional[str] = None) -> List[str]:
+    def missing_keys(self, locale: str, reference_locale: str | None = None) -> list[str]:
         """Retorna chaves que existem no locale de referência mas não no target."""
         ref = reference_locale or self.fallback_locale
         ref_keys = set(self._translations.get(ref, {}).keys())
@@ -345,21 +344,21 @@ try:
     @i18n_router.get("/translate/{key}")
     async def translate_key(
         key: str,
-        accept_language: Optional[str] = Header(default=None),
-    ) -> Dict[str, str]:
+        accept_language: str | None = Header(default=None),
+    ) -> dict[str, str]:
         locale = (accept_language or DEFAULT_LOCALE).split(",")[0].split("-")[0].lower()
         i18n = I18n(locale=locale)
         return {"key": key, "locale": i18n.locale, "translation": i18n.t(key)}
 
     @i18n_router.get("/locales")
-    async def list_locales() -> Dict[str, Any]:
+    async def list_locales() -> dict[str, Any]:
         return {
             "supported": sorted(SUPPORTED_LOCALES),
             "default": DEFAULT_LOCALE,
         }
 
     @i18n_router.get("/keys")
-    async def list_translation_keys(locale: str = DEFAULT_LOCALE) -> Dict[str, Any]:
+    async def list_translation_keys(locale: str = DEFAULT_LOCALE) -> dict[str, Any]:
         i18n = I18n(locale=locale)
         return {"locale": i18n.locale, "keys": i18n.list_keys()}
 

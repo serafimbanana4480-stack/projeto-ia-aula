@@ -9,23 +9,22 @@ from __future__ import annotations
 import pytest
 
 from backend.tools.web_search_v2 import (
+    FetchedContent,
     SearchHit,
     SearchResult,
-    FetchedContent,
-    _domain_score,
-    _relevance_score,
-    _rank_hits,
-    _parse_age_hint,
-    _extract_site_filter,
     _apply_recency_filter,
     _cross_reference_facts,
-    search_web,
+    _domain_score,
+    _extract_site_filter,
+    _parse_age_hint,
+    _rank_hits,
+    _relevance_score,
     fetch_and_summarize,
     search_and_answer,
-    search_github,
     search_docs,
+    search_github,
+    search_web,
 )
-
 
 # ---------------------------------------------------------------------------
 # Mock fixtures — keep tests deterministic and fast
@@ -337,9 +336,7 @@ class TestFetchAndSummarize:
         assert result["status"] == "success"
 
     @pytest.mark.asyncio
-    async def test_fetch_and_summarize_invalid_url(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_fetch_and_summarize_invalid_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Force both fetch strategies to fail
         async def _fail(*args, **kwargs):
             return None
@@ -347,7 +344,9 @@ class TestFetchAndSummarize:
         monkeypatch.setattr("backend.tools.web_search_v2._fetch_via_jina", _fail)
         monkeypatch.setattr("backend.tools.web_search_v2._fetch_via_httpx", _fail)
 
-        result = await fetch_and_summarize("https://this-domain-does-not-exist-12345.invalid", max_length=200)
+        result = await fetch_and_summarize(
+            "https://this-domain-does-not-exist-12345.invalid", max_length=200
+        )
         assert result["status"] == "error"
 
 
@@ -374,7 +373,12 @@ class TestSearchGithub:
     @pytest.mark.asyncio
     async def test_search_github_no_results(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def _empty(*args, **kwargs):
-            return {"query": args[0] if args else "", "repositories": [], "count": 0, "total_count": 0}
+            return {
+                "query": args[0] if args else "",
+                "repositories": [],
+                "count": 0,
+                "total_count": 0,
+            }
 
         monkeypatch.setattr("backend.tools.web_search_v2.search_github", _empty)
         result = await search_github("xyznonexistent123456", stars_min=50000)

@@ -26,6 +26,7 @@ import logging
 from typing import Any
 
 from backend.cache_backends import NullCacheBackend, TTLCacheBackend
+from backend.config.settings import get_model_config, load_prompt
 from backend.models.api import AgentName, RoutingDecision
 from backend.orchestrator.router_engine import (
     DEFAULT_CACHE_TTL,
@@ -41,7 +42,6 @@ from backend.orchestrator.routing_strategies import (
 )
 from backend.tools.ollama_client import ChatMessage
 from backend.tools.sanitizer import detect_injection
-from backend.config.settings import get_model_config, load_prompt
 
 logger = logging.getLogger(__name__)
 

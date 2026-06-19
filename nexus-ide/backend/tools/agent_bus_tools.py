@@ -70,7 +70,6 @@ async def subscribe_bus_topic(
     Returns:
         Dict with ``subscription_id`` and ``topic``.
     """
-    import uuid
 
     bus = get_agent_bus()
 

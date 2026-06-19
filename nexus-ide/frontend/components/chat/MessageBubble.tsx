@@ -3,6 +3,7 @@
 import ReactMarkdown from "react-markdown";
 import { memo, useEffect, useState } from "react";
 import { motion } from "framer-motion";
+import { Copy, Check, RefreshCw, AlertCircle } from "lucide-react";
 import type { ChatMessage, AgentName } from "../../lib/types";
 import { stripAnsiCodes } from "../../lib/utils";
 import AgentBadge from "./AgentBadge";
@@ -66,9 +67,11 @@ function TypingDots() {
 function MessageBubbleComponent({
   message,
   isStreaming = false,
+  onRetry,
 }: {
   message: ChatMessage;
   isStreaming?: boolean;
+  onRetry?: (prompt: string) => void;
 }) {
   const isUser = message.role === "user";
   const [relativeTime, setRelativeTime] = useState(() =>
@@ -164,9 +167,9 @@ function MessageBubbleComponent({
 
         {message.metrics && (
           <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-nexus-muted">
-            {Object.entries(message.metrics).map(([k, v]) => (
+            {Object.entries(message.metrics).map(([k, v], idx) => (
               <span
-                key={k}
+                key={`${idx}-${k}`}
                 className="rounded-lg bg-nexus-bg/80 px-2.5 py-1 backdrop-blur-sm"
               >
                 {k}: {v}
@@ -174,8 +177,54 @@ function MessageBubbleComponent({
             ))}
           </div>
         )}
+
+        {/* Error retry + copy actions (only for error messages) */}
+        {!isUser && message.metadata?.kind === "error" && (
+          <div className="mt-3 flex items-center gap-2 border-t border-rose-500/20 pt-2">
+            <AlertCircle className="h-3.5 w-3.5 text-rose-400" />
+            <span className="text-[10px] uppercase tracking-wider text-rose-400/80">
+              Erro
+            </span>
+            {message.metadata?.canRetry && onRetry && message.metadata?.prompt && (
+              <button
+                onClick={() => onRetry(message.metadata!.prompt as string)}
+                className="ml-auto flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[11px] font-medium text-rose-300 transition-colors hover:bg-rose-500/20"
+                title="Reenviar a mesma mensagem"
+              >
+                <RefreshCw className="h-3 w-3" />
+                Tentar novamente
+              </button>
+            )}
+            <CopyMessageButton text={message.content} />
+          </div>
+        )}
+
+        {/* Copy button for regular assistant messages */}
+        {!isUser && message.metadata?.kind !== "error" && message.content.trim() && (
+          <CopyMessageButton text={message.content} className="absolute -top-1 right-2 opacity-0 transition-opacity group-hover:opacity-100" />
+        )}
       </div>
     </motion.div>
+  );
+}
+
+function CopyMessageButton({ text, className = "" }: { text: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={async (e) => {
+        e.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        } catch {}
+      }}
+      className={`flex items-center gap-1 rounded p-1 text-[10px] text-nexus-muted hover:bg-nexus-bg/40 hover:text-nexus-text ${className}`}
+      title="Copiar mensagem"
+    >
+      {copied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+    </button>
   );
 }
 

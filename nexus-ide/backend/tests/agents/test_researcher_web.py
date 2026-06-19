@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from backend.agents.researcher_web import ResearcherWebAgent
 from backend.agents.base import AgentAction
+from backend.agents.researcher_web import ResearcherWebAgent
 
 
 class TestResearcherWebAgent:
@@ -30,4 +30,4 @@ class TestResearcherWebAgent:
     def test_has_execute_method(self) -> None:
         agent = ResearcherWebAgent()
         assert hasattr(agent, "_execute")
-        assert callable(getattr(agent, "_execute"))
+        assert callable(agent._execute)

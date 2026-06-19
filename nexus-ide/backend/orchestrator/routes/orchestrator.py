@@ -47,7 +47,9 @@ async def _execute_task(task_id: str, data: dict[str, Any]) -> None:
 
 
 @router.post("/orchestrator/tasks/parallel")
-async def spawn_parallel(data: dict[str, Any], _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def spawn_parallel(
+    data: dict[str, Any], _user: dict = Depends(require_auth)
+) -> dict[str, Any]:
     tasks = data.get("tasks", [])
     results = []
     for t in tasks:

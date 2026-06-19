@@ -69,16 +69,11 @@ def _init_peer_review_db() -> None:
             """
         )
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pr_artifact "
-            "ON peer_review_requests(artifact_id)"
+            "CREATE INDEX IF NOT EXISTS idx_pr_artifact ON peer_review_requests(artifact_id)"
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pr_status ON peer_review_requests(status)")
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pr_status "
-            "ON peer_review_requests(status)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pr_results_review "
-            "ON peer_review_results(review_id)"
+            "CREATE INDEX IF NOT EXISTS idx_pr_results_review ON peer_review_results(review_id)"
         )
 
 
@@ -228,9 +223,7 @@ class PeerReviewSystem:
         reviews: list[dict[str, Any]] = []
         for req_row in req_rows:
             review = self._row_to_request(req_row)
-            res_rows = await asyncio.to_thread(
-                self._fetch_result_rows, review.review_id
-            )
+            res_rows = await asyncio.to_thread(self._fetch_result_rows, review.review_id)
             results = [self._row_to_result(r) for r in res_rows]
             reviews.append(
                 {
@@ -361,17 +354,13 @@ class PeerReviewSystem:
                 (review_id,),
             ).fetchall()
 
-    async def list_pending_reviews(
-        self, reviewer_agent: str | None = None
-    ) -> list[ReviewRequest]:
+    async def list_pending_reviews(self, reviewer_agent: str | None = None) -> list[ReviewRequest]:
         """Return review requests that are still pending or in review."""
         await self._ensure_init()
         rows = await asyncio.to_thread(self._fetch_pending_rows, reviewer_agent)
         return [self._row_to_request(r) for r in rows]
 
-    def _fetch_pending_rows(
-        self, reviewer_agent: str | None
-    ) -> list[sqlite3.Row]:
+    def _fetch_pending_rows(self, reviewer_agent: str | None) -> list[sqlite3.Row]:
         with get_db() as conn:
             return conn.execute(
                 """
@@ -399,9 +388,7 @@ class PeerReviewSystem:
         except Exception as exc:
             logger.warning("Failed to publish review.completed event: %s", exc)
 
-    def _update_request_status(
-        self, conn: sqlite3.Connection, review_id: str
-    ) -> None:
+    def _update_request_status(self, conn: sqlite3.Connection, review_id: str) -> None:
         req_row = conn.execute(
             "SELECT * FROM peer_review_requests WHERE review_id = ?",
             (review_id,),
@@ -461,9 +448,7 @@ class PeerReviewSystem:
             review_id=row["review_id"],
             reviewer_agent=row["reviewer_agent"],
             status=row["status"],
-            comments=[
-                ReviewComment(**c) for c in json.loads(row["comments"])
-            ],
+            comments=[ReviewComment(**c) for c in json.loads(row["comments"])],
             criteria_scores=json.loads(row["criteria_scores"]),
             created_at=datetime.fromisoformat(row["created_at"]),
         )

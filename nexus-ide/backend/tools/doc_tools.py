@@ -47,7 +47,11 @@ async def generate_module_doc(
         logger.exception("Failed to index %s: %s", path, exc)
         return {"error": f"Failed to index {path}: {exc}"}
 
-    rel_path = path.relative_to(Path(project_path).resolve()) if path.is_relative_to(Path(project_path).resolve()) else path
+    rel_path = (
+        path.relative_to(Path(project_path).resolve())
+        if path.is_relative_to(Path(project_path).resolve())
+        else path
+    )
 
     lines: list[str] = [
         f"# Documentation: {path.name}",

@@ -27,6 +27,7 @@ class TestSandboxConfig:
     def test_sandbox_executor_available(self) -> None:
         """Verify SandboxExecutor is importable and provides security."""
         from backend.sandbox.executor import SandboxConfig
+
         config = SandboxConfig()
         assert config.network_enabled is False
         assert config.max_memory_mb == 512
@@ -36,6 +37,7 @@ class TestSandboxConfig:
     def test_dangerous_command_detector(self) -> None:
         """Verify dangerous command detection works."""
         from backend.sandbox.executor import DangerousCommandDetector, RiskLevel
+
         risk, reasons = DangerousCommandDetector.assess_risk("rm -rf /")
         assert risk == RiskLevel.CRITICAL
         assert len(reasons) > 0
@@ -45,10 +47,10 @@ class TestExecuteCode:
     def test_python_hello(self) -> None:
         """Test that Python code executes and returns output."""
         result = asyncio.run(execute_code("print('hello world')", "python"))
-        assert isinstance(result, ExecutionResult)
-        assert result.exit_code == 0
-        assert "hello world" in result.stdout
-        assert result.timed_out is False
+        assert isinstance(result, dict)
+        assert result["exit_code"] == 0
+        assert "hello world" in result["stdout"]
+        assert result["timed_out"] is False
 
     def test_unsupported_language(self) -> None:
         """Test that unsupported languages raise ValueError."""

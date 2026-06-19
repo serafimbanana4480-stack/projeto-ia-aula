@@ -11,16 +11,12 @@ Validates:
 
 from __future__ import annotations
 
-import math
-import time
-from unittest.mock import MagicMock, patch
-
 import pytest
-
 
 # =========================================================================
 # FASE 1 — TOKEN MANAGEMENT
 # =========================================================================
+
 
 class TestTokenCounting:
     """Token counting accuracy and fallback behavior."""
@@ -107,7 +103,7 @@ class TestTokenCounting:
 
     def test_validate_total_budget_overflow(self):
         """Validation must raise ContextOverflowError when exceeding limits."""
-        from backend.token_management import validate_total_budget, ContextOverflowError
+        from backend.token_management import ContextOverflowError, validate_total_budget
 
         with pytest.raises(ContextOverflowError) as excinfo:
             validate_total_budget(
@@ -122,7 +118,7 @@ class TestTokenCounting:
 
     def test_validate_total_budget_with_tool_results(self):
         """Tool result tokens must be included in the calculation."""
-        from backend.token_management import validate_total_budget, ContextOverflowError
+        from backend.token_management import ContextOverflowError, validate_total_budget
 
         with pytest.raises(ContextOverflowError):
             validate_total_budget(
@@ -191,12 +187,14 @@ class TestTokenCounting:
 # FASE 2 — SEMANTIC CACHE
 # =========================================================================
 
+
 class TestSemanticCache:
     """Semantic cache for LLM responses."""
 
     @pytest.fixture
     def cache(self):
         from backend.cache import SemanticCache
+
         return SemanticCache(similarity_threshold=0.85)
 
     @pytest.fixture
@@ -211,6 +209,7 @@ class TestSemanticCache:
 
     def test_cache_store_and_retrieve(self, cache, same_embedding):
         """Stored response must be retrievable for an identical query."""
+
         def embed_fn(text):
             return same_embedding
 
@@ -220,14 +219,13 @@ class TestSemanticCache:
 
     def test_cache_miss_on_different_query(self, cache, same_embedding, different_embedding):
         """Different queries should miss if embeddings differ."""
-        cache.store("hello", "world", "test-model", "test-sys",
-                     lambda t: same_embedding)
-        result = cache.get("different", "test-model", "test-sys",
-                           lambda t: different_embedding)
+        cache.store("hello", "world", "test-model", "test-sys", lambda t: same_embedding)
+        result = cache.get("different", "test-model", "test-sys", lambda t: different_embedding)
         assert result is None
 
     def test_cache_threshold_behavior(self, cache):
         """Similar (but not identical) embeddings must hit if above threshold."""
+
         def embed_fn(text):
             return [0.1, 0.2, 0.3, 0.4] * 96
 
@@ -240,6 +238,7 @@ class TestSemanticCache:
 
     def test_cache_metrics(self, cache, same_embedding):
         """Cache metrics must track hits and misses correctly."""
+
         def embed_fn(text):
             return same_embedding
 
@@ -254,6 +253,7 @@ class TestSemanticCache:
 
     def test_cache_clear(self, cache, same_embedding):
         """Clear must remove all entries."""
+
         def embed_fn(text):
             return same_embedding
 
@@ -265,6 +265,7 @@ class TestSemanticCache:
     def test_cosine_similarity_identical(self):
         """Identical vectors must have similarity = 1.0."""
         from backend.cache.semantic_cache import SemanticCache
+
         cache = SemanticCache()
         a = [1.0, 0.0, 0.0]
         b = [1.0, 0.0, 0.0]
@@ -274,6 +275,7 @@ class TestSemanticCache:
     def test_cosine_similarity_orthogonal(self):
         """Orthogonal vectors must have similarity = 0.0."""
         from backend.cache.semantic_cache import SemanticCache
+
         cache = SemanticCache()
         a = [1.0, 0.0, 0.0]
         b = [0.0, 1.0, 0.0]
@@ -283,6 +285,7 @@ class TestSemanticCache:
     def test_cosine_similarity_different_dimensions(self):
         """Different dimension vectors must return 0.0."""
         from backend.cache.semantic_cache import SemanticCache
+
         cache = SemanticCache()
         sim = cache._cosine_similarity([1.0, 0.0], [1.0, 0.0, 0.0])
         assert sim == 0.0
@@ -292,12 +295,14 @@ class TestSemanticCache:
 # FASE 2 — TOOL RESULT CACHE
 # =========================================================================
 
+
 class TestToolResultCache:
     """TTL-based tool result cache."""
 
     @pytest.fixture
     def cache(self):
         from backend.cache import ToolResultCache
+
         return ToolResultCache(max_entries=100)
 
     def test_cache_hit_same_args(self, cache):
@@ -363,6 +368,7 @@ class TestToolResultCache:
 # FASE 3 — FAISS VECTOR STORE
 # =========================================================================
 
+
 class TestFAISSVectorStore:
     """FAISS-based ANN vector search."""
 
@@ -373,6 +379,7 @@ class TestFAISSVectorStore:
     @pytest.fixture
     def store(self, tmp_path):
         from backend.cache.vector_store import FAISSEmbeddingStore
+
         return FAISSEmbeddingStore(
             dimension=64,
             index_path=str(tmp_path / "faiss_test"),
@@ -423,8 +430,9 @@ class TestFAISSVectorStore:
 
     def test_persist_and_reload(self, tmp_path):
         """Index must survive persist/reload cycle."""
-        from backend.cache.vector_store import FAISSEmbeddingStore
         import numpy as np
+
+        from backend.cache.vector_store import FAISSEmbeddingStore
 
         idx_path = tmp_path / "faiss_persist"
 
@@ -471,12 +479,14 @@ class TestFAISSVectorStore:
 # FASE 5 — COST TRACKING
 # =========================================================================
 
+
 class TestCostTracking:
     """LLM cost tracking."""
 
     def test_cost_calculation(self):
         """Cost must be calculated based on token counts and model pricing."""
         from backend.observability.metrics import CostTracker
+
         tracker = CostTracker()
 
         cost = tracker.record(
@@ -495,6 +505,7 @@ class TestCostTracking:
     def test_cost_accumulation(self):
         """Multiple calls to same session must accumulate cost."""
         from backend.observability.metrics import CostTracker
+
         tracker = CostTracker()
 
         tracker.record("gpt-4o", 1000, 500, "session-1", "CODER")
@@ -506,6 +517,7 @@ class TestCostTracking:
     def test_cost_zero_tokens(self):
         """Zero tokens must result in zero cost."""
         from backend.observability.metrics import CostTracker
+
         tracker = CostTracker()
 
         cost = tracker.record("gpt-4o", 0, 0, "session-1", "CODER")
@@ -514,6 +526,7 @@ class TestCostTracking:
     def test_cost_report(self):
         """Report must contain all tracked sessions."""
         from backend.observability.metrics import CostTracker
+
         tracker = CostTracker()
 
         tracker.record("model", 100, 50, "session-a", "AGENT_A")
@@ -530,6 +543,7 @@ class TestCostTracking:
 # FASE 10 — INTEGRATION / END-TO-END
 # =========================================================================
 
+
 class TestTokenManagementIntegration:
     """Integration test: token management + cache + metrics."""
 
@@ -538,8 +552,8 @@ class TestTokenManagementIntegration:
         from backend.token_management import (
             count_tokens,
             deduplicate_context_blocks,
-            validate_total_budget,
             dynamic_threshold,
+            validate_total_budget,
         )
 
         # Simulate building context
@@ -584,7 +598,7 @@ class TestCacheIntegration:
 
     def test_caches_independent(self):
         """Tool cache and semantic cache must operate independently."""
-        from backend.cache import ToolResultCache, SemanticCache
+        from backend.cache import SemanticCache, ToolResultCache
 
         tool_cache = ToolResultCache()
         sem_cache = SemanticCache()
@@ -594,7 +608,9 @@ class TestCacheIntegration:
         assert tool_cache.get("search_codebase", {"query": "auth"}) is not None
 
         # Semantic cache operates independently
-        def embed(t): return [0.1] * 384
+        def embed(t):
+            return [0.1] * 384
+
         sem_cache.store("hello", "world", "m", "s", embed)
         assert sem_cache.get("hello", "m", "s", embed) == "world"
 

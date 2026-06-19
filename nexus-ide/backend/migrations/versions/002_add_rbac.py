@@ -5,11 +5,10 @@ Revises: 001_initial
 Create Date: 2025-01-12
 
 """
+
 from __future__ import annotations
 
 from alembic import op
-import sqlalchemy as sa
-
 
 # revision identifiers, used by Alembic.
 revision = "002_add_rbac"
@@ -87,7 +86,9 @@ def upgrade() -> None:
     op.execute("CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id)")
     op.execute("CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(role_id)")
     op.execute("CREATE INDEX IF NOT EXISTS idx_role_permissions_role ON role_permissions(role_id)")
-    op.execute("CREATE INDEX IF NOT EXISTS idx_role_permissions_permission ON role_permissions(permission_id)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_role_permissions_permission ON role_permissions(permission_id)"
+    )
     op.execute("CREATE INDEX IF NOT EXISTS idx_permissions_resource ON permissions(resource)")
 
     # Insert default roles

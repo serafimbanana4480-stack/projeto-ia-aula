@@ -87,10 +87,7 @@ class MockProvider:
         effective_model = model or "mock"
         return list(
             await asyncio.gather(
-                *(
-                    self.chat_complete(effective_model, msgs, **kwargs)
-                    for msgs in messages_list
-                )
+                *(self.chat_complete(effective_model, msgs, **kwargs) for msgs in messages_list)
             )
         )
 
@@ -221,9 +218,7 @@ class ResilientLLMProvider:
                 return list(
                     await asyncio.gather(
                         *(
-                            provider.chat_complete(
-                                model or "", msgs, options=options, **kwargs
-                            )
+                            provider.chat_complete(model or "", msgs, options=options, **kwargs)
                             for msgs in messages_list
                         )
                     )
@@ -347,6 +342,14 @@ def _build_fallback_chain(
                 api_key=settings.openrouter_api_key,
             )
         )
+
+    # Always add Ollama local as a fallback for embeddings and basic chat
+    if settings.ollama_host:
+        try:
+            fallbacks.append(OllamaProvider(base_url=settings.ollama_host))
+            logger.info("Added Ollama fallback to chain")
+        except Exception:
+            pass
 
     # Add DevProvider for zero-cost local development before the ultimate mock fallback
     has_any_real_provider = bool(
@@ -473,7 +476,7 @@ def create_llm_client(**overrides: Any) -> Any:
     """Create an LLM provider instance based on configuration.
 
     Reads ``llm_provider`` from settings (env var ``LLM_PROVIDER``).
-    Supported providers: ``ollama``/``local``, ``airllm``, ``openai``, ``deepseek``, ``kimi``, ``groq``, ``anthropic``, ``gemini``, ``openrouter``.
+    Supported providers: ``ollama``/``local``, ``airllm``, ``openai``, ``deepseek``, ``kimi``, ``groq``, ``anthropic``, ``gemini``, ``openrouter``, ``opencode_go``, ``dev``.
 
     If ``MULTI_LLM_ENABLED`` is true, returns a :class:`MultiLLMManager`
     configured with all available providers.
@@ -652,6 +655,25 @@ def create_llm_client(**overrides: Any) -> Any:
             base_url=overrides.get(
                 "openrouter_base_url",
                 getattr(settings, "openrouter_base_url", "https://openrouter.ai/api/v1"),
+            ),
+            api_key=api_key,
+        )
+
+    if provider == "opencode_go":
+        from backend.llm.opencode_go_provider import OpenCodeGoProvider
+
+        api_key = (
+            overrides.get("opencode_go_api_key", "")
+            or _runtime.get("opencode_go_api_key")
+            or getattr(settings, "opencode_go_api_key", "")
+        )
+        if not api_key:
+            logger.warning("OPENCODE_GO_API_KEY not set — requests will fail")
+        logger.info("Using OpenCode Go provider at https://opencode.ai/zen/go/v1")
+        return OpenCodeGoProvider(
+            base_url=overrides.get(
+                "opencode_go_base_url",
+                getattr(settings, "opencode_go_base_url", "https://opencode.ai/zen/go/v1"),
             ),
             api_key=api_key,
         )

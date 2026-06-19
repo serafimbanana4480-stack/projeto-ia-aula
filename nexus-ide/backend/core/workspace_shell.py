@@ -7,7 +7,6 @@ and environment sanitisation.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import platform
 import shlex
@@ -92,12 +91,12 @@ async def execute_shell(
         # asyncio.create_subprocess_exec raises NotImplementedError on Windows
         # with the default event loop policy.
         import subprocess
+
         def _run_shell():
             return subprocess.run(
                 command,
                 cwd=str(cwd_path) if cwd_path else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 env=merged_env,
                 shell=True,
                 text=True,
@@ -116,7 +115,7 @@ async def execute_shell(
             "exit_code": result.returncode,
             "cwd": str(cwd_path) if cwd_path else None,
         }
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Shell command timed out: %s", command)
         return {"error": f"Command timed out after {timeout} seconds", "command": command}
     except FileNotFoundError:
@@ -164,11 +163,11 @@ async def execute_python(
 
         def _run_python():
             import subprocess
+
             return subprocess.run(
                 [sys.executable, temp_path],
                 cwd=str(cwd_path),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 errors="replace",
             )
@@ -178,14 +177,14 @@ async def execute_python(
                 asyncio.to_thread(_run_python),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Attempt to kill the Python process on timeout
             try:
                 import subprocess
+
                 subprocess.run(
                     ["taskkill", "/F", "/T", "/IM", Path(sys.executable).name],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    capture_output=True,
                     check=False,
                 )
             except Exception:
@@ -235,17 +234,18 @@ async def execute_script(
         if not await asyncio.to_thread(script.exists):
             return {"error": f"Script not found: {path}"}
 
-        cwd_path = await asyncio.to_thread(lambda: Path(cwd).expanduser().resolve()) if cwd else script.parent
+        cwd_path = (
+            await asyncio.to_thread(lambda: Path(cwd).expanduser().resolve())
+            if cwd
+            else script.parent
+        )
     except Exception as exc:
         return {"error": f"Path resolution failed: {exc}"}
 
     interpreter: str | None = None
     ext = script.suffix.lower()
     if ext == ".py":
-        if platform.system() == "Windows" and shutil.which("py"):
-            interpreter = "py"
-        else:
-            interpreter = "python"
+        interpreter = "py" if platform.system() == "Windows" and shutil.which("py") else "python"
     elif ext == ".sh":
         interpreter = "bash"
     elif ext in (".ps1", ".psm1"):
@@ -256,7 +256,9 @@ async def execute_script(
         interpreter = "ruby"
     else:
         try:
-            first_line = (await asyncio.to_thread(script.read_text, encoding="utf-8", errors="ignore")).splitlines()[0]
+            first_line = (
+                await asyncio.to_thread(script.read_text, encoding="utf-8", errors="ignore")
+            ).splitlines()[0]
         except (PermissionError, FileNotFoundError, IndexError):
             first_line = ""
         if first_line.startswith("#!"):
@@ -276,13 +278,14 @@ async def execute_script(
             return {"error": f"Sandbox blocked: {reason}", "command": " ".join(cmd)}
 
     try:
+
         def _run_script():
             import subprocess
+
             return subprocess.run(
                 cmd,
                 cwd=str(cwd_path),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 errors="replace",
             )
@@ -299,7 +302,7 @@ async def execute_script(
             "exit_code": result.returncode,
             "cwd": str(cwd_path),
         }
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"error": f"Script timed out after {timeout}s", "command": " ".join(cmd)}
     except FileNotFoundError:
         return {"error": f"Interpreter not found: {interpreter}", "command": " ".join(cmd)}

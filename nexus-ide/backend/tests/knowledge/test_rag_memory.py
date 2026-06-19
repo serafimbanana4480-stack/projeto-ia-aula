@@ -38,9 +38,7 @@ def client() -> TestClient:
 
 class TestMemoryContext:
     @pytest.mark.asyncio
-    async def test_get_context_includes_relevant_memories(
-        self, rag_store: MemoryStore
-    ) -> None:
+    async def test_get_context_includes_relevant_memories(self, rag_store: MemoryStore) -> None:
         await rag_store.store(
             "Authentication uses JWT tokens for security",
             memory_type=MemoryType.GLOBAL,
@@ -59,9 +57,7 @@ class TestMemoryContext:
         assert "PostgreSQL" in context or "ORM" in context
 
     @pytest.mark.asyncio
-    async def test_get_context_respects_token_budget(
-        self, rag_store: MemoryStore
-    ) -> None:
+    async def test_get_context_respects_token_budget(self, rag_store: MemoryStore) -> None:
         long_content = "word " * 2000
         await rag_store.store(long_content, memory_type=MemoryType.GLOBAL)
         await rag_store.store("short note", memory_type=MemoryType.GLOBAL)
@@ -71,9 +67,7 @@ class TestMemoryContext:
         assert "short note" in context or context == ""
 
     @pytest.mark.asyncio
-    async def test_remember_conversation_links_memories(
-        self, rag_store: MemoryStore
-    ) -> None:
+    async def test_remember_conversation_links_memories(self, rag_store: MemoryStore) -> None:
         user_mem, assistant_mem = await rag_store.remember_conversation(
             user_message="What is the database?",
             assistant_message="PostgreSQL.",

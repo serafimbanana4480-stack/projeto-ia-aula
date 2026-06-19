@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 
 from backend.core.workspace_fs import (
     list_dir_absolute,
@@ -13,7 +13,6 @@ from backend.core.workspace_fs import (
     write_file_absolute,
 )
 from backend.core.workspace_security import _is_blocked_path
-
 from backend.middleware.auth import require_auth
 from backend.models.api import FileListRequest, FileReadRequest, FileTreeEntry, FileWriteRequest
 from backend.tools.file_ops import list_dir, read_file, write_file
@@ -106,7 +105,9 @@ def _validate_upload(file: UploadFile, content: bytes) -> tuple[bool, str]:
     # 3. Content-Type consistency (best-effort)
     declared = (file.content_type or "application/octet-stream").lower()
     allowed_types = [t.lower() for t in _UPLOAD_ALLOWLIST[suffix]]
-    if declared not in allowed_types and not any(declared.startswith(a.split("/")[0]) for a in allowed_types):
+    if declared not in allowed_types and not any(
+        declared.startswith(a.split("/")[0]) for a in allowed_types
+    ):
         logger.warning(
             "Upload content-type mismatch: declared %r for %s (expected one of %r)",
             declared,
@@ -127,7 +128,10 @@ def _validate_upload(file: UploadFile, content: bytes) -> tuple[bool, str]:
                     if suffix == ".webp":
                         matched = True
                         break
-                    return False, f"File content ({expected_ext}) does not match expected format for {suffix}"
+                    return (
+                        False,
+                        f"File content ({expected_ext}) does not match expected format for {suffix}",
+                    )
                 # RIFF but not WEBP (e.g. WAV/AVI) — keep scanning other signatures
                 continue
             # General case: magic matched a non-WEBP binary format
@@ -141,7 +145,10 @@ def _validate_upload(file: UploadFile, content: bytes) -> tuple[bool, str]:
             if expected_ext == ".jpeg" and suffix == ".jpg":
                 matched = True
                 break
-            return False, f"File content ({expected_ext}) does not match expected format for {suffix}"
+            return (
+                False,
+                f"File content ({expected_ext}) does not match expected format for {suffix}",
+            )
         if not matched:
             return False, f"File content does not match expected format for {suffix}"
 
@@ -190,7 +197,9 @@ async def list_files_endpoint(req: FileListRequest, _user: dict = Depends(requir
     if Path(req.path).is_absolute():
         result = await list_dir_absolute(req.path, recursive=req.recursive, max_results=5_000)
     else:
-        result = await list_dir(path=req.path, project_path=req.project_path, recursive=req.recursive)
+        result = await list_dir(
+            path=req.path, project_path=req.project_path, recursive=req.recursive
+        )
     if "error" in result:
         return result
 
@@ -220,8 +229,8 @@ async def write_file_endpoint(req: FileWriteRequest, _user: dict = Depends(requi
 @router.post("/files/upload")
 async def upload_file(
     file: UploadFile = File(...),
-    project_path: str = ".",
-    session_id: str | None = None,
+    project_path: str = Form("."),
+    session_id: str | None = Form(None),
     _user: dict = Depends(require_auth),
 ) -> dict:
     """Upload a file to the project workspace.
@@ -237,9 +246,12 @@ async def upload_file(
         target_dir = Path(project_path).resolve()
         target_path = target_dir / (file.filename or "unnamed")
 
-        # Path traversal guard
+        # Path traversal guard. We must compare the *resolved* paths so the
+        # ``..`` segments in the user-supplied filename are normalised before
+        # the relative_to check — a string-level relative_to would let
+        # ``../../etc/passwd`` pass.
         try:
-            target_path.relative_to(target_dir)
+            target_path.resolve().relative_to(target_dir)
         except ValueError:
             return {"error": "Invalid file path — outside project directory"}
 

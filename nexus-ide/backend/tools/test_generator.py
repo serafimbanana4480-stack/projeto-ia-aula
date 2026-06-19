@@ -94,30 +94,33 @@ def _generate_test_for_function(func_info: dict, module_path: str) -> list[str]:
     lines.append(f'    """Test {func_name}."""')
 
     if is_async:
-        lines.append(f"    import asyncio")
+        lines.append("    import asyncio")
         lines.append(f"    result = asyncio.run({func_name}({call_str}))")
     else:
         lines.append(f"    result = {func_name}({call_str})")
 
-    lines.append(f"    # TODO: adjust assertion based on expected behavior")
-    lines.append(f"    assert result is not None")
+    lines.append("    # TODO: adjust assertion based on expected behavior")
+    lines.append("    assert result is not None")
     lines.append("")
 
     has_numeric = any(
         a["default"] is None
         and a.get("type") not in {"*args", "**kwargs"}
-        and any(x in a["name"].lower() for x in ["count", "num", "size", "limit", "id", "age", "width", "height"])
+        and any(
+            x in a["name"].lower()
+            for x in ["count", "num", "size", "limit", "id", "age", "width", "height"]
+        )
         for a in args
     )
     if has_numeric:
         lines.append(f"def {test_func_name}_edge_cases() -> None:")
         lines.append(f'    """Test {func_name} edge cases."""')
         if is_async:
-            lines.append(f"    import asyncio")
+            lines.append("    import asyncio")
             lines.append(f"    result = asyncio.run({func_name}({call_str}))")
         else:
             lines.append(f"    result = {func_name}({call_str})")
-        lines.append(f"    assert result is not None")
+        lines.append("    assert result is not None")
         lines.append("")
 
     return lines
@@ -129,7 +132,8 @@ def _generate_test_for_class(cls_node: ast.ClassDef, module_path: str) -> list[s
     class_name = cls_node.name
 
     methods = [
-        n for n in cls_node.body
+        n
+        for n in cls_node.body
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("_")
     ]
 
@@ -138,7 +142,9 @@ def _generate_test_for_class(cls_node: ast.ClassDef, module_path: str) -> list[s
     lines.append("")
 
     # Always create a fixture for the class instance
-    init_methods = [n for n in cls_node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"]
+    init_methods = [
+        n for n in cls_node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+    ]
     if init_methods:
         init_args = _get_function_signature(init_methods[0])["args"]
         init_args = [a for a in init_args if a["name"] != "self"]
@@ -155,7 +161,7 @@ def _generate_test_for_class(cls_node: ast.ClassDef, module_path: str) -> list[s
     else:
         setup_str = ""
 
-    lines.append(f"    @pytest.fixture")
+    lines.append("    @pytest.fixture")
     lines.append(f"    def instance(self) -> {class_name}:")
     lines.append(f'        """Create a {class_name} instance for testing."""')
     lines.append(f"        return {class_name}({setup_str})")
@@ -164,7 +170,7 @@ def _generate_test_for_class(cls_node: ast.ClassDef, module_path: str) -> list[s
     if not methods:
         lines.append(f"    def test_init(self, instance: {class_name}) -> None:")
         lines.append(f'        """Test {class_name} instantiation."""')
-        lines.append(f"        assert instance is not None")
+        lines.append("        assert instance is not None")
         lines.append("")
         return lines
 
@@ -193,12 +199,12 @@ def _generate_test_for_class(cls_node: ast.ClassDef, module_path: str) -> list[s
         lines.append(f"    def test_{method_name}(self, instance: {class_name}) -> None:")
         lines.append(f'        """Test {method_name}."""')
         if is_async:
-            lines.append(f"        import asyncio")
+            lines.append("        import asyncio")
             lines.append(f"        result = asyncio.run(instance.{method_name}({call_str}))")
         else:
             lines.append(f"        result = instance.{method_name}({call_str})")
-        lines.append(f"        # TODO: adjust assertion based on expected behavior")
-        lines.append(f"        assert result is not None")
+        lines.append("        # TODO: adjust assertion based on expected behavior")
+        lines.append("        assert result is not None")
         lines.append("")
 
     return lines
@@ -259,7 +265,7 @@ async def generate_tests(file_path: str, project_path: str = ".") -> dict:
         if not full_path.exists():
             return {"error": f"File not found: {file_path}"}
 
-        if not full_path.suffix == ".py":
+        if full_path.suffix != ".py":
             return {"error": "Test generation is only supported for .py files"}
 
         source = full_path.read_text(encoding="utf-8")

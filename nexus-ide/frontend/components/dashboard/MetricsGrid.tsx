@@ -163,7 +163,7 @@ export default function MetricsGrid() {
       .join(" ");
     return (
       <svg
-        className="h-6 w-full"
+        className="h-8 w-full"
         viewBox="0 0 100 100"
         preserveAspectRatio="none"
         role="img"
@@ -176,10 +176,10 @@ export default function MetricsGrid() {
   };
 
   const getCellBorderColor = (cell: MetricCell) => {
-    if (cell.critical) return "border-red-500/50 bg-red-500/5";
-    if (cell.warning) return "border-yellow-500/50 bg-yellow-500/5";
-    if (selectedMetric === cell.key) return "border-nexus-accent/50 bg-nexus-accent/5";
-    return "border-nexus-border bg-nexus-panel hover:border-nexus-border/80";
+    if (cell.critical) return "border-red-500/50 bg-gradient-to-br from-red-500/10 to-red-500/5";
+    if (cell.warning) return "border-yellow-500/50 bg-gradient-to-br from-yellow-500/10 to-yellow-500/5";
+    if (selectedMetric === cell.key) return "border-nexus-accent/50 bg-gradient-to-br from-nexus-accent/10 to-nexus-accent/5";
+    return "border-nexus-border bg-gradient-to-br from-nexus-panel to-nexus-bg hover:border-nexus-border/80";
   };
 
   const getCellTextColor = (cell: MetricCell) => {
@@ -242,9 +242,10 @@ export default function MetricsGrid() {
               tabIndex={0}
               aria-pressed={selectedMetric === cell.key}
               aria-label={cellAria}
+              title={`${cell.label}: ${cell.value} | Histórico: ${cell.sparkline?.slice(-5).join(", ") ?? "N/A"}`}
               onClick={() => setSelectedMetric(cell.key)}
               onKeyDown={(e) => handleCellKeyDown(e, cell.key)}
-              className={`min-w-0 cursor-pointer rounded border p-2.5 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent ${getCellBorderColor(cell)}`}
+              className={`min-w-0 cursor-pointer rounded border p-2.5 transition-all duration-200 hover:scale-[1.02] hover:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent ${getCellBorderColor(cell)}`}
             >
               <div className="mb-1 flex items-center justify-between gap-1">
                 <span className="truncate text-[10px] uppercase tracking-wider text-gray-500 sm:text-xs">
@@ -280,12 +281,15 @@ export default function MetricsGrid() {
 
       {metrics && selectedCell && (
         <div
-          className="rounded border border-nexus-border bg-nexus-panel p-3"
+          className="rounded border border-nexus-accent/30 bg-gradient-to-br from-nexus-accent/8 to-nexus-accent/3 p-3"
           aria-label="Detalhe da métrica selecionada"
         >
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs sm:text-sm">
-            <span className="min-w-0 truncate text-gray-400">
-              {selectedCell.label} — {getBaselineComparison(selectedMetric)}
+            <span className="flex items-center gap-2 min-w-0 truncate text-gray-400">
+              <span className="font-medium text-gray-300">{selectedCell.label}</span>
+              <span className="rounded bg-nexus-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-nexus-accent">
+                {getBaselineComparison(selectedMetric)}
+              </span>
             </span>
             <span className="text-gray-500">{history.length} amostras</span>
           </div>

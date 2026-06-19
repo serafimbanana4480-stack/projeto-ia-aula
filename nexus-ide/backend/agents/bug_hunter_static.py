@@ -14,9 +14,7 @@ Supports autonomous execution via ReAct loop:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-
-from .base import AgentAction, AgentBase, AgentRequest
+from .base import AgentAction, AgentBase
 
 
 class BugHunterStaticAgent(AgentBase):
@@ -41,5 +39,3 @@ class BugHunterStaticAgent(AgentBase):
         AgentAction.EXECUTE_CODE,
         AgentAction.CONSULT_AGENT,
     }
-
-

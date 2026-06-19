@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from backend.agents.base import AgentAction
 from backend.agents.dashboard_agent import DashboardAgent
 
@@ -23,25 +21,29 @@ class TestDashboardAgent:
 
     def test_health_score_nominal(self) -> None:
         agent = DashboardAgent()
-        agent._history.append({
-            "cpu_percent": 30.0,
-            "ram_percent": 40.0,
-            "disk_percent": 50.0,
-            "avg_latency_ms": 200.0,
-            "db_stats": {"tool_error_rate": 0.0},
-        })
+        agent._history.append(
+            {
+                "cpu_percent": 30.0,
+                "ram_percent": 40.0,
+                "disk_percent": 50.0,
+                "avg_latency_ms": 200.0,
+                "db_stats": {"tool_error_rate": 0.0},
+            }
+        )
         score = agent.get_health_score()
         assert 0.9 <= score <= 1.0
 
     def test_health_score_critical(self) -> None:
         agent = DashboardAgent()
-        agent._history.append({
-            "cpu_percent": 95.0,
-            "ram_percent": 95.0,
-            "disk_percent": 95.0,
-            "avg_latency_ms": 8000.0,
-            "db_stats": {"tool_error_rate": 0.5},
-        })
+        agent._history.append(
+            {
+                "cpu_percent": 95.0,
+                "ram_percent": 95.0,
+                "disk_percent": 95.0,
+                "avg_latency_ms": 8000.0,
+                "db_stats": {"tool_error_rate": 0.5},
+            }
+        )
         score = agent.get_health_score()
         assert 0.0 <= score <= 0.5
 

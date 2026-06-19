@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.agents.guardian import NexusGuardianAgent, Suggestion
+from backend.agents.guardian import NexusGuardianAgent
 
 
 @pytest.fixture

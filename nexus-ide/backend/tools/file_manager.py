@@ -127,9 +127,7 @@ ALLOWED_EXTENSIONS = {
 BLOCKED_PATH_PARTS = {"/etc", "/sys", "/proc", ".ssh", ".aws", "/root", "/var/run"}
 
 # Component-level blocklist used for accurate path matching.
-_BLOCKED_PATH_COMPONENTS = frozenset(
-    part.strip("/").lower() for part in BLOCKED_PATH_PARTS
-)
+_BLOCKED_PATH_COMPONENTS = frozenset(part.strip("/").lower() for part in BLOCKED_PATH_PARTS)
 
 
 class UnsafePathError(ValueError):

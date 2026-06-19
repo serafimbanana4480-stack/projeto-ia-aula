@@ -10,13 +10,8 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
-import json
-import threading
-import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,7 +23,6 @@ from backend.middleware.auth import create_access_token
 from backend.orchestrator.main import app
 from backend.persistence.db import init_db
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────────────────────────────────────
@@ -38,6 +32,7 @@ from backend.persistence.db import init_db
 def reset_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reset all singletons before each test."""
     from backend.persistence.db import close_pool
+
     close_pool()
     monkeypatch.setattr(FileLockManager, "_instance", None)
     monkeypatch.setattr(SharedMemory, "_instance", None)
@@ -85,7 +80,7 @@ class TestFileLocksDirect:
         lock = asyncio.Lock()
 
         async def agent_a():
-            lid = await manager.acquire_write_lock(test_file, "agent-A", timeout=5.0)
+            await manager.acquire_write_lock(test_file, "agent-A", timeout=5.0)
             async with lock:
                 results.append("A-acquired")
             await asyncio.sleep(0.3)  # hold the lock
@@ -97,7 +92,7 @@ class TestFileLocksDirect:
             await asyncio.sleep(0.05)  # ensure A acquires first
             async with lock:
                 results.append("B-before-acquire")
-            lid = await manager.acquire_write_lock(test_file, "agent-B", timeout=5.0)
+            await manager.acquire_write_lock(test_file, "agent-B", timeout=5.0)
             async with lock:
                 results.append("B-acquired")
             manager.release_lock(test_file, "agent-B")
@@ -120,15 +115,13 @@ class TestFileLocksDirect:
         lock = asyncio.Lock()
 
         async def reader(agent_name: str):
-            lid = await manager.acquire_read_lock(test_file, agent_name, timeout=2.0)
+            await manager.acquire_read_lock(test_file, agent_name, timeout=2.0)
             async with lock:
                 acquired.append(agent_name)
             await asyncio.sleep(0.1)
             manager.release_lock(test_file, agent_name)
 
-        await asyncio.gather(
-            reader("agent-1"), reader("agent-2"), reader("agent-3")
-        )
+        await asyncio.gather(reader("agent-1"), reader("agent-2"), reader("agent-3"))
 
         assert len(acquired) == 3
         assert set(acquired) == {"agent-1", "agent-2", "agent-3"}
@@ -213,7 +206,9 @@ class TestFileLocksAPI:
     """Test file locking behaviour through the REST API."""
 
     @pytest.mark.asyncio
-    async def test_parallel_writes_via_api(self, client: TestClient, tmp_project: Path, monkeypatch):
+    async def test_parallel_writes_via_api(
+        self, client: TestClient, tmp_project: Path, monkeypatch
+    ):
         """Write to same file from two parallel async requests via /api/files/write.
 
         Using httpx.AsyncClient avoids blocking the shared TestClient event loop
@@ -226,14 +221,13 @@ class TestFileLocksAPI:
         def _fake_get_project_by_path(path: str):
             return {"name": "api_test", "path": str(tmp_project), "trust": True}
 
-        monkeypatch.setattr(
-            "backend.persistence.db.get_project_by_path", _fake_get_project_by_path
-        )
+        monkeypatch.setattr("backend.persistence.db.get_project_by_path", _fake_get_project_by_path)
 
         target = str(tmp_project / "test_file.txt")
         Path(target).write_text("original", encoding="utf-8")
 
         import httpx
+
         from backend.orchestrator.main import app
         from backend.persistence.db import create_session
 
@@ -257,9 +251,7 @@ class TestFileLocksAPI:
                     },
                 )
 
-            resp_a, resp_b = await asyncio.gather(
-                writer("CONTENT-A"), writer("CONTENT-B")
-            )
+            resp_a, resp_b = await asyncio.gather(writer("CONTENT-A"), writer("CONTENT-B"))
 
         responses = [
             {"status": resp_a.status_code, "json": resp_a.json()},
