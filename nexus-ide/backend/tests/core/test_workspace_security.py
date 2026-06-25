@@ -16,13 +16,13 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.core.workspace import (
-    _SHELL_WHITELIST,
+from backend.core.workspace_security import _SHELL_WHITELIST
+from backend.core.workspace_shell import (
     _check_python_sandbox,
     _is_blocked_path,
-    _is_safe_git_remote,
     _validate_shell_command,
 )
+from backend.core.workspace import _is_safe_git_remote
 
 # ---------------------------------------------------------------------------
 # 1. Pipe bypass

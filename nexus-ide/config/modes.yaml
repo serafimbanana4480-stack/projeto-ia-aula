@@ -9,7 +9,7 @@ modes:
     router: "smart"
     tools_enabled: ["all"]
     enable_thinking: true
-    max_iterations: 6
+    max_iterations: 7
     supports_subagents: true
     system_prompt_addon: |
       1. Usa tools imediatamente, não descrevas.
@@ -156,6 +156,22 @@ modes:
       Each agent may consult sub-agents (CONSULT_AGENT) and recall memories.
       Final output must be a single coherent, professional answer that resolves contradictions, cites agent contributions, and lists concrete next actions.
 
+  dashboard:
+    description: "Monitorização contínua, alertas e interpretação de métricas do sistema"
+    default_agent: "DASHBOARD"
+    default_model: "dashboard"
+    router: "none"
+    tools_enabled: ["consult_agent", "recall_context", "store_memory", "analyze_data"]
+    enable_thinking: false
+    max_iterations: 5
+    supports_subagents: true
+    system_prompt_addon: |
+      You are the system monitoring assistant.
+      Interpret metrics, detect anomalies, and give actionable recommendations.
+      Be concise for routine data and clear for alerts.
+      When a user asks for diagnosis or root-cause analysis, consult ANALYZER or DEBUGGER via CONSULT_AGENT.
+      Recall previous alerts and stored system facts to provide context-aware answers.
+
 # ---------------------------------------------------------------------------
 # SWARM Operational Modes (v2 — see backend/swarm/modes/mode_registry.py)
 # ---------------------------------------------------------------------------
@@ -210,22 +226,6 @@ swarm_modes:
     uses_rag: false
     uses_research: true
     max_iterations: 4
-
-  dashboard:
-    description: "Monitorização contínua, alertas e interpretação de métricas do sistema"
-    default_agent: "DASHBOARD"
-    default_model: "dashboard"
-    router: "none"
-    tools_enabled: ["consult_agent", "recall_context", "store_memory", "analyze_data"]
-    enable_thinking: false
-    max_iterations: 5
-    supports_subagents: true
-    system_prompt_addon: |
-      You are the system monitoring assistant.
-      Interpret metrics, detect anomalies, and give actionable recommendations.
-      Be concise for routine data and clear for alerts.
-      When a user asks for diagnosis or root-cause analysis, consult ANALYZER or DEBUGGER via CONSULT_AGENT.
-      Recall previous alerts and stored system facts to provide context-aware answers.
 
 # Tool aliases for mode configuration
 tool_aliases:

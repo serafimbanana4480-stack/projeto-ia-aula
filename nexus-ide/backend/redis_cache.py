@@ -298,7 +298,16 @@ def get_sync_cache() -> SyncCacheClient | NullCacheBackend:
     global _sync_cache_client
     if _sync_cache_client is None:
         try:
-            _sync_cache_client = SyncCacheClient()
+            import os
+            redis_url = os.environ.get("REDIS_URL", "")
+            if redis_url:
+                from urllib.parse import urlparse
+                parsed = urlparse(redis_url)
+                host = parsed.hostname or "localhost"
+                port = parsed.port or 6379
+                _sync_cache_client = SyncCacheClient(host=host, port=port)
+            else:
+                _sync_cache_client = SyncCacheClient()
         except Exception as exc:
             logger.warning("Falling back to NullCacheBackend: %s", exc)
             return NullCacheBackend()

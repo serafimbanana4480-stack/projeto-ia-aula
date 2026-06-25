@@ -125,3 +125,8 @@ coverage_report/
 
 # Accidental subprojects / scratch directories
 p/
+
+# Nexus internal state
+.nexus/
+snapshots/
+rollback/

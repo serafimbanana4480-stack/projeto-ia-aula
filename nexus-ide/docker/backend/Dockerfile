@@ -17,6 +17,7 @@ RUN pip install --upgrade pip && pip install -r /app/requirements-docker.txt
 
 COPY backend /app/backend
 COPY config  /app/config
+COPY pyproject.toml /app/pyproject.toml
 
 RUN mkdir -p /app/logs /app/data \
     && groupadd -r nexus \
