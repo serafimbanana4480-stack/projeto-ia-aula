@@ -524,23 +524,23 @@ describe("lib/api.ts Client Suite", () => {
       expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/me", expect.any(Object));
 
       await api.updatePreferences({});
-      expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/preferences", expect.objectContaining({ method: "PUT" }));
+      expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/profile/preferences", expect.objectContaining({ method: "PUT" }));
 
       mockResponse(200, []);
       await api.getRoutines();
-      expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/routines", expect.any(Object));
+      expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/profile/routines", expect.any(Object));
 
       mockResponse(200, {});
       await api.createRoutine({});
-      expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/routines", expect.objectContaining({ method: "POST" }));
+      expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/profile/routines", expect.objectContaining({ method: "POST" }));
 
       mockResponse(200, []);
       await api.getProfileMemories();
-      expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/memories", expect.any(Object));
+      expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/profile/memories", expect.any(Object));
 
       mockResponse(200, {});
       await api.createProfileMemory({});
-      expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/memories", expect.objectContaining({ method: "POST" }));
+      expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/profile/memories", expect.objectContaining({ method: "POST" }));
     });
   });
 });

@@ -52,7 +52,9 @@ describe("MetricsGrid", () => {
       backendOnline: true,
     });
     render(<MetricsGrid />);
-    expect(screen.getByText("Tokens/s")).toBeDefined();
+    // Tokens/s appears in the metric cell label AND in the detail section
+    // when selected, so we use getAllByText to handle the duplicate
+    expect(screen.getAllByText("Tokens/s").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Modelo ativo")).toBeDefined();
     expect(screen.getByText("CPU")).toBeDefined();
     expect(screen.getByText("RAM")).toBeDefined();

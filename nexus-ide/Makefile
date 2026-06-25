@@ -11,44 +11,47 @@ test: test-backend test-frontend
 
 # NOTE: pytest targets run from the nexus-ide root (where pyproject.toml lives)
 # so that testpaths/pythonpath/asyncio_mode/markers/filterwarnings are applied.
+# Uses $(PYTHON) which auto-detects python3 or python on macOS/Linux.
+
+PYTHON := $(shell command -v python3 || command -v python || echo python)
 
 test-backend:
-	python -m pytest backend/tests/ --cov=backend --cov-report=term-missing --cov-fail-under=70 -v
+	$(PYTHON) -m pytest backend/tests/ --cov=backend --cov-report=term-missing --cov-fail-under=70 -v
 
 test-frontend:
 	cd frontend && npm test
 
 test-unit:
-	python -m pytest backend/tests/ -m "not integration and not e2e" --cov=backend --cov-report=term-missing -v
+	$(PYTHON) -m pytest backend/tests/ -m "not integration and not e2e" --cov=backend --cov-report=term-missing -v
 
 test-integration:
-	python -m pytest backend/tests/ -m "integration" -v
+	$(PYTHON) -m pytest backend/tests/ -m "integration" -v
 
 test-e2e:
 	cd frontend && npx playwright test
 
 test-agents:
-	python -m pytest backend/tests/agents/ -v
+	$(PYTHON) -m pytest backend/tests/agents/ -v
 
 test-tools:
-	python -m pytest backend/tests/tools/ -v
+	$(PYTHON) -m pytest backend/tests/tools/ -v
 
 test-memory:
-	python -m pytest backend/tests/knowledge/ -v
+	$(PYTHON) -m pytest backend/tests/knowledge/ -v
 
 test-orchestrator:
-	python -m pytest backend/tests/orchestrator/ -v
+	$(PYTHON) -m pytest backend/tests/orchestrator/ -v
 
 test-contracts:
-	python -m pytest backend/tests/contracts/ -m "contract" -v
+	$(PYTHON) -m pytest backend/tests/contracts/ -m "contract" -v
 
 test-middleware:
-	python -m pytest backend/tests/middleware/ -v
+	$(PYTHON) -m pytest backend/tests/middleware/ -v
 
 # ─── Quality ───────────────────────────────────────────────────────────
 
 lint-backend:
-	cd backend && ruff check . && mypy . --ignore-missing-imports
+	cd backend && ruff check . && $(PYTHON) -m mypy . --ignore-missing-imports
 
 lint-frontend:
 	cd frontend && npm run lint && npm run type-check
@@ -60,11 +63,11 @@ lint: lint-backend lint-frontend
 coverage: test-backend
 
 coverage-html:
-	python -m pytest backend/tests/ --cov=backend --cov-report=html --cov-report=term-missing -v
+	$(PYTHON) -m pytest backend/tests/ --cov=backend --cov-report=html --cov-report=term-missing -v
 	@echo "Coverage report generated at htmlcov/index.html"
 
 coverage-xml:
-	python -m pytest backend/tests/ --cov=backend --cov-report=xml --cov-report=term-missing -v
+	$(PYTHON) -m pytest backend/tests/ --cov=backend --cov-report=xml --cov-report=term-missing -v
 	@echo "Coverage XML report generated at coverage.xml"
 
 format:
@@ -77,7 +80,7 @@ dev:
 	docker compose -f docker/docker-compose.yml up
 
 backend:
-	cd backend && python -m uvicorn backend.orchestrator.main:app --host 0.0.0.0 --port 8000 --reload
+	cd backend && $(PYTHON) -m uvicorn backend.orchestrator.main:app --host 0.0.0.0 --port 8000 --reload
 
 frontend:
 	cd frontend && npm run dev
@@ -94,7 +97,7 @@ smoke-test:
 	bash scripts/smoke-test.sh
 
 selftest:
-	python scripts/selftest/run_diagnostics.py
+	cd backend && $(PYTHON) scripts/selftest/run_diagnostics.py
 
 observability:
 	@echo "Starting observability stack..."
@@ -105,36 +108,37 @@ observability:
 # ─── Maintenance ───────────────────────────────────────────────────────
 
 clean:
-	docker compose -f docker/docker-compose.yml down -v
+	-docker compose -f docker/docker-compose.yml down -v 2>/dev/null || true
 	rm -rf frontend/.next frontend/node_modules backend/__pycache__ backend/.pytest_cache backend/.ruff_cache
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name .mypy_cache -exec rm -rf {} + 2>/dev/null || true
 
 # ─── Database ───────────────────────────────────────────────────────────
 
 db-migrate:
-	cd backend && source ../.venv/bin/activate && alembic upgrade head
+	cd backend && . .venv/bin/activate && alembic upgrade head
 
 db-rollback:
-	cd backend && source ../.venv/bin/activate && alembic downgrade -1
+	cd backend && . .venv/bin/activate && alembic downgrade -1
 
 db-backup:
-	source .venv/bin/activate && python scripts/backup_db.py backup
+	. .venv/bin/activate && $(PYTHON) scripts/backup_db.py backup
 
 db-backup-compressed:
-	source .venv/bin/activate && python scripts/backup_db.py backup --compress
+	. .venv/bin/activate && $(PYTHON) scripts/backup_db.py backup --compress
 
 db-restore:
 	@echo "Usage: make db-restore BACKUP=<path_to_backup>"
-	source .venv/bin/activate && python scripts/backup_db.py restore $(BACKUP)
+	. .venv/bin/activate && $(PYTHON) scripts/backup_db.py restore $(BACKUP)
 
 db-list-backups:
-	source .venv/bin/activate && python scripts/backup_db.py list
+	. .venv/bin/activate && $(PYTHON) scripts/backup_db.py list
 
 db-cleanup-backups:
-	source .venv/bin/activate && python scripts/backup_db.py cleanup --keep 10
+	. .venv/bin/activate && $(PYTHON) scripts/backup_db.py cleanup --keep 10
 
 db-status:
-	cd backend && source ../.venv/bin/activate && alembic current
+	cd backend && . .venv/bin/activate && alembic current
 
 help:
 	@echo "NEXUS IDE Makefile"
@@ -168,11 +172,11 @@ help:
 	@echo "  dev               - Docker compose full stack"
 	@echo "  backend           - Run backend only"
 	@echo "  frontend          - Run frontend only"
-	@echo "  setup             - Initial setup"
+	@echo "  setup             - Initial setup (Linux/macOS)"
+	@echo "  setup-mac         - Initial setup (macOS via start-mac.sh)"
 	@echo ""
 	@echo "Health & Diagnostics:"
 	@echo "  healthcheck       - Quick service health check"
-	@echo "  smoke-test        - End-to-end smoke tests"
 	@echo "  selftest          - AI self-diagnostics"
 	@echo "  observability     - Start monitoring stack"
 	@echo ""
@@ -185,6 +189,10 @@ help:
 	@echo "  db-list-backups   - List all available backups"
 	@echo "  db-cleanup-backups - Remove old backups (keep 10 by default)"
 	@echo "  db-status         - Show current migration status"
+	@echo ""
+	@echo "macOS:"
+	@echo "  ./start-mac.sh    - Start IDE on macOS/Linux"
+	@echo "  ./stop-mac.sh     - Stop all services on macOS/Linux"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  clean             - Clean all artifacts"
