@@ -101,9 +101,11 @@ iniciar.bat
 <summary><strong>Linux / macOS</strong></summary>
 
 ```bash
-./start-all.sh    # iniciar
-./stop-all.sh     # parar
-make dev          # stack Docker
+./start-mac.sh    # iniciar
+./start-mac.sh --parar     # parar
+./start-mac.sh --status    # estado dos serviços
+./start-mac.sh --setup     # instalar dependências
+make dev                   # stack Docker
 ```
 </details>
 
@@ -112,7 +114,7 @@ make dev          # stack Docker
 
 1. `copy .env.example .env` (ou `cp .env.example .env`)
 2. Edite `.env` com as tuas configurações
-3. Execute `iniciar.bat` ou `./start-all.sh`
+3. Execute `iniciar.bat` (Windows) ou `./start-mac.sh` (macOS/Linux)
 </details>
 
 **URLs após arranque:**
