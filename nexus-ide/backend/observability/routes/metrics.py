@@ -3,8 +3,6 @@
 Provides real-time metrics streaming and historical data.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging

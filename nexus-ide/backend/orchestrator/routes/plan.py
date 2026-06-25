@@ -9,8 +9,6 @@ Endpoints:
 - GET /api/plan/stream — SSE stream of orchestration events
 """
 
-from __future__ import annotations
-
 import logging
 from collections.abc import AsyncIterator
 

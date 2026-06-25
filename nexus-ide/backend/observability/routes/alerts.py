@@ -3,8 +3,6 @@
 Provides SSE streaming of real-time alerts based on system metrics.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging

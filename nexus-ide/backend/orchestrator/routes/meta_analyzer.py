@@ -7,7 +7,7 @@ Endpoints:
     POST /api/meta/approve       — Submit metrics for formal approval evaluation.
 """
 
-from __future__ import annotations
+
 
 import logging
 from collections.abc import AsyncIterator

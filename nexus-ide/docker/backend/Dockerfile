@@ -18,7 +18,9 @@ RUN pip install --upgrade pip && pip install -r /app/requirements-docker.txt
 COPY backend /app/backend
 COPY config  /app/config
 
-RUN groupadd -r nexus && useradd -r -g nexus nexus \
+RUN mkdir -p /app/logs /app/data \
+    && groupadd -r nexus \
+    && useradd -r -g nexus nexus \
     && chown -R nexus:nexus /app
 
 USER nexus

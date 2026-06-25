@@ -45,7 +45,12 @@ from backend.orchestrator.routes.agent_state import router as agent_state_router
 from backend.orchestrator.routes.agents import router as agents_router
 from backend.orchestrator.routes.thinking import router as thinking_router
 from backend.orchestrator.routes.auth import router as auth_router
-from backend.orchestrator.routes.browser import router as browser_router
+try:
+    from backend.orchestrator.routes.browser import router as browser_router
+    _BROWSER_AVAILABLE = True
+except ImportError:
+    _BROWSER_AVAILABLE = False
+    browser_router = None
 from backend.orchestrator.routes.chat import router as chat_router
 from backend.orchestrator.routes.collaboration import router as collaboration_router
 from backend.orchestrator.routes.dashboard import router as dashboard_router
@@ -262,7 +267,8 @@ app.add_middleware(
 
 # Include routers
 app.include_router(auth_router, prefix="/api")
-app.include_router(browser_router, prefix="/api")
+if _BROWSER_AVAILABLE:
+    app.include_router(browser_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(dashboard_router, prefix="/api")
 app.include_router(email_router, prefix="/api")

@@ -4,8 +4,6 @@ Endpoints mirror the Workspace Manager tools so the frontend can call them
 directly without going through the generic tool-execution layer.
 """
 
-from __future__ import annotations
-
 from fastapi import APIRouter, Depends, Request
 
 from backend.core.workspace import (

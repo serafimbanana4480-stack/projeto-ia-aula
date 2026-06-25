@@ -40,6 +40,9 @@ docker==7.1.0
 # Database
 alembic==1.13.3
 
+# Form handling (FastAPI multipart support)
+python-multipart>=0.0.12
+
 # Cross-process file locking & system metrics
 filelock>=3.14.0
 psutil>=5.9.0
