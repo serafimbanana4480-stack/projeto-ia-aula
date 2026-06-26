@@ -26,8 +26,8 @@ class PrioritizedItem:
     title: str
     base_priority: PriorityLevel
     created_at: float = field(default_factory=time.time)
-    escalated_at: Optional[float] = None
-    deadline: Optional[float] = None
+    escalated_at: float | None = None
+    deadline: float | None = None
     tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -71,7 +71,7 @@ class PriorityManager:
         item_id: str,
         title: str,
         base_priority: PriorityLevel = PriorityLevel.MEDIUM,
-        deadline: Optional[float] = None,
+        deadline: float | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> PrioritizedItem:
@@ -87,7 +87,7 @@ class PriorityManager:
         logger.info("Item added: %s (priority=%s)", title, base_priority.name)
         return item
 
-    def escalate(self, item_id: str) -> Optional[PrioritizedItem]:
+    def escalate(self, item_id: str) -> PrioritizedItem | None:
         item = self._items.get(item_id)
         if not item:
             return None
@@ -101,7 +101,7 @@ class PriorityManager:
         logger.warning("Item escalated: %s → %s", item_id, item.base_priority.name)
         return item
 
-    def deprioritize(self, item_id: str) -> Optional[PrioritizedItem]:
+    def deprioritize(self, item_id: str) -> PrioritizedItem | None:
         item = self._items.get(item_id)
         if not item:
             return None
