@@ -18,6 +18,12 @@ class OllamaProvider(OllamaClient):
     using :func:`asyncio.gather`.
     """
 
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Return usage from the most recent Ollama call."""
+        # Delegate to the underlying OllamaClient._last_usage
+        return dict(getattr(self, "_last_usage", {}))
+
     async def batch_complete(
         self,
         messages_list: list[list[dict[str, str]]],

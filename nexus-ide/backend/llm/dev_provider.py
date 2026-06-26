@@ -20,6 +20,19 @@ from backend.llm.airllm_provider import ChatMessage
 class DevProvider:
     """Zero-cost provider for development and testing."""
 
+    # Internal — estimated usage (tokens are counted from text length)
+    _last_usage: dict[str, int] = {}
+
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Return estimated usage from the most recent call."""
+        return dict(self._last_usage)
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Rough token estimate (~4 chars per token)."""
+        return max(1, len(text) // 4)
+
     # Pre-canned responses for common intents
     _RESPONSES: dict[str, list[str]] = {
         "greeting": [
@@ -98,7 +111,16 @@ class DevProvider:
         ]
         intent = self._classify(dict_messages)
         candidates = self._RESPONSES.get(intent, self._RESPONSES["default"])
-        return random.choice(candidates)
+        result = random.choice(candidates)
+
+        # Estimate token counts from text
+        input_text = " ".join(m.get("content", "") for m in dict_messages)
+        self._last_usage = {
+            "input_tokens": self._estimate_tokens(input_text),
+            "output_tokens": self._estimate_tokens(result),
+            "total_tokens": self._estimate_tokens(input_text) + self._estimate_tokens(result),
+        }
+        return result
 
     async def embed(
         self,

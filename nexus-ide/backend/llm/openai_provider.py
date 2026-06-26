@@ -1,4 +1,8 @@
-"""OpenAI-compatible provider for DeepSeek, Groq, OpenAI, etc."""
+"""OpenAI-compatible provider for DeepSeek, Groq, OpenAI, etc.
+
+Exposes usage data from the response via the internal ``_last_usage``
+attribute (does not change the public API).
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,26 @@ class OpenAIProvider:
             headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
             timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0),
         )
+        # Internal — set after each successful chat_complete / chat_stream
+        self._last_usage: dict[str, int] = {}
+
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Return the usage info from the most recent call.
+
+        Returns a dict with ``input_tokens`` and ``output_tokens`` keys
+        (or empty dict if none available).
+        """
+        return dict(self._last_usage)
+
+    def _extract_usage(self, data: dict[str, Any]) -> dict[str, int]:
+        """Extract token counts from an OpenAI-compatible response body."""
+        usage = data.get("usage", {})
+        return {
+            "input_tokens": usage.get("prompt_tokens", 0) or 0,
+            "output_tokens": usage.get("completion_tokens", 0) or 0,
+            "total_tokens": usage.get("total_tokens", 0) or 0,
+        }
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -47,6 +71,7 @@ class OpenAIProvider:
                 if key in options:
                     payload[key] = options[key]
 
+        self._last_usage = {}
         async with self._client.stream("POST", "/v1/chat/completions", json=payload) as resp:
             if resp.status_code != 200:
                 text = await resp.aread()
@@ -63,6 +88,11 @@ class OpenAIProvider:
                         content = delta.get("content", "")
                         if content:
                             yield content
+                        # Try to extract usage from stream — some providers
+                        # include it on the final chunk.
+                        usage = data.get("usage")
+                        if usage:
+                            self._last_usage = self._extract_usage(data)
                     except (json.JSONDecodeError, IndexError):
                         continue
 
@@ -90,6 +120,7 @@ class OpenAIProvider:
             raise RuntimeError(f"OpenAI API error {resp.status_code}: {resp.text}")
 
         data = resp.json()
+        self._last_usage = self._extract_usage(data)
         return data["choices"][0]["message"]["content"]
 
     async def embed(

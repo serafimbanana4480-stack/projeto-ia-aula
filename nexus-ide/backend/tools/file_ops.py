@@ -284,3 +284,109 @@ register_tool(
         handler=search_in_files,
     )
 )
+
+# ---------------------------------------------------------------------------
+# Absolute-path tools — used by agents via auto-upgrade (base.py:857-872)
+# Bypass project_path resolution for direct filesystem access.
+# ---------------------------------------------------------------------------
+
+
+async def _read_file_absolute_handler(path: str, max_size: int | None = None) -> dict:
+    """Read a file at an absolute path with security checks.
+
+    Bypasses ``project_path`` resolution by delegating directly to
+    ``workspace_fs.read_file_absolute``, which validates against the
+    global allowed-base blocklist.
+    """
+    from backend.core.workspace_fs import read_file_absolute as _read_abs
+
+    result = await _read_abs(path)
+    if max_size is not None and "error" not in result:
+        content = result.get("content", "")
+        if len(content) > max_size:
+            result["content"] = content[:max_size]
+            result["truncated"] = True
+            result["original_size"] = len(content)
+    return result
+
+
+async def _write_file_absolute_handler(
+    path: str,
+    content: str,
+    create_dirs: bool = True,
+) -> dict:
+    """Write a file at an absolute path with workspace security.
+
+    Delegates to ``workspace_fs.write_file_absolute``, which enforces
+    the global allowed-base blocklist, creates backups, and runs
+    write-back verification.  Parent directories are created on demand
+    (``mkdir -p`` behaviour) when *create_dirs* is ``True``.
+    """
+    from backend.core.workspace_fs import write_file_absolute as _write_abs
+
+    if create_dirs:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return await _write_abs(path, content)
+
+
+async def _list_dir_absolute_handler(path: str, recursive: bool = False) -> dict:
+    """List a directory at an absolute path.
+
+    Delegates to ``workspace_fs.list_dir_absolute`` with the same
+    security and recursion behaviour.
+    """
+    from backend.core.workspace_fs import list_dir_absolute as _list_abs
+
+    return await _list_abs(path, recursive=recursive)
+
+
+register_tool(ToolSpec(
+    name="read_file_absolute",
+    description="Read a file using an absolute path (bypasses project_path resolution).",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Absolute path to the file"},
+            "max_size": {"type": "integer", "description": "Max content size in bytes (default: no limit)"},
+        },
+        "required": ["path"],
+    },
+    handler=_read_file_absolute_handler,
+))
+
+register_tool(ToolSpec(
+    name="write_file_absolute",
+    description="Write a file at an absolute path. Subject to workspace security checks.",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Absolute path to the file"},
+            "content": {"type": "string", "description": "File content"},
+            "create_dirs": {
+                "type": "boolean",
+                "description": "Create parent dirs if missing",
+                "default": True,
+            },
+        },
+        "required": ["path", "content"],
+    },
+    handler=_write_file_absolute_handler,
+))
+
+register_tool(ToolSpec(
+    name="list_dir_absolute",
+    description="List files/directories at an absolute path.",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Absolute directory path"},
+            "recursive": {
+                "type": "boolean",
+                "description": "Recurse into subdirectories",
+                "default": False,
+            },
+        },
+        "required": ["path"],
+    },
+    handler=_list_dir_absolute_handler,
+))

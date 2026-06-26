@@ -118,9 +118,8 @@ class DependencyGraph:
         self._in_degree[task.task_id] = len(task.depends_on)
         for dep_id in task.depends_on:
             self._adjacency[dep_id].append(task.task_id)
-            if dep_id in self._nodes:
-                if task.task_id not in self._nodes[dep_id].required_by:
-                    self._nodes[dep_id].required_by.append(task.task_id)
+            if dep_id in self._nodes and task.task_id not in self._nodes[dep_id].required_by:
+                self._nodes[dep_id].required_by.append(task.task_id)
         return task
 
     def add_dependency(self, from_task_id: str, to_task_id: str) -> None:
@@ -270,6 +269,7 @@ class ExecutionPlan:
     risk_level: str = "low"  # low, medium, high
     requires_approval: bool = True
     approved: bool = False
+    approved_by: str = ""
     created_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -286,6 +286,7 @@ class ExecutionPlan:
             "risk_level": self.risk_level,
             "requires_approval": self.requires_approval,
             "approved": self.approved,
+            "approved_by": self.approved_by,
         }
 
     @classmethod

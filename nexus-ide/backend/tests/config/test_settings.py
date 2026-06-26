@@ -27,7 +27,16 @@ class TestSettingsDefaults:
         # Primary provider defaults to opencode_go in current NEXUS IDE config;
         # override via LLM_PROVIDER env var, so we only assert the value is known.
         assert isinstance(s.llm_provider, str)
-        assert s.llm_provider in {"ollama", "openrouter", "openai", "anthropic", "deepseek", "kimi", "gemini", "opencode_go"}
+        assert s.llm_provider in {
+            "ollama",
+            "openrouter",
+            "openai",
+            "anthropic",
+            "deepseek",
+            "kimi",
+            "gemini",
+            "opencode_go",
+        }
         assert isinstance(s.local_llm_device, str)
         assert s.local_llm_device
         assert isinstance(s.local_llm_dashboard_device, str)

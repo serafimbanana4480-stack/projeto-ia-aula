@@ -9,12 +9,16 @@ Pipeline integration:
     smart_route_tier() which returns a tier key. That tier is then mapped to
     the agent that uses the corresponding model.
 
-Prioritizes:
-1. Trivial queries → micro (qwen2.5:0.5b) for <50ms
-2. Code tasks → coder (qwen2.5-coder:7b)
-3. Reasoning → reasoning (deepseek-r1:8b)
-4. Deep analysis → deep (qwen2.5:32b)
-5. Fallback: LLM classifier if heuristics uncertain
+Prioritizes (all cloud models via OpenCode Go):
+1. Trivial queries  -> micro (mimo-v2.5)              ~200ms
+2. Simple answers   -> fast (deepseek-v4-flash)       ~600ms
+3. Code tasks       -> coder (kimi-k2.7-code)         ~1200ms
+4. Reasoning        -> reasoning (glm-5.2)            ~2000ms
+5. Deep analysis    -> deep (deepseek-v4-pro)         ~4000ms
+6. Fallback: LLM classifier if heuristics uncertain
+
+All models are cloud-based via OpenCode Go (no local ollama dependency).
+The actual model for each tier is configured in ``config/models.yaml``.
 """
 
 from __future__ import annotations
@@ -240,7 +244,7 @@ def _classify_by_heuristics(user_input: str, config: dict) -> TierDecision | Non
     if _is_trivial(user_input, config):
         return TierDecision(
             tier="micro",
-            model_id=models.get("micro", {}).get("id", "qwen2.5:0.5b"),
+            model_id=models.get("micro", {}).get("id", "mimo-v2.5"),
             reason=f"Trivial query (word_count={word_count})",
             confidence=0.95,
             decision_ms=int((time.time() - start) * 1000),
@@ -271,7 +275,7 @@ async def _classify_by_llm(user_input: str, client: Any, config: dict) -> TierDe
     )
 
     try:
-        micro_id = models.get("micro", {}).get("id", "qwen2.5:0.5b")
+        micro_id = models.get("micro", {}).get("id", "mimo-v2.5")
         response = await client.chat_complete(
             model=micro_id,
             messages=[{"role": "user", "content": prompt}],

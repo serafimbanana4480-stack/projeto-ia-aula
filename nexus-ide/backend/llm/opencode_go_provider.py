@@ -95,6 +95,11 @@ class OpenCodeGoProvider:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Return usage from the most recent call (delegates to OpenAIProvider)."""
+        return dict(getattr(self._client, "_last_usage", {}))
+
     def list_models(self) -> list[str]:
         """Return the catalog of models offered by OpenCode Go."""
         return list(self.MODELS)
@@ -120,9 +125,7 @@ class OpenCodeGoProvider:
     ):
         """Stream chat completion tokens from OpenCode Go."""
         resolved = self.resolve_model(model)
-        async for token in self._client.chat_stream(
-            resolved, messages, options=options, **kwargs
-        ):
+        async for token in self._client.chat_stream(resolved, messages, options=options, **kwargs):
             yield token
 
     async def chat_complete(
@@ -135,19 +138,14 @@ class OpenCodeGoProvider:
     ) -> str:
         """Return a non-streaming chat completion from OpenCode Go."""
         resolved = self.resolve_model(model)
-        return await self._client.chat_complete(
-            resolved, messages, options=options, **kwargs
-        )
+        return await self._client.chat_complete(resolved, messages, options=options, **kwargs)
 
     async def health_check(self) -> bool:
         """Hit the models endpoint to verify connectivity + auth."""
         try:
             import httpx
-            headers = (
-                {"Authorization": "Bearer " + str(self._api_key)}
-                if self._api_key
-                else {}
-            )
+
+            headers = {"Authorization": "Bearer " + str(self._api_key)} if self._api_key else {}
             async with httpx.AsyncClient(
                 base_url=self._base_url, headers=headers, timeout=5.0
             ) as c:

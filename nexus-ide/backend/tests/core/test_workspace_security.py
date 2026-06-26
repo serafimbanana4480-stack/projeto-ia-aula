@@ -16,13 +16,13 @@ from unittest.mock import patch
 
 import pytest
 
+from backend.core.workspace import _is_safe_git_remote
 from backend.core.workspace_security import _SHELL_WHITELIST
 from backend.core.workspace_shell import (
     _check_python_sandbox,
     _is_blocked_path,
     _validate_shell_command,
 )
-from backend.core.workspace import _is_safe_git_remote
 
 # ---------------------------------------------------------------------------
 # 1. Pipe bypass
@@ -64,14 +64,16 @@ class TestPathTraversal:
         an override word (e.g. *desktop* inside System32)."""
         fake_blocked = {str(tmp_path / "blocked")}
         fake_allowed = [tmp_path]
-        with patch("backend.core.workspace_security._BLOCKED_SYSTEM_PATHS", fake_blocked):
-            with patch(
+        with (
+            patch("backend.core.workspace_security._BLOCKED_SYSTEM_PATHS", fake_blocked),
+            patch(
                 "backend.core.workspace_security._get_allowed_base_paths", return_value=fake_allowed
-            ):
-                target = tmp_path / "blocked" / "nexus" / "file.txt"
-                blocked, reason = _is_blocked_path(str(target))
-                assert blocked
-                assert "blocked" in reason.lower()
+            ),
+        ):
+            target = tmp_path / "blocked" / "nexus" / "file.txt"
+            blocked, reason = _is_blocked_path(str(target))
+            assert blocked
+            assert "blocked" in reason.lower()
 
     def test_path_inside_allowed_base_permitted(self, tmp_path: Path) -> None:
         fake_allowed = [tmp_path]
@@ -86,15 +88,17 @@ class TestPathTraversal:
         """Paths outside all allowed bases must be blocked (implicit deny)."""
         fake_allowed = [tmp_path]
         fake_blocked: set[str] = set()
-        with patch("backend.core.workspace_security._BLOCKED_SYSTEM_PATHS", fake_blocked):
-            with patch(
+        with (
+            patch("backend.core.workspace_security._BLOCKED_SYSTEM_PATHS", fake_blocked),
+            patch(
                 "backend.core.workspace_security._get_allowed_base_paths", return_value=fake_allowed
-            ):
-                blocked, reason = _is_blocked_path("/var/nexus_test.txt")
-                # On Windows this resolves to the current drive; on Linux it stays /var.
-                # Either way it is not under the fake_allowed base, so it must be blocked.
-                assert blocked
-                assert "outside allowed" in reason.lower()
+            ),
+        ):
+            blocked, reason = _is_blocked_path("/var/nexus_test.txt")
+            # On Windows this resolves to the current drive; on Linux it stays /var.
+            # Either way it is not under the fake_allowed base, so it must be blocked.
+            assert blocked
+            assert "outside allowed" in reason.lower()
 
 
 # ---------------------------------------------------------------------------

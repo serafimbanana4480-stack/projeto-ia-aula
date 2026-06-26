@@ -766,6 +766,21 @@ export async function getDashboardStatus(): Promise<Record<string, unknown>> {
   );
 }
 
+export async function getMetricsUsage(range: string = "24h"): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(
+      apiUrl(`/api/metrics/usage?range=${encodeURIComponent(range)}`),
+      { headers: authHeaders() },
+    ),
+  );
+}
+
+export async function getProvidersStatus(): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(
+    await fetch(apiUrl("/api/providers/status"), { headers: authHeaders() }),
+  );
+}
+
 export async function getDashboardAlerts(): Promise<Record<string, unknown>> {
   return readJson<Record<string, unknown>>(
     await fetch(apiUrl("/api/dashboard/alerts"), { headers: authHeaders() }),

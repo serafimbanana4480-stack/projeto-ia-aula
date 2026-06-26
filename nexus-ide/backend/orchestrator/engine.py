@@ -34,6 +34,7 @@ from enum import StrEnum
 from typing import Any
 
 from backend.agents.base import AgentBase
+from backend.config.settings import get_settings
 from backend.orchestrator.agent_pool import AgentPool, get_agent_pool
 from backend.orchestrator.cancellation_registry import CancellationRegistry
 from backend.orchestrator.dependency_graph import ExecutionPlan, TaskNode, TaskPriority
@@ -90,6 +91,34 @@ class ExecutionContext:
             self._global_context_parts.append(value)
         else:
             self._global_context_parts.append(value)
+
+
+@dataclass
+class PlanApprovalRequest:
+    """A plan waiting for user approval, with metadata for the frontend."""
+
+    plan_id: str
+    session_id: str
+    title: str = ""
+    description: str = ""
+    total_steps: int = 0
+    risk_level: str = "low"
+    estimated_duration_seconds: int = 0
+    approval_timeout_s: int = 300
+    created_at: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "session_id": self.session_id,
+            "title": self.title,
+            "description": self.description,
+            "total_steps": self.total_steps,
+            "risk_level": self.risk_level,
+            "estimated_duration_seconds": self.estimated_duration_seconds,
+            "approval_timeout_s": self.approval_timeout_s,
+            "created_at": self.created_at,
+        }
 
 
 @dataclass
@@ -156,6 +185,12 @@ class OrchestrationEngine:
 
         self._agent_pool: AgentPool = get_agent_pool()
 
+        # Approval tracking
+        self._approval_requests: dict[str, PlanApprovalRequest] = {}
+        self._approval_timeouts: dict[str, asyncio.Task[None]] = {}
+        self._rejection_reasons: dict[str, str] = {}
+        self._modifications: dict[str, dict[str, Any]] = {}
+
         # Sub-components — fall back to defaults if not injected
         self._plan_creator = plan_creator or PlanCreator(llm_client, event_bus)
         self._plan_executor = plan_executor or PlanExecutor(
@@ -179,8 +214,14 @@ class OrchestrationEngine:
         *,
         context: str = "",
         history: list[ChatMessage] | None = None,
+        auto_approve: bool = False,
     ) -> ExecutionPlan:
-        """Create a structured execution plan for ``objective``."""
+        """Create a structured execution plan for ``objective``.
+
+        If ``auto_approve`` is False (default), the engine transitions to
+        ``AWAITING_APPROVAL`` and emits a ``PLAN_AWAITING_APPROVAL`` event.
+        The caller must call :meth:`approve_plan` before execution.
+        """
         self._state[session_id] = OrchestrationState.PLANNING
 
         plan = await self._plan_creator.create(
@@ -194,8 +235,322 @@ class OrchestrationEngine:
         self._plans[plan.plan_id] = plan
         self._session_plans[session_id] = plan.plan_id
 
+        if auto_approve:
+            # Skip approval — mark approved and move to executing
+            plan.approved = True
+            self._state[session_id] = OrchestrationState.IDLE
+            logger.info(
+                "Plan %s auto-approved (auto_approve=True) for session %s",
+                plan.plan_id,
+                session_id,
+            )
+            return plan
+
         self._state[session_id] = OrchestrationState.AWAITING_APPROVAL
+
+        # Build approval request metadata
+        approval_request = PlanApprovalRequest(
+            plan_id=plan.plan_id,
+            session_id=session_id,
+            title=plan.title,
+            description=plan.description,
+            total_steps=len(plan.steps),
+            risk_level=plan.risk_level,
+            estimated_duration_seconds=plan.estimated_duration_seconds,
+            approval_timeout_s=get_settings().plan_approval_timeout,
+            created_at=plan.created_at,
+        )
+        self._approval_requests[plan.plan_id] = approval_request
+
+        # Publish awaiting_approval event (frontend will show modal)
+        asyncio.ensure_future(
+            self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.PLAN_AWAITING_APPROVAL,
+                    source="ORCHESTRATOR",
+                    session_id=session_id,
+                    task_id=plan.plan_id,
+                    data=approval_request.to_dict(),
+                )
+            )
+        )
+
+        # Start approval timeout task
+        timeout = get_settings().plan_approval_timeout
+        if timeout > 0:
+            self._approval_timeouts[plan.plan_id] = asyncio.create_task(
+                self._approval_timeout_worker(plan.plan_id, session_id, timeout)
+            )
+            logger.info(
+                "Plan %s awaiting approval (timeout=%ds) for session %s",
+                plan.plan_id,
+                timeout,
+                session_id,
+            )
+
         return plan
+
+    # ------------------------------------------------------------------
+    # Plan Approval Workflow
+    # ------------------------------------------------------------------
+
+    def request_approval(self, plan_id: str) -> PlanApprovalRequest | None:
+        """Return the serialized approval request for a plan, or None if not found."""
+        return self._approval_requests.get(plan_id)
+
+    async def approve_plan(self, plan_id: str, user_id: str) -> OrchestrationResult | None:
+        """Approve a plan and immediately execute it.
+
+        Returns the :class:`OrchestrationResult` on success, or ``None`` if
+        the plan was not found or was already approved/rejected.
+        """
+        plan = self._plans.get(plan_id)
+        if plan is None:
+            logger.warning("approve_plan: plan %s not found", plan_id)
+            return None
+
+        session_id = plan.session_id
+        current_state = self._state.get(session_id)
+        if current_state != OrchestrationState.AWAITING_APPROVAL:
+            logger.warning(
+                "approve_plan: plan %s is in state %s (expected AWAITING_APPROVAL)",
+                plan_id,
+                current_state,
+            )
+            return None
+
+        # Cancel the timeout task if still running
+        self._cancel_approval_timeout(plan_id)
+
+        plan.approved = True
+        plan.approved_by = user_id  # type: ignore[attr-defined]
+        self._state[session_id] = OrchestrationState.EXECUTING
+
+        # Clean up approval metadata
+        self._approval_requests.pop(plan_id, None)
+
+        logger.info(
+            "Plan %s approved by user %s — executing now",
+            plan_id,
+            user_id,
+        )
+
+        # Publish approval event
+        asyncio.ensure_future(
+            self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.PLAN_APPROVED,
+                    source="ORCHESTRATOR",
+                    session_id=session_id,
+                    task_id=plan_id,
+                    data={"user_id": user_id, "plan_id": plan_id},
+                )
+            )
+        )
+
+        # Execute the approved plan
+        result = await self.execute_plan(
+            plan=plan,
+            session_id=session_id,
+            auto_approve=True,
+        )
+        return result
+
+    async def reject_plan(self, plan_id: str, reason: str = "") -> bool:
+        """Reject a plan, cancelling it permanently.
+
+        Returns ``True`` if the plan was successfully rejected.
+        """
+        plan = self._plans.get(plan_id)
+        if plan is None:
+            logger.warning("reject_plan: plan %s not found", plan_id)
+            return False
+
+        session_id = plan.session_id
+        current_state = self._state.get(session_id)
+        if current_state != OrchestrationState.AWAITING_APPROVAL:
+            logger.warning(
+                "reject_plan: plan %s is in state %s (expected AWAITING_APPROVAL)",
+                plan_id,
+                current_state,
+            )
+            return False
+
+        # Cancel the timeout task if still running
+        self._cancel_approval_timeout(plan_id)
+
+        self._state[session_id] = OrchestrationState.CANCELLED
+        self._rejection_reasons[plan_id] = reason
+        self._approval_requests.pop(plan_id, None)
+
+        logger.info(
+            "Plan %s rejected (reason: %s)",
+            plan_id,
+            reason or "no reason given",
+        )
+
+        # Publish rejection event
+        asyncio.ensure_future(
+            self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.PLAN_REJECTED,
+                    source="ORCHESTRATOR",
+                    session_id=session_id,
+                    task_id=plan_id,
+                    data={"reason": reason, "plan_id": plan_id},
+                )
+            )
+        )
+
+        return True
+
+    async def modify_plan(
+        self,
+        plan_id: str,
+        modifications: dict[str, Any],
+    ) -> ExecutionPlan | None:
+        """Apply modifications to a plan while it is awaiting approval.
+
+        ``modifications`` supports:
+
+        - ``steps_to_remove``: list of step indices (0-based) to remove
+        - ``steps_to_add``: list of ``{name, description, agent, depends_on}``
+          dicts to append
+        - ``steps_to_reorder``: list of step indices specifying a new order
+        - ``title``: override plan title
+        - ``risk_level``: override risk level
+
+        Returns the updated :class:`ExecutionPlan` or ``None`` if not found.
+        """
+        plan = self._plans.get(plan_id)
+        if plan is None:
+            logger.warning("modify_plan: plan %s not found", plan_id)
+            return None
+
+        self._modifications[plan_id] = modifications
+
+        # Apply title override
+        if "title" in modifications and modifications["title"]:
+            plan.title = str(modifications["title"])
+
+        # Apply risk level override
+        if "risk_level" in modifications:
+            allowed_risk = {"low", "medium", "high"}
+            rl = str(modifications["risk_level"]).lower()
+            if rl in allowed_risk:
+                plan.risk_level = rl
+
+        # Remove steps by index (high-to-low to preserve indices)
+        steps_to_remove: set[int] = set(modifications.get("steps_to_remove", []))
+        if steps_to_remove:
+            valid = {i for i in steps_to_remove if 0 <= i < len(plan.steps)}
+            plan.steps = [s for i, s in enumerate(plan.steps) if i not in valid]
+            plan.total_steps = len(plan.steps)
+            # Rebuild dependency graph
+            from backend.orchestrator.dependency_graph import DependencyGraph
+
+            new_graph = DependencyGraph()
+            for step in plan.steps:
+                new_graph.add_task(step)
+            plan.dependency_graph = new_graph
+            plan.parallel_layers = len(new_graph.topological_layers())
+
+        # Add new steps
+        steps_to_add: list[dict[str, Any]] = modifications.get("steps_to_add", [])
+        if steps_to_add:
+            for raw in steps_to_add:
+                priority_val = raw.get("priority", "medium").upper()
+                resolved_priority = (
+                    TaskPriority[priority_val]
+                    if priority_val in TaskPriority.__members__
+                    else TaskPriority.MEDIUM
+                )
+                new_step = TaskNode(
+                    name=raw.get("name", f"Step {len(plan.steps) + 1}"),
+                    description=raw.get("description", ""),
+                    agent=raw.get("agent", "CODER").upper(),
+                    priority=resolved_priority,
+                    sandboxed=raw.get("sandboxed", False),
+                )
+                plan.steps.append(new_step)
+                plan.dependency_graph.add_task(new_step)
+            plan.total_steps = len(plan.steps)
+            plan.parallel_layers = len(plan.dependency_graph.topological_layers())
+
+        # Reorder steps (requires all indices to be present)
+        steps_to_reorder: list[int] = modifications.get("steps_to_reorder", [])
+        if len(steps_to_reorder) == len(plan.steps) and len(set(steps_to_reorder)) == len(
+            plan.steps
+        ):
+            ordered = []
+            try:
+                ordered = [plan.steps[i] for i in steps_to_reorder]
+            except IndexError:
+                logger.warning("modify_plan: invalid step indices in reorder")
+            if ordered:
+                plan.steps = ordered
+
+        # Recalculate estimated duration
+        plan.estimated_duration_seconds = sum(
+            s.timeout_seconds for s in plan.steps
+        )
+
+        # Update approval request metadata
+        req = self._approval_requests.get(plan_id)
+        if req:
+            req.total_steps = len(plan.steps)
+            req.risk_level = plan.risk_level
+            req.estimated_duration_seconds = plan.estimated_duration_seconds
+
+        logger.info(
+            "Plan %s modified — steps: %d, risk: %s",
+            plan_id,
+            len(plan.steps),
+            plan.risk_level,
+        )
+
+        # Publish modification event
+        asyncio.ensure_future(
+            self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.PLAN_MODIFIED,
+                    source="ORCHESTRATOR",
+                    session_id=plan.session_id,
+                    task_id=plan_id,
+                    data={"plan_id": plan_id, "total_steps": len(plan.steps)},
+                )
+            )
+        )
+
+        return plan
+
+    def _cancel_approval_timeout(self, plan_id: str) -> None:
+        """Cancel the approval timeout task for a plan if it exists."""
+        task = self._approval_timeouts.pop(plan_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _approval_timeout_worker(
+        self,
+        plan_id: str,
+        session_id: str,
+        timeout: int,
+    ) -> None:
+        """Background task: auto-reject plan if not approved within timeout."""
+        try:
+            await asyncio.sleep(timeout)
+
+            # Double-check still awaiting approval
+            if self._state.get(session_id) == OrchestrationState.AWAITING_APPROVAL:
+                logger.warning(
+                    "Plan %s auto-rejected after %ds timeout (session %s)",
+                    plan_id,
+                    timeout,
+                    session_id,
+                )
+                await self.reject_plan(plan_id, reason="Approval timeout")
+        except asyncio.CancelledError:
+            pass  # Plan was approved/rejected before timeout
 
     async def execute_plan(
         self,
@@ -263,14 +618,14 @@ class OrchestrationEngine:
 
         Returns the final OrchestrationResult with all verification data.
         """
-        # Phase 1: PLAN
+        # Phase 1: PLAN (auto-approve — autonomous mode skips user approval)
         plan = await self.create_plan(
             objective=objective,
             session_id=session_id,
             context=context,
             history=history,
+            auto_approve=True,
         )
-        plan.approved = True  # Auto-approve in autonomous mode
 
         await self._events.publish(
             OrchestratorEvent(

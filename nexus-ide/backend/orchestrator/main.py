@@ -40,13 +40,17 @@ from backend.middleware.auth import require_auth
 from backend.observability.health import HealthChecker
 from backend.observability.routes.alerts import router as alerts_router
 from backend.observability.routes.metrics import router as metrics_router
+from backend.observability.routes.usage import router as usage_router
+from backend.orchestrator.routes.admin import router as admin_router
 from backend.orchestrator.routes.agent_bus import router as agent_bus_router
 from backend.orchestrator.routes.agent_state import router as agent_state_router
 from backend.orchestrator.routes.agents import router as agents_router
-from backend.orchestrator.routes.thinking import router as thinking_router
 from backend.orchestrator.routes.auth import router as auth_router
+from backend.orchestrator.routes.thinking import router as thinking_router
+
 try:
     from backend.orchestrator.routes.browser import router as browser_router
+
     _BROWSER_AVAILABLE = True
 except ImportError:
     _BROWSER_AVAILABLE = False
@@ -190,6 +194,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auto_correction = auto_correction
     logger.info("Auto-correction loop started")
 
+    # Start Session Lifecycle Manager (garbage collection)
+    from backend.orchestrator.session_lifecycle import SessionLifecycleManager
+
+    session_lifecycle = SessionLifecycleManager(event_bus=app.state.event_bus)
+    session_lifecycle.start()
+    app.state.session_lifecycle = session_lifecycle
+    logger.info(
+        "Session lifecycle manager started (ttl=%dh, interval=%dmin)",
+        session_lifecycle.ttl_hours,
+        session_lifecycle.gc_interval_minutes,
+    )
+
     logger.info("NEXUS orchestrator ready (provider=%s)", settings.llm_provider)
     try:
         yield
@@ -202,6 +218,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         guardian_task.cancel()
         # Stop auto-correction loop
         await auto_correction.stop_monitoring()
+        # Stop session lifecycle GC loop
+        session_lifecycle = getattr(app.state, "session_lifecycle", None)
+        if session_lifecycle:
+            await session_lifecycle.stop()
         # Stop background workers
         worker_manager = getattr(app.state, "worker_manager", None)
         if worker_manager:
@@ -267,6 +287,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(auth_router, prefix="/api")
+app.include_router(admin_router)
 if _BROWSER_AVAILABLE:
     app.include_router(browser_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
@@ -274,6 +295,7 @@ app.include_router(dashboard_router, prefix="/api")
 app.include_router(email_router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
 app.include_router(alerts_router, prefix="/api")
+app.include_router(usage_router, prefix="/api")
 app.include_router(modes_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
 app.include_router(projects_router, prefix="/api")

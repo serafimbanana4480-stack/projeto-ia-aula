@@ -169,7 +169,7 @@ async def wizard_generate(
         }
     except Exception as exc:
         logger.exception("Project generation failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Generation failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Generation failed: {exc}") from exc
 
 
 @router.get("/wizard/status/{session_id}")

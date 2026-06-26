@@ -498,7 +498,7 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
         return None
 
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
+        if isinstance(node, ast.Import | ast.ImportFrom):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     base = alias.name.split(".")[0]
@@ -558,8 +558,12 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
                 return False, f"{node.func.id}() is blocked in sandbox mode"
 
             # Block os.system, os.popen, os.exec*, subprocess.call, etc.
-            if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-                if node.func.value.id in _DANGEROUS_MODULES and node.func.attr in (
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in _DANGEROUS_MODULES
+                and node.func.attr
+                in (
                     "system",
                     "popen",
                     "exec",
@@ -568,16 +572,20 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
                     "fork",
                     "kill",
                     "spawn",
-                ):
-                    return (
-                        False,
-                        f"{node.func.value.id}.{node.func.attr}() is blocked in sandbox mode",
-                    )
+                )
+            ):
+                return (
+                    False,
+                    f"{node.func.value.id}.{node.func.attr}() is blocked in sandbox mode",
+                )
 
             # Block access to __builtins__ via attribute (e.g. __builtins__['eval'])
-            if isinstance(node.func, ast.Subscript):
-                if isinstance(node.func.value, ast.Name) and node.func.value.id == "__builtins__":
-                    return False, "__builtins__ access is blocked in sandbox mode"
+            if (
+                isinstance(node.func, ast.Subscript)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "__builtins__"
+            ):
+                return False, "__builtins__ access is blocked in sandbox mode"
 
     return True, ""
 

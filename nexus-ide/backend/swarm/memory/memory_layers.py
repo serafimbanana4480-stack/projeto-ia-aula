@@ -233,13 +233,13 @@ class MemoryStore:
                 # Best-effort async push; in sync context we just skip
                 import asyncio
 
-                async def _push() -> None:
+                async def _push(_entry=entry) -> None:
                     await store.store(
-                        content=entry.content,
+                        content=_entry.content,
                         memory_type=MemoryType.DOCUMENTATION,
-                        session_id=entry.session_id,
-                        tags=entry.tags + [f"swarm:{layer}", f"run:{run_id}"],
-                        importance=entry.importance,
+                        session_id=_entry.session_id,
+                        tags=_entry.tags + [f"swarm:{layer}", f"run:{run_id}"],
+                        importance=_entry.importance,
                         source=f"SWARM_{layer.upper()}",
                     )
 

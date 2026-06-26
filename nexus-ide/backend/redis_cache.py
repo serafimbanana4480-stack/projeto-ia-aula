@@ -299,9 +299,11 @@ def get_sync_cache() -> SyncCacheClient | NullCacheBackend:
     if _sync_cache_client is None:
         try:
             import os
+
             redis_url = os.environ.get("REDIS_URL", "")
             if redis_url:
                 from urllib.parse import urlparse
+
                 parsed = urlparse(redis_url)
                 host = parsed.hostname or "localhost"
                 port = parsed.port or 6379

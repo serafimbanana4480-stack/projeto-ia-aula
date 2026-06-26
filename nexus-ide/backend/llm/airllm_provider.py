@@ -105,8 +105,8 @@ class LocalLLMModelError(LocalLLMError):
 # Circuit breaker (kept for resilience parity with old OllamaProvider)
 # ---------------------------------------------------------------------------
 
-import contextlib
-from enum import Enum
+import contextlib  # noqa: E402
+from enum import Enum  # noqa: E402
 
 
 class CircuitState(Enum):
@@ -137,13 +137,12 @@ class CircuitBreaker:
         with self._lock:
             self.failure_count += 1
             self.last_failure_time = time.time()
-            if self.failure_count >= self.failure_threshold:
-                if self.state != CircuitState.OPEN:
-                    self.state = CircuitState.OPEN
-                    logger.error(
-                        "Circuit breaker opened after %d consecutive failures",
-                        self.failure_count,
-                    )
+            if self.failure_count >= self.failure_threshold and self.state != CircuitState.OPEN:
+                self.state = CircuitState.OPEN
+                logger.error(
+                    "Circuit breaker opened after %d consecutive failures",
+                    self.failure_count,
+                )
 
     def can_execute(self) -> bool:
         with self._lock:
@@ -851,7 +850,7 @@ class AirLLMProvider:
             raise LocalLLMError(
                 f"AirLLM generation timed out after {timeout}s. "
                 "The model may be too large for your hardware."
-            )
+            ) from None
         except Exception as exc:
             self._circuit.record_failure()
             logger.exception("AirLLM generation failed for model %s", model)
@@ -915,7 +914,7 @@ class AirLLMProvider:
                 f"AirLLM completion timed out after {timeout}s. "
                 "The model may be too large for your hardware. "
                 "Try a smaller model or increase timeout."
-            )
+            ) from None
         except Exception as exc:
             self._circuit.record_failure()
             logger.exception("AirLLM completion failed for model %s", model)

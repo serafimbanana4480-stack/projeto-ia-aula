@@ -16,11 +16,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(r"C:\Users\rodri\Desktop\PROJETO IA AULA GIT CLONE\projeto-ia-aula\nexus-ide")
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import pytest
-from fastapi.testclient import TestClient
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
-from backend.middleware import auth as auth_module
-from backend.orchestrator.main import app
+from backend.middleware import auth as auth_module  # noqa: E402
+from backend.orchestrator.main import app  # noqa: E402
 
 
 # Override require_auth so tests don't depend on JWT signature secrets

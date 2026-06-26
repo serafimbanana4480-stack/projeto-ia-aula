@@ -13,7 +13,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from queue import Empty, Queue
@@ -22,7 +22,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Import cache for performance optimization
-from backend.redis_cache import (
+from backend.redis_cache import (  # noqa: E402
     SHORT_TTL,
     sync_cache_invalidate_pattern,
     sync_cache_result,
@@ -135,7 +135,7 @@ class SQLiteConnectionPool:
                     self._created_count -= 1
                 return self._create_connection()
         except Empty:
-            raise TimeoutError(f"Connection pool exhausted after {self.timeout}s")
+            raise TimeoutError(f"Connection pool exhausted after {self.timeout}s") from None
 
     def return_connection(self, conn: sqlite3.Connection) -> None:
         """Return a connection to the pool.
@@ -612,7 +612,7 @@ def list_sessions_with_counts(project_id: str | None = None, limit: int = 100) -
       * ``closed``  — last activity more than 24 h ago
     """
     sessions = list_sessions(project_id=project_id, limit=limit)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for s in sessions:
         try:
             s["message_count"] = get_session_message_count(s["id"])
@@ -649,6 +649,7 @@ def add_message(
     tools_used: list | None = None,
     tokens_in: int = 0,
     tokens_out: int = 0,
+    cost_usd: float = 0.0,
     latency_ms: int = 0,
 ) -> dict:
     mid = _new_id()
@@ -656,8 +657,8 @@ def add_message(
         conn.execute(
             """INSERT INTO messages
                (id, session_id, role, content, tier_used, model_used, tools_used_json,
-                tokens_in, tokens_out, latency_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                tokens_in, tokens_out, cost_usd, latency_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 mid,
                 session_id,
@@ -668,6 +669,7 @@ def add_message(
                 json.dumps(tools_used) if tools_used else None,
                 tokens_in,
                 tokens_out,
+                cost_usd,
                 latency_ms,
             ),
         )
@@ -705,6 +707,7 @@ def get_message_statistics() -> dict[str, Any]:
                 SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END) AS assistant_messages,
                 COALESCE(SUM(tokens_in), 0) AS tokens_in_total,
                 COALESCE(SUM(tokens_out), 0) AS tokens_out_total,
+                COALESCE(SUM(cost_usd), 0.0) AS cost_usd_total,
                 COALESCE(AVG(NULLIF(latency_ms, 0)), 0) AS avg_latency_ms,
                 COALESCE(MAX(created_at), '') AS last_message_at
             FROM messages
@@ -718,6 +721,7 @@ def get_message_statistics() -> dict[str, Any]:
                 "assistant_messages": 0,
                 "tokens_in_total": 0,
                 "tokens_out_total": 0,
+                "cost_usd_total": 0.0,
                 "avg_latency_ms": 0.0,
                 "last_message_at": "",
             }
@@ -1373,3 +1377,159 @@ def delete_email_account(account_id: str) -> None:
     """Delete an email account."""
     with get_db() as conn:
         conn.execute("DELETE FROM email_accounts WHERE id = ?", (account_id,))
+
+
+# ───── SESSION LIFECYCLE (GARBAGE COLLECTION) ────────────────────────────
+
+
+_SESSION_GC_SCHEMA_MIGRATED = False
+
+
+def _ensure_session_gc_schema() -> None:
+    """Add ``status`` and ``expired_at`` columns to the ``sessions`` table.
+
+    Idempotent — safe to call multiple times.  Uses PRAGMA table_info to
+    check column existence before ALTER TABLE so it works on SQLite.
+    """
+    global _SESSION_GC_SCHEMA_MIGRATED
+    if _SESSION_GC_SCHEMA_MIGRATED:
+        return
+    try:
+        with get_db() as conn:
+            existing = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "status" not in existing:
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN status TEXT "
+                    "NOT NULL DEFAULT 'active' "
+                    "CHECK (status IN ('active', 'idle', 'expired'))"
+                )
+                logger.info("Added 'status' column to sessions table")
+            if "expired_at" not in existing:
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN expired_at TEXT"
+                )
+                logger.info("Added 'expired_at' column to sessions table")
+            if "status" in existing and "expired_at" in existing:
+                _SESSION_GC_SCHEMA_MIGRATED = True
+    except Exception as exc:
+        logger.warning("Session GC schema migration failed: %s", exc)
+
+
+def list_expired_sessions(ttl_hours: int = 24) -> list[dict]:
+    """Return sessions whose ``last_active_at`` is older than ``ttl_hours``.
+
+    Only includes sessions that are not already marked ``expired``.
+    """
+    _ensure_session_gc_schema()
+    cutoff = _now_iso_minus_hours(ttl_hours)
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM sessions
+               WHERE (status IS NULL OR status != 'expired')
+                 AND last_active_at < ?
+               ORDER BY last_active_at ASC""",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def _now_iso_minus_hours(hours: int) -> str:
+    """Return an ISO-8601 string for ``now - hours``."""
+    dt = datetime.now(UTC) - timedelta(hours=hours)
+    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def mark_session_expired(session_id: str) -> bool:
+    """Mark a session as ``expired`` (soft-delete).
+
+    Does **not** delete the session row, only sets ``status`` and
+    ``expired_at``.  Returns ``True`` if the session was found.
+    """
+    _ensure_session_gc_schema()
+    with get_db() as conn:
+        cursor = conn.execute(
+            "UPDATE sessions SET status = 'expired', expired_at = ? WHERE id = ?",
+            (_now_iso(), session_id),
+        )
+    _invalidate_session_cache(session_id)
+    return cursor.rowcount > 0
+
+
+def delete_session_related_data(session_id: str) -> dict[str, int]:
+    """Delete all FK-referenced data for a session (messages, tool executions,
+    routing decisions, proposed changes).
+
+    Returns a dict with counts of deleted rows per table.
+    """
+    counts: dict[str, int] = {}
+    with get_db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM messages WHERE session_id = ?", (session_id,)
+        )
+        counts["messages"] = cursor.rowcount
+        cursor = conn.execute(
+            "DELETE FROM tool_executions WHERE session_id = ?", (session_id,)
+        )
+        counts["tool_executions"] = cursor.rowcount
+        cursor = conn.execute(
+            "DELETE FROM routing_decisions WHERE session_id = ?", (session_id,)
+        )
+        counts["routing_decisions"] = cursor.rowcount
+        cursor = conn.execute(
+            "DELETE FROM proposed_changes WHERE session_id = ?", (session_id,)
+        )
+        counts["proposed_changes"] = cursor.rowcount
+        cursor = conn.execute(
+            "DELETE FROM git_commits WHERE session_id = ?", (session_id,)
+        )
+        counts["git_commits"] = cursor.rowcount
+        cursor = conn.execute(
+            "DELETE FROM agent_states WHERE session_id = ?", (session_id,)
+        )
+        counts["agent_states"] = cursor.rowcount
+    _invalidate_session_cache(session_id)
+    return counts
+
+
+def hard_delete_expired_sessions(before_days: int = 7) -> list[str]:
+    """Permanently delete session rows that have been ``expired`` for at
+    least ``before_days`` days.
+
+    Returns the list of deleted session IDs.
+    """
+    _ensure_session_gc_schema()
+    cutoff = _now_iso_minus_hours(before_days * 24)
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id FROM sessions WHERE status = 'expired' AND expired_at < ?",
+            (cutoff,),
+        ).fetchall()
+        ids = [r["id"] for r in rows]
+        for sid in ids:
+            conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+            _invalidate_session_cache(sid)
+        return ids
+
+
+def get_session_stats() -> dict[str, int]:
+    """Return counters for session lifecycle stats.
+
+    Returns:
+        ``{"active": N, "expired": N, "total": N}``
+    """
+    _ensure_session_gc_schema()
+    with get_db() as conn:
+        total_row = conn.execute("SELECT COUNT(*) AS c FROM sessions").fetchone()
+        total = int(total_row["c"]) if total_row else 0
+        active_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM sessions WHERE status IS NULL OR status = 'active' OR status = 'idle'"
+        ).fetchone()
+        active = int(active_row["c"]) if active_row else 0
+        expired_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM sessions WHERE status = 'expired'"
+        ).fetchone()
+        expired = int(expired_row["c"]) if expired_row else 0
+    return {"active": active, "expired": expired, "total": total}

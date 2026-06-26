@@ -342,7 +342,6 @@ class AISuggestionEngine:
 
 try:
     from fastapi import APIRouter, HTTPException
-    from fastapi.responses import JSONResponse
 
     router = APIRouter(prefix="/ai/suggestions", tags=["AI Suggestions"])
     _engine: AISuggestionEngine | None = None

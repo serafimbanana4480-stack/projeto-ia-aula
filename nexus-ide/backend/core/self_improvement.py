@@ -166,7 +166,7 @@ class SelfImprovementAnalyzer:
         # Simple parsing: split by "---" headers and extract date/title
         sections = re.split(r"\n---\n", text)
         for section in sections:
-            lines = [l.strip() for l in section.splitlines() if l.strip()]
+            lines = [line.strip() for line in section.splitlines() if line.strip()]
             if not lines:
                 continue
             title = lines[0].lstrip("#").strip()

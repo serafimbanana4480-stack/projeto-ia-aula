@@ -33,12 +33,6 @@ async def analyze_data(
     If `query` is provided, a safe analysis is generated.
     The `code` parameter is rejected for security reasons.
     """
-    # Lazy imports — pandas/numpy are heavy and only needed at runtime
-    try:
-        import pandas as pd  # noqa: F811
-    except ImportError:
-        pass  # type: ignore[assignment]
-
     try:
         if code:
             return {

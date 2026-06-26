@@ -6,7 +6,20 @@ Import from ``backend.redis_cache`` or from ``backend.cache`` (the package)
 which re-exports the same symbols.
 """
 
-from backend.redis_cache import *
+from backend.redis_cache import (
+    DEFAULT_TTL,
+    LONG_TTL,
+    SHORT_TTL,
+    CacheClient,
+    CacheError,
+    SyncCacheClient,
+    cache_invalidate_pattern,
+    cache_result,
+    get_cache,
+    get_sync_cache,
+    sync_cache_invalidate_pattern,
+    sync_cache_result,
+)
 
 __all__ = [
     "CacheClient",

@@ -20,8 +20,8 @@ from backend.llm.dev_provider import DevProvider
 from backend.llm.factory import MockProvider, ResilientLLMProvider, _build_fallback_chain
 
 OllamaProvider = AirLLMProvider  # backwards-compat alias for existing tests
-from backend.tests.conftest import make_stream_response
-from backend.tools.ollama_client import ChatMessage, OllamaClient, OllamaError
+from backend.tests.conftest import make_stream_response  # noqa: E402
+from backend.tools.ollama_client import ChatMessage, OllamaClient, OllamaError  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Retry logic tests

@@ -42,7 +42,7 @@ def decode_access_token(token: str) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from e
 
 
 async def get_current_user(
@@ -88,3 +88,34 @@ async def require_auth(current_user: dict = Depends(get_current_user)) -> dict:
             headers={"WWW-Authenticate": "Bearer"},
         )
     return current_user
+
+
+async def require_admin(current_user: dict = Depends(require_auth)) -> dict:
+    """Require admin privileges for an endpoint.
+
+    Checks that the authenticated user has an admin-like email or the
+    ``admin`` role assigned.  Falls back to checking the user's email
+    against the configured admin email or a hard-coded default so that
+    the local default admin (``admin@nexus-ide.com``) always has access.
+    """
+    user_id = current_user.get("user_id", "")
+    email = current_user.get("email", "")
+
+    # Allow the configured default admin email and development fallback
+    admin_email = "admin@nexus-ide.com"
+    if email and email == admin_email:
+        return current_user
+
+    # Check via RBAC permission
+    try:
+        from backend.persistence.db import user_has_permission
+
+        if user_has_permission(user_id, resource="admin", action="*"):
+            return current_user
+    except Exception:
+        pass
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Admin privileges required",
+    )

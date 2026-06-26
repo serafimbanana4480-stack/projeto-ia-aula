@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+
+# Cache modules — best-effort; system works without them
+import importlib.util
 import json
 import logging
 import re
@@ -42,14 +45,10 @@ from backend.token_management import (
 from backend.tools.ollama_client import ChatMessage
 from backend.tools.registry import execute_tool
 
-# Cache modules — best-effort; system works without them
-try:
-    from backend.cache.semantic_cache import get_semantic_cache
-    from backend.cache.tool_result_cache import get_tool_cache
-
-    _HAVE_CACHE = True
-except ImportError:
-    _HAVE_CACHE = False
+_HAVE_CACHE = (
+    importlib.util.find_spec("backend.cache.semantic_cache") is not None
+    and importlib.util.find_spec("backend.cache.tool_result_cache") is not None
+)
 
 try:
     from backend.observability.metrics import get_cost_tracker

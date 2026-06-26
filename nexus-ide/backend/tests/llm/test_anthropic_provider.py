@@ -174,7 +174,7 @@ class _MockLineIterator:
         try:
             return next(self._lines)
         except StopIteration:
-            raise StopAsyncIteration
+            raise StopAsyncIteration from None
 
 
 class _MockAsyncClient:

@@ -361,7 +361,7 @@ def get_available_voices() -> list[dict[str, str]]:
 # Tool Registration
 # ---------------------------------------------------------------------------
 
-from backend.tools.registry import ToolSpec, register_tool
+from backend.tools.registry import ToolSpec, register_tool  # noqa: E402
 
 register_tool(
     ToolSpec(

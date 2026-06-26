@@ -86,6 +86,8 @@ class OllamaClient:
             limits=limits or DEFAULT_LIMITS,
             transport=transport,
         )
+        # Internal — populated after each chat completion / stream
+        self._last_usage: dict[str, int] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -168,6 +170,7 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
         **_: Any,
     ) -> AsyncIterator[str]:
+        self._last_usage = {}
         payload = {
             "model": self._resolve_model(model),
             "messages": self._normalize_messages(messages),
@@ -176,6 +179,7 @@ class OllamaClient:
         }
         response = await self._request_with_retries("POST", "/api/chat", json_payload=payload)
 
+        final_chunk: dict[str, Any] = {}
         async for line in response.aiter_lines():
             if not line:
                 continue
@@ -186,11 +190,23 @@ class OllamaClient:
                 continue
 
             if data.get("done") is True:
+                final_chunk = data
                 break
 
             chunk = data.get("message", {}).get("content")
             if chunk:
                 yield chunk
+
+        # Extract usage from the final (done) chunk
+        if final_chunk:
+            self._last_usage = {
+                "input_tokens": final_chunk.get("prompt_eval_count", 0) or 0,
+                "output_tokens": final_chunk.get("eval_count", 0) or 0,
+                "total_tokens": (
+                    (final_chunk.get("prompt_eval_count", 0) or 0)
+                    + (final_chunk.get("eval_count", 0) or 0)
+                ),
+            }
 
     async def chat_complete(
         self,
@@ -200,9 +216,11 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
+        self._last_usage = {}
         parts: list[str] = []
         async for token in self.chat_stream(model, messages, options=options, **kwargs):
             parts.append(token)
+        # Usage is set by chat_stream from the final chunk
         return "".join(parts)
 
     async def embed(

@@ -51,6 +51,8 @@ class AnthropicProvider:
             headers=headers,
             timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=5.0),
         )
+        # Internal — populated after each successful chat call
+        self._last_usage: dict[str, int] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -58,6 +60,11 @@ class AnthropicProvider:
     def resolve_model(self, model: str) -> str:
         """Resolve a model alias to the official Anthropic model name."""
         return self.MODEL_ALIASES.get(model, model)
+
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Return usage from the most recent call."""
+        return dict(self._last_usage)
 
     @staticmethod
     def _openai_to_anthropic_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -81,6 +88,15 @@ class AnthropicProvider:
         system = "\n".join(system_texts) if system_texts else None
         return normalized, system
 
+    def _extract_usage_from_message(self, data: dict[str, Any]) -> dict[str, int]:
+        """Extract token counts from an Anthropic Messages API response."""
+        usage = data.get("usage", {})
+        return {
+            "input_tokens": usage.get("input_tokens", 0) or 0,
+            "output_tokens": usage.get("output_tokens", 0) or 0,
+            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+        }
+
     async def chat_stream(
         self,
         model: str,
@@ -90,6 +106,7 @@ class AnthropicProvider:
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         """Stream a chat completion from the Anthropic Messages API."""
+        self._last_usage = {}
         normalized_messages, system = self._openai_to_anthropic_messages(messages)
         payload: dict[str, Any] = {
             "model": self.resolve_model(model),
@@ -132,8 +149,17 @@ class AnthropicProvider:
                         if text:
                             yield text
                     elif event_type == "message_delta":
-                        # End of stream signal; no content.
-                        pass
+                        # End-of-stream — usage info is usually in message_start
+                        # but some providers put it here.
+                        usage = event.get("usage")
+                        if usage:
+                            self._last_usage = {
+                                "input_tokens": usage.get("input_tokens", 0) or 0,
+                                "output_tokens": usage.get("output_tokens", 0) or 0,
+                            }
+                    elif event_type == "message_start":
+                        msg = event.get("message", {})
+                        self._last_usage = self._extract_usage_from_message(msg)
 
     async def chat_complete(
         self,
@@ -167,6 +193,7 @@ class AnthropicProvider:
             raise RuntimeError(f"Anthropic API error {resp.status_code}: {resp.text}")
 
         data = resp.json()
+        self._last_usage = self._extract_usage_from_message(data)
         contents = data.get("content", [])
         return "".join(block.get("text", "") for block in contents if block.get("type") == "text")
 

@@ -204,7 +204,9 @@ async def list_dependencies(project_path: str = ".") -> dict:
     req = project / "requirements.txt"
     if req.exists():
         result["pip"] = [
-            l.strip() for l in req.read_text().splitlines() if l.strip() and not l.startswith("#")
+            line.strip()
+            for line in req.read_text().splitlines()
+            if line.strip() and not line.startswith("#")
         ]
     pkg = project / "package.json"
     if pkg.exists():

@@ -63,9 +63,16 @@ class GeminiProvider:
             headers={"Content-Type": "application/json"},
             timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=5.0),
         )
+        # Internal — set after each successful chat call
+        self._last_usage: dict[str, int] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Return usage from the most recent call."""
+        return dict(self._last_usage)
 
     def resolve_model(self, model: str) -> str:
         """Resolve a model alias to the canonical Gemini model name."""
@@ -130,6 +137,15 @@ class GeminiProvider:
                 await asyncio.sleep(wait)
         raise last_exc or RuntimeError("Gemini request failed after retries")
 
+    def _extract_usage_from_gemini(self, data: dict[str, Any]) -> dict[str, int]:
+        """Extract token counts from a Gemini generateContent response."""
+        usage_meta = data.get("usageMetadata", {})
+        return {
+            "input_tokens": usage_meta.get("promptTokenCount", 0) or 0,
+            "output_tokens": usage_meta.get("candidatesTokenCount", 0) or 0,
+            "total_tokens": usage_meta.get("totalTokenCount", 0) or 0,
+        }
+
     async def chat_stream(
         self,
         model: str,
@@ -139,6 +155,7 @@ class GeminiProvider:
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         """Stream chat completion from Gemini API."""
+        self._last_usage = {}
         resolved = self.resolve_model(model)
         payload: dict[str, Any] = self._convert_messages(messages)
         # Gemini uses generationConfig
@@ -175,6 +192,7 @@ class GeminiProvider:
                             await asyncio.sleep(wait)
                             continue
                         raise RuntimeError(f"Gemini API error {resp.status_code}: {text.decode()}")
+                    last_chunk: dict[str, Any] = {}
                     async for line in resp.aiter_lines():
                         line = line.strip()
                         if not line or line == "data: []":
@@ -184,6 +202,7 @@ class GeminiProvider:
                             try:
                                 chunks = json.loads(line)
                                 for chunk in chunks:
+                                    last_chunk = chunk
                                     candidates = chunk.get("candidates", [])
                                     if candidates:
                                         parts = candidates[0].get("content", {}).get("parts", [])
@@ -193,10 +212,19 @@ class GeminiProvider:
                                                 yield text_piece
                             except json.JSONDecodeError:
                                 continue
+                            # Extract usage from the last chunk if available
+                            if last_chunk:
+                                usage_gemini = last_chunk.get("usageMetadata", {})
+                                if usage_gemini:
+                                    self._last_usage = {
+                                        "input_tokens": usage_gemini.get("promptTokenCount", 0) or 0,
+                                        "output_tokens": usage_gemini.get("candidatesTokenCount", 0) or 0,
+                                    }
                             return
                         if line.startswith("{"):
                             try:
                                 chunk = json.loads(line)
+                                last_chunk = chunk
                                 candidates = chunk.get("candidates", [])
                                 if candidates:
                                     parts = candidates[0].get("content", {}).get("parts", [])
@@ -250,6 +278,7 @@ class GeminiProvider:
         if resp.status_code != 200:
             raise RuntimeError(f"Gemini API error {resp.status_code}: {resp.text}")
         data = resp.json()
+        self._last_usage = self._extract_usage_from_gemini(data)
         candidates = data.get("candidates", [])
         if not candidates:
             raise RuntimeError(f"Gemini returned no candidates. Response: {data}")

@@ -21,6 +21,7 @@ import {
   PanelRightOpen,
   Wand2,
   Paperclip,
+  Mic,
   Send,
   StopCircle,
   RotateCcw,
@@ -306,6 +307,20 @@ export default function ChatPanel({
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [shared, setShared] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  // Drag & drop state
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  // Voice input state
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+  // @mentions state
+  const [showMentions, setShowMentions] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [mentionStart, setMentionStart] = useState(-1);
+  // Search state
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<number[]>([]);
+  const [searchIdx, setSearchIdx] = useState(0);
   const [modelSelectorOpen, setModelSelectorOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [thinkingStrength, setThinkingStrength] = useState<ThinkingStrength>(() => {
@@ -458,6 +473,149 @@ export default function ChatPanel({
     await loadHistory();
   };
 
+  // -----------------------------------------------------------------------
+  // Drag & Drop handlers
+  // -----------------------------------------------------------------------
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isDraggingOver) setIsDraggingOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only hide overlay if leaving the panel itself (not entering a child)
+    if (e.currentTarget === e.target) {
+      setIsDraggingOver(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (!files.length) return;
+    // Reuse same validation as picker: max 5, 50KB each
+    const valid: File[] = [];
+    for (const f of files) {
+      if (attachedFiles.length + valid.length >= 5) break;
+      if (f.size > 50_000) continue; // skip oversized
+      valid.push(f);
+    }
+    if (valid.length) setAttachedFiles((prev) => [...prev, ...valid]);
+  };
+
+  // -----------------------------------------------------------------------
+  // Voice input handler
+  // -----------------------------------------------------------------------
+  const startListening = () => {
+    const SpeechRecognition: any =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      toast.error("Reconhecimento de voz não suportado neste browser");
+      return;
+    }
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = "pt-PT";
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0]?.[0]?.transcript ?? "";
+      if (transcript) {
+        setInput((prev) => (prev ? prev + " " + transcript : transcript));
+      }
+    };
+    recognition.onend = () => setIsListening(false);
+    recognition.onerror = () => setIsListening(false);
+    recognitionRef.current = recognition;
+    recognition.start();
+    setIsListening(true);
+  };
+
+  // -----------------------------------------------------------------------
+  // @mentions detection in input
+  // -----------------------------------------------------------------------
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    setInput(value);
+    // Detect @-mention
+    const cursorPos = e.target.selectionStart ?? value.length;
+    const before = value.slice(0, cursorPos);
+    const match = before.match(/(?:^|\s)@([a-zA-Z_]*)$/);
+    if (match) {
+      setMentionQuery(match[1]);
+      setMentionStart(cursorPos - match[1].length - 1);
+      setShowMentions(true);
+    } else {
+      setShowMentions(false);
+      setMentionQuery("");
+      setMentionStart(-1);
+    }
+  };
+
+  const insertMention = (agentName: string) => {
+    if (mentionStart < 0) return;
+    const before = input.slice(0, mentionStart);
+    const after = input.slice(mentionStart + 1 + mentionQuery.length);
+    const newInput = `${before}@${agentName} ${after}`;
+    setInput(newInput);
+    setShowMentions(false);
+    setMentionQuery("");
+    setMentionStart(-1);
+  };
+
+  // Filter agents based on mention query
+  const filteredAgents = useMemo(() => {
+    if (!showMentions) return [];
+    const agents = ["auto", "coder", "analyzer", "architect", "reviewer", "debugger", "researcher", "optimizer"];
+    const q = mentionQuery.toLowerCase();
+    return agents.filter((a) => a.startsWith(q));
+  }, [showMentions, mentionQuery]);
+
+  // -----------------------------------------------------------------------
+  // Search within messages (Ctrl+K)
+  // -----------------------------------------------------------------------
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+      } else if (e.key === "Escape" && searchOpen) {
+        setSearchOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [searchOpen]);
+
+  useEffect(() => {
+    if (!searchQuery) {
+      setSearchResults([]);
+      return;
+    }
+    const q = searchQuery.toLowerCase();
+    const results: number[] = [];
+    (historyMessages || []).forEach((m, i) => {
+      if (m.content?.toLowerCase().includes(q)) results.push(i);
+    });
+    setSearchResults(results);
+    setSearchIdx(0);
+  }, [searchQuery, historyMessages]);
+
+  // Cleanup voice recognition on unmount
+  useEffect(() => {
+    return () => {
+      try { recognitionRef.current?.stop(); } catch {}
+    };
+  }, []);
+
   useKeyboardShortcuts([
     {
       key: "Enter",
@@ -539,6 +697,33 @@ export default function ChatPanel({
 
   function handleCancel() {
     cancel();
+  }
+
+  // Edit a user message: replace its content and regenerate the assistant response
+  function handleEditMessage(messageId: string, newContent: string) {
+    setHistoryMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, content: newContent } : m)));
+    setInput(newContent);
+    toast.info("Mensagem editada. Reenvia para regenerar a resposta.");
+  }
+
+  // Regenerate the assistant response for a given message
+  async function handleRegenerateMessage(messageId: string) {
+    // Find the previous user message
+    const idx = historyMessages.findIndex((m) => m.id === messageId);
+    if (idx < 1) {
+      toast.error("Não foi possível regenerar");
+      return;
+    }
+    const prev = historyMessages[idx - 1];
+    if (prev.role !== "user") {
+      toast.error("Apenas é possível regenerar a partir de uma mensagem do utilizador");
+      return;
+    }
+    // Remove everything after the user message
+    const newHistory = historyMessages.slice(0, idx - 1);
+    setHistoryMessages(newHistory);
+    setInput(prev.content);
+    toast.info("Pronto. Envia para regenerar a resposta.");
   }
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
@@ -1097,6 +1282,8 @@ export default function ChatPanel({
               message={m}
               isStreaming={streaming && idx === messages.length - 1}
               onRetry={handleRetryFromError}
+              onEdit={handleEditMessage}
+              onRegenerate={handleRegenerateMessage}
             />
           )}
           initialLimit={50}
@@ -1178,7 +1365,22 @@ export default function ChatPanel({
           )}
           </AnimatePresence>
 
-          <motion.div className="flex items-end gap-2 rounded-xl border border-nexus-border bg-nexus-bg/60 px-2 py-2 shadow-inner">
+          <motion.div
+            className={`relative flex items-end gap-2 rounded-xl border bg-nexus-bg/60 px-2 py-2 shadow-inner transition-colors ${
+              isDraggingOver ? "border-nexus-accent bg-nexus-accent/5" : "border-nexus-border"
+            }`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            {isDraggingOver && (
+              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-nexus-accent bg-nexus-accent/10">
+                <div className="flex items-center gap-2 text-sm font-medium text-nexus-accent">
+                  <Paperclip className="h-4 w-4" />
+                  Larga os ficheiros aqui
+                </div>
+              </div>
+            )}
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
@@ -1191,13 +1393,44 @@ export default function ChatPanel({
             <textarea
               className="min-h-[40px] max-h-[160px] flex-1 resize-none bg-transparent px-2 py-2 text-sm text-nexus-text placeholder-nexus-muted outline-none"
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={handleInputChange}
               onKeyDown={handleKeyDown}
-              placeholder="Pergunte qualquer coisa..."
+              placeholder="Pergunte qualquer coisa... (use @ para mencionar agents, Ctrl+K para procurar)"
               disabled={streaming}
               rows={1}
               style={{ fieldSizing: "content" }}
             />
+
+            {/* Voice input button */}
+            <button
+              type="button"
+              onClick={startListening}
+              className={`shrink-0 rounded-lg border p-2 transition-colors ${
+                isListening
+                  ? "border-red-500/50 bg-red-500/10 text-red-400 animate-pulse"
+                  : "border-nexus-border/70 text-nexus-muted hover:border-nexus-accent/40 hover:text-nexus-text"
+              }`}
+              title={isListening ? "A ouvir... clica para parar" : "Input de voz (Web Speech API)"}
+              aria-label="Voice input"
+            >
+              <Mic className="h-4 w-4" />
+            </button>
+
+            {/* @mentions autocomplete */}
+            {showMentions && filteredAgents.length > 0 && (
+              <div className="absolute bottom-full left-12 mb-1 max-h-40 w-48 overflow-y-auto rounded-lg border border-nexus-border bg-nexus-panel/95 shadow-lg backdrop-blur-md">
+                {filteredAgents.map((a) => (
+                  <button
+                    key={a}
+                    type="button"
+                    onClick={() => insertMention(a)}
+                    className="block w-full px-3 py-1.5 text-left text-xs text-nexus-text hover:bg-nexus-accent/20"
+                  >
+                    <span className="text-nexus-accent">@{a}</span>
+                  </button>
+                ))}
+              </div>
+            )}
 
             {streaming ? (
               <motion.button
@@ -1245,6 +1478,69 @@ export default function ChatPanel({
         </div>
       </div>
       </div>
+
+      {/* Search overlay (Ctrl+K) */}
+      <AnimatePresence>
+        {searchOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="absolute right-4 top-20 z-50 w-80 rounded-lg border border-nexus-border bg-nexus-panel/95 p-3 shadow-2xl backdrop-blur-md"
+          >
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wider text-nexus-muted">
+                Procurar nas mensagens
+              </span>
+              <button
+                onClick={() => setSearchOpen(false)}
+                className="text-nexus-muted hover:text-nexus-text"
+                title="Fechar (Esc)"
+              >
+                <XCircle className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Escreve para procurar..."
+              autoFocus
+              className="w-full rounded border border-nexus-border bg-nexus-bg/40 px-2 py-1 text-sm text-nexus-text placeholder-nexus-muted outline-none focus:border-nexus-accent"
+            />
+            {searchQuery && (
+              <div className="mt-2 text-[11px] text-nexus-muted">
+                {searchResults.length} resultado(s) &mdash;{" "}
+                {searchIdx + 1}/{Math.max(1, searchResults.length)}
+              </div>
+            )}
+            {searchResults.length > 0 && (
+              <div className="mt-2 max-h-40 overflow-y-auto">
+                {searchResults.slice(0, 5).map((idx, i) => {
+                  const m = messages[idx];
+                  if (!m) return null;
+                  const q = searchQuery.toLowerCase();
+                  const pos = m.content?.toLowerCase().indexOf(q) ?? -1;
+                  const snippet = m.content?.slice(Math.max(0, pos - 20), pos + 60) ?? "";
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => setSearchIdx(i)}
+                      className={`block w-full rounded px-2 py-1 text-left text-[11px] ${
+                        i === searchIdx
+                          ? "bg-nexus-accent/20 text-nexus-accent"
+                          : "text-nexus-text hover:bg-nexus-bg/40"
+                      }`}
+                    >
+                      {snippet || "(sem preview)"}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

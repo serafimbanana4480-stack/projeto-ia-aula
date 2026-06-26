@@ -165,11 +165,11 @@ class LogStore:
             logs = list(self._buffer)
 
         if session_id:
-            logs = [l for l in logs if l.get("session_id") == session_id]
+            logs = [entry for entry in logs if entry.get("session_id") == session_id]
         if agent:
-            logs = [l for l in logs if l.get("agent") == agent]
+            logs = [entry for entry in logs if entry.get("agent") == agent]
         if level:
-            logs = [l for l in logs if l.get("level") == level.upper()]
+            logs = [entry for entry in logs if entry.get("level") == level.upper()]
 
         return logs[-limit:]
 

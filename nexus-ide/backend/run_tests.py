@@ -88,7 +88,7 @@ def test_2_quality_metrics():
             f"technical_debt_ratio={metrics.technical_debt_ratio}",
         ]
         all_ok = all(
-            isinstance(v, (int, float))
+            isinstance(v, int | float)
             for v in [
                 metrics.coverage_percent,
                 metrics.cyclomatic_complexity,

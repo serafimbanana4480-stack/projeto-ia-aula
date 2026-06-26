@@ -47,12 +47,9 @@ class VisionConfig:
         if not self.enabled:
             return False
         # Check if PIL is available
-        try:
-            import PIL
+        import importlib.util
 
-            return True
-        except ImportError:
-            return False
+        return importlib.util.find_spec("PIL") is not None
 
 
 _config = VisionConfig()
@@ -381,7 +378,7 @@ def get_image_info(image_path: str | Path) -> dict[str, Any]:
 # Tool Registration
 # ---------------------------------------------------------------------------
 
-from backend.tools.registry import ToolSpec, register_tool
+from backend.tools.registry import ToolSpec, register_tool  # noqa: E402
 
 
 def vision_status() -> dict[str, Any]:

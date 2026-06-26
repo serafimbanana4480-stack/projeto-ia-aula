@@ -57,6 +57,8 @@ class EventType(StrEnum):
     PLAN_UPDATED = "plan_updated"
     PLAN_APPROVED = "plan_approved"
     PLAN_REJECTED = "plan_rejected"
+    PLAN_AWAITING_APPROVAL = "plan_awaiting_approval"
+    PLAN_MODIFIED = "plan_modified"
     STEP_COMPLETED = "step_completed"
 
     # System
@@ -70,6 +72,9 @@ class EventType(StrEnum):
     AUTONOMY_DECISION = "autonomy_decision"
     SELF_HEAL = "self_heal"
     REPLAY_COMPLETE = "replay_complete"
+
+    # Session lifecycle / garbage collection
+    SESSION_CLEANUP_COMPLETED = "session.cleanup_completed"
 
 
 @dataclass

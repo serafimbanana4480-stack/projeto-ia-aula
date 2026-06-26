@@ -218,7 +218,7 @@ class PluginRegistry:
         try:
             module = importlib.import_module(module_path)
         except ImportError as exc:
-            raise ImportError(f"Cannot import plugin '{module_path}': {exc}")
+            raise ImportError(f"Cannot import plugin '{module_path}': {exc}") from exc
 
         name = getattr(module, "name", module_path)
         version = getattr(module, "version", "0.0.0")

@@ -3,9 +3,15 @@
 import ReactMarkdown from "react-markdown";
 import { memo, useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Copy, Check, RefreshCw, AlertCircle } from "lucide-react";
+import { Copy, Check, RefreshCw, AlertCircle, Pencil, RotateCw, Save, X } from "lucide-react";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import {
+  oneDark,
+  oneLight,
+} from "react-syntax-highlighter/dist/esm/styles/prism";
 import type { ChatMessage, AgentName } from "../../lib/types";
 import { stripAnsiCodes } from "../../lib/utils";
+import { useThemeStore } from "../../stores/themeStore";
 import AgentBadge from "./AgentBadge";
 import ToolCallTimeline from "./ToolCallTimeline";
 import ThinkingBlock from "./ThinkingBlock";
@@ -68,15 +74,22 @@ function MessageBubbleComponent({
   message,
   isStreaming = false,
   onRetry,
+  onEdit,
+  onRegenerate,
 }: {
   message: ChatMessage;
   isStreaming?: boolean;
   onRetry?: (prompt: string) => void;
+  onEdit?: (messageId: string, newContent: string) => void;
+  onRegenerate?: (messageId: string) => void;
 }) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editContent, setEditContent] = useState(message.content);
   const isUser = message.role === "user";
   const [relativeTime, setRelativeTime] = useState(() =>
     getRelativeTime(new Date(message.timestamp)),
   );
+  const theme = useThemeStore((s) => s.theme);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -129,14 +142,40 @@ function MessageBubbleComponent({
             className="prose prose-sm max-w-none"
             components={{
               code({ inline, className, children, ...props }: any) {
-                const mergedClassName = `${className ?? ""} ${inline ? "rounded bg-nexus-bg/80 px-1 py-0.5 text-[11px]" : "rounded-lg bg-nexus-bg/80 p-3 text-xs overflow-x-auto border border-nexus-border/60 block"}`.trim();
-                if (inline) {
+                const match = /language-(\w+)/.exec(className || "");
+                const lang = match ? match[1] : "";
+                const codeString = String(children).replace(/\n$/, "");
+
+                if (!inline && lang) {
+                  const style = theme === "light" ? oneLight : oneDark;
                   return (
-                    <code className={mergedClassName} {...props}>
-                      {children}
-                    </code>
+                    <div className="relative group">
+                      <div className="absolute right-2 top-2 z-10 flex items-center gap-1.5">
+                        <span className="rounded bg-nexus-bg/60 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-nexus-muted font-mono border border-nexus-border/40">
+                          {lang}
+                        </span>
+                      </div>
+                      <SyntaxHighlighter
+                        language={lang}
+                        style={style}
+                        customStyle={{
+                          margin: 0,
+                          borderRadius: "0.5rem",
+                          fontSize: "0.75rem",
+                          lineHeight: "1.4",
+                          padding: "1rem",
+                          background: "rgba(11, 11, 20, 0.8)",
+                        }}
+                        PreTag="div"
+                        showLineNumbers={codeString.split("\n").length > 3}
+                      >
+                        {codeString}
+                      </SyntaxHighlighter>
+                    </div>
                   );
                 }
+
+                const mergedClassName = `${className ?? ""} ${inline ? "rounded bg-nexus-bg/80 px-1 py-0.5 text-[11px]" : "rounded-lg bg-nexus-bg/80 p-3 text-xs overflow-x-auto border border-nexus-border/60 block"}`.trim();
                 return (
                   <code className={mergedClassName} {...props}>
                     {children}
@@ -199,9 +238,69 @@ function MessageBubbleComponent({
           </div>
         )}
 
-        {/* Copy button for regular assistant messages */}
-        {!isUser && message.metadata?.kind !== "error" && message.content.trim() && (
-          <CopyMessageButton text={message.content} className="absolute -top-1 right-2 opacity-0 transition-opacity group-hover:opacity-100" />
+        {/* Edit mode for user messages */}
+        {isUser && isEditing && (
+          <div className="mt-2 space-y-2">
+            <textarea
+              value={editContent}
+              onChange={(e) => setEditContent(e.target.value)}
+              className="w-full resize-none rounded-lg border border-nexus-border bg-nexus-bg/40 p-2 text-sm text-nexus-text focus:border-nexus-accent focus:outline-none"
+              rows={Math.max(2, editContent.split("\n").length)}
+              autoFocus
+            />
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  if (onEdit && editContent.trim() && editContent !== message.content) {
+                    onEdit(message.id, editContent.trim());
+                  }
+                  setIsEditing(false);
+                }}
+                className="flex items-center gap-1 rounded-md bg-nexus-accent/20 px-2 py-1 text-[11px] font-medium text-nexus-accent transition-colors hover:bg-nexus-accent/30"
+              >
+                <Save className="h-3 w-3" /> Guardar e regenerar
+              </button>
+              <button
+                onClick={() => {
+                  setIsEditing(false);
+                  setEditContent(message.content);
+                }}
+                className="flex items-center gap-1 rounded-md border border-nexus-border px-2 py-1 text-[11px] font-medium text-nexus-muted transition-colors hover:bg-nexus-bg/40"
+              >
+                <X className="h-3 w-3" /> Cancelar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Action buttons (edit, regenerate, copy) */}
+        {!isStreaming && message.content.trim() && !isEditing && (
+          <div className="mt-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            {/* Edit button (user messages only) */}
+            {isUser && onEdit && (
+              <button
+                onClick={() => setIsEditing(true)}
+                className="flex items-center gap-1 rounded p-1 text-[10px] text-nexus-muted hover:bg-nexus-bg/40 hover:text-nexus-text"
+                title="Editar mensagem"
+              >
+                <Pencil className="h-3 w-3" />
+              </button>
+            )}
+            {/* Regenerate button (assistant messages only) */}
+            {!isUser && onRegenerate && (
+              <button
+                onClick={() => onRegenerate(message.id)}
+                className="flex items-center gap-1 rounded p-1 text-[10px] text-nexus-muted hover:bg-nexus-bg/40 hover:text-nexus-text"
+                title="Regenerar resposta"
+              >
+                <RotateCw className="h-3 w-3" />
+              </button>
+            )}
+            {/* Copy button (always for non-error messages) */}
+            {(!isUser || isUser) && message.metadata?.kind !== "error" && (
+              <CopyMessageButton text={message.content} />
+            )}
+          </div>
         )}
       </div>
     </motion.div>

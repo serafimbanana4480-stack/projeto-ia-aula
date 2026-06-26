@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 try:
     import yaml  # PyYAML — declared in backend/requirements.txt
@@ -33,6 +32,11 @@ class ActionSpec:
     action: str
     tool: str
     example_args: str
+    when_to_use: str = ""
+    risk_level: str = "low"
+    requires_confirmation: bool = False
+    tags: tuple[str, ...] = ()
+    examples: tuple[dict, ...] = ()
 
 
 class ActionRegistry:
@@ -54,7 +58,6 @@ class ActionRegistry:
         if not path.is_file():
             raise FileNotFoundError(f"Agent action registry file not found: {path}")
 
-        raw: Any
         if yaml is not None:
             with path.open("r", encoding="utf-8") as fh:
                 loaded = yaml.safe_load(fh) or {}

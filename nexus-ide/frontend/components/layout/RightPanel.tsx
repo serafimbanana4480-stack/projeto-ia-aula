@@ -1,464 +1,623 @@
 "use client";
 
-import { useMemo, useCallback } from "react";
+import { useMemo } from "react";
 import { motion } from "framer-motion";
 import {
-  Cpu,
   Zap,
-  MessageSquare,
   Coins,
   TrendingUp,
-  TrendingDown,
-  Globe,
+  Activity,
+  Brain,
+  Wrench,
+  CircleDot,
+  CheckCircle2,
+  AlertCircle,
+  ChevronDown,
+  Layers,
+  Server,
+  HardDrive,
+  Sparkles,
 } from "lucide-react";
 import { useModelStore } from "../../stores/modelStore";
-import { useToolsStore } from "../../stores/toolsStore";
 import { useMetricsStore } from "../../stores/metricsStore";
-import { toggleTool as toggleToolRemote } from "../../lib/api";
-import { useRouter } from "next/navigation";
-import { log } from "../../lib/log";
+import { useToolsStore } from "../../stores/toolsStore";
+import { useProjectStore } from "../../stores/projectStore";
+import { useModeStore } from "../../stores/modeStore";
 
-interface ModelInfo {
+/* -------------------------------------------------------------------------
+ * Cloud model catalog (OpenCode Go provider)
+ * No local ollama — every model is cloud-served.
+ * ------------------------------------------------------------------------- */
+interface CloudModel {
   id: string;
+  tier: "micro" | "fast" | "coder" | "reasoning" | "deep";
   name: string;
-  desc: string;
+  provider: string;
+  latencyMs: number;
+  contextWindow: number;
+  costPer1kIn: number;
+  costPer1kOut: number;
+  free: boolean;
+  description: string;
   color: string;
-  size: string;
-  provider?: string;
-  sizeGB?: number;
-  parameter_size?: string;
-  status?: "available" | "loading" | "error";
+  badge: string;
 }
 
-const PROVIDER_COLORS: Record<string, string> = {
-  ollama: "bg-orange-500",
-  openrouter: "bg-purple-500",
-  openai: "bg-green-500",
-  deepseek: "bg-blue-500",
-  groq: "bg-yellow-500",
-  anthropic: "bg-amber-600",
-  gemini: "bg-teal-500",
-};
-
-function providerBadgeClass(provider?: string): string {
-  if (!provider) return "bg-gray-500 text-gray-100";
-  const key = provider.toLowerCase();
-  return PROVIDER_COLORS[key] ?? "bg-gray-500 text-gray-100";
-}
-
-function statusText(status?: ModelInfo["status"]): string {
-  if (status === "loading") return "A carregar";
-  if (status === "error") return "Erro";
-  return "Disponível";
-}
-
-function statusColor(status?: ModelInfo["status"]): string {
-  if (status === "loading") return "text-yellow-400";
-  if (status === "error") return "text-red-400";
-  return "text-green-400";
-}
-
-function formatSizeGB(sizeGB?: number): string | null {
-  if (!sizeGB || sizeGB <= 0) return null;
-  if (sizeGB < 1) return `${(sizeGB * 1024).toFixed(0)} MB`;
-  return `${sizeGB.toFixed(1).replace(/\.0$/, "")} GB`;
-}
-
-const DEFAULT_MODELS: ModelInfo[] = [
+const CLOUD_MODELS: CloudModel[] = [
   {
-    id: "deep",
-    name: "Qwen 32B",
-    desc: "Mais poderoso - Ideal para análises complexas",
-    color: "#7c6afb",
-    size: "20GB",
-    provider: "ollama",
-    sizeGB: 20,
-    parameter_size: "32B",
-    status: "available",
+    id: "mimo-v2.5",
+    tier: "micro",
+    name: "MiMo V2.5",
+    provider: "OpenCode Go",
+    latencyMs: 200,
+    contextWindow: 32_000,
+    costPer1kIn: 0.00005,
+    costPer1kOut: 0.00015,
+    free: false,
+    description: "Ultra-rápido para classificação, routing e Q&A simples.",
+    color: "#94a3b8",
+    badge: "MICRO",
   },
   {
-    id: "reasoning",
-    name: "Qwen 14B",
-    desc: "Bom equilíbrio",
-    color: "#a78bfa",
-    size: "9GB",
-    provider: "ollama",
-    sizeGB: 9,
-    parameter_size: "14B",
-    status: "available",
-  },
-  {
-    id: "coder",
-    name: "Qwen 7B",
-    desc: "Rápido e eficiente",
+    id: "deepseek-v4-flash",
+    tier: "fast",
+    name: "DeepSeek V4 Flash",
+    provider: "OpenCode Go",
+    latencyMs: 600,
+    contextWindow: 128_000,
+    costPer1kIn: 0.00025,
+    costPer1kOut: 0.00075,
+    free: false,
+    description: "Respostas rápidas e fiáveis. Ideal para formatação.",
     color: "#60a5fa",
-    size: "4.7GB",
-    provider: "deepseek",
-    sizeGB: 4.7,
-    parameter_size: "7B",
-    status: "available",
+    badge: "FAST",
   },
   {
-    id: "fast",
-    name: "Phi-3",
-    desc: "Ultra rápido",
-    color: "#5eead4",
-    size: "2GB",
-    provider: "ollama",
-    sizeGB: 2,
-    parameter_size: "3.8B",
-    status: "available",
+    id: "kimi-k2.7-code",
+    tier: "coder",
+    name: "Kimi K2.7 Code",
+    provider: "OpenCode Go",
+    latencyMs: 1200,
+    contextWindow: 200_000,
+    costPer1kIn: 0.0,
+    costPer1kOut: 0.0,
+    free: true,
+    description: "Especialista em código. Refactor, debug, generate.",
+    color: "#a78bfa",
+    badge: "CODER",
   },
-];
-
-const TOOLS_DISPLAY = [
   {
-    name: "web_scraping",
-    label: "Web Scraping",
-    icon: Globe,
+    id: "glm-5.2",
+    tier: "reasoning",
+    name: "GLM 5.2 (Thinking)",
+    provider: "OpenCode Go",
+    latencyMs: 2000,
+    contextWindow: 128_000,
+    costPer1kIn: 0.0,
+    costPer1kOut: 0.0,
+    free: true,
+    description: "Raciocínio multi-passo com thinking explícito.",
     color: "#fbbf24",
+    badge: "REASON",
+  },
+  {
+    id: "deepseek-v4-pro",
+    tier: "deep",
+    name: "DeepSeek V4 Pro",
+    provider: "OpenCode Go",
+    latencyMs: 4000,
+    contextWindow: 256_000,
+    costPer1kIn: 0.002,
+    costPer1kOut: 0.008,
+    free: false,
+    description: "Análise profunda e arquitetura. Top-tier quality.",
+    color: "#f472b6",
+    badge: "DEEP",
   },
 ];
 
-function formatUptime(seconds: number): string {
-  if (seconds < 60) return `${Math.floor(seconds)}s`;
-  if (seconds < 3600)
-    return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h ${mins}m`;
-  return `${hours}h ${mins}m`;
+/* -------------------------------------------------------------------------
+ * Helpers
+ * ------------------------------------------------------------------------- */
+function formatNumber(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toFixed(0);
 }
 
+function formatCost(n: number): string {
+  if (n === 0) return "$0.00";
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  return `$${n.toFixed(3)}`;
+}
+
+function formatContextBar(used: number, total: number): { pct: number; color: string } {
+  const pct = Math.min(100, (used / total) * 100);
+  let color = "bg-emerald-500";
+  if (pct > 75) color = "bg-amber-500";
+  if (pct > 90) color = "bg-rose-500";
+  return { pct, color };
+}
+
+/** Derive a category from a tool's name (used for skill aggregation). */
+function deriveCategory(toolName: string): string {
+  const lower = toolName.toLowerCase();
+  if (/(read|write|file|list|delete|move|copy|append|search|index)/.test(lower)) return "file";
+  if (/(git|commit|push|pull|diff)/.test(lower)) return "git";
+  if (/(execute|run_code|test|lint|format|quality)/.test(lower)) return "code";
+  if (/(web|fetch|search|scrape|url)/.test(lower)) return "web";
+  if (/(docker|compose)/.test(lower)) return "docker";
+  if (/(db|database|sql|query)/.test(lower)) return "db";
+  if (/(shell|bash|command|run_)/.test(lower)) return "shell";
+  if (/(memory|recall|store|context)/.test(lower)) return "memory";
+  if (/(agent|consult|bus)/.test(lower)) return "agent";
+  if (/(notify|webhook|email|alert)/.test(lower)) return "notification";
+  if (/(api|http|request)/.test(lower)) return "api";
+  if (/(scaffold|project|template)/.test(lower)) return "scaffold";
+  if (/(doc|readme|report)/.test(lower)) return "doc";
+  if (/(analyze|data|chart)/.test(lower)) return "data";
+  return "other";
+}
+
+/* -------------------------------------------------------------------------
+ * Main RightPanel
+ * ------------------------------------------------------------------------- */
 export default function RightPanel() {
-  const { activeModel, setActiveModel } = useModelStore();
-  const { tools, toggleTool } = useToolsStore();
+  const { activeModel, setActiveModel, models } = useModelStore();
+  const { tools } = useToolsStore();
   const metrics = useMetricsStore((s) => s.metrics);
   const backendOnline = useMetricsStore((s) => s.backendOnline);
-  const router = useRouter();
+  const currentProject = useProjectStore((s) => s.currentProject);
+  const currentMode = useModeStore((s) => s.currentMode);
 
-  const models = useModelStore((s) => s.models);
-
-  const activeModelData: ModelInfo = useMemo(() => {
-    const fallback =
-      DEFAULT_MODELS.find((m) => m.id === activeModel) || DEFAULT_MODELS[0];
+  // Resolve active model from cloud catalog
+  const activeCloudModel = useMemo<CloudModel>(() => {
     const fromStore = models.find((m) => m.id === activeModel);
-    if (!fromStore) return fallback;
-
-    const sizeGB = fromStore.size_gb ?? fallback.sizeGB;
-    const paramSize = fromStore.parameter_size ?? fallback.parameter_size;
-
-    return {
-      id: fromStore.id,
-      name: fromStore.name || fallback.name,
-      desc: fallback.desc,
-      color: fallback.color,
-      size: fallback.size,
-      provider: fromStore.provider || fallback.provider,
-      sizeGB,
-      parameter_size: paramSize,
-      status: fromStore.status || fallback.status,
-    };
+    if (fromStore) {
+      const matched = CLOUD_MODELS.find((m) => m.id === fromStore.id);
+      if (matched) return matched;
+    }
+    return CLOUD_MODELS.find((m) => m.id === activeModel) || CLOUD_MODELS[1]; // fast
   }, [activeModel, models]);
 
-  const sessionStats = useMemo(() => {
+  // Token usage & cost
+  const usage = useMemo(() => {
     const msgStats = metrics?.message_stats;
+    const inputTokens = msgStats?.tokens_in_total ?? 0;
+    const outputTokens = msgStats?.tokens_out_total ?? 0;
+    const totalTokens = inputTokens + outputTokens;
+    const cost =
+      (inputTokens / 1000) * activeCloudModel.costPer1kIn +
+      (outputTokens / 1000) * activeCloudModel.costPer1kOut;
     return {
-      messages: msgStats?.total_messages ?? 0,
-      tokens:
-        (msgStats?.tokens_out_total ?? 0) +
-        (msgStats?.tokens_in_total ?? 0),
-      cost: 0,
-      messages_change: 0,
-      tokens_change: 0,
-      cost_change: 0,
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      cost,
+      contextPct: (totalTokens / activeCloudModel.contextWindow) * 100,
     };
-  }, [metrics]);
+  }, [metrics, activeCloudModel]);
 
-  const modelMetrics = useMemo(() => {
-    return {
-      latency: metrics?.avg_latency_ms ?? 0,
-      tokens: metrics?.message_stats?.tokens_out_total ?? 0,
-      tokensPerSec: metrics?.tokens_per_second ?? 0,
-    };
-  }, [metrics]);
+  // Aggregate tools by tag for skill display
+  const skillsByTag = useMemo(() => {
+    const map: Record<string, { count: number; enabled: number }> = {};
+    for (const tool of tools) {
+      // Tool schema doesn't have category/uses — derive category from name
+      const cat = deriveCategory(tool.name);
+      if (!map[cat]) map[cat] = { count: 0, enabled: 0 };
+      map[cat].count += 1;
+      if (tool.enabled) map[cat].enabled += 1;
+    }
+    return map;
+  }, [tools]);
 
-  const handleToggleTool = useCallback(
-    async (toolName: string) => {
-      const toolState = tools.find((t) => t.name === toolName);
-      const enabled = toolState?.enabled ?? true;
-      toggleTool(toolName);
-      try {
-        await toggleToolRemote(toolName, !enabled);
-      } catch (error) {
-        log.error("Failed to toggle tool:", error);
-        toggleTool(toolName);
-      }
-    },
-    [tools, toggleTool],
-  );
+  const totalTools = tools.length;
+  const enabledTools = tools.filter((t) => t.enabled).length;
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-y-auto thin-scrollbar p-4">
+    <div className="flex h-full flex-col gap-3 overflow-y-auto thin-scrollbar p-3">
+      {/* =================================================================
+       * ACTIVE MODEL CARD
+       * ================================================================= */}
       <motion.div
         initial={{ opacity: 0, x: 20 }}
         animate={{ opacity: 1, x: 0 }}
-        className="card p-4"
+        className="card relative overflow-hidden p-4"
       >
+        {/* Animated gradient accent strip */}
+        <div
+          className="absolute inset-x-0 top-0 h-0.5"
+          style={{
+            background: `linear-gradient(90deg, transparent, ${activeCloudModel.color}, transparent)`,
+          }}
+        />
+
         <div className="mb-3 flex items-center justify-between">
-          <span className="text-xs font-semibold text-nexus-muted">
-            Modelo Ativo
-          </span>
-          <button
-            onClick={() => router.push("/models")}
-            className="text-[10px] text-nexus-accent hover:underline"
+          <div className="flex items-center gap-2">
+            <CircleDot
+              className="h-3 w-3 animate-pulse"
+              style={{ color: activeCloudModel.color }}
+            />
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
+              Modelo Ativo
+            </span>
+          </div>
+          <span
+            className="rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-white"
+            style={{ backgroundColor: activeCloudModel.color }}
           >
-            Gerir Modelos
-          </button>
+            {activeCloudModel.badge}
+          </span>
         </div>
 
-        <div className="flex items-center gap-3">
+        {/* Model name + provider */}
+        <div className="mb-3 flex items-center gap-3">
           <div
-            className="flex h-10 w-10 items-center justify-center rounded-lg"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
             style={{
-              background: `${activeModelData.color}20`,
-              color: activeModelData.color,
+              background: `${activeCloudModel.color}20`,
+              boxShadow: `0 0 12px ${activeCloudModel.color}30`,
             }}
           >
-            <Cpu className="h-5 w-5" />
+            <Brain className="h-5 w-5" style={{ color: activeCloudModel.color }} />
           </div>
-          <div className="flex-1">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold">
-                {activeModelData.name}
-              </span>
-              {activeModelData.provider && (
-                <span
-                  className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${providerBadgeClass(activeModelData.provider)}`}
-                >
-                  {activeModelData.provider}
-                </span>
-              )}
-              <span
-                className={`text-[10px] ${statusColor(activeModelData.status)} font-medium`}
-              >
-                {statusText(activeModelData.status)}
-              </span>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-semibold text-nexus-text">
+              {activeCloudModel.name}
             </div>
-            <div className="mt-1 flex items-center gap-2 text-[11px] text-nexus-muted">
-              {activeModelData.sizeGB ? (
-                <span>
-                  {formatSizeGB(activeModelData.sizeGB)}
-                  {activeModelData.parameter_size
-                    ? ` · ${activeModelData.parameter_size} params`
-                    : ""}
+            <div className="flex items-center gap-1.5 text-[10px] text-nexus-muted">
+              <Server className="h-2.5 w-2.5" />
+              <span>{activeCloudModel.provider}</span>
+              {activeCloudModel.free ? (
+                <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-400">
+                  FREE
                 </span>
               ) : (
-                <span>{activeModelData.size || "—"}</span>
+                <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-amber-400">
+                  PAID
+                </span>
               )}
             </div>
-            <div className="mt-0.5 text-[10px] text-nexus-muted">
-              {activeModelData.desc}
-            </div>
           </div>
+        </div>
+
+        {/* Description */}
+        <div className="mb-3 text-[11px] leading-relaxed text-nexus-muted">
+          {activeCloudModel.description}
+        </div>
+
+        {/* Context window usage bar */}
+        <div className="mb-1.5 flex items-center justify-between text-[10px]">
+          <span className="text-nexus-muted">Contexto</span>
+          <span className="font-mono font-semibold text-nexus-text">
+            {formatNumber(usage.totalTokens)} / {formatNumber(activeCloudModel.contextWindow)}
+          </span>
+        </div>
+        <div className="mb-3 h-1.5 overflow-hidden rounded-full bg-nexus-bg/80">
+          <motion.div
+            initial={{ width: 0 }}
+            animate={{ width: `${Math.min(100, usage.contextPct)}%` }}
+            transition={{ duration: 0.5, ease: "easeOut" }}
+            className={`h-full ${formatContextBar(usage.totalTokens, activeCloudModel.contextWindow).color}`}
+          />
+        </div>
+
+        {/* Stats row */}
+        <div className="grid grid-cols-3 gap-1.5">
+          <Stat
+            icon={<Zap className="h-3 w-3 text-yellow-400" />}
+            label="Latência"
+            value={activeCloudModel.latencyMs < 1000 ? `${activeCloudModel.latencyMs}ms` : `${(activeCloudModel.latencyMs / 1000).toFixed(1)}s`}
+          />
+          <Stat
+            icon={<Activity className="h-3 w-3 text-nexus-accent" />}
+            label="In/Out"
+            value={`${formatNumber(usage.inputTokens)}/${formatNumber(usage.outputTokens)}`}
+          />
+          <Stat
+            icon={<Coins className="h-3 w-3 text-emerald-400" />}
+            label="Custo"
+            value={formatCost(usage.cost)}
+          />
         </div>
 
         {!backendOnline && (
-          <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[10px] text-amber-400">
-            Backend offline — dados em cache
+          <div className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[10px] text-amber-400">
+            <AlertCircle className="h-3 w-3 shrink-0" />
+            <span>Backend offline — dados em cache</span>
           </div>
         )}
-
-        <div className="mt-3 grid grid-cols-3 gap-2">
-          <div className="rounded-lg bg-nexus-bg p-2 text-center">
-            <Zap className="mx-auto mb-1 h-3 w-3 text-yellow-400" />
-            <div className="text-[10px] text-nexus-muted">Tempo</div>
-            <div className="text-xs font-semibold">
-              {modelMetrics.latency > 0
-                ? modelMetrics.latency < 1000
-                  ? `${modelMetrics.latency.toFixed(0)}ms`
-                  : `${(modelMetrics.latency / 1000).toFixed(1)}s`
-                : "—"}
-            </div>
-          </div>
-          <div className="rounded-lg bg-nexus-bg p-2 text-center">
-            <MessageSquare className="mx-auto mb-1 h-3 w-3 text-nexus-accent" />
-            <div className="text-[10px] text-nexus-muted">Tokens (sessão)</div>
-            <div className="text-xs font-semibold">
-              {modelMetrics.tokens > 0
-                ? modelMetrics.tokens.toLocaleString()
-                : "—"}
-            </div>
-          </div>
-          <div className="rounded-lg bg-nexus-bg p-2 text-center">
-            <Coins className="mx-auto mb-1 h-3 w-3 text-nexus-accent2" />
-            <div className="text-[10px] text-nexus-muted">T/s</div>
-            <div className="text-xs font-semibold">
-              {modelMetrics.tokensPerSec > 0
-                ? modelMetrics.tokensPerSec.toFixed(1)
-                : "—"}
-            </div>
-          </div>
-        </div>
       </motion.div>
 
+      {/* =================================================================
+       * MODEL SWITCHER
+       * ================================================================= */}
       <motion.div
         initial={{ opacity: 0, x: 20 }}
         animate={{ opacity: 1, x: 0 }}
         transition={{ delay: 0.05 }}
-        className="card p-4"
+        className="card p-3"
       >
-        <div className="mb-3 text-xs font-semibold text-nexus-muted">
-          Alternar Modelo
-        </div>
-        <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-1">
-          {DEFAULT_MODELS.map((model) => (
-            <button
-              key={model.id}
-              onClick={() => setActiveModel(model.id)}
-              className={`flex shrink-0 flex-col items-center gap-1 rounded-lg border p-2 transition-all ${
-                activeModel === model.id
-                  ? "border-nexus-accent bg-nexus-accent/10"
-                  : "border-nexus-border bg-nexus-bg hover:border-nexus-muted/30"
-              }`}
-              style={
-                activeModel === model.id
-                  ? { borderColor: model.color }
-                  : undefined
-              }
-            >
-              <div
-                className="flex h-8 w-8 items-center justify-center rounded-md"
-                style={{ background: `${model.color}20`, color: model.color }}
-              >
-                <Cpu className="h-4 w-4" />
-              </div>
-              <span className="text-[10px] font-medium">{model.name}</span>
-            </button>
-          ))}
-        </div>
-      </motion.div>
-
-      <motion.div
-        initial={{ opacity: 0, x: 20 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ delay: 0.1 }}
-        className="card p-4"
-      >
-        <div className="mb-3 flex items-center justify-between">
-          <span className="text-xs font-semibold text-nexus-muted">
-            Desempenho da Sessão
+        <div className="mb-2.5 flex items-center gap-2">
+          <Layers className="h-3 w-3 text-nexus-muted" />
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
+            Trocar Modelo
           </span>
-          <button
-            onClick={() => router.push("/analysis")}
-            className="text-[10px] text-nexus-accent hover:underline"
-          >
-            Ver Detalhes
-          </button>
         </div>
-
-        <div className="grid grid-cols-3 gap-2">
-          <div>
-            <div className="text-[10px] text-nexus-muted">Mensagens</div>
-            <div className="text-lg font-bold">{sessionStats.messages}</div>
-            {sessionStats.messages > 0 && (
-              <div className="flex items-center gap-1 text-[10px] text-green-400">
-                <TrendingUp className="h-3 w-3" />
-                {sessionStats.messages}
-              </div>
-            )}
-          </div>
-          <div>
-            <div className="text-[10px] text-nexus-muted">Tokens Usados</div>
-            <div className="text-lg font-bold">
-              {sessionStats.tokens > 0
-                ? sessionStats.tokens.toLocaleString()
-                : "—"}
-            </div>
-            {sessionStats.tokens > 0 && (
-              <div className="flex items-center gap-1 text-[10px] text-green-400">
-                <TrendingUp className="h-3 w-3" />
-                {sessionStats.tokens.toLocaleString()}
-              </div>
-            )}
-          </div>
-          <div>
-            <div className="text-[10px] text-nexus-muted">Uptime</div>
-            <div className="text-lg font-bold">
-              {metrics?.uptime_seconds
-                ? formatUptime(metrics.uptime_seconds)
-                : "—"}
-            </div>
-            <div className="flex items-center gap-1 text-[10px] text-green-400">
-              <TrendingDown className="h-3 w-3" />
-              {metrics?.active_sessions ?? 0} sessões
-            </div>
-          </div>
-        </div>
-      </motion.div>
-
-      <motion.div
-        initial={{ opacity: 0, x: 20 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ delay: 0.15 }}
-        className="card p-4"
-      >
-        <div className="mb-3 flex items-center justify-between">
-          <span className="text-xs font-semibold text-nexus-muted">
-            Ferramentas Ativas
-          </span>
-          <button
-            onClick={() => router.push("/scraping")}
-            className="text-[10px] text-nexus-accent hover:underline"
-          >
-            Personalizar
-          </button>
-        </div>
-
-        <div className="space-y-2">
-          {TOOLS_DISPLAY.map((tool) => {
-            const isEnabled =
-              tools.find((t) => t.name === tool.name)?.enabled ?? true;
-            const Icon = tool.icon;
+        <div className="space-y-1.5">
+          {CLOUD_MODELS.map((model) => {
+            const isActive = activeCloudModel.id === model.id;
             return (
-              <div
-                key={tool.name}
-                className="flex items-center justify-between rounded-lg bg-nexus-bg px-3 py-2"
+              <button
+                key={model.id}
+                onClick={() => setActiveModel(model.id)}
+                className={`group flex w-full items-center gap-2.5 rounded-lg border p-2 text-left transition-all ${
+                  isActive
+                    ? "border-nexus-accent/50 bg-nexus-accent/5"
+                    : "border-nexus-border/50 bg-nexus-bg/40 hover:border-nexus-muted/30 hover:bg-nexus-bg/60"
+                }`}
               >
-                <div className="flex items-center gap-2">
-                  <div
-                    className="flex h-7 w-7 items-center justify-center rounded-md"
-                    style={{ background: `${tool.color}15`, color: tool.color }}
-                  >
-                    <Icon className="h-3.5 w-3.5" />
+                <div
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
+                  style={{
+                    background: `${model.color}20`,
+                    color: model.color,
+                  }}
+                >
+                  <Brain className="h-3.5 w-3.5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-xs font-semibold text-nexus-text">
+                      {model.name}
+                    </span>
+                    {model.free && (
+                      <span className="rounded bg-emerald-500/20 px-1 py-0.5 text-[8px] font-bold text-emerald-400">
+                        FREE
+                      </span>
+                    )}
                   </div>
-                  <span className="text-xs">{tool.label}</span>
+                  <div className="flex items-center gap-2 text-[9px] text-nexus-muted">
+                    <span>{model.tier}</span>
+                    <span>•</span>
+                    <span>{model.latencyMs}ms</span>
+                    <span>•</span>
+                    <span>{formatNumber(model.contextWindow)} ctx</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`text-[10px] ${isEnabled ? "text-green-400" : "text-nexus-muted"}`}
-                  >
-                    {isEnabled ? "Ativo" : "Inativo"}
-                  </span>
-                  <button
-                    onClick={() => handleToggleTool(tool.name)}
-                    className={`relative h-4 w-7 rounded-full transition-colors ${
-                      isEnabled ? "bg-green-500" : "bg-nexus-border"
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all ${
-                        isEnabled ? "left-3.5" : "left-0.5"
-                      }`}
-                    />
-                  </button>
-                </div>
-              </div>
+                {isActive && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-nexus-accent" />}
+              </button>
             );
           })}
         </div>
       </motion.div>
+
+      {/* =================================================================
+       * SKILLS / TOOLS
+       * ================================================================= */}
+      <motion.div
+        initial={{ opacity: 0, x: 20 }}
+        animate={{ opacity: 1, x: 0 }}
+        transition={{ delay: 0.1 }}
+        className="card p-3"
+      >
+        <div className="mb-2.5 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Wrench className="h-3 w-3 text-nexus-muted" />
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
+              Skills & Tools
+            </span>
+          </div>
+          <span className="text-[10px] font-mono text-nexus-muted">
+            {enabledTools}/{totalTools}
+          </span>
+        </div>
+
+        {/* Capability tags */}
+        <div className="mb-2 flex flex-wrap gap-1">
+          {Object.entries(skillsByTag)
+            .sort((a, b) => b[1].count - a[1].count)
+            .slice(0, 8)
+            .map(([cat, stats]) => (
+              <div
+                key={cat}
+                className={`rounded-md px-2 py-1 text-[9px] font-medium ${
+                  stats.enabled > 0
+                    ? "bg-nexus-accent/15 text-nexus-accent"
+                    : "bg-nexus-bg/60 text-nexus-muted"
+                }`}
+                title={`${stats.count} tools, ${stats.enabled} enabled`}
+              >
+                {cat} <span className="opacity-60">·{stats.count}</span>
+              </div>
+            ))}
+        </div>
+
+        {/* Tools list (collapsed by default) */}
+        <details className="group">
+          <summary className="flex cursor-pointer items-center justify-between text-[10px] text-nexus-muted hover:text-nexus-text">
+            <span>Ver todas as {totalTools} tools</span>
+            <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="mt-2 max-h-48 space-y-0.5 overflow-y-auto pr-1 thin-scrollbar">
+            {tools.map((tool) => (
+              <div
+                key={tool.name}
+                className="flex items-center justify-between rounded px-2 py-1 text-[10px] hover:bg-nexus-bg/40"
+              >
+                <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                  <CircleDot
+                    className={`h-2 w-2 shrink-0 ${tool.enabled ? "text-emerald-400" : "text-gray-500"}`}
+                  />
+                  <span className="truncate text-nexus-text">{tool.name}</span>
+                </div>
+                <span className="text-[9px] text-nexus-muted">
+                  {/* uses count not available in current Tool type */}
+                </span>
+              </div>
+            ))}
+          </div>
+        </details>
+      </motion.div>
+
+      {/* =================================================================
+       * PROJECT & MODE CONTEXT
+       * ================================================================= */}
+      <motion.div
+        initial={{ opacity: 0, x: 20 }}
+        animate={{ opacity: 1, x: 0 }}
+        transition={{ delay: 0.12 }}
+        className="card p-3"
+      >
+        <div className="mb-2.5 flex items-center gap-2">
+          <Sparkles className="h-3 w-3 text-nexus-accent" />
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
+            Contexto da IA
+          </span>
+        </div>
+        <div className="space-y-1.5">
+          {/* Project */}
+          <div className="flex items-center gap-2 rounded-md bg-nexus-bg/40 px-2 py-1.5">
+            <HardDrive className="h-3 w-3 shrink-0 text-nexus-muted" />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[11px] font-medium text-nexus-text">
+                {currentProject?.name ?? "Sem projeto"}
+              </div>
+              <div className="truncate text-[9px] text-nexus-muted">
+                {currentProject?.path ?? "—"}
+              </div>
+            </div>
+          </div>
+          {/* Mode */}
+          <div className="flex items-center gap-2 rounded-md bg-nexus-bg/40 px-2 py-1.5">
+            <Activity className="h-3 w-3 shrink-0 text-nexus-muted" />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[11px] font-medium text-nexus-text">
+                Modo: {currentMode || "auto"}
+              </div>
+              <div className="truncate text-[9px] text-nexus-muted">
+                {totalTools} tools · {formatNumber(usage.totalTokens)} tokens
+              </div>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+
+      {/* =================================================================
+       * SYSTEM TOOLS (recent integrations)
+       * ================================================================= */}
+      <motion.div
+        initial={{ opacity: 0, x: 20 }}
+        animate={{ opacity: 1, x: 0 }}
+        transition={{ delay: 0.13 }}
+        className="card p-3"
+      >
+        <div className="mb-2.5 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Server className="h-3 w-3 text-nexus-muted" />
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
+              System Tools
+            </span>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-1.5">
+          <SystemToolBadge name="Docker" enabled={tools.some((t) => t.name.startsWith("docker"))} />
+          <SystemToolBadge name="Database" enabled={tools.some((t) => t.name.startsWith("db_"))} />
+          <SystemToolBadge name="Git" enabled={tools.some((t) => t.name.startsWith("git_"))} />
+          <SystemToolBadge name="API" enabled={tools.some((t) => t.name === "api_request")} />
+          <SystemToolBadge name="Tests" enabled={tools.some((t) => t.name === "run_tests")} />
+          <SystemToolBadge name="Lint" enabled={tools.some((t) => t.name === "run_lint" || t.name === "format_code")} />
+          <SystemToolBadge name="Notify" enabled={tools.some((t) => t.name.startsWith("send_") || t.name === "show_desktop_notification")} />
+          <SystemToolBadge name="Quality" enabled={tools.some((t) => t.name === "type_check")} />
+        </div>
+      </motion.div>
+
+      {/* =================================================================
+       * SESSION STATS
+       * ================================================================= */}
+      <motion.div
+        initial={{ opacity: 0, x: 20 }}
+        animate={{ opacity: 1, x: 0 }}
+        transition={{ delay: 0.15 }}
+        className="card p-3"
+      >
+        <div className="mb-2.5 flex items-center gap-2">
+          <TrendingUp className="h-3 w-3 text-nexus-muted" />
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
+            Sessão
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-1.5">
+          <Stat
+            label="Mensagens"
+            value={formatNumber(metrics?.message_stats?.total_messages ?? 0)}
+          />
+          <Stat
+            label="Requests"
+            value={formatNumber(metrics?.requests_total ?? 0)}
+          />
+          <Stat
+            label="T/s"
+            value={
+              metrics?.tokens_per_second
+                ? metrics.tokens_per_second.toFixed(1)
+                : "0"
+            }
+          />
+          <Stat
+            label="Custo total"
+            value={formatCost(usage.cost)}
+          />
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------
+ * Stat — compact metric tile
+ * ------------------------------------------------------------------------- */
+function Stat({
+  icon,
+  label,
+  value,
+}: {
+  icon?: React.ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-lg bg-nexus-bg/60 p-1.5 text-center">
+      {icon && <div className="mx-auto mb-0.5 flex justify-center">{icon}</div>}
+      <div className="text-[9px] uppercase tracking-wider text-nexus-muted">
+        {label}
+      </div>
+      <div className="truncate text-[11px] font-bold text-nexus-text">
+        {value}
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------
+ * SystemToolBadge — visual indicator for a category of tools
+ * ------------------------------------------------------------------------- */
+function SystemToolBadge({ name, enabled }: { name: string; enabled: boolean }) {
+  return (
+    <div
+      className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 ${
+        enabled
+          ? "bg-nexus-accent/10 text-nexus-accent"
+          : "bg-nexus-bg/40 text-nexus-muted/50"
+      }`}
+      title={enabled ? `${name} tools disponíveis` : `${name} tools não instaladas`}
+    >
+      <CircleDot
+        className={`h-2 w-2 shrink-0 ${
+          enabled ? "text-emerald-400" : "text-gray-500"
+        }`}
+      />
+      <span className="text-[10px] font-medium">{name}</span>
     </div>
   );
 }

@@ -237,6 +237,7 @@ class StreamEvent(BaseModel):
     tool_args: dict[str, Any] | None = None
     tool_result: Any | None = None
     tool_error: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
     timestamp: str = Field(default_factory=_utcnow_iso)
 
 

@@ -9,7 +9,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from backend.config.settings import get_settings as _get_settings
@@ -23,9 +23,12 @@ def _is_dev_mode() -> bool:
         return True
 
 
-from backend.observability.metrics_collector import get_metrics_collector
-from backend.observability.metrics_store import get_metrics_store
-from backend.persistence.db import (
+from backend.llm.circuit_breaker import all_breakers  # noqa: E402
+from backend.middleware.auth import require_auth  # noqa: E402
+from backend.observability.metrics_collector import get_metrics_collector  # noqa: E402
+from backend.observability.metrics_store import get_metrics_store  # noqa: E402
+from backend.observability.usage_store import get_usage_store  # noqa: E402
+from backend.persistence.db import (  # noqa: E402
     count_pending_changes,
     get_agent_activity,
     get_change_statistics,
@@ -304,3 +307,64 @@ async def get_analytics(request: Request) -> dict:
             "uptime_hours": snapshot.uptime_seconds / 3600,
         },
     }
+
+
+@router.get("/metrics/usage")
+async def get_usage(
+    range: str = Query("24h", description="Time range: 24h, 7d, or 30d"),
+    _user: dict = Depends(require_auth),
+) -> dict:
+    """Return aggregated token usage and cost data.
+
+    Breakdown by model and by agent (top 5 by token count).
+    Time range options: 24h (default), 7d, 30d.
+    """
+    range_map = {"24h": 86400, "7d": 604800, "30d": 2592000}
+    seconds = range_map.get(range, 86400)
+    store = get_usage_store()
+    return await store.get_usage(range_seconds=seconds)
+
+
+@router.get("/providers/status")
+async def get_providers_status(
+    request: Request,
+    _user: dict = Depends(require_auth),
+) -> dict:
+    """Return real-time status of all LLM providers.
+
+    Includes health status, P95 latency, circuit breaker state,
+    and last error for each registered provider.
+    """
+    # Try to get the multi-LLM manager from app state
+    llm_client = getattr(request.app.state, "llm_client", None)
+    if llm_client is None:
+        return {
+            "providers": {},
+            "note": "LLM client not initialised",
+        }
+
+    # If it's a MultiLLMManager, use its provider_status
+    from backend.llm.multi_llm_manager import MultiLLMManager
+    if isinstance(llm_client, MultiLLMManager):
+        status = llm_client.provider_status()
+        return {
+            "providers": status,
+            "breakers": all_breakers(),
+        }
+
+    # Otherwise inspect the resilient provider's internals
+    from backend.llm.factory import ResilientLLMProvider
+    if isinstance(llm_client, ResilientLLMProvider):
+        providers: dict[str, dict] = {}
+        for idx, prov in enumerate([llm_client.primary] + llm_client.fallbacks):
+            name = prov.__class__.__name__.replace("Provider", "").lower() or f"provider_{idx}"
+            providers[name] = {
+                "healthy": True,
+                "latency": 0.0,
+                "last_check": 0.0,
+                "circuit_breaker": {},
+            }
+        return {
+            "providers": providers,
+            "breakers": all_breakers(),
+        }

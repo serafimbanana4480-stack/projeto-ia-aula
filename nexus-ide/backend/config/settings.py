@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     environment: str = Field(default="development")
 
     # LLM Provider selection
-    llm_provider: str = Field(default="ollama")
+    # Default: OpenCode Go (cloud). Ollama is opt-in via NEXUS_ENABLE_OLLAMA=true.
+    llm_provider: str = Field(default="opencode_go")
 
     # Local LLM (AirLLM experimental)
     local_llm_device: str = Field(default="auto")
@@ -75,9 +76,9 @@ class Settings(BaseSettings):
     opencode_go_base_url: str = Field(default="https://opencode.ai/zen/go/v1")
 
     # Multi-LLM Manager
-    multi_llm_enabled: bool = Field(default=False)
-    default_provider: str = Field(default="ollama")
-    fallback_provider: str = Field(default="ollama")
+    multi_llm_enabled: bool = Field(default=True)
+    default_provider: str = Field(default="opencode_go")
+    fallback_provider: str = Field(default="opencode_go")
 
     # Provider-specific defaults
     openai_temperature: float = Field(default=0.7)
@@ -133,6 +134,13 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = Field(default=f"sqlite:///{REPO_ROOT.as_posix()}/data/nexus.db")
+
+    # Plan approval
+    plan_approval_timeout: int = Field(default=300)
+
+    # Session lifecycle / garbage collection
+    nexus_session_ttl_hours: int = Field(default=24, description="Hours of inactivity before a session is considered expired")
+    nexus_gc_interval_minutes: int = Field(default=60, description="Minutes between automatic garbage-collection runs")
 
     # Rate limiting
     rate_limit_enabled: bool = Field(default=True)

@@ -129,6 +129,7 @@ async def _call_embed(provider, texts: list[str], model: str) -> list[list[float
         # 2-D array of shape (n, dim).
         try:
             import numpy as _np
+
             if isinstance(maybe_awaitable, _np.ndarray):
                 arr = maybe_awaitable
                 if arr.ndim == 3:
@@ -359,7 +360,7 @@ def _chunk_python(content: str) -> list[tuple[int, int, str, str, str]]:
     for node in ast.iter_child_nodes(tree):
         start = getattr(node, "lineno", 1)
         end = getattr(node, "end_lineno", start)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             _extract(start, end, "function", node.name)
         elif isinstance(node, ast.ClassDef):
             _extract(start, end, "class", node.name)
@@ -591,6 +592,7 @@ async def index_codebase(
                         # the FAISS indexer always sees 2-D arrays.
                         try:
                             import numpy as _np
+
                             if isinstance(emb, _np.ndarray):
                                 arr = emb
                                 while arr.ndim > 1:
@@ -616,6 +618,7 @@ async def index_codebase(
                 # FAISS indexer always sees 2-D arrays.
                 try:
                     import numpy as _np
+
                     if isinstance(emb, _np.ndarray):
                         arr = emb
                         while arr.ndim > 1:
@@ -673,7 +676,7 @@ async def search_codebase(query: str, k: int = 8) -> list[CodeChunk]:
 
     # Fallback: linear O(n) scan (original behavior)
     scored: list[tuple[float, CodeChunk]] = []
-    for chunk_id, (embedding, chunk) in _store.items():
+    for _chunk_id, (embedding, chunk) in _store.items():
         sim = _cosine_sim(query_embedding, embedding)
         chunk.score = sim
         scored.append((sim, chunk))
@@ -881,3 +884,144 @@ register_tool(
         handler=_index_stats_tool,
     )
 )
+
+# ---------------------------------------------------------------------------
+# Symbol-search tools — used by agents via auto-upgrade (base.py:857-872)
+# Expose filtered semantic search over code symbols and a dedicated
+# index action so agents can trigger indexing independently.
+# ---------------------------------------------------------------------------
+
+
+async def _search_symbols_handler(
+    query: str = "",
+    kind: str = "any",
+    limit: int = 20,
+) -> dict:
+    """Search for symbols (functions, classes, variables) in the indexed codebase.
+
+    Wraps ``search_codebase`` with an optional ``kind`` filter so the
+    agent can narrow results to a particular symbol type.
+    """
+    if not query.strip():
+        return {"error": "Query cannot be empty."}
+
+    try:
+        results = await search_codebase(query, k=limit)
+    except RuntimeError as exc:
+        return {"error": f"Semantic search unavailable: {exc}"}
+
+    if not results:
+        return {
+            "query": query,
+            "results": [],
+            "message": (
+                "Codebase not indexed yet. Use the index_symbols tool "
+                "to index the project first."
+            ),
+        }
+
+    # Apply optional kind filter (function, class, variable, any)
+    if kind != "any":
+        results = [r for r in results if r.symbol_type.lower() == kind.lower()]
+
+    # Deduplicate by (file, symbol_name) — keep highest score
+    seen: set[tuple[str, str]] = set()
+    deduped = []
+    for r in results:
+        key = (r.file, r.symbol_name or f"{r.start_line}")
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+    results = deduped[:limit]
+
+    return {
+        "query": query,
+        "results": [
+            {
+                "file": r.file,
+                "start_line": r.start_line,
+                "end_line": r.end_line,
+                "score": round(r.score, 3),
+                "language": r.language,
+                "symbol_name": r.symbol_name,
+                "symbol_type": r.symbol_type,
+                "content": r.content[:500],
+            }
+            for r in results
+        ],
+        "total_found": len(results),
+    }
+
+
+async def _index_symbols_handler(
+    project_path: str = ".",
+    force: bool = False,
+) -> dict:
+    """Index the project for symbol search.
+
+    Delegates to ``index_codebase`` which walks the project, chunks
+    source files, generates embeddings, and persists the index to disk.
+    """
+    root = Path(project_path).resolve()
+    if not root.is_dir():
+        return {"error": f"Path is not a directory: {project_path}"}
+
+    try:
+        count = await index_codebase(str(root), force_reindex=force)
+    except Exception as exc:
+        return {"error": f"Indexing failed: {exc}"}
+
+    stats = await get_index_stats()
+    return {
+        "chunks_indexed": count,
+        "total_chunks": stats["total_chunks"],
+        "project_path": str(root),
+    }
+
+
+register_tool(ToolSpec(
+    name="search_symbols",
+    description=(
+        "Search for symbols (functions, classes, variables) in the indexed codebase. "
+        "The codebase must be indexed first via index_symbols."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Symbol name or partial name to search"},
+            "kind": {
+                "type": "string",
+                "enum": ["function", "class", "variable", "any"],
+                "default": "any",
+                "description": "Filter by symbol type",
+            },
+            "limit": {
+                "type": "integer",
+                "default": 20,
+                "description": "Maximum number of results",
+            },
+        },
+        "required": ["query"],
+    },
+    handler=_search_symbols_handler,
+))
+
+register_tool(ToolSpec(
+    name="index_symbols",
+    description="Index the project for symbol search. Chunks source files and generates embeddings.",
+    schema={
+        "type": "object",
+        "properties": {
+            "project_path": {
+                "type": "string",
+                "description": "Project root path (default: current working directory)",
+            },
+            "force": {
+                "type": "boolean",
+                "default": False,
+                "description": "Force re-index even if cache exists",
+            },
+        },
+    },
+    handler=_index_symbols_handler,
+))

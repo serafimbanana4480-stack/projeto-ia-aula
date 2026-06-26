@@ -134,7 +134,7 @@ def _generate_test_for_class(cls_node: ast.ClassDef, module_path: str) -> list[s
     methods = [
         n
         for n in cls_node.body
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("_")
+        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef) and not n.name.startswith("_")
     ]
 
     lines.append(f"class Test{class_name}:")
@@ -227,7 +227,7 @@ def _generate_tests_for_module(source: str, module_name: str) -> str:
     has_content = False
 
     for node in ast.iter_child_nodes(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             if node.name.startswith("_"):
                 continue
             func_info = _get_function_signature(node)

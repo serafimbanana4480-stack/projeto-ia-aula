@@ -16,6 +16,7 @@ until a ``{"type": "done"}`` event.
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import AsyncIterator
@@ -57,6 +58,10 @@ def _sse(event: StreamEvent) -> str:
 # We convert them into first-class SSE events so the frontend can render
 # tool calls cleanly instead of showing raw JSON.
 _INLINE_EVENT_RE = re.compile(r"<event>([^|>]+)(?:\|(.*?))?</event>", re.DOTALL)
+
+# Per-token streaming timeout: how long to wait between individual tokens
+# before declaring the stream dead. Configurable via env var.
+TOKEN_TIMEOUT_SECONDS = int(os.environ.get("NEXUS_STREAM_TOKEN_TIMEOUT", "30"))
 
 
 def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
@@ -292,7 +297,10 @@ async def _stream_autonomous_execution(
                     # Also publish to the dashboard thinking feed (non-blocking)
                     try:
                         from backend.orchestrator.routes.thinking import publish_thought
-                        publish_thought(agent=agent, phase="thinking", text=content, model=data.get("model"))
+
+                        publish_thought(
+                            agent=agent, phase="thinking", text=content, model=data.get("model")
+                        )
                     except Exception:
                         pass
                 elif et in (
@@ -1005,8 +1013,28 @@ async def _run_pipeline(
     parts: list[str] = []
     MAX_RESPONSE_LENGTH = 100_000  # ~100k chars to prevent memory DoS
     think_buffer: str = ""  # accumulates <think>...</think> blocks that may span multiple tokens
+    token_iter = token_stream.__aiter__()
     try:
-        async for token in token_stream:
+        while True:
+            try:
+                token = await asyncio.wait_for(
+                    token_iter.__anext__(), timeout=TOKEN_TIMEOUT_SECONDS
+                )
+            except StopAsyncIteration:
+                break
+            except TimeoutError:
+                logger.warning(
+                    "Token streaming timeout after %ds", TOKEN_TIMEOUT_SECONDS
+                )
+                yield _sse(
+                    StreamEvent(
+                        type="error",
+                        content=f"Stream timeout ({TOKEN_TIMEOUT_SECONDS}s). Try again.",
+                        agent=outcome.used_agent,
+                    )
+                )
+                break
+
             # Detect streaming <think>...</think> blocks. Some providers (DeepSeek,
             # Qwen) emit the open/close tags in different SSE chunks, so we need
             # to buffer the chunks until we either see the close tag or determine
@@ -1017,10 +1045,15 @@ async def _run_pipeline(
                 # Flush the thinking block as a proper "thinking" SSE event.
                 content = think_match.group(1).strip()
                 if content:
-                    yield _sse(StreamEvent(type="thinking", agent=outcome.used_agent, content=content))
+                    yield _sse(
+                        StreamEvent(type="thinking", agent=outcome.used_agent, content=content)
+                    )
                     try:
                         from backend.orchestrator.routes.thinking import publish_thought
-                        publish_thought(agent=outcome.used_agent, phase="thinking", text=content, model=None)
+
+                        publish_thought(
+                            agent=outcome.used_agent, phase="thinking", text=content, model=None
+                        )
                     except Exception:
                         pass
                 # Anything before the open tag and after the close tag is plain text.

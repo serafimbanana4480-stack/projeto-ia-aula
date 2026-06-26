@@ -336,8 +336,7 @@ def t(key: str, **kwargs: Any) -> str:
 # ── FastAPI Integration (opcional) ──────────────────────────
 
 try:
-    from fastapi import APIRouter, Header, Request
-    from fastapi.responses import JSONResponse
+    from fastapi import APIRouter, Header
 
     i18n_router = APIRouter(prefix="/i18n", tags=["i18n"])
 

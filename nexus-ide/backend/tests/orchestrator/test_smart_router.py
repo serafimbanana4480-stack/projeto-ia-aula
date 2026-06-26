@@ -319,9 +319,13 @@ class TestSmartRouterRouteFallback:
         # Use a query that does NOT match any fast_route markers
         query = "totally ambiguous query with no markers at all"
 
-        with patch(
-            "backend.orchestrator.smart_router.smart_route_tier", side_effect=RuntimeError("boom")
-        ), patch("backend.orchestrator.smart_router.route_with_model") as mock_route:
+        with (
+            patch(
+                "backend.orchestrator.smart_router.smart_route_tier",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch("backend.orchestrator.smart_router.route_with_model") as mock_route,
+        ):
             mock_route.return_value = RoutingDecision(
                 primary_agent="ANALYZER",
                 routing_confidence=0.85,
@@ -341,11 +345,15 @@ class TestSmartRouterRouteFallback:
 
         router = SmartRouter(llm_client=client)
 
-        with patch(
-            "backend.orchestrator.smart_router.smart_route_tier", side_effect=RuntimeError("boom")
-        ), patch(
-            "backend.orchestrator.smart_router.route_with_model",
-            side_effect=RuntimeError("also boom"),
+        with (
+            patch(
+                "backend.orchestrator.smart_router.smart_route_tier",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch(
+                "backend.orchestrator.smart_router.route_with_model",
+                side_effect=RuntimeError("also boom"),
+            ),
         ):
             decision = await router.route("something something")
             assert decision.primary_agent == "CODER"

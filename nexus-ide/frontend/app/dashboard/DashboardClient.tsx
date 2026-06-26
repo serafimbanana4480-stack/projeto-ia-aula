@@ -14,6 +14,8 @@ import {
   Clock,
   ExternalLink
 } from "lucide-react";
+import UsageWidget from "../../components/dashboard/UsageWidget";
+import ProviderStatusWidget from "../../components/dashboard/ProviderStatusWidget";
 import { motion } from "framer-motion";
 import Link from "next/link";
 
@@ -212,6 +214,12 @@ export default function DashboardClient() {
             </div>
           </div>
 
+        </div>
+
+        {/* Cost/Usage + Provider Status Widgets */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <UsageWidget />
+          <ProviderStatusWidget />
         </div>
 
         {/* SWARM & MODES ORCHESTRATION */}

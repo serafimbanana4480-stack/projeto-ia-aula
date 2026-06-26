@@ -46,6 +46,18 @@ class MockProvider:
     real providers are down.
     """
 
+    _last_usage: dict[str, int] = {}
+
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Return usage from the most recent call."""
+        return dict(self._last_usage)
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Rough token estimate (~4 chars per token)."""
+        return max(1, len(text) // 4)
+
     async def aclose(self) -> None:
         pass
 
@@ -55,9 +67,19 @@ class MockProvider:
         messages: list[dict[str, str]],
         **kwargs: Any,
     ) -> AsyncIterator[str]:
-        yield "The AI service is currently unavailable. "
-        yield "Please check that Ollama is running with the required models, or configure a cloud provider like OpenAI or DeepSeek. "
-        yield "You can set LLM_PROVIDER=openai and OPENAI_API_KEY=sk-... in your environment."
+        result = (
+            "The AI service is currently unavailable. "
+            "Please check that Ollama is running with the required models, or configure a cloud provider like OpenAI or DeepSeek. "
+            "You can set LLM_PROVIDER=openai and OPENAI_API_KEY=sk-... in your environment."
+        )
+        input_text = " ".join(m.get("content", "") for m in messages)
+        self._last_usage = {
+            "input_tokens": self._estimate_tokens(input_text),
+            "output_tokens": self._estimate_tokens(result),
+            "total_tokens": self._estimate_tokens(input_text) + self._estimate_tokens(result),
+        }
+        for word in result.split():
+            yield word + " "
 
     async def chat_complete(
         self,
@@ -65,11 +87,18 @@ class MockProvider:
         messages: list[dict[str, str]],
         **kwargs: Any,
     ) -> str:
-        return (
+        result = (
             "The AI service is currently unavailable. "
             "Please check that Ollama is running with the required models, or configure a cloud provider like OpenAI or DeepSeek. "
             "You can set LLM_PROVIDER=openai and OPENAI_API_KEY=sk-... in your environment."
         )
+        input_text = " ".join(m.get("content", "") for m in messages)
+        self._last_usage = {
+            "input_tokens": self._estimate_tokens(input_text),
+            "output_tokens": self._estimate_tokens(result),
+            "total_tokens": self._estimate_tokens(input_text) + self._estimate_tokens(result),
+        }
+        return result
 
     async def batch_complete(
         self,
@@ -369,7 +398,14 @@ def _build_fallback_chain(
 
 
 def create_multi_llm_manager() -> MultiLLMManager:
-    """Create and configure a MultiLLMManager with all available providers."""
+    """Create and configure a MultiLLMManager with all available providers.
+
+    **OpenCode Go is the primary cloud provider.** Other cloud providers
+    (OpenAI, Anthropic, Gemini, Kimi, etc.) are only registered when their
+    API key is explicitly set. Ollama is only registered when
+    ``NEXUS_ENABLE_OLLAMA=true`` is set (kept for backward compatibility and
+    local development).
+    """
     # Lazy imports to avoid loading unused provider classes at startup
     from backend.llm.kimi_provider import KimiProvider
     from backend.llm.openai_provider import OpenAIProvider
@@ -377,10 +413,35 @@ def create_multi_llm_manager() -> MultiLLMManager:
     settings = get_settings()
     manager = MultiLLMManager()
 
-    ollama_provider = OllamaProvider(base_url=settings.ollama_host)
-    manager.register_provider("ollama", ollama_provider, priority=1)
-    manager.register_provider("local", ollama_provider, priority=1)
+    # ------------------------------------------------------------------
+    # PRIMARY: OpenCode Go (always registered)
+    # ------------------------------------------------------------------
+    from backend.llm.opencode_go_provider import OpenCodeGoProvider
 
+    if settings.opencode_go_api_key:
+        manager.register_provider(
+            "opencode_go",
+            OpenCodeGoProvider(
+                base_url=settings.opencode_go_base_url,
+                api_key=settings.opencode_go_api_key,
+            ),
+            priority=0,  # Highest priority
+        )
+
+    # ------------------------------------------------------------------
+    # OPTIONAL: Local Ollama (only if NEXUS_ENABLE_OLLAMA=true)
+    # ------------------------------------------------------------------
+    import os
+
+    if os.environ.get("NEXUS_ENABLE_OLLAMA", "").lower() == "true":
+        ollama_provider = OllamaProvider(base_url=settings.ollama_host)
+        manager.register_provider("ollama", ollama_provider, priority=4)
+        manager.register_provider("local", ollama_provider, priority=4)
+        logger.info("Ollama provider registered (NEXUS_ENABLE_OLLAMA=true)")
+
+    # ------------------------------------------------------------------
+    # OPTIONAL: AirLLM experimental (only if explicitly enabled)
+    # ------------------------------------------------------------------
     if settings.airllm_experimental_enabled:
         manager.register_provider(
             "airllm",
@@ -388,9 +449,12 @@ def create_multi_llm_manager() -> MultiLLMManager:
                 device=settings.local_llm_device,
                 compression=settings.local_llm_compression,
             ),
-            priority=2,
+            priority=5,  # Lowest priority (fallback)
         )
 
+    # ------------------------------------------------------------------
+    # OPTIONAL: Other cloud providers (only if API key is set)
+    # ------------------------------------------------------------------
     if settings.openai_api_key:
         manager.register_provider(
             "openai",
@@ -398,7 +462,7 @@ def create_multi_llm_manager() -> MultiLLMManager:
                 base_url="https://api.openai.com/v1",
                 api_key=settings.openai_api_key,
             ),
-            priority=2,
+            priority=3,
         )
 
     if settings.kimi_api_key:
@@ -408,7 +472,7 @@ def create_multi_llm_manager() -> MultiLLMManager:
                 base_url="https://api.moonshot.cn/v1",
                 api_key=settings.kimi_api_key,
             ),
-            priority=2,
+            priority=3,
         )
 
     if settings.deepseek_api_key:
@@ -440,7 +504,7 @@ def create_multi_llm_manager() -> MultiLLMManager:
                 base_url="https://api.anthropic.com",
                 api_key=settings.anthropic_api_key,
             ),
-            priority=2,
+            priority=3,
         )
 
     if settings.gemini_api_key:
@@ -454,7 +518,7 @@ def create_multi_llm_manager() -> MultiLLMManager:
                 ),
                 api_key=settings.gemini_api_key,
             ),
-            priority=2,
+            priority=3,
         )
 
     if settings.openrouter_api_key:
@@ -466,9 +530,13 @@ def create_multi_llm_manager() -> MultiLLMManager:
                 base_url=getattr(settings, "openrouter_base_url", "https://openrouter.ai/api/v1"),
                 api_key=settings.openrouter_api_key,
             ),
-            priority=2,
+            priority=3,
         )
 
+    if not manager.list_providers() if hasattr(manager, "list_providers") else not manager.providers:
+        logger.warning(
+            "No providers configured! Set OPENCODE_GO_API_KEY in .env to enable cloud models."
+        )
     return manager
 
 

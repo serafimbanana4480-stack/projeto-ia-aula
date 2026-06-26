@@ -17,6 +17,7 @@ refactoring spec.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -162,10 +163,8 @@ async def _redis_lock_client() -> Any:
             "Redis unavailable for distributed file locks (%s); using in-memory/filelock fallback",
             exc,
         )
-        try:
+        with contextlib.suppress(Exception):
             await client.aclose()
-        except Exception:  # pragma: no cover - best effort cleanup
-            pass
         return None
     _redis_client = client
     return client
@@ -1001,7 +1000,7 @@ class FileLockManager:
                                 raise LockError(
                                     f"Timeout acquiring {lock_type} lock on "
                                     f"{file_path} for {owner!r}"
-                                )
+                                ) from None
                         # LockError (contention timeout) propagates naturally.
 
                     if lock_type == "write" and redis_token is None and _filelock_enabled():
@@ -1059,7 +1058,7 @@ class FileLockManager:
                         self._wait_graph[owner].discard(file_path)
                     raise LockError(
                         f"Timeout acquiring {lock_type} lock on {file_path} for {owner!r}"
-                    )
+                    ) from None
 
         return lock_id
 

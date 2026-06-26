@@ -8,12 +8,13 @@ topics plus an in-memory ring buffer for the most recent events.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
@@ -70,10 +71,8 @@ def publish_thought(
     _recent.append(payload)
     # fan-out to all WebSocket subscribers (non-blocking)
     for q in list(_ws_subscribers):
-        try:
+        with contextlib.suppress(Exception):
             q.put_nowait(payload)
-        except Exception:
-            pass
     return payload
 
 

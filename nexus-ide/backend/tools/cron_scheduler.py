@@ -423,17 +423,15 @@ def _execute_job(job: CronJob) -> dict[str, Any]:
                 for node in ast.walk(tree):
                     if isinstance(
                         node,
-                        (
-                            ast.Import,
-                            ast.ImportFrom,
-                            ast.Call,
-                            ast.ClassDef,
-                            ast.FunctionDef,
-                            ast.AsyncFunctionDef,
-                            ast.Await,
-                            ast.Yield,
-                            ast.YieldFrom,
-                        ),
+                        ast.Import
+                        | ast.ImportFrom
+                        | ast.Call
+                        | ast.ClassDef
+                        | ast.FunctionDef
+                        | ast.AsyncFunctionDef
+                        | ast.Await
+                        | ast.Yield
+                        | ast.YieldFrom,
                     ):
                         raise ValueError(
                             f"Node type {type(node).__name__} is not allowed in cron python tasks"
@@ -610,7 +608,7 @@ def scheduler_status() -> dict[str, Any]:
 # Tool Registration
 # ---------------------------------------------------------------------------
 
-from backend.tools.registry import ToolSpec, register_tool
+from backend.tools.registry import ToolSpec, register_tool  # noqa: E402
 
 register_tool(
     ToolSpec(

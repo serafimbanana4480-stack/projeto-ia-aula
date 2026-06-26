@@ -16,13 +16,17 @@ PARENT_OF_BACKEND = os.path.dirname(BASE_DIR)  # .../nexus-ide/
 if PARENT_OF_BACKEND not in sys.path:
     sys.path.insert(0, PARENT_OF_BACKEND)
 
-import asyncio
-import contextlib
-import tempfile
-from pathlib import Path
+import asyncio  # noqa: E402
+import contextlib  # noqa: E402
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 # Now we can import from the backend package
-from backend.core.workspace import _is_blocked_path, read_file_absolute, write_file_absolute
+from backend.core.workspace import (  # noqa: E402
+    _is_blocked_path,
+    read_file_absolute,
+    write_file_absolute,
+)
 
 # ── Step 1 ──────────────────────────────────────────────────────────────────
 home = Path.home()

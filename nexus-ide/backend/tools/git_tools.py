@@ -233,3 +233,135 @@ register_tool(
         handler=git_commit_safe,
     )
 )
+
+
+async def git_pull(command: str, project_path: str | None = None) -> dict:
+    """Pull changes from remote (safe operation, read-only effect on remote).
+
+    Args:
+        command: git pull arguments (e.g. 'origin main' or 'origin feature-branch')
+        project_path: Path to the project directory
+
+    Returns:
+        dict with stdout/stderr from git pull
+    """
+    cmd_lower = command.strip().lower()
+    # Block force-pull with rebase/reset
+    for blocked in ("-f ", " --force", "--rebase", "reset --hard"):
+        if blocked in cmd_lower:
+            return {"error": f"Blocked unsafe pull flag: {blocked.strip()}"}
+    return await git_operation(f"git pull {command}", project_path)
+
+
+async def git_push(
+    command: str, project_path: str | None = None, confirm: bool = False
+) -> dict:
+    """Push commits to remote.
+
+    **Requires explicit confirmation** via the ``confirm`` parameter to prevent
+    accidental pushes. If ``confirm`` is False, returns a dry-run preview.
+    Set the env var ``NEXUS_ALLOW_GIT_PUSH=true`` to enable without confirm
+    (only do this in trusted environments).
+
+    Args:
+        command: git push arguments (e.g. 'origin main' or 'origin feature-branch')
+        project_path: Path to the project directory
+        confirm: Must be True to actually push
+
+    Returns:
+        dict with status (preview/pushed) and stdout/stderr
+    """
+    import os
+
+    allow_without_confirm = os.environ.get("NEXUS_ALLOW_GIT_PUSH", "").lower() == "true"
+
+    if not confirm and not allow_without_confirm:
+        # Dry-run preview
+        preview = await git_operation(
+            f"git push --dry-run {command}", project_path
+        )
+        return {
+            "status": "preview",
+            "message": (
+                "Push not executed. Pass confirm=True to actually push, "
+                "or set NEXUS_ALLOW_GIT_PUSH=true env var."
+            ),
+            "dry_run_output": preview,
+        }
+
+    cmd_lower = command.strip().lower()
+    # Block force-push (catastrophic)
+    for blocked in ("-f", "--force", "--force-with-lease", "mirror"):
+        if blocked in cmd_lower:
+            return {"error": f"Blocked unsafe push flag: {blocked}"}
+
+    # Also block deleting remote branches
+    if ":delete" in command or "--delete" in command:
+        return {"error": "Blocked push --delete (use 'git branch -d' locally instead)"}
+
+    result = await git_operation(f"git push {command}", project_path)
+    result["status"] = "pushed"
+    return result
+
+
+register_tool(
+    ToolSpec(
+        name="git_pull",
+        description=(
+            "Pull changes from a remote repository. Safe read-only operation. "
+            "Force-pull and rebase flags are blocked."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "Pull arguments e.g. 'origin main' or 'origin feature-branch'"
+                    ),
+                },
+                "project_path": {
+                    "type": "string",
+                    "description": "Path to the project directory",
+                },
+            },
+            "required": ["command"],
+        },
+        handler=git_pull,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="git_push",
+        description=(
+            "Push commits to a remote repository. **Requires confirmation** via "
+            "the confirm=true parameter (or set NEXUS_ALLOW_GIT_PUSH=true env). "
+            "Without confirmation, returns a dry-run preview. Force-push, "
+            "mirror-push, and --delete are blocked."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "Push arguments e.g. 'origin main' or 'origin feature-branch'"
+                    ),
+                },
+                "project_path": {
+                    "type": "string",
+                    "description": "Path to the project directory",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Must be true to actually push (safety check)",
+                    "default": False,
+                },
+            },
+            "required": ["command"],
+        },
+        handler=git_push,
+    )
+)
+

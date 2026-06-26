@@ -143,19 +143,21 @@ class TestFetchAndSummarize:
 
     @pytest.mark.asyncio
     async def test_direct_fetch_fallback(self, tmp_path: pytest.TempPathFactory) -> None:
-        with patch(
-            "backend.tools.web_fetcher.CACHE_DB_PATH",
-            tmp_path / "test_web_cache.db",
-        ):
+        with (
+            patch(
+                "backend.tools.web_fetcher.CACHE_DB_PATH",
+                tmp_path / "test_web_cache.db",
+            ),
             # First call (Jina) fails
-            with patch(
+            patch(
                 "backend.tools.web_fetcher._request_with_retry",
                 new_callable=AsyncMock,
                 side_effect=Exception("jina down"),
-            ):
-                result = await fetch_and_summarize("https://fail.com")
-                # Since both Jina and direct fail, we get error
-                assert result["status"] == "error"
+            ),
+        ):
+            result = await fetch_and_summarize("https://fail.com")
+            # Since both Jina and direct fail, we get error
+            assert result["status"] == "error"
 
     @pytest.mark.asyncio
     async def test_direct_fetch_success(self, tmp_path: pytest.TempPathFactory) -> None:

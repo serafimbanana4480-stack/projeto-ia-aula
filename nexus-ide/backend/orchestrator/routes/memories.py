@@ -76,7 +76,7 @@ async def search_memories(
         try:
             mem_type = MemoryType(req.memory_type)
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid memory_type")
+            raise HTTPException(status_code=400, detail="Invalid memory_type") from None
 
     results = await store.search(
         req.query,
@@ -119,7 +119,7 @@ async def create_memory(
     try:
         mem_type = MemoryType(req.memory_type)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid memory_type")
+        raise HTTPException(status_code=400, detail="Invalid memory_type") from None
 
     memory = await store.store(
         content=req.content,
@@ -156,7 +156,7 @@ async def list_memories(
         try:
             mem_type = MemoryType(memory_type)
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid memory_type")
+            raise HTTPException(status_code=400, detail="Invalid memory_type") from None
 
     all_memories = await store.list_all(limit=max(limit, 1000))
     filtered = [
