@@ -81,10 +81,14 @@ async def enhanced_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.event_bus = event_bus
     logger.info("Event system initialized")
     
-    # Initialize WebSocket server
-    websocket_server = await start_websocket_server(event_bus)
-    app.state.websocket_server = websocket_server
-    logger.info("WebSocket server initialized")
+    # Initialize WebSocket server (optional - skip if port in use)
+    try:
+        websocket_server = await start_websocket_server(event_bus)
+        app.state.websocket_server = websocket_server
+        logger.info("WebSocket server initialized")
+    except OSError as e:
+        logger.warning("WebSocket server could not start (port in use): %s", e)
+        app.state.websocket_server = None
     
     # Initialize metrics collector
     metrics_collector = await get_metrics_collector(event_bus)
@@ -135,7 +139,8 @@ async def enhanced_lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.error(f"Failed to stop agent {agent.name}: {e}")
         
         # Shutdown systems
-        await stop_websocket_server()
+        if app.state.websocket_server:
+            await stop_websocket_server()
         await shutdown_metrics_collector()
         await shutdown_memory_dashboard()
         await shutdown_event_system()

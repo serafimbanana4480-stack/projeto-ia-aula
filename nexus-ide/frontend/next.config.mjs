@@ -64,18 +64,18 @@ const nextConfig = {
     return [
       {
         source: "/api/:path*",
-        destination: "http://localhost:8002/api/:path*",
+        destination: "http://localhost:8003/api/:path*",
       },
       {
         source: "/health",
-        destination: "http://localhost:8002/health",
+        destination: "http://localhost:8003/health",
       },
       // WebSocket connections are handled by connecting directly to
       // the backend. This rewrite is kept for non-WS fallback only;
       // Next.js rewrites do NOT support the WS protocol.
       {
         source: "/ws/:path*",
-        destination: "http://localhost:8002/ws/:path*",
+        destination: "http://localhost:8003/ws/:path*",
       },
     ];
   },
