@@ -291,6 +291,29 @@ def init_db(run_migrations: bool = False) -> None:
             except Exception:
                 logger.debug("Alembic check failed, continuing", exc_info=True)
 
+        # Auto-repair: if the users table is missing, apply schema anyway
+        try:
+            with sqlite3.connect(str(DB_PATH)) as conn:
+                row = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
+                ).fetchone()
+                if row is None:
+                    logger.warning("Missing 'users' table — applying schema repair")
+                    schema = SCHEMA_PATH.read_text(encoding="utf-8")
+                    conn.executescript(schema)
+                    conn.commit()
+                    _seed_default_user()
+                    _stamp_alembic()
+                    logger.info("Schema repair complete — all tables created")
+                else:
+                    # Users table exists but might be empty (seed was interrupted)
+                    count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                    if count == 0:
+                        logger.warning("Users table is empty — seeding default user")
+                        _seed_default_user()
+        except Exception:
+            logger.debug("Schema repair check failed", exc_info=True)
+
 
 def _seed_default_user() -> None:
     """Create a default admin user if the users table is empty.
@@ -305,8 +328,8 @@ def _seed_default_user() -> None:
 
     try:
         with sqlite3.connect(str(DB_PATH)) as conn:
-            row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
-            if row and row["count"] > 0:
+            row = conn.execute("SELECT COUNT(*) FROM users").fetchone()
+            if row and row[0] > 0:
                 logger.debug("Users already exist, skipping default user seed")
                 return
 

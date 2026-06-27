@@ -8,7 +8,7 @@ This module provides comprehensive memory capabilities:
 - Intelligent memory retrieval
 """
 
-from .advanced_memory import AdvancedMemorySystem, MemoryType, MemoryStatus, MemoryItem
+from .advanced_memory import AdvancedMemorySystem, MemoryType, MemoryStatus, MemoryFragment
 from .cross_session_memory import (
     CrossSessionMemoryManager, 
     CrossSessionMemory, 
@@ -22,7 +22,7 @@ __all__ = [
     "AdvancedMemorySystem",
     "MemoryType",
     "MemoryStatus", 
-    "MemoryItem",
+    "MemoryFragment",
     "CrossSessionMemoryManager",
     "CrossSessionMemory",
     "SessionLink",

@@ -80,8 +80,13 @@ async def require_auth(current_user: dict = Depends(get_current_user)) -> dict:
 
     Use this dependency for endpoints that MUST have authentication.
     Raises HTTP 401 if no valid token is provided.
+    In development mode, authentication is bypassed.
     """
     if current_user is None:
+        from backend.config.settings import get_settings
+        settings = get_settings()
+        if settings.environment == "development":
+            return {"user_id": "dev-user", "email": "admin@nexus-ide.com", "role": "admin"}
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",

@@ -19,7 +19,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 import numpy as np
 
-from backend.knowledge.memory import MemorySystem
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from backend.knowledge.memory import MemorySystem
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
 

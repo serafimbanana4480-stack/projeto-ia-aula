@@ -36,13 +36,20 @@ from backend.orchestrator.routes.tasks import router as tasks_router
 from backend.orchestrator.routes.knowledge import router as knowledge_router
 from backend.orchestrator.routes.additional import router as additional_router
 from backend.orchestrator.routes.omega import router as omega_router
+from backend.orchestrator.routes.agent_bus import router as agent_bus_router
+from backend.orchestrator.routes.meta import router as meta_router
 from backend import tools as _tools  # noqa: F401
 from backend.persistence import init_db
 from backend.tools.ollama_client import OllamaClient
-from backend.dashboard.websocket_server import get_websocket_server, stop_websocket_server
+from backend.dashboard.websocket_server import start_websocket_server, stop_websocket_server
 from backend.metrics.realtime_metrics import get_metrics_collector, shutdown_metrics_collector
 from backend.memory.memory_dashboard import get_memory_dashboard, shutdown_memory_dashboard
-from backend.agents.event_emitting_agent import EventEmittingAgent
+from backend.agents.event_emitting_agent import (
+    EventEmittingAgent,
+    EventEmittingCoderAgent,
+    EventEmittingArchitectAgent,
+    EventEmittingDebuggerAgent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +60,8 @@ async def enhanced_lifespan(app: FastAPI) -> AsyncIterator[None]:
     
     logger.info("Starting enhanced NEXUS orchestrator...")
     
-    # Initialize database
-    await init_db()
+    # Initialize database (synchronous init)
+    init_db()
     
     # Get settings
     settings = get_settings()
@@ -64,13 +71,18 @@ async def enhanced_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.registry = build_default_registry()
     app.state.context = ContextStore()
     
+    # Initialize LLM client for chat endpoints
+    from backend.llm.factory import create_multi_llm_manager
+    app.state.llm_client = create_multi_llm_manager()
+    logger.info("LLM client initialized")
+    
     # Initialize event system
     event_bus = await get_event_bus()
     app.state.event_bus = event_bus
     logger.info("Event system initialized")
     
     # Initialize WebSocket server
-    websocket_server = await get_websocket_server(event_bus)
+    websocket_server = await start_websocket_server(event_bus)
     app.state.websocket_server = websocket_server
     logger.info("WebSocket server initialized")
     
@@ -164,6 +176,8 @@ app.include_router(tasks_router, prefix="/api")
 app.include_router(knowledge_router, prefix="/api")
 app.include_router(additional_router, prefix="/api")
 app.include_router(omega_router, prefix="/api")
+app.include_router(agent_bus_router, prefix="/api")
+app.include_router(meta_router, prefix="/api")
 
 
 @app.get("/health")

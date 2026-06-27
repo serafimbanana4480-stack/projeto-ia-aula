@@ -197,3 +197,35 @@ help:
 	@echo "Maintenance:"
 	@echo "  clean             - Clean all artifacts"
 	@echo "  help              - This help message"
+
+# Novos alvos adicionados pela auditoria e melhoria autónoma
+
+# Instalar e configurar Ollama (fallback local)
+setup-ollama:
+	bash scripts/setup_ollama.sh
+
+# Testar integridade antes de deploy
+test-integrity:
+	$(PYTHON) -m pytest tests/integrity_test.py -v
+
+# Iniciar com fallback chain ativo
+dev-with-fallback:
+	$(PYTHON) -m backend.llm.fallback_chain
+
+# Self-monitoring (iniciar em background)
+self-monitor:
+	$(PYTHON) -m backend.core.self_monitoring &
+
+# Deploy completo (produção)
+deploy-prod: test-integrity
+	docker-compose -f docker/docker-compose.prod.yml up -d
+
+# Limpar tudo (incluindo caches e ficheiros temporários)
+clean-all: clean
+	rm -rf frontend/.next backend/__pycache__ *.log data/*.log
+	find . -name "*.pyc" -delete
+	find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
+# Auditoria completa (Self-Improvement)
+audit-self-improvement:
+	$(PYTHON) -c "from backend.core.self_improvement import SelfImprovement; s = SelfImprovement(); print(s.get_recommendations())"

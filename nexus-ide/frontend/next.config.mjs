@@ -40,7 +40,7 @@ const nextConfig = {
       "default-src 'self'",
       "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: blob:",
+      "img-src 'self' data: blob: https://ui-avatars.com",
       "font-src 'self' data:",
       `connect-src 'self' ${apiUrl} ${wsUrl}`,
       "worker-src 'self' blob:",
@@ -64,18 +64,18 @@ const nextConfig = {
     return [
       {
         source: "/api/:path*",
-        destination: "http://localhost:8000/api/:path*",
+        destination: "http://localhost:8002/api/:path*",
       },
       {
         source: "/health",
-        destination: "http://localhost:8000/health",
+        destination: "http://localhost:8002/health",
       },
       // WebSocket connections are handled by connecting directly to
       // the backend. This rewrite is kept for non-WS fallback only;
       // Next.js rewrites do NOT support the WS protocol.
       {
         source: "/ws/:path*",
-        destination: "http://localhost:8000/ws/:path*",
+        destination: "http://localhost:8002/ws/:path*",
       },
     ];
   },

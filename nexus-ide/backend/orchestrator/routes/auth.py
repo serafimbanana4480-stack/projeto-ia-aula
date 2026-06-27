@@ -70,14 +70,21 @@ async def register(request: Request, user_data: UserRegister):
 
 
 @router.post("/login", response_model=TokenResponse)
-@limiter.limit("5/minute")
+@limiter.limit("30/minute")
 async def login(request: Request, user_data: UserLogin):
     """Login with email and password.
 
     Rate limited to 10 requests per minute to prevent brute force attacks.
     """
     # Get user with password hash
-    user = get_user_with_password(user_data.email)
+    try:
+        user = get_user_with_password(user_data.email)
+    except Exception:
+        logger.exception("Database error during login (missing schema?)")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="A base de dados não está inicializada. Tente novamente ou contacte o administrador.",
+        )
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

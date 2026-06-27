@@ -1,0 +1,52 @@
+{
+  "providers": [
+    {
+      "name": "ollama",
+      "enabled": true,
+      "priority": 1,
+      "api_base": "http://localhost:11434",
+      "models": [
+        "llama3.2",
+        "mistral",
+        "codellama"
+      ],
+      "fallback": true,
+      "auto_install": true
+    },
+    {
+      "name": "openrouter",
+      "enabled": true,
+      "priority": 2,
+      "api_base": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "models": [
+        "deepseek/deepseek-chat",
+        "anthropic/claude-3.5-sonnet"
+      ],
+      "fallback": true
+    },
+    {
+      "name": "deepseek",
+      "enabled": true,
+      "priority": 3,
+      "api_base": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "models": [
+        "deepseek-chat"
+      ],
+      "fallback": true
+    }
+  ],
+  "fallback_strategy": "auto",
+  "circuit_breaker": {
+    "enabled": true,
+    "failure_threshold": 3,
+    "reset_timeout": 30,
+    "half_open_max_requests": 2
+  },
+  "retry": {
+    "max_retries": 2,
+    "backoff_factor": 1.5,
+    "timeout": 30
+  }
+}

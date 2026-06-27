@@ -16,14 +16,17 @@ import json
 import pickle
 import hashlib
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Tuple, Set, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
 import uuid
+
 import redis
 import numpy as np
 
-from backend.knowledge.memory import MemorySystem
+if TYPE_CHECKING:
+    from backend.knowledge.memory import MemorySystem
+
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
 
