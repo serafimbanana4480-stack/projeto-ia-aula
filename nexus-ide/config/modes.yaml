@@ -9,13 +9,14 @@ modes:
     router: "smart"
     tools_enabled: ["all"]
     enable_thinking: true
-    max_iterations: 7
+    max_iterations: 10
     supports_subagents: true
     system_prompt_addon: |
       1. Usa tools imediatamente, não descrevas.
       2. Após write_file com sucesso, resposta final curta.
       3. Consulta outros agentes quando precisares.
       4. Resposta final: o que fizeste + ficheiros (2-3 linhas max).
+      5. Tens 10 iterações - lê, planeia, executa, verifica.
 
   coder:
     description: "Modo focado em geração e análise de código com autonomia total de ferramentas"
@@ -23,7 +24,7 @@ modes:
     default_model: "coder"
     router: "none"
     tools_enabled: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code", "consult_agent"]
-    max_iterations: 4
+    max_iterations: 8
     supports_subagents: true
     system_prompt_addon: |
       Focus on clean, idiomatic, production-ready code.
@@ -32,6 +33,11 @@ modes:
       Follow project conventions and best practices.
       Consult ARCHITECT or ANALYZER when design decisions are unclear.
       Recall relevant project memories before modifying existing code.
+      IMPORTANT: You have up to 8 iterations. Use them wisely:
+      1. Read files you need to understand
+      2. Plan your changes
+      3. Write files with your changes
+      4. Verify the result
 
   reviewer:
     description: "Modo dedicado a peer review de código com análise de qualidade, segurança, performance e style"
