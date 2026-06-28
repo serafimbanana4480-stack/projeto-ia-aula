@@ -1,1 +1,0 @@
-"""SWARM tests package marker."""

@@ -51,3 +51,8 @@ htmlcov/
 .coverage
 .coverage.*
 coverage.xml
+
+# Nexus IDE data (databases bloqueados)
+nexus-ide/data/
+nexus-ide/*.db*
+nexus-ide/*.sqlite*
