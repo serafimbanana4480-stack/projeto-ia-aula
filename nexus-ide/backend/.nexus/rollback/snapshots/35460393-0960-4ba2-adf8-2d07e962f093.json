@@ -1,0 +1,13 @@
+{
+  "id": "35460393-0960-4ba2-adf8-2d07e962f093",
+  "created_at": "2026-06-17T19:41:36.727083",
+  "project_path": "C:\\Users\\rodri\\Desktop\\PROJETO IA AULA GIT CLONE\\projeto-ia-aula\\nexus-ide\\backend",
+  "artifact_id": "test_artifact",
+  "file_path": "run_tests.py",
+  "content_before": "# test snapshot content",
+  "content_after": null,
+  "status": "pending",
+  "metadata": {
+    "test": true
+  }
+}

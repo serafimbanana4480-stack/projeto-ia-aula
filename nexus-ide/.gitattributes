@@ -1,0 +1,40 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Shell scripts must use LF line endings (Unix/macOS compatibility)
+*.sh text eol=lf
+
+# Batch scripts must use CRLF line endings (Windows compatibility)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Python files should use LF
+*.py text eol=lf
+
+# JavaScript/TypeScript files should use LF
+*.js text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.mjs text eol=lf
+
+# Markdown and config files should use LF
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+
+# Binary files should not be modified
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.db binary

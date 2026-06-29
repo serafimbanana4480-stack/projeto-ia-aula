@@ -1,0 +1,69 @@
+# Development Environment Configuration
+# This file overrides default settings for development environment
+
+# Application Settings
+app:
+  name: "NEXUS IDE (Development)"
+  debug: true
+  log_level: "DEBUG"
+  reload: true
+
+# CORS Settings
+cors:
+  allowed_origins:
+    - "http://localhost:3000"
+    - "http://127.0.0.1:3000"
+    - "http://localhost:8000"
+  allow_credentials: true
+  allow_methods: ["*"]
+  allow_headers: ["*"]
+
+# Database Settings
+database:
+  url: "sqlite:///./data/nexus_dev.db"
+  echo: true  # Log SQL queries in development
+
+# Redis Settings
+redis:
+  url: "redis://redis:6379"
+  db: 0
+  password: null
+
+# Local LLM (AirLLM) Settings
+local_llm:
+  device: "auto"        # auto | cuda:0 | cpu
+  dashboard_device: "cpu"
+  compression: ""       # "" | 4bit | 8bit
+  timeout: 300
+  retry_attempts: 1
+
+# Observability Settings
+observability:
+  enable_tracing: false
+  enable_metrics: true
+  otel_exporter_otlp_endpoint: "http://localhost:4317"
+  prometheus_port: 9090
+
+# Rate Limiting
+rate_limiting:
+  enabled: false  # Disabled in development for easier testing
+  requests_per_minute: 1000
+
+# Security Settings
+security:
+  secret_key: "development-secret-key-change-in-production"
+  session_expire_hours: 24
+
+# Feature Flags
+features:
+  enable_web_search: true
+  enable_code_execution: true
+  enable_file_operations: true
+  enable_terminal: true
+  max_file_size_mb: 50
+
+# Logging
+logging:
+  level: "DEBUG"
+  format: "detailed"
+  file: "logs/nexus_dev.log"

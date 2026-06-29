@@ -1,0 +1,33 @@
+id: changelog-from-diff
+name: Changelog from diff
+description: Generate a user-facing changelog entry from a diff or branch.
+category: docs
+icon: book-open
+mode: investigation
+strategy: ensemble
+agents: [INVESTIGATOR, ARCHITECT]
+max_iterations: 3
+tags: [changelog, release-notes, docs]
+variables:
+  - name: diff_or_branch
+    label: Diff or branch
+    description: Paste a diff or a branch name
+    multiline: true
+  - name: audience
+    label: Audience
+    description: end-users / developers / SREs
+    default: end-users
+    multiline: false
+objective_template: |
+  Generate a changelog entry for {audience} from the following diff/branch:
+
+  ```
+  {diff_or_branch}
+  ```
+
+  Produce:
+  1. One-paragraph summary
+  2. "What's new" list (added)
+  3. "What's fixed" list (fixed)
+  4. "Breaking changes" list (with migration steps)
+  5. "Known issues" list (if any)

@@ -1,0 +1,35 @@
+id: dependency-upgrade
+name: Dependency upgrade
+description: Plan a major version upgrade (e.g. Next 14 → 15, React 18 → 19, FastAPI 0.100 → 0.115).
+category: maintenance
+icon: package
+mode: planning
+strategy: divide
+agents: [ARCHITECT, INVESTIGATOR]
+max_iterations: 4
+tags: [deps, upgrade, migration]
+variables:
+  - name: package
+    label: Package
+    description: Name of the package (e.g. next, react, fastapi)
+    required: true
+    multiline: false
+  - name: from_version
+    label: From version
+    description: Currently installed version
+    required: true
+    multiline: false
+  - name: to_version
+    label: To version
+    description: Target version
+    required: true
+    multiline: false
+objective_template: |
+  Plan a major upgrade of {package} from {from_version} → {to_version}.
+
+  Produce a structured plan:
+  1. Breaking changes (cite release notes / official docs)
+  2. Affected files in the codebase (use RAG)
+  3. Migration steps in order, with estimated effort
+  4. Rollback strategy
+  5. Test plan to verify
