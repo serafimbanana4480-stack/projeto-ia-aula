@@ -44,8 +44,8 @@ class Settings(BaseSettings):
     environment: str = Field(default="development")
 
     # LLM Provider selection
-    # Default: OpenCode Go (cloud). Ollama is opt-in via NEXUS_ENABLE_OLLAMA=true.
-    llm_provider: str = Field(default="opencode_go")
+    # Default: OpenRouter (cloud). Ollama is opt-in via NEXUS_ENABLE_OLLAMA=true.
+    llm_provider: str = Field(default="openrouter")
 
     # Local LLM (AirLLM experimental)
     local_llm_device: str = Field(default="auto")
@@ -77,8 +77,8 @@ class Settings(BaseSettings):
 
     # Multi-LLM Manager
     multi_llm_enabled: bool = Field(default=True)
-    default_provider: str = Field(default="opencode_go")
-    fallback_provider: str = Field(default="opencode_go")
+    default_provider: str = Field(default="openrouter")
+    fallback_provider: str = Field(default="openrouter")
 
     # Provider-specific defaults
     openai_temperature: float = Field(default=0.7)
@@ -378,10 +378,26 @@ def validate_configuration() -> list[str]:
 def resolve_project_path(project_path: str) -> tuple[str, bool]:
     """Return an effective project path and whether a default was applied.
 
-    Empty strings and ``"."`` resolve to :data:`REPO_ROOT` so file tools
-    always have a sensible workspace root when the frontend omits context.
+    Empty strings and ``"."`` resolve to the first project in the database,
+    or :data:`REPO_ROOT` if no project exists.
     """
     stripped = (project_path or "").strip()
     if not stripped or stripped == ".":
+        # Try to get project from database
+        try:
+            from backend.persistence.db import get_connection_pool
+            pool = get_connection_pool()
+            conn = pool.get_connection()
+            try:
+                row = conn.execute('SELECT path FROM projects LIMIT 1').fetchone()
+                if row:
+                    return row['path'], True
+            finally:
+                conn.close()
+        except Exception as _e:
+            import logging
+            logging.getLogger(__name__).warning(f"resolve_project_path: DB read failed: {_e}")
+            # Don't fail silently - let callers know something went wrong
+            pass  # Still default to REPO_ROOT
         return str(REPO_ROOT), True
     return stripped, False

@@ -588,12 +588,38 @@ async def _run_pipeline(
         )
         yield _sse(StreamEvent(type="done"))
         return
-    project_path, project_path_defaulted = resolve_project_path(
-        getattr(req, "project_path", "") or ""
-    )
+    # Always get project from database
+    project_path = ""
+    project_path_defaulted = True
+    
+    # Try database first
+    try:
+        from backend.persistence.db import get_connection_pool
+        pool = get_connection_pool()
+        conn = pool.get_connection()
+        try:
+            row = conn.execute('SELECT path FROM projects LIMIT 1').fetchone()
+            if row:
+                project_path = row['path']
+                project_path_defaulted = False
+                logger.info("Using project from database: %s", project_path)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("Could not read project from database: %s", e)
+    
+    # Fallback to request or default
     if project_path_defaulted:
+        req_project_path = getattr(req, "project_path", "") or ""
+        if req_project_path and os.path.isdir(req_project_path):
+            project_path = req_project_path
+            project_path_defaulted = False
+    
+    # Final fallback
+    if project_path_defaulted:
+        project_path = str(REPO_ROOT)
         logger.warning(
-            "Empty project_path — defaulting to workspace root: %s | session=%s",
+            "No project found — using root: %s | session=%s",
             project_path,
             req.session_id,
         )

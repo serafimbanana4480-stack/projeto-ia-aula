@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/next.js-15-black?style=for-the-badge&logo=next.js" alt="Next.js">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/tests-passing-brightgreen?style=for-the-badge" alt="Tests">
-  <img src="https://img.shields.io/badge/OpenCode_Go-integrated-8A2BE2?style=for-the-badge" alt="OpenCode Go">
+  <img src="https://img.shields.io/badge/OpenRouter-integrated-8A2BE2?style=for-the-badge" alt="OpenRouter">
   <img src="https://img.shields.io/badge/multi--agent-7_specialists-FF6B6B?style=for-the-badge" alt="Multi-agent">
   <img src="https://img.shields.io/badge/thinking-live%20feed-00BFFF?style=for-the-badge" alt="Thinking">
 </p>
