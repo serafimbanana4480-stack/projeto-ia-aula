@@ -122,7 +122,7 @@ export async function logout(): Promise<void> {
     try {
       await fetch(apiUrl("/api/auth/logout"), {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${currentToken}` },
       });
     } catch {
       // ignore network errors on logout

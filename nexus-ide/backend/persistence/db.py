@@ -480,9 +480,14 @@ def update_project(project_id: str, **fields: Any) -> dict | None:
     if not fields:
         return get_project(project_id)
     fields["updated_at"] = _now_iso()
-    cols = ", ".join(f"{k} = ?" for k in fields)
+    # Whitelist allowed columns to prevent SQL injection
+    ALLOWED_COLS = {"name", "description", "mode", "preferred_model", "trust", "updated_at"}
+    safe_fields = {k: v for k, v in fields.items() if k in ALLOWED_COLS}
+    if not safe_fields:
+        return get_project(project_id)
+    cols = ", ".join(f"{k} = ?" for k in safe_fields)
     with get_db() as conn:
-        conn.execute(f"UPDATE projects SET {cols} WHERE id = ?", (*fields.values(), project_id))
+        conn.execute(f"UPDATE projects SET {cols} WHERE id = ?", (*safe_fields.values(), project_id))
     return get_project(project_id)
 
 
@@ -1020,9 +1025,14 @@ def update_user(user_id: str, **fields: Any) -> dict | None:
     fields["updated_at"] = _now_iso()
     # Don't allow updating password_hash through this method
     fields.pop("password_hash", None)
-    cols = ", ".join(f"{k} = ?" for k in fields)
+    # Whitelist allowed columns
+    ALLOWED_COLS = {"email", "full_name", "is_active", "role", "preferences", "updated_at"}
+    safe_fields = {k: v for k, v in fields.items() if k in ALLOWED_COLS}
+    if not safe_fields:
+        return get_user(user_id)
+    cols = ", ".join(f"{k} = ?" for k in safe_fields)
     with get_db() as conn:
-        conn.execute(f"UPDATE users SET {cols} WHERE id = ?", (*fields.values(), user_id))
+        conn.execute(f"UPDATE users SET {cols} WHERE id = ?", (*safe_fields.values(), user_id))
     return get_user(user_id)
 
 
@@ -1365,10 +1375,15 @@ def update_email_account(account_id: str, **fields: Any) -> dict | None:
         return get_email_account(account_id)
     fields["updated_at"] = _now_iso()
     fields.pop("id", None)
-    cols = ", ".join(f"{k} = ?" for k in fields)
+    # Whitelist allowed columns
+    ALLOWED_COLS = {"email", "display_name", "imap_server", "imap_port", "smtp_server", "smtp_port", "use_ssl", "is_active", "updated_at"}
+    safe_fields = {k: v for k, v in fields.items() if k in ALLOWED_COLS}
+    if not safe_fields:
+        return get_email_account(account_id)
+    cols = ", ".join(f"{k} = ?" for k in safe_fields)
     with get_db() as conn:
         conn.execute(
-            f"UPDATE email_accounts SET {cols} WHERE id = ?", (*fields.values(), account_id)
+            f"UPDATE email_accounts SET {cols} WHERE id = ?", (*safe_fields.values(), account_id)
         )
     return get_email_account(account_id)
 

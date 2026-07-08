@@ -51,9 +51,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     try {
-      const res = await fetch(apiUrl("/api/auth/me"), {
-        headers: { Authorization: `Bearer ${currentToken}` },
-      });
+          const res = await fetch(apiUrl("/api/auth/me"), {
+            headers: { Authorization: `Bearer ${currentToken}` },
+          });
       if (!res.ok) throw new Error("Session expired");
       const data = await res.json();
       if (data.authenticated) {
@@ -112,10 +112,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const currentToken = getStoredToken();
       if (currentToken) {
-        await fetch(apiUrl("/api/auth/logout"), {
-          method: "POST",
-          headers: { Authorization: `Bearer ${currentToken}` },
-        });
+              await fetch(apiUrl("/api/auth/logout"), {
+                method: "POST",
+                headers: { Authorization: `Bearer ${currentToken}` },
+              });
       }
     } catch {
       // ignore logout errors
