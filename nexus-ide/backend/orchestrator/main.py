@@ -196,6 +196,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auto_correction = auto_correction
     logger.info("Auto-correction loop started")
 
+    # Start Autonomous Execution Engine (task retry + monitoring)
+    from backend.orchestrator.autonomous_execution_engine import AutonomousExecutionEngine
+
+    exec_engine = AutonomousExecutionEngine(max_concurrent=5)
+    app.state.autonomous_execution_engine = exec_engine
+    logger.info("Autonomous execution engine started (max_concurrent=5)")
+
+    # Start SelfImprovementLoop (metrics + trend analysis)
+    from backend.orchestrator.self_improvement_loop import SelfImprovementLoop
+
+    improver = SelfImprovementLoop(target_metrics=["response_time", "accuracy", "throughput", "success_rate"])
+    app.state.self_improvement_loop = improver
+    logger.info("Self-improvement loop initialized")
+
     # Start Self-Healing Engine (active improvement + skills)
     settings = get_settings()
     auto_apply = settings.environment == "production" or os.environ.get("NEXUS_AUTO_APPLY", "false").lower() == "true"
@@ -253,6 +267,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         healer = getattr(app.state, "healer", None)
         if healer:
             await healer.stop()
+        # Auto-exec engine needs no teardown (in-memory state)
+        logger.info("Autonomous execution engine shut down")
+        # SelfImprovementLoop needs no teardown (in-memory deque)
         # Stop session lifecycle GC loop
         session_lifecycle = getattr(app.state, "session_lifecycle", None)
         if session_lifecycle:
