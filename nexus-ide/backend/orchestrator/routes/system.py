@@ -63,7 +63,26 @@ async def get_system_health(request: Request) -> dict[str, Any]:
     if all(v == "offline" for v in health["services"].values()):
         health["status"] = "unhealthy"
 
+    # Add self-healing engine status
+    healer = getattr(request.app.state, "healer", None)
+    if healer:
+        health["self_healing"] = healer.status()
+    else:
+        health["self_healing"] = {"running": False, "skills_count": 0}
+
     return health
+
+
+@router.get("/system/healer/status")
+@limiter.limit("60/minute")
+async def get_healer_status(
+    request: Request, _user: dict = Depends(require_auth)
+) -> dict[str, Any]:
+    """Return self-healing engine status."""
+    healer = getattr(request.app.state, "healer", None)
+    if not healer:
+        return {"running": False, "error": "Healer not initialized"}
+    return healer.status()
 
 
 @router.get("/system/self-improvement")

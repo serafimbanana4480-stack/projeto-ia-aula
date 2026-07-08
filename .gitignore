@@ -56,3 +56,6 @@ coverage.xml
 nexus-ide/data/
 nexus-ide/*.db*
 nexus-ide/*.sqlite*
+nexus-ide/*.sqlite3
+nexus-ide/src/
+nexus-ide/requirements_*.txt

@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
@@ -194,6 +196,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auto_correction = auto_correction
     logger.info("Auto-correction loop started")
 
+    # Start Self-Healing Engine (active improvement + skills)
+    settings = get_settings()
+    auto_apply = settings.environment == "production" or os.environ.get("NEXUS_AUTO_APPLY", "false").lower() == "true"
+    from backend.core.self_healing_engine import SelfHealingEngine
+
+    healer = SelfHealingEngine(
+        auto_apply=auto_apply,
+        dry_run=settings.environment == "development",
+        min_confidence=0.7,
+        analysis_interval=3600,
+    )
+    await healer.start()
+    app.state.healer = healer
+    logger.info("Self-healing engine started (auto_apply=%s, dry_run=%s)", auto_apply, settings.environment == "development")
+
+    # Pre-populate evolution log if empty
+    from pathlib import Path
+    evolution_log = Path(__file__).resolve().parent.parent.parent / "data" / "evolution_log.md"
+    if not evolution_log.exists():
+        evolution_log.parent.mkdir(parents=True, exist_ok=True)
+        evolution_log.write_text(
+            f"# NEXUS IDE Evolution Log\n\n"
+            f"Started: {datetime.now(UTC).isoformat()}\n"
+            f"Auto-heal: {auto_apply}\n"
+            f"---\n",
+            encoding="utf-8"
+        )
+        logger.info("Evolution log created at %s", evolution_log)
+
     # Start Session Lifecycle Manager (garbage collection)
     from backend.orchestrator.session_lifecycle import SessionLifecycleManager
 
@@ -218,6 +249,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         guardian_task.cancel()
         # Stop auto-correction loop
         await auto_correction.stop_monitoring()
+        # Stop self-healing engine
+        healer = getattr(app.state, "healer", None)
+        if healer:
+            await healer.stop()
         # Stop session lifecycle GC loop
         session_lifecycle = getattr(app.state, "session_lifecycle", None)
         if session_lifecycle:
