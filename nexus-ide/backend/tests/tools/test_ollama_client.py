@@ -20,6 +20,38 @@ class TestChatMessage:
 
 
 class TestChatStream:
+    async def test_uses_httpx_stream_instead_of_buffering_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The response must remain open while tokens are yielded."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return make_stream_response(["first", " second"])
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        stream_calls: list[tuple[tuple, dict]] = []
+        original_stream = client._client.stream
+
+        def tracked_stream(*args, **kwargs):
+            stream_calls.append((args, kwargs))
+            return original_stream(*args, **kwargs)
+
+        async def request_must_not_be_used(*args, **kwargs):
+            raise AssertionError("chat_stream must not use AsyncClient.request")
+
+        monkeypatch.setattr(client._client, "stream", tracked_stream)
+        monkeypatch.setattr(client._client, "request", request_must_not_be_used)
+        try:
+            tokens = [
+                token
+                async for token in client.chat_stream("m", [ChatMessage(role="user", content="q")])
+            ]
+            assert tokens == ["first", " second"]
+            assert len(stream_calls) == 1
+            assert stream_calls[0][0][:2] == ("POST", "/api/chat")
+        finally:
+            await client.aclose()
+
     async def test_streams_every_chunk(self) -> None:
         tokens = ["a", "b", "c", "d"]
 
@@ -35,6 +67,36 @@ class TestChatStream:
                 )
             ]
             assert out == tokens
+        finally:
+            await client.aclose()
+
+    async def test_keeps_content_in_the_final_done_frame(self) -> None:
+        body = (
+            json.dumps({"message": {"content": "Hello "}, "done": False})
+            + "\n"
+            + json.dumps(
+                {
+                    "message": {"content": "world"},
+                    "done": True,
+                    "prompt_eval_count": 3,
+                    "eval_count": 2,
+                }
+            )
+            + "\n"
+        )
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=body.encode())
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            result = await client.chat_complete("m", [ChatMessage(role="user", content="q")])
+            assert result == "Hello world"
+            assert client._last_usage == {
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "total_tokens": 5,
+            }
         finally:
             await client.aclose()
 
@@ -86,6 +148,39 @@ class TestChatStream:
                 t async for t in client.chat_stream("m", [ChatMessage(role="user", content="q")])
             ]
             assert out == ["x"]
+        finally:
+            await client.aclose()
+
+    async def test_error_payload_is_not_reported_as_an_empty_success(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b'{"error":"model is unavailable"}\n')
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            with pytest.raises(OllamaError, match="model is unavailable"):
+                async for _ in client.chat_stream("m", [ChatMessage(role="user", content="q")]):
+                    pass
+        finally:
+            await client.aclose()
+
+    async def test_done_without_content_raises_instead_of_returning_blank_response(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b'{"done":true}\n')
+
+        monkeypatch.setattr("backend.tools.ollama_client.asyncio.sleep", fake_sleep)
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            with pytest.raises(OllamaError, match="completed without content"):
+                async for _ in client.chat_stream("m", [ChatMessage(role="user", content="q")]):
+                    pass
+            assert sleeps == [1, 2, 4, 8]
         finally:
             await client.aclose()
 

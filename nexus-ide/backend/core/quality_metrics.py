@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import importlib.util
 import logging
 import math
 import os
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +25,194 @@ class QualityMetrics:
     security_issues_count: int = 0
     duplication_ratio: float = 0.0
     technical_debt_ratio: float = 0.0
+
+
+# The complete measurement below can deliberately run linters and the test
+# suite.  It is useful for an explicit quality audit, but it must never be run
+# from a latency-sensitive event handler.  Auto-correction uses this bounded,
+# static-only snapshot instead.
+_LIGHTWEIGHT_CACHE_TTL_SECONDS = 30.0
+_LIGHTWEIGHT_MAX_FILES = 250
+_LIGHTWEIGHT_TIMEOUT_SECONDS = 2.0
+_LIGHTWEIGHT_IGNORED_DIRS = frozenset(
+    {
+        ".git",
+        ".mypy_cache",
+        ".next",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "venv",
+    }
+)
+_lightweight_metrics_cache: dict[tuple[str, int], tuple[float, QualityMetrics]] = {}
+_lightweight_metrics_cache_lock = threading.Lock()
+
+
+def _copy_metrics(metrics: QualityMetrics) -> QualityMetrics:
+    """Return a defensive copy so callers cannot mutate a cached snapshot."""
+    return QualityMetrics(**metrics.__dict__)
+
+
+def _collect_lightweight_python_files(root: Path, max_files: int) -> list[Path]:
+    """Collect a bounded sample without descending into generated/dependency trees."""
+    files: list[Path] = []
+    for directory, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(
+            name for name in dirnames if name not in _LIGHTWEIGHT_IGNORED_DIRS
+        )
+        for filename in sorted(filenames):
+            if not filename.endswith(".py"):
+                continue
+            files.append(Path(directory) / filename)
+            if len(files) >= max_files:
+                return files
+    return files
+
+
+def _measure_lightweight_sync(root: Path, max_files: int) -> QualityMetrics:
+    """Compute static-only metrics without subprocesses or a full test run."""
+    files = _collect_lightweight_python_files(root, max_files)
+    if not files:
+        return QualityMetrics()
+
+    total_complexity = 0.0
+    issue_indicators = 0
+    security_issues = 0
+    block_hashes: set[str] = set()
+    total_blocks = 0
+    duplicate_blocks = 0
+
+    for filepath in files:
+        try:
+            source = filepath.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        total_complexity += _compute_ast_complexity(source)
+        lines = source.splitlines()
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("print(") and not stripped.startswith("#"):
+                issue_indicators += 1
+            if "import *" in stripped or stripped == "except:":
+                issue_indicators += 1
+
+        if len(lines) > 500:
+            issue_indicators += 1
+
+        security_issues += source.count("eval(")
+        security_issues += source.count(" exec(")
+        security_issues += source.count("os.system(")
+        security_issues += source.count("subprocess.call(")
+        security_issues += source.count("__import__(")
+        security_issues += source.count("pickle.loads(")
+
+        normalized_lines = [line.strip() for line in lines if line.strip()]
+        for index in range(0, max(1, len(normalized_lines) - 5)):
+            block = "\n".join(normalized_lines[index : index + 6])
+            block_hash = hashlib.sha256(block.encode("utf-8", errors="ignore")).hexdigest()
+            total_blocks += 1
+            if block_hash in block_hashes:
+                duplicate_blocks += 1
+            else:
+                block_hashes.add(block_hash)
+
+    measured_files = max(1, len(files))
+    complexity = round(total_complexity / measured_files, 2)
+    duplication = round((duplicate_blocks / total_blocks) * 100, 2) if total_blocks else 0.0
+    lint_score = _normalize_score(100.0 - issue_indicators * 2.0)
+    complexity_for_index = complexity if complexity > 0 else 1.0
+    maintainability = round(
+        max(
+            0.0,
+            min(
+                100.0,
+                171
+                - 5.2 * math.log(complexity_for_index)
+                - 0.23 * complexity_for_index
+                - 16.2 * math.log(complexity_for_index)
+                - 50 * duplication,
+            ),
+        ),
+        2,
+    )
+    technical_debt = round(
+        (
+            max(0.0, complexity - 10.0) * 2.0
+            + max(0.0, 100.0 - lint_score) * 1.5
+            + security_issues * 10.0
+            + duplication * 3.0
+        )
+        / 10.0,
+        2,
+    )
+
+    # Coverage is intentionally left unknown/neutral.  Calculating it entails
+    # executing pytest, which is unsafe in the autonomous event path.
+    return QualityMetrics(
+        coverage_percent=0.0,
+        cyclomatic_complexity=complexity,
+        maintainability_index=maintainability,
+        lint_score=lint_score,
+        security_issues_count=security_issues,
+        duplication_ratio=duplication,
+        technical_debt_ratio=technical_debt,
+    )
+
+
+def invalidate_lightweight_cache(project_path: str | Path) -> None:
+    """Discard a cached lightweight snapshot after an agent may have changed files."""
+    key_prefix = str(Path(project_path).expanduser().resolve())
+    with _lightweight_metrics_cache_lock:
+        for key in [key for key in _lightweight_metrics_cache if key[0] == key_prefix]:
+            _lightweight_metrics_cache.pop(key, None)
+
+
+async def measure_lightweight(
+    project_path: str | Path,
+    *,
+    max_files: int = _LIGHTWEIGHT_MAX_FILES,
+    cache_ttl_seconds: float = _LIGHTWEIGHT_CACHE_TTL_SECONDS,
+    timeout_seconds: float = _LIGHTWEIGHT_TIMEOUT_SECONDS,
+) -> QualityMetrics:
+    """Return a bounded, cached static snapshot suitable for event handlers.
+
+    Unlike :func:`measure`, this function never starts pytest, ruff, or bandit.
+    File work is moved off the event loop and bounded by both a file cap and a
+    short await timeout.  It is intended for a quick regression signal; a full
+    quality audit remains an explicit operation.
+    """
+    root = Path(project_path).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"Invalid project path: {root}")
+
+    cache_key = (str(root), max(1, max_files))
+    now = time.monotonic()
+    with _lightweight_metrics_cache_lock:
+        cached = _lightweight_metrics_cache.get(cache_key)
+        if cached and now - cached[0] < max(0.0, cache_ttl_seconds):
+            return _copy_metrics(cached[1])
+
+    try:
+        metrics = await asyncio.wait_for(
+            asyncio.to_thread(_measure_lightweight_sync, root, cache_key[1]),
+            timeout=max(0.01, timeout_seconds),
+        )
+    except TimeoutError:
+        logger.warning("Lightweight quality measurement timed out for %s", root)
+        metrics = QualityMetrics()
+    except OSError as exc:
+        logger.warning("Lightweight quality measurement failed for %s: %s", root, exc)
+        metrics = QualityMetrics()
+
+    with _lightweight_metrics_cache_lock:
+        _lightweight_metrics_cache[cache_key] = (time.monotonic(), _copy_metrics(metrics))
+    return metrics
 
 
 def _run_cmd(cmd: list[str], cwd: str | None = None) -> tuple[int, str, str]:

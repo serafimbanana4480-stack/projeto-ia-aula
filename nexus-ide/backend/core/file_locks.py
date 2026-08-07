@@ -85,7 +85,9 @@ def _filelock_enabled() -> bool:
 # ``NEXUS_LOCK_REDIS_TTL_MS`` if longer holds are required.
 REDIS_LOCK_TTL_MS = int(os.environ.get("NEXUS_LOCK_REDIS_TTL_MS", "30000"))
 REDIS_LOCK_KEY_PREFIX = os.environ.get("NEXUS_LOCK_REDIS_PREFIX", "nexus:lock:")
-REDIS_LOCK_CONNECT_TIMEOUT = float(os.environ.get("NEXUS_LOCK_REDIS_CONNECT_TIMEOUT", "1.0"))
+# Redis is an optional acceleration layer; a local file lock must not wait a
+# full second just to discover that no Redis daemon is running on a dev box.
+REDIS_LOCK_CONNECT_TIMEOUT = float(os.environ.get("NEXUS_LOCK_REDIS_CONNECT_TIMEOUT", "0.02"))
 REDIS_LOCK_RETRY_INTERVAL = float(os.environ.get("NEXUS_LOCK_REDIS_RETRY", "0.1"))
 REDIS_LOCK_UNAVAILABLE_COOLDOWN = float(os.environ.get("NEXUS_LOCK_REDIS_COOLDOWN", "5.0"))
 

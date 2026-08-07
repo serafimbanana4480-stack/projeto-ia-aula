@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from backend.orchestrator.limiter import limiter
 
 from backend.observability.event_system import get_event_bus
 from backend.performance.performance_engine import get_performance_engine, PerformanceMetricType, OptimizationType
@@ -203,7 +202,6 @@ async def get_optimization_recommendations(
 
 
 @router.post("/performance/recommendations/{recommendation_id}/implement")
-@limiter.limit("60/minute")
 async def implement_recommendation(recommendation_id: str, request: Request) -> Dict[str, Any]:
     """Implement an optimization recommendation."""
     try:
@@ -329,7 +327,6 @@ async def get_optimization_types() -> Dict[str, List[str]]:
 
 
 @router.post("/performance/metrics")
-@limiter.limit("60/minute")
 async def add_metric(
     metric_type: str,
     value: float,
@@ -366,7 +363,6 @@ async def add_metric(
 
 
 @router.post("/performance/optimize")
-@limiter.limit("10/minute")
 async def trigger_optimization(request: Request) -> Dict[str, str]:
     """Trigger manual optimization check."""
     try:

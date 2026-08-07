@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef } from "react";
 import { create } from "zustand";
-import { authHeaders } from "../lib/auth";
+import { authenticatedFetch } from "../lib/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -61,9 +61,7 @@ export const useChatSessionsStore = create<ChatSessionsState>((set, get) => ({
   refresh: async () => {
     set({ loading: true });
     try {
-      const res = await fetch(`${API_BASE}/api/sessions?limit=100`, {
-        headers: authHeaders(),
-      });
+      const res = await authenticatedFetch(`${API_BASE}/api/sessions?limit=100`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       set({ sessions: data.sessions || [], error: null });
@@ -76,9 +74,9 @@ export const useChatSessionsStore = create<ChatSessionsState>((set, get) => ({
 
   create: async (title: string = "Nova sessão", mode: string = "auto") => {
     try {
-      const res = await fetch(`${API_BASE}/api/sessions`, {
+      const res = await authenticatedFetch(`${API_BASE}/api/sessions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title, mode }),
       });
       if (!res.ok) {
@@ -115,9 +113,9 @@ export const useChatSessionsStore = create<ChatSessionsState>((set, get) => ({
 
   rename: async (id: string, title: string) => {
     try {
-      const res = await fetch(`${API_BASE}/api/sessions/${id}`, {
+      const res = await authenticatedFetch(`${API_BASE}/api/sessions/${id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -134,9 +132,8 @@ export const useChatSessionsStore = create<ChatSessionsState>((set, get) => ({
 
   remove: async (id: string) => {
     try {
-      const res = await fetch(`${API_BASE}/api/sessions/${id}`, {
+      const res = await authenticatedFetch(`${API_BASE}/api/sessions/${id}`, {
         method: "DELETE",
-        headers: authHeaders(),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
     } catch (e) {

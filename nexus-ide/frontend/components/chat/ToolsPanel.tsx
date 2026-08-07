@@ -1,34 +1,29 @@
 "use client";
 import { useToolsStore } from "../../stores/toolsStore";
-import { getTools, toggleTool as toggleToolRemote } from "../../lib/api";
 import { motion } from "framer-motion";
-import { Wrench, Check } from "lucide-react";
+import { Wrench, Check, AlertTriangle, Ban, ShieldAlert, Loader2 } from "lucide-react";
 import { useEffect } from "react";
 
-const TOOLS = [
-  { id: "read_file", name: "Read File", desc: "Read file contents" },
-  { id: "write_file", name: "Write File", desc: "Write to files" },
-  { id: "list_dir", name: "List Directory", desc: "List files and folders" },
-  { id: "search_in_files", name: "Search Files", desc: "Search in codebase" },
-  { id: "execute_code", name: "Execute Code", desc: "Run Python/JS/Bash" },
-  { id: "web_search", name: "Web Search", desc: "Search the web" },
-];
-
 export default function ToolsPanel() {
-  const { tools, setTools, toggleTool } = useToolsStore();
+  const { tools, toggleTool, loadTools, toolsLoading, toolsError } = useToolsStore();
 
   useEffect(() => {
-    // Initialize tools from backend
-    const initializeTools = async () => {
-      try {
-        const data = await getTools();
-        setTools(data);
-      } catch (error) {
-        console.error("Failed to fetch tools:", error);
-      }
-    };
-    initializeTools();
-  }, [setTools]);
+    void loadTools();
+  }, [loadTools]);
+
+  const statusLabel = (status?: string) => {
+    if (status === "missing_dependency") return "dependência em falta";
+    if (status === "blocked") return "bloqueada";
+    if (status === "requires_confirmation") return "requer confirmação";
+    return "disponível";
+  };
+
+  const statusIcon = (status?: string) => {
+    if (status === "missing_dependency") return <AlertTriangle className="h-3.5 w-3.5 text-amber-300" />;
+    if (status === "blocked") return <Ban className="h-3.5 w-3.5 text-slate-400" />;
+    if (status === "requires_confirmation") return <ShieldAlert className="h-3.5 w-3.5 text-amber-300" />;
+    return <Check className="h-3.5 w-3.5 text-emerald-300" />;
+  };
 
   return (
     <motion.div
@@ -38,38 +33,36 @@ export default function ToolsPanel() {
     >
       <div className="mb-3 flex items-center gap-2">
         <Wrench className="h-4 w-4 text-nexus-accent" />
-        <span className="text-sm font-semibold">Active Tools</span>
+        <span className="text-sm font-semibold">Tools do registry</span>
       </div>
-      
+      {toolsLoading && <div className="mb-2 flex items-center gap-2 text-[10px] text-nexus-muted"><Loader2 className="h-3 w-3 animate-spin" /> A carregar estado real…</div>}
+      {toolsError && <div className="mb-2 rounded border border-rose-400/20 bg-rose-400/5 p-2 text-[10px] text-rose-200">Não foi possível carregar o registry: {toolsError}</div>}
       <div className="space-y-2">
-        {TOOLS.map((tool) => {
-          const toolState = tools.find((t) => t.name === tool.id);
-          const enabled = toolState?.enabled ?? true;
-          
+        {tools.map((tool) => {
+          const status = tool.status ?? (tool.enabled ? "available" : "blocked");
+          const interactive = status !== "missing_dependency";
           return (
             <motion.button
-              key={tool.id}
+              key={tool.name}
+              type="button"
+              disabled={!interactive}
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
               onClick={async () => {
-                toggleTool(tool.id);
-                try {
-                  await toggleToolRemote(tool.id, !enabled);
-                } catch (error) {
-                  console.error("Failed to toggle tool:", error);
-                }
+                if (interactive) await toggleTool(tool.name);
               }}
               className={`flex w-full items-center justify-between rounded border p-2 text-left transition-colors ${
-                enabled
+                status === "available" || status === "requires_confirmation"
                   ? "border-nexus-border bg-nexus-border/30"
-                  : "border-nexus-border/30 bg-transparent opacity-50"
+                  : "border-nexus-border/30 bg-transparent opacity-60"
               }`}
             >
               <div>
                 <div className="text-xs font-medium">{tool.name}</div>
-                <div className="text-xs text-gray-500">{tool.desc}</div>
+                <div className="text-xs text-gray-500">{tool.description}</div>
+                <div className="mt-1 text-[9px] text-nexus-muted">{statusLabel(status)}{tool.dependency ? ` · ${tool.dependency}` : ""}</div>
               </div>
-              {enabled && <Check className="h-4 w-4 text-nexus-accent" />}
+              {statusIcon(status)}
             </motion.button>
           );
         })}

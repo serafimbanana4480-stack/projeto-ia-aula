@@ -66,7 +66,12 @@ def _validate_relative_path(project_path: str, target_path: str) -> Path:
     that legacy tests can match on that substring.
     """
     project = Path(project_path).expanduser().resolve()
-    target = _resolve_path(target_path, project_path)
+    return _validate_relative_path_under(project, target_path)
+
+
+def _validate_relative_path_under(project: Path, target_path: str) -> Path:
+    """Validate a relative path when the project root is already resolved."""
+    target = (project / target_path).expanduser().resolve()
     try:
         target.relative_to(project)
     except ValueError:
@@ -139,6 +144,7 @@ async def read_multiple(
         }
 
     resolved_paths: list[str] = []
+    project_root = Path(project_path).expanduser().resolve()
     for path in paths:
         if _is_absolute(path):
             blocked, reason = _is_blocked_path(_path_for_security_check(path))
@@ -153,7 +159,7 @@ async def read_multiple(
             resolved_paths.append(path)
         else:
             try:
-                full_path = _validate_relative_path(project_path, path)
+                full_path = _validate_relative_path_under(project_root, path)
             except PermissionError as exc:
                 return {
                     "files": {},
@@ -164,24 +170,18 @@ async def read_multiple(
                 }
             resolved_paths.append(str(full_path))
 
-    # Acquire read locks on all resolved paths in sorted order to avoid
-    # deadlocks with concurrent writers.
-    sorted_paths = sorted(set(resolved_paths))
+    # Batch reads deliberately avoid one cross-process lock file per path.
+    # Workspace writes are atomic and the batch reader verifies each file's
+    # stat signature, which gives consistent individual reads without turning
+    # a 100-file context load into hundreds of filesystem lock operations.
     try:
-        for p in sorted_paths:
-            await _lock_manager.acquire_read_lock(p, owner, timeout=timeout_seconds)
         return await read_multiple_files_absolute(
             resolved_paths,
             max_total_bytes=max_total_bytes,
             max_files=max_files,
         )
-    except (LockError, DeadlockError) as exc:
-        return {"error": f"Lock error: {exc}"}
     except Exception as exc:
         return {"error": f"Failed to read multiple files: {exc}"}
-    finally:
-        for p in sorted_paths:
-            _lock_manager.release_lock(p, owner)
 
 
 async def write(

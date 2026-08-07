@@ -9,13 +9,22 @@ modes:
     router: "smart"
     tools_enabled: ["all"]
     enable_thinking: true
-    max_iterations: 7
+    # 0 = use the bounded NEXUS_REACT_MAX_ITERATIONS safety default. A run
+    # must always have a terminal budget so it can be resumed truthfully.
+    max_iterations: 0
     supports_subagents: true
     system_prompt_addon: |
-      1. Usa tools imediatamente, não descrevas.
-      2. Após write_file com sucesso, resposta final curta.
-      3. Consulta outros agentes quando precisares.
-      4. Resposta final: o que fizeste + ficheiros (2-3 linhas max).
+      1. Usa tools imediatamente; não pares numa descrição, plano ou pedido de confirmação.
+      2. O pedido do utilizador já autoriza trabalho local e reversível dentro do objetivo,
+         incluindo criar relatórios e escrever no caminho explicitamente indicado.
+      3. Após uma alteração, verifica o resultado e executa uma auditoria limitada de melhorias:
+         corrige defeitos claros e relevantes, sem mudanças especulativas ou ciclos sem progresso.
+      4. Continua sem feedback humano até o objetivo estar verificado e não existir outra melhoria
+         segura, relevante e suportada por evidência.
+      5. Pede intervenção apenas perante credenciais ausentes, escolha crítica impossível de inferir,
+         ou ação destrutiva, irreversível, financeira ou externamente visível.
+      6. Consulta outros agentes quando precisares.
+      7. Resposta final curta: resultado, ficheiros, verificações e limitações reais.
 
   coder:
     description: "Modo focado em geração e análise de código com autonomia total de ferramentas"
@@ -23,12 +32,12 @@ modes:
     default_model: "coder"
     router: "none"
     tools_enabled: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code", "consult_agent"]
-    max_iterations: 4
+    max_iterations: 0
     supports_subagents: true
     system_prompt_addon: |
       Focus on clean, idiomatic, production-ready code.
       Always use write_file to create/modify files — do NOT output code in the chat.
-      Explain changes briefly before applying them.
+      Keep user-facing updates brief: say what you are doing, then do it.
       Follow project conventions and best practices.
       Consult ARCHITECT or ANALYZER when design decisions are unclear.
       Recall relevant project memories before modifying existing code.
@@ -40,7 +49,7 @@ modes:
     router: "none"
     tools_enabled: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code", "consult_agent"]
     enable_thinking: true
-    max_iterations: 5
+    max_iterations: 0
     supports_subagents: true
     system_prompt_addon: |
       You are in CODE REVIEW mode. Your sole focus is comprehensive peer review of code.
@@ -58,7 +67,7 @@ modes:
     router: "none"
     tools_enabled: ["execute_code", "web_search", "web_scraper", "sql_query", "read_file", "consult_agent"]
     enable_thinking: true
-    max_iterations: 5
+    max_iterations: 0
     supports_subagents: true
     system_prompt_addon: |
       Focus on data analysis, web scraping, and generating structured reports.
@@ -86,27 +95,29 @@ modes:
     router: "none"
     tools_enabled: ["all"]
     enable_thinking: true
-    max_iterations: 6
+    max_iterations: 0
     supports_subagents: true
     system_prompt_addon: |
-      Think deeply about the problem. Show your reasoning in thinking blocks.
-      Consider multiple perspectives, edge cases, and trade-offs.
-      Provide comprehensive, well-structured answers.
+      Think deeply about the problem and compare multiple approaches internally.
+      Surface only short progress updates and the useful conclusion; do not dump private chain-of-thought.
+      Consider edge cases and trade-offs, then choose, execute, verify, and summarise concisely.
       Consult ANALYZER for review and RESEARCHER for external knowledge.
       Recall and store relevant memories throughout the investigation.
 
   plan:
-    description: "Cria um plano de execução estruturado para aprovação"
+    description: "Cria, executa e verifica um plano estruturado autonomamente"
     default_agent: "ARCHITECT"
     default_model: "reasoning"
     router: "none"
     tools_enabled: ["read_file", "list_dir", "search_in_files", "consult_agent"]
     enable_thinking: true
-    max_iterations: 4
+    max_iterations: 0
     supports_subagents: true
     system_prompt_addon: |
       Create a structured execution plan with clear steps, agents, dependencies, and deliverables.
-      Do not execute the plan; present it for user approval.
+      Execute the plan immediately after it is created, then verify the result and recover from
+      correctable failures without waiting for user feedback. Stop only for an irreversible
+      external side effect that genuinely requires explicit approval.
       You may consult other agents to refine the plan.
       Recall prior project decisions and constraints so the plan is consistent with existing work.
 
@@ -117,7 +128,7 @@ modes:
     router: "none"
     tools_enabled: ["read_file", "execute_code", "search_codebase", "consult_agent"]
     enable_thinking: true
-    max_iterations: 5
+    max_iterations: 0
     supports_subagents: true
     system_prompt_addon: |
       Investigate bugs, errors, and failures systematically.
@@ -137,6 +148,24 @@ modes:
       Answer the question directly without using tools.
       Keep responses concise.
 
+  auto_swarm:
+    description: "Enxame totalmente automático: escolhe a equipa de agentes e a estratégia (divide/ensemble/pipeline/debate) a partir do objetivo, com progresso live no chat e no dashboard"
+    default_agent: "SWARM"
+    default_model: "auto"
+    router: "smart"
+    tools_enabled: ["all"]
+    enable_thinking: false
+    max_iterations: 0
+    supports_subagents: true
+    system_prompt_addon: |
+      You are the SWARM coordinator in fully automatic mode.
+      Pick the team and strategy adaptively from the objective:
+        - simple/single-file tasks: fewer agents, divide or ensemble.
+        - design + implement + verify: pipeline.
+        - open-ended or contested problems: debate.
+      Keep the user informed with concise live progress and finish with one
+      coherent professional answer citing each agent's contribution.
+
   swarm:
     description: "Vários agentes colaboram numa resposta com fusão inteligente via LLM"
     default_agent: "SWARM"
@@ -144,7 +173,7 @@ modes:
     router: "smart"
     tools_enabled: ["all"]
     enable_thinking: false
-    max_iterations: 4
+    max_iterations: 0
     supports_subagents: true
     system_prompt_addon: |
       You are the SWARM coordinator. Multiple expert agents are working in parallel on the same objective.
@@ -163,7 +192,7 @@ modes:
     router: "none"
     tools_enabled: ["consult_agent", "recall_context", "store_memory", "analyze_data"]
     enable_thinking: false
-    max_iterations: 5
+    max_iterations: 0
     supports_subagents: true
     system_prompt_addon: |
       You are the system monitoring assistant.
@@ -183,7 +212,7 @@ swarm_modes:
     agents: ["COORDINATOR", "INVESTIGATOR", "ARCHITECT", "REVIEWER"]
     uses_rag: true
     uses_research: false
-    max_iterations: 5
+    max_iterations: 1000
   investigation:
     description: "Read the codebase via RAG, summarise what exists, surface constraints."
     default_strategy: "ensemble"
@@ -211,7 +240,7 @@ swarm_modes:
     agents: ["COORDINATOR", "INVESTIGATOR", "IMPLEMENTER", "REVIEWER"]
     uses_rag: true
     uses_research: false
-    max_iterations: 5
+    max_iterations: 1000
   planning:
     description: "Produce a structured execution plan, no code changes."
     default_strategy: "divide"

@@ -23,7 +23,6 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from backend.orchestrator.limiter import limiter
 
 from backend.models.api import StreamEvent
 from backend.orchestrator.router import fast_route
@@ -85,7 +84,6 @@ async def _generate_agent_response(agent: str, context: str, ollama) -> str:
 
 
 @router.post("/chat/multi")
-@limiter.limit("30/minute")
 async def multi_agent_chat(req: MultiAgentChatRequest, request: Request) -> StreamingResponse:
     """Stream a collaborative multi-agent conversation.
 

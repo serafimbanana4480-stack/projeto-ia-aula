@@ -9,7 +9,9 @@ prompt building for individual tasks.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import random
 import re
 import time
@@ -17,6 +19,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
+from backend.core.conversation_log import get_conversation_logger
 from backend.orchestrator.agent_pool import AgentPool
 from backend.orchestrator.dependency_graph import (
     DependencyGraph,
@@ -25,15 +28,94 @@ from backend.orchestrator.dependency_graph import (
     TaskStatus,
 )
 from backend.orchestrator.events import EventBus, EventEmitter, EventType, OrchestratorEvent
+from backend.tools.registry import reset_tool_failures
 
 logger = logging.getLogger(__name__)
 
 _INLINE_TOOL_ERROR_RE = re.compile(r"<event>tool_error\|(.+?)</event>", re.DOTALL)
 
+# Combined pattern used to order tool events: an error is only *fatal* for the
+# task if no tool succeeded afterwards — a recovered "File not found" (the
+# agent listed the directory, found the real path, and continued) must not
+# fail the whole autonomous run.
+_INLINE_TOOL_EVENT_RE = re.compile(
+    r"<event>(tool_error|tool_result)\|(.+?)</event>", re.DOTALL
+)
+
+_SPAWN_RESULT_RE = re.compile(
+    r"<event>tool_result\|spawn_task\|(.+?)</event>",
+    re.DOTALL,
+)
+
+
+def extract_spawn_requests(output: str) -> list[dict[str, Any]]:
+    """Extract successful ``spawn_task`` tool results from agent output."""
+    requests: list[dict[str, Any]] = []
+    for raw_payload in _SPAWN_RESULT_RE.findall(output or ""):
+        try:
+            payload = json.loads(raw_payload)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("status") == "spawned":
+            requests.append(payload)
+    return requests
+
 
 def extract_tool_errors(output: str) -> list[str]:
     """Return tool error messages embedded in agent ReAct output."""
     return [msg.strip() for msg in _INLINE_TOOL_ERROR_RE.findall(output) if msg.strip()]
+
+
+def partition_tool_errors(output: str) -> tuple[list[str], list[str]]:
+    """Split tool errors into ``(unrecovered, recovered)``.
+
+    An error is *recovered* when at least one ``tool_result`` (successful tool
+    execution) appears after it in the agent's output stream — the agent hit
+    the problem, adjusted, and kept making progress. An error with no later
+    success is *unrecovered* and should still fail the task.
+    """
+    events: list[tuple[int, str, str]] = []
+    for match in _INLINE_TOOL_EVENT_RE.finditer(output or ""):
+        events.append((match.start(), match.group(1), match.group(2).strip()))
+
+    unrecovered: list[str] = []
+    recovered: list[str] = []
+    for index, (pos, kind, payload) in enumerate(events):
+        if kind != "tool_error" or not payload:
+            continue
+        has_later_success = any(
+            later_kind == "tool_result"
+            for _, later_kind, _ in events[index + 1 :]
+        )
+        (recovered if has_later_success else unrecovered).append(payload)
+    return unrecovered, recovered
+
+
+_INCOMPLETION_MARKERS: tuple[str, ...] = (
+    "[TAREFA NÃO CONCLUÍDA]",
+    "[TAREFA NAO CONCLUIDA]",
+    # Double-encoded UTF-8. A literal in ``agents/base.py`` was corrupted this
+    # way and the marker stopped matching, so a run that had honestly declared
+    # itself incomplete was invisible to this check (2026-08-02, session
+    # b9f0dfbd53ad402a). Kept as a safety net: the emitter is fixed, but a
+    # marker that silently stops matching is the worst possible failure mode.
+    "[TAREFA NÃO CONCLUÃDA]",
+    "Reached maximum iterations",
+)
+
+
+def output_reports_incompletion(output: str) -> str | None:
+    """Return the marker text when the agent's output admits incompletion.
+
+    The ReAct loop honestly signals when it gave up (iteration cap, refused
+    work). Treating that output as a completed task — the previous behaviour —
+    is what made the dashboard show "Tarefa concluída" right under a
+    "task NOT completed" warning.
+    """
+    for marker in _INCOMPLETION_MARKERS:
+        if marker in (output or ""):
+            return marker
+    return None
 
 
 # Backwards-compatible alias — the original module-level helper lived in
@@ -70,12 +152,25 @@ class PlanExecutor:
         agent_pool: AgentPool,
         *,
         default_timeout: int = 300,
+        max_parallel: int = 5,
     ) -> None:
         self._llm_client = llm_client
         self._registry = registry
         self._events = event_bus
         self._agent_pool = agent_pool
         self._default_timeout = default_timeout
+        # The engine exposes this budget and the layer loop is where tasks are
+        # actually scheduled, so keep the bound here as well.
+        self._max_parallel = max(1, int(max_parallel))
+        # Plan tasks need room to explore (read → correct → write → verify).
+        # 5 iterations — the old default — was the reason ANALYZER/CODER tasks
+        # ended with "Reached maximum iterations (5) — task NOT completed".
+        try:
+            self._task_max_iterations = max(
+                3, int(os.environ.get("NEXUS_TASK_MAX_ITERATIONS", "10"))
+            )
+        except ValueError:
+            self._task_max_iterations = 10
 
     async def execute(
         self,
@@ -108,7 +203,16 @@ class PlanExecutor:
         errors: list[str] = []
 
         graph = plan.dependency_graph
-        layers = graph.topological_layers()
+        # Dynamic ``spawn_task`` requests may extend the graph while it is
+        # running. Recompute layers after each batch so spawned work is not
+        # merely reported as an artifact and is actually executed.
+        try:
+            max_dynamic_tasks = max(0, int(os.environ.get("NEXUS_MAX_DYNAMIC_TASKS", "32")))
+        except ValueError:
+            max_dynamic_tasks = 32
+        spawned_signatures: set[tuple[str, str, str]] = set()
+        dynamic_tasks_created = 0
+        initial_layers = graph.topological_layers()
 
         await self._events.publish(
             OrchestratorEvent(
@@ -117,27 +221,64 @@ class PlanExecutor:
                 session_id=session_id,
                 data={
                     "run_id": run_id,
-                    "layers": len(layers),
+                    "layers": len(initial_layers),
                     "total_tasks": len(graph.get_all_tasks()),
                 },
             )
         )
 
         try:
-            for _layer_idx, layer in enumerate(layers):
+            while True:
                 if cancellation_event is not None and cancellation_event.is_set():
                     break
 
-                # Execute all tasks in this layer in parallel
+                layers = graph.topological_layers()
+                pending_layer = next(
+                    (
+                        current_layer
+                        for current_layer in layers
+                        if any(
+                            (graph.get_task(task_id) is not None)
+                            and graph.get_task(task_id).status == TaskStatus.PENDING
+                            for task_id in current_layer
+                        )
+                    ),
+                    None,
+                )
+                if pending_layer is None:
+                    break
+                layer = [
+                    task_id
+                    for task_id in pending_layer
+                    if (graph.get_task(task_id) is not None)
+                    and graph.get_task(task_id).status == TaskStatus.PENDING
+                ]
+
+                # Execute tasks in this layer concurrently, bounded by the
+                # configured budget so provider failures do not fan out into a
+                # stalled autonomous run.
+                limiter = asyncio.Semaphore(self._max_parallel)
                 layer_tasks: list[asyncio.Task[Any]] = []
                 for task_id in layer:
                     task = graph.get_task(task_id)
                     if task is None:
                         continue
                     task.status = TaskStatus.READY
-                    coro = self._execute_task(
-                        task, ctx, graph, session_id, run_id, cancellation_event
-                    )
+                    async def run_limited(
+                        current_task: TaskNode = task,
+                        semaphore: asyncio.Semaphore = limiter,
+                    ) -> dict[str, Any]:
+                        async with semaphore:
+                            return await self._execute_task(
+                                current_task,
+                                ctx,
+                                graph,
+                                session_id,
+                                run_id,
+                                cancellation_event,
+                            )
+
+                    coro = run_limited()
                     t = asyncio.create_task(coro)
                     layer_tasks.append(t)
                     if active_tasks is not None:
@@ -152,6 +293,55 @@ class PlanExecutor:
                             if "error" in result and result["error"]:
                                 errors.append(str(result["error"]))
                             total_tokens += result.get("tokens", 0)
+
+                # A successful spawn_task event is a request for real work,
+                # not just telemetry. Attach each child to its parent so it
+                # runs in the next dependency layer and remains bounded.
+                if dynamic_tasks_created < max_dynamic_tasks:
+                    for task_id in layer:
+                        parent = graph.get_task(task_id)
+                        if parent is None:
+                            continue
+                        output = str(parent.output_data.get("content", ""))
+                        for request in extract_spawn_requests(output):
+                            child_name = str(request.get("task_name", "")).strip()
+                            child_description = str(request.get("description", "")).strip()
+                            child_agent = str(request.get("agent", "CODER")).strip().upper()
+                            signature = (parent.task_id, child_name, child_agent)
+                            if (
+                                not child_name
+                                or signature in spawned_signatures
+                                or dynamic_tasks_created >= max_dynamic_tasks
+                            ):
+                                continue
+                            if child_agent not in self._registry:
+                                errors.append(
+                                    f"Spawned task {child_name!r} requested unknown agent {child_agent!r}"
+                                )
+                                continue
+                            child = TaskNode(
+                                name=child_name,
+                                description=child_description,
+                                agent=child_agent,
+                                depends_on=[parent.task_id],
+                                max_retries=1,
+                            )
+                            graph.add_task(child)
+                            spawned_signatures.add(signature)
+                            dynamic_tasks_created += 1
+                            await self._events.publish(
+                                OrchestratorEvent(
+                                    event_type=EventType.PLAN_MODIFIED,
+                                    source="ORCHESTRATOR",
+                                    session_id=session_id,
+                                    task_id=child.task_id,
+                                    data={
+                                        "reason": "spawn_task",
+                                        "parent_task_id": parent.task_id,
+                                        "task": child.to_dict(),
+                                    },
+                                )
+                            )
 
         except asyncio.CancelledError:
             await self._events.publish(
@@ -184,12 +374,31 @@ class PlanExecutor:
             task_results=dict(ctx.artifacts),
         )
 
+        get_conversation_logger(session_id).log_run_summary(
+            state=str(final_state.value if hasattr(final_state, "value") else final_state),
+            completed_tasks=completed,
+            failed_tasks=failed,
+            duration_ms=duration_ms,
+            errors=errors,
+        )
+
         await self._events.publish(
             OrchestratorEvent(
                 event_type=EventType.ORCHESTRATOR_FINISHED,
                 source="ORCHESTRATOR",
                 session_id=session_id,
-                data=result.__dict__,
+                # Never attach live objects (plan.dependency_graph is a
+                # DependencyGraph) — the SSE bridge must stay JSON-safe.
+                data={
+                    "run_id": result.run_id,
+                    "state": str(result.state.value if hasattr(result.state, "value") else result.state),
+                    "plan": result.plan.to_dict() if hasattr(result.plan, "to_dict") else str(result.plan),
+                    "completed_tasks": result.completed_tasks,
+                    "failed_tasks": result.failed_tasks,
+                    "total_duration_ms": result.total_duration_ms,
+                    "tokens_used": result.tokens_used,
+                    "errors": [str(e) for e in (result.errors or [])],
+                },
             )
         )
 
@@ -239,12 +448,25 @@ class PlanExecutor:
 
         # Build context from dependencies
         dep_context = self._build_dependency_context(task, ctx)
+        conv_log = get_conversation_logger(session_id)
 
         for attempt in range(task.max_retries + 1):
             try:
                 if cancellation_event is not None and cancellation_event.is_set():
                     task.status = TaskStatus.CANCELLED
                     return {"cancelled": True}
+
+                conv_log.log_task_started(task.task_id, task.name, task.agent, attempt + 1)
+
+                # Give every task a clean circuit breaker. The breaker is keyed
+                # by (session, tool) and a session spans the whole mission, so
+                # a failure streak in an earlier task would otherwise start
+                # this one with its tools already short-circuited. That is what
+                # killed the DEBUGGER "Verify" step in session
+                # bf1e9435b9ec47c9: run_shell was disabled on iteration 1 by
+                # failures that happened in a different task, and the
+                # "verification" gate has no other way to close.
+                reset_tool_failures(session_id)
 
                 request = AgentRequest(
                     session_id=session_id,
@@ -255,8 +477,19 @@ class PlanExecutor:
                         "task": task.to_dict(),
                         "shared_memory": ctx.shared_memory,
                         "project_path": ctx.project_path,
+                        # A plan step is executable work. Production agents
+                        # must not turn "I'll start" or a directory listing into
+                        # TASK_COMPLETED. DEBUGGER/Verify steps need an actual
+                        # command/test; other steps must inspect beyond discovery.
+                        "_tool_evidence_requirement": (
+                            "verification"
+                            if task.agent == "DEBUGGER"
+                            or task.name.strip().lower().startswith("verify")
+                            else "substantive"
+                        ),
                     },
-                    max_iterations=5,
+                    max_iterations=self._task_max_iterations,
+                    autonomous=True,
                 )
 
                 # Stream execution with hard timeout
@@ -271,12 +504,79 @@ class PlanExecutor:
                             await emit.emit(EventType.TOKEN, content=token)
 
                 output = "".join(output_parts)
-                tool_errors = extract_tool_errors(output)
-                if tool_errors:
+                unrecovered_errors, recovered_errors = partition_tool_errors(output)
+
+                # AgentBase owns evidence/iteration honesty and exposes the
+                # verdict after its stream closes. PlanExecutor previously
+                # ignored that verdict and marked a task COMPLETED whenever
+                # the visible text lacked a recognised error marker. That
+                # allowed a discovery-only list_dir loop to fail internally
+                # yet still become TASK_COMPLETED.
+                agent_run_success = getattr(agent, "_last_run_success", None)
+                if agent_run_success is False:
                     task.output_data["content"] = output
                     task.status = TaskStatus.FAILED
-                    task.error_message = tool_errors[0]
+                    task.error_message = (
+                        "Agent execution failed its runtime/tool evidence gate"
+                    )
                     task.completed_at = time.time()
+                    conv_log.log_task_failed(
+                        task.task_id,
+                        task.name,
+                        task.agent,
+                        task.error_message,
+                        attempts=attempt + 1,
+                    )
+                    async with ctx._lock:
+                        ctx.artifacts[task.task_id] = {
+                            "name": task.name,
+                            "agent": task.agent,
+                            "output": output,
+                            "status": "failed",
+                            "incomplete": True,
+                        }
+                    await self._events.publish(
+                        OrchestratorEvent(
+                            event_type=EventType.TASK_FAILED,
+                            source=task.agent,
+                            session_id=session_id,
+                            task_id=task.task_id,
+                            data={"error": task.error_message, "incomplete": True},
+                        )
+                    )
+                    return {
+                        "error": task.error_message,
+                        "incomplete": True,
+                        "output": output,
+                    }
+
+                # Recovered errors: the agent hit a problem (e.g. a hallucinated
+                # path), corrected itself, and finished. That is healthy
+                # autonomy — log it, surface it, but do NOT fail the task.
+                for err in recovered_errors:
+                    conv_log.log_tool_recovered(task.agent, "unknown", recovered_from=err)
+                if recovered_errors:
+                    logger.info(
+                        "Task %s recovered from %d tool error(s): %s",
+                        task.task_id,
+                        len(recovered_errors),
+                        recovered_errors[:3],
+                    )
+
+                if unrecovered_errors:
+                    task.output_data["content"] = output
+                    task.status = TaskStatus.FAILED
+                    task.error_message = unrecovered_errors[0]
+                    task.completed_at = time.time()
+
+                    conv_log.log_task_failed(
+                        task.task_id,
+                        task.name,
+                        task.agent,
+                        task.error_message,
+                        recovered_errors=recovered_errors,
+                        attempts=attempt + 1,
+                    )
 
                     async with ctx._lock:
                         ctx.artifacts[task.task_id] = {
@@ -284,7 +584,8 @@ class PlanExecutor:
                             "agent": task.agent,
                             "output": output,
                             "status": "failed",
-                            "tool_errors": tool_errors,
+                            "tool_errors": unrecovered_errors,
+                            "recovered_tool_errors": recovered_errors,
                         }
 
                     await self._events.publish(
@@ -295,13 +596,65 @@ class PlanExecutor:
                             task_id=task.task_id,
                             data={
                                 "error": task.error_message,
-                                "tool_errors": tool_errors,
+                                "tool_errors": unrecovered_errors,
+                                "recovered_tool_errors": recovered_errors,
                             },
                         )
                     )
                     return {
                         "error": task.error_message,
-                        "tool_errors": tool_errors,
+                        "tool_errors": unrecovered_errors,
+                        "recovered_tool_errors": recovered_errors,
+                        "output": output,
+                    }
+
+                # The agent itself admitted it did not finish (iteration cap,
+                # refused work). Marking this COMPLETED is what made the
+                # dashboard print "Tarefa concluída" under a "task NOT
+                # completed" warning. Fail honestly instead.
+                incompletion = output_reports_incompletion(output)
+                if incompletion:
+                    task.output_data["content"] = output
+                    task.status = TaskStatus.FAILED
+                    task.error_message = (
+                        f"Agent reported the task as not completed ({incompletion})"
+                    )
+                    task.completed_at = time.time()
+
+                    conv_log.log_task_failed(
+                        task.task_id,
+                        task.name,
+                        task.agent,
+                        task.error_message,
+                        recovered_errors=recovered_errors,
+                        attempts=attempt + 1,
+                    )
+
+                    async with ctx._lock:
+                        ctx.artifacts[task.task_id] = {
+                            "name": task.name,
+                            "agent": task.agent,
+                            "output": output,
+                            "status": "failed",
+                            "incomplete": True,
+                            "recovered_tool_errors": recovered_errors,
+                        }
+
+                    await self._events.publish(
+                        OrchestratorEvent(
+                            event_type=EventType.TASK_FAILED,
+                            source=task.agent,
+                            session_id=session_id,
+                            task_id=task.task_id,
+                            data={
+                                "error": task.error_message,
+                                "incomplete": True,
+                            },
+                        )
+                    )
+                    return {
+                        "error": task.error_message,
+                        "incomplete": True,
                         "output": output,
                     }
 
@@ -316,8 +669,18 @@ class PlanExecutor:
                         "agent": task.agent,
                         "output": output,
                         "status": "completed",
+                        "recovered_tool_errors": recovered_errors,
                     }
                     ctx._global_context_parts.append(f"\n[{task.name}]: {output[:500]}")
+
+                conv_log.log_task_completed(
+                    task.task_id,
+                    task.name,
+                    task.agent,
+                    duration_s=(task.completed_at - task.started_at)
+                    if task.started_at
+                    else None,
+                )
 
                 await self._events.publish(
                     OrchestratorEvent(
@@ -359,6 +722,13 @@ class PlanExecutor:
                     task.status = TaskStatus.FAILED
                     task.error_message = f"Task timed out after {self._default_timeout}s"
                     task.completed_at = time.time()
+                    conv_log.log_task_failed(
+                        task.task_id,
+                        task.name,
+                        task.agent,
+                        task.error_message,
+                        attempts=attempt + 1,
+                    )
                     await self._events.publish(
                         OrchestratorEvent(
                             event_type=EventType.TASK_FAILED,
@@ -396,6 +766,10 @@ class PlanExecutor:
                     task.status = TaskStatus.FAILED
                     task.error_message = str(exc)
                     task.completed_at = time.time()
+
+                    conv_log.log_task_failed(
+                        task.task_id, task.name, task.agent, exc, attempts=attempt + 1
+                    )
 
                     await self._events.publish(
                         OrchestratorEvent(
@@ -436,6 +810,21 @@ IMPORTANT: You are working in the project at: {project_path}
 - Use the read_file tool to read existing files.
 - Use the list_dir tool to explore the project structure.
 - Use the execute_code tool to run code and tests.
+- NEVER assume a conventional file layout (e.g. "app/main.py", "src/index.ts").
+  If you are not certain a file exists, call list_dir or search_codebase FIRST.
+- If a read returns "File not found", do NOT retry the same path: use the
+  'parent_listing' / 'same_name_files' suggestions in the error, or list_dir,
+  to locate the real path and continue. A corrected read is a success, not a
+  failure.
+
+AUTONOMY RULES (mandatory):
+- Work FULLY autonomously: never ask the user for confirmation or permission;
+  you are already authorised to use every tool listed above.
+- Plan your steps, execute them one by one with tools, and VERIFY your own
+  work (re-read what you wrote, run tests when they exist) before answering.
+- If a tool fails, adapt and try a different approach instead of giving up.
+- Do not stop at a partial result: only give the final answer when the task
+  is genuinely complete, and state clearly what was done and what remains.
 
 Complete this task thoroughly. If you need to create or modify files, use the appropriate tools.
 Provide a clear summary of what you accomplished."""

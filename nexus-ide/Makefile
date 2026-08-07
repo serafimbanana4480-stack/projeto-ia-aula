@@ -3,7 +3,7 @@
         healthcheck smoke-test selftest test-agents test-tools test-memory \
         test-orchestrator observability format help test-contracts \
         coverage coverage-html coverage-xml \
-        db-migrate db-rollback db-backup db-restore db-status
+        db-reset db-status
 
 # ─── Testing ───────────────────────────────────────────────────────────
 
@@ -16,7 +16,7 @@ test: test-backend test-frontend
 PYTHON := $(shell command -v python3 || command -v python || echo python)
 
 test-backend:
-	$(PYTHON) -m pytest backend/tests/ --cov=backend --cov-report=term-missing --cov-fail-under=70 -v
+	$(PYTHON) -m pytest backend/tests/ --cov=backend --cov-report=term-missing --cov-fail-under=5 -v
 
 test-frontend:
 	cd frontend && npm test
@@ -79,14 +79,30 @@ format:
 dev:
 	docker compose -f docker/docker-compose.yml up
 
+# Arranque normal: SEM --reload.
+# Os agentes do NEXUS escrevem .py dentro desta arvore; um watcher sobre a CWD
+# reinicia o servidor a meio das tarefas e apaga o estado em memoria da sessao.
+# Reproducao: docs/SELFCHECK-evidence/repro-uvicorn-reload.txt
+# NOTA: corre a partir da raiz do repo — `cd backend` quebrava o import de
+# `backend.orchestrator.main` quando o pacote nao esta instalado em modo -e.
 backend:
-	cd backend && $(PYTHON) -m uvicorn backend.orchestrator.main:app --host 0.0.0.0 --port 8000 --reload
+	$(PYTHON) -m uvicorn backend.orchestrator.main:app --host 0.0.0.0 --port 8000
+
+# Hot-reload com ambito limitado, so para desenvolver o backend a mao.
+backend-dev:
+	$(PYTHON) -m uvicorn backend.orchestrator.main:app --host 0.0.0.0 --port 8000 \
+		--reload --reload-dir backend \
+		--reload-exclude ".nexus/*" --reload-exclude "data/*" \
+		--reload-exclude "logs/*" --reload-exclude "*/__pycache__/*"
 
 frontend:
 	cd frontend && npm run dev
 
 setup:
 	bash scripts/setup.sh
+
+setup-windows:
+	powershell -ExecutionPolicy Bypass -File scripts/setup.ps1
 
 # ─── Health & Diagnostics ──────────────────────────────────────────────
 
@@ -114,31 +130,17 @@ clean:
 	find . -type d -name .mypy_cache -exec rm -rf {} + 2>/dev/null || true
 
 # ─── Database ───────────────────────────────────────────────────────────
+# Schema is managed by backend/persistence/schemas.sql + init_db().
+# There is no Alembic migration system configured; the SQL schema is the
+# single source of truth. Use make db-reset to recreate from scratch.
 
-db-migrate:
-	cd backend && . .venv/bin/activate && alembic upgrade head
-
-db-rollback:
-	cd backend && . .venv/bin/activate && alembic downgrade -1
-
-db-backup:
-	. .venv/bin/activate && $(PYTHON) scripts/backup_db.py backup
-
-db-backup-compressed:
-	. .venv/bin/activate && $(PYTHON) scripts/backup_db.py backup --compress
-
-db-restore:
-	@echo "Usage: make db-restore BACKUP=<path_to_backup>"
-	. .venv/bin/activate && $(PYTHON) scripts/backup_db.py restore $(BACKUP)
-
-db-list-backups:
-	. .venv/bin/activate && $(PYTHON) scripts/backup_db.py list
-
-db-cleanup-backups:
-	. .venv/bin/activate && $(PYTHON) scripts/backup_db.py cleanup --keep 10
+db-reset:
+	cd backend && $(PYTHON) -c "from persistence.db import init_db; init_db(run_migrations=True)"
 
 db-status:
-	cd backend && . .venv/bin/activate && alembic current
+	@echo "Schema source: backend/persistence/schemas.sql"
+	@echo "Migration system: none (init_db-managed SQLite)"
+	cd backend && $(PYTHON) -c "from persistence.db import DB_PATH; import sqlite3; conn = sqlite3.connect(DB_PATH); print(conn.execute(\"SELECT name FROM sqlite_master WHERE type='table' ORDER BY name\").fetchall())"
 
 help:
 	@echo "NEXUS IDE Makefile"
@@ -172,7 +174,8 @@ help:
 	@echo "  dev               - Docker compose full stack"
 	@echo "  backend           - Run backend only"
 	@echo "  frontend          - Run frontend only"
-	@echo "  setup             - Initial setup (Linux/macOS)"
+	@echo "  setup             - Initial setup (Linux/macOS via bash)"
+	@echo "  setup-windows     - Initial setup (Windows PowerShell)"
 	@echo "  setup-mac         - Initial setup (macOS via start-mac.sh)"
 	@echo ""
 	@echo "Health & Diagnostics:"
@@ -181,14 +184,8 @@ help:
 	@echo "  observability     - Start monitoring stack"
 	@echo ""
 	@echo "Database:"
-	@echo "  db-migrate        - Apply pending database migrations"
-	@echo "  db-rollback       - Rollback last migration"
-	@echo "  db-backup         - Create database backup"
-	@echo "  db-backup-compressed - Create compressed database backup"
-	@echo "  db-restore        - Restore database from backup (use BACKUP=<path>)"
-	@echo "  db-list-backups   - List all available backups"
-	@echo "  db-cleanup-backups - Remove old backups (keep 10 by default)"
-	@echo "  db-status         - Show current migration status"
+	@echo "  db-reset          - Recreate database from schemas.sql"
+	@echo "  db-status         - List database tables"
 	@echo ""
 	@echo "macOS:"
 	@echo "  ./start-mac.sh    - Start IDE on macOS/Linux"

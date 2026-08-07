@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from backend.core.agent_bus import BusMessage, get_agent_bus
@@ -24,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 5
 AGENT_TIMEOUT_SECONDS = 300.0
+AGENT_POLL_INTERVAL_SECONDS = 0.1
 
 
 @dataclass
@@ -64,7 +68,11 @@ class AutoCorrectionLoop:
         await loop.stop_monitoring()
     """
 
-    def __init__(self, lifecycle_manager: AgentLifecycleManager | None = None) -> None:
+    def __init__(
+        self,
+        lifecycle_manager: AgentLifecycleManager | None = None,
+        state_file: Path | str | None = None,
+    ) -> None:
         self._task: asyncio.Task[Any] | None = None
         self._stop_event: asyncio.Event | None = None
         self._status: dict[str, Any] = {
@@ -77,11 +85,57 @@ class AutoCorrectionLoop:
         self._lifecycle = lifecycle_manager or AgentLifecycleManager()
         self.active_corrections: dict[str, list[str]] = {}
         self._monitor_tasks: list[asyncio.Task[Any]] = []
+        self._scheduled_corrections: set[tuple[str, str]] = set()
 
         # Self-heal circuit breaker
         self._self_heal_history: list[float] = []
-        self._max_self_heals_per_hour: int = int(os.getenv("NEXUS_SELF_HEAL_MAX_PER_HOUR", "5"))
+        self._max_self_heals_per_hour: int = int(os.getenv("NEXUS_SELF_HEAL_MAX_PER_HOUR", "10"))
         self._replan_counts: dict[str, int] = {}
+
+        # Persistent state for correction trackers (survives restarts)
+        env_state_file = os.getenv("NEXUS_AUTO_CORRECTION_STATE_FILE")
+        if state_file is not None:
+            self._state_file = Path(state_file)
+        elif env_state_file:
+            self._state_file = Path(env_state_file)
+        else:
+            self._state_file = Path(__file__).resolve().parent.parent.parent / "data" / "auto_correction_state.json"
+        self._load_state()
+
+    def _load_state(self) -> None:
+        """Load persistent correction tracker state from disk."""
+        try:
+            if self._state_file.exists():
+                data = json.loads(self._state_file.read_text(encoding="utf-8"))
+                self._status["corrections"] = data.get("corrections", [])
+                self._status["overseer_signoff"] = data.get("overseer_signoff", {})
+                self._status["meta_signoff"] = data.get("meta_signoff", {})
+                self._replan_counts = data.get("replan_counts", {})
+                self._self_heal_history = data.get("self_heal_history", [])
+                logger.info(
+                    "Loaded auto-correction state: %d trackers, overseer_signoff=%d, meta_signoff=%d",
+                    len(self._status["corrections"]),
+                    len(self._status["overseer_signoff"]),
+                    len(self._status["meta_signoff"]),
+                )
+        except Exception as e:
+            logger.warning("Failed to load auto-correction state: %s", e)
+
+    def _save_state(self) -> None:
+        """Save persistent correction tracker state to disk."""
+        try:
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "corrections": self._status["corrections"],
+                "overseer_signoff": self._status.get("overseer_signoff", {}),
+                "meta_signoff": self._status.get("meta_signoff", {}),
+                "replan_counts": self._replan_counts,
+                "self_heal_history": self._self_heal_history,
+                "saved_at": datetime.now(UTC).isoformat(),
+            }
+            self._state_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning("Failed to save auto-correction state: %s", e)
 
     async def start_monitoring(self) -> None:
         """Start the background bus-monitoring task."""
@@ -103,10 +157,14 @@ class AutoCorrectionLoop:
         """Stop the background bus-monitoring task."""
         if self._stop_event is not None:
             self._stop_event.set()
-        for task in self._monitor_tasks:
+        correction_tasks = list(self._monitor_tasks)
+        for task in correction_tasks:
             if not task.done():
                 task.cancel()
+        if correction_tasks:
+            await asyncio.gather(*correction_tasks, return_exceptions=True)
         self._monitor_tasks = []
+        self._scheduled_corrections.clear()
         if self._task is not None:
             self._task.cancel()
             try:
@@ -117,6 +175,51 @@ class AutoCorrectionLoop:
         self._status["monitoring"] = False
         logger.info("Auto-correction loop stopped")
 
+    def _schedule_correction(
+        self,
+        *,
+        trigger: str,
+        artifact_id: str,
+        handler: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Run a correction outside the AgentBus callback without duplicating it.
+
+        AgentBus deliberately awaits subscriber callbacks.  A correction can
+        wait minutes for agents, so doing it inline stalls every publisher and
+        the other subscribers of that topic.  Tracking the task also lets
+        ``stop_monitoring`` cancel it cleanly.
+        """
+        key = (trigger, artifact_id)
+        if key in self._scheduled_corrections:
+            logger.info("Auto-correction already active | trigger=%s artifact_id=%s", trigger, artifact_id)
+            return
+        if self._stop_event is not None and self._stop_event.is_set():
+            return
+
+        self._scheduled_corrections.add(key)
+        task = asyncio.create_task(
+            handler(),
+            name=f"auto-correction:{trigger}:{artifact_id}",
+        )
+        self._monitor_tasks.append(task)
+
+        def _on_complete(completed: asyncio.Task[Any]) -> None:
+            with contextlib.suppress(ValueError):
+                self._monitor_tasks.remove(completed)
+            self._scheduled_corrections.discard(key)
+            if completed.cancelled():
+                return
+            try:
+                completed.result()
+            except Exception:
+                logger.exception(
+                    "Auto-correction task failed | trigger=%s artifact_id=%s",
+                    trigger,
+                    artifact_id,
+                )
+
+        task.add_done_callback(_on_complete)
+
     # ------------------------------------------------------------------
     # Bus monitoring
     # ------------------------------------------------------------------
@@ -125,26 +228,45 @@ class AutoCorrectionLoop:
         bus = get_agent_bus()
 
         async def _on_test_results(msg: BusMessage) -> None:
-            payload = msg.payload or {}
+            payload = dict(msg.payload or {})
             failures = payload.get("failures", 0)
             if failures and failures > 0:
-                await self._handle_test_failure(payload)
+                artifact_id = str(payload.get("artifact_id") or "unknown")
+                self._schedule_correction(
+                    trigger="test_failure",
+                    artifact_id=artifact_id,
+                    handler=lambda: self._handle_test_failure(payload),
+                )
 
         async def _on_errors_found(msg: BusMessage) -> None:
-            payload = msg.payload or {}
+            payload = dict(msg.payload or {})
             severity = payload.get("severity", "low")
             if severity in ("CRITICAL", "HIGH"):
-                await self._handle_critical_error(payload)
+                artifact_id = str(payload.get("artifact_id") or "unknown")
+                self._schedule_correction(
+                    trigger="critical_error",
+                    artifact_id=artifact_id,
+                    handler=lambda: self._handle_critical_error(payload),
+                )
 
         async def _on_review_completed(msg: BusMessage) -> None:
-            payload = msg.payload or {}
+            payload = dict(msg.payload or {})
             review_id = payload.get("review_id")
             if review_id:
-                await self._handle_review_completed(review_id, payload)
+                self._schedule_correction(
+                    trigger="review_changes",
+                    artifact_id=str(payload.get("artifact_id") or f"review:{review_id}"),
+                    handler=lambda: self._handle_review_completed(review_id, payload),
+                )
 
         async def _on_performance_regression(msg: BusMessage) -> None:
-            payload = msg.payload or {}
-            await self._handle_performance_regression(payload)
+            payload = dict(msg.payload or {})
+            artifact_id = str(payload.get("artifact_id") or "unknown")
+            self._schedule_correction(
+                trigger="performance_regression",
+                artifact_id=artifact_id,
+                handler=lambda: self._handle_performance_regression(payload),
+            )
 
         sub1 = await bus.subscribe("test.results", _on_test_results)
         sub2 = await bus.subscribe("errors.found", _on_errors_found)
@@ -190,6 +312,7 @@ class AutoCorrectionLoop:
                     tracker = self._get_or_create_tracker(artifact_id, "test_failure")
                     tracker.status = "completed"
                     self._update_tracker(tracker)
+                    self._save_state()
                 return
 
             # Still failing — check if we have iterations left
@@ -335,7 +458,11 @@ class AutoCorrectionLoop:
         error_report = payload.get("error_report", "N/A")
         project_path = payload.get("project_path", ".")
 
-        before = await qm.measure(project_path)
+        try:
+            before = await qm.measure_lightweight(project_path)
+        except Exception as exc:  # noqa: BLE001 - quality signal must not stop a repair
+            logger.warning("Unable to measure pre-fix quality for %s: %s", artifact_id, exc)
+            before = None
 
         # Step 1 — CODER
         coder_id = await self._spawn_agent(
@@ -372,7 +499,15 @@ class AutoCorrectionLoop:
                 iteration,
             )
 
-        after = await qm.measure(project_path)
+        after = None
+        if before is not None:
+            # The CODER may have changed the workspace.  Recompute a bounded
+            # snapshot instead of reusing the pre-fix cache entry.
+            qm.invalidate_lightweight_cache(project_path)
+            try:
+                after = await qm.measure_lightweight(project_path)
+            except Exception as exc:  # noqa: BLE001 - repair result is still useful
+                logger.warning("Unable to measure post-fix quality for %s: %s", artifact_id, exc)
 
         if before is not None and after is not None and qm.should_reject_fix(before, after):
             logger.warning(
@@ -630,9 +765,17 @@ class AutoCorrectionLoop:
                 )
                 return
 
-            # Responsive sleep: wake immediately on stop event
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
+            # Responsive sleep: wake immediately on stop event while avoiding
+            # a full second of latency for short-lived agents.
+            remaining = max(0.0, timeout - (time.time() - start))
+            sleep_for = min(AGENT_POLL_INTERVAL_SECONDS, remaining)
+            if sleep_for <= 0:
+                break
+            if self._stop_event is None:
+                await asyncio.sleep(sleep_for)
+            else:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=sleep_for)
 
         logger.warning(
             "AutoCorrection timeout waiting for agent %s after %.0fs",
@@ -710,6 +853,7 @@ class AutoCorrectionLoop:
                 "started_at": tracker.started_at,
             }
         )
+        self._save_state()
         return tracker
 
     def _update_tracker(self, tracker: _CorrectionTracker) -> None:
@@ -718,7 +862,9 @@ class AutoCorrectionLoop:
                 c["iterations"] = tracker.iterations
                 c["agents_spawned"] = tracker.agents_spawned
                 c["status"] = tracker.status
+                self._save_state()
                 return
+        self._save_state()
 
     async def _escalate(self, artifact_id: str, reason: str) -> None:
         """Escalate to META_ANALYZER + OVERSEER.
@@ -893,6 +1039,7 @@ class AutoCorrectionLoop:
         # All conditions met — record the decision.
         self._self_heal_history.append(time.time())
         self._replan_counts[artifact_id] = self._replan_counts.get(artifact_id, 0) + 1
+        self._save_state()
         event = SelfHealEvent(
             event_id=str(uuid.uuid4()),
             artifact_id=artifact_id,
@@ -959,11 +1106,13 @@ class AutoCorrectionLoop:
     def record_overseer_signoff(self, artifact_id: str) -> None:
         """Mark the OVERSEER signoff for a self-heal decision."""
         self._status.setdefault("overseer_signoff", {})[artifact_id] = True
+        self._save_state()
         logger.info("OVERSEER signoff recorded for %s", artifact_id)
 
     def record_meta_signoff(self, artifact_id: str) -> None:
         """Mark the META_ANALYZER signoff for a self-heal decision."""
         self._status.setdefault("meta_signoff", {})[artifact_id] = True
+        self._save_state()
         logger.info("META_ANALYZER signoff recorded for %s", artifact_id)
 
     def circuit_open(self) -> bool:
@@ -980,6 +1129,7 @@ _auto_correction_loop_instance: AutoCorrectionLoop | None = None
 
 def get_auto_correction_loop(
     lifecycle_manager: AgentLifecycleManager | None = None,
+    state_file: Path | str | None = None,
 ) -> AutoCorrectionLoop:
     """Return the singleton :class:`AutoCorrectionLoop` instance.
 
@@ -989,7 +1139,10 @@ def get_auto_correction_loop(
     """
     global _auto_correction_loop_instance
     if _auto_correction_loop_instance is None:
-        _auto_correction_loop_instance = AutoCorrectionLoop(lifecycle_manager=lifecycle_manager)
+        _auto_correction_loop_instance = AutoCorrectionLoop(
+            lifecycle_manager=lifecycle_manager,
+            state_file=state_file,
+        )
     elif lifecycle_manager is not None:
         _auto_correction_loop_instance._lifecycle = lifecycle_manager
     return _auto_correction_loop_instance

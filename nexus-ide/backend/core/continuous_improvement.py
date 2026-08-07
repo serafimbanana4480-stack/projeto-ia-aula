@@ -137,7 +137,7 @@ class ContinuousImprovementLoop:
         start = time.monotonic()
         try:
             report = await asyncio.wait_for(
-                asyncio.to_thread(self._analyzer.run_analysis),
+                self._analyzer.run_analysis(),
                 timeout=timeout_s,
             )
         except TimeoutError:
@@ -163,10 +163,17 @@ class ContinuousImprovementLoop:
                 if p.id not in existing_ids:
                     self._pending_proposals.append(p)
 
-        # Auto-apply high-confidence prompt proposals
+        # Safety change (2026-07-30): direct prompt mutation is disabled.
+        # High-confidence prompt proposals must now be applied through
+        # ProposalApplier (git snapshot, dry-run test, confidence >= 0.6)
+        # so long-term evolution does not accumulate unbounded prompt debt.
         auto_apply = os.environ.get("NEXUS_SELF_IMPROVE_AUTO_APPLY", "").lower() == "true"
         if auto_apply:
-            await self._auto_apply_prompts(proposals)
+            logger.warning(
+                "NEXUS_SELF_IMPROVE_AUTO_APPLY is deprecated: "
+                "direct prompt mutation is disabled. "
+                "Use the ProposalApplier flow (git snapshot + dry-run) instead."
+            )
 
         logger.info(
             "self_improvement.analysis_completed proposals=%d duration=%.2fs",
@@ -180,46 +187,6 @@ class ContinuousImprovementLoop:
             "duration_s": round(duration, 2),
         }
 
-    async def _auto_apply_prompts(self, proposals: list[ImprovementProposal]) -> None:
-        """Auto-apply high-confidence prompt proposals (only)."""
-        min_conf = float(os.environ.get("NEXUS_SELF_IMPROVE_MIN_CONFIDENCE", "0.8"))
-        applied = 0
-        for p in proposals:
-            if p.category != "prompt":
-                continue
-            if p.confidence < min_conf:
-                continue
-            try:
-                # Prompt files live in config/prompts/<agent>.md
-                prompt_path = self._get_prompt_path(p.target)
-                if not prompt_path:
-                    continue
-                # Append refinement to the prompt file (with marker)
-                from datetime import UTC, datetime
-                ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-                marker = (
-                    f"\n\n<!-- AUTO-REFINEMENT @ {ts} (confidence={p.confidence:.2f}) -->\n"
-                    f"{p.proposed_change}\n"
-                )
-                with open(prompt_path, "a", encoding="utf-8") as f:
-                    f.write(marker)
-                applied += 1
-                logger.info(
-                    "self_improvement.proposal_applied id=%s target=%s confidence=%.2f",
-                    p.id,
-                    p.target,
-                    p.confidence,
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Failed to apply proposal %s: %s", p.id, e)
-        self.stats.proposals_applied_total += applied
-
-    def _get_prompt_path(self, target: str):
-        """Resolve agent name to prompt file path."""
-        import pathlib
-        project_root = pathlib.Path(__file__).resolve().parents[2]
-        path = project_root / "config" / "prompts" / f"{target}.md"
-        return path if path.exists() else None
 
     # ------------------------------------------------------------------ Proposal management
     async def list_proposals(self, status: str = "pending") -> list[dict[str, Any]]:

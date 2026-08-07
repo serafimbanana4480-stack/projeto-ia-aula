@@ -24,7 +24,6 @@ from backend.core.peer_review import (
 )
 from backend.core.shared_memory import get_shared_memory
 from backend.middleware.auth import require_auth
-from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -92,7 +91,6 @@ class DebateCreateRequest(BaseModel):
 
 
 @router.get("/whiteboard")
-@limiter.limit("120/minute")
 async def list_whiteboard(
     request: Request,
     _auth: None = Depends(require_auth),
@@ -125,7 +123,6 @@ async def list_whiteboard(
 
 
 @router.post("/whiteboard")
-@limiter.limit("120/minute")
 async def write_whiteboard(
     req: WhiteboardWriteRequest,
     request: Request,
@@ -150,7 +147,6 @@ async def write_whiteboard(
 
 
 @router.get("/whiteboard/search")
-@limiter.limit("120/minute")
 async def search_whiteboard(
     request: Request,
     _auth: None = Depends(require_auth),
@@ -168,7 +164,6 @@ async def search_whiteboard(
 
 
 @router.get("/whiteboard/thread/{entry_id}")
-@limiter.limit("120/minute")
 async def get_whiteboard_thread(
     request: Request,
     entry_id: str,
@@ -190,7 +185,6 @@ async def get_whiteboard_thread(
 
 
 @router.get("/reviews/{artifact_id}")
-@limiter.limit("120/minute")
 async def get_reviews(
     request: Request,
     artifact_id: str,
@@ -203,7 +197,6 @@ async def get_reviews(
 
 
 @router.post("/reviews/submit")
-@limiter.limit("60/minute")
 async def submit_review(
     req: ReviewSubmitRequest,
     request: Request,
@@ -225,7 +218,6 @@ async def submit_review(
 
 
 @router.post("/reviews/conduct")
-@limiter.limit("60/minute")
 async def conduct_review(
     req: ReviewConductRequest,
     request: Request,
@@ -247,7 +239,6 @@ async def conduct_review(
 
 
 @router.post("/debates")
-@limiter.limit("30/minute")
 async def create_debate(
     req: DebateCreateRequest,
     request: Request,
@@ -263,7 +254,6 @@ async def create_debate(
 
 
 @router.get("/debates/{debate_id}")
-@limiter.limit("120/minute")
 async def get_debate(
     request: Request,
     debate_id: str,
@@ -280,7 +270,6 @@ async def get_debate(
 
 
 @router.get("/auto-correction/status")
-@limiter.limit("120/minute")
 async def auto_correction_status(
     request: Request, _auth: None = Depends(require_auth)
 ) -> dict[str, Any]:

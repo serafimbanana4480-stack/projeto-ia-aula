@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -14,9 +15,9 @@ from backend.core.auto_correction import AutoCorrectionLoop, get_auto_correction
 
 
 @pytest.fixture
-def fresh_loop() -> AutoCorrectionLoop:
-    """Return a fresh AutoCorrectionLoop instance."""
-    return AutoCorrectionLoop()
+def fresh_loop(tmp_path) -> AutoCorrectionLoop:
+    """Return a fresh AutoCorrectionLoop instance with isolated persistent state."""
+    return AutoCorrectionLoop(state_file=tmp_path / "auto_correction_state.json")
 
 
 @pytest.fixture
@@ -27,6 +28,16 @@ def bus(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
     monkeypatch.setattr(AgentBus, "_instance", None)
     return get_agent_bus()
+
+
+async def wait_until(predicate, *, timeout: float = 3.0) -> None:
+    """Wait for a background correction task without relying on fixed sleeps."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("condition was not met before timeout")
 
 
 class FakeInstance:
@@ -111,8 +122,7 @@ class TestAutoCorrection:
                 payload={"failures": 3, "artifact_id": "calc.py"},
             ),
         )
-        # Give the mock agents time to "complete"
-        await asyncio.sleep(0.3)
+        await wait_until(lambda: len(mock_lifecycle.spawn_calls) == 3)
 
         status = loop.get_status()
         assert len(status["corrections"]) == 1
@@ -146,7 +156,13 @@ class TestAutoCorrection:
                 payload={"failures": 3, "artifact_id": "loop.py"},
             ),
         )
-        await asyncio.sleep(0.5)
+        await wait_until(
+            lambda: any(
+                c["artifact_id"] == "loop.py" and c["iterations"] == 5
+                for c in loop.get_status()["corrections"]
+            )
+            and "META_ANALYZER" in [call[0] for call in mock_lifecycle.spawn_calls]
+        )
 
         status = loop.get_status()
         loop_corr = [c for c in status["corrections"] if c["artifact_id"] == "loop.py"]
@@ -183,7 +199,12 @@ class TestAutoCorrection:
                 payload={"failures": 1, "artifact_id": "pass.py"},
             ),
         )
-        await asyncio.sleep(0.3)
+        await wait_until(
+            lambda: any(
+                c["artifact_id"] == "pass.py" and c["status"] == "completed"
+                for c in loop.get_status()["corrections"]
+            )
+        )
 
         status = loop.get_status()
         loop_corr = [c for c in status["corrections"] if c["artifact_id"] == "pass.py"]
@@ -197,7 +218,9 @@ class TestAutoCorrection:
         await loop.stop_monitoring()
 
     @pytest.mark.asyncio
-    async def test_critical_error_handler_spawns_coder_then_overseer(self, bus, fresh_loop):
+    async def test_critical_error_handler_spawns_coder_then_overseer(
+        self, bus, fresh_loop, tmp_path
+    ):
         mock_lifecycle = MockLifecycleManager(
             outputs={"CODER": "Fixed the null pointer exception. Bug resolved."}
         )
@@ -210,10 +233,19 @@ class TestAutoCorrection:
             BusMessage(
                 message_id="msg2",
                 source_agent="BUG_HUNTER_RUNTIME",
-                payload={"severity": "CRITICAL", "artifact_id": "auth.py"},
+                payload={
+                    "severity": "CRITICAL",
+                    "artifact_id": "auth.py",
+                    "project_path": str(tmp_path),
+                },
             ),
         )
-        await asyncio.sleep(0.3)
+        await wait_until(
+            lambda: any(
+                c["artifact_id"] == "auth.py" and c["status"] == "completed"
+                for c in loop.get_status()["corrections"]
+            )
+        )
 
         status = loop.get_status()
         assert any(c["trigger"] == "critical_error" for c in status["corrections"])
@@ -224,7 +256,53 @@ class TestAutoCorrection:
         await loop.stop_monitoring()
 
     @pytest.mark.asyncio
-    async def test_critical_error_loops_when_not_fixed(self, bus, fresh_loop):
+    async def test_critical_event_does_not_block_bus_and_deduplicates_active_work(
+        self, bus, fresh_loop, monkeypatch
+    ):
+        """A slow quality snapshot must not hold up publishers or peer subscribers."""
+        import backend.core.quality_metrics as qm
+
+        measurement_started = asyncio.Event()
+        release_measurement = asyncio.Event()
+        observed = asyncio.Event()
+
+        async def slow_measurement(*args, **kwargs):
+            measurement_started.set()
+            await release_measurement.wait()
+            return qm.QualityMetrics()
+
+        async def observer(_: BusMessage) -> None:
+            observed.set()
+
+        monkeypatch.setattr(qm, "measure_lightweight", slow_measurement)
+        loop = fresh_loop
+        await loop.start_monitoring()
+        await asyncio.sleep(0)
+        subscription = await bus.subscribe("errors.found", observer)
+        message = BusMessage(
+            message_id="nonblocking-critical",
+            source_agent="BUG_HUNTER_RUNTIME",
+            payload={"severity": "CRITICAL", "artifact_id": "slow.py"},
+        )
+
+        try:
+            started_at = time.monotonic()
+            await asyncio.wait_for(bus.publish("errors.found", message), timeout=0.5)
+            assert time.monotonic() - started_at < 0.5
+            await asyncio.wait_for(measurement_started.wait(), timeout=0.5)
+            assert observed.is_set()
+
+            # A duplicate error for the same artifact is coalesced while the
+            # first correction is still waiting on its quality snapshot.
+            await asyncio.wait_for(bus.publish("errors.found", message), timeout=0.5)
+            assert len(loop._monitor_tasks) == 1
+        finally:
+            await loop.stop_monitoring()
+            assert not loop._monitor_tasks
+            await bus.unsubscribe(subscription.subscription_id)
+
+    @pytest.mark.asyncio
+    async def test_critical_error_loops_when_not_fixed(self, bus, fresh_loop, tmp_path):
         """If CODER output doesn't claim a fix, the loop should iterate."""
         mock_lifecycle = MockLifecycleManager(
             outputs={"CODER": "I looked at the code but could not determine the issue."}
@@ -238,10 +316,20 @@ class TestAutoCorrection:
             BusMessage(
                 message_id="msg2",
                 source_agent="BUG_HUNTER_RUNTIME",
-                payload={"severity": "CRITICAL", "artifact_id": "retry.py"},
+                payload={
+                    "severity": "CRITICAL",
+                    "artifact_id": "retry.py",
+                    "project_path": str(tmp_path),
+                },
             ),
         )
-        await asyncio.sleep(0.5)
+        await wait_until(
+            lambda: any(
+                c["artifact_id"] == "retry.py" and c["iterations"] == 5
+                for c in loop.get_status()["corrections"]
+            )
+            and "META_ANALYZER" in [call[0] for call in mock_lifecycle.spawn_calls]
+        )
 
         status = loop.get_status()
         loop_corr = [c for c in status["corrections"] if c["artifact_id"] == "retry.py"]
@@ -272,6 +360,13 @@ class TestAutoCorrection:
             )
             await asyncio.sleep(0.1)
 
+        await wait_until(
+            lambda: any(
+                c["artifact_id"] == "loop.py" and c["iterations"] == 5
+                for c in loop.get_status()["corrections"]
+            )
+            and "META_ANALYZER" in [call[0] for call in mock_lifecycle.spawn_calls]
+        )
         status = loop.get_status()
         loop_corr = [c for c in status["corrections"] if c["artifact_id"] == "loop.py"]
         assert loop_corr
@@ -310,7 +405,7 @@ class TestAutoCorrection:
                 payload={"review_id": review.review_id},
             ),
         )
-        await asyncio.sleep(0.3)
+        await wait_until(lambda: len(mock_lifecycle.spawn_calls) == 2)
 
         status = loop.get_status()
         assert any(c["trigger"] == "review_changes" for c in status["corrections"])

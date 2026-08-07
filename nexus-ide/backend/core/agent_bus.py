@@ -396,7 +396,7 @@ class AgentBus:
             with sqlite3.connect(str(self._db_path), check_same_thread=False) as conn:
                 conn.execute(
                     """
-                    INSERT INTO bus_messages
+                    INSERT OR IGNORE INTO bus_messages
                     (message_id, topic, source_agent, target_agents, payload, timestamp, priority, ttl_seconds)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,

@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/tests-passing-brightgreen?style=for-the-badge" alt="Tests">
   <img src="https://img.shields.io/badge/OpenRouter-integrated-8A2BE2?style=for-the-badge" alt="OpenRouter">
-  <img src="https://img.shields.io/badge/multi--agent-7_specialists-FF6B6B?style=for-the-badge" alt="Multi-agent">
+  <img src="https://img.shields.io/badge/multi--agent-24_specialists-FF6B6B?style=for-the-badge" alt="Multi-agent">
   <img src="https://img.shields.io/badge/thinking-live%20feed-00BFFF?style=for-the-badge" alt="Thinking">
 </p>
 
@@ -227,9 +227,9 @@ Arquitetura **defense-in-depth** com 8 camadas de proteção:
 
 ## Testes
 
-| Suite | Tecnologia | Como executar | Cobertura |
-|-------|-----------|---------------|-----------|
-| **Backend** | pytest + coverage | `python -m pytest backend/tests/ --cov=backend -q` ou `make test-backend` | Upload (6 casos), CSP, locks, agentes, orquestrador, ferramentas, cache, token management |
+| Suite | Tecnologia | Como executar | Cobertura (medida 2026-07-25) |
+|-------|-----------|---------------|-------------------------------|
+| **Backend** | pytest + coverage | `python -m pytest backend/tests/ --cov=backend -q` ou `make test-backend` | ~8% linha (baseline). Alvo: 80%+ |
 | **Frontend** | Vitest | `cd frontend && npm test` | 4 ficheiros para widgets (RequestFlow, TokenTimeline, AgentActivity, MetricsGrid) |
 | **E2E** | Playwright | `cd e2e && npx playwright test` | Fluxos críticos de ponta a ponta |
 | **Lint** | ruff + mypy + eslint | `make lint` | Qualidade de código, tipos, estilo |

@@ -15,8 +15,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Short timeout for every individual check (seconds)
-_CHECK_TIMEOUT = 0.5
+# Short timeout for every individual check (seconds). Redis-backed file locks
+# may spend up to one second discovering that Redis is unavailable before the
+# local file-lock fallback can run, so 0.5s produced a false degraded signal.
+_CHECK_TIMEOUT = 1.25
 
 
 class HealthChecker:
@@ -49,16 +51,22 @@ class HealthChecker:
             "file_locks": self._check_file_locks(),
         }
 
-        results: dict[str, Any] = {}
-        for name, coro in coros.items():
+        async def run_check(name: str, coro: Any) -> tuple[str, dict[str, Any]]:
             try:
-                results[name] = await asyncio.wait_for(coro, timeout=_CHECK_TIMEOUT)
+                return name, await asyncio.wait_for(coro, timeout=_CHECK_TIMEOUT)
             except TimeoutError:
-                results[name] = {"status": "timeout", "healthy": False}
+                result = {"status": "timeout", "healthy": False}
                 logger.warning("Health check timeout: %s", name)
             except Exception as exc:
-                results[name] = {"status": f"error: {exc}", "healthy": False}
+                result = {"status": f"error: {exc}", "healthy": False}
                 logger.warning("Health check error: %s — %s", name, exc)
+            return name, result
+
+        # The checks are independent. Running them sequentially made a slow
+        # provider/lock probe block every other health signal and inflated the
+        # endpoint latency, which in turn made the UI look disconnected.
+        checked = await asyncio.gather(*(run_check(name, coro) for name, coro in coros.items()))
+        results = dict(checked)
 
         elapsed_ms = round((time.monotonic() - started) * 1000, 2)
         overall = (
@@ -145,7 +153,7 @@ class HealthChecker:
         tmp_file = Path(tempfile.gettempdir()) / f"nexus_health_lock_{time.time()}.tmp"
         try:
             await asyncio.wait_for(
-                manager.acquire_write_lock(str(tmp_file), "health-check", timeout=2.0),
+                manager.acquire_write_lock(str(tmp_file), "health-check", timeout=_CHECK_TIMEOUT),
                 timeout=_CHECK_TIMEOUT,
             )
             manager.release_lock(str(tmp_file), "health-check")

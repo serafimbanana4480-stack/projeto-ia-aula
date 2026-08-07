@@ -50,7 +50,7 @@ class Skill:
     objective_template: str
     variables: list[SkillVariable] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
-    max_iterations: int = 5
+    max_iterations: int = 1000
     estimated_seconds: int = 60
 
     def render_objective(self, values: dict[str, str]) -> str:
@@ -300,7 +300,7 @@ SKILL_CATALOGUE: list[Skill] = [
             ),
         ],
         tags=["api", "design", "rest", "graphql"],
-        max_iterations=5,
+        max_iterations=1000,
         estimated_seconds=90,
     ),
     Skill(
@@ -334,7 +334,7 @@ SKILL_CATALOGUE: list[Skill] = [
             ),
         ],
         tags=["data", "db", "schema"],
-        max_iterations=5,
+        max_iterations=1000,
         estimated_seconds=90,
     ),
     Skill(
@@ -548,7 +548,7 @@ SKILL_CATALOGUE: list[Skill] = [
             ),
         ],
         tags=["bug", "fix", "debug"],
-        max_iterations=5,
+        max_iterations=1000,
         estimated_seconds=75,
     ),
 ]

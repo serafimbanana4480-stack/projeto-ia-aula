@@ -1,623 +1,420 @@
 "use client";
 
-import { useMemo } from "react";
-import { motion } from "framer-motion";
+/**
+ * Right rail — the state of the current session.
+ *
+ * WHAT CHANGED AND WHY
+ *
+ * 1. TABS INSTEAD OF A STACK. Four cards of equal visual weight competed for
+ *    attention, so nothing had priority. Grouping them under Sessão /
+ *    Contexto / Ferramentas puts one concern on screen at a time and gives the
+ *    session card the room to be the hero it should be.
+ *
+ * 2. COST IS SHOWN. `modelStore` already carries per-million pricing and the
+ *    telemetry store already carries token counts; nothing multiplied them. In
+ *    an AI IDE, spend is the number a user wants visible at all times, and it
+ *    was the one number the panel omitted.
+ *
+ * 3. ONE MODEL SELECTOR, NOT TWO. The full switcher lived here *and* in the
+ *    chat header, which meant two controls could disagree about the active
+ *    model. The rail now reports the active model and links to the picker.
+ *
+ * 4. ONE EMPTY STATE. The same unknown value rendered as "não reportada",
+ *    "Não reportado", "—" and "não reportado" within a single component.
+ *    Everything routes through `EMPTY` from lib/format.
+ */
+
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
-  Zap,
-  Coins,
-  TrendingUp,
   Activity,
   Brain,
-  Wrench,
-  CircleDot,
-  CheckCircle2,
-  AlertCircle,
-  ChevronDown,
-  Layers,
+  Clock3,
+  Coins,
+  FolderGit2,
   Server,
-  HardDrive,
-  Sparkles,
+  Settings2,
+  Wrench,
+  Zap,
 } from "lucide-react";
+
 import { useModelStore } from "../../stores/modelStore";
 import { useMetricsStore } from "../../stores/metricsStore";
 import { useToolsStore } from "../../stores/toolsStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useModeStore } from "../../stores/modeStore";
+import { useChatTelemetryStore } from "../../stores/chatTelemetryStore";
+import { Surface } from "../ui/Surface";
+import { CardEmpty, CardStat } from "../ui/Card";
+import ContextUsagePanel from "./ContextUsagePanel";
+import {
+  EMPTY,
+  formatCompact,
+  formatContext,
+  formatLatency,
+  formatUsd,
+} from "../../lib/format";
 
-/* -------------------------------------------------------------------------
- * Cloud model catalog (OpenCode Go provider)
- * No local ollama — every model is cloud-served.
- * ------------------------------------------------------------------------- */
-interface CloudModel {
-  id: string;
-  tier: "micro" | "fast" | "coder" | "reasoning" | "deep";
-  name: string;
-  provider: string;
-  latencyMs: number;
-  contextWindow: number;
-  costPer1kIn: number;
-  costPer1kOut: number;
-  free: boolean;
-  description: string;
-  color: string;
-  badge: string;
-}
+/** Fallback tint when a model reports no colour of its own. A token rather
+ *  than a literal so it follows the active theme. */
+const DEFAULT_MODEL_COLOR = "var(--nx-accent-bright)";
 
-const CLOUD_MODELS: CloudModel[] = [
-  {
-    id: "mimo-v2.5",
-    tier: "micro",
-    name: "MiMo V2.5",
-    provider: "OpenCode Go",
-    latencyMs: 200,
-    contextWindow: 32_000,
-    costPer1kIn: 0.00005,
-    costPer1kOut: 0.00015,
-    free: false,
-    description: "Ultra-rápido para classificação, routing e Q&A simples.",
-    color: "#94a3b8",
-    badge: "MICRO",
-  },
-  {
-    id: "deepseek-v4-flash",
-    tier: "fast",
-    name: "DeepSeek V4 Flash",
-    provider: "OpenCode Go",
-    latencyMs: 600,
-    contextWindow: 128_000,
-    costPer1kIn: 0.00025,
-    costPer1kOut: 0.00075,
-    free: false,
-    description: "Respostas rápidas e fiáveis. Ideal para formatação.",
-    color: "#60a5fa",
-    badge: "FAST",
-  },
-  {
-    id: "kimi-k2.7-code",
-    tier: "coder",
-    name: "Kimi K2.7 Code",
-    provider: "OpenCode Go",
-    latencyMs: 1200,
-    contextWindow: 200_000,
-    costPer1kIn: 0.0,
-    costPer1kOut: 0.0,
-    free: true,
-    description: "Especialista em código. Refactor, debug, generate.",
-    color: "#a78bfa",
-    badge: "CODER",
-  },
-  {
-    id: "glm-5.2",
-    tier: "reasoning",
-    name: "GLM 5.2 (Thinking)",
-    provider: "OpenCode Go",
-    latencyMs: 2000,
-    contextWindow: 128_000,
-    costPer1kIn: 0.0,
-    costPer1kOut: 0.0,
-    free: true,
-    description: "Raciocínio multi-passo com thinking explícito.",
-    color: "#fbbf24",
-    badge: "REASON",
-  },
-  {
-    id: "deepseek-v4-pro",
-    tier: "deep",
-    name: "DeepSeek V4 Pro",
-    provider: "OpenCode Go",
-    latencyMs: 4000,
-    contextWindow: 256_000,
-    costPer1kIn: 0.002,
-    costPer1kOut: 0.008,
-    free: false,
-    description: "Análise profunda e arquitetura. Top-tier quality.",
-    color: "#f472b6",
-    badge: "DEEP",
-  },
+type Tab = "sessao" | "contexto" | "ferramentas";
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "sessao", label: "Sessão" },
+  { id: "contexto", label: "Contexto" },
+  { id: "ferramentas", label: "Ferramentas" },
 ];
 
-/* -------------------------------------------------------------------------
- * Helpers
- * ------------------------------------------------------------------------- */
-function formatNumber(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toFixed(0);
+/**
+ * Cost of the exchange so far, from token counts and the model's own pricing.
+ *
+ * Returns `null` rather than 0 when pricing is unknown: "$0" is a claim that
+ * this was free, which for a paid model is simply wrong, and a wrong number is
+ * worse than an admitted gap.
+ */
+function sessionCost(
+  inputTokens: number,
+  outputTokens: number,
+  inputPricePer1M: number | null | undefined,
+  outputPricePer1M: number | null | undefined,
+): number | null {
+  if (inputPricePer1M == null && outputPricePer1M == null) return null;
+  const input = ((inputPricePer1M ?? 0) * inputTokens) / 1_000_000;
+  const output = ((outputPricePer1M ?? 0) * outputTokens) / 1_000_000;
+  return input + output;
 }
 
-function formatCost(n: number): string {
-  if (n === 0) return "$0.00";
-  if (n < 0.01) return `$${n.toFixed(4)}`;
-  return `$${n.toFixed(3)}`;
-}
-
-function formatContextBar(used: number, total: number): { pct: number; color: string } {
-  const pct = Math.min(100, (used / total) * 100);
-  let color = "bg-emerald-500";
-  if (pct > 75) color = "bg-amber-500";
-  if (pct > 90) color = "bg-rose-500";
-  return { pct, color };
-}
-
-/** Derive a category from a tool's name (used for skill aggregation). */
-function deriveCategory(toolName: string): string {
-  const lower = toolName.toLowerCase();
-  if (/(read|write|file|list|delete|move|copy|append|search|index)/.test(lower)) return "file";
-  if (/(git|commit|push|pull|diff)/.test(lower)) return "git";
-  if (/(execute|run_code|test|lint|format|quality)/.test(lower)) return "code";
-  if (/(web|fetch|search|scrape|url)/.test(lower)) return "web";
-  if (/(docker|compose)/.test(lower)) return "docker";
-  if (/(db|database|sql|query)/.test(lower)) return "db";
-  if (/(shell|bash|command|run_)/.test(lower)) return "shell";
-  if (/(memory|recall|store|context)/.test(lower)) return "memory";
-  if (/(agent|consult|bus)/.test(lower)) return "agent";
-  if (/(notify|webhook|email|alert)/.test(lower)) return "notification";
-  if (/(api|http|request)/.test(lower)) return "api";
-  if (/(scaffold|project|template)/.test(lower)) return "scaffold";
-  if (/(doc|readme|report)/.test(lower)) return "doc";
-  if (/(analyze|data|chart)/.test(lower)) return "data";
-  return "other";
-}
-
-/* -------------------------------------------------------------------------
- * Main RightPanel
- * ------------------------------------------------------------------------- */
 export default function RightPanel() {
-  const { activeModel, setActiveModel, models } = useModelStore();
-  const { tools } = useToolsStore();
-  const metrics = useMetricsStore((s) => s.metrics);
-  const backendOnline = useMetricsStore((s) => s.backendOnline);
-  const currentProject = useProjectStore((s) => s.currentProject);
-  const currentMode = useModeStore((s) => s.currentMode);
+  const { activeModel, models } = useModelStore();
+  const { tools, toolsError, loadTools } = useToolsStore();
+  const metrics = useMetricsStore((state) => state.metrics);
+  const backendOnline = useMetricsStore((state) => state.backendOnline);
+  const currentProject = useProjectStore((state) => state.currentProject);
+  const currentMode = useModeStore((state) => state.currentMode);
+  const streaming = useChatTelemetryStore((state) => state.streaming);
+  const usage = useChatTelemetryStore((state) => state.usage);
+  const startedAt = useChatTelemetryStore((state) => state.startedAt);
 
-  // Resolve active model from cloud catalog
-  const activeCloudModel = useMemo<CloudModel>(() => {
-    const fromStore = models.find((m) => m.id === activeModel);
-    if (fromStore) {
-      const matched = CLOUD_MODELS.find((m) => m.id === fromStore.id);
-      if (matched) return matched;
-    }
-    return CLOUD_MODELS.find((m) => m.id === activeModel) || CLOUD_MODELS[1]; // fast
-  }, [activeModel, models]);
+  const [tab, setTab] = useState<Tab>("sessao");
+  const [now, setNow] = useState(() => Date.now());
 
-  // Token usage & cost
-  const usage = useMemo(() => {
-    const msgStats = metrics?.message_stats;
-    const inputTokens = msgStats?.tokens_in_total ?? 0;
-    const outputTokens = msgStats?.tokens_out_total ?? 0;
-    const totalTokens = inputTokens + outputTokens;
-    const cost =
-      (inputTokens / 1000) * activeCloudModel.costPer1kIn +
-      (outputTokens / 1000) * activeCloudModel.costPer1kOut;
-    return {
-      inputTokens,
-      outputTokens,
-      totalTokens,
-      cost,
-      contextPct: (totalTokens / activeCloudModel.contextWindow) * 100,
-    };
-  }, [metrics, activeCloudModel]);
+  useEffect(() => {
+    void loadTools();
+  }, [loadTools]);
 
-  // Aggregate tools by tag for skill display
-  const skillsByTag = useMemo(() => {
-    const map: Record<string, { count: number; enabled: number }> = {};
-    for (const tool of tools) {
-      // Tool schema doesn't have category/uses — derive category from name
-      const cat = deriveCategory(tool.name);
-      if (!map[cat]) map[cat] = { count: 0, enabled: 0 };
-      map[cat].count += 1;
-      if (tool.enabled) map[cat].enabled += 1;
-    }
-    return map;
-  }, [tools]);
+  useEffect(() => {
+    if (!streaming) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [streaming]);
 
-  const totalTools = tools.length;
-  const enabledTools = tools.filter((t) => t.enabled).length;
+  // The metrics payload is authoritative while a request is running. The
+  // selector remains the user's choice for the next request.
+  const selectedModelId =
+    metrics?.active_model && metrics.active_model !== "none"
+      ? metrics.active_model
+      : activeModel;
+  const selectedModel = models.find((model) => model.id === selectedModelId);
+  const modelName =
+    selectedModel?.name ||
+    (selectedModelId && selectedModelId !== "none" ? selectedModelId : EMPTY);
+  const modelColor = selectedModel?.color || DEFAULT_MODEL_COLOR;
+
+  const contextWindow =
+    selectedModel?.contextWindow && selectedModel.contextWindow > 0
+      ? selectedModel.contextWindow
+      : null;
+
+  const inputTokens = usage?.input_tokens ?? metrics?.message_stats?.tokens_in_total ?? 0;
+  const outputTokens = usage?.output_tokens ?? metrics?.message_stats?.tokens_out_total ?? 0;
+  const totalTokens = usage?.total_tokens ?? inputTokens + outputTokens;
+
+  const cost = useMemo(
+    () =>
+      sessionCost(
+        inputTokens,
+        outputTokens,
+        selectedModel?.inputPricePer1M,
+        selectedModel?.outputPricePer1M,
+      ),
+    [inputTokens, outputTokens, selectedModel],
+  );
+
+  // While streaming, measure the live rate; otherwise fall back to the
+  // system-wide figure. `startedAt` can be in the same second, so the divisor
+  // is floored at 1 to avoid a nonsensical spike on the first tick.
+  const outputRate =
+    streaming && usage?.output_tokens && startedAt
+      ? usage.output_tokens / Math.max((now - startedAt) / 1_000, 1)
+      : metrics?.tokens_per_second;
+
+  const enabledTools = tools.filter((tool) => tool.enabled).length;
+
+  const contextPercent = contextWindow
+    ? Math.min(100, (totalTokens / contextWindow) * 100)
+    : null;
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-y-auto thin-scrollbar p-3">
-      {/* =================================================================
-       * ACTIVE MODEL CARD
-       * ================================================================= */}
-      <motion.div
-        initial={{ opacity: 0, x: 20 }}
-        animate={{ opacity: 1, x: 0 }}
-        className="card relative overflow-hidden p-4"
-      >
-        {/* Animated gradient accent strip */}
-        <div
-          className="absolute inset-x-0 top-0 h-0.5"
-          style={{
-            background: `linear-gradient(90deg, transparent, ${activeCloudModel.color}, transparent)`,
-          }}
-        />
-
-        <div className="mb-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <CircleDot
-              className="h-3 w-3 animate-pulse"
-              style={{ color: activeCloudModel.color }}
-            />
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
-              Modelo Ativo
-            </span>
-          </div>
+    <div className="flex h-full flex-col gap-3 overflow-y-auto p-3 thin-scrollbar">
+      {/* ── Active model: the one card that is always visible ───────────── */}
+      <Surface elevation={2} padding="md" live={streaming}>
+        <div className="flex items-start gap-3">
           <span
-            className="rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-white"
-            style={{ backgroundColor: activeCloudModel.color }}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-rim"
+            // `color-mix`, not a concatenated `${hex}22` alpha suffix: the
+            // fallback is now a CSS variable, and `var(--x)22` is not a colour.
+            style={{ backgroundColor: `color-mix(in srgb, ${modelColor} 14%, transparent)` }}
           >
-            {activeCloudModel.badge}
+            <Brain className="h-5 w-5" style={{ color: modelColor }} />
           </span>
-        </div>
-
-        {/* Model name + provider */}
-        <div className="mb-3 flex items-center gap-3">
-          <div
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
-            style={{
-              background: `${activeCloudModel.color}20`,
-              boxShadow: `0 0 12px ${activeCloudModel.color}30`,
-            }}
-          >
-            <Brain className="h-5 w-5" style={{ color: activeCloudModel.color }} />
-          </div>
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-semibold text-nexus-text">
-              {activeCloudModel.name}
+            <div className="flex items-center gap-2">
+              <span
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                  streaming
+                    ? "bg-nexus-accent animate-pulse-subtle"
+                    : backendOnline
+                      ? "bg-emerald-400"
+                      : "bg-nexus-faint"
+                }`}
+              />
+              <span className="truncate text-[13px] font-semibold text-nexus-text">
+                {modelName}
+              </span>
             </div>
-            <div className="flex items-center gap-1.5 text-[10px] text-nexus-muted">
-              <Server className="h-2.5 w-2.5" />
-              <span>{activeCloudModel.provider}</span>
-              {activeCloudModel.free ? (
-                <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-400">
-                  FREE
-                </span>
-              ) : (
-                <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-amber-400">
-                  PAID
-                </span>
-              )}
+            <div className="mt-0.5 flex items-center gap-1 text-[10px] text-nexus-faint">
+              <Server className="h-3 w-3 shrink-0" />
+              <span className="truncate">{selectedModel?.provider || EMPTY}</span>
             </div>
           </div>
+          <Link
+            href="/models"
+            title="Escolher modelo"
+            aria-label="Escolher modelo"
+            className="shrink-0 rounded-lg border border-nexus-border p-1.5 text-nexus-muted shadow-rim transition-colors hover:border-[rgba(124,106,251,0.45)] hover:text-nexus-text"
+          >
+            <Settings2 className="h-3.5 w-3.5" />
+          </Link>
         </div>
 
-        {/* Description */}
-        <div className="mb-3 text-[11px] leading-relaxed text-nexus-muted">
-          {activeCloudModel.description}
-        </div>
-
-        {/* Context window usage bar */}
-        <div className="mb-1.5 flex items-center justify-between text-[10px]">
-          <span className="text-nexus-muted">Contexto</span>
-          <span className="font-mono font-semibold text-nexus-text">
-            {formatNumber(usage.totalTokens)} / {formatNumber(activeCloudModel.contextWindow)}
-          </span>
-        </div>
-        <div className="mb-3 h-1.5 overflow-hidden rounded-full bg-nexus-bg/80">
-          <motion.div
-            initial={{ width: 0 }}
-            animate={{ width: `${Math.min(100, usage.contextPct)}%` }}
-            transition={{ duration: 0.5, ease: "easeOut" }}
-            className={`h-full ${formatContextBar(usage.totalTokens, activeCloudModel.contextWindow).color}`}
-          />
-        </div>
-
-        {/* Stats row */}
-        <div className="grid grid-cols-3 gap-1.5">
-          <Stat
-            icon={<Zap className="h-3 w-3 text-yellow-400" />}
-            label="Latência"
-            value={activeCloudModel.latencyMs < 1000 ? `${activeCloudModel.latencyMs}ms` : `${(activeCloudModel.latencyMs / 1000).toFixed(1)}s`}
-          />
-          <Stat
-            icon={<Activity className="h-3 w-3 text-nexus-accent" />}
-            label="In/Out"
-            value={`${formatNumber(usage.inputTokens)}/${formatNumber(usage.outputTokens)}`}
-          />
-          <Stat
-            icon={<Coins className="h-3 w-3 text-emerald-400" />}
+        {/* Cost first: it is the figure that changes behaviour. */}
+        <div className="mt-3 grid grid-cols-3 gap-1.5">
+          <CardStat
             label="Custo"
-            value={formatCost(usage.cost)}
-          />
-        </div>
-
-        {!backendOnline && (
-          <div className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[10px] text-amber-400">
-            <AlertCircle className="h-3 w-3 shrink-0" />
-            <span>Backend offline — dados em cache</span>
-          </div>
-        )}
-      </motion.div>
-
-      {/* =================================================================
-       * MODEL SWITCHER
-       * ================================================================= */}
-      <motion.div
-        initial={{ opacity: 0, x: 20 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ delay: 0.05 }}
-        className="card p-3"
-      >
-        <div className="mb-2.5 flex items-center gap-2">
-          <Layers className="h-3 w-3 text-nexus-muted" />
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
-            Trocar Modelo
-          </span>
-        </div>
-        <div className="space-y-1.5">
-          {CLOUD_MODELS.map((model) => {
-            const isActive = activeCloudModel.id === model.id;
-            return (
-              <button
-                key={model.id}
-                onClick={() => setActiveModel(model.id)}
-                className={`group flex w-full items-center gap-2.5 rounded-lg border p-2 text-left transition-all ${
-                  isActive
-                    ? "border-nexus-accent/50 bg-nexus-accent/5"
-                    : "border-nexus-border/50 bg-nexus-bg/40 hover:border-nexus-muted/30 hover:bg-nexus-bg/60"
-                }`}
-              >
-                <div
-                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
-                  style={{
-                    background: `${model.color}20`,
-                    color: model.color,
-                  }}
-                >
-                  <Brain className="h-3.5 w-3.5" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="truncate text-xs font-semibold text-nexus-text">
-                      {model.name}
-                    </span>
-                    {model.free && (
-                      <span className="rounded bg-emerald-500/20 px-1 py-0.5 text-[8px] font-bold text-emerald-400">
-                        FREE
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 text-[9px] text-nexus-muted">
-                    <span>{model.tier}</span>
-                    <span>•</span>
-                    <span>{model.latencyMs}ms</span>
-                    <span>•</span>
-                    <span>{formatNumber(model.contextWindow)} ctx</span>
-                  </div>
-                </div>
-                {isActive && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-nexus-accent" />}
-              </button>
-            );
-          })}
-        </div>
-      </motion.div>
-
-      {/* =================================================================
-       * SKILLS / TOOLS
-       * ================================================================= */}
-      <motion.div
-        initial={{ opacity: 0, x: 20 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ delay: 0.1 }}
-        className="card p-3"
-      >
-        <div className="mb-2.5 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Wrench className="h-3 w-3 text-nexus-muted" />
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
-              Skills & Tools
-            </span>
-          </div>
-          <span className="text-[10px] font-mono text-nexus-muted">
-            {enabledTools}/{totalTools}
-          </span>
-        </div>
-
-        {/* Capability tags */}
-        <div className="mb-2 flex flex-wrap gap-1">
-          {Object.entries(skillsByTag)
-            .sort((a, b) => b[1].count - a[1].count)
-            .slice(0, 8)
-            .map(([cat, stats]) => (
-              <div
-                key={cat}
-                className={`rounded-md px-2 py-1 text-[9px] font-medium ${
-                  stats.enabled > 0
-                    ? "bg-nexus-accent/15 text-nexus-accent"
-                    : "bg-nexus-bg/60 text-nexus-muted"
-                }`}
-                title={`${stats.count} tools, ${stats.enabled} enabled`}
-              >
-                {cat} <span className="opacity-60">·{stats.count}</span>
-              </div>
-            ))}
-        </div>
-
-        {/* Tools list (collapsed by default) */}
-        <details className="group">
-          <summary className="flex cursor-pointer items-center justify-between text-[10px] text-nexus-muted hover:text-nexus-text">
-            <span>Ver todas as {totalTools} tools</span>
-            <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
-          </summary>
-          <div className="mt-2 max-h-48 space-y-0.5 overflow-y-auto pr-1 thin-scrollbar">
-            {tools.map((tool) => (
-              <div
-                key={tool.name}
-                className="flex items-center justify-between rounded px-2 py-1 text-[10px] hover:bg-nexus-bg/40"
-              >
-                <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                  <CircleDot
-                    className={`h-2 w-2 shrink-0 ${tool.enabled ? "text-emerald-400" : "text-gray-500"}`}
-                  />
-                  <span className="truncate text-nexus-text">{tool.name}</span>
-                </div>
-                <span className="text-[9px] text-nexus-muted">
-                  {/* uses count not available in current Tool type */}
-                </span>
-              </div>
-            ))}
-          </div>
-        </details>
-      </motion.div>
-
-      {/* =================================================================
-       * PROJECT & MODE CONTEXT
-       * ================================================================= */}
-      <motion.div
-        initial={{ opacity: 0, x: 20 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ delay: 0.12 }}
-        className="card p-3"
-      >
-        <div className="mb-2.5 flex items-center gap-2">
-          <Sparkles className="h-3 w-3 text-nexus-accent" />
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
-            Contexto da IA
-          </span>
-        </div>
-        <div className="space-y-1.5">
-          {/* Project */}
-          <div className="flex items-center gap-2 rounded-md bg-nexus-bg/40 px-2 py-1.5">
-            <HardDrive className="h-3 w-3 shrink-0 text-nexus-muted" />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[11px] font-medium text-nexus-text">
-                {currentProject?.name ?? "Sem projeto"}
-              </div>
-              <div className="truncate text-[9px] text-nexus-muted">
-                {currentProject?.path ?? "—"}
-              </div>
-            </div>
-          </div>
-          {/* Mode */}
-          <div className="flex items-center gap-2 rounded-md bg-nexus-bg/40 px-2 py-1.5">
-            <Activity className="h-3 w-3 shrink-0 text-nexus-muted" />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[11px] font-medium text-nexus-text">
-                Modo: {currentMode || "auto"}
-              </div>
-              <div className="truncate text-[9px] text-nexus-muted">
-                {totalTools} tools · {formatNumber(usage.totalTokens)} tokens
-              </div>
-            </div>
-          </div>
-        </div>
-      </motion.div>
-
-      {/* =================================================================
-       * SYSTEM TOOLS (recent integrations)
-       * ================================================================= */}
-      <motion.div
-        initial={{ opacity: 0, x: 20 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ delay: 0.13 }}
-        className="card p-3"
-      >
-        <div className="mb-2.5 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Server className="h-3 w-3 text-nexus-muted" />
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
-              System Tools
-            </span>
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-1.5">
-          <SystemToolBadge name="Docker" enabled={tools.some((t) => t.name.startsWith("docker"))} />
-          <SystemToolBadge name="Database" enabled={tools.some((t) => t.name.startsWith("db_"))} />
-          <SystemToolBadge name="Git" enabled={tools.some((t) => t.name.startsWith("git_"))} />
-          <SystemToolBadge name="API" enabled={tools.some((t) => t.name === "api_request")} />
-          <SystemToolBadge name="Tests" enabled={tools.some((t) => t.name === "run_tests")} />
-          <SystemToolBadge name="Lint" enabled={tools.some((t) => t.name === "run_lint" || t.name === "format_code")} />
-          <SystemToolBadge name="Notify" enabled={tools.some((t) => t.name.startsWith("send_") || t.name === "show_desktop_notification")} />
-          <SystemToolBadge name="Quality" enabled={tools.some((t) => t.name === "type_check")} />
-        </div>
-      </motion.div>
-
-      {/* =================================================================
-       * SESSION STATS
-       * ================================================================= */}
-      <motion.div
-        initial={{ opacity: 0, x: 20 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ delay: 0.15 }}
-        className="card p-3"
-      >
-        <div className="mb-2.5 flex items-center gap-2">
-          <TrendingUp className="h-3 w-3 text-nexus-muted" />
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
-            Sessão
-          </span>
-        </div>
-        <div className="grid grid-cols-2 gap-1.5">
-          <Stat
-            label="Mensagens"
-            value={formatNumber(metrics?.message_stats?.total_messages ?? 0)}
-          />
-          <Stat
-            label="Requests"
-            value={formatNumber(metrics?.requests_total ?? 0)}
-          />
-          <Stat
-            label="T/s"
-            value={
-              metrics?.tokens_per_second
-                ? metrics.tokens_per_second.toFixed(1)
-                : "0"
+            value={cost != null ? formatUsd(cost) : EMPTY}
+            hint={
+              cost != null
+                ? "Estimado a partir dos tokens e do preço do modelo"
+                : "Preço deste modelo não reportado pelo provider"
             }
           />
-          <Stat
-            label="Custo total"
-            value={formatCost(usage.cost)}
+          <CardStat
+            label="Latência"
+            value={formatLatency(metrics?.avg_latency_ms)}
+            hint="Média reportada pelo backend"
+          />
+          <CardStat
+            label="Débito"
+            value={outputRate != null ? `${outputRate.toFixed(1)} t/s` : EMPTY}
+            hint={streaming ? "Medido nesta resposta" : "Média do sistema"}
           />
         </div>
-      </motion.div>
-    </div>
-  );
-}
 
-/* -------------------------------------------------------------------------
- * Stat — compact metric tile
- * ------------------------------------------------------------------------- */
-function Stat({
-  icon,
-  label,
-  value,
-}: {
-  icon?: React.ReactNode;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="rounded-lg bg-nexus-bg/60 p-1.5 text-center">
-      {icon && <div className="mx-auto mb-0.5 flex justify-center">{icon}</div>}
-      <div className="text-[9px] uppercase tracking-wider text-nexus-muted">
-        {label}
-      </div>
-      <div className="truncate text-[11px] font-bold text-nexus-text">
-        {value}
-      </div>
-    </div>
-  );
-}
+        <div className="mt-3">
+          <div className="mb-1.5 flex items-center justify-between text-[10px]">
+            <span className="text-nexus-faint">Janela de contexto</span>
+            <span className="font-mono tabular-nums text-nexus-muted">
+              {contextWindow
+                ? `${formatCompact(totalTokens)} / ${formatContext(contextWindow)}`
+                : EMPTY}
+            </span>
+          </div>
+          <div
+            className="nx-inset h-1.5 overflow-hidden rounded-full"
+            role="progressbar"
+            aria-label="Utilização da janela de contexto"
+            aria-valuenow={contextPercent != null ? Math.round(contextPercent) : undefined}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
+            {/* An unknown window renders as an empty track, not a 0% fill —
+                "we don't know" and "you've used none of it" look identical
+                otherwise, and only one of them is safe to act on. */}
+            {contextPercent != null ? (
+              <div
+                className="h-full rounded-full transition-[width,background-color] duration-500"
+                style={{
+                  width: `${contextPercent}%`,
+                  backgroundColor:
+                    contextPercent >= 90
+                      ? "var(--nx-rose)"
+                      : contextPercent >= 70
+                        ? "var(--nx-amber)"
+                        : "var(--nx-accent)",
+                }}
+              />
+            ) : null}
+          </div>
+        </div>
+      </Surface>
 
-/* -------------------------------------------------------------------------
- * SystemToolBadge — visual indicator for a category of tools
- * ------------------------------------------------------------------------- */
-function SystemToolBadge({ name, enabled }: { name: string; enabled: boolean }) {
-  return (
-    <div
-      className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 ${
-        enabled
-          ? "bg-nexus-accent/10 text-nexus-accent"
-          : "bg-nexus-bg/40 text-nexus-muted/50"
-      }`}
-      title={enabled ? `${name} tools disponíveis` : `${name} tools não instaladas`}
-    >
-      <CircleDot
-        className={`h-2 w-2 shrink-0 ${
-          enabled ? "text-emerald-400" : "text-gray-500"
-        }`}
-      />
-      <span className="text-[10px] font-medium">{name}</span>
+      <ContextUsagePanel contextWindow={contextWindow ?? 0} />
+
+      {/* Tabs */}
+      <div className="nx-inset flex gap-1 rounded-xl p-1" role="tablist">
+        {TABS.map((entry) => (
+          <button
+            key={entry.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === entry.id}
+            onClick={() => setTab(entry.id)}
+            className={`flex-1 rounded-lg px-2 py-1.5 text-[11px] font-medium transition-all duration-200 ${
+              tab === entry.id
+                ? "nx-elev-2 text-nexus-text"
+                : "text-nexus-faint hover:text-nexus-muted"
+            }`}
+          >
+            {entry.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "sessao" ? (
+        <Surface elevation={1} padding="sm">
+          <div className="mb-2.5 flex items-center gap-2">
+            <Zap className="h-3 w-3 text-nexus-faint" />
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+              Tokens desta sessão
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <CardStat label="Entrada" value={formatCompact(inputTokens)} />
+            <CardStat label="Saída" value={formatCompact(outputTokens)} />
+            <CardStat
+              label="Raciocínio"
+              value={usage?.reasoning_tokens ? formatCompact(usage.reasoning_tokens) : EMPTY}
+              hint="Tokens de thinking, quando o provider os reporta"
+            />
+            <CardStat
+              label="Cache"
+              value={
+                usage?.cache_read_tokens != null
+                  ? formatCompact(usage.cache_read_tokens)
+                  : EMPTY
+              }
+              hint={
+                usage?.cache_status === "not_reported"
+                  ? "Este provider não reporta uso de cache"
+                  : "Tokens servidos a partir de cache"
+              }
+            />
+          </div>
+          {usage?.source ? (
+            <p className="mt-2 text-[10px] text-nexus-faint">
+              {usage.source === "provider"
+                ? "Valores reportados pelo provider."
+                : "Valores estimados — o provider não reportou uso."}
+            </p>
+          ) : null}
+        </Surface>
+      ) : null}
+
+      {tab === "contexto" ? (
+        <Surface elevation={1} padding="sm">
+          <div className="mb-2.5 flex items-center gap-2">
+            <FolderGit2 className="h-3 w-3 text-nexus-faint" />
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+              Projeto e sessão
+            </span>
+          </div>
+          {currentProject ? (
+            <div className="nx-inset rounded-lg px-2.5 py-2">
+              <div className="truncate text-[12px] font-medium text-nexus-text">
+                {currentProject.name}
+              </div>
+              {currentProject.path ? (
+                <div className="truncate text-[10px] text-nexus-faint">
+                  {currentProject.path}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <CardEmpty icon={<FolderGit2 className="h-3.5 w-3.5" />}>
+              Sem projeto selecionado.
+            </CardEmpty>
+          )}
+
+          <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+            <CardStat label="Modo" value={currentMode || "auto"} />
+            <CardStat
+              label="Sessões ativas"
+              value={metrics?.active_sessions ?? EMPTY}
+            />
+          </div>
+        </Surface>
+      ) : null}
+
+      {tab === "ferramentas" ? (
+        <Surface elevation={1} padding="sm">
+          <div className="mb-2.5 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Wrench className="h-3 w-3 text-nexus-faint" />
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+                Ferramentas
+              </span>
+            </div>
+            <Link href="/tools" className="text-[10px] text-nexus-accent-bright hover:underline">
+              Gerir
+            </Link>
+          </div>
+
+          {tools.length > 0 ? (
+            <>
+              <div className="grid grid-cols-2 gap-1.5">
+                <CardStat label="Ativas" value={`${enabledTools}/${tools.length}`} />
+                <CardStat
+                  label="Pedidos"
+                  value={formatCompact(metrics?.requests_total ?? 0)}
+                />
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1">
+                {tools
+                  .filter((tool) => tool.enabled)
+                  .slice(0, 12)
+                  .map((tool) => (
+                    <span key={tool.name} className="tool-chip">
+                      {tool.name}
+                    </span>
+                  ))}
+              </div>
+            </>
+          ) : (
+            <CardEmpty icon={<Activity className="h-3.5 w-3.5" />}>
+              {toolsError || "Nenhuma ferramenta reportada pelo backend."}
+            </CardEmpty>
+          )}
+
+          <div className="mt-2 flex items-center gap-1.5 text-[10px] text-nexus-faint">
+            <Clock3 className="h-3 w-3" />
+            {backendOnline ? "Backend ligado" : "Sem ligação ao backend"}
+          </div>
+        </Surface>
+      ) : null}
+
+      {cost != null && cost > 0 ? (
+        <div className="mt-auto flex items-center justify-between rounded-xl border border-nexus-border px-3 py-2 text-[11px] shadow-rim">
+          <span className="flex items-center gap-1.5 text-nexus-faint">
+            <Coins className="h-3.5 w-3.5" />
+            Custo estimado
+          </span>
+          <span className="font-mono font-semibold tabular-nums text-nexus-text">
+            {formatUsd(cost)}
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 }

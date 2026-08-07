@@ -16,14 +16,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from backend.core.agent_state import AgentStateStore
 from backend.middleware.auth import require_auth
-from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 @router.get("/agent-states")
-@limiter.limit("100/minute")
 async def list_agent_states(
     request: Request, auth_user: None = Depends(require_auth)
 ) -> dict[str, list[dict[str, Any]]]:
@@ -60,7 +58,6 @@ async def list_agent_states(
 
 
 @router.get("/agent-states/{agent_name}")
-@limiter.limit("100/minute")
 async def get_agent_brain(
     agent_name: str, request: Request, auth_user: None = Depends(require_auth)
 ) -> dict[str, Any]:
@@ -81,7 +78,6 @@ async def get_agent_brain(
 
 
 @router.post("/agent-states/recall")
-@limiter.limit("60/minute")
 async def recall_memories(
     request: Request,
     agent_name: str,
@@ -123,7 +119,6 @@ async def recall_memories(
 
 
 @router.delete("/agent-states/{agent_name}")
-@limiter.limit("30/minute")
 async def clear_agent_brain(
     request: Request,
     agent_name: str,

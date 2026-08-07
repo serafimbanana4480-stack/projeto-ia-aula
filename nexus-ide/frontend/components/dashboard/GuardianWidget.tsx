@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { apiUrl, authHeaders } from "../../lib/api";
 import { useMetricsStore } from "../../stores/metricsStore";
 import { usePolling } from "../../hooks/usePolling";
@@ -9,9 +9,10 @@ import {
   Wrench,
   Clock,
   CheckCircle2,
-  Loader2,
   AlertTriangle,
 } from "lucide-react";
+import { Surface, SurfaceHeader } from "../ui/Surface";
+import { Badge, StatusDot, Meter, EmptyState, Button } from "../ui/Primitives";
 
 export interface GuardianSuggestion {
   id: string;
@@ -38,14 +39,13 @@ export interface GuardianStatus {
   };
 }
 
-const PRIORITY_CONFIG: Record<
-  GuardianSuggestion["priority"],
-  { color: string; label: string; dot: string }
-> = {
-  critical: { color: "bg-red-500/15 text-red-400 border-red-500/30", label: "Crítico", dot: "bg-red-400" },
-  high: { color: "bg-orange-500/15 text-orange-400 border-orange-500/30", label: "Alta", dot: "bg-orange-400" },
-  medium: { color: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30", label: "Média", dot: "bg-yellow-400" },
-  low: { color: "bg-blue-500/15 text-blue-400 border-blue-500/30", label: "Baixa", dot: "bg-blue-400" },
+type Tone = "neutral" | "info" | "accent" | "success" | "warning" | "danger";
+
+const PRIORITY_CONFIG: Record<GuardianSuggestion["priority"], { tone: Tone; label: string }> = {
+  critical: { tone: "danger", label: "Crítico" },
+  high: { tone: "warning", label: "Alta" },
+  medium: { tone: "warning", label: "Média" },
+  low: { tone: "info", label: "Baixa" },
 };
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -56,19 +56,14 @@ const CATEGORY_LABELS: Record<string, string> = {
   health: "Saúde",
 };
 
-function getHealthIndicator(status: GuardianStatus | null): {
-  color: string;
-  label: string;
-  dot: string;
-} {
-  if (!status || !status.system_health)
-    return { color: "text-gray-500", label: "Desconhecido", dot: "bg-gray-500" };
+function getHealthIndicator(status: GuardianStatus | null): { tone: Tone; label: string } {
+  if (!status || !status.system_health) return { tone: "neutral", label: "Desconhecido" };
   const { cpu_percent, memory_percent, disk_percent } = status.system_health;
   const hasCritical = cpu_percent > 90 || memory_percent > 90 || disk_percent > 90;
   const hasWarning = cpu_percent > 70 || memory_percent > 80 || disk_percent > 80;
-  if (hasCritical) return { color: "text-red-400", label: "Crítico", dot: "bg-red-400" };
-  if (hasWarning) return { color: "text-yellow-400", label: "Aviso", dot: "bg-yellow-400" };
-  return { color: "text-green-400", label: "Saudável", dot: "bg-green-400" };
+  if (hasCritical) return { tone: "danger", label: "Crítico" };
+  if (hasWarning) return { tone: "warning", label: "Aviso" };
+  return { tone: "success", label: "Saudável" };
 }
 
 function formatTimeAgo(timestamp: string): string {
@@ -77,6 +72,59 @@ function formatTimeAgo(timestamp: string): string {
   if (diff < 3600000) return `há ${Math.floor(diff / 60000)}m`;
   if (diff < 86400000) return `há ${Math.floor(diff / 3600000)}h`;
   return `há ${Math.floor(diff / 86400000)}d`;
+}
+
+function percentTone(value: number, warn: number, danger: number): Tone {
+  if (value > danger) return "danger";
+  if (value > warn) return "warning";
+  return "success";
+}
+
+function latencyTone(value: number): Tone {
+  if (value > 1000) return "danger";
+  if (value > 500) return "warning";
+  return "success";
+}
+
+function HealthStat({
+  label,
+  value,
+  percent,
+  tone,
+}: {
+  label: string;
+  value: string;
+  percent?: number;
+  tone: Tone;
+}) {
+  const TONE_TEXT: Record<Tone, string> = {
+    neutral: "text-nexus-text",
+    info: "text-cyan-400",
+    accent: "text-[var(--nx-accent-bright)]",
+    success: "text-emerald-400",
+    warning: "text-amber-400",
+    danger: "text-rose-400",
+  };
+  return (
+    <div className="nx-inset rounded-lg p-2 text-center">
+      <div className="mb-0.5 text-[10px] text-nexus-faint">{label}</div>
+      <div className={`font-mono text-xs font-semibold tabular-nums ${TONE_TEXT[tone]}`}>{value}</div>
+      {percent != null && <Meter value={percent} tone={tone === "neutral" ? undefined : tone} showThresholds={false} height={3} className="mt-1.5" />}
+    </div>
+  );
+}
+
+function WidgetShell({ children }: { children: ReactNode }) {
+  return (
+    <Surface elevation={1} padding="sm">
+      <SurfaceHeader
+        icon={<Shield className="h-4 w-4" />}
+        title="Guardião"
+        subtitle="Sugestões automáticas de manutenção e saúde"
+      />
+      {children}
+    </Surface>
+  );
 }
 
 export default function GuardianWidget() {
@@ -182,39 +230,41 @@ export default function GuardianWidget() {
   const suggestions = (guardian?.suggestions ?? []) as GuardianSuggestion[];
   const pendingCount = guardian?.pending_suggestions ?? 0;
 
-  return (
-    <section
-      className="rounded border border-nexus-border bg-nexus-panel p-3"
-      aria-labelledby="guardian-widget-title"
-    >
-      <div className="mb-3 flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2 min-w-0">
-          <Shield className="h-4 w-4 text-nexus-accent" aria-hidden="true" />
-          <h3 id="guardian-widget-title" className="text-sm font-semibold">
-            Guardião
-          </h3>
-          <span
-            className={`flex items-center gap-1.5 rounded px-2 py-0.5 text-xs border ${health.color}`}
-          >
-            <span className={`h-2 w-2 rounded-full ${health.dot}`} aria-hidden="true" />
-            <span>{health.label}</span>
-          </span>
-          <span className="sr-only">Estado do sistema: {health.label}</span>
+  if (guardianLoading && !guardian) {
+    return (
+      <WidgetShell>
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          <div className="nx-shimmer h-14 rounded-lg" />
+          <div className="nx-shimmer h-14 rounded-lg" />
+          <div className="nx-shimmer h-14 rounded-lg" />
         </div>
-        {pendingCount > 0 && (
-          <span
-            className="rounded bg-nexus-accent/15 px-1.5 py-0.5 text-[10px] text-nexus-accent"
-            aria-label={`${pendingCount} pendentes`}
-          >
-            {pendingCount} pendentes
-          </span>
-        )}
-      </div>
+        <div className="mt-3 space-y-1.5">
+          <div className="nx-shimmer h-12 rounded-lg" />
+          <div className="nx-shimmer h-12 rounded-lg" />
+        </div>
+      </WidgetShell>
+    );
+  }
+
+  return (
+    <Surface elevation={1} padding="sm">
+      <SurfaceHeader
+        icon={<Shield className="h-4 w-4" />}
+        title="Guardião"
+        subtitle="Sugestões automáticas de manutenção e saúde"
+        action={
+          <div className="flex items-center gap-1.5">
+            <StatusDot tone={health.tone} pulse={health.tone === "danger"} />
+            <Badge tone={health.tone}>{health.label}</Badge>
+            {pendingCount > 0 && <Badge tone="accent">{pendingCount} pendentes</Badge>}
+          </div>
+        }
+      />
 
       {!backendOnline && (
         <div
           role="alert"
-          className="mb-2 rounded border border-yellow-500/20 bg-yellow-500/5 px-3 py-1.5 text-xs text-yellow-400 flex items-center gap-2"
+          className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300"
         >
           <AlertTriangle className="h-3 w-3" aria-hidden="true" />
           Backend offline — guardião indisponível
@@ -224,7 +274,7 @@ export default function GuardianWidget() {
       {guardianError && guardian && guardian.running === undefined && (
         <div
           role="alert"
-          className="mb-2 rounded border border-red-500/20 bg-red-500/5 px-3 py-1.5 text-xs text-red-400 flex items-center gap-2"
+          className="mt-3 flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300"
         >
           <AlertTriangle className="h-3 w-3" aria-hidden="true" />
           Falha ao carregar: {guardianError}
@@ -234,153 +284,93 @@ export default function GuardianWidget() {
       {applyError && (
         <div
           role="alert"
-          className="mb-2 rounded border border-red-500/20 bg-red-500/5 px-3 py-1.5 text-xs text-red-400 flex items-center gap-2"
+          className="mt-3 flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300"
         >
           <AlertTriangle className="h-3 w-3" aria-hidden="true" />
           {applyError}
         </div>
       )}
 
-      {guardianLoading ? (
-        <div
-          className="flex h-24 items-center justify-center text-xs text-gray-500"
-          role="status"
-          aria-live="polite"
-        >
-          <Loader2 className="h-4 w-4 animate-spin mr-2" aria-hidden="true" />
-          A carregar…
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {guardian?.system_health && (
-            <div
-              className="grid grid-cols-3 gap-2"
-              role="group"
-              aria-label="Estado do sistema"
-            >
-              <HealthCard
-                label="CPU"
-                value={`${guardian.system_health.cpu_percent.toFixed(0)}%`}
-                tone={percentTone(guardian.system_health.cpu_percent, 50, 80)}
-              />
-              <HealthCard
-                label="RAM"
-                value={`${guardian.system_health.memory_percent.toFixed(0)}%`}
-                tone={percentTone(guardian.system_health.memory_percent, 60, 80)}
-              />
-              <HealthCard
-                label="Latência"
-                value={`${guardian.system_health.avg_latency_ms.toFixed(0)}ms`}
-                tone={latencyTone(guardian.system_health.avg_latency_ms)}
-              />
-            </div>
-          )}
+      <div className="mt-3 space-y-3">
+        {guardian?.system_health && (
+          <div className="grid grid-cols-3 gap-2" role="group" aria-label="Estado do sistema">
+            <HealthStat
+              label="CPU"
+              value={`${guardian.system_health.cpu_percent.toFixed(0)}%`}
+              percent={guardian.system_health.cpu_percent}
+              tone={percentTone(guardian.system_health.cpu_percent, 50, 80)}
+            />
+            <HealthStat
+              label="RAM"
+              value={`${guardian.system_health.memory_percent.toFixed(0)}%`}
+              percent={guardian.system_health.memory_percent}
+              tone={percentTone(guardian.system_health.memory_percent, 60, 80)}
+            />
+            <HealthStat
+              label="Latência"
+              value={`${guardian.system_health.avg_latency_ms.toFixed(0)}ms`}
+              tone={latencyTone(guardian.system_health.avg_latency_ms)}
+            />
+          </div>
+        )}
 
-          <div>
-            <div
-              className="mb-1.5 text-[10px] uppercase tracking-wider text-gray-500"
-              id="guardian-suggestions-heading"
+        <div>
+          <div className="mb-1.5 text-[10px] uppercase tracking-wider text-nexus-faint" id="guardian-suggestions-heading">
+            Sugestões do Guardião
+          </div>
+          {suggestions.length === 0 ? (
+            <EmptyState
+              compact
+              icon={<CheckCircle2 className="h-5 w-5" />}
+              title="Sem sugestões pendentes"
+              hint="O sistema está a funcionar dentro dos parâmetros esperados."
+            />
+          ) : (
+            <ul
+              role="list"
+              aria-labelledby="guardian-suggestions-heading"
+              className="max-h-52 space-y-1.5 overflow-y-auto text-xs sm:text-sm"
             >
-              Sugestões do Guardião
-            </div>
-            {suggestions.length === 0 ? (
-              <div
-                className="flex h-16 flex-col items-center justify-center text-xs text-gray-500"
-                role="status"
-              >
-                <CheckCircle2 className="h-5 w-5 text-green-500/50 mb-1" aria-hidden="true" />
-                <span>Sem sugestões pendentes</span>
-              </div>
-            ) : (
-              <ul
-                role="list"
-                aria-labelledby="guardian-suggestions-heading"
-                className="space-y-1.5 max-h-52 overflow-y-auto text-xs sm:text-sm"
-              >
-                {suggestions.map((s) => {
-                  const config = PRIORITY_CONFIG[s.priority] ?? PRIORITY_CONFIG.low;
-                  return (
-                    <li
-                      key={s.id}
-                      className={`rounded border px-2.5 py-2 ${config.color}`}
-                    >
+              {suggestions.map((s) => {
+                const config = PRIORITY_CONFIG[s.priority] ?? PRIORITY_CONFIG.low;
+                return (
+                  <li key={s.id}>
+                    <Surface elevation={0} tone={config.tone} padding="sm">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5 mb-0.5">
-                            <span className={`h-1.5 w-1.5 rounded-full ${config.dot}`} aria-hidden="true" />
-                            <span className="text-xs font-medium truncate">{s.title}</span>
+                          <div className="mb-0.5 flex items-center gap-1.5">
+                            <Badge tone={config.tone}>{config.label}</Badge>
+                            <span className="truncate text-xs font-medium text-nexus-text">{s.title}</span>
                           </div>
-                          <span className="sr-only">Prioridade: {config.label}</span>
-                          <div className="text-[10px] text-gray-400 line-clamp-2">
-                            {s.description}
-                          </div>
-                          <div className="mt-1 flex items-center gap-2 text-[10px] text-gray-500">
+                          <div className="line-clamp-2 text-[10px] text-nexus-muted">{s.description}</div>
+                          <div className="mt-1 flex items-center gap-2 text-[10px] text-nexus-faint">
                             <span>{CATEGORY_LABELS[s.category] ?? s.category}</span>
                             <span aria-hidden="true">·</span>
-                            <Clock className="h-3 w-3 inline" aria-hidden="true" />
+                            <Clock className="inline h-3 w-3" aria-hidden="true" />
                             <span>{formatTimeAgo(s.created_at)}</span>
                           </div>
                         </div>
                         {s.auto_apply_safe && (
-                          <button
-                            type="button"
+                          <Button
+                            variant="secondary"
+                            size="xs"
+                            icon={<Wrench className="h-3 w-3" />}
+                            loading={applyingId === s.id}
                             onClick={() => applySuggestion(s.id)}
-                            disabled={applyingId === s.id}
-                            aria-label={`Aplicar sugestão: ${s.title}`}
-                            className="shrink-0 inline-flex items-center gap-1 rounded bg-nexus-accent/20 px-2 py-1 text-[10px] text-nexus-accent hover:bg-nexus-accent/30 transition-colors disabled:opacity-50"
+                            className="shrink-0"
                           >
-                            {applyingId === s.id ? (
-                              <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
-                            ) : (
-                              <Wrench className="h-3 w-3" aria-hidden="true" />
-                            )}
                             Aplicar
-                          </button>
+                          </Button>
                         )}
                       </div>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
+                    </Surface>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
-      )}
-    </section>
-  );
-}
-
-function percentTone(value: number, warn: number, danger: number): "green" | "yellow" | "red" {
-  if (value > danger) return "red";
-  if (value > warn) return "yellow";
-  return "green";
-}
-
-function latencyTone(value: number): "green" | "yellow" | "red" {
-  if (value > 1000) return "red";
-  if (value > 500) return "yellow";
-  return "green";
-}
-
-const TONE_CLASS: Record<"green" | "yellow" | "red", string> = {
-  green: "text-green-400",
-  yellow: "text-yellow-400",
-  red: "text-red-400",
-};
-
-function HealthCard({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone: "green" | "yellow" | "red";
-}) {
-  return (
-    <div className="rounded border border-nexus-border/50 bg-nexus-bg/50 p-2 text-center min-w-0">
-      <div className="text-[10px] text-gray-500 mb-0.5">{label}</div>
-      <div className={`text-xs font-mono font-semibold ${TONE_CLASS[tone]}`}>{value}</div>
-    </div>
+      </div>
+    </Surface>
   );
 }

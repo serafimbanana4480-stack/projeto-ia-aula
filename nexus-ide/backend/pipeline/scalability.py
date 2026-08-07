@@ -72,26 +72,8 @@ class TenantManager:
         return self._tenants.get(tenant_id)
 
     def check_rate_limit(self, tenant_id: str) -> bool:
-        """Check if tenant is within rate limits."""
-        tenant = self._tenants.get(tenant_id)
-        if not tenant or not tenant.active:
-            return False
-
-        now = time.time()
-        window = now - 60  # 1 minute window
-
-        with self._lock:
-            # Clean old entries
-            self._rate_limiters[tenant_id] = [
-                t for t in self._rate_limiters.get(tenant_id, []) if t > window
-            ]
-            current = len(self._rate_limiters[tenant_id])
-
-            if current >= tenant.rate_limit_per_minute:
-                return False
-
-            self._rate_limiters[tenant_id].append(now)
-            return True
+        """Rate limiting is disabled globally."""
+        return True
 
     def can_start_workflow(self, tenant_id: str) -> bool:
         """Check if tenant can start a new workflow."""

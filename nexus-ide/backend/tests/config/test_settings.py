@@ -24,8 +24,8 @@ class TestSettingsDefaults:
         types and well-formedness, not specific default values.
         """
         s = Settings()
-        # Primary provider defaults to opencode_go in current NEXUS IDE config;
-        # override via LLM_PROVIDER env var, so we only assert the value is known.
+        # The current runtime uses OpenRouter as the primary cloud provider;
+        # override via LLM_PROVIDER when a local Ollama-only profile is needed.
         assert isinstance(s.llm_provider, str)
         assert s.llm_provider in {
             "ollama",
@@ -40,7 +40,7 @@ class TestSettingsDefaults:
         assert isinstance(s.local_llm_device, str)
         assert s.local_llm_device
         assert isinstance(s.local_llm_dashboard_device, str)
-        assert s.default_provider == "ollama"
+        assert s.default_provider == "openrouter"
         assert s.ollama_host.startswith("http://")
         # Network / runtime fields have the right types
         assert isinstance(s.backend_port, int)
@@ -102,6 +102,10 @@ class TestLoadModelsConfig:
             or "qwen" in nano["id"]
             or "Qwen" in nano["id"]
             or "deepseek" in nano["id"].lower()
+            or "mimo" in nano["id"].lower()
+            or "minimax" in nano["id"].lower()
+            or "gemma" in nano["id"].lower()
+            or "nemotron" in nano["id"].lower()
         )
         assert nano["temperature"] == 0.1
         assert "routing" in nano["use_cases"]

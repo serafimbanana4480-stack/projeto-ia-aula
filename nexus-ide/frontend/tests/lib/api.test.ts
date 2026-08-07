@@ -4,6 +4,11 @@ import * as api from "../../lib/api";
 // Mock the auth module to provide deterministic test headers
 vi.mock("../../lib/auth", () => ({
   authHeaders: () => ({ Authorization: "Bearer mock-token" }),
+  authenticatedFetch: (input: RequestInfo | URL, init: RequestInit = {}) =>
+    fetch(input, {
+      ...init,
+      headers: { Authorization: "Bearer mock-token", ...(init.headers as Record<string, string> | undefined) },
+    }),
   clearAuth: vi.fn(),
   getAccessToken: () => "mock-token",
 }));
@@ -42,7 +47,17 @@ describe("lib/api.ts Client Suite", () => {
   describe("Chat API", () => {
     it("postChat makes correct POST request", async () => {
       mockResponse(200, {});
-      const resp = await api.postChat("hello", "session123", "agent", undefined, "modelX", "/proj", "strong");
+      const resp = await api.postChat(
+        "hello",
+        "session123",
+        "agent",
+        undefined,
+        "modelX",
+        "/proj",
+        "strong",
+        undefined,
+        "chat_request_1",
+      );
       // Verify the fetch was called with the right URL, method, and headers,
       // and that the body contains all expected fields. The exact key order in
       // the body is an implementation detail of ``postChat`` and changes
@@ -54,6 +69,7 @@ describe("lib/api.ts Client Suite", () => {
           headers: expect.objectContaining({
             Authorization: "Bearer mock-token",
             Accept: "text/event-stream",
+            "X-Nexus-Request-Id": "chat_request_1",
           }),
         })
       );
@@ -68,6 +84,26 @@ describe("lib/api.ts Client Suite", () => {
         thinking_strength: "strong",
       });
       expect(resp).toBeDefined();
+    });
+
+    it("saveSettings uses the backend envelope and does not erase blank secrets", async () => {
+      mockResponse(200, { status: "saved" });
+
+      await api.saveSettings({
+        llm_provider: "openai",
+        enable_telemetry: false,
+        openai_api_key: "",
+        gemini_api_key: "masked****key",
+      });
+
+      const fetchMock = global.fetch as unknown as ReturnType<typeof vi.fn>;
+      const callBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(callBody).toEqual({
+        settings: {
+          llm_provider: "openai",
+          enable_telemetry: "false",
+        },
+      });
     });
 
     it("getSessionHistory retrieves and resolves session messages", async () => {

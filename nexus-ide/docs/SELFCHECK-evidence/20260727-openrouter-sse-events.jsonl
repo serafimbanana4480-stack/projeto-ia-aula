@@ -1,0 +1,8 @@
+{"type":"routing","routing":{"primary_agent":"MICRO","thinking_mode":"fast","routing_reason":"explicit-mode:ask"}}
+{"type":"agent_started","agent":"MICRO"}
+{"type":"token","agent":"MICRO","content":"<redacted-token-fragment>"}
+{"type":"metric","agent":"MICRO","data":{"usage":{"input_tokens":9,"output_tokens":14,"reasoning_tokens":0,"total_tokens":23,"source":"estimated","cache_status":"not_reported"}}}
+{"type":"agent_finished","agent":"MICRO"}
+{"type":"done"}
+
+Stream capture summary: 22 `data:` frames; `routing=1`, `agent_started=1`, `token=17`, `metric=1`, `agent_finished=1`, `done=1`. The token content is redacted here; the capture was made from the local SSE response and contains no bearer header or API key.

@@ -59,3 +59,16 @@ nexus-ide/*.sqlite*
 nexus-ide/*.sqlite3
 nexus-ide/src/
 nexus-ide/requirements_*.txt
+
+
+# ── Build / test artifacts (regenerable, do NOT commit) ──
+.next-*/
+nexus-ide/frontend/.next-*/
+.pytest*/
+.pytest_tmp*/
+.pytest-*
+*.nexus-tmp
+
+# Local tool backups (runtime, contain scratch/secret scratch files)
+.nexus/backups/
+.nexus-foundry/

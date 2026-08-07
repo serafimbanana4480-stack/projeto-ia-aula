@@ -40,7 +40,7 @@ export default function ChatStream() {
     setIsStreaming(true);
 
     // Simular streaming (em produção, conectar ao backend SSE)
-    setTimeout(() => {
+    if (true) {
       const thinkingMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: "thinking",
@@ -49,7 +49,7 @@ export default function ChatStream() {
       };
       setMessages((prev) => [...prev, thinkingMsg]);
 
-      setTimeout(() => {
+      if (true) {
         const assistantMsg: Message = {
           id: (Date.now() + 2).toString(),
           role: "assistant",
@@ -57,8 +57,8 @@ export default function ChatStream() {
         };
         setMessages((prev) => [...prev, assistantMsg]);
         setIsStreaming(false);
-      }, 1000);
-    }, 500);
+      }
+    }
   };
 
   return (
@@ -83,7 +83,7 @@ export default function ChatStream() {
                   </div>
                 </div>
               ) : msg.role === "thinking" ? (
-                <ThinkingBlock content={msg.content} iteration={msg.iteration} />
+                <ThinkingBlock content={msg.content} />
               ) : msg.role === "tool_call" ? (
                 <ToolCallCard
                   toolName={msg.toolName!}

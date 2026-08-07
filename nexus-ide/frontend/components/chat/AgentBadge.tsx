@@ -2,7 +2,7 @@
 import { memo } from "react";
 import type { AgentName } from "../../lib/types";
 
-const AGENT_COLORS: Record<AgentName, string> = {
+const AGENT_COLORS: Partial<Record<AgentName, string>> = {
   ROUTER: "bg-gray-600",
   ARCHITECT: "bg-indigo-600",
   RESEARCHER: "bg-blue-600",
@@ -20,7 +20,7 @@ const AGENT_COLORS: Record<AgentName, string> = {
 function AgentBadge({ agent }: { agent: AgentName }) {
   return (
     <span
-      className={`inline-block rounded px-2 py-0.5 text-xs font-semibold text-white ${AGENT_COLORS[agent]}`}
+      className={`inline-block rounded px-2 py-0.5 text-xs font-semibold text-white ${AGENT_COLORS[agent] || "bg-violet-600"}`}
     >
       {agent}
     </span>

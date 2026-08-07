@@ -48,7 +48,6 @@ from backend.core.workspace_fs import (
 
 # Re-export security layer --------------------------------------------------
 from backend.core.workspace_security import (
-    _check_file_size_limit,
     _is_blocked_path,
     _is_path_within_project,
     _is_safe_git_remote,
@@ -778,45 +777,37 @@ class WorkspaceManager:
 
     async def search_files(self, path: str, pattern: str, glob: str = "*.py") -> dict[str, Any]:
         # The legacy signature expects path + pattern + glob.
-        # We perform a content search under *path* and filter by glob.
+        # Delegate to the ripgrep-backed filesystem layer and preserve the
+        # compact legacy response shape used by agents.
         search_root = self._resolve(path)
-        results = []
-        count = 0
         try:
             root = Path(search_root)
-            file_paths = await asyncio.to_thread(lambda: list(root.rglob(glob)))
-            for file_path in file_paths:
-                if not await asyncio.to_thread(file_path.is_file):
-                    continue
-                ok, _size, _err = _check_file_size_limit(file_path)
-                if not ok:
-                    continue
-                try:
-                    content = await asyncio.to_thread(
-                        file_path.read_text, encoding="utf-8", errors="ignore"
-                    )
-                except Exception:
-                    continue
-                if pattern.lower() in content.lower():
-                    lines = content.splitlines()
-                    matches = [
-                        (i + 1, line)
-                        for i, line in enumerate(lines)
-                        if pattern.lower() in line.lower()
-                    ]
-                    if matches:
-                        results.append(
-                            {
-                                "path": str(file_path.relative_to(root)),
-                                "matches": len(matches),
-                                "preview": matches[:3],
-                            }
-                        )
-                        count += 1
+            raw = await search_files_absolute(
+                pattern,
+                str(root),
+                max_results=100,
+                glob_pattern=glob,
+            )
+            if "error" in raw:
+                return raw
+            results = []
+            for item in raw.get("results", []):
+                file_path = Path(item["path"])
+                preview = [
+                    (match["line"], match["text"])
+                    for match in item.get("matches", [])[:3]
+                ]
+                results.append(
+                    {
+                        "path": str(file_path.relative_to(root)),
+                        "matches": int(item.get("match_count", len(preview))),
+                        "preview": preview,
+                    }
+                )
         except Exception as exc:
             return {"error": f"Search failed: {exc}"}
 
-        return {"query": pattern, "results": results, "count": count}
+        return {"query": pattern, "results": results, "count": len(results)}
 
     async def execute_shell(
         self,

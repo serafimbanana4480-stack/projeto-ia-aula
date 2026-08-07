@@ -1,226 +1,124 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useEffect } from "react";
 import { motion } from "framer-motion";
-import TopBar from "../../components/layout/TopBar";
-import Sidebar from "../../components/layout/Sidebar";
-import BottomHUD from "../../components/layout/BottomHUD";
-import { Cpu, Download, CheckCircle, XCircle, Loader2 } from "lucide-react";
-import { log } from "../../lib/log";
-
-interface Model {
-  id: string;
-  size_bytes: number;
-  size_gb?: number;
-  status: "available" | "loading" | "error";
-  details?: Record<string, unknown>;
-}
+import AppShell from "../../components/layout/AppShell";
+import { Cpu, Loader2, AlertCircle, CheckCircle2, Zap } from "lucide-react";
+import { useModelStore } from "../../stores/modelStore";
 
 export default function ModelsPage() {
-  const [models, setModels] = useState<Model[]>([]);
-  const [installing, setInstalling] = useState<string | null>(null);
-  const [installProgress, setInstallProgress] = useState<string>("");
+  const models = useModelStore((s) => s.models);
+  const activeModel = useModelStore((s) => s.activeModel);
+  const setActiveModel = useModelStore((s) => s.setActiveModel);
+  const modelsLoaded = useModelStore((s) => s.modelsLoaded);
+  const modelsLoading = useModelStore((s) => s.modelsLoading);
+  const modelsError = useModelStore((s) => s.modelsError);
+  const loadModels = useModelStore((s) => s.loadModels);
 
   useEffect(() => {
-    let mounted = true;
-    const fetchModels = async () => {
-      try {
-        const response = await fetch("/api/models/status", {
-          headers: {
-            "Authorization": `Bearer ${localStorage.getItem("nexus.access_token")}`,
-          },
-        });
-        if (response.ok) {
-          const data = await response.json() as Model[];
-          if (mounted && Array.isArray(data)) {
-            setModels(data);
-          }
-        }
-      } catch (error) {
-        log.error("Failed to fetch models:", error);
-      }
-    };
-    fetchModels();
-    const interval = setInterval(fetchModels, 30000);
-    return () => { mounted = false; clearInterval(interval); };
-  }, []);
-
-  const formatSize = (bytes: number) => {
-    if (bytes < 1e9) return `${(bytes / 1e6).toFixed(1)} MB`;
-    return `${(bytes / 1e9).toFixed(1)} GB`;
-  };
-
-  const handleInstall = async (modelId: string) => {
-    setInstalling(modelId);
-    setInstallProgress("Starting download...");
-
-    try {
-      // Use Ollama's pull API to download the model
-      const OLLAMA_HOST = process.env.NEXT_PUBLIC_OLLAMA_HOST ?? "http://localhost:11434";
-      const response = await fetch(`${OLLAMA_HOST}/api/pull`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: modelId, stream: true }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to start download: ${response.statusText}`);
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error("No response body");
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const data = JSON.parse(line);
-            if (data.status) {
-              setInstallProgress(data.status);
-            }
-            if (data.completed && data.total) {
-              const pct = ((data.completed / data.total) * 100).toFixed(0);
-              setInstallProgress(`Downloading: ${pct}%`);
-            }
-          } catch {
-            // Skip malformed JSON
-          }
-        }
-      }
-
-      setInstallProgress("Installation complete!");
-      setModels([]);
-    } catch (error) {
-      log.error("Failed to install model:", error);
-      setInstallProgress(
-        `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
-      );
-    } finally {
-      setTimeout(() => {
-        setInstalling(null);
-        setInstallProgress("");
-      }, 2000);
-    }
-  };
+    loadModels();
+  }, [loadModels]);
 
   return (
-    <div className="flex h-screen flex-col bg-nexus-bg">
-      <TopBar />
+    <AppShell title="Modelos IA">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="max-w-4xl mx-auto"
+      >
+        <div className="mb-6 flex items-center gap-3">
+          <Cpu className="h-6 w-6 text-nexus-accent" />
+          <h1 className="text-2xl font-bold">Modelos IA</h1>
+        </div>
 
-      <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
+        {modelsLoading && (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="h-8 w-8 animate-spin text-nexus-accent" />
+          </div>
+        )}
 
-        <main className="flex-1 overflow-auto p-6">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-          >
-            <div className="mb-6 flex items-center gap-3">
-              <Cpu className="h-6 w-6 text-nexus-accent" />
-              <h1 className="text-2xl font-bold">Models</h1>
+        {modelsError && (
+          <div className="flex items-center gap-2 text-sm text-red-400">
+            <AlertCircle className="h-4 w-4" />
+            {modelsError}
+          </div>
+        )}
+
+        {modelsLoaded && !modelsError && models.length === 0 && (
+          <div className="flex items-center gap-2 text-sm text-nexus-muted">
+            <AlertCircle className="h-4 w-4" />
+            Nenhum modelo disponível. Verifique se o backend está a
+            funcionar.
+          </div>
+        )}
+
+        {!modelsLoading && models.length > 0 && (
+          <div className="space-y-3">
+            <div className="text-sm text-nexus-muted">
+              {models.length} modelos disponíveis
             </div>
-
-            {installing && installProgress && (
-              <motion.div
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="mb-4 rounded border border-nexus-accent/30 bg-nexus-accent/10 p-3 text-sm"
-              >
-                <div className="flex items-center gap-2">
-                  <Loader2 className="h-4 w-4 animate-spin text-nexus-accent" />
-                  <span>
-                    Installing <strong>{installing}</strong>: {installProgress}
-                  </span>
-                </div>
-              </motion.div>
-            )}
-
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {models.map((model, index) => (
-                <motion.div
+            {models.map((model, index) => {
+              const isActive = model.id === activeModel;
+              return (
+                <motion.button
                   key={model.id}
-                  initial={{ opacity: 0, y: 20 }}
+                  initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: index * 0.1 }}
-                  className="rounded border border-nexus-border bg-nexus-panel/50 p-4"
+                  transition={{ delay: index * 0.03 }}
+                  onClick={() => setActiveModel(model.id)}
+                  className={`card w-full text-left transition-colors ${
+                    isActive
+                      ? "border-nexus-accent"
+                      : "hover:border-nexus-border/80"
+                  }`}
                 >
-                  <div className="mb-3 flex items-start justify-between">
-                    <div>
-                      <h3 className="text-sm font-semibold">{model.id}</h3>
-                      <p className="text-xs text-gray-500">
-                        {formatSize(model.size_bytes)}
-                      </p>
-                      {model.details?.parameter_size ? (
-                        <p className="text-xs text-gray-500">
-                          {String(model.details.parameter_size)}B parameters
-                        </p>
-                      ) : null}
-                    </div>
-                    {model.status === "available" && (
-                      <CheckCircle className="h-4 w-4 text-green-500" />
-                    )}
-                    {model.status === "loading" && (
-                      <Loader2 className="h-4 w-4 animate-spin text-nexus-accent" />
-                    )}
-                    {model.status === "error" && (
-                      <XCircle className="h-4 w-4 text-red-500" />
-                    )}
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <div className="rounded bg-nexus-border px-2 py-0.5 text-xs">
-                      {model.status}
-                    </div>
-                    {model.status !== "available" && (
-                      <button
-                        onClick={() => handleInstall(model.id)}
-                        disabled={installing === model.id}
-                        className="flex items-center gap-1 rounded bg-nexus-accent px-3 py-1 text-xs text-black hover:bg-nexus-accent/80 disabled:opacity-50"
-                      >
-                        {installing === model.id ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <Download className="h-3 w-3" />
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex items-center gap-2">
+                        <span className="font-medium">
+                          {model.name || model.id}
+                        </span>
+                        {isActive && (
+                          <CheckCircle2 className="h-4 w-4 text-nexus-accent" />
                         )}
-                        Install
-                      </button>
-                    )}
+                      </div>
+                      <p className="font-mono text-xs text-nexus-muted">
+                        {model.id}
+                      </p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-nexus-muted">
+                        {model.provider && (
+                          <span className="rounded-full border border-nexus-border px-2 py-0.5">
+                            {model.provider}
+                          </span>
+                        )}
+                        {model.pricing && (
+                          <span className="rounded-full border border-nexus-border px-2 py-0.5">
+                            {model.pricing}
+                          </span>
+                        )}
+                        {model.estimated_tokens_per_sec != null && (
+                          <span className="flex items-center gap-1">
+                            <Zap className="h-3 w-3" />
+                            {model.estimated_tokens_per_sec} tok/s
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <span
+                      className={`shrink-0 rounded-lg border px-3 py-1.5 text-xs ${
+                        isActive
+                          ? "border-nexus-accent text-nexus-accent"
+                          : "border-nexus-border text-nexus-muted"
+                      }`}
+                    >
+                      {isActive ? "Ativo" : "Selecionar"}
+                    </span>
                   </div>
-                </motion.div>
-              ))}
-            </div>
-
-            {models.length === 0 && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="flex h-64 items-center justify-center text-gray-500"
-              >
-                <div className="text-center">
-                  <Cpu className="mx-auto mb-3 h-12 w-12 text-nexus-border" />
-                  <p className="text-sm">No models available</p>
-                  <p className="text-xs">
-                    Make sure Ollama is running to see and install models
-                  </p>
-                </div>
-              </motion.div>
-            )}
-          </motion.div>
-        </main>
-      </div>
-
-      <BottomHUD />
-    </div>
+                </motion.button>
+              );
+            })}
+          </div>
+        )}
+      </motion.div>
+    </AppShell>
   );
 }

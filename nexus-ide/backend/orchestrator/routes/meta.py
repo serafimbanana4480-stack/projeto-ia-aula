@@ -27,7 +27,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.middleware.auth import require_auth
-from backend.middleware.rate_limit import limiter
 from backend.orchestrator.meta import MetaOrchestrator, Mission
 from backend.orchestrator.registry import get_registry
 
@@ -142,7 +141,6 @@ def _mission_to_status_dict(mission: Mission) -> dict[str, Any]:
 
 
 @router.get("/missions")
-@limiter.limit("120/minute")
 async def list_missions(request: Request, _auth: None = Depends(require_auth)) -> dict[str, Any]:
     """List all active missions."""
     meta = _get_meta(request)
@@ -154,7 +152,6 @@ async def list_missions(request: Request, _auth: None = Depends(require_auth)) -
 
 
 @router.post("/missions")
-@limiter.limit("30/minute")
 async def create_mission(
     req: CreateMissionRequest, request: Request, _auth: None = Depends(require_auth)
 ) -> CreateMissionResponse:
@@ -177,7 +174,6 @@ async def create_mission(
 
 
 @router.get("/missions/{mission_id}")
-@limiter.limit("120/minute")
 async def get_mission(
     request: Request, mission_id: str, _auth: None = Depends(require_auth)
 ) -> MissionStatusResponse:
@@ -194,7 +190,6 @@ async def get_mission(
 
 
 @router.post("/missions/{mission_id}/pause")
-@limiter.limit("60/minute")
 async def pause_mission(
     request: Request, mission_id: str, _auth: None = Depends(require_auth)
 ) -> MissionActionResponse:
@@ -214,7 +209,6 @@ async def pause_mission(
 
 
 @router.post("/missions/{mission_id}/resume")
-@limiter.limit("60/minute")
 async def resume_mission(
     request: Request, mission_id: str, _auth: None = Depends(require_auth)
 ) -> MissionActionResponse:
@@ -234,7 +228,6 @@ async def resume_mission(
 
 
 @router.post("/missions/{mission_id}/abort")
-@limiter.limit("60/minute")
 async def abort_mission(
     request: Request, mission_id: str, _auth: None = Depends(require_auth)
 ) -> MissionActionResponse:
@@ -254,7 +247,6 @@ async def abort_mission(
 
 
 @router.get("/missions/{mission_id}/agents")
-@limiter.limit("120/minute")
 async def list_active_agents(
     request: Request, mission_id: str, _auth: None = Depends(require_auth)
 ) -> ActiveAgentsResponse:

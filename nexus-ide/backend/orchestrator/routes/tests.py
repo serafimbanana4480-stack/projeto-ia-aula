@@ -7,7 +7,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from backend.orchestrator.limiter import limiter
 
 from backend.pipeline.test_generator import TestGenerator, TestRunner
 from backend.tools.ollama_client import OllamaClient
@@ -33,7 +32,6 @@ class RunTestsRequest(BaseModel):
 
 
 @router.post("/tests/generate", response_model=GenerateTestsResponse)
-@limiter.limit("10/minute")
 async def generate_tests(req: GenerateTestsRequest, request: Request) -> dict[str, Any]:
     """Generate pytest unit tests from source code."""
     try:
@@ -65,7 +63,6 @@ async def generate_tests(req: GenerateTestsRequest, request: Request) -> dict[st
 
 
 @router.post("/tests/run")
-@limiter.limit("10/minute")
 async def run_tests(req: RunTestsRequest, request: Request) -> dict[str, Any]:
     """Run pytest in a project directory."""
     from pathlib import Path

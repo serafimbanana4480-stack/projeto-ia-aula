@@ -52,23 +52,29 @@ describe("RequestFlow", () => {
     });
   });
 
-  it("renderiza o título PT e o placeholder quando não há métricas", () => {
+  it("renderiza o título PT e o placeholder quando não há métricas", async () => {
     render(<RequestFlow />);
     expect(screen.getByText("Fluxo de Pedidos")).toBeDefined();
-    expect(screen.getByText("Dados indisponíveis")).toBeDefined();
-    expect(
-      screen.getByText("O backend não está a fornecer métricas de fluxo."),
-    ).toBeDefined();
+    expect(screen.getByText("Dados de fluxo indisponíveis")).toBeDefined();
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "O backend não está a fornecer métricas de fluxo de pedidos.",
+        ),
+      ).toBeDefined();
+    });
   });
 
-  it("mostra aviso de backend offline quando backendOnline é false", () => {
+  it("mostra aviso de backend offline quando backendOnline é false", async () => {
     useMetricsStore.setState({ backendOnline: false });
     render(<RequestFlow />);
-    expect(
-      screen.getByText(
-        "Backend offline — os dados apresentados podem estar desatualizados.",
-      ),
-    ).toBeDefined();
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Backend offline — os dados apresentados podem estar desatualizados.",
+        ),
+      ).toBeDefined();
+    });
   });
 
   it("mostra valores e agentes quando o store tem métricas", async () => {
@@ -96,7 +102,9 @@ describe("RequestFlow", () => {
     expect(screen.getByText("Router")).toBeDefined();
     expect(screen.getByText("LLM")).toBeDefined();
     expect(screen.getByText("Resposta")).toBeDefined();
-    expect(screen.getByText("80.0% sucesso")).toBeDefined();
+    expect(
+      screen.getByLabelText("Taxa de sucesso: 80.0 por cento, aceitável"),
+    ).toBeDefined();
     // The agent name ``CODER`` is rendered both in the active-agents list
     // and in the request flow node, so multiple elements match. Use
     // ``getAllByText`` to assert the agent label is present at least once.

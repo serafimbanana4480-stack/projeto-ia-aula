@@ -48,7 +48,9 @@ class TestModesYamlStructure:
         auto = modes_yaml["modes"]["auto"]
         assert auto["router"] == "smart"
         assert auto["supports_subagents"] is True
-        assert auto["max_iterations"] >= 7
+        # Zero is the explicit unlimited ReAct sentinel. The loop still
+        # terminates on a final answer or repeated-tool guard.
+        assert auto["max_iterations"] == 0
         assert auto["enable_thinking"] is True
 
     def test_swarm_mode_capabilities(self, modes_yaml: dict) -> None:

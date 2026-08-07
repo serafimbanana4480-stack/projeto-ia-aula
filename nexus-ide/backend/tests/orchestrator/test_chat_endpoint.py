@@ -54,6 +54,20 @@ def client_with_mocked_ollama(
         if hasattr(main_module.app.state, attr):
             delattr(main_module.app.state, attr)
 
+    # Runtime Settings UI overrides can select a real cloud provider.  Pin
+    # this endpoint test to the mocked local provider so it never depends on
+    # the developer machine's current provider or credentials.
+    from backend.llm.factory import create_llm_client
+
+    monkeypatch.setattr(
+        "backend.llm.create_llm_client",
+        lambda: create_llm_client(
+            multi_llm_enabled=False,
+            llm_provider="ollama",
+            ollama_host="http://ollama.test",
+        ),
+    )
+
     token = create_access_token({"sub": "test-user", "email": "test@test.com"})
     with TestClient(main_module.app, headers={"Authorization": f"Bearer {token}"}) as client:
         yield client
@@ -87,7 +101,9 @@ class TestChatEndpoint:
         assert types.count("agent_started") == 1
         assert types.count("done") == 1
         tokens = [e["content"] for e in events if e["type"] == "token"]
-        assert tokens == ["Hello", " ", "NEXUS"]
+        # Autonomous tool-capable turns buffer provider text until it is known
+        # not to be raw tool transport, then publish one clean answer chunk.
+        assert tokens == ["Hello NEXUS"]
 
     def test_injection_is_blocked(self, client_with_mocked_ollama: TestClient) -> None:
         response = client_with_mocked_ollama.post(

@@ -25,6 +25,7 @@ from backend.orchestrator.dependency_graph import (
 from backend.orchestrator.engine import (
     ExecutionContext,
     OrchestrationEngine,
+    OrchestrationResult,
     OrchestrationState,
 )
 from backend.orchestrator.engine import (
@@ -36,6 +37,7 @@ from backend.orchestrator.events import (
     EventType,
     OrchestratorEvent,
 )
+from backend.orchestrator.plan_executor import extract_spawn_requests
 
 # ---------------------------------------------------------------------------
 # Dependency Graph Tests
@@ -276,6 +278,42 @@ class TestEventBus:
         assert events[1].content == "world"
 
     @pytest.mark.asyncio
+    async def test_slow_stream_drops_oldest_events_without_blocking_publish(self) -> None:
+        """A full client queue must not stall the producer/orchestrator."""
+        bus = EventBus(max_queue_size=2)
+        stream = bus.stream_events(session_id="s1")
+
+        # Start the generator and consume one event.  It remains subscribed,
+        # but intentionally stops reading afterwards to simulate a slow SSE
+        # client.
+        first_event = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0)
+        await bus.publish(
+            OrchestratorEvent(event_type=EventType.TOKEN, session_id="s1", content="one")
+        )
+        assert (await first_event).content == "one"
+
+        await bus.publish(
+            OrchestratorEvent(event_type=EventType.TOKEN, session_id="s1", content="two")
+        )
+        await bus.publish(
+            OrchestratorEvent(event_type=EventType.TOKEN, session_id="s1", content="three")
+        )
+
+        # The third unread event used to block here forever because the stream
+        # callback awaited queue.put().  The explicit policy drops "two" and
+        # keeps the newest progress events.
+        await asyncio.wait_for(
+            bus.publish(
+                OrchestratorEvent(event_type=EventType.TOKEN, session_id="s1", content="four")
+            ),
+            timeout=0.1,
+        )
+        assert (await anext(stream)).content == "three"
+        assert (await anext(stream)).content == "four"
+        await stream.aclose()
+
+    @pytest.mark.asyncio
     async def test_get_recent_events(self) -> None:
         bus = EventBus()
         for i in range(5):
@@ -373,6 +411,38 @@ class TestOrchestrationEngine:
             await engine.execute_plan(plan, "s1")
 
     @pytest.mark.asyncio
+    async def test_execute_plan_cancellation_wins_over_optimistic_executor_result(
+        self, event_bus: EventBus
+    ) -> None:
+        """A concurrent cancellation cannot be reported back as completed."""
+        completed_result = OrchestrationResult(
+            run_id="run",
+            state=OrchestrationState.COMPLETED,
+            completed_tasks=1,
+        )
+
+        async def complete_after_cancellation(*_args, cancellation_event, **_kwargs):
+            cancellation_event.set()
+            return completed_result, MagicMock()
+
+        plan_executor = MagicMock()
+        plan_executor.execute = complete_after_cancellation
+        engine = OrchestrationEngine(
+            llm_client=MagicMock(),
+            registry={},
+            event_bus=event_bus,
+            plan_executor=plan_executor,
+        )
+        plan = ExecutionPlan.from_steps(
+            "Test", "Desc", [TaskNode(name="Task")], session_id="s1"
+        )
+
+        result = await engine.execute_plan(plan, "s1", auto_approve=True)
+
+        assert result.state == OrchestrationState.CANCELLED
+        assert engine.get_state("s1") == OrchestrationState.CANCELLED
+
+    @pytest.mark.asyncio
     async def test_execute_parallel_tasks(self, engine: OrchestrationEngine) -> None:
         t1 = TaskNode(name="Task 1", agent="CODER")
         t2 = TaskNode(name="Task 2", agent="CODER")
@@ -383,6 +453,40 @@ class TestOrchestrationEngine:
 
         result = await engine.execute_plan(plan, "s1", auto_approve=True)
         assert result.completed_tasks == 2
+
+    @pytest.mark.asyncio
+    async def test_spawned_task_runs_in_same_plan(self, event_bus: EventBus) -> None:
+        call_count = 0
+
+        async def run_agent(_request):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield (
+                    '<event>tool_result|spawn_task|{"status":"spawned",'
+                    '"task_name":"Verify","description":"Run focused tests",'
+                    '"agent":"DEBUGGER"}</event>'
+                )
+            else:
+                yield "<event>answer</event>Verification complete"
+
+        agent = MagicMock()
+        agent.name = "CODER"
+        agent.run = run_agent
+        dynamic_engine = OrchestrationEngine(
+            llm_client=MagicMock(),
+            registry={"CODER": agent, "DEBUGGER": agent},
+            event_bus=event_bus,
+            max_parallel=2,
+        )
+        initial = TaskNode(name="Implement", agent="CODER")
+        plan = ExecutionPlan.from_steps("Dynamic", "Spawn verification", [initial])
+
+        result = await dynamic_engine.execute_plan(plan, "s1", auto_approve=True)
+
+        assert result.completed_tasks == 2
+        assert call_count == 2
+        assert len(plan.dependency_graph.get_all_tasks()) == 2
 
     @pytest.mark.asyncio
     async def test_execute_with_dependencies(self, engine: OrchestrationEngine) -> None:
@@ -441,6 +545,111 @@ class TestOrchestrationEngine:
         artifact = result.task_results[t1.task_id]
         assert artifact["status"] == "failed"
 
+    @pytest.mark.asyncio
+    async def test_autonomous_primary_failure_is_preserved(self, event_bus: EventBus) -> None:
+        """A failed primary plan must not be overwritten by final review success."""
+        plan = ExecutionPlan.from_steps(
+            "Primary plan",
+            "desc",
+            [TaskNode(name="Analyze", agent="ANALYZER")],
+            session_id="s1",
+        )
+        plan_creator = MagicMock()
+        plan_creator.create = AsyncMock(return_value=plan)
+        failed_result = OrchestrationResult(
+            run_id="primary",
+            state=OrchestrationState.FAILED,
+            failed_tasks=1,
+            errors=["primary task failed"],
+        )
+        plan_executor = MagicMock()
+        plan_executor.execute = AsyncMock(return_value=(failed_result, MagicMock()))
+        engine = OrchestrationEngine(
+            llm_client=MagicMock(),
+            registry={},
+            event_bus=event_bus,
+            plan_creator=plan_creator,
+            plan_executor=plan_executor,
+        )
+
+        result = await engine.execute_autonomous("objective", "s1")
+
+        assert result.state == OrchestrationState.FAILED
+        assert engine.get_state("s1") == OrchestrationState.FAILED
+        # No verification or review may run after a terminal primary failure.
+        assert plan_executor.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_autonomous_primary_cancellation_is_preserved(self, event_bus: EventBus) -> None:
+        """Cancellation must stop the autonomous cycle before later phases."""
+        plan = ExecutionPlan.from_steps(
+            "Primary plan",
+            "desc",
+            [TaskNode(name="Analyze", agent="ANALYZER")],
+            session_id="s1",
+        )
+        plan_creator = MagicMock()
+        plan_creator.create = AsyncMock(return_value=plan)
+        cancelled_result = OrchestrationResult(
+            run_id="primary",
+            state=OrchestrationState.CANCELLED,
+        )
+        plan_executor = MagicMock()
+        plan_executor.execute = AsyncMock(return_value=(cancelled_result, MagicMock()))
+        engine = OrchestrationEngine(
+            llm_client=MagicMock(),
+            registry={},
+            event_bus=event_bus,
+            plan_creator=plan_creator,
+            plan_executor=plan_executor,
+        )
+
+        result = await engine.execute_autonomous("objective", "s1")
+
+        assert result.state == OrchestrationState.CANCELLED
+        assert engine.get_state("s1") == OrchestrationState.CANCELLED
+        assert plan_executor.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_autonomous_final_review_failure_is_preserved(self, event_bus: EventBus) -> None:
+        """A failed final review cannot turn a run into COMPLETED."""
+        plan = ExecutionPlan.from_steps(
+            "Primary plan",
+            "desc",
+            [TaskNode(name="Analyze", agent="ANALYZER")],
+            session_id="s1",
+        )
+        plan_creator = MagicMock()
+        plan_creator.create = AsyncMock(return_value=plan)
+        primary_result = OrchestrationResult(
+            run_id="primary",
+            state=OrchestrationState.COMPLETED,
+            completed_tasks=1,
+        )
+        review_failure = OrchestrationResult(
+            run_id="review",
+            state=OrchestrationState.FAILED,
+            failed_tasks=1,
+            errors=["review agent failed"],
+        )
+        plan_executor = MagicMock()
+        plan_executor.execute = AsyncMock(
+            side_effect=[(primary_result, MagicMock()), (review_failure, MagicMock())]
+        )
+        engine = OrchestrationEngine(
+            llm_client=MagicMock(),
+            registry={},
+            event_bus=event_bus,
+            plan_creator=plan_creator,
+            plan_executor=plan_executor,
+        )
+
+        result = await engine.execute_autonomous("objective", "s1", max_verify_iterations=0)
+
+        assert result is review_failure
+        assert result.state == OrchestrationState.FAILED
+        assert engine.get_state("s1") == OrchestrationState.FAILED
+
 
 class TestToolErrorExtraction:
     def test_extract_tool_errors_from_react_output(self) -> None:
@@ -451,6 +660,22 @@ class TestToolErrorExtraction:
         )
         errors = _extract_tool_errors(output)
         assert errors == ["Write operation failed", "Disk full"]
+
+    def test_extract_spawn_requests_from_react_output(self) -> None:
+        output = (
+            'before<event>tool_result|spawn_task|{"status":"spawned",'
+            '"task_name":"Verify","description":"Run tests","agent":"DEBUGGER"}'
+            "</event>after"
+        )
+
+        assert extract_spawn_requests(output) == [
+            {
+                "status": "spawned",
+                "task_name": "Verify",
+                "description": "Run tests",
+                "agent": "DEBUGGER",
+            }
+        ]
 
 
 # ---------------------------------------------------------------------------

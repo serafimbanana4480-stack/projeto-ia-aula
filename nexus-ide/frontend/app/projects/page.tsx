@@ -2,9 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { apiUrl, authHeaders, createProject, getProjects } from "../../lib/api";
-import TopBar from "../../components/layout/TopBar";
-import Sidebar from "../../components/layout/Sidebar";
-import BottomHUD from "../../components/layout/BottomHUD";
+import AppShell from "../../components/layout/AppShell";
 import { FolderKanban, Plus, Settings, Trash2, Clock, FolderOpen, AlertTriangle } from "lucide-react";
 import type { Project } from "../../lib/types";
 import { useProjectStore } from "../../stores/projectStore";
@@ -254,124 +252,114 @@ export default function ProjectsPage() {
   }
 
   return (
-    <div className="flex h-screen flex-col bg-nexus-bg">
-      <TopBar />
+    <AppShell title="Projetos">
+      <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+        <div className="mb-6 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <FolderKanban className="h-6 w-6 text-nexus-accent" />
+            <h1 className="text-2xl font-bold">Projects</h1>
+          </div>
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="flex items-center gap-2 rounded bg-nexus-accent px-4 py-2 text-sm font-medium text-black hover:bg-nexus-accent/80"
+          >
+            <Plus className="h-4 w-4" />
+            New Project
+          </button>
+        </div>
 
-      <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
+        {hasDuplicatePaths && (
+          <div className="mb-4 flex items-center gap-2 rounded border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-300">
+            <AlertTriangle className="h-4 w-4" />
+            <span>Some projects share the same folder path. Duplicates have been hidden to avoid conflicts.</span>
+          </div>
+        )}
 
-        <main className="flex-1 overflow-auto p-6">
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
-            <div className="mb-6 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <FolderKanban className="h-6 w-6 text-nexus-accent" />
-                <h1 className="text-2xl font-bold">Projects</h1>
-              </div>
-              <button
-                onClick={() => setShowCreateModal(true)}
-                className="flex items-center gap-2 rounded bg-nexus-accent px-4 py-2 text-sm font-medium text-black hover:bg-nexus-accent/80"
-              >
-                <Plus className="h-4 w-4" />
-                New Project
-              </button>
-            </div>
-
-            {hasDuplicatePaths && (
-              <div className="mb-4 flex items-center gap-2 rounded border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-300">
-                <AlertTriangle className="h-4 w-4" />
-                <span>Some projects share the same folder path. Duplicates have been hidden to avoid conflicts.</span>
-              </div>
-            )}
-
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {projects.map((project, index) => (
-                <motion.div
-                  key={project.id}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: index * 0.05 }}
-                  onClick={() => handleOpenProject(project)}
-                  className="cursor-pointer rounded border border-nexus-border bg-nexus-panel/50 p-4 hover:border-nexus-accent/50 transition-colors"
-                >
-                  <div className="mb-3 flex items-start justify-between">
-                    <div className="min-w-0 flex-1">
-                      <h3 className="text-sm font-semibold truncate">{project.name}</h3>
-                      <p className="text-xs text-gray-500 font-mono truncate">{project.path}</p>
-                    </div>
-                    <div className="flex gap-1 ml-2 shrink-0">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleOpenEditModal(project);
-                        }}
-                        className="rounded p-1 text-gray-400 hover:bg-nexus-border hover:text-gray-300"
-                      >
-                        <Settings className="h-3 w-3" />
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (confirm(`Delete project "${project.name}"?`)) {
-                            handleDeleteProject(project.id);
-                          }
-                        }}
-                        className="rounded p-1 text-gray-400 hover:bg-red-500/20 hover:text-red-400"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    </div>
-                  </div>
-
-                  {project.description && (
-                    <p className="mb-3 text-xs text-gray-400 line-clamp-2">
-                      {project.description}
-                    </p>
-                  )}
-
-                  <div className="flex items-center gap-3 text-xs text-gray-500">
-                    <div className="flex items-center gap-1">
-                      <Clock className="h-3 w-3" />
-                      <span>{new Date(project.updated_at).toLocaleDateString()}</span>
-                    </div>
-                    <div className="rounded bg-nexus-border px-2 py-0.5">
-                      {project.mode}
-                    </div>
-                    {project.preferred_model && (
-                      <div className="rounded bg-nexus-accent/10 px-2 py-0.5 text-nexus-accent">
-                        {project.preferred_model}
-                      </div>
-                    )}
-                  </div>
-                </motion.div>
-              ))}
-            </div>
-
-            {loading && (
-              <div className="flex h-64 items-center justify-center">
-                <div className="flex items-center gap-3 text-sm text-nexus-muted">
-                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-nexus-accent border-t-transparent" />
-                  <span>Loading projects...</span>
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {projects.map((project, index) => (
+            <motion.div
+              key={project.id}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: index * 0.05 }}
+              onClick={() => handleOpenProject(project)}
+              className="cursor-pointer rounded border border-nexus-border bg-nexus-panel/50 p-4 hover:border-nexus-accent/50 transition-colors"
+            >
+              <div className="mb-3 flex items-start justify-between">
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-sm font-semibold truncate">{project.name}</h3>
+                  <p className="text-xs text-gray-500 font-mono truncate">{project.path}</p>
+                </div>
+                <div className="flex gap-1 ml-2 shrink-0">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleOpenEditModal(project);
+                    }}
+                    className="rounded p-1 text-gray-400 hover:bg-nexus-border hover:text-gray-300"
+                  >
+                    <Settings className="h-3 w-3" />
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (confirm(`Delete project "${project.name}"?`)) {
+                        handleDeleteProject(project.id);
+                      }
+                    }}
+                    className="rounded p-1 text-gray-400 hover:bg-red-500/20 hover:text-red-400"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
                 </div>
               </div>
-            )}
-            {!loading && projects.length === 0 && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="flex h-64 items-center justify-center text-gray-500"
-              >
-                <div className="text-center">
-                  <FolderKanban className="mx-auto mb-3 h-12 w-12 text-nexus-border" />
-                  <p className="text-sm">No projects yet</p>
-                  <p className="text-xs">Create your first project to get started</p>
+
+              {project.description && (
+                <p className="mb-3 text-xs text-gray-400 line-clamp-2">
+                  {project.description}
+                </p>
+              )}
+
+              <div className="flex items-center gap-3 text-xs text-gray-500">
+                <div className="flex items-center gap-1">
+                  <Clock className="h-3 w-3" />
+                  <span>{new Date(project.updated_at).toLocaleDateString()}</span>
                 </div>
-              </motion.div>
-            )}
+                <div className="rounded bg-nexus-border px-2 py-0.5">
+                  {project.mode}
+                </div>
+                {project.preferred_model && (
+                  <div className="rounded bg-nexus-accent/10 px-2 py-0.5 text-nexus-accent">
+                    {project.preferred_model}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          ))}
+        </div>
+
+        {loading && (
+          <div className="flex h-64 items-center justify-center">
+            <div className="flex items-center gap-3 text-sm text-nexus-muted">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-nexus-accent border-t-transparent" />
+              <span>Loading projects...</span>
+            </div>
+          </div>
+        )}
+        {!loading && projects.length === 0 && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="flex h-64 items-center justify-center text-gray-500"
+          >
+            <div className="text-center">
+              <FolderKanban className="mx-auto mb-3 h-12 w-12 text-nexus-border" />
+              <p className="text-sm">No projects yet</p>
+              <p className="text-xs">Create your first project to get started</p>
+            </div>
           </motion.div>
-        </main>
-      </div>
-
-      <BottomHUD />
+        )}
+      </motion.div>
 
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
@@ -582,6 +570,6 @@ export default function ProjectsPage() {
           </motion.div>
         </div>
       )}
-    </div>
+    </AppShell>
   );
 }

@@ -1,5 +1,22 @@
-from fastapi import APIRouter
+"""Model catalog exposed to the chat/model selectors.
 
+``/models/available`` used to ``return`` a hardcoded constant, so an API key
+never revealed the models it unlocks. It now aggregates the live catalog of
+every configured provider (see ``backend/llm/model_catalog.py``) and only falls
+back to the curated list below when no provider answers — for example on a
+fresh install with no keys, or offline.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from fastapi import APIRouter, Depends
+
+from backend.llm.model_catalog import aggregate_models
+from backend.middleware.auth import require_auth
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -79,17 +96,136 @@ TIER_TO_OPENCODE_MODEL: dict[str, str] = {
 }
 
 
-@router.get("/models/available")
-async def list_available_models() -> list[dict[str, object]]:
-    """Return the curated OpenCode Go model catalog.
+OPENROUTER_FREE_MODELS: list[dict[str, object]] = [
+    {
+        "id": "tencent/hy3:free",
+        "name": "Tencent Hy3",
+        "provider": "OpenRouter",
+        "tier": "reasoning",
+        "free": True,
+        "color": "#fbbf24",
+        "pricing": "free",
+        "estimated_tokens_per_sec": 28,
+        "context_window": 262_144,
+        "description": "Raciocínio e agentes para tarefas complexas.",
+    },
+    {
+        "id": "nvidia/nemotron-3-super-120b-a12b:free",
+        "name": "NVIDIA Nemotron 3 Super",
+        "provider": "OpenRouter",
+        "tier": "deep",
+        "free": True,
+        "color": "#76b900",
+        "pricing": "free",
+        "estimated_tokens_per_sec": 22,
+        "context_window": 1_000_000,
+        "description": "Agentes multi-passo e contexto muito longo.",
+    },
+    {
+        "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "name": "NVIDIA Nemotron 3 Nano Omni",
+        "provider": "OpenRouter",
+        "tier": "fast",
+        "free": True,
+        "color": "#22d3ee",
+        "pricing": "free",
+        "estimated_tokens_per_sec": 42,
+        "context_window": 262_144,
+        "description": "Rápido, económico e orientado a reasoning/código.",
+    },
+    {
+        "id": "poolside/laguna-m.1:free",
+        "name": "Poolside Laguna M.1",
+        "provider": "OpenRouter",
+        "tier": "coder",
+        "free": True,
+        "color": "#a78bfa",
+        "pricing": "free",
+        "estimated_tokens_per_sec": 34,
+        "context_window": 262_144,
+        "description": "Especialista gratuito para programação e agentes de código.",
+    },
+    {
+        "id": "openai/gpt-oss-20b:free",
+        "name": "OpenAI gpt-oss 20B",
+        "provider": "OpenRouter",
+        "tier": "medium",
+        "free": True,
+        "color": "#10b981",
+        "pricing": "free",
+        "estimated_tokens_per_sec": 38,
+        "context_window": 128_000,
+        "description": "Generalista open-weight para chat e tarefas diárias.",
+    },
+    {
+        "id": "google/gemma-4-31b-it:free",
+        "name": "Google Gemma 4 31B",
+        "provider": "OpenRouter",
+        "tier": "medium",
+        "free": True,
+        "color": "#60a5fa",
+        "pricing": "free",
+        "estimated_tokens_per_sec": 45,
+        "context_window": 131_072,
+        "description": "Modelo generalista gratuito com contexto muito longo.",
+    },
+]
 
-    Only one entry per model (no tier duplicates), so the chat selector
-    stays clean. Tier is exposed via ``/api/models/tiers`` instead.
+
+@router.get("/models/available")
+async def list_available_models(
+    refresh: bool = False, _user: dict = Depends(require_auth)
+) -> list[dict[str, object]]:
+    """Every model reachable with the currently configured API keys.
+
+    Queries each provider's own list-models endpoint (cached for 10 minutes)
+    and returns the union, free models first. Falls back to
+    :data:`OPENROUTER_FREE_MODELS` when discovery yields nothing so a fresh
+    install still has a usable selector.
     """
-    return list(OPENCODE_GO_MODEL_CATALOG)
+    try:
+        catalog = await aggregate_models(refresh=refresh)
+    except Exception:  # noqa: BLE001 - the selector must never hard-fail
+        logger.exception("Model aggregation failed; serving curated fallback")
+        return list(OPENROUTER_FREE_MODELS)
+
+    models = catalog.get("models") or []
+    if models:
+        return models
+
+    reasons = [
+        f"{p.get('label', p.get('provider'))}: {p.get('error')}"
+        for p in catalog.get("providers", [])
+        if p.get("error")
+    ]
+    logger.warning(
+        "No models discovered from any provider, serving curated fallback. %s",
+        "; ".join(reasons) or "no providers configured",
+    )
+    return list(OPENROUTER_FREE_MODELS)
+
+
+@router.get("/models/catalog")
+async def models_catalog(
+    refresh: bool = False, _user: dict = Depends(require_auth)
+) -> dict[str, object]:
+    """Same data as ``/models/available`` plus per-provider status and errors.
+
+    The plain list endpoint is kept for backwards compatibility; this one lets
+    the UI explain *why* a provider contributed no models.
+    """
+    try:
+        return await aggregate_models(refresh=refresh)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Model aggregation failed")
+        return {
+            "models": list(OPENROUTER_FREE_MODELS),
+            "providers": [],
+            "error": str(exc)[:200],
+        }
 
 
 @router.get("/models/tiers")
-async def list_tier_mapping() -> dict[str, str]:
+async def list_tier_mapping(_user: dict = Depends(require_auth)) -> dict[str, str]:
     """Return the tier -> OpenCode Go model mapping used by the smart router."""
     return dict(TIER_TO_OPENCODE_MODEL)

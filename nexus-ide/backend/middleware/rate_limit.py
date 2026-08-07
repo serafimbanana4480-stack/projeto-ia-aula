@@ -10,40 +10,31 @@ from slowapi.util import get_remote_address
 
 logger = logging.getLogger(__name__)
 
-# Use Redis for rate limiting when REDIS_URL is configured;
-# fall back to in-memory storage for development.
-_redis_url = os.getenv("REDIS_URL", "")
-if _redis_url:
-    _storage_uri = _redis_url
-    logger.info("Rate limiting using Redis: %s", _redis_url)
-else:
-    _storage_uri = "memory://"
-    logger.info("Rate limiting using in-memory storage")
-
 limiter = Limiter(
     key_func=get_remote_address,
-    default_limits=["200/minute", "1000/hour"],  # Default limits for all endpoints
-    storage_uri=_storage_uri,
+    default_limits=[],
+    storage_uri="memory://",
 )
 
 
 def get_rate_limit_config() -> dict[str, str]:
     """Get rate limit configuration for different endpoint types.
 
-    Returns a dictionary with rate limit configurations for different
-    types of endpoints (auth, chat, etc.).
+    The limiter's global defaults remain disabled so deployments can opt in via
+    the application settings, but callers (and the route decorators) still
+    need a single, explicit policy catalogue.  Values can be overridden with
+    environment variables without changing code between development and
+    production.
     """
-    return {
-        # Authentication endpoints - stricter limits
+    defaults = {
         "auth": "5/minute",
-        # Chat endpoints - moderate limits
         "chat": "60/minute",
-        # File operations - moderate limits
         "files": "30/minute",
-        # Terminal operations - moderate limits
         "terminal": "30/minute",
-        # Dashboard - higher limits
         "dashboard": "200/minute",
-        # Default limits
         "default": "200/minute",
+    }
+    return {
+        key: os.getenv(f"NEXUS_RATE_LIMIT_{key.upper()}", value)
+        for key, value in defaults.items()
     }

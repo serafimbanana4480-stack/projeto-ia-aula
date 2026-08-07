@@ -263,6 +263,20 @@ class CodeWatcher(BackgroundWorker):
     Uses ``watchdog`` if available, otherwise falls back to polling.
     """
 
+    # Runtime artefacts change continuously while the IDE is running. Watching
+    # them creates a feedback loop: a test/agent writes a log or temp file,
+    # the watcher launches TEST_RUNNER_UNIT and BUG_HUNTER_STATIC, and those
+    # workers create still more files. In production this had driven CPU to
+    # 100% and made chat appear to freeze.
+    _IGNORED_DIRECTORY_NAMES = frozenset(
+        {
+            ".git", ".next", ".pytest_cache", ".venv", "__pycache__",
+            "build", "coverage", "data", "dist", "logs", "node_modules",
+            "test-results", "tmp",
+        }
+    )
+    _TRIGGER_DEBOUNCE_SECONDS = 30.0
+
     def __init__(
         self,
         watch_path: str | Path = ".",
@@ -274,6 +288,17 @@ class CodeWatcher(BackgroundWorker):
         self._has_watchdog = self._detect_watchdog()
         self._observer: Any = None
         self._event_queue: asyncio.Queue[list[Path]] = asyncio.Queue()
+        self._last_trigger_at = float("-inf")
+
+    def _is_relevant_file(self, path: Path) -> bool:
+        """Return whether a changed path is source worth reacting to."""
+        try:
+            relative = path.resolve().relative_to(self.watch_path)
+        except (OSError, ValueError):
+            return False
+        return not any(
+            part.lower() in self._IGNORED_DIRECTORY_NAMES for part in relative.parts[:-1]
+        )
 
     def _detect_watchdog(self) -> bool:
         try:
@@ -297,19 +322,26 @@ class CodeWatcher(BackgroundWorker):
             from watchdog.observers import Observer
 
             class _Handler(FileSystemEventHandler):
-                def __init__(self, queue: asyncio.Queue[list[Path]]) -> None:
+                def __init__(
+                    self,
+                    queue: asyncio.Queue[list[Path]],
+                    is_relevant_file: Any,
+                ) -> None:
                     self._queue = queue
+                    self._is_relevant_file = is_relevant_file
 
                 def on_any_event(self, event: Any) -> None:
                     if event.is_directory:
                         return
                     try:
-                        self._queue.put_nowait([Path(event.src_path)])
+                        path = Path(event.src_path)
+                        if self._is_relevant_file(path):
+                            self._queue.put_nowait([path])
                     except asyncio.QueueFull:
                         logger.warning("File watcher queue full, dropping event")
 
             observer = Observer()
-            handler = _Handler(self._event_queue)
+            handler = _Handler(self._event_queue, self._is_relevant_file)
             observer.schedule(handler, str(self.watch_path), recursive=True)
             observer.start()
             self._observer = observer
@@ -330,9 +362,16 @@ class CodeWatcher(BackgroundWorker):
     async def _tick_polling(self) -> None:
         """Poll filesystem mtimes to detect changes."""
         changed_files: list[Path] = []
-        for root, _dirs, files in os.walk(self.watch_path):
+        for root, dirs, files in os.walk(self.watch_path):
+            # Prune expensive/runtime directories before descending into them.
+            dirs[:] = [
+                name for name in dirs
+                if name.lower() not in self._IGNORED_DIRECTORY_NAMES
+            ]
             for fname in files:
                 fpath = Path(root) / fname
+                if not self._is_relevant_file(fpath):
+                    continue
                 try:
                     mtime = fpath.stat().st_mtime
                 except OSError:
@@ -349,6 +388,8 @@ class CodeWatcher(BackgroundWorker):
         """Classify changed files and trigger appropriate downstream actions."""
         triggers: set[str] = set()
         for fpath in files:
+            if not self._is_relevant_file(fpath):
+                continue
             name = fpath.name.lower()
             if name.endswith(".py"):
                 triggers.add("python_change")
@@ -362,6 +403,15 @@ class CodeWatcher(BackgroundWorker):
                 "pdm.lock",
             ):
                 triggers.add("dependency_change")
+
+        if not triggers:
+            return
+
+        now = time.monotonic()
+        if now - self._last_trigger_at < self._TRIGGER_DEBOUNCE_SECONDS:
+            logger.debug("CODE_WATCHER debounced duplicate trigger batch")
+            return
+        self._last_trigger_at = now
 
         if "python_change" in triggers:
             await self._publish(

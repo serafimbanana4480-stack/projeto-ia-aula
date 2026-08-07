@@ -27,7 +27,6 @@ from ..memory.advanced_memory import AdvancedMemorySystem
 from ..processing.multimodal import MultiModalProcessor
 from ..dashboard.realtime_dashboard import RealtimeDashboard
 from ..monitoring.performance_monitor import PerformanceMonitor
-from ..security.security_hardening import SecurityHardeningSystem
 from ..testing.testing_framework import TestingFramework
 from ..documentation.docs_generator import DocumentationGenerator
 from ..deployment.deployment_automation import DeploymentAutomation
@@ -287,13 +286,6 @@ class SystemIntegrator:
         await monitoring.initialize()
         logger.info("PerformanceMonitor initialized")
         return monitoring
-        
-    async def _initialize_security(self) -> SecurityHardeningSystem:
-        """Initialize SecurityHardeningSystem."""
-        security = SecurityHardeningSystem()
-        await security.initialize()
-        logger.info("SecurityHardeningSystem initialized")
-        return security
         
     async def _initialize_testing(self) -> TestingFramework:
         """Initialize TestingFramework."""

@@ -280,7 +280,10 @@ function stopAll() {
 }
 
 async function fetchMetrics() {
-  if (!isAuthenticated()) {
+  // In dev mode the backend metrics endpoints are open (no auth required),
+  // so we still fetch even when not authenticated. Only bail out on a real
+  // 401 from the backend (production with invalid/expired credentials).
+  if (!isAuthenticated() && process.env.NODE_ENV !== "development") {
     if (sseInstance || pollingTimer) {
       stopAll();
     }
@@ -326,14 +329,18 @@ function startSSE() {
   if (isStopped) return;
 
   const token = getAccessToken();
-  if (!token) {
+  // Native EventSource cannot send an Authorization header. Never put bearer
+  // tokens in a query string: URLs are written to browser history, proxies and
+  // Uvicorn access logs. Authenticated clients use the existing polling path;
+  // anonymous clients must not open an unauthed SSE connection.
+  if (token || process.env.NODE_ENV !== "development") {
     startPolling();
     return;
   }
+  return;
 
   try {
-    const streamUrl = `${apiUrl("/api/dashboard/stream")}?token=${encodeURIComponent(token)}`;
-    const es = new EventSource(streamUrl);
+    const es = new EventSource(apiUrl("/api/dashboard/stream"));
     sseInstance = es;
 
     es.onopen = () => {
@@ -379,7 +386,9 @@ function startSSE() {
 
 function startPolling() {
   if (pollingTimer || isStopped) return;
-  if (!isAuthenticated()) return;
+  // Metrics are intentionally public in development, matching the SSE
+  // endpoint. Do not leave the HUD frozen when SSE is unavailable locally.
+  if (!isAuthenticated() && process.env.NODE_ENV !== "development") return;
 
   useMetricsStore.getState()._setConnectionMode("polling");
   fetchMetrics(); // immediate
@@ -393,8 +402,10 @@ export function initMetricsStream() {
   // Allow restart after an auth failure stopped the stream.
   if (isInitialized && !isStopped) return;
 
-  // Do not start if user is not authenticated yet
-  if (!isAuthenticated()) {
+  // In dev mode the backend metrics endpoints are open, so we start the
+  // stream immediately even before authentication completes. In production
+  // we wait for auth (the endpoints require a valid JWT).
+  if (!isAuthenticated() && process.env.NODE_ENV !== "development") {
     isInitialized = false;
     isStopped = false;
     startAuthHeartbeat();

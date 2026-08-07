@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import re
@@ -78,7 +79,8 @@ class SwarmRunRequest:
     agents: list[AgentRole] | None = None
     project_path: str = ""
     auto_approve: bool = False
-    max_iterations: int = 5
+    autonomous: bool = True
+    max_iterations: int = 1000
 
 
 # ---------------------------------------------------------------------------
@@ -86,20 +88,26 @@ class SwarmRunRequest:
 # ---------------------------------------------------------------------------
 
 
-def _safe_call(coro, default: Any = None) -> Any:
-    """Run an awaitable but never raise — return ``default`` on failure."""
-    try:
-        return asyncio.get_event_loop().run_until_complete(coro)
-    except RuntimeError:
-        # No running loop / already in a loop
-        try:
-            return asyncio.run(coro)
-        except Exception as exc:
-            logger.debug("safe_call failed: %s", exc)
-            return default
-    except Exception as exc:
-        logger.debug("safe_call failed: %s", exc)
-        return default
+@dataclass
+class _RunContext:
+    """Per-run collaboration substrate.
+
+    Each ``run()`` gets its own bus, coordinator, researcher and reviewer so
+    two concurrent runs cannot clear each other's history or share the
+    anti-loop counters. It is published through a :class:`~contextvars.ContextVar`
+    so the existing ``self.message_bus`` / ``self.coordinator`` call sites keep
+    working unchanged.
+    """
+
+    message_bus: MessageBus
+    coordinator: Coordinator
+    researcher: ResearcherAgent
+    reviewer: ReviewerAgent
+
+
+_current_run: contextvars.ContextVar[_RunContext | None] = contextvars.ContextVar(
+    "swarm_run_context", default=None
+)
 
 
 # ---------------------------------------------------------------------------
@@ -110,9 +118,10 @@ def _safe_call(coro, default: Any = None) -> Any:
 class SwarmOrchestrator:
     """Top-level SWARM orchestrator.
 
-    Constructed once per process; ``run()`` may be called concurrently from
-    different sessions — the message bus and memory store are the shared
-    substrate that keeps runs isolated by run_id.
+    Constructed once per process. ``run()`` may be called concurrently from
+    different sessions: each run allocates its own :class:`_RunContext`, while
+    the memory store and RAG retriever stay shared (they are additive and
+    run-tagged).
     """
 
     def __init__(
@@ -127,12 +136,43 @@ class SwarmOrchestrator:
         self.llm_client = llm_client
         self.registry = registry or {}
         self.events = event_bus  # legacy NEXUS EventBus (for SSE / dashboard)
-        self.message_bus = message_bus or MessageBus()
         self.memory = memory or MemoryStore()
         self.retriever = retriever or SwarmRetriever()
-        self.coordinator = Coordinator(self.message_bus)
-        self.researcher = ResearcherAgent(self.message_bus)
-        self.reviewer = ReviewerAgent(self.message_bus)
+        # Fallback substrate used outside of a run (and by callers that
+        # injected their own bus).
+        self._default_ctx = _RunContext(
+            message_bus=message_bus or MessageBus(),
+            coordinator=Coordinator(message_bus),
+            researcher=ResearcherAgent(message_bus),
+            reviewer=ReviewerAgent(message_bus),
+        )
+        if message_bus is None:
+            bus = self._default_ctx.message_bus
+            self._default_ctx.coordinator = Coordinator(bus)
+            self._default_ctx.researcher = ResearcherAgent(bus)
+            self._default_ctx.reviewer = ReviewerAgent(bus)
+
+    # -- per-run substrate ------------------------------------------------
+
+    @property
+    def _ctx(self) -> _RunContext:
+        return _current_run.get() or self._default_ctx
+
+    @property
+    def message_bus(self) -> MessageBus:
+        return self._ctx.message_bus
+
+    @property
+    def coordinator(self) -> Coordinator:
+        return self._ctx.coordinator
+
+    @property
+    def researcher(self) -> ResearcherAgent:
+        return self._ctx.researcher
+
+    @property
+    def reviewer(self) -> ReviewerAgent:
+        return self._ctx.reviewer
 
     # ------------------------------------------------------------------
     # Public API
@@ -148,16 +188,40 @@ class SwarmOrchestrator:
             strategy=req.strategy or SwarmStrategy.ADAPTIVE,
             objective=req.objective,
         )
-        self.message_bus.clear()
-        self.coordinator.reset_guard()
+        bus = MessageBus()
+        token = _current_run.set(
+            _RunContext(
+                message_bus=bus,
+                coordinator=Coordinator(bus),
+                researcher=ResearcherAgent(bus),
+                reviewer=ReviewerAgent(bus),
+            )
+        )
+        try:
+            return await self._run_inner(req, result, run_id, started)
+        finally:
+            _current_run.reset(token)
 
+    async def _run_inner(
+        self,
+        req: SwarmRunRequest,
+        result: SwarmResult,
+        run_id: str,
+        started: float,
+    ) -> SwarmResult:
+        """Body of :meth:`run`, executed inside an active :class:`_RunContext`."""
         try:
             # 1. Coordinator decides mode + strategy
             decision = self.coordinator.decide(req.objective, explicit_mode=req.mode)
             result.mode = decision.mode
             result.strategy = req.strategy or decision.strategy
             spec = get_mode(result.mode)
-            result.agents_involved = [a.value for a in spec.agents]
+            # Report the team that will actually run, not the mode default —
+            # otherwise an explicit ``agents`` selection never showed up in
+            # the result and the UI displayed the wrong roster.
+            result.agents_involved = [
+                a.value for a in self._resolve_agents(spec.agents, req.agents)
+            ]
             await self._publish_status(
                 f"🧭 Coordinator chose mode={result.mode.value} strategy={result.strategy.value} "
                 f"(confidence={decision.confidence:.2f})",
@@ -438,9 +502,25 @@ class SwarmOrchestrator:
         spec_agents: list[AgentRole],
         requested: list[AgentRole] | None,
     ) -> list[AgentRole]:
-        """Map SWARM roles to NEXUS agents, falling back to CODER when missing."""
+        """Pick the roles to run, preferring the caller's explicit selection.
+
+        Falls back to the mode's default team when the request is empty or
+        filters down to nothing — previously an all-unknown selection produced
+        an empty list and the run silently returned no output at all.
+        """
         if requested:
-            return [a for a in requested if a in AGENT_BINDINGS]
+            picked = [a for a in requested if a in AGENT_BINDINGS]
+            # De-duplicate while preserving order.
+            seen: set[AgentRole] = set()
+            picked = [a for a in picked if not (a in seen or seen.add(a))]
+            if picked:
+                return picked
+            logger.warning(
+                "Requested agents %s resolved to nothing — falling back to the "
+                "mode default team %s",
+                [getattr(a, "value", a) for a in requested],
+                [a.value for a in spec_agents],
+            )
         return list(spec_agents)
 
     async def _gather_agent_outputs(
@@ -503,6 +583,7 @@ class SwarmOrchestrator:
             project_path=req.project_path or ".",
             max_iterations=req.max_iterations,
             enable_thinking=False,
+            autonomous=req.autonomous,
         )
         parts: list[str] = []
         try:

@@ -1,75 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useCallback, useState } from "react";
-import { useAgentStore } from "./useAgentStore";
+import { mapApiAgent, useAgentStore } from "./useAgentStore";
 import { useTaskStore } from "./useTaskStore";
 import { useSystemStore } from "./useSystemStore";
-import { useMemoryStore } from "./useMemoryStore";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-const AGENT_STATES = ["active", "busy", "idle", "error"] as const;
-const REASONING_TYPES = ["reasoning", "planning", "reflection", "tool_use", "thought"] as const;
-const CONNECTION_TYPES = ["coordination", "debate", "planning", "error"] as const;
-
-function randChoice<T>(arr: readonly T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function randInt(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-function randFloat(min: number, max: number, decimals = 2): number {
-  return parseFloat((Math.random() * (max - min) + min).toFixed(decimals));
-}
-
-interface ReasoningStep {
-  id: string;
-  agentId: string;
-  agentType: string;
-  type: string;
-  content: string;
-  confidence: number;
-  priority: string;
-  timestamp: number;
-}
-
-interface Connection {
-  source: string;
-  target: string;
-  type: string;
-  frequency: number;
-  messageRate: number;
-}
-
-interface MemoryNode {
-  id: string;
-  type: string;
-  content: string;
-  importance: number;
-  accessCount: number;
-  lastAccessed: number;
-  position: { x: number; y: number };
-  connections: string[];
-}
-
-interface SystemMetrics {
-  timestamp: number;
-  cpu_usage: number;
-  memory_usage: number;
-  gpu_usage: number;
-  disk_usage: number;
-  network_in: number;
-  network_out: number;
-  active_connections: number;
-  queue_size: number;
-  requests_per_second: number;
-  avg_response_time_ms: number;
-  tokens_per_second: number;
-  cache_hit_rate: number;
-  error_rate: number;
-}
 
 export function useEventBus() {
   const [isConnected, setIsConnected] = useState(false);
@@ -79,12 +15,10 @@ export function useEventBus() {
   const reconnectTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
   
   const { updateAgent, setAgents } = useAgentStore();
-  const { updateTask, setTasks } = useTaskStore();
+  const { updateTask } = useTaskStore();
   const { updateSystemMetrics } = useSystemStore();
-  const { setMemoryNodes } = useMemoryStore();
   
   const connectedRef = useRef(false);
-  const tickRef = useRef<NodeJS.Timeout | null>(null);
 
   const connectSSE = useCallback((url: string, storeKey: string, onData: (data: unknown) => void) => {
     if (abortControllers.current.get(storeKey)) {
@@ -136,6 +70,9 @@ export function useEventBus() {
       })
       .catch((err) => {
         if (!controller.signal.aborted) {
+          abortControllers.current.delete(storeKey);
+          setConnectionError(`Falha ao ligar a ${storeKey}`);
+          setIsConnected(false);
           console.warn(`SSE connection ${storeKey} failed:`, err);
           scheduleReconnect(url, storeKey, onData);
         }
@@ -189,7 +126,6 @@ export function useEventBus() {
           tokensPerSecond: metrics.tokens_per_second || 0,
           cacheHitRate: metrics.cache_hit_rate || 0,
           apiErrorsPerMin: metrics.error_rate || 0,
-          hallucinationAlerts: 0,
           timestamp: metrics.timestamp || Date.now(),
         });
       }
@@ -228,18 +164,18 @@ export function useEventBus() {
     connectSSE("/api/agents/topology/stream", "topology", (data) => {
       if (data && Array.isArray(data)) {
         const agents = data as any[];
-        setAgents(agents.map((a: any) => ({
+        setAgents(agents.map((a: any) => mapApiAgent({
           id: a.agentId || a.id,
           name: a.agentType || a.agentId,
           status: a.status,
-          description: a.task || "",
+          task: a.task || "",
         })));
       }
     });
 
     setIsConnected(true);
     connectedRef.current = true;
-  }, [connectSSE, updateAgent, updateTask, setAgents, setMemoryNodes, updateSystemMetrics]);
+  }, [connectSSE, updateAgent, updateTask, setAgents, updateSystemMetrics]);
 
   const stopBus = useCallback(() => {
     for (const [key, controller] of abortControllers.current) {
@@ -250,11 +186,6 @@ export function useEventBus() {
       clearTimeout(timer);
     }
     reconnectTimers.current.clear();
-
-    if (tickRef.current) {
-      clearInterval(tickRef.current);
-      tickRef.current = null;
-    }
 
     setIsConnected(false);
     connectedRef.current = false;

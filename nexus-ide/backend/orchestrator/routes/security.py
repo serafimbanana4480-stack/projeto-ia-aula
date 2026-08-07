@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Any
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
 
-from backend.orchestrator.limiter import limiter
 
 from backend.observability.event_system import get_event_bus
 from backend.security.security_auditor import get_security_auditor, SecurityLevel, SecurityEventType
@@ -167,7 +166,6 @@ async def get_blocked_ips() -> Dict[str, List[str]]:
 
 
 @router.post("/security/blocked-ips/{ip_address}/remove")
-@limiter.limit("60/minute")
 async def unblock_ip(ip_address: str, request: Request) -> Dict[str, str]:
     """Remove an IP from blocked list."""
     try:
@@ -206,7 +204,6 @@ async def get_suspicious_users() -> Dict[str, List[str]]:
 
 
 @router.post("/security/suspicious-users/{user_id}/remove")
-@limiter.limit("60/minute")
 async def unflag_user(user_id: str, request: Request) -> Dict[str, str]:
     """Remove a user from suspicious list."""
     try:
@@ -277,7 +274,6 @@ async def get_security_levels() -> Dict[str, List[str]]:
 
 
 @router.post("/security/audit-request")
-@limiter.limit("60/minute")
 async def audit_request(request_data: Dict[str, Any], request: Request) -> Dict[str, Any]:
     """Manually audit a request for security threats."""
     try:
@@ -305,7 +301,6 @@ async def audit_request(request_data: Dict[str, Any], request: Request) -> Dict[
 
 
 @router.post("/security/audit-authentication")
-@limiter.limit("60/minute")
 async def audit_authentication(auth_data: Dict[str, Any], request: Request) -> Dict[str, Any]:
     """Manually audit an authentication event."""
     try:

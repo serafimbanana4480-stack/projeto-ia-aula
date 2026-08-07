@@ -21,11 +21,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
 
 from backend.config.settings import get_settings
-from backend.middleware.rate_limit import limiter
 from backend.middleware.security import SecurityHeadersMiddleware
 
 try:
@@ -41,13 +38,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.middleware.auth import require_auth
 from backend.observability.health import HealthChecker
 from backend.observability.routes.alerts import router as alerts_router
+from backend.observability.routes.health import router as health_router
 from backend.observability.routes.metrics import router as metrics_router
 from backend.observability.routes.usage import router as usage_router
 from backend.orchestrator.routes.admin import router as admin_router
+from backend.orchestrator.routes.advanced_modes import router as advanced_modes_router
 from backend.orchestrator.routes.agent_bus import router as agent_bus_router
 from backend.orchestrator.routes.agent_state import router as agent_state_router
 from backend.orchestrator.routes.agents import router as agents_router
+from backend.orchestrator.routes.analytics import router as analytics_router
 from backend.orchestrator.routes.auth import router as auth_router
+from backend.orchestrator.routes.autonomous_improvement import (
+    router as autonomous_improvement_router,
+)
+from backend.orchestrator.routes.mission import router as mission_router
 from backend.orchestrator.routes.thinking import router as thinking_router
 
 try:
@@ -57,22 +61,34 @@ try:
 except ImportError:
     _BROWSER_AVAILABLE = False
     browser_router = None
+from backend.core.routes.improvement import router as improvement_router
+from backend.observability.routes.workflows import router as workflows_router
+from backend.orchestrator.chat_cancellation import chat_cancellation_middleware
+from backend.orchestrator.routes.cancellation_routes import router as cancellation_router
 from backend.orchestrator.routes.chat import router as chat_router
 from backend.orchestrator.routes.collaboration import router as collaboration_router
 from backend.orchestrator.routes.dashboard import router as dashboard_router
 from backend.orchestrator.routes.email import router as email_router
 from backend.orchestrator.routes.embeddings import router as embeddings_router
+from backend.orchestrator.routes.errors import router as errors_router
 from backend.orchestrator.routes.files import router as files_router
 from backend.orchestrator.routes.guardian import router as guardian_router
+from backend.orchestrator.routes.knowledge import router as knowledge_router
 from backend.orchestrator.routes.logs import router as logs_router
+from backend.orchestrator.routes.mcp import router as mcp_router
 from backend.orchestrator.routes.memories import router as memories_router
 from backend.orchestrator.routes.meta import router as meta_router
 from backend.orchestrator.routes.meta_analyzer import router as meta_analyzer_router
 from backend.orchestrator.routes.models_ui import router as models_ui_router
 from backend.orchestrator.routes.modes import router as modes_router
+from backend.orchestrator.routes.neural_dashboard import router as neural_dashboard_router
+from backend.orchestrator.routes.observability import agents_topology
+from backend.orchestrator.routes.observability import router as observability_router
+from backend.orchestrator.routes.omega import router as omega_router
 from backend.orchestrator.routes.orchestrator import router as orchestrator_router
 from backend.orchestrator.routes.overseer import router as overseer_router
 from backend.orchestrator.routes.plan import router as plan_router
+from backend.orchestrator.routes.profile import get_profile
 from backend.orchestrator.routes.profile import router as profile_router
 from backend.orchestrator.routes.projects import router as projects_router
 from backend.orchestrator.routes.providers import router as providers_router
@@ -81,6 +97,7 @@ from backend.orchestrator.routes.sessions import router as sessions_router
 from backend.orchestrator.routes.settings import router as settings_router
 from backend.orchestrator.routes.skills import router as skills_router
 from backend.orchestrator.routes.system import router as system_router
+from backend.orchestrator.routes.tasks import router as tasks_router
 from backend.orchestrator.routes.terminal import router as terminal_router
 from backend.orchestrator.routes.wizard import router as wizard_router
 from backend.orchestrator.routes.workers import router as workers_router
@@ -90,21 +107,58 @@ from backend.swarm.api.routes import router as swarm_router
 logger = logging.getLogger(__name__)
 
 
+#: Modules whose behaviour changes the outcome of an autonomous run. Their
+#: content hash is logged at startup so a stale process is diagnosable from the
+#: log alone.
+_FINGERPRINTED_MODULES = (
+    "backend/orchestrator/plan_creator.py",
+    "backend/orchestrator/plan_executor.py",
+    "backend/orchestrator/engine.py",
+    "backend/orchestrator/verification.py",
+    "backend/agents/base.py",
+    "config/models.yaml",
+)
+
+
+def _log_code_fingerprint() -> None:
+    """Record which *version of the source* this process is actually running.
+
+    Motivation, with evidence. On 2026-07-27 the working tree contained a fixed
+    ``plan_creator.py`` (mtime 08:38) yet the 09:18 run still logged
+    ``"No JSON array found in plan content, creating single-step plan"`` — a
+    string that exists only in the previous revision. Python had the old module
+    object in memory and nothing in the log said so, which cost an entire
+    debugging session chasing a bug that had already been fixed on disk.
+
+    Best-effort by construction: a missing file or an unreadable path must
+    never prevent the backend from starting.
+    """
+    import hashlib
+    from datetime import datetime
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    for relative in _FINGERPRINTED_MODULES:
+        path = root / relative
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            logger.warning("Code fingerprint unavailable for %s: %s", relative, exc)
+            continue
+        digest = hashlib.sha256(data).hexdigest()[:12]
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC).isoformat()
+        logger.info("Code fingerprint | %s | sha256=%s | mtime=%s", relative, digest, mtime)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Create long-lived singletons and guarantee clean shutdown.
-
-    ``llm_client`` must be closed explicitly so httpx does not warn about
-    orphaned connections. ``ContextStore`` and the agent registry are plain
-    Python objects and need no teardown.
-    """
-    # Lazy imports of heavy modules to keep import-time / worker start-up fast
+    """Create long-lived singletons and guarantee clean shutdown."""
     from backend.core.auto_correction import get_auto_correction_loop
     from backend.llm import create_llm_client
     from backend.observability.advanced_logging import get_structured_logger
-
-    # Activate structured logging
     from backend.observability.logging_config import setup_logging
+    from backend.observability.routes.workflows import init_workflow_tracker
+    from backend.orchestrator.cancellation import get_cancellation_registry
     from backend.orchestrator.context_manager import ContextStore
     from backend.orchestrator.events import EventBus as OrchestrationEventBus
     from backend.orchestrator.registry import get_registry
@@ -114,8 +168,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     slog = get_structured_logger()
     app.state.structured_logger = slog
     slog.info("NEXUS IDE backend starting", agent="SYSTEM", source="startup")
+    _log_code_fingerprint()
 
-    # Validate configuration at startup
     settings = get_settings()
     config_errors = validate_configuration()
 
@@ -127,30 +181,70 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "Configuration validation failed. Please fix the errors before starting the application."
         )
 
-    logger.info(f"Configuration validated successfully for environment: {settings.environment}")
-
-    # Initialize database
+    logger.info("Configuration validated successfully for environment: %s", settings.environment)
     init_db()
 
-    # Lazy-load tools and workspace modules so their heavy imports don't block
-    # startup.  They self-register on first import.
+    # Background services are individually opt-out via NEXUS_ENABLE_<SERVICE>=false.
+    # They default ON in every environment, including development: NEXUS is a
+    # local-first autonomous IDE, so the machine it runs on is exactly where
+    # the dashboard agent, self-healing and the improvement orchestrator must
+    # be alive. A previous default disabled everything in development, which
+    # meant the entire autonomy stack was decorative in the environment where
+    # the product is actually used. Set NEXUS_BACKGROUND_SERVICES=off to
+    # disable the whole stack at once (e.g. in test runs or CI).
+    master = os.environ.get("NEXUS_BACKGROUND_SERVICES", "").strip().lower()
+    master_off = master in {"0", "false", "no", "off"}
+
+    def _svc(name: str) -> bool:
+        if master_off:
+            return False
+        raw = os.environ.get(f"NEXUS_ENABLE_{name}", "").strip().lower()
+        if raw:
+            return raw in {"1", "true", "yes", "on"}
+        return True
+
+    enable_workers       = _svc("BACKGROUND_WORKERS")
+    enable_dashboard     = _svc("DASHBOARD_AGENT")
+    enable_guardian      = _svc("GUARDIAN_AGENT")
+    enable_auto_correct  = _svc("AUTO_CORRECTION")
+    enable_exec_engine   = _svc("EXEC_ENGINE")
+    enable_improvement   = _svc("CONTINUOUS_IMPROVEMENT")
+    enable_self_improve  = _svc("SELF_IMPROVEMENT")
+    enable_self_healing  = _svc("SELF_HEALING")
+    enable_ai_orchestrator = _svc("AI_ORCHESTRATOR")
+    enable_auto_trigger  = _svc("AUTO_TRIGGER")
+    enable_session_gc    = _svc("SESSION_GC")
+
+    off = [n for n, on in [
+        ("BACKGROUND_WORKERS", enable_workers),
+        ("DASHBOARD_AGENT", enable_dashboard),
+        ("GUARDIAN_AGENT", enable_guardian),
+        ("AUTO_CORRECTION", enable_auto_correct),
+        ("EXEC_ENGINE", enable_exec_engine),
+        ("CONTINUOUS_IMPROVEMENT", enable_improvement),
+        ("SELF_IMPROVEMENT", enable_self_improve),
+        ("SELF_HEALING", enable_self_healing),
+        ("AI_ORCHESTRATOR", enable_ai_orchestrator),
+        ("AUTO_TRIGGER", enable_auto_trigger),
+        ("SESSION_GC", enable_session_gc),
+    ] if not on]
+    if off:
+        logger.info("Disabled background services: %s (default is ON; NEXUS_ENABLE_<NAME>=false disables)", ", ".join(off))
+
     import backend.core.workspace as _workspace  # noqa: F401
     import backend.tools as _tools  # noqa: F401
 
-    # Lazy-init LLM client (cached in app.state)
     if not hasattr(app.state, "llm_client") or app.state.llm_client is None:
         app.state.llm_client = create_llm_client()
 
-    # Lazy-init registry on first access instead of eagerly at startup
     registry = get_registry(app)
     app.state.context = ContextStore()
     app.state.event_bus = OrchestrationEventBus()
+    app.state.workflow_tracker = init_workflow_tracker()
 
-    # Initialize Agent Lifecycle Manager
     from backend.core.agent_lifecycle import AgentLifecycleManager
 
     lifecycle = AgentLifecycleManager(registry=registry, llm_client=app.state.llm_client)
-    # Wire overseer callback if overseer is in registry
     overseer = registry.get("OVERSEER")
     if overseer:
         lifecycle.set_overseer_callback(
@@ -160,58 +254,67 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     app.state.agent_lifecycle = lifecycle
     app.state.registry = registry
-    logger.info("Agent lifecycle manager initialized (execution enabled)")
+    logger.info("Agent lifecycle manager ready")
 
-    # Start Background Workers
     from backend.core.background_workers import BackgroundWorkerManager
 
-    worker_manager = BackgroundWorkerManager()
-    await worker_manager.start_all()
+    worker_manager = BackgroundWorkerManager() if enable_workers else None
+    if worker_manager:
+        await worker_manager.start_all()
     app.state.worker_manager = worker_manager
-    logger.info("Background workers started")
+    if worker_manager:
+        logger.info("Background workers started")
 
-    # Start DashboardAgent background loops
     from backend.agents.dashboard_agent import DashboardAgent
 
     dashboard = DashboardAgent()
     app.state.dashboard_agent = dashboard
-    monitor_task = asyncio.create_task(dashboard.monitor_loop())
-    summary_task = asyncio.create_task(dashboard.session_summary_loop())
+    monitor_task = asyncio.create_task(dashboard.monitor_loop()) if enable_dashboard else None
+    summary_task = asyncio.create_task(dashboard.session_summary_loop()) if enable_dashboard else None
     app.state.dashboard_monitor_task = monitor_task
     app.state.dashboard_summary_task = summary_task
-    logger.info("Dashboard agent background loops started")
+    if enable_dashboard:
+        logger.info("Dashboard agent loops started")
 
-    # Start GuardianAgent background loop
     from backend.agents.guardian import NexusGuardianAgent
 
     guardian = NexusGuardianAgent()
-    guardian_task = asyncio.create_task(guardian.monitor_loop())
+    guardian_task = await guardian.start() if enable_guardian else None
     app.state.guardian_agent = guardian
     app.state.guardian_task = guardian_task
-    logger.info("Guardian agent background loop started")
+    if enable_guardian:
+        logger.info("Guardian agent loop started")
 
-    # Start Auto-Correction Loop
     auto_correction = get_auto_correction_loop(lifecycle_manager=lifecycle)
-    await auto_correction.start_monitoring()
+    if enable_auto_correct:
+        await auto_correction.start_monitoring()
     app.state.auto_correction = auto_correction
-    logger.info("Auto-correction loop started")
+    if enable_auto_correct:
+        logger.info("Auto-correction loop started")
 
-    # Start Autonomous Execution Engine (task retry + monitoring)
     from backend.orchestrator.autonomous_execution_engine import AutonomousExecutionEngine
 
     exec_engine = AutonomousExecutionEngine(max_concurrent=5)
     app.state.autonomous_execution_engine = exec_engine
-    logger.info("Autonomous execution engine started (max_concurrent=5)")
+    if enable_exec_engine:
+        logger.info("Autonomous execution engine started (max_concurrent=5)")
 
-    # Start SelfImprovementLoop (metrics + trend analysis)
+    from backend.core.continuous_improvement import get_continuous_improvement_loop
+
+    improvement_loop = get_continuous_improvement_loop()
+    if enable_improvement:
+        await improvement_loop.start()
+    app.state.improvement_loop = improvement_loop
+    if enable_improvement:
+        logger.info("Continuous improvement loop started")
+
     from backend.orchestrator.self_improvement_loop import SelfImprovementLoop
 
     improver = SelfImprovementLoop(target_metrics=["response_time", "accuracy", "throughput", "success_rate"])
     app.state.self_improvement_loop = improver
-    logger.info("Self-improvement loop initialized")
+    if enable_self_improve:
+        logger.info("Self-improvement loop started")
 
-    # Start Self-Healing Engine (active improvement + skills)
-    settings = get_settings()
     auto_apply = settings.environment == "production" or os.environ.get("NEXUS_AUTO_APPLY", "false").lower() == "true"
     from backend.core.self_healing_engine import SelfHealingEngine
 
@@ -221,11 +324,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         min_confidence=0.7,
         analysis_interval=3600,
     )
-    await healer.start()
+    if enable_self_healing:
+        await healer.start()
     app.state.healer = healer
-    logger.info("Self-healing engine started (auto_apply=%s, dry_run=%s)", auto_apply, settings.environment == "development")
+    if enable_self_healing:
+        logger.info("Self-healing engine started (auto_apply=%s, dry_run=%s)", auto_apply, settings.environment == "development")
 
-    # Pre-populate evolution log if empty
+    from backend.config.settings import get_autonomous_improvement_config
+    from backend.orchestrator.autonomous_improvement_orchestrator import (
+        get_autonomous_improvement_orchestrator,
+    )
+
+    ai_config = get_autonomous_improvement_config()
+    ai_orchestrator = get_autonomous_improvement_orchestrator(
+        config=ai_config,
+        lifecycle_manager=lifecycle,
+        llm_client=app.state.llm_client,
+        registry=registry,
+        event_bus=app.state.event_bus,
+    )
+    if enable_ai_orchestrator:
+        await ai_orchestrator.start()
+    app.state.ai_orchestrator = ai_orchestrator
+    if enable_ai_orchestrator:
+        logger.info("Autonomous improvement orchestrator started (interval=%sm)", ai_config.get("cycle_interval_minutes", 30))
+
+    from backend.orchestrator.auto_trigger_engine import AutoTriggerEngine
+
+    auto_trigger = AutoTriggerEngine(orchestrator=ai_orchestrator)
+    if enable_auto_trigger:
+        await auto_trigger.start()
+    app.state.auto_trigger = auto_trigger
+    if enable_auto_trigger:
+        logger.info("Auto trigger engine started (rules=%d)", len(AutoTriggerEngine.TRIGGER_RULES))
+
     from pathlib import Path
     evolution_log = Path(__file__).resolve().parent.parent.parent / "data" / "evolution_log.md"
     if not evolution_log.exists():
@@ -239,117 +371,90 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         logger.info("Evolution log created at %s", evolution_log)
 
-    # Start Session Lifecycle Manager (garbage collection)
     from backend.orchestrator.session_lifecycle import SessionLifecycleManager
 
     session_lifecycle = SessionLifecycleManager(event_bus=app.state.event_bus)
-    session_lifecycle.start()
+    if enable_session_gc:
+        session_lifecycle.start()
     app.state.session_lifecycle = session_lifecycle
-    logger.info(
-        "Session lifecycle manager started (ttl=%dh, interval=%dmin)",
-        session_lifecycle.ttl_hours,
-        session_lifecycle.gc_interval_minutes,
-    )
+    if enable_session_gc:
+        logger.info("Session lifecycle GC started (ttl=%dh, interval=%dmin)", session_lifecycle.ttl_hours, session_lifecycle.gc_interval_minutes)
 
     logger.info("NEXUS orchestrator ready (provider=%s)", settings.llm_provider)
     try:
         yield
     finally:
-        # Cancel dashboard background loops
-        monitor_task.cancel()
-        summary_task.cancel()
-        # Cancel guardian background loop
-        await guardian.stop()
-        guardian_task.cancel()
-        # Stop auto-correction loop
-        await auto_correction.stop_monitoring()
-        # Stop self-healing engine
+        if monitor_task:
+            monitor_task.cancel()
+        if summary_task:
+            summary_task.cancel()
+        if enable_guardian:
+            await guardian.stop()
+        await get_cancellation_registry().shutdown()
+        if enable_auto_correct:
+            await auto_correction.stop_monitoring()
         healer = getattr(app.state, "healer", None)
         if healer:
             await healer.stop()
-        # Auto-exec engine needs no teardown (in-memory state)
+        ai_orchestrator = getattr(app.state, "ai_orchestrator", None)
+        if ai_orchestrator:
+            await ai_orchestrator.stop()
+        auto_trigger = getattr(app.state, "auto_trigger", None)
+        if auto_trigger:
+            await auto_trigger.stop()
+        improvement_loop = getattr(app.state, "improvement_loop", None)
+        if improvement_loop:
+            await improvement_loop.stop()
         logger.info("Autonomous execution engine shut down")
-        # SelfImprovementLoop needs no teardown (in-memory deque)
-        # Stop session lifecycle GC loop
         session_lifecycle = getattr(app.state, "session_lifecycle", None)
         if session_lifecycle:
             await session_lifecycle.stop()
-        # Stop background workers
         worker_manager = getattr(app.state, "worker_manager", None)
         if worker_manager:
             await worker_manager.stop_all()
-        # Wait for all background tasks to finish cleanly
         await asyncio.gather(
-            monitor_task,
-            summary_task,
-            guardian_task,
+            *(task for task in (monitor_task, summary_task, guardian_task) if task is not None),
             return_exceptions=True,
         )
-        await app.state.llm_client.aclose()
+        from backend.orchestrator.llm_client_lifecycle import close_all_llm_clients
+        await close_all_llm_clients(app)
 
 
 app = FastAPI(title="NEXUS IDE Orchestrator", version="0.1.0", lifespan=lifespan)
 
-# OpenAPI: NEXUS has several ``from __future__ import annotations`` modules
-# that confuse Pydantic 2's TypeAdapter (the "class-not-fully-defined"
-# error). We override the app's ``openapi()`` method so the schema
-# generation never crashes the request — it returns a minimal schema
-# instead. The interactive UI at /docs still works.
-_original_openapi = app.openapi
-
-
-def _safe_openapi() -> dict:
-    try:
-        return _original_openapi()
-    except Exception as exc:
-        return {
-            "openapi": "3.1.0",
-            "info": {
-                "title": "NEXUS IDE Orchestrator",
-                "version": "0.1.0",
-                "description": (
-                    "Schema generation is partial due to a Pydantic 2 / "
-                    "PEP 563 incompatibility. See /docs for the UI."
-                ),
-            },
-            "paths": {},
-            "components": {"schemas": {}},
-            "x_error": str(exc)[:500],
-        }
-
-
-app.openapi = _safe_openapi  # type: ignore[assignment]
-
-# Setup rate limiting
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-# Add security headers middleware
 app.add_middleware(SecurityHeadersMiddleware)
 
-# CORS configuration from settings - restrictive, no wildcards
 settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.get_allowed_origins_list(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "X-Nexus-Request-Id"],
+    expose_headers=["X-Nexus-Request-Id"],
 )
 
-# Include routers
+
+@app.middleware("http")
+async def _track_chat_cancellation(request: Request, call_next):
+    return await chat_cancellation_middleware(request, call_next)
+
+
 app.include_router(auth_router, prefix="/api")
 app.include_router(admin_router)
 if _BROWSER_AVAILABLE:
     app.include_router(browser_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
+app.include_router(cancellation_router)
 app.include_router(dashboard_router, prefix="/api")
 app.include_router(email_router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
+app.include_router(health_router, prefix="/api")
 app.include_router(alerts_router, prefix="/api")
 app.include_router(usage_router, prefix="/api")
 app.include_router(modes_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
+app.add_api_route("/api/me", get_profile, methods=["GET"], tags=["profile"])
 app.include_router(projects_router, prefix="/api")
 app.include_router(providers_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
@@ -360,6 +465,7 @@ app.include_router(plan_router, prefix="/api")
 app.include_router(guardian_router, prefix="/api")
 app.include_router(overseer_router, prefix="/api")
 app.include_router(wizard_router, prefix="/api")
+app.include_router(mcp_router, prefix="/api")
 app.include_router(agent_state_router, prefix="/api")
 app.include_router(workspace_router, prefix="/api")
 app.include_router(agent_bus_router, prefix="/api")
@@ -368,53 +474,61 @@ app.include_router(meta_analyzer_router, prefix="/api")
 app.include_router(collaboration_router, prefix="/api")
 app.include_router(workers_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")
+app.include_router(observability_router, prefix="/api")
 app.include_router(thinking_router, prefix="/api")
 app.include_router(system_router, prefix="/api")
+app.include_router(improvement_router)
+app.include_router(autonomous_improvement_router)
 app.include_router(second_brain_router, prefix="/api")
 app.include_router(orchestrator_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")
 app.include_router(models_ui_router, prefix="/api")
 app.include_router(settings_router, prefix="/api")
 app.include_router(logs_router, prefix="/api")
+app.include_router(analytics_router, prefix="/api")
+app.include_router(neural_dashboard_router, prefix="/api")
+app.add_api_route("/api/agents/topology", agents_topology, methods=["GET"], tags=["agents"])
+app.include_router(omega_router, prefix="/api")
+app.include_router(tasks_router, prefix="/api")
+app.include_router(knowledge_router, prefix="/api")
+app.include_router(errors_router, prefix="/api")
+app.include_router(workflows_router, prefix="/api")
 app.include_router(sessions_router)
 app.include_router(swarm_router)
+app.include_router(advanced_modes_router, prefix="/api")
+app.include_router(mission_router, prefix="/api")
 
-# MetaOrchestrator WebSocket — mounted directly so path is ``/ws/missions/{id}``
 from backend.orchestrator.routes.meta import mission_websocket as _meta_ws  # noqa: E402
 
 app.add_api_websocket_route("/ws/missions/{mission_id}", _meta_ws)
 
 
 @app.get("/health")
-@limiter.limit("100/minute")
-async def health(request: Request) -> dict[str, str]:
-    """Basic liveness probe — no auth required."""
+async def health(request: Request) -> dict[str, Any]:
+    # Keep the historical ``/health?deep=true`` probe working for local
+    # monitors and smoke tests. The dedicated ``/health/deep`` endpoint still
+    # enforces authentication; this compatibility form exposes only the same
+    # bounded component statuses needed by the local runtime dashboard.
+    if request.query_params.get("deep", "").lower() in {"1", "true", "yes"}:
+        return await HealthChecker(request.app.state).check_all()
     return {"status": "ok"}
 
 
 @app.get("/health/deep")
-@limiter.limit("30/minute")
 async def health_deep(
     request: Request,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
-    """Deep health check — requires authentication.
-
-    Runs a full check against every background service and returns
-    per-subsystem status.
-    """
     checker = HealthChecker(request.app.state)
     return await checker.check_all()
 
 
 @app.get("/api/sessions/{session_id}/history")
-@limiter.limit("200/minute")
 async def get_history(
     request: Request,
     session_id: str,
     _user: dict = Depends(require_auth),
 ) -> dict[str, list[dict[str, str]]]:
-    """Return the rolling conversation history for a session."""
     history = await app.state.context.get_history(session_id)
     return {
         "messages": [
@@ -431,10 +545,8 @@ async def get_history(
 
 
 def main() -> None:  # pragma: no cover
-    """Dev entry point: ``python -m backend.orchestrator.main``."""
     import uvicorn
 
-    # Validate configuration before starting the application
     settings = get_settings()
     config_errors = validate_configuration()
 
@@ -446,7 +558,7 @@ def main() -> None:  # pragma: no cover
             "Configuration validation failed. Please fix the errors above before starting the application."
         )
 
-    logger.info(f"Starting NEXUS IDE Orchestrator in {settings.environment} mode")
+    logger.info("Starting NEXUS IDE Orchestrator in %s mode", settings.environment)
     logging.basicConfig(level=settings.log_level)
 
     uvicorn.run(
@@ -459,4 +571,3 @@ def main() -> None:  # pragma: no cover
 
 if __name__ == "__main__":  # pragma: no cover
     main()
-# force reload 1781149067

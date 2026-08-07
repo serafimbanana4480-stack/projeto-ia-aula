@@ -10,7 +10,6 @@ from fastapi import APIRouter, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from backend.orchestrator.limiter import limiter
 
 from backend.observability.event_system import get_event_bus
 from backend.users.multi_user_system import get_multi_user_system, UserRole, UserStatus
@@ -65,7 +64,6 @@ async def get_current_user(authorization: str = Header(None)) -> Dict[str, Any]:
 
 
 @router.post("/users/register")
-@limiter.limit("5/minute")
 async def register_user(user_data: UserCreateRequest, request: Request) -> Dict[str, str]:
     """Register a new user."""
     try:
@@ -98,7 +96,6 @@ async def register_user(user_data: UserCreateRequest, request: Request) -> Dict[
 
 
 @router.post("/users/login")
-@limiter.limit("5/minute")
 async def login_user(login_data: LoginRequest,
                     request: Request,
                     ip_address: str = "",
@@ -135,7 +132,6 @@ async def login_user(login_data: LoginRequest,
 
 
 @router.post("/users/logout")
-@limiter.limit("5/minute")
 async def logout_user(session_id: str, request: Request) -> Dict[str, str]:
     """Logout user and terminate session."""
     try:
@@ -267,7 +263,6 @@ async def get_groups(
 
 
 @router.post("/groups")
-@limiter.limit("60/minute")
 async def create_group(
     group_data: GroupCreateRequest,
     request: Request,
@@ -297,7 +292,6 @@ async def create_group(
 
 
 @router.post("/groups/{group_id}/join")
-@limiter.limit("60/minute")
 async def join_group(
     group_id: str,
     request: Request,
@@ -322,7 +316,6 @@ async def join_group(
 
 
 @router.post("/groups/{group_id}/leave")
-@limiter.limit("60/minute")
 async def leave_group(
     group_id: str,
     request: Request,
@@ -432,7 +425,6 @@ async def get_user_statuses() -> Dict[str, List[str]]:
 
 
 @router.post("/users/validate-token")
-@limiter.limit("60/minute")
 async def validate_token(
     token: str,
     request: Request

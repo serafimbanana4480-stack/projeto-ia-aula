@@ -302,7 +302,15 @@ class TestContextManagers:
     async def test_write_lock_context_manager(
         self, manager: FileLockManager, dummy_file: str
     ) -> None:
-        async with manager.write_lock(dummy_file, "ctx-w", timeout=1.0):
+        # Write locks probe the optional Redis distributed-lock backend first
+        # (see file_locks.py's _redis_lock_client), which itself waits up to
+        # REDIS_LOCK_CONNECT_TIMEOUT (default 1.0s) before falling back to
+        # the in-memory/filelock path when Redis is unreachable — true for
+        # any dev/CI box without a local Redis. A 1.0s lock timeout left no
+        # margin after that probe and made this test flaky in exactly that
+        # (common) setup; 3.0s gives headroom without weakening the
+        # assertion, which is unchanged.
+        async with manager.write_lock(dummy_file, "ctx-w", timeout=3.0):
             assert manager.is_locked(dummy_file)
         assert not manager.is_locked(dummy_file)
 

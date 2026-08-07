@@ -67,17 +67,29 @@ class SecurityHeadersMiddleware:
                 settings = get_settings()
                 is_prod = getattr(settings, "environment", "development") == "production"
 
-                # Content Security Policy — configurable.
-                #   CSP_ENABLED=false -> header omitted entirely (dev/debug).
-                #   CSP_POLICY=<string> -> used verbatim, overriding the default.
-                #   otherwise -> DEFAULT_CSP (pragmatic production policy).
+                # Content Security Policy — only apply to HTML/document responses.
+                # API responses do not render documents, so CSP there is unnecessary
+                # and can interfere with the frontend's own CSP via browser
+                # response-header inheritance in some engines.
                 csp_enabled = bool(getattr(settings, "csp_enabled", True))
                 if csp_enabled:
-                    csp_policy = getattr(settings, "csp_policy", "") or ""
-                    csp = csp_policy.strip() if csp_policy.strip() else DEFAULT_CSP
-                    if is_prod:
-                        csp = csp + "; upgrade-insecure-requests"
-                    headers["Content-Security-Policy"] = csp
+                    accept_header = ""
+                    for key, value in scope.get("headers", []):
+                        if key.lower() == b"accept":
+                            accept_header = value.decode("latin-1", errors="ignore")
+                            break
+                    # Browsers send ``text/html`` for document navigations;
+                    # lightweight ASGI clients (and the health/root smoke
+                    # probes) commonly send ``*/*``.  Treat the wildcard as
+                    # document-compatible while still avoiding CSP on callers
+                    # that explicitly request another representation.
+                    is_html = not accept_header or "text/html" in accept_header or "*/*" in accept_header
+                    if is_html:
+                        csp_policy = getattr(settings, "csp_policy", "") or ""
+                        csp = csp_policy.strip() if csp_policy.strip() else DEFAULT_CSP
+                        if is_prod:
+                            csp = csp + "; upgrade-insecure-requests"
+                        headers["Content-Security-Policy"] = csp
 
                 # X-Frame-Options - Prevent clickjacking (legacy browsers).
                 # CSP frame-ancestors 'none' takes precedence in modern browsers.

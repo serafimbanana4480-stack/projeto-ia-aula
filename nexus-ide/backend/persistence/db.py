@@ -59,12 +59,19 @@ SCHEMA_PATH = Path(__file__).resolve().parent / "schemas.sql"
 # Connection pool settings
 MAX_POOL_SIZE = 10
 POOL_TIMEOUT = 30  # seconds
+MAX_POOL_OVERFLOW = 20
 
 
 class SQLiteConnectionPool:
     """A simple thread-safe connection pool for SQLite."""
 
-    def __init__(self, db_path: Path, max_size: int = MAX_POOL_SIZE, timeout: int = POOL_TIMEOUT):
+    def __init__(
+        self,
+        db_path: Path,
+        max_size: int = MAX_POOL_SIZE,
+        timeout: int = POOL_TIMEOUT,
+        max_overflow: int = MAX_POOL_OVERFLOW,
+    ):
         """Initialize the connection pool.
 
         Args:
@@ -75,9 +82,11 @@ class SQLiteConnectionPool:
         self.db_path = db_path
         self.max_size = max_size
         self.timeout = timeout
+        self.max_overflow = max(0, max_overflow)
         self._pool: Queue[sqlite3.Connection] = Queue(maxsize=max_size)
         self._lock = threading.Lock()
         self._created_count = 0
+        self._overflow_connections: set[int] = set()
 
     def _create_connection(self) -> sqlite3.Connection:
         """Create a new database connection with proper settings."""
@@ -85,7 +94,10 @@ class SQLiteConnectionPool:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
+        # FULL keeps WAL-backed session/checkpoint writes durable across a
+        # process crash or power loss. The small fsync cost is preferable for
+        # long-running agent work where losing the last checkpoint is costly.
+        conn.execute("PRAGMA synchronous = FULL")
         conn.execute("PRAGMA busy_timeout = 5000")  # 5 second timeout for locks
         return conn
 
@@ -111,6 +123,7 @@ class SQLiteConnectionPool:
                 conn.close()
                 with self._lock:
                     self._created_count -= 1
+                    self._created_count += 1
                 return self._create_connection()
         except Empty:
             logger.debug("Connection pool empty, will create new connection if under limit")
@@ -121,6 +134,21 @@ class SQLiteConnectionPool:
                 self._created_count += 1
                 logger.debug("Creating new connection (total: %d)", self._created_count)
                 return self._create_connection()
+
+            # Background monitoring and request handling share this pool. Do
+            # not block the caller while all pooled connections are briefly in
+            # use: an async request can hold the event loop while waiting and
+            # prevent the task that would release a connection from running.
+            # Overflow connections are short-lived and are closed on return.
+            if len(self._overflow_connections) < self.max_overflow:
+                conn = self._create_connection()
+                self._overflow_connections.add(id(conn))
+                logger.warning(
+                    "Connection pool at capacity; using overflow connection (%d/%d)",
+                    len(self._overflow_connections),
+                    self.max_overflow,
+                )
+                return conn
 
         # Pool is at max capacity; block and wait for one to be returned.
         try:
@@ -133,6 +161,7 @@ class SQLiteConnectionPool:
                 conn.close()
                 with self._lock:
                     self._created_count -= 1
+                    self._created_count += 1
                 return self._create_connection()
         except Empty:
             raise TimeoutError(f"Connection pool exhausted after {self.timeout}s") from None
@@ -143,6 +172,22 @@ class SQLiteConnectionPool:
         Args:
             conn: The connection to return.
         """
+        with self._lock:
+            is_overflow = id(conn) in self._overflow_connections
+            if is_overflow:
+                self._overflow_connections.remove(id(conn))
+
+        if is_overflow:
+            try:
+                conn.rollback()
+            except sqlite3.Error as exc:
+                logger.warning("Rollback failed when closing overflow connection: %s", exc)
+            try:
+                conn.close()
+            except sqlite3.Error as exc:
+                logger.warning("Failed to close overflow connection: %s", exc)
+            return
+
         try:
             # Rollback any uncommitted changes
             try:
@@ -173,6 +218,7 @@ class SQLiteConnectionPool:
                 logger.warning("Failed to close pooled connection: %s", exc)
         with self._lock:
             self._created_count = 0
+            self._overflow_connections.clear()
         logger.info("All connections closed")
 
 
@@ -240,6 +286,50 @@ def _ensure_git_commits_table() -> None:
         logger.warning("Failed to ensure git_commits table: %s", e)
 
 
+def _ensure_message_cost_column() -> None:
+    """Repair databases created from older/stamped schemas.
+
+    Some existing development databases were stamped at the current Alembic
+    head while their ``messages`` table still came from an older SQL schema.
+    Chat persistence then failed after the model had already streamed tokens,
+    truncating the SSE response. Keep this compatibility migration idempotent
+    so startup repairs that drift without requiring a destructive rebuild.
+    """
+    try:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            if columns and "cost_usd" not in columns:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN cost_usd REAL DEFAULT 0.0"
+                )
+                conn.commit()
+                logger.info("Added missing messages.cost_usd compatibility column")
+    except Exception as exc:
+        logger.warning("Failed to ensure messages.cost_usd column: %s", exc)
+
+
+def _ensure_current_schema() -> None:
+    """Create any tables added since an existing database was first made.
+
+    Early NEXUS databases predate Alembic tracking.  The old startup fast-path
+    saw that the SQLite file existed and skipped both ``schemas.sql`` and
+    migrations, leaving newer routes (profile, RBAC, email) pointed at tables
+    that did not exist.  ``schemas.sql`` is intentionally idempotent, so
+    replaying its CREATE IF NOT EXISTS statements is the safe compatibility
+    path for both tracked and untracked databases.
+    """
+    try:
+        schema = SCHEMA_PATH.read_text(encoding="utf-8")
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            conn.executescript(schema)
+            conn.commit()
+    except Exception as exc:
+        logger.warning("Failed to ensure current database schema: %s", exc)
+
+
 def init_db(run_migrations: bool = False) -> None:
     """Initialize the database with migration support.
 
@@ -268,11 +358,21 @@ def init_db(run_migrations: bool = False) -> None:
         # Seed default admin user for fresh databases
         _seed_default_user()
 
+        # Seed default RBAC roles and permissions
+        _seed_default_rbac()
+
         # Try to stamp with alembic if available
         _stamp_alembic()
     else:
+        # Repair pre-Alembic and partially stamped databases before any seed
+        # operation touches tables introduced after the original schema.
+        _ensure_current_schema()
         # Ensure git_commits table exists for existing databases (migration)
         _ensure_git_commits_table()
+        # Safety net: if the database exists but the users table is still empty,
+        # seed the development default user so auth flows keep working.
+        _seed_default_user()
+        _seed_default_rbac()
         if run_migrations:
             _run_alembic_migrations()
         else:
@@ -291,6 +391,16 @@ def init_db(run_migrations: bool = False) -> None:
             except Exception:
                 logger.debug("Alembic check failed, continuing", exc_info=True)
 
+    # A process restart cannot resume a live provider generator, but it must
+    # never leave the run looking active forever. Keep its durable checkpoint
+    # and mark it recoverable/interrupted for the UI and future resume logic.
+    mark_stale_session_runs()
+
+    # Run small idempotent compatibility repairs regardless of Alembic state.
+    # This also covers databases that were stamped without executing a newer
+    # schema change.
+    _ensure_message_cost_column()
+
 
 def _seed_default_user() -> None:
     """Create a default admin user if the users table is empty.
@@ -306,7 +416,7 @@ def _seed_default_user() -> None:
     try:
         with sqlite3.connect(str(DB_PATH)) as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
-            if row and row["count"] > 0:
+            if row and row[0] > 0:
                 logger.debug("Users already exist, skipping default user seed")
                 return
 
@@ -330,6 +440,87 @@ def _seed_default_user() -> None:
         )
     except Exception as exc:
         logger.warning("Failed to seed default user: %s", exc)
+
+
+def ensure_dev_default_user() -> dict | None:
+    """Ensure a development default user exists when there are no users yet.
+
+    This is a safety net for fresh or partially-initialized SQLite databases.
+    Returns the created user without password hash or ``None`` if it could not be created.
+    """
+    import os
+
+    try:
+        default_email = os.environ.get("NEXUS_DEFAULT_EMAIL", "admin@nexus-ide.com")
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
+            if row and row[0] > 0:
+                existing = conn.execute("SELECT * FROM users WHERE email = ?", (default_email,)).fetchone()
+                if existing:
+                    user = dict(existing)
+                    user.pop("password_hash", None)
+                    return user
+                return None
+
+        _seed_default_user()
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            existing = conn.execute("SELECT * FROM users WHERE email = ?", (default_email,)).fetchone()
+            if existing:
+                user = dict(existing)
+                user.pop("password_hash", None)
+                return user
+    except Exception as exc:
+        logger.warning("Failed to ensure dev default user: %s", exc)
+        return None
+
+
+def _seed_default_rbac() -> None:
+    """Create default roles, permissions and assign admin role to the default user.
+
+    Idempotent: safe to run multiple times.
+    """
+    try:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            conn.executescript("""
+                INSERT OR IGNORE INTO roles (id, name, description) VALUES
+                    ('role_admin',    'admin',    'Full system access'),
+                    ('role_user',     'user',     'Standard authenticated user'),
+                    ('role_readonly', 'readonly', 'Read-only access to non-sensitive data');
+
+                INSERT OR IGNORE INTO permissions (id, name, description, resource, action) VALUES
+                    ('perm_admin_all',       'admin_all',        'All admin operations',     'admin',    '*'),
+                    ('perm_chat_write',      'chat_write',       'Send chat messages',       'chat',     'write'),
+                    ('perm_files_read',      'files_read',       'Read project files',       'files',    'read'),
+                    ('perm_files_write',     'files_write',      'Write project files',      'files',    'write'),
+                    ('perm_projects_read',   'projects_read',    'List/view projects',       'projects', 'read'),
+                    ('perm_projects_write',  'projects_write',   'Create/edit projects',     'projects', 'write'),
+                    ('perm_system_read',     'system_read',      'Read system status',       'system',   'read'),
+                    ('perm_agents_read',     'agents_read',      'View agent status',        'agents',   'read');
+
+                INSERT OR IGNORE INTO role_permissions (id, role_id, permission_id) VALUES
+                    ('rp_001', 'role_admin',    'perm_admin_all'),
+                    ('rp_002', 'role_admin',    'perm_chat_write'),
+                    ('rp_003', 'role_admin',    'perm_files_read'),
+                    ('rp_004', 'role_admin',    'perm_files_write'),
+                    ('rp_005', 'role_admin',    'perm_projects_read'),
+                    ('rp_006', 'role_admin',    'perm_projects_write'),
+                    ('rp_007', 'role_admin',    'perm_system_read'),
+                    ('rp_008', 'role_admin',    'perm_agents_read'),
+                    ('rp_009', 'role_user',     'perm_chat_write'),
+                    ('rp_010', 'role_user',     'perm_files_read'),
+                    ('rp_011', 'role_user',     'perm_projects_read'),
+                    ('rp_012', 'role_readonly', 'perm_projects_read'),
+                    ('rp_013', 'role_readonly', 'perm_system_read');
+
+                INSERT OR IGNORE INTO user_roles (id, user_id, role_id)
+                    SELECT 'ur_admin_001', u.id, 'role_admin'
+                      FROM users u
+                     WHERE u.email = 'admin@nexus-ide.com'
+                     LIMIT 1;
+            """)
+            conn.commit()
+    except Exception as exc:
+        logger.warning("Failed to seed default RBAC: %s", exc)
 
 
 def _stamp_alembic() -> None:
@@ -694,10 +885,165 @@ def add_message(
 def get_messages(session_id: str, limit: int = 200) -> list[dict]:
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?",
+            "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC LIMIT ?",
             (session_id, limit),
         ).fetchall()
-        return [dict(r) for r in rows]
+        messages: list[dict] = []
+        for raw_row in rows:
+            row = dict(raw_row)
+            if (
+                messages
+                and row.get("role") == messages[-1].get("role")
+                and row.get("content") == messages[-1].get("content")
+            ):
+                # Older chat runs persisted the user turn once when execution
+                # started and again when it completed.  Keep one logical turn
+                # without destructively rewriting the user's SQLite history.
+                first = messages[-1]
+                merged = {**first, **row}
+                merged["id"] = first.get("id")
+                merged["created_at"] = first.get("created_at")
+                messages[-1] = merged
+                continue
+            messages.append(row)
+        return messages
+
+
+def upsert_session_run(
+    run_id: str,
+    session_id: str,
+    *,
+    status: str = "running",
+    agent: str | None = None,
+    phase: str = "starting",
+    prompt: str | None = None,
+    partial_output: str | None = None,
+    checkpoint: dict[str, Any] | None = None,
+    usage: dict[str, Any] | None = None,
+    error: str | None = None,
+    finished: bool = False,
+) -> dict[str, Any] | None:
+    """Persist a durable, privacy-preserving checkpoint for a chat run.
+
+    Checkpoints contain progress metadata and the visible partial answer only;
+    they never contain provider credentials or private chain-of-thought.
+    ``INSERT .. ON CONFLICT`` makes this safe to call from the streaming loop.
+    """
+    now = _now_iso()
+    finished_at = now if finished else None
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO session_runs
+                (id, session_id, status, agent, phase, prompt, partial_output,
+                 checkpoint_json, usage_json, error, started_at, updated_at, finished_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                agent = COALESCE(excluded.agent, session_runs.agent),
+                phase = excluded.phase,
+                prompt = CASE WHEN excluded.prompt <> '' THEN excluded.prompt ELSE session_runs.prompt END,
+                partial_output = excluded.partial_output,
+                checkpoint_json = excluded.checkpoint_json,
+                usage_json = excluded.usage_json,
+                error = excluded.error,
+                updated_at = excluded.updated_at,
+                finished_at = excluded.finished_at
+            """,
+            (
+                run_id,
+                session_id,
+                status,
+                agent,
+                phase,
+                prompt or "",
+                partial_output or "",
+                json.dumps(checkpoint or {}, ensure_ascii=False),
+                json.dumps(usage or {}, ensure_ascii=False),
+                error,
+                now,
+                now,
+                finished_at,
+            ),
+        )
+        row = conn.execute("SELECT * FROM session_runs WHERE id = ?", (run_id,)).fetchone()
+    touch_session(session_id)
+    return dict(row) if row else None
+
+
+def get_session_run(run_id: str) -> dict[str, Any] | None:
+    """Return a single durable run checkpoint, if it exists."""
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM session_runs WHERE id = ?", (run_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_session_runs(session_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    """List recent runs for the session, newest first."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM session_runs WHERE session_id = ? ORDER BY updated_at DESC LIMIT ?",
+            (session_id, max(1, min(limit, 100))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def interrupt_active_session_runs(
+    session_id: str,
+    *,
+    except_run_id: str | None = None,
+    reason: str = "Superseded by a newer request in the same session",
+) -> int:
+    """Close obsolete runs before starting a replacement chat request.
+
+    The frontend intentionally permits only one active stream per session.
+    If a user sends again, every older ``running`` row for that session is no
+    longer live even when the browser disconnect happened during routing,
+    before the normal streaming cancellation checkpoint was installed.
+    """
+    now = _now_iso()
+    params: list[Any] = [reason, now, now, session_id]
+    exclude = ""
+    if except_run_id:
+        exclude = " AND id <> ?"
+        params.append(except_run_id)
+    with get_db() as conn:
+        cursor = conn.execute(
+            f"""
+            UPDATE session_runs
+               SET status = 'interrupted',
+                   phase = 'superseded',
+                   error = COALESCE(error, ?),
+                   updated_at = ?,
+                   finished_at = COALESCE(finished_at, ?)
+             WHERE session_id = ?
+               AND status = 'running'
+               {exclude}
+            """,
+            params,
+        )
+        return int(cursor.rowcount or 0)
+
+
+def mark_stale_session_runs(max_age_seconds: int = 120) -> int:
+    """Mark runs left behind by a crashed/restarted process as interrupted."""
+    cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE session_runs
+               SET status = 'interrupted',
+                   phase = 'process_restart',
+                   error = COALESCE(error, 'Backend restarted before the run completed'),
+                   finished_at = COALESCE(finished_at, ?),
+                   updated_at = ?
+             WHERE status = 'running' AND updated_at < ?
+            """,
+            (_now_iso(), _now_iso(), cutoff),
+        )
+    if cursor.rowcount:
+        logger.warning("Marked %d stale session run(s) as interrupted", cursor.rowcount)
+    return int(cursor.rowcount)
 
 
 @monitor_query_performance
@@ -731,6 +1077,141 @@ def get_message_statistics() -> dict[str, Any]:
                 "last_message_at": "",
             }
         return dict(row)
+
+
+@monitor_query_performance
+def get_token_usage_overview() -> dict[str, Any]:
+    """Return persisted token usage for the dashboard metrics experience.
+
+    Token accounting lives on ``messages``: prompt tokens are attached to the
+    user message and generated tokens to the assistant message. Keeping this
+    aggregation here makes the metrics page survive process restarts and lets
+    it expose an honest all-time view instead of the 30-day in-memory window.
+    """
+
+    now = datetime.now(UTC)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=today_start.weekday())
+    month_start = today_start.replace(day=1)
+    timeline_start = today_start - timedelta(days=29)
+
+    def iso_start(value: datetime) -> str:
+        # SQLite stores timestamps as UTC ISO strings with a ``Z`` suffix.
+        return value.strftime("%Y-%m-%dT%H:%M:%S")
+
+    def period_stats(conn: sqlite3.Connection, start: str | None) -> dict[str, Any]:
+        where = "WHERE created_at >= ?" if start else ""
+        params: tuple[Any, ...] = (start,) if start else ()
+        row = conn.execute(
+            f"""
+            SELECT
+                COALESCE(SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)), 0) AS total_tokens,
+                COALESCE(SUM(COALESCE(tokens_in, 0)), 0) AS tokens_in,
+                COALESCE(SUM(COALESCE(tokens_out, 0)), 0) AS tokens_out,
+                COUNT(CASE WHEN role = 'assistant' THEN 1 END) AS requests,
+                COUNT(DISTINCT session_id) AS sessions,
+                COALESCE(SUM(COALESCE(cost_usd, 0)), 0.0) AS cost,
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN COALESCE(tokens_out, 0) ELSE 0 END), 0) AS generated_tokens,
+                COALESCE(SUM(CASE WHEN role = 'assistant' AND latency_ms > 0 THEN latency_ms ELSE 0 END), 0) AS latency_ms
+            FROM messages
+            {where}
+            """,
+            params,
+        ).fetchone()
+        total = int(row["total_tokens"] or 0)
+        generated = int(row["generated_tokens"] or 0)
+        latency_ms = int(row["latency_ms"] or 0)
+        return {
+            "total_tokens": total,
+            "tokens_in": int(row["tokens_in"] or 0),
+            "tokens_out": int(row["tokens_out"] or 0),
+            "requests": int(row["requests"] or 0),
+            "sessions": int(row["sessions"] or 0),
+            "cost": round(float(row["cost"] or 0.0), 6),
+            "avg_tokens_per_second": round(generated / (latency_ms / 1000), 2) if latency_ms > 0 else 0.0,
+        }
+
+    def model_stats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT
+                COALESCE(NULLIF(model_used, ''), NULLIF(tier_used, ''), 'Não identificado') AS name,
+                COALESCE(SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)), 0) AS total_tokens,
+                COALESCE(SUM(COALESCE(tokens_in, 0)), 0) AS tokens_in,
+                COALESCE(SUM(COALESCE(tokens_out, 0)), 0) AS tokens_out,
+                COUNT(CASE WHEN role = 'assistant' THEN 1 END) AS requests,
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN COALESCE(tokens_out, 0) ELSE 0 END), 0) AS generated_tokens,
+                COALESCE(SUM(CASE WHEN role = 'assistant' AND latency_ms > 0 THEN latency_ms ELSE 0 END), 0) AS latency_ms,
+                COALESCE(SUM(COALESCE(cost_usd, 0)), 0.0) AS cost
+            FROM messages
+            GROUP BY name
+            ORDER BY total_tokens DESC
+            LIMIT 12
+            """
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            latency_ms = int(row["latency_ms"] or 0)
+            generated = int(row["generated_tokens"] or 0)
+            result.append(
+                {
+                    "name": str(row["name"]),
+                    "total_tokens": int(row["total_tokens"] or 0),
+                    "tokens_in": int(row["tokens_in"] or 0),
+                    "tokens_out": int(row["tokens_out"] or 0),
+                    "requests": int(row["requests"] or 0),
+                    "cost": round(float(row["cost"] or 0.0), 6),
+                    "avg_tokens_per_second": round(generated / (latency_ms / 1000), 2) if latency_ms > 0 else 0.0,
+                }
+            )
+        return result
+
+    with get_db() as conn:
+        timeline_rows = conn.execute(
+            """
+            SELECT
+                substr(created_at, 1, 10) AS day,
+                COALESCE(SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)), 0) AS total_tokens,
+                COALESCE(SUM(COALESCE(tokens_in, 0)), 0) AS tokens_in,
+                COALESCE(SUM(COALESCE(tokens_out, 0)), 0) AS tokens_out,
+                COUNT(CASE WHEN role = 'assistant' THEN 1 END) AS requests,
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN COALESCE(tokens_out, 0) ELSE 0 END), 0) AS generated_tokens,
+                COALESCE(SUM(CASE WHEN role = 'assistant' AND latency_ms > 0 THEN latency_ms ELSE 0 END), 0) AS latency_ms
+            FROM messages
+            WHERE created_at >= ?
+            GROUP BY day
+            ORDER BY day ASC
+            """,
+            (iso_start(timeline_start),),
+        ).fetchall()
+
+        timeline: list[dict[str, Any]] = []
+        for row in timeline_rows:
+            latency_ms = int(row["latency_ms"] or 0)
+            generated = int(row["generated_tokens"] or 0)
+            timeline.append(
+                {
+                    "day": row["day"],
+                    "total_tokens": int(row["total_tokens"] or 0),
+                    "tokens_in": int(row["tokens_in"] or 0),
+                    "tokens_out": int(row["tokens_out"] or 0),
+                    "requests": int(row["requests"] or 0),
+                    "avg_tokens_per_second": round(generated / (latency_ms / 1000), 2) if latency_ms > 0 else 0.0,
+                }
+            )
+
+        return {
+            "periods": {
+                "today": period_stats(conn, iso_start(today_start)),
+                "week": period_stats(conn, iso_start(week_start)),
+                "month": period_stats(conn, iso_start(month_start)),
+                "all": period_stats(conn, None),
+            },
+            "timeline": timeline,
+            "by_model": model_stats(conn),
+            "generated_at": time.time(),
+            "currency": "USD",
+        }
 
 
 def count_pending_changes(session_id: str | None = None) -> int:

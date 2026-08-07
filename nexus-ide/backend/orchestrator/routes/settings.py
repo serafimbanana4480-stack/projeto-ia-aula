@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.config.settings import get_settings
@@ -74,15 +74,18 @@ def _get_public_settings() -> dict[str, Any]:
     env_settings = get_settings()
     result: dict[str, Any] = {}
 
-    for key in dir(env_settings):
-        if key.startswith("_"):
-            continue
-        try:
-            value = getattr(env_settings, key)
-        except Exception:
-            continue
-        if callable(value):
-            continue
+    # ``dir(BaseSettings)`` also exposes Pydantic metadata such as
+    # ``model_fields`` whose values contain ``FieldInfo`` objects.  FastAPI
+    # cannot serialize those and GET /api/settings returned HTTP 500.
+    # ``model_dump()`` is the supported JSON-oriented view; the small fallback
+    # keeps this helper usable by integrations/tests that inject a namespace.
+    if hasattr(env_settings, "model_dump"):
+        raw_settings = env_settings.model_dump(mode="json")
+    elif hasattr(env_settings, "dict") and callable(env_settings.dict):
+        raw_settings = env_settings.dict()
+    else:
+        raw_settings = vars(env_settings) if hasattr(env_settings, "__dict__") else {}
+    for key, value in raw_settings.items():
         if _is_sensitive(key) and isinstance(value, str) and value:
             result[key] = _mask(value)
         else:
@@ -112,6 +115,7 @@ async def get_settings_endpoint(_user: dict = Depends(require_auth)) -> dict[str
 @router.put("/settings")
 async def update_settings(
     update: SettingsUpdate,
+    request: Request,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """Update runtime settings (persisted to data/settings.json).
@@ -127,6 +131,44 @@ async def update_settings(
             continue
         current[key.strip()] = value
 
-    _save_runtime_settings(current)
+    # Build the replacement before persisting it.  A malformed provider
+    # configuration must not leave the saved settings pointing at a client
+    # that could not be initialized.
+    try:
+        from backend.llm.factory import create_llm_client
+
+        replacement_client = create_llm_client(**current)
+    except Exception as exc:
+        logger.warning("Rejected runtime LLM settings update: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="The supplied LLM settings could not be initialized.",
+        ) from exc
+
+    try:
+        _save_runtime_settings(current)
+    except OSError as exc:
+        close = getattr(replacement_client, "aclose", None)
+        if callable(close):
+            await close()
+        raise HTTPException(status_code=500, detail="Could not save runtime settings.") from exc
+
+    previous_client = getattr(request.app.state, "llm_client", None)
+    request.app.state.llm_client = replacement_client
+    lifecycle = getattr(request.app.state, "agent_lifecycle", None)
+    if lifecycle is not None and hasattr(lifecycle, "_llm_client"):
+        lifecycle._llm_client = replacement_client
+
+    # Existing SSE responses keep their captured client until completion;
+    # retire_llm_client closes it immediately only when no stream uses it.
+    from backend.orchestrator.llm_client_lifecycle import retire_llm_client
+
+    if previous_client is not replacement_client:
+        await retire_llm_client(request.app, previous_client)
+
     logger.info("Runtime settings updated (%d keys)", len(update.settings))
-    return {"status": "saved", "settings": _get_public_settings()}
+    return {
+        "status": "saved",
+        "llm_reloaded": True,
+        "settings": _get_public_settings(),
+    }

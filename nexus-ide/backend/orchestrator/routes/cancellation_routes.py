@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from backend.middleware.auth import require_auth
 from backend.orchestrator.cancellation import get_cancellation_registry
+from backend.orchestrator.chat_cancellation import is_valid_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +23,16 @@ router = APIRouter(prefix="/api/chat", tags=["cancellation"])
 
 
 @router.post("/cancel/{request_id}")
-async def cancel_request(request_id: str) -> dict:
+async def cancel_request(
+    request_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict:
     """Cancel an in-flight chat request by ID.
 
     Returns:
         dict with status: "cancelled" or "not_found"
     """
-    if not request_id or len(request_id) > 200:
+    if not is_valid_request_id(request_id):
         raise HTTPException(status_code=400, detail="Invalid request_id")
 
     registry = get_cancellation_registry()
@@ -41,7 +46,7 @@ async def cancel_request(request_id: str) -> dict:
 
 
 @router.get("/cancel/stats")
-async def cancellation_stats() -> dict:
+async def cancellation_stats(_user: dict = Depends(require_auth)) -> dict:
     """Return cancellation registry statistics (active/cancelled counts)."""
     registry = get_cancellation_registry()
     return registry.stats()

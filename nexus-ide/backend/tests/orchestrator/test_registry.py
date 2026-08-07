@@ -8,6 +8,7 @@ from backend.agents.bug_hunter_runtime import BugHunterRuntimeAgent
 from backend.agents.bug_hunter_static import BugHunterStaticAgent
 from backend.agents.coder import CoderAgent
 from backend.agents.dashboard_agent import DashboardAgent
+from backend.agents.planner import PlannerAgent
 from backend.orchestrator.registry import build_default_registry, resolve
 
 
@@ -15,6 +16,7 @@ class TestRegistry:
     def test_default_registry_contains_core_agents(self) -> None:
         r = build_default_registry()
         for name in (
+            "PLANNER",
             "CODER",
             "ANALYZER",
             "DEBUGGER",
@@ -32,6 +34,9 @@ class TestRegistry:
             "BUG_HUNTER_RUNTIME",
         ):
             assert name in r, f"{name} missing from default registry"
+
+    def test_resolve_planner_returns_planner_agent(self) -> None:
+        assert isinstance(resolve(build_default_registry(), "PLANNER"), PlannerAgent)
 
     def test_resolve_returns_matching_agent(self) -> None:
         r = build_default_registry()

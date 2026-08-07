@@ -82,13 +82,14 @@ async def tools_execution_stream(request: Request) -> StreamingResponse:
 @router.get("/timeline/stream")
 async def timeline_stream(request: Request) -> StreamingResponse:
     """Stream execution timeline updates via SSE from real WorkflowTracker."""
-    workflow_tracker = request.app.state.workflow_tracker
+    workflow_tracker = getattr(request.app.state, "workflow_tracker", None)
     event_bus = request.app.state.event_bus
     
     async def event_generator() -> AsyncIterator[str]:
         """Stream real workflow events from WorkflowTracker and EventBus."""
+        yield "data: {\"type\": \"heartbeat\"}\n\n"
         # Stream existing workflows first
-        workflows = workflow_tracker.get_all_workflows()
+        workflows = workflow_tracker.list_workflows(limit=50) if workflow_tracker else []
         for workflow in workflows:
             event = {
                 "type": "event",
@@ -96,7 +97,7 @@ async def timeline_stream(request: Request) -> StreamingResponse:
                     "id": workflow.workflow_id,
                     "type": workflow.status,
                     "timestamp": workflow.created_at,
-                    "agent": workflow.agent,
+                    "agent": workflow.metadata.get("agent", ""),
                     "goal": workflow.goal,
                     "step_count": len(workflow.steps),
                 }
@@ -104,16 +105,18 @@ async def timeline_stream(request: Request) -> StreamingResponse:
             yield f"data: {json.dumps(event)}\n\n"
         
         # Stream new events from EventBus
-        async for event in event_bus.subscribe("workflow.*"):
+        async for event in event_bus.stream_events():
+            if "workflow" not in event.event_type.value:
+                continue
             timeline_event = {
                 "type": "event",
                 "event": {
-                    "id": event.payload.get("workflow_id", ""),
-                    "type": event.type,
-                    "timestamp": event.timestamp.timestamp(),
-                    "agent": event.agent,
-                    "step": event.payload.get("step", ""),
-                    "status": event.payload.get("status", ""),
+                    "id": event.data.get("workflow_id", ""),
+                    "type": event.event_type.value,
+                    "timestamp": event.timestamp,
+                    "agent": event.source,
+                    "step": event.data.get("step", ""),
+                    "status": event.data.get("status", ""),
                 }
             }
             yield f"data: {json.dumps(timeline_event)}\n\n"
@@ -202,14 +205,16 @@ async def autonomous_tasks_stream(request: Request) -> StreamingResponse:
     formats and the canonical ``agent_started``/``task_scheduled`` etc.
     types are emitted so that older frontend code continues to work.
     """
-    agent_pool = request.app.state.agent_pool
+    agent_pool = getattr(request.app.state, "agent_pool", None)
     event_bus = request.app.state.event_bus
 
     async def event_generator() -> AsyncIterator[str]:
         """Stream real agent task events from AgentPool and EventBus."""
 
+        yield "data: {\"type\": \"heartbeat\"}\n\n"
+
         # ── 1. Stream current agent instances ────────
-        for agent_type, instances in agent_pool.agent_instances.items():
+        for agent_type, instances in getattr(agent_pool, "agent_instances", {}).items():
             for instance in instances.values():
                 # Canonical format (frontend StreamEvent)
                 canonical = {

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { authHeaders } from "../lib/auth";
+import { authenticatedFetch } from "../lib/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -22,6 +22,7 @@ interface ModeStore {
   modesLoaded: boolean;
   modesLoading: boolean;
   modesError: string | null;
+  usingFallback: boolean;
   setMode: (mode: string) => void;
   setModes: (modes: Mode[]) => void;
   loadModes: () => Promise<void>;
@@ -33,6 +34,7 @@ export const useModeStore = create<ModeStore>((set, get) => ({
   modesLoaded: false,
   modesLoading: false,
   modesError: null,
+  usingFallback: false,
   setMode: (mode) => {
     if (typeof window !== "undefined") {
       localStorage.setItem("nexus.currentMode", mode);
@@ -44,7 +46,7 @@ export const useModeStore = create<ModeStore>((set, get) => ({
     if (get().modesLoaded || get().modesLoading) return;
     set({ modesLoading: true, modesError: null });
     try {
-      const res = await fetch(`${API_BASE}/api/modes`, { headers: authHeaders() });
+      const res = await authenticatedFetch(`${API_BASE}/api/modes`);
       if (res.ok) {
         const data = (await res.json()) as { modes: Record<string, ModePayload> };
         const modes: Mode[] = Object.entries(data.modes).map(([id, m]) => ({
@@ -56,7 +58,7 @@ export const useModeStore = create<ModeStore>((set, get) => ({
           tools_enabled: m.tools_enabled ?? [],
           system_prompt_addon: m.system_prompt_addon,
         }));
-        set({ modes, modesLoaded: true, modesLoading: false });
+        set({ modes, modesLoaded: true, modesLoading: false, usingFallback: false });
         // Validate current mode exists
         const current = get().currentMode;
         if (!modes.find((m) => m.id === current)) {
@@ -66,21 +68,15 @@ export const useModeStore = create<ModeStore>((set, get) => ({
         throw new Error(`HTTP ${res.status}`);
       }
     } catch {
-      // Backend unavailable — use defaults
+      // Backend unavailable — do NOT fabricate modes. Leave the list empty so
+      // the UI can show a truthful "modos indisponíveis" state. currentMode
+      // stays at its default "auto" so the chat keeps working.
       set({
-        modes: [
-          { id: "auto", description: "IA escolhe automaticamente", default_agent: "CODER", default_model: "auto", router: "smart", tools_enabled: ["all"] },
-          { id: "coder", description: "Geração e análise de código", default_agent: "CODER", default_model: "coder", router: "none", tools_enabled: ["read_file", "write_file", "list_dir", "search_in_files", "execute_code"] },
-          { id: "analyst", description: "Análise de dados e relatórios", default_agent: "ANALYZER", default_model: "coder", router: "none", tools_enabled: ["execute_code", "web_search", "web_scraper", "sql_query"] },
-          { id: "plan", description: "Criar plano de execução", default_agent: "ARCHITECT", default_model: "reasoning", router: "none", tools_enabled: ["read_file", "list_dir", "search_in_files"] },
-          { id: "debug", description: "Debug de código", default_agent: "DEBUGGER", default_model: "coder", router: "none", tools_enabled: ["read_file", "execute_code", "search_codebase"] },
-          { id: "ask", description: "Respostas rápidas", default_agent: "MICRO", default_model: "fast", router: "none", tools_enabled: [] },
-          { id: "swarm", description: "Colaboração multi-agente", default_agent: "SWARM", default_model: "auto", router: "none", tools_enabled: ["all"] },
-          { id: "fast", description: "Respostas rápidas", default_agent: "MICRO", default_model: "fast", router: "none", tools_enabled: [] },
-          { id: "deep", description: "Raciocínio avançado", default_agent: "ARCHITECT", default_model: "deep", router: "none", tools_enabled: ["all"] },
-        ],
+        modes: [],
         modesLoaded: true,
         modesLoading: false,
+        modesError: "Backend indisponível — modos não carregados",
+        usingFallback: true,
       });
     }
   },

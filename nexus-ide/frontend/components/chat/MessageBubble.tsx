@@ -15,8 +15,10 @@ import { useThemeStore } from "../../stores/themeStore";
 import AgentBadge from "./AgentBadge";
 import ToolCallTimeline from "./ToolCallTimeline";
 import ThinkingBlock from "./ThinkingBlock";
+import ExecutionActivity from "./ExecutionActivity";
+import { sanitizeAssistantContent } from "../../lib/chatPresentation";
 
-const AGENT_HEX_COLORS: Record<AgentName, string> = {
+const AGENT_HEX_COLORS: Partial<Record<AgentName, string>> = {
   ROUTER: "#4b5563",
   ARCHITECT: "#4f46e5",
   RESEARCHER: "#2563eb",
@@ -72,12 +74,14 @@ function TypingDots() {
 
 function MessageBubbleComponent({
   message,
+  sessionId = "default",
   isStreaming = false,
   onRetry,
   onEdit,
   onRegenerate,
 }: {
   message: ChatMessage;
+  sessionId?: string;
   isStreaming?: boolean;
   onRetry?: (prompt: string) => void;
   onEdit?: (messageId: string, newContent: string) => void;
@@ -90,6 +94,8 @@ function MessageBubbleComponent({
     getRelativeTime(new Date(message.timestamp)),
   );
   const theme = useThemeStore((s) => s.theme);
+  const visibleContent = isUser ? message.content : sanitizeAssistantContent(message.content);
+  const agentColor = AGENT_HEX_COLORS[message.agent || "ROUTER"] || "#7c3aed";
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -106,10 +112,10 @@ function MessageBubbleComponent({
       className={`flex ${isUser ? "justify-end" : "justify-start"}`}
     >
       <div
-        className={`group max-w-[85%] rounded-2xl p-4 text-sm shadow-lg transition-all duration-200 hover:shadow-xl ${
+        className={`group rounded-2xl text-[15px] leading-7 transition-all duration-200 ${
           isUser
-            ? "bg-gradient-to-br from-nexus-accent/90 to-nexus-accent/70 text-white hover:scale-[1.01]"
-            : "bg-nexus-card text-nexus-text border border-nexus-border/60 hover:border-nexus-accent/30 hover:shadow-nexus-accent/5"
+            ? "max-w-[82%] bg-gradient-to-br from-nexus-accent/90 to-nexus-accent/70 p-4 text-white shadow-lg hover:scale-[1.01]"
+            : "w-full max-w-[920px] border border-nexus-border/50 bg-nexus-card/70 p-4 text-nexus-text shadow-sm hover:border-nexus-border"
         }`}
       >
         <div className="mb-2 flex items-center justify-between gap-3 text-[11px] text-nexus-muted">
@@ -125,7 +131,7 @@ function MessageBubbleComponent({
                   <div
                     className="flex h-7 w-7 items-center justify-center rounded-full text-[10px] font-bold text-white shadow-md"
                     style={{
-                      background: `linear-gradient(135deg, ${AGENT_HEX_COLORS[message.agent || "ROUTER"]}, ${AGENT_HEX_COLORS[message.agent || "ROUTER"]}dd)`,
+                      background: `linear-gradient(135deg, ${agentColor}, ${agentColor}dd)`,
                     }}
                   >
                     {(message.agent || "N").charAt(0).toUpperCase()}
@@ -137,9 +143,17 @@ function MessageBubbleComponent({
           <span className="tabular-nums opacity-70">{relativeTime}</span>
         </div>
 
-        {typeof ReactMarkdown !== "undefined" ? (
+        {!isUser && message.thinking && (
+          <ThinkingBlock content={message.thinking} isStreaming={isStreaming} />
+        )}
+
+        {!isUser && message.activities && message.activities.length > 0 && (
+          <ExecutionActivity items={message.activities} isStreaming={isStreaming} />
+        )}
+
+        {visibleContent.trim() && typeof ReactMarkdown !== "undefined" ? (
           <ReactMarkdown
-            className="prose prose-sm max-w-none"
+            className="prose prose-base max-w-none leading-7"
             components={{
               code({ inline, className, children, ...props }: any) {
                 const match = /language-(\w+)/.exec(className || "");
@@ -149,11 +163,12 @@ function MessageBubbleComponent({
                 if (!inline && lang) {
                   const style = theme === "light" ? oneLight : oneDark;
                   return (
-                    <div className="relative group">
+                    <div className="relative group/code">
                       <div className="absolute right-2 top-2 z-10 flex items-center gap-1.5">
                         <span className="rounded bg-nexus-bg/60 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-nexus-muted font-mono border border-nexus-border/40">
                           {lang}
                         </span>
+                        <CopyCodeButton code={codeString} />
                       </div>
                       <SyntaxHighlighter
                         language={lang}
@@ -184,24 +199,20 @@ function MessageBubbleComponent({
               },
             }}
           >
-            {stripAnsiCodes(message.content)}
+            {stripAnsiCodes(visibleContent)}
           </ReactMarkdown>
-        ) : (
-          <div className="whitespace-pre-wrap leading-relaxed">{message.content}</div>
-        )}
+        ) : visibleContent.trim() ? (
+          <div className="whitespace-pre-wrap leading-relaxed">{visibleContent}</div>
+        ) : null}
 
-        {!isUser && isStreaming && !message.content.trim() && (!message.toolCalls || message.toolCalls.length === 0) && (
+        {!isUser && isStreaming && !visibleContent.trim() && (!message.toolCalls || message.toolCalls.length === 0) && (!message.activities || message.activities.length === 0) && (
           <div className="mt-2 flex items-center gap-2 text-xs text-nexus-muted">
             <TypingDots />
           </div>
         )}
 
         {!isUser && message.toolCalls && message.toolCalls.length > 0 && (
-          <ToolCallTimeline calls={message.toolCalls} />
-        )}
-
-        {!isUser && message.thinking && (
-          <ThinkingBlock content={message.thinking} />
+          <ToolCallTimeline calls={message.toolCalls} sessionId={sessionId} />
         )}
 
         {message.metrics && (
@@ -234,7 +245,7 @@ function MessageBubbleComponent({
                 Tentar novamente
               </button>
             )}
-            <CopyMessageButton text={message.content} />
+            <CopyMessageButton text={visibleContent} />
           </div>
         )}
 
@@ -274,7 +285,7 @@ function MessageBubbleComponent({
         )}
 
         {/* Action buttons (edit, regenerate, copy) */}
-        {!isStreaming && message.content.trim() && !isEditing && (
+        {!isStreaming && visibleContent.trim() && !isEditing && (
           <div className="mt-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
             {/* Edit button (user messages only) */}
             {isUser && onEdit && (
@@ -298,12 +309,42 @@ function MessageBubbleComponent({
             )}
             {/* Copy button (always for non-error messages) */}
             {(!isUser || isUser) && message.metadata?.kind !== "error" && (
-              <CopyMessageButton text={message.content} />
+              <CopyMessageButton text={visibleContent} />
             )}
           </div>
         )}
       </div>
     </motion.div>
+  );
+}
+
+function CopyCodeButton({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={async (e) => {
+        e.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(code);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        } catch {}
+      }}
+      className="flex items-center gap-1 rounded border border-nexus-border/40 bg-nexus-bg/60 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-nexus-muted opacity-0 transition-all hover:text-nexus-text group-hover/code:opacity-100"
+      title="Copiar código"
+    >
+      {copied ? (
+        <>
+          <Check className="h-3 w-3 text-emerald-400" />
+          <span className="text-emerald-400">Copiado</span>
+        </>
+      ) : (
+        <>
+          <Copy className="h-3 w-3" />
+          Copiar
+        </>
+      )}
+    </button>
   );
 }
 

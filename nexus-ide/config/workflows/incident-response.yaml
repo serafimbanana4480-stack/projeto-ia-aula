@@ -6,7 +6,7 @@ icon: siren
 mode: planning
 strategy: pipeline
 agents: [ARCHITECT, INVESTIGATOR]
-max_iterations: 5
+max_iterations: 1000
 tags: [sre, incident, runbook]
 variables:
   - name: severity

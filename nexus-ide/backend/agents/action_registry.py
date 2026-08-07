@@ -79,10 +79,21 @@ class ActionRegistry:
             example_args = str(spec.get("example_args", "")).strip()
             if not tool:
                 raise ValueError(f"Invalid spec for action {name!r} in {path}: 'tool' is required.")
+            raw_tags = spec.get("tags", ())
+            raw_examples = spec.get("examples", ())
             specs[str(name)] = ActionSpec(
                 action=str(name),
                 tool=tool,
                 example_args=example_args,
+                when_to_use=str(spec.get("when_to_use", "")).strip(),
+                risk_level=str(spec.get("risk_level", "low")).strip().lower(),
+                requires_confirmation=bool(spec.get("requires_confirmation", False)),
+                tags=tuple(str(tag) for tag in raw_tags) if isinstance(raw_tags, list) else (),
+                examples=(
+                    tuple(dict(example) for example in raw_examples if isinstance(example, dict))
+                    if isinstance(raw_examples, list)
+                    else ()
+                ),
             )
         return specs
 

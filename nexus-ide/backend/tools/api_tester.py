@@ -24,14 +24,6 @@ from backend.tools.registry import ToolSpec, register_tool
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Rate limiting: 100 req/min per session (sliding window)
-# ---------------------------------------------------------------------------
-_REQUEST_HISTORY: dict[str, deque[float]] = defaultdict(deque)
-_RATE_LIMIT_MAX = 100
-_RATE_LIMIT_WINDOW_S = 60.0
-_RATE_LOCK = asyncio.Lock()
-
-# ---------------------------------------------------------------------------
 # SSRF protection: block requests to private/loopback IPs (unless explicitly allowed)
 # ---------------------------------------------------------------------------
 _ALLOW_PRIVATE_NETWORKS = False  # set to True in trusted environments
@@ -41,17 +33,7 @@ _MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 def _check_rate_limit(session_id: str | None) -> tuple[bool, str | None]:
-    """Check if a session is rate-limited. Returns (allowed, error_msg)."""
-    if not session_id:
-        return True, None
-    now = time.monotonic()
-    history = _REQUEST_HISTORY[session_id]
-    # Drop expired entries
-    while history and (now - history[0]) > _RATE_LIMIT_WINDOW_S:
-        history.popleft()
-    if len(history) >= _RATE_LIMIT_MAX:
-        return False, f"Rate limit exceeded ({_RATE_LIMIT_MAX} req/{_RATE_LIMIT_WINDOW_S}s)"
-    history.append(now)
+    """Rate limiting is disabled globally."""
     return True, None
 
 

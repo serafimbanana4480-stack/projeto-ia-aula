@@ -5,7 +5,7 @@ This document is the authoritative architecture reference for NEXUS IDE. The sca
 ## 1. Philosophy
 
 - **Cloud-first, local-fallback** — DeepSeek-v4-flash via OpenRouter as primary provider; Ollama local as fallback.
-- **Specialization over generalism** — 9 agents, each with a surgical system prompt.
+- **Specialization over generalism** — 24 registered specialist agents, each with a focused system prompt.
 - **Iterative ReAct loop** — Reason → Act → Observe → Reason.
 - **Dashboard as first-class citizen** — dedicated agent with background monitoring loops.
 - **Observability total** — JSON structured logs, Prometheus metrics, deep health checks.
@@ -89,7 +89,7 @@ GitHub Actions: backend tests, frontend tests, security scan (bandit/safety), Do
 ## 13. Roadmap
 
 1. **Foundation** (wk 1–3) — single model, basic chat.
-2. **Agents** (wk 4–6) — all 9 agents + routing.
+2. **Agents** (wk 4–6) — all 24 registered agents + routing.
 3. **ReAct & search** (wk 7–9) — iterative loop + Brave.
 4. **Dashboard** (wk 10–12) — full observability.
 5. **IDE** (wk 13–16) — Monaco integrations, terminal.

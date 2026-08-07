@@ -69,6 +69,12 @@ actions:
     examples:
       - code: "import math; print(math.sqrt(16))"
         language: "python"
+  RUN_SHELL:
+    tool: run_shell
+    example_args: '{"command": "git status --short", "project_path": "."}'
+    when_to_use: "When you need to run a project command, inspect logs, or reproduce a failure in the real workspace."
+    risk_level: "medium"
+    tags: ["code", "shell", "debug"]
 
   # --- Code search ---
   SEARCH_CODEBASE:
@@ -138,6 +144,12 @@ actions:
     when_to_use: "When you need an expert opinion from a specialist agent (e.g. ARCHITECT, DEBUGGER)."
     risk_level: "low"
     tags: ["agent", "consult", "a2a"]
+  SPAWN_TASK:
+    tool: spawn_task
+    example_args: '{"name": "Run focused verification", "description": "Execute the affected tests and report failures", "agent": "DEBUGGER", "depends_on": []}'
+    when_to_use: "When an independent follow-up task is required and can be scheduled by the orchestrator."
+    risk_level: "low"
+    tags: ["agent", "task", "spawn"]
   READ_DOCS:
     tool: read_file
     example_args: '{"path": "docs/auth.md"}'

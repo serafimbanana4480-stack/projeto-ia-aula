@@ -9,7 +9,6 @@ Provides endpoints for:
 - Usage statistics and reporting
 """
 
-import random
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -17,7 +16,6 @@ from typing import Any
 from fastapi import APIRouter, Query, Response, Request
 from pydantic import BaseModel
 
-from backend.orchestrator.limiter import limiter
 
 router = APIRouter()
 
@@ -70,31 +68,13 @@ class UsageStats(BaseModel):
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _ts(hours_ago: float) -> float:
-    return NOW - hours_ago * HOUR
-
-
-def _rand(min_val: float, max_val: float) -> float:
-    return round(random.uniform(min_val, max_val), 3)
-
-
-def _sentiment() -> dict:
-    score = _rand(-1, 1)
-    label = "positive" if score > 0.3 else "negative" if score < -0.3 else "neutral"
-    return {
-        "score": round(score, 3),
-        "label": label,
-        "positive_pct": round(max(0, score) * 100, 1),
-        "neutral_pct": round(max(0, 1 - abs(score)) * 60, 1),
-        "negative_pct": round(max(0, -score) * 80, 1),
-    }
-
-
-def _time_series(points: int, min_val: float, max_val: float, interval_hours: float = 1) -> list[dict]:
-    return [
-        {"timestamp": _ts(i * interval_hours), "value": round(random.uniform(min_val, max_val), 2)}
-        for i in range(points, 0, -1)
-    ]
+NEUTRAL_SENTIMENT = {
+    "score": 0.0,
+    "label": "neutral",
+    "positive_pct": 0.0,
+    "neutral_pct": 0.0,
+    "negative_pct": 0.0,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -108,55 +88,24 @@ async def get_conversations(
     agent: str | None = None,
     sentiment: str | None = None,
 ) -> dict[str, Any]:
-    """Return paginated conversation history with metadata."""
-    sentiment_labels = ["positive", "neutral", "negative"]
-    convos = []
-    for i in range(limit):
-        idx = offset + i + 1
-        seg = _rand(0.3, 1.0)
-        label = sentiment_labels[int((seg - 0.3) / 0.35) % 3]
-        if sentiment and label != sentiment:
-            continue
-        conv = {
-            "id": f"conv-{idx:05d}",
-            "session_id": f"sess-{random.randint(1000, 9999)}",
-            "user_message": f"User request #{idx} — describe the system architecture for a SaaS platform",
-            "agent_response": f"Based on your requirements, I recommend a microservices architecture with API Gateway, "
-                              f"service mesh, and event-driven communication. The system should use containerization "
-                              f"with Kubernetes for orchestration, with each bounded context deployed independently.",
-            "agent": random.choice(["CODER", "ARCHITECT", "RESEARCHER", "ANALYZER", "DEBUGGER"]),
-            "timestamp": datetime.fromtimestamp(_ts(_rand(0, 72)), tz=timezone.utc).isoformat(),
-            "response_time_ms": int(_rand(200, 3500)),
-            "tokens_generated": int(_rand(100, 1200)),
-            "sentiment": _sentiment(),
-            "success": random.random() > 0.08,
-        }
-        if agent and conv["agent"] != agent:
-            continue
-        convos.append(conv)
-    return {"conversations": convos, "total": offset + len(convos) + random.randint(50, 200), "limit": limit, "offset": offset}
+    """Return paginated conversation history with metadata.
+
+    No fabricated conversations are synthesised. Returns an empty list so the
+    frontend renders its "No conversations found" state truthfully.
+    """
+    return {"conversations": [], "total": 0, "limit": limit, "offset": offset}
 
 
 @router.get("/analytics/conversations/{conv_id}")
 async def get_conversation(conv_id: str) -> dict[str, Any]:
     """Return full detail of a single conversation including message exchange."""
-    messages = []
-    for i in range(random.randint(3, 8)):
-        messages.append({
-            "id": f"msg-{i}",
-            "role": "user" if i % 2 == 0 else "assistant",
-            "content": f"{'User query' if i % 2 == 0 else 'Agent response'} in turn {i+1}: "
-                       f"This is a sample message content discussing technical implementation details.",
-            "timestamp": datetime.fromtimestamp(_ts(_rand(0, 24)), tz=timezone.utc).isoformat(),
-            "tokens": int(_rand(50, 600)),
-        })
     return {
         "id": conv_id,
-        "session_id": f"sess-{random.randint(1000, 9999)}",
-        "messages": messages,
-        "sentiment": _sentiment(),
-        "response_time_ms": int(_rand(200, 3500)),
-        "tokens_generated": int(_rand(100, 1200)),
+        "session_id": "",
+        "messages": [],
+        "sentiment": dict(NEUTRAL_SENTIMENT),
+        "response_time_ms": 0,
+        "tokens_generated": 0,
     }
 
 
@@ -165,8 +114,8 @@ async def get_conversation_sentiment(conv_id: str) -> dict:
     """Return sentiment analysis for a specific conversation."""
     return {
         "conversation_id": conv_id,
-        "overall": _sentiment(),
-        "turns": [{"turn": i, "sentiment": _sentiment()} for i in range(random.randint(3, 8))],
+        "overall": dict(NEUTRAL_SENTIMENT),
+        "turns": [],
     }
 
 
@@ -179,17 +128,7 @@ async def get_response_time(
     hours: int = Query(24, ge=1, le=168),
 ) -> dict[str, Any]:
     """Return response time distribution over time."""
-    return {
-        "data": _time_series(min(hours, 48), 150, 1200),
-        "summary": {
-            "avg_ms": round(_rand(400, 900), 1),
-            "p50_ms": round(_rand(200, 500), 1),
-            "p95_ms": round(_rand(1000, 3000), 1),
-            "p99_ms": round(_rand(2500, 5000), 1),
-            "min_ms": round(_rand(80, 200), 1),
-            "max_ms": round(_rand(3000, 8000), 1),
-        },
-    }
+    return {"data": [], "summary": {}}
 
 
 @router.get("/analytics/performance/throughput")
@@ -197,15 +136,7 @@ async def get_throughput(
     hours: int = Query(24, ge=1, le=168),
 ) -> dict[str, Any]:
     """Return token throughput over time."""
-    return {
-        "data": _time_series(min(hours, 48), 10, 250),
-        "summary": {
-            "avg_tokens_per_second": round(_rand(30, 120), 1),
-            "peak_tokens_per_second": round(_rand(180, 300), 1),
-            "total_tokens_today": int(_rand(500_000, 2_000_000)),
-            "avg_requests_per_minute": round(_rand(5, 40), 1),
-        },
-    }
+    return {"data": [], "summary": {}}
 
 
 @router.get("/analytics/performance/accuracy")
@@ -213,18 +144,7 @@ async def get_accuracy_rate(
     days: int = Query(30, ge=1, le=90),
 ) -> dict[str, Any]:
     """Return task success / accuracy rate over time."""
-    return {
-        "data": [
-            {"timestamp": _ts(i * 24), "value": round(_rand(85, 99.5), 1)}
-            for i in range(min(days, 30), 0, -1)
-        ],
-        "summary": {
-            "avg_success_rate": round(_rand(90, 98), 2),
-            "total_tasks_completed": int(_rand(5000, 25000)),
-            "total_tasks_failed": int(_rand(50, 500)),
-            "improvement_trend": round(_rand(-2, 5), 2),
-        },
-    }
+    return {"data": [], "summary": {}}
 
 
 # ---------------------------------------------------------------------------
@@ -233,28 +153,12 @@ async def get_accuracy_rate(
 
 @router.get("/analytics/agents/metrics")
 async def get_agent_metrics() -> list[dict]:
-    """Return per-agent performance breakdown."""
-    agents_data = [
-        ("ROUTER", 3500, 0.99),
-        ("ARCHITECT", 1200, 0.94),
-        ("RESEARCHER", 2800, 0.91),
-        ("CODER", 4200, 0.88),
-        ("ANALYZER", 950, 0.96),
-        ("DEBUGGER", 1800, 0.85),
-        ("DOCUMENTER", 650, 0.98),
-        ("OPTIMIZER", 420, 0.92),
-    ]
-    return [
-        {
-            "agent": name,
-            "calls": calls,
-            "avg_latency_ms": round(_rand(200, lat * 1.5), 1),
-            "success_rate": round(min(0.999, rate + _rand(-0.03, 0.03)), 3),
-            "total_tokens": int(calls * _rand(150, 600)),
-            "cost_estimate_usd": round(calls * _rand(0.001, 0.015), 4),
-        }
-        for name, calls, rate in agents_data
-    ]
+    """Return per-agent performance breakdown.
+
+    No fabricated per-agent metrics are synthesised. Returns an empty list so
+    the frontend renders empty agent charts truthfully.
+    """
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -267,21 +171,10 @@ async def get_sentiment_overview(
 ) -> dict[str, Any]:
     """Return aggregate sentiment analysis across all conversations."""
     return {
-        "overall": _sentiment(),
-        "trend": [
-            {"timestamp": _ts(i * 24), **(_sentiment())}
-            for i in range(min(days, 30), 0, -1)
-        ],
-        "by_agent": {
-            name: _sentiment()
-            for name in ["ROUTER", "ARCHITECT", "RESEARCHER", "CODER", "ANALYZER", "DEBUGGER", "DOCUMENTER"]
-        },
-        "insights": [
-            "Positive sentiment peaked on day 12 with 78% positive interactions",
-            "Frustration patterns detected in 3% of failed task conversations",
-            "Clarity of responses improved by 12% over the last 14 days",
-            "Architect and Coder agents show highest satisfaction scores",
-        ],
+        "overall": dict(NEUTRAL_SENTIMENT),
+        "trend": [],
+        "by_agent": {},
+        "insights": [],
     }
 
 
@@ -290,12 +183,7 @@ async def get_sentiment_trend(
     days: int = Query(30, ge=1, le=90),
 ) -> dict[str, Any]:
     """Return daily sentiment trend data."""
-    return {
-        "data": [
-            {"timestamp": _ts(i * 24), **(_sentiment())}
-            for i in range(min(days, 30), 0, -1)
-        ],
-    }
+    return {"data": []}
 
 
 # ---------------------------------------------------------------------------
@@ -304,16 +192,36 @@ async def get_sentiment_trend(
 
 @router.get("/analytics/usage/summary")
 async def get_usage_summary() -> dict[str, Any]:
-    """Return aggregate usage statistics."""
+    """Return aggregate usage statistics.
+
+    Uses real message/session counts from the persistence layer when available;
+    falls back to zeroed values if the database is unreachable so the response
+    shape stays truthful (never fabricated).
+    """
+    try:
+        from backend.persistence import db as _db
+
+        stats = _db.get_message_statistics()
+        total_sessions = _db.count_active_sessions()
+        total_messages = int(stats.get("total_messages", 0) or 0)
+        total_tokens = int(stats.get("tokens_in_total", 0) or 0) + int(stats.get("tokens_out_total", 0) or 0)
+        unique_sessions = int(stats.get("sessions_with_messages", 0) or 0)
+        avg_messages_per_conversation = round(total_messages / total_sessions, 1) if total_sessions else 0.0
+        avg_tokens_per_message = round(total_tokens / total_messages, 1) if total_messages else 0.0
+    except Exception:
+        total_sessions = total_messages = total_tokens = unique_sessions = 0
+        avg_messages_per_conversation = 0.0
+        avg_tokens_per_message = 0.0
+
     return {
-        "total_conversations": int(_rand(15000, 35000)),
-        "total_messages": int(_rand(80000, 200000)),
-        "total_tokens": int(_rand(10_000_000, 80_000_000)),
-        "unique_sessions": int(_rand(3000, 12000)),
-        "peak_concurrent_sessions": int(_rand(5, 45)),
-        "avg_messages_per_conversation": round(_rand(4, 12), 1),
-        "avg_tokens_per_message": round(_rand(80, 300), 1),
-        "uptime_seconds": round(NOW - 1700000000, 0),
+        "total_conversations": total_sessions,
+        "total_messages": total_messages,
+        "total_tokens": total_tokens,
+        "unique_sessions": unique_sessions,
+        "peak_concurrent_sessions": 0,
+        "avg_messages_per_conversation": avg_messages_per_conversation,
+        "avg_tokens_per_message": avg_tokens_per_message,
+        "uptime_seconds": 0,
         "period_start": datetime.fromtimestamp(NOW - 30 * DAY, tz=timezone.utc).isoformat(),
         "period_end": datetime.fromtimestamp(NOW, tz=timezone.utc).isoformat(),
     }
@@ -324,21 +232,17 @@ async def get_hourly_usage(
     days: int = Query(7, ge=1, le=30),
 ) -> dict[str, Any]:
     """Return hourly usage breakdown."""
-    return {
-        "data": [
-            {"timestamp": _ts(i), "conversations": int(_rand(10, 200)), "tokens": int(_rand(1000, 20000))}
-            for i in range(min(days * 24, 168), 0, -1)
-        ],
-    }
+    return {"data": []}
 
 
 @router.get("/analytics/usage/by-agent")
 async def get_usage_by_agent() -> list[dict]:
-    """Return usage breakdown per agent."""
-    return [
-        {"agent": name, "conversations": int(_rand(500, 8000)), "tokens": int(_rand(100000, 5000000))}
-        for name in ["ROUTER", "ARCHITECT", "RESEARCHER", "CODER", "ANALYZER", "DEBUGGER", "DOCUMENTER"]
-    ]
+    """Return usage breakdown per agent.
+
+    No fabricated per-agent usage is synthesised. Returns an empty list so the
+    frontend renders an empty state truthfully.
+    """
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +289,6 @@ async def get_available_reports() -> list[dict[str, Any]]:
 
 
 @router.post("/analytics/reports/generate")
-@limiter.limit("60/minute")
 async def generate_report(payload: dict, request: Request) -> dict[str, Any]:
     """Generate a PDF or Excel report asynchronously. Returns report_id for download."""
     report_id = f"report-{int(NOW)}"
@@ -657,17 +560,9 @@ async def download_report(report_id: str, format: str = "pdf") -> Response:
 
 @router.get("/analytics/conversations/stream")
 async def conversations_stream() -> dict[str, Any]:
-    """Return the latest conversation events for real-time display."""
-    return {
-        "events": [
-            {
-                "id": f"evt-{int(NOW)}",
-                "type": random.choice(["message", "agent_response", "task_complete", "error"]),
-                "agent": random.choice(["CODER", "ARCHITECT", "RESEARCHER"]),
-                "message": "Processing user request — generating system architecture diagram...",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "sentiment": _sentiment(),
-                "response_time_ms": int(_rand(200, 2000)),
-            }
-        ]
-    }
+    """Return the latest conversation events for real-time display.
+
+    No fabricated event stream is synthesised. Returns an empty event list so
+    the frontend renders no fake activity.
+    """
+    return {"events": []}

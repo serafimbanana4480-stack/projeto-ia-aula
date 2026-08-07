@@ -5,7 +5,6 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Any, Optional
 
-from backend.orchestrator.limiter import limiter
 
 from backend.orchestrator.autonomous_execution_engine import (
     AutonomousExecutionEngine,
@@ -40,7 +39,6 @@ class TaskResponse(BaseModel):
 
 
 @router.post("/tasks", response_model=TaskResponse)
-@limiter.limit("10/minute")
 async def submit_task(request: SubmitTaskRequest, http_request: Request) -> TaskResponse:
     if _engine is None:
         raise HTTPException(status_code=503, detail="Execution engine not available")

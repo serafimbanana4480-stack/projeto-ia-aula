@@ -47,18 +47,18 @@ interface ThoughtEvent {
 }
 
 const AGENT_META: Record<AgentName, { label: string; color: string; bg: string; icon: any }> = {
-  ROUTER:    { label: "Router",     color: "text-amber-300",   bg: "bg-amber-500/15",   icon: Cpu },
-  ARCHITECT: { label: "Architect",  color: "text-purple-300", bg: "bg-purple-500/15", icon: Brain },
-  CODER:     { label: "Coder",      color: "text-emerald-300",bg: "bg-emerald-500/15",icon: Wrench },
-  DEBUGGER:  { label: "Debugger",   color: "text-rose-300",   bg: "bg-rose-500/15",   icon: ShieldCheck },
-  ANALYZER:  { label: "Analyzer",   color: "text-cyan-300",   bg: "bg-cyan-500/15",   icon: Search },
-  RESEARCHER:{ label: "Researcher", color: "text-orange-300", bg: "bg-orange-500/15", icon: Search },
-  OPTIMIZER: { label: "Optimizer",  color: "text-yellow-300", bg: "bg-yellow-500/15", icon: Zap },
-  DOCUMENTER:{ label: "Documenter", color: "text-pink-300",   bg: "bg-pink-500/15",   icon: Sparkles },
-  MICRO:     { label: "Micro",      color: "text-slate-300",  bg: "bg-slate-500/15",  icon: Cpu },
-  GUARDIAN:  { label: "Guardian",   color: "text-violet-300", bg: "bg-violet-500/15", icon: ShieldCheck },
-  SWARM:     { label: "Swarm",      color: "text-fuchsia-300",bg: "bg-fuchsia-500/15",icon: Sparkles },
-  TESTER:    { label: "Tester",     color: "text-lime-300",   bg: "bg-lime-500/15",   icon: Activity },
+  ROUTER:    { label: "Router",       color: "text-amber-300",   bg: "bg-amber-500/15",   icon: Cpu },
+  ARCHITECT: { label: "Arquiteto",    color: "text-purple-300", bg: "bg-purple-500/15", icon: Brain },
+  CODER:     { label: "Programador",  color: "text-emerald-300",bg: "bg-emerald-500/15",icon: Wrench },
+  DEBUGGER:  { label: "Depurador",    color: "text-rose-300",   bg: "bg-rose-500/15",   icon: ShieldCheck },
+  ANALYZER:  { label: "Analisador",   color: "text-cyan-300",   bg: "bg-cyan-500/15",   icon: Search },
+  RESEARCHER:{ label: "Investigador", color: "text-orange-300", bg: "bg-orange-500/15", icon: Search },
+  OPTIMIZER: { label: "Otimizador",   color: "text-yellow-300", bg: "bg-yellow-500/15", icon: Zap },
+  DOCUMENTER:{ label: "Documentador", color: "text-pink-300",   bg: "bg-pink-500/15",   icon: Sparkles },
+  MICRO:     { label: "Micro",        color: "text-slate-300",  bg: "bg-slate-500/15",  icon: Cpu },
+  GUARDIAN:  { label: "Guardião",     color: "text-violet-300", bg: "bg-violet-500/15", icon: ShieldCheck },
+  SWARM:     { label: "Swarm",        color: "text-fuchsia-300",bg: "bg-fuchsia-500/15",icon: Sparkles },
+  TESTER:    { label: "Testador",     color: "text-lime-300",   bg: "bg-lime-500/15",   icon: Activity },
 };
 
 const PHASE_COLOR: Record<ThoughtEvent["phase"], string> = {
@@ -164,7 +164,9 @@ export default function ThinkingInsights() {
     <motion.section
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      className="overflow-hidden rounded-xl border border-sky-500/20 bg-gradient-to-br from-sky-500/[0.04] via-cyan-500/[0.02] to-blue-600/[0.04] shadow-lg shadow-sky-900/5"
+      className={`overflow-hidden rounded-xl border border-sky-500/20 bg-gradient-to-br from-sky-500/[0.04] via-cyan-500/[0.02] to-blue-600/[0.04] shadow-lg shadow-sky-900/5 ${
+        missionActive ? "nx-live-rim" : ""
+      }`}
     >
       {/* Header */}
       <div className="flex items-center justify-between border-b border-sky-500/15 bg-gradient-to-r from-sky-500/5 to-transparent px-4 py-2.5">
@@ -180,7 +182,7 @@ export default function ThinkingInsights() {
             )}
           </span>
           <h2 className="text-[13px] font-semibold uppercase tracking-wider text-sky-100">
-            Thinking Insights
+            Raciocínio dos Agentes
           </h2>
           <span className="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-mono text-sky-200">
             {events.length}
@@ -196,7 +198,7 @@ export default function ThinkingInsights() {
             </button>
           )}
           <Circle className={`h-1.5 w-1.5 ${events.length > 0 ? "fill-sky-400 text-sky-400" : "text-slate-500"}`} />
-          <span>{events.length > 0 ? "live" : "idle"}</span>
+          <span>{events.length > 0 ? "ao vivo" : "inativo"}</span>
         </div>
       </div>
 

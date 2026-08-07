@@ -5,7 +5,6 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Any, Optional
 
-from backend.orchestrator.limiter import limiter
 
 from backend.orchestrator.debate_visualizer import DebateVisualizer, Stance
 
@@ -33,7 +32,6 @@ class AddArgumentRequest(BaseModel):
 
 
 @router.post("/sessions")
-@limiter.limit("30/minute")
 async def create_session(request: CreateSessionRequest, http_request: Request) -> dict[str, Any]:
     if _debate_viz is None:
         raise HTTPException(status_code=503, detail="Debate visualizer not available")
@@ -52,7 +50,6 @@ async def get_session(session_id: str) -> dict[str, Any]:
 
 
 @router.post("/sessions/{session_id}/arguments")
-@limiter.limit("30/minute")
 async def add_argument(session_id: str, request: AddArgumentRequest, http_request: Request) -> dict[str, Any]:
     if _debate_viz is None:
         raise HTTPException(status_code=503, detail="Debate visualizer not available")
@@ -72,7 +69,6 @@ async def add_argument(session_id: str, request: AddArgumentRequest, http_reques
 
 
 @router.post("/sessions/{session_id}/complete")
-@limiter.limit("30/minute")
 async def complete_session(session_id: str, http_request: Request) -> dict[str, Any]:
     if _debate_viz is None:
         raise HTTPException(status_code=503, detail="Debate visualizer not available")

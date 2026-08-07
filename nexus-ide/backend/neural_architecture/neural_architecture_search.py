@@ -617,7 +617,7 @@ class ArchitectureEvaluator:
                 "objectives": [obj.value for obj in objectives],
                 "results": evaluation_results
             }
-        )
+        ))
         
         return evaluation_results
     
@@ -707,7 +707,7 @@ class NeuralArchitectureSearch:
                 "layer_types": layer_types,
                 "objectives": [obj.value for obj in objectives]
             }
-        )
+        ))
         
         logger.info(f"Search space created: {space_id} ({name})")
         
@@ -804,7 +804,7 @@ class NeuralArchitectureSearch:
                 "num_iterations": iteration + 1,
                 "best_architecture_id": best_architecture.arch_id if best_architecture else None
             }
-        )
+        ))
         
         logger.info(f"NAS completed: {search_id} (Best score: {best_score:.4f})")
         

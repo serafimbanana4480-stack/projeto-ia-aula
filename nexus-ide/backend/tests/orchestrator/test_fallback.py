@@ -89,6 +89,82 @@ class TestInvokeWithFallback:
         tokens = [t async for t in stream]
         assert tokens == ["recovered"]
 
+    async def test_falls_back_when_lazy_primary_fails_before_first_token(self) -> None:
+        """Provider failures are raised while consuming, not creating, streams."""
+        calls: list[str] = []
+
+        async def broken_stream() -> AsyncIterator[str]:
+            raise RuntimeError("upstream unavailable")
+            yield ""  # pragma: no cover - keeps this an async generator
+
+        async def recovered_stream() -> AsyncIterator[str]:
+            yield "recovered"
+
+        async def invoke(name: str) -> AsyncIterator[str]:
+            calls.append(name)
+            return broken_stream() if name == "CODER" else recovered_stream()
+
+        outcome, stream = await invoke_with_fallback("CODER", invoke)
+
+        assert outcome.used_agent != "CODER"
+        assert calls[:2] == ["CODER", "DEBUGGER"]
+        assert [token async for token in stream] == ["recovered"]
+
+    async def test_setup_marker_does_not_mask_a_lazy_primary_failure(self) -> None:
+        """A ReAct thinking marker is not a successful LLM response."""
+        async def broken_stream() -> AsyncIterator[str]:
+            yield "<event>thinking|iteration:1</event>"
+            raise RuntimeError("upstream unavailable")
+
+        async def recovered_stream() -> AsyncIterator[str]:
+            yield "recovered"
+
+        async def invoke(name: str) -> AsyncIterator[str]:
+            return broken_stream() if name == "CODER" else recovered_stream()
+
+        outcome, stream = await invoke_with_fallback("CODER", invoke)
+
+        assert outcome.used_agent == "DEBUGGER"
+        assert [token async for token in stream] == ["recovered"]
+
+    async def test_early_agent_error_marker_triggers_the_next_agent(self) -> None:
+        """AgentBase reports all-model failure as an inline error marker."""
+        async def failed_agent_stream() -> AsyncIterator[str]:
+            yield "<event>error|all models unavailable</event>"
+
+        async def recovered_stream() -> AsyncIterator[str]:
+            yield "recovered"
+
+        async def invoke(name: str) -> AsyncIterator[str]:
+            return failed_agent_stream() if name == "CODER" else recovered_stream()
+
+        outcome, stream = await invoke_with_fallback("CODER", invoke)
+
+        assert outcome.used_agent == "DEBUGGER"
+        assert [token async for token in stream] == ["recovered"]
+
+    async def test_never_restarts_after_visible_stream_output(self) -> None:
+        """Failover after output would duplicate a reply or repeat tool calls."""
+        calls: list[str] = []
+
+        async def partial_stream() -> AsyncIterator[str]:
+            yield "partial"
+            raise RuntimeError("connection lost")
+
+        async def recovered_stream() -> AsyncIterator[str]:
+            yield "should-not-run"
+
+        async def invoke(name: str) -> AsyncIterator[str]:
+            calls.append(name)
+            return partial_stream() if name == "CODER" else recovered_stream()
+
+        outcome, stream = await invoke_with_fallback("CODER", invoke)
+        assert outcome.used_agent == "CODER"
+        assert await anext(stream) == "partial"
+        with pytest.raises(RuntimeError, match="connection lost"):
+            await anext(stream)
+        assert calls == ["CODER"]
+
     async def test_entire_chain_exhausted_raises(self) -> None:
         async def invoke(name: str) -> AsyncIterator[str]:
             raise OllamaError(f"{name} is down")

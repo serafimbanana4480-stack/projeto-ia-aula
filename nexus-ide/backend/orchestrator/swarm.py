@@ -67,12 +67,57 @@ class SwarmOrchestrator:
         registry: dict[str, AgentBase],
         event_bus: Any,
         max_agents: int = 5,
+        event_queue: Any = None,
     ) -> None:
         self.llm_client = llm_client
         self.registry = registry
         self.events = event_bus
         self.max_agents = max_agents
+        # Optional asyncio.Queue used by the chat route to stream per-agent
+        # swarm progress live to the frontend (previously the UI saw nothing
+        # until the entire swarm finished — up to 300s of apparent silence).
+        self.event_queue = event_queue
         self._slog = get_structured_logger()
+
+    # ------------------------------------------------------------------
+    # Live progress events (chat SSE queue + dashboard event bus)
+    # ------------------------------------------------------------------
+    def _emit_live(self, payload: dict[str, Any]) -> None:
+        """Best-effort push of a raw SSE-style event to the chat stream."""
+        queue = self.event_queue
+        if queue is None:
+            return
+        try:
+            queue.put_nowait(payload)
+        except Exception:
+            pass
+
+    async def _publish(
+        self,
+        event_type: Any,
+        source: str,
+        session_id: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """Best-effort publish to the orchestrator event bus so dashboards
+        (autonomous-tasks stream, agent topology) see swarm subagent activity
+        in real time."""
+        bus = self.events
+        if bus is None:
+            return
+        try:
+            from backend.orchestrator.events import OrchestratorEvent
+
+            await bus.publish(
+                OrchestratorEvent(
+                    event_type=event_type,
+                    source=source,
+                    session_id=session_id,
+                    data=data or {},
+                )
+            )
+        except Exception:
+            logger.debug("Swarm event-bus publish failed", exc_info=True)
 
     async def execute_swarm(
         self,
@@ -82,8 +127,9 @@ class SwarmOrchestrator:
         strategy: str = "divide",
         project_path: str = ".",
         history: list[ChatMessage] | None = None,
-        max_iterations: int = 5,
+        max_iterations: int = 1000,
         enable_thinking: bool = False,
+        autonomous: bool = True,
     ) -> SwarmResult:
         """Execute a swarm of agents on an objective."""
         start = time.time()
@@ -109,12 +155,31 @@ class SwarmOrchestrator:
             extra={"strategy": selected_strategy, "objective": objective[:200]},
         )
 
+        from backend.orchestrator.events import EventType
+
+        await self._publish(
+            EventType.ORCHESTRATOR_STARTED,
+            "SWARM",
+            session_id,
+            data={"strategy": selected_strategy, "agents": available_agents},
+        )
+        self._emit_live(
+            {
+                "type": "routing",
+                "agent": "SWARM",
+                "content": (
+                    f"Estratégia: {selected_strategy} | Agentes: {', '.join(available_agents)}"
+                ),
+            }
+        )
+
         # Common kwargs passed to every strategy so they all use the same
         # iteration budget, thinking mode, and conversational history.
         strategy_kwargs = {
             "history": history,
             "max_iterations": max_iterations,
             "enable_thinking": enable_thinking,
+            "autonomous": autonomous,
         }
 
         if selected_strategy == "divide":
@@ -149,6 +214,18 @@ class SwarmOrchestrator:
             extra={"result_tokens": result.tokens_used},
         )
 
+        await self._publish(
+            EventType.ORCHESTRATOR_FINISHED,
+            "SWARM",
+            session_id,
+            data={
+                "strategy": selected_strategy,
+                "duration_ms": result.duration_ms,
+                "agents_succeeded": sum(1 for r in result.agent_results if r.success),
+                "agents_failed": sum(1 for r in result.agent_results if not r.success),
+            },
+        )
+
         return result
 
     # ------------------------------------------------------------------
@@ -162,8 +239,9 @@ class SwarmOrchestrator:
         agents: list[str],
         project_path: str,
         history: list[ChatMessage] | None = None,
-        max_iterations: int = 5,
+        max_iterations: int = 1000,
         enable_thinking: bool = False,
+        autonomous: bool = True,
     ) -> SwarmResult:
         """Split objective into subtasks, assign each to the best agent in parallel."""
         subtasks = await self._create_subtasks(
@@ -174,6 +252,7 @@ class SwarmOrchestrator:
             history=history,
             max_iterations=max_iterations,
             enable_thinking=enable_thinking,
+            autonomous=autonomous,
         )
 
         # Map each subtask to the most capable available agent
@@ -184,7 +263,7 @@ class SwarmOrchestrator:
 
         results = await asyncio.gather(
             *[
-                self._run_agent(
+                self._run_with_timeout(
                     agent,
                     subtask,
                     session_id,
@@ -193,6 +272,7 @@ class SwarmOrchestrator:
                     history=history,
                     max_iterations=max_iterations,
                     enable_thinking=enable_thinking,
+                    autonomous=autonomous,
                 )
                 for agent, subtask, subtask_id in tasks
             ],
@@ -230,13 +310,14 @@ class SwarmOrchestrator:
         agents: list[str],
         project_path: str,
         history: list[ChatMessage] | None = None,
-        max_iterations: int = 5,
+        max_iterations: int = 1000,
         enable_thinking: bool = False,
+        autonomous: bool = True,
     ) -> SwarmResult:
         """All agents work on the same objective, merge results intelligently."""
         results = await asyncio.gather(
             *[
-                self._run_agent(
+                self._run_with_timeout(
                     agent,
                     objective,
                     session_id,
@@ -245,6 +326,7 @@ class SwarmOrchestrator:
                     history=history,
                     max_iterations=max_iterations,
                     enable_thinking=enable_thinking,
+                    autonomous=autonomous,
                 )
                 for agent in agents
             ],
@@ -281,8 +363,9 @@ class SwarmOrchestrator:
         agents: list[str],
         project_path: str,
         history: list[ChatMessage] | None = None,
-        max_iterations: int = 5,
+        max_iterations: int = 1000,
         enable_thinking: bool = False,
+        autonomous: bool = True,
     ) -> SwarmResult:
         """Chain agents: output of agent N becomes input of agent N+1.
 
@@ -310,6 +393,7 @@ class SwarmOrchestrator:
                 history=history,
                 max_iterations=max_iterations,
                 enable_thinking=enable_thinking,
+                autonomous=autonomous,
             )
             agent_results.append(result)
             if result.success:
@@ -352,14 +436,15 @@ class SwarmOrchestrator:
         agents: list[str],
         project_path: str,
         history: list[ChatMessage] | None = None,
-        max_iterations: int = 5,
+        max_iterations: int = 1000,
         enable_thinking: bool = False,
+        autonomous: bool = True,
     ) -> SwarmResult:
         """Agents propose solutions, then a moderator picks and integrates the best."""
         # Phase 1: Each agent proposes a solution
         proposals = await asyncio.gather(
             *[
-                self._run_agent(
+                self._run_with_timeout(
                     agent,
                     f"Propose a concrete solution or answer for: {objective}\n\n"
                     "Be specific. Include rationale, trade-offs, and implementation steps if applicable.",
@@ -369,6 +454,7 @@ class SwarmOrchestrator:
                     history=history,
                     max_iterations=max_iterations,
                     enable_thinking=enable_thinking,
+                    autonomous=autonomous,
                 )
                 for agent in agents
             ],
@@ -407,13 +493,24 @@ class SwarmOrchestrator:
         debate_prompt = (
             f"You are moderating a debate on: {objective}\n\n"
             "Evaluate the following proposals. Select the BEST proposal and explain why. "
-            "Then produce a FINAL, INTEGRATED answer that:"
+            "Then produce a FINAL, INTEGRATED answer that:\n"
+            "1. Directly addresses the original objective.\n"
+            "2. Combines the strongest points from the proposals, resolving "
+            "any contradictions between them.\n"
+            "3. Is concrete and actionable (include implementation steps or "
+            "the final deliverable where applicable).\n"
+            "4. Explicitly notes any open risks or uncertainties that remain."
         )
 
         for agent, proposal in valid_proposals:
             debate_prompt += f"\n\n## {agent}\n{proposal[:800]}"
 
-        debate_prompt += "\n\nYour final answer should:"
+        debate_prompt += (
+            "\n\nYour final answer should:\n"
+            "- Begin with a one-paragraph synthesis of the chosen approach.\n"
+            "- Follow with the concrete integrated solution.\n"
+            "- End with a short list of caveats or next steps."
+        )
 
         final = await self._run_agent(
             moderator,
@@ -424,6 +521,7 @@ class SwarmOrchestrator:
             history=history,
             max_iterations=max_iterations,
             enable_thinking=True,
+            autonomous=autonomous,
         )
         agent_results.append(final)
 
@@ -433,7 +531,10 @@ class SwarmOrchestrator:
             final_answer=final_answer,
             agent_results=agent_results,
             tokens_used=sum(r.tokens for r in agent_results),
+            # Confidence reflects whether the moderator actually produced a
+            # usable integrated answer, not a fixed constant.
             confidence=0.85 if final.success else 0.55,
+
             metadata={
                 "debate_proposals": len(valid_proposals),
                 "moderator": moderator,
@@ -545,8 +646,9 @@ class SwarmOrchestrator:
         session_id: str,
         project_path: str,
         history: list[ChatMessage] | None = None,
-        max_iterations: int = 5,
+        max_iterations: int = 1000,
         enable_thinking: bool = False,
+        autonomous: bool = True,
     ) -> list[str]:
         """Use an agent to break the objective into specific, parallel subtasks."""
         # Prefer ARCHITECT or ANALYZER for planning, then CODER
@@ -581,6 +683,7 @@ class SwarmOrchestrator:
             history=history,
             max_iterations=max_iterations,
             enable_thinking=enable_thinking,
+            autonomous=autonomous,
         )
         if not result.success:
             return [objective]
@@ -688,6 +791,52 @@ class SwarmOrchestrator:
             except Exception:
                 return "qwen2.5:1.5b"
 
+    async def _run_with_timeout(
+        self,
+        agent_name: str,
+        query: str,
+        session_id: str,
+        project_path: str,
+        subtask_id: str = "",
+        history: list[ChatMessage] | None = None,
+        max_iterations: int = 1000,
+        enable_thinking: bool = False,
+        autonomous: bool = True,
+        timeout_seconds: int = 300,
+    ) -> AgentResult:
+        """Run an agent with a hard timeout so a hung agent cannot stall
+        the whole swarm. On timeout the result is marked as failed.
+        """
+        try:
+            return await asyncio.wait_for(
+                self._run_agent(
+                    agent_name,
+                    query,
+                    session_id,
+                    project_path,
+                    subtask_id=subtask_id,
+                    history=history,
+                    max_iterations=max_iterations,
+                    enable_thinking=enable_thinking,
+                    autonomous=autonomous,
+                ),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            self._emit_live(
+                {
+                    "type": "token",
+                    "agent": agent_name,
+                    "content": f"⏱ Timeout após {timeout_seconds}s — agente marcado como falhado.\n",
+                }
+            )
+            self._emit_live({"type": "agent_finished", "agent": agent_name})
+            return AgentResult(
+                agent=agent_name,
+                error=f"Agent timed out after {timeout_seconds}s",
+                success=False,
+            )
+
     async def _run_agent(
         self,
         agent_name: str,
@@ -696,8 +845,9 @@ class SwarmOrchestrator:
         project_path: str,
         subtask_id: str = "",
         history: list[ChatMessage] | None = None,
-        max_iterations: int = 5,
+        max_iterations: int = 1000,
         enable_thinking: bool = False,
+        autonomous: bool = True,
     ) -> AgentResult:
         """Run a single agent and capture metrics."""
         agent = self.registry.get(agent_name)
@@ -710,6 +860,16 @@ class SwarmOrchestrator:
         tokens = 0
         parts: list[str] = []
 
+        from backend.orchestrator.events import EventType
+
+        self._emit_live({"type": "agent_started", "agent": agent_name})
+        await self._publish(
+            EventType.AGENT_STARTED,
+            agent_name,
+            session_id,
+            data={"swarm": True, "task": query[:200], "subtask_id": subtask_id},
+        )
+
         try:
             req = AgentRequest(
                 session_id=f"{session_id}:{subtask_id}" if subtask_id else session_id,
@@ -719,6 +879,7 @@ class SwarmOrchestrator:
                 project_path=project_path,
                 max_iterations=max_iterations,
                 enable_thinking=enable_thinking,
+                autonomous=autonomous,
             )
 
             async for token in agent.run(req):
@@ -728,19 +889,62 @@ class SwarmOrchestrator:
             output = "".join(parts)
             duration = int((time.time() - start) * 1000)
 
-            self._slog.agent_end(agent_name, session_id, tokens, duration, True)
+            # A run that raised no exception is NOT automatically a success.
+            # When the ReAct loop exhausts its iterations it emits a
+            # "[TAREFA NÃO CONCLUÍDA]" marker instead of a real answer.
+            exhausted = "[TAREFA NÃO CONCLUÍDA]" in output
+            success = not exhausted and bool(output.strip())
+
+            self._slog.agent_end(agent_name, session_id, tokens, duration, success)
+
+            status_line = (
+                f"✅ Concluído em {duration / 1000:.1f}s ({tokens} tokens).\n"
+                if success
+                else f"⚠ Terminou sem resposta final ({tokens} tokens, {duration / 1000:.1f}s).\n"
+            )
+            self._emit_live({"type": "token", "agent": agent_name, "content": status_line})
+            self._emit_live({"type": "agent_finished", "agent": agent_name})
+            await self._publish(
+                EventType.AGENT_FINISHED if success else EventType.AGENT_FAILED,
+                agent_name,
+                session_id,
+                data={
+                    "swarm": True,
+                    "duration_ms": duration,
+                    "tokens": tokens,
+                    "success": success,
+                },
+            )
 
             return AgentResult(
                 agent=agent_name,
                 output=output,
                 tokens=tokens,
                 duration_ms=duration,
-                success=True,
+                success=success,
+                error=(
+                    "Agent exhausted iterations without a final answer"
+                    if exhausted else None
+                ),
             )
 
         except Exception as exc:
             duration = int((time.time() - start) * 1000)
             self._slog.agent_end(agent_name, session_id, tokens, duration, False)
+            self._emit_live(
+                {
+                    "type": "token",
+                    "agent": agent_name,
+                    "content": f"❌ Falhou: {str(exc)[:200]}\n",
+                }
+            )
+            self._emit_live({"type": "agent_finished", "agent": agent_name})
+            await self._publish(
+                EventType.AGENT_FAILED,
+                agent_name,
+                session_id,
+                data={"swarm": True, "error": str(exc)[:500], "duration_ms": duration},
+            )
             return AgentResult(
                 agent=agent_name,
                 error=str(exc),

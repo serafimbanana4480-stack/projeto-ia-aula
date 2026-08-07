@@ -363,6 +363,18 @@ class EventBus:
         if self.redis_backend:
             await self.redis_backend.listen()
 
+    async def emit(self, event: Event) -> None:
+        """Alias for :meth:`publish`.
+
+        This is the bus actually held by ``ReflectionSystem``,
+        ``MetaCognition``, the human-oversight queues and the cross-session
+        memory — all of which call ``self.event_bus.emit(...)``. Without the
+        alias every one of those calls raised ``AttributeError`` and was
+        swallowed by the surrounding ``except Exception``, so the features
+        appeared wired up while publishing nothing.
+        """
+        await self.publish(event)
+
     async def publish(self, event: Event) -> None:
         """Publish an event to all matching subscribers.
 

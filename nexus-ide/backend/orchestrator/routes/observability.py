@@ -45,7 +45,7 @@ async def agents_registry(request: Request) -> list[dict[str, Any]]:
     """Return the 9 agent definitions with inferred status from recent events."""
     registry = _get_registry(request)
     event_bus = _get_event_bus(request)
-    recent = event_bus.get_recent_events(limit=200)
+    recent = await event_bus.get_recent_events(limit=200)
 
     agents_info = []
     for name, agent in registry.items():
@@ -78,12 +78,34 @@ async def agents_registry(request: Request) -> list[dict[str, Any]]:
     return agents_info
 
 
+@router.get("/agents/status")
+async def agents_status(request: Request) -> dict[str, Any]:
+    """Compatibility summary for dashboards and older clients."""
+    agents = await agents_registry(request)
+    active = sum(1 for agent in agents if agent["status"] == "active")
+    return {
+        "total": len(agents),
+        "active": active,
+        "idle": sum(1 for agent in agents if agent["status"] == "idle"),
+        "agents": [
+            {**agent, "role": agent["name"]}
+            for agent in agents
+        ],
+    }
+
+
+@router.get("/agents/list")
+async def agents_list(request: Request) -> list[dict[str, Any]]:
+    """Alias retained for clients using the original agent API."""
+    return await agents_registry(request)
+
+
 @router.get("/agents/topology")
 async def agents_topology(request: Request) -> dict[str, Any]:
     """Return agent network topology nodes and links for graph visualization."""
     registry = _get_registry(request)
     event_bus = _get_event_bus(request)
-    recent = event_bus.get_recent_events(limit=500)
+    recent = await event_bus.get_recent_events(limit=500)
 
     nodes = []
     links = []
@@ -510,17 +532,17 @@ async def workflows_stream(request: Request) -> StreamingResponse:
 
 
 @router.get("/workflows/{workflow_id}")
-async def get_workflow(workflow_id: str) -> dict[str, Any]:
+async def get_workflow(workflow_id: str) -> Any:
     """Get workflow state by ID."""
-    from backend.observability.workflow_tracker import WorkflowTracker
-    tracker = WorkflowTracker(enable_persistence=True)
+    from backend.observability.routes.workflows import get_workflow_tracker
+    tracker = get_workflow_tracker()
+
+    if workflow_id == "active":
+        active = []
+        for status in ("active", "running"):
+            active.extend(w.to_dict() for w in tracker.list_workflows(status=status, limit=50))
+        return active
     
-    # Try to get from database first
-    workflow_state = tracker.get_persisted_workflow(workflow_id)
-    if workflow_state:
-        return workflow_state
-    
-    # Fallback to in-memory
     workflow = tracker.get_workflow(workflow_id)
     if workflow:
         return workflow.to_dict()
@@ -531,15 +553,12 @@ async def get_workflow(workflow_id: str) -> dict[str, Any]:
 @router.get("/workflows")
 async def list_workflows(status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
     """List workflows, optionally filtered by status."""
-    from backend.observability.workflow_tracker import WorkflowTracker
-    tracker = WorkflowTracker(enable_persistence=True)
+    from backend.observability.routes.workflows import get_workflow_tracker
+    tracker = get_workflow_tracker()
     
     if status == "active":
-        return tracker.list_active_workflows(limit)
-    elif status == "completed":
-        return tracker.list_completed_workflows(limit)
-    elif status == "failed":
-        return tracker.list_failed_workflows(limit)
+        statuses = ("active", "running")
+        return [w.to_dict() for s in statuses for w in tracker.list_workflows(status=s, limit=limit)][:limit]
     else:
         # Return from in-memory tracker
         workflows = tracker.list_workflows(status=status, limit=limit)
@@ -549,7 +568,7 @@ async def list_workflows(status: str | None = None, limit: int = 50) -> list[dic
 @router.get("/workflows/{workflow_id}/timeline")
 async def get_workflow_timeline(workflow_id: str) -> list[dict[str, Any]]:
     """Get workflow timeline for replay."""
-    from backend.observability.workflow_tracker import WorkflowTracker
-    tracker = WorkflowTracker()
+    from backend.observability.routes.workflows import get_workflow_tracker
+    tracker = get_workflow_tracker()
     
     return tracker.get_timeline(workflow_id)

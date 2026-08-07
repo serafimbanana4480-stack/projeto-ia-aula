@@ -113,20 +113,14 @@ export default function QualityGateStatus() {
           ))}
         </div>
       ) : gates.length === 0 ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
-          {Object.entries(gateMeta).map(([key, meta], idx) => (
-            <motion.div
-              key={key}
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ delay: idx * 0.05 }}
-              className="flex flex-col items-center justify-center rounded-lg border border-nexus-border bg-nexus-card p-4 text-center text-gray-400"
-            >
-              <div className="mb-2">{meta.icon}</div>
-              <div className="text-sm font-semibold text-nexus-text">{meta.label}</div>
-              <div className="mt-1 text-[10px] text-nexus-muted">{meta.description}</div>
-            </motion.div>
-          ))}
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-nexus-border bg-nexus-card/40 p-6 text-center">
+          <Shield className="mb-2 h-6 w-6 text-nexus-muted" />
+          <div className="text-sm font-medium text-nexus-text">
+            Sem gates de qualidade disponíveis
+          </div>
+          <div className="mt-1 text-[11px] text-nexus-muted">
+            Aguardando eventos do backend
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">

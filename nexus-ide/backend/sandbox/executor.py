@@ -27,6 +27,8 @@ import asyncio
 import logging
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import time
 import uuid
@@ -173,6 +175,7 @@ class SandboxExecutor:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
+                timeout=5,
             )
             self._docker_available = result.returncode == 0
         except (FileNotFoundError, OSError):
@@ -388,7 +391,28 @@ class SandboxExecutor:
             elif language == "javascript":
                 cmd = ["node", "-e", code]
             elif language == "bash":
-                cmd = ["bash", "-c", code]
+                bash = shutil.which("bash")
+                if os.name == "nt" and bash:
+                    try:
+                        probe = subprocess.run(
+                            [bash, "--version"],
+                            capture_output=True,
+                            timeout=3,
+                            check=False,
+                        )
+                        if probe.returncode != 0:
+                            bash = None
+                    except (OSError, subprocess.SubprocessError):
+                        bash = None
+                if bash:
+                    cmd = [bash, "-c", code]
+                elif os.name == "nt":
+                    # Windows commonly exposes the unusable WSL bash shim even
+                    # when no distribution is installed. PowerShell provides a
+                    # practical local fallback for simple shell verification.
+                    cmd = ["powershell", "-NoProfile", "-Command", code]
+                else:
+                    cmd = ["bash", "-c", code]
             else:
                 return SandboxResult(
                     execution_id=execution_id,
@@ -405,42 +429,48 @@ class SandboxExecutor:
                 # Linux: set memory limit via environment for child process
                 env["PYTHONMEMORY"] = str(self._config.max_memory_mb * 1024 * 1024)
 
-            # Use asyncio.to_thread + subprocess.run for Windows compatibility
-            import subprocess
-
-            def _run_subprocess():
-                return subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    cwd=cwd or tempfile.gettempdir(),
-                    env={**os.environ, **env} if env else None,
-                )
+            # Use Popen so a timeout can terminate exactly this child process.
+            # Calling taskkill with /IM would also kill the pytest runner and
+            # unrelated Python processes on Windows.
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=cwd or tempfile.gettempdir(),
+                env={**os.environ, **env} if env else None,
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                ),
+            )
 
             try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(_run_subprocess),
-                    timeout=timeout,
+                stdout, stderr = await asyncio.wait_for(
+                    asyncio.to_thread(process.communicate), timeout=timeout
                 )
                 duration_ms = int((time.time() - start) * 1000)
 
                 return SandboxResult(
                     execution_id=execution_id,
-                    stdout=result.stdout.decode("utf-8", errors="replace") if result.stdout else "",
-                    stderr=result.stderr.decode("utf-8", errors="replace") if result.stderr else "",
-                    exit_code=result.returncode or 0,
+                    stdout=stdout.decode("utf-8", errors="replace") if stdout else "",
+                    stderr=stderr.decode("utf-8", errors="replace") if stderr else "",
+                    exit_code=process.returncode or 0,
                     timed_out=False,
                     duration_ms=duration_ms,
                 )
             except TimeoutError:
-                # Try to kill the process tree on timeout
+                # Kill only the process tree rooted at this exact PID.
                 try:
-                    await asyncio.to_thread(
-                        subprocess.run,
-                        ["taskkill", "/F", "/T", "/IM", Path(cmd[0]).name],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        check=False,
-                    )
+                    if os.name == "nt":
+                        await asyncio.to_thread(
+                            subprocess.run,
+                            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            check=False,
+                        )
+                    else:
+                        process.kill()
+                    await asyncio.to_thread(process.communicate)
                 except Exception as exc:
                     logger.debug(
                         "Failed to kill local process for sandbox %s: %s", execution_id, exc

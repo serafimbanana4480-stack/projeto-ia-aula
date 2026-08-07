@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from backend.config.settings import get_settings
+from backend.llm.openai_provider import _system_verify_context
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +45,18 @@ class KimiProvider:
     ) -> None:
         if api_key is None:
             api_key = get_settings().kimi_api_key
+        # All Kimi endpoints used below are relative to the API v1 root.  Keep
+        # both user-friendly host-only overrides and the documented ``.../v1``
+        # URL valid without producing a ``/v1/v1/...`` request path.
         self._base_url = base_url.rstrip("/")
+        if not self._base_url.endswith("/v1"):
+            self._base_url = f"{self._base_url}/v1"
         self._api_key = api_key
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
             timeout=httpx.Timeout(10.0, connect=10.0, read=60.0, write=10.0),
+            verify=_system_verify_context(),
         )
 
     async def aclose(self) -> None:
@@ -114,10 +121,11 @@ class KimiProvider:
 
         max_retries = 3
         last_exc: Exception | None = None
+        emitted_output = False
         for attempt in range(1, max_retries + 1):
             try:
                 async with self._client.stream(
-                    "POST", "/v1/chat/completions", json=payload
+                    "POST", "/chat/completions", json=payload
                 ) as resp:
                     if resp.status_code != 200:
                         text = await resp.aread()
@@ -135,19 +143,30 @@ class KimiProvider:
                         raise RuntimeError(f"Kimi API error {resp.status_code}: {text.decode()}")
                     async for line in resp.aiter_lines():
                         line = line.strip()
-                        if not line or line == "data: [DONE]":
+                        if not line:
                             continue
+                        if line == "data: [DONE]":
+                            break
                         if line.startswith("data: "):
                             try:
                                 data = json.loads(line[6:])
                                 delta = data.get("choices", [{}])[0].get("delta", {})
                                 content = delta.get("content", "")
                                 if content:
+                                    emitted_output = True
                                     yield content
                             except (json.JSONDecodeError, IndexError):
                                 continue
-                    return
+                    if emitted_output:
+                        return
+                    # A successful HTTP response without emitted assistant
+                    # text must not be reported as a blank successful answer.
+                    raise RuntimeError("Kimi stream completed without text content")
             except (httpx.NetworkError, httpx.TimeoutException) as exc:
+                # Once text is visible to the user, restarting would append a
+                # second response to an already-partial answer.
+                if emitted_output:
+                    raise
                 last_exc = exc
                 if attempt < max_retries:
                     wait = 2 ** (attempt - 1)
@@ -182,7 +201,7 @@ class KimiProvider:
                 if key in options:
                     payload[key] = options[key]
 
-        resp = await self._post_with_retry("/v1/chat/completions", payload)
+        resp = await self._post_with_retry("/chat/completions", payload)
         if resp.status_code != 200:
             raise RuntimeError(f"Kimi API error {resp.status_code}: {resp.text}")
 
@@ -197,7 +216,7 @@ class KimiProvider:
     ) -> list[list[float]]:
         """Get embeddings for texts."""
         payload = {"model": self.resolve_model(model), "input": texts}
-        resp = await self._post_with_retry("/v1/embeddings", payload)
+        resp = await self._post_with_retry("/embeddings", payload)
         if resp.status_code != 200:
             raise RuntimeError(f"Kimi API error {resp.status_code}: {resp.text}")
 

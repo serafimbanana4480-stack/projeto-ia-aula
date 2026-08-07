@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Users, Brain, Sparkles, Loader2, CheckCircle2, XCircle, Clock, Send, Search, BookOpen, Hammer, Bug, ClipboardList, Lightbulb, FlaskConical, Activity, Gauge, Shield, AlertTriangle, MessageSquare, History, Layers, Wrench, Library, Database, GitBranch, GitPullRequest, ArrowRight, Siren, Book, Scissors, Play } from "lucide-react";
 import { authHeaders } from "../../lib/auth";
@@ -27,7 +27,14 @@ const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 // ---------------------------------------------------------------------------
-// Static catalogue (mirrors backend/swarm/modes/mode_registry.py + agents.py)
+// Catalogue
+//
+// The backend is the source of truth (backend/swarm/modes/mode_registry.py and
+// backend/swarm/core/agents.py). The constants below are only a fallback for
+// when /api/swarm/modes and /api/swarm/agents are unreachable — they must stay
+// in sync with the `AgentRole` / `OperationalMode` StrEnums, which are
+// lowercase. Posting the NEXUS agent names (ARCHITECT, ANALYZER, CODER, …)
+// here is what produced `HTTP 422: Input should be 'coordinator', ...`.
 // ---------------------------------------------------------------------------
 
 type OperationalMode =
@@ -41,85 +48,126 @@ type OperationalMode =
 
 type SwarmStrategy = "adaptive" | "divide" | "ensemble" | "pipeline" | "debate";
 
-const OPERATIONAL_MODES: {
+/** Canonical SWARM roles — must match backend `AgentRole`. */
+type AgentRole =
+  | "coordinator"
+  | "architect"
+  | "researcher"
+  | "investigator"
+  | "implementer"
+  | "reviewer";
+
+interface ModeSpec {
   id: OperationalMode;
   label: string;
   description: string;
   icon: React.ComponentType<{ className?: string }>;
   color: string;
   defaultStrategy: SwarmStrategy;
-  agents: string[];
+  agents: AgentRole[];
   gradient: string;
-}[] = [
+}
+
+const MODE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
+  architecture: Brain,
+  investigation: Search,
+  implementation: Hammer,
+  review: Shield,
+  bugfix: Bug,
+  planning: ClipboardList,
+  research: FlaskConical,
+};
+
+const MODE_COLORS: Record<string, string> = {
+  architecture: "text-violet-400",
+  investigation: "text-sky-400",
+  implementation: "text-emerald-400",
+  review: "text-amber-400",
+  bugfix: "text-red-400",
+  planning: "text-indigo-400",
+  research: "text-cyan-400",
+};
+
+const MODE_GRADIENTS: Record<string, string> = {
+  architecture: "from-violet-500/20 to-fuchsia-500/10 border-violet-500/40",
+  investigation: "from-sky-500/20 to-cyan-500/10 border-sky-500/40",
+  implementation: "from-emerald-500/20 to-teal-500/10 border-emerald-500/40",
+  review: "from-amber-500/20 to-orange-500/10 border-amber-500/40",
+  bugfix: "from-red-500/20 to-rose-500/10 border-red-500/40",
+  planning: "from-indigo-500/20 to-blue-500/10 border-indigo-500/40",
+  research: "from-cyan-500/20 to-blue-500/10 border-cyan-500/40",
+};
+
+const FALLBACK_MODES: ModeSpec[] = [
   {
     id: "architecture",
     label: "Architecture",
     description: "Design system structure and trade-offs.",
     icon: Brain,
-    color: "text-violet-400",
+    color: MODE_COLORS.architecture,
     defaultStrategy: "debate",
-    agents: ["ARCHITECT", "ANALYZER", "REVIEWER"],
-    gradient: "from-violet-500/20 to-fuchsia-500/10 border-violet-500/40",
+    agents: ["coordinator", "investigator", "architect", "reviewer"],
+    gradient: MODE_GRADIENTS.architecture,
   },
   {
     id: "investigation",
     label: "Investigation",
     description: "Read the codebase via RAG, surface constraints.",
     icon: Search,
-    color: "text-sky-400",
+    color: MODE_COLORS.investigation,
     defaultStrategy: "ensemble",
-    agents: ["ANALYZER", "ARCHITECT"],
-    gradient: "from-sky-500/20 to-cyan-500/10 border-sky-500/40",
+    agents: ["coordinator", "investigator", "architect"],
+    gradient: MODE_GRADIENTS.investigation,
   },
   {
     id: "implementation",
     label: "Implementation",
     description: "Plan and emit a proposal for code changes.",
     icon: Hammer,
-    color: "text-emerald-400",
+    color: MODE_COLORS.implementation,
     defaultStrategy: "pipeline",
-    agents: ["ARCHITECT", "CODER", "REVIEWER"],
-    gradient: "from-emerald-500/20 to-teal-500/10 border-emerald-500/40",
+    agents: ["coordinator", "investigator", "architect", "implementer", "reviewer"],
+    gradient: MODE_GRADIENTS.implementation,
   },
   {
     id: "review",
     label: "Review",
     description: "Independent code/output review with 8-axis findings.",
     icon: Shield,
-    color: "text-amber-400",
+    color: MODE_COLORS.review,
     defaultStrategy: "ensemble",
-    agents: ["REVIEWER", "ANALYZER"],
-    gradient: "from-amber-500/20 to-orange-500/10 border-amber-500/40",
+    agents: ["coordinator", "investigator", "reviewer"],
+    gradient: MODE_GRADIENTS.review,
   },
   {
     id: "bugfix",
     label: "Bugfix",
     description: "Investigate → propose a fix → reviewer validates.",
     icon: Bug,
-    color: "text-red-400",
+    color: MODE_COLORS.bugfix,
     defaultStrategy: "pipeline",
-    agents: ["ANALYZER", "CODER", "DEBUGGER", "REVIEWER"],
-    gradient: "from-red-500/20 to-rose-500/10 border-red-500/40",
+    agents: ["coordinator", "investigator", "implementer", "reviewer"],
+    gradient: MODE_GRADIENTS.bugfix,
   },
   {
     id: "planning",
     label: "Planning",
     description: "Structured execution plan, no code changes.",
     icon: ClipboardList,
-    color: "text-indigo-400",
+    color: MODE_COLORS.planning,
     defaultStrategy: "divide",
-    agents: ["ARCHITECT", "ANALYZER"],
-    gradient: "from-indigo-500/20 to-blue-500/10 border-indigo-500/40",
+    agents: ["coordinator", "investigator", "architect"],
+    gradient: MODE_GRADIENTS.planning,
   },
   {
     id: "research",
     label: "Research",
     description: "Multi-source external research with citations.",
     icon: FlaskConical,
-    color: "text-cyan-400",
+    color: MODE_COLORS.research,
     defaultStrategy: "ensemble",
-    agents: ["RESEARCHER", "ARCHITECT"],
-    gradient: "from-cyan-500/20 to-blue-500/10 border-cyan-500/40",
+    agents: ["coordinator", "researcher", "architect"],
+    gradient: MODE_GRADIENTS.research,
   },
 ];
 
@@ -131,15 +179,20 @@ const STRATEGIES: { id: SwarmStrategy; label: string; description: string; icon:
   { id: "debate", label: "Debate", description: "Propose + moderator integrates.", icon: MessageSquare },
 ];
 
-const ALL_AGENTS = [
-  "ARCHITECT",
-  "RESEARCHER",
-  "ANALYZER",
-  "DEBUGGER",
-  "DOCUMENTER",
-  "OPTIMIZER",
-  "CODER",
-  "REVIEWER",
+interface AgentSpec {
+  id: AgentRole;
+  label: string;
+  objective: string;
+  mapsTo: string;
+}
+
+const FALLBACK_AGENTS: AgentSpec[] = [
+  { id: "coordinator", label: "Coordinator", objective: "Picks the mode and keeps the run on track.", mapsTo: "ARCHITECT" },
+  { id: "architect", label: "Architect", objective: "Designs structure and trade-offs.", mapsTo: "ARCHITECT" },
+  { id: "researcher", label: "Researcher", objective: "Gathers external sources with citations.", mapsTo: "RESEARCHER" },
+  { id: "investigator", label: "Investigator", objective: "Reads the codebase and surfaces constraints.", mapsTo: "ANALYZER" },
+  { id: "implementer", label: "Implementer", objective: "Emits a reviewable change proposal.", mapsTo: "CODER" },
+  { id: "reviewer", label: "Reviewer", objective: "Reviews output across 8 axes.", mapsTo: "REVIEWER" },
 ];
 
 const STATE_COLORS: Record<string, string> = {
@@ -208,6 +261,29 @@ function StateBadge({ state }: { state: string }) {
 interface SwarmPanelProps {
   sessionId: string;
   onInsertIntoChat?: (text: string) => void;
+  /** Project root the run should index + reason over. */
+  projectPath?: string;
+}
+
+/** Turn a raw `HTTP 422: {json}` body into something a human can act on. */
+function humaniseError(status: number, body: string): string {
+  try {
+    const parsed = JSON.parse(body);
+    const detail = parsed?.detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      return detail
+        .map((d: any) => {
+          const field = Array.isArray(d?.loc) ? d.loc.filter((p: any) => p !== "body").join(".") : "";
+          return field ? `${field}: ${d?.msg ?? "invalid"}` : (d?.msg ?? "invalid");
+        })
+        .join("\n");
+    }
+  } catch {
+    // not JSON — fall through
+  }
+  const trimmed = body.trim();
+  return trimmed ? `HTTP ${status}: ${trimmed.slice(0, 500)}` : `HTTP ${status}`;
 }
 
 interface SkillSummary {
@@ -225,17 +301,21 @@ interface SkillSummary {
   estimated_seconds: number;
 }
 
-export default function SwarmPanel({ sessionId, onInsertIntoChat }: SwarmPanelProps) {
+export default function SwarmPanel({ sessionId, onInsertIntoChat, projectPath = "" }: SwarmPanelProps) {
   const [mode, setLocalMode] = useState<OperationalMode>("architecture");
   const [strategy, setStrategy] = useState<SwarmStrategy>("adaptive");
-  const [agents, setAgents] = useState<string[]>([]);
+  const [agents, setAgents] = useState<AgentRole[]>([]);
   const [objective, setObjective] = useState("");
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
-  const [activeTab, setActiveTab] = useState<"answer" | "trace" | "scores" | "skills" | "history">("answer");
+  const [activeTab, setActiveTab] = useState<"answer" | "trace" | "scores">("answer");
   const [, setOpenSettings] = useState(false);
+
+  // Catalogue (backend-driven, with a static fallback)
+  const [modeCatalogue, setModeCatalogue] = useState<ModeSpec[]>(FALLBACK_MODES);
+  const [agentCatalogue, setAgentCatalogue] = useState<AgentSpec[]>(FALLBACK_AGENTS);
 
   // Skills
   const [skills, setSkills] = useState<SkillSummary[]>([]);
@@ -243,15 +323,24 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat }: SwarmPanelPr
   const [skillVars, setSkillVars] = useState<Record<string, string>>({});
   const [skillCategory, setSkillCategory] = useState<string>("all");
 
-  const modeSpec = useMemo(() => OPERATIONAL_MODES.find((m) => m.id === mode)!, [mode]);
+  // One in-flight run at a time; abort it on unmount so the component never
+  // calls setState after being torn down.
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
 
-  // Sync agents when mode changes
+  const modeSpec = useMemo(
+    () => modeCatalogue.find((m) => m.id === mode) ?? modeCatalogue[0] ?? FALLBACK_MODES[0],
+    [modeCatalogue, mode]
+  );
+
+  // Sync strategy + agents when the mode (or the catalogue) changes
   useEffect(() => {
-    setStrategy(modeSpec.defaultStrategy as SwarmStrategy);
+    setStrategy(modeSpec.defaultStrategy);
     setAgents(modeSpec.agents);
   }, [modeSpec]);
 
-  // Load recent runs
+  // ---- data loading --------------------------------------------------
+
   const refreshHistory = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/api/swarm/runs?limit=20`, {
@@ -266,11 +355,6 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat }: SwarmPanelPr
     }
   }, []);
 
-  useEffect(() => {
-    refreshHistory();
-    refreshSkills();
-  }, [refreshHistory]);
-
   const refreshSkills = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/api/swarm/skills`, { headers: authHeaders() });
@@ -283,39 +367,150 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat }: SwarmPanelPr
     }
   }, []);
 
-  const runSkill = useCallback(async (skill: SkillSummary) => {
-    if (running) return;
-    setRunning(true);
-    setError(null);
-    setResult(null);
-    setActiveTab("answer");
+  /**
+   * Pull the mode + agent catalogue from the backend so the two never drift
+   * apart again. Anything the backend does not describe keeps its local
+   * icon/colour, and a failed fetch silently keeps the fallback.
+   */
+  const refreshCatalogue = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/swarm/skills/${skill.id}/run`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({
+      const [modesRes, agentsRes] = await Promise.all([
+        fetch(`${API_BASE}/api/swarm/modes`, { headers: authHeaders() }),
+        fetch(`${API_BASE}/api/swarm/agents`, { headers: authHeaders() }),
+      ]);
+
+      if (modesRes.ok) {
+        const data = await modesRes.json();
+        const entries = Object.entries<any>(data.modes ?? {});
+        if (entries.length > 0) {
+          setModeCatalogue(
+            entries.map(([id, spec]) => ({
+              id: id as OperationalMode,
+              label: spec.label ?? id,
+              description: spec.description ?? "",
+              icon: MODE_ICONS[id] ?? Brain,
+              color: MODE_COLORS[id] ?? "text-nexus-accent",
+              defaultStrategy: (spec.default_strategy ?? "adaptive") as SwarmStrategy,
+              agents: (spec.agents ?? []) as AgentRole[],
+              gradient:
+                MODE_GRADIENTS[id] ?? "from-nexus-accent/20 to-nexus-accent/5 border-nexus-accent/40",
+            }))
+          );
+        }
+      }
+
+      if (agentsRes.ok) {
+        const data = await agentsRes.json();
+        const entries = Object.entries<any>(data.agents ?? {});
+        if (entries.length > 0) {
+          setAgentCatalogue(
+            entries.map(([id, spec]) => ({
+              id: id as AgentRole,
+              label: spec.label ?? id,
+              objective: spec.objective ?? "",
+              mapsTo: spec.maps_to ?? "",
+            }))
+          );
+        }
+      }
+    } catch {
+      // keep the fallback catalogue
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshCatalogue();
+    refreshHistory();
+    refreshSkills();
+  }, [refreshCatalogue, refreshHistory, refreshSkills]);
+
+  // ---- runs ----------------------------------------------------------
+
+  /** Shared POST + result handling for both `/run` and `/skills/{id}/run`. */
+  const postRun = useCallback(
+    async (url: string, payload: Record<string, unknown>, header: (d: any) => string) => {
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      setRunning(true);
+      setError(null);
+      setResult(null);
+      setActiveTab("answer");
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          throw new Error(humaniseError(res.status, await res.text()));
+        }
+        const data = await res.json();
+        if (controller.signal.aborted) return;
+        setResult(data);
+        if (data.error) setError(data.error);
+        refreshHistory();
+        if (data.final_answer && onInsertIntoChat) {
+          onInsertIntoChat(`${header(data)}\n\n${data.final_answer}`);
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (abortRef.current === controller) abortRef.current = null;
+        if (!controller.signal.aborted) setRunning(false);
+      }
+    },
+    [onInsertIntoChat, refreshHistory]
+  );
+
+  const runSkill = useCallback(
+    async (skill: SkillSummary) => {
+      if (running) return;
+      // Validate here too so the user sees the missing field inline instead of
+      // a 422 round-trip.
+      const missing = skill.variables
+        .filter((v) => v.required && !(skillVars[v.name] ?? "").trim())
+        .map((v) => v.label || v.name);
+      if (missing.length > 0) {
+        setError(`Missing required field(s): ${missing.join(", ")}`);
+        return;
+      }
+      await postRun(
+        `${API_BASE}/api/swarm/skills/${encodeURIComponent(skill.id)}/run`,
+        {
           variables: skillVars,
           session_id: sessionId,
-        }),
-      });
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(`HTTP ${res.status}: ${txt}`);
-      }
-      const data = await res.json();
-      setResult(data);
-      refreshHistory();
-      if (data.final_answer && onInsertIntoChat) {
-        onInsertIntoChat(`## ${data.skill_name} (${data.mode} · ${data.strategy})\n\n${data.final_answer}`);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setRunning(false);
-    }
-  }, [running, skillVars, sessionId, onInsertIntoChat, refreshHistory]);
+          project_path: projectPath,
+        },
+        (d) => `## ${d.skill_name} (${d.mode} · ${d.strategy})`
+      );
+    },
+    [running, skillVars, sessionId, projectPath, postRun]
+  );
 
-  const toggleAgent = (agent: string) => {
+  /**
+   * `/runs` returns lightweight summaries, so fetch the full payload before
+   * showing a past run (otherwise the Answer/Trace tabs render empty).
+   */
+  const openRun = useCallback(async (summary: any) => {
+    setResult(summary);
+    setActiveTab("answer");
+    if (!summary?.run_id) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/swarm/runs/${encodeURIComponent(summary.run_id)}`,
+        { headers: authHeaders() }
+      );
+      if (res.ok) setResult(await res.json());
+    } catch {
+      // keep the summary
+    }
+  }, []);
+
+  const toggleAgent = (agent: AgentRole) => {
     setAgents((prev) =>
       prev.includes(agent) ? prev.filter((a) => a !== agent) : [...prev, agent]
     );
@@ -323,40 +518,20 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat }: SwarmPanelPr
 
   const run = useCallback(async () => {
     if (!objective.trim() || running) return;
-    setRunning(true);
-    setError(null);
-    setResult(null);
-    setActiveTab("answer");
-    try {
-      const res = await fetch(`${API_BASE}/api/swarm/run`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({
-          objective: objective.trim(),
-          session_id: sessionId,
-          mode,
-          strategy,
-          agents: agents.length > 0 ? agents : undefined,
-          max_iterations: 5,
-        }),
-      });
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(`HTTP ${res.status}: ${txt}`);
-      }
-      const data = await res.json();
-      setResult(data);
-      refreshHistory();
-      // Auto-insert the final answer into the chat
-      if (data.final_answer && onInsertIntoChat) {
-        onInsertIntoChat(`## SWARM (${data.mode} · ${data.strategy})\n\n${data.final_answer}`);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setRunning(false);
-    }
-  }, [objective, mode, strategy, agents, sessionId, running, onInsertIntoChat, refreshHistory]);
+    await postRun(
+      `${API_BASE}/api/swarm/run`,
+      {
+        objective: objective.trim(),
+        session_id: sessionId,
+        mode,
+        strategy,
+        agents: agents.length > 0 ? agents : undefined,
+        project_path: projectPath,
+        max_iterations: 5,
+      },
+      (d) => `## SWARM (${d.mode} · ${d.strategy})`
+    );
+  }, [objective, mode, strategy, agents, sessionId, projectPath, running, postRun]);
 
   return (
     <div className="flex h-full flex-col">
@@ -413,7 +588,7 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat }: SwarmPanelPr
             <Brain className="h-3 w-3" /> Operational mode
           </label>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-            {OPERATIONAL_MODES.map((m) => {
+            {modeCatalogue.map((m) => {
               const Icon = m.icon;
               const active = m.id === mode;
               return (
@@ -474,24 +649,31 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat }: SwarmPanelPr
               <Users className="h-3 w-3" /> Agents ({agents.length})
             </label>
             <div className="flex flex-wrap gap-1.5">
-              {ALL_AGENTS.map((a) => {
-                const active = agents.includes(a);
+              {agentCatalogue.map((a) => {
+                const active = agents.includes(a.id);
                 return (
                   <motion.button
-                    key={a}
+                    key={a.id}
                     whileTap={{ scale: 0.95 }}
-                    onClick={() => toggleAgent(a)}
-                    className={`rounded-md border px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                    onClick={() => toggleAgent(a.id)}
+                    title={a.mapsTo ? `${a.objective} (runs as ${a.mapsTo})` : a.objective}
+                    aria-pressed={active}
+                    className={`rounded-md border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide transition-colors ${
                       active
                         ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
                         : "border-nexus-border bg-nexus-card/40 text-nexus-muted hover:border-nexus-accent/30 hover:text-nexus-text"
                     }`}
                   >
-                    {a}
+                    {a.label}
                   </motion.button>
                 );
               })}
             </div>
+            {agents.length === 0 && (
+              <p className="mt-1 text-[10px] text-amber-400/80">
+                No agents selected — the mode&apos;s default team will be used.
+              </p>
+            )}
           </div>
         </div>
 
@@ -669,13 +851,10 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat }: SwarmPanelPr
               {history.slice(0, 5).map((r: any) => (
                 <button
                   key={r.run_id}
-                  onClick={() => {
-                    setResult(r);
-                    setActiveTab("answer");
-                  }}
+                  onClick={() => openRun(r)}
                   className="flex w-full items-center gap-2 rounded-md border border-nexus-border/60 bg-nexus-card/30 px-2 py-1.5 text-left text-[11px] hover:border-fuchsia-500/30"
                 >
-                  <span className="font-mono text-nexus-muted">{r.run_id.slice(0, 6)}</span>
+                  <span className="font-mono text-nexus-muted">{String(r.run_id ?? "").slice(0, 6)}</span>
                   <span className="text-nexus-text">{r.objective?.slice(0, 40)}</span>
                   <span className="ml-auto">
                     <StateBadge state={r.state} />

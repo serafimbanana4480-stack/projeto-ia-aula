@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Loader2, Sparkles, Zap, Brain, Shield, Activity, Wrench } from "lucide-react";
+import { CheckCircle2, Sparkles, Zap, Brain, Shield, Activity, Wrench } from "lucide-react";
 import { useModeStore } from "../../stores/modeStore";
+import { Surface, SurfaceHeader } from "../ui/Surface";
+import { Badge, EmptyState } from "../ui/Primitives";
 
 const MODE_ICONS: Record<string, typeof Zap> = {
   auto: Sparkles,
@@ -51,81 +53,59 @@ export default function ModesWidget() {
 
   const modeList = useMemo(() => Object.values(modes), [modes]);
 
-  if (modesLoading && modeList.length === 0) {
-    return (
-      <div className="flex h-32 items-center justify-center rounded border border-nexus-border bg-nexus-panel">
-        <Loader2 className="h-4 w-4 animate-spin text-nexus-muted" aria-hidden />
-      </div>
-    );
-  }
-
-  if (modesError && modeList.length === 0) {
-    return (
-      <div
-        role="status"
-        aria-live="polite"
-        className="flex items-center gap-2 rounded border border-yellow-500/30 bg-yellow-500/5 px-3 py-2 text-xs text-yellow-400"
-      >
-        <Loader2 className="h-3.5 w-3.5" aria-hidden />
-        <span>Modos indisponíveis — {modesError}</span>
-      </div>
-    );
-  }
-
   return (
-    <section
-      className="min-w-0 rounded border border-nexus-border bg-nexus-panel p-3"
-      aria-labelledby="modes-widget-title"
-    >
-      <header className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-nexus-accent" aria-hidden />
-          <h3 id="modes-widget-title" className="text-sm font-semibold">
-            Modos
-          </h3>
-        </div>
-        <span className="rounded-full bg-nexus-accent/15 px-2 py-0.5 text-[10px] font-medium text-nexus-accent">
-          {currentMode}
-        </span>
-      </header>
+    <Surface elevation={1} padding="sm">
+      <SurfaceHeader
+        icon={<Sparkles className="h-4 w-4" />}
+        title="Modos"
+        subtitle="Perfis de comportamento dos agentes"
+        action={<Badge tone="accent">{currentMode}</Badge>}
+      />
 
-      <ul
-        className="grid grid-cols-2 gap-2 sm:grid-cols-3"
-        aria-label="Lista de modos disponíveis"
-      >
-        {modeList.map((mode) => {
-          const Icon = MODE_ICONS[mode.id] ?? Sparkles;
-          const gradient = MODE_COLORS[mode.id] ?? "from-nexus-accent/10 to-nexus-accent/5 border-nexus-border";
-          const isActive = mode.id === currentMode;
-          return (
-            <li key={mode.id}>
-              <button
-                type="button"
-                onClick={() => setMode(mode.id)}
-                aria-pressed={isActive}
-                className={`group relative w-full rounded-lg border bg-gradient-to-br p-2 text-left transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent ${
-                  isActive
-                    ? `${gradient} ring-1 ring-nexus-accent/40`
-                    : "border-nexus-border/40 bg-nexus-bg/30 hover:border-nexus-accent/30"
-                }`}
-              >
-                <div className="flex items-center gap-1.5">
-                  <Icon className="h-3.5 w-3.5 text-nexus-accent" aria-hidden />
-                  <span className="truncate text-[11px] font-semibold uppercase tracking-wider text-nexus-text">
-                    {mode.id}
-                  </span>
-                  {isActive && (
-                    <CheckCircle2 className="ml-auto h-3 w-3 text-nexus-accent" aria-hidden />
-                  )}
-                </div>
-                <p className="mt-0.5 line-clamp-2 text-[10px] leading-snug text-nexus-muted">
-                  {mode.description || `${mode.default_agent} • ${mode.default_model}`}
-                </p>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-    </section>
+      <div className="mt-3">
+        {modesLoading && modeList.length === 0 ? (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="nx-shimmer h-16 rounded-lg" />
+            ))}
+          </div>
+        ) : modesError && modeList.length === 0 ? (
+          <EmptyState compact icon={<Sparkles className="h-5 w-5" />} title="Modos indisponíveis" hint={modesError} />
+        ) : (
+          <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3" aria-label="Lista de modos disponíveis">
+            {modeList.map((mode) => {
+              const Icon = MODE_ICONS[mode.id] ?? Sparkles;
+              const gradient = MODE_COLORS[mode.id] ?? "from-nexus-accent/10 to-nexus-accent/5 border-nexus-border";
+              const isActive = mode.id === currentMode;
+              return (
+                <li key={mode.id}>
+                  <button
+                    type="button"
+                    onClick={() => setMode(mode.id)}
+                    aria-pressed={isActive}
+                    className={`nx-surface group relative w-full rounded-lg border bg-gradient-to-br p-2 text-left transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent ${
+                      isActive
+                        ? `${gradient} ring-1 ring-nexus-accent/40 shadow-nx-1`
+                        : "border-[var(--nx-line)] bg-nexus-panel/60 hover:border-nexus-accent/30"
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Icon className="h-3.5 w-3.5 text-nexus-accent" aria-hidden />
+                      <span className="truncate text-[11px] font-semibold uppercase tracking-wider text-nexus-text">
+                        {mode.id}
+                      </span>
+                      {isActive && <CheckCircle2 className="ml-auto h-3 w-3 text-nexus-accent" aria-hidden />}
+                    </div>
+                    <p className="mt-0.5 line-clamp-2 text-[10px] leading-snug text-nexus-muted">
+                      {mode.description || `${mode.default_agent} • ${mode.default_model}`}
+                    </p>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </Surface>
   );
 }

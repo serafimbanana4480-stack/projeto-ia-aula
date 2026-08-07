@@ -407,7 +407,13 @@ class MultiLLMManager:
         provider: str | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
-        """Stream chat completion with same logic."""
+        """Stream a completion, failing over only before visible output.
+
+        A streaming provider can fail after it has already emitted tokens.
+        Restarting that request on another provider corrupts the answer and can
+        repeat downstream ReAct tool calls, so only pre-output failures are
+        eligible for failover.
+        """
         target = provider or self.get_best_provider()
         if target not in self.providers:
             raise RuntimeError(f"Provider '{target}' not registered")
@@ -425,12 +431,17 @@ class MultiLLMManager:
 
             started = time.time()
             chunks: list[str] = []
+            emitted_output = False
             try:
                 async for token in self.providers[name].chat_stream(
                     model=model, messages=messages, options=options, **kwargs
                 ):
+                    if token:
+                        emitted_output = True
                     chunks.append(token)
                     yield token
+                if not emitted_output:
+                    raise RuntimeError(f"Provider '{name}' returned an empty stream")
                 await breaker.record_success()
                 self._update_health(name, True, (time.time() - started) * 1000)
                 # Record token usage after stream completes
@@ -438,13 +449,115 @@ class MultiLLMManager:
                 self._record_usage(provider_name=name, model=model, messages=messages, output_text=full_output)
                 logger.info("Provider '%s' succeeded for chat_stream", name)
                 return
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 await breaker.record_failure()
                 last_error = exc
                 self._update_health(name, False, (time.time() - started) * 1000)
                 logger.warning("Provider '%s' failed for chat_stream: %s", name, exc)
+                if emitted_output:
+                    # The response has already reached the user. Never append
+                    # a second provider's response to it.
+                    raise
 
         raise last_error or RuntimeError("All providers failed for chat_stream")
+
+    async def embed(
+        self,
+        texts: list[str],
+        model: str,
+        provider: str | None = None,
+        **kwargs: Any,
+    ) -> list[list[float]]:
+        """Embed text through the same health-aware provider failover path.
+
+        ``create_llm_client()`` can return this manager when multi-provider
+        mode is enabled.  Without this method, semantic memory and code search
+        fail with ``AttributeError`` even when a registered provider supports
+        embeddings.
+        """
+        target = provider or self.get_best_provider()
+        if target not in self.providers:
+            raise RuntimeError(f"Provider '{target}' not registered")
+
+        last_error: Exception | None = None
+        names_to_try = [target] + [name for name in self.providers if name != target]
+        for name in names_to_try:
+            candidate = self.providers[name]
+            if not hasattr(candidate, "embed"):
+                continue
+
+            breaker = get_breaker(name)
+            if not await breaker.is_call_permitted():
+                last_error = RuntimeError(f"Circuit breaker open for '{name}'")
+                continue
+
+            started = time.time()
+            try:
+                vectors = await candidate.embed(texts, model=model, **kwargs)
+                if not isinstance(vectors, list) or len(vectors) != len(texts):
+                    raise RuntimeError(
+                        f"Provider '{name}' returned {len(vectors) if isinstance(vectors, list) else 'invalid'} "
+                        f"embeddings for {len(texts)} inputs"
+                    )
+                await breaker.record_success()
+                self._update_health(name, True, (time.time() - started) * 1000)
+                return vectors
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await breaker.record_failure()
+                last_error = exc
+                self._update_health(name, False, (time.time() - started) * 1000)
+                logger.warning("Provider '%s' failed for embed: %s", name, exc)
+
+        raise last_error or RuntimeError("No registered provider supports embeddings")
+
+    async def batch_complete(
+        self,
+        messages_list: list[list[dict[str, str]]],
+        *,
+        model: str | None = None,
+        options: dict[str, Any] | None = None,
+        provider: str | None = None,
+        **kwargs: Any,
+    ) -> list[str]:
+        """Run a batch while preserving the manager's provider resilience."""
+        if not messages_list:
+            return []
+        if not model:
+            raise ValueError("MultiLLMManager.batch_complete requires an explicit model")
+
+        target = provider or self.get_best_provider()
+        if target not in self.providers:
+            raise RuntimeError(f"Provider '{target}' not registered")
+
+        candidate = self.providers[target]
+        if hasattr(candidate, "batch_complete"):
+            try:
+                return await candidate.batch_complete(
+                    messages_list, model=model, options=options, **kwargs
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Provider '%s' failed for batch_complete: %s", target, exc)
+
+        return list(
+            await asyncio.gather(
+                *(
+                    self.chat_complete(
+                        model=model,
+                        messages=messages,
+                        options=options,
+                        provider=provider,
+                        **kwargs,
+                    )
+                    for messages in messages_list
+                )
+            )
+        )
 
     async def parallel_completion(
         self,

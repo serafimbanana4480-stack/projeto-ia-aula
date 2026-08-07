@@ -20,9 +20,40 @@ DEFAULT_TTL = 300  # 5 minutes
 SHORT_TTL = 60  # 1 minute
 LONG_TTL = 3600  # 1 hour
 
+# Consecutive Redis failures before the circuit breaker trips and the client
+# switches to its no-op fallback. Without this, a down Redis turns every cache
+# call into a multi-second blocking connect attempt — which starves the async
+# event loop so badly that uvicorn can fail to finish startup at all.
+_CACHE_CIRCUIT_THRESHOLD = 1
+_CACHE_SOCKET_TIMEOUT = 0.5  # optional cache must never add seconds to a chat request
+
 
 class CacheError(RuntimeError):
     """Raised when cache operations fail."""
+
+
+class _CircuitBreakerMixin:
+    """Trips ``_fallback`` after repeated consecutive Redis failures."""
+
+    _fallback: bool
+    _consecutive_failures: int
+
+    def _cache_success(self) -> None:
+        self._consecutive_failures = 0
+
+    def _cache_error(self, op: str, key: str, exc: Exception) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= _CACHE_CIRCUIT_THRESHOLD:
+            if not self._fallback:
+                self._fallback = True
+                logger.warning(
+                    "Redis unreachable (%s) — cache disabled after %d consecutive "
+                    "failures; continuing without cache",
+                    exc,
+                    _CACHE_CIRCUIT_THRESHOLD,
+                )
+        else:
+            logger.warning("Cache %s failed for key %s: %s", op, key, exc)
 
 
 try:
@@ -37,7 +68,7 @@ except ImportError:
 
 if _redis_available:
 
-    class SyncCacheClient:
+    class SyncCacheClient(_CircuitBreakerMixin):
         """Synchronous Redis client with connection pooling and error handling."""
 
         def __init__(
@@ -57,18 +88,23 @@ if _redis_available:
                 password=password,
                 max_connections=max_connections,
                 decode_responses=decode_responses,
+                socket_connect_timeout=_CACHE_SOCKET_TIMEOUT,
+                socket_timeout=_CACHE_SOCKET_TIMEOUT,
             )
             self._client = redis_sync.Redis(connection_pool=self._pool)
             self._fallback = False
+            self._consecutive_failures = 0
 
         def get(self, key: str) -> str | None:
             """Get a value from cache."""
             if self._fallback:
                 return None
             try:
-                return self._client.get(key)
+                value = self._client.get(key)
+                self._cache_success()
+                return value
             except redis_sync.RedisError as e:
-                logger.warning("Cache get failed for key %s: %s", key, e)
+                self._cache_error("get", key, e)
                 return None
 
         def set(
@@ -82,9 +118,10 @@ if _redis_available:
                 return False
             try:
                 self._client.setex(key, ttl, value)
+                self._cache_success()
                 return True
             except redis_sync.RedisError as e:
-                logger.warning("Cache set failed for key %s: %s", key, e)
+                self._cache_error("set", key, e)
                 return False
 
         def delete(self, key: str) -> bool:
@@ -93,9 +130,10 @@ if _redis_available:
                 return False
             try:
                 self._client.delete(key)
+                self._cache_success()
                 return True
             except redis_sync.RedisError as e:
-                logger.warning("Cache delete failed for key %s: %s", key, e)
+                self._cache_error("delete", key, e)
                 return False
 
         def delete_pattern(self, pattern: str) -> int:
@@ -106,9 +144,10 @@ if _redis_available:
                 keys = self._client.keys(pattern)
                 if keys:
                     self._client.delete(*keys)
+                self._cache_success()
                 return len(keys)
             except redis_sync.RedisError as e:
-                logger.warning("Cache delete_pattern failed for %s: %s", pattern, e)
+                self._cache_error("delete_pattern", pattern, e)
                 return 0
 
         def exists(self, key: str) -> bool:
@@ -116,9 +155,11 @@ if _redis_available:
             if self._fallback:
                 return False
             try:
-                return bool(self._client.exists(key))
+                found = bool(self._client.exists(key))
+                self._cache_success()
+                return found
             except redis_sync.RedisError as e:
-                logger.warning("Cache exists check failed for key %s: %s", key, e)
+                self._cache_error("exists", key, e)
                 return False
 
         def close(self) -> None:
@@ -127,7 +168,7 @@ if _redis_available:
                 return
             self._client.close()
 
-    class CacheClient:
+    class CacheClient(_CircuitBreakerMixin):
         """Async Redis client with connection pooling and error handling."""
 
         def __init__(
@@ -147,18 +188,23 @@ if _redis_available:
                 password=password,
                 max_connections=max_connections,
                 decode_responses=decode_responses,
+                socket_connect_timeout=_CACHE_SOCKET_TIMEOUT,
+                socket_timeout=_CACHE_SOCKET_TIMEOUT,
             )
             self._client = redis.Redis(connection_pool=self._pool)
             self._fallback = False
+            self._consecutive_failures = 0
 
         async def get(self, key: str) -> str | None:
             """Get a value from cache."""
             if self._fallback:
                 return None
             try:
-                return await self._client.get(key)
+                value = await self._client.get(key)
+                self._cache_success()
+                return value
             except redis_sync.RedisError as e:
-                logger.warning("Cache get failed for key %s: %s", key, e)
+                self._cache_error("get", key, e)
                 return None
 
         async def set(
@@ -172,9 +218,10 @@ if _redis_available:
                 return False
             try:
                 await self._client.setex(key, ttl, value)
+                self._cache_success()
                 return True
             except redis_sync.RedisError as e:
-                logger.warning("Cache set failed for key %s: %s", key, e)
+                self._cache_error("set", key, e)
                 return False
 
         async def delete(self, key: str) -> bool:
@@ -183,9 +230,10 @@ if _redis_available:
                 return False
             try:
                 await self._client.delete(key)
+                self._cache_success()
                 return True
             except redis_sync.RedisError as e:
-                logger.warning("Cache delete failed for key %s: %s", key, e)
+                self._cache_error("delete", key, e)
                 return False
 
         async def delete_pattern(self, pattern: str) -> int:
@@ -198,9 +246,10 @@ if _redis_available:
                     keys.append(key)
                 if keys:
                     await self._client.delete(*keys)
+                self._cache_success()
                 return len(keys)
             except redis_sync.RedisError as e:
-                logger.warning("Cache delete_pattern failed for %s: %s", pattern, e)
+                self._cache_error("delete_pattern", pattern, e)
                 return 0
 
         async def exists(self, key: str) -> bool:
@@ -208,9 +257,11 @@ if _redis_available:
             if self._fallback:
                 return False
             try:
-                return bool(await self._client.exists(key))
+                found = bool(await self._client.exists(key))
+                self._cache_success()
+                return found
             except redis_sync.RedisError as e:
-                logger.warning("Cache exists check failed for key %s: %s", key, e)
+                self._cache_error("exists", key, e)
                 return False
 
         async def close(self) -> None:

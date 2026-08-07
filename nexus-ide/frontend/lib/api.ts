@@ -9,7 +9,7 @@ import type {
   TerminalExecutionResult,
   Tool,
 } from "./types";
-import { authHeaders } from "./auth";
+import { authHeaders, authenticatedFetch } from "./auth";
 
 // Re-export auth helpers for consumers that import them from api.ts
 export { authHeaders } from "./auth";
@@ -80,10 +80,13 @@ export async function postChat(
     strategy?: string;
     operationalMode?: string;
   },
+  cancellationRequestId?: string,
+  provider?: string,
 ): Promise<Response> {
   try {
     const body: Record<string, unknown> = { message, session_id: sessionId, mode, project_path: projectPath };
     if (model) body.model = model;
+    if (provider) body.provider = provider;
     if (thinkingStrength) body.thinking_strength = thinkingStrength;
     if (swarmOptions?.agents && swarmOptions.agents.length > 0) {
       body.swarm_agents = swarmOptions.agents;
@@ -94,13 +97,18 @@ export async function postChat(
     if (swarmOptions?.operationalMode) {
       body.swarm_operational_mode = swarmOptions.operationalMode;
     }
+    const headers: Record<string, string> = {
+      ...authHeaders(),
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+    };
+    if (cancellationRequestId) {
+      headers["X-Nexus-Request-Id"] = cancellationRequestId;
+    }
+
     const response = await fetch(apiUrl("/api/chat"), {
       method: "POST",
-      headers: {
-        ...authHeaders(),
-        Accept: "text/event-stream",
-        "Content-Type": "application/json",
-      },
+      headers,
       body: JSON.stringify(body),
       signal,
     });
@@ -135,11 +143,42 @@ export async function postChat(
   }
 }
 
+/**
+ * Stop the server-side work for an active chat stream.
+ *
+ * A 404 means that the stream finished before the cancellation reached the
+ * server, which is already the desired end state.  ``keepalive`` allows a
+ * best-effort cancellation to survive a component unmount or page close.
+ */
+export async function cancelChatRequest(requestId: string): Promise<void> {
+  const response = await fetch(
+    apiUrl(`/api/chat/cancel/${encodeURIComponent(requestId)}`),
+    {
+      method: "POST",
+      headers: authHeaders(),
+      keepalive: true,
+    },
+  );
+  if (response.ok || response.status === 404) {
+    return;
+  }
+
+  let responseText = "";
+  try {
+    responseText = await response.text();
+  } catch {
+    responseText = "Unable to read cancellation response";
+  }
+  throw new ApiError(
+    `Failed to cancel chat request (HTTP ${response.status})`,
+    response.status,
+    responseText,
+  );
+}
+
 export async function getSessionHistory(id: string): Promise<ChatMessage[]> {
   const data = await readJson<SessionHistoryResponse | ChatMessage[]>(
-    await fetch(apiUrl(`/api/sessions/${id}/history`), {
-      headers: authHeaders(),
-    }),
+    await authenticatedFetch(apiUrl(`/api/sessions/${id}/history`)),
   );
   return Array.isArray(data) ? data : (data.messages ?? []);
 }
@@ -151,11 +190,133 @@ export interface AvailableModel {
   provider: string;
   pricing: string;
   estimated_tokens_per_sec: number;
+  free?: boolean;
+  color?: string;
+  context_window?: number;
+  description?: string;
+  /** USD per 1M input tokens, as reported by the provider. */
+  input_price_per_1m?: number | null;
+  output_price_per_1m?: number | null;
+  /** "chat" | "code" | "reasoning" | "vision" | "embedding" */
+  capabilities?: string[];
+  deprecated?: boolean;
 }
 
-export async function getAvailableModels(): Promise<AvailableModel[]> {
+/** Per-provider outcome of a catalog lookup — explains an empty model list. */
+export interface ProviderCatalogStatus {
+  provider: string;
+  label: string;
+  count: number;
+  cached: boolean;
+  fetched_at: number;
+  /** Human-readable reason the lookup failed, or null on success. */
+  error: string | null;
+  /** False when no API key is configured for this provider. */
+  configured: boolean;
+}
+
+export interface ModelCatalog {
+  models: AvailableModel[];
+  providers: ProviderCatalogStatus[];
+}
+
+/** Provider metadata for the Settings screen. */
+export interface ProviderSpec {
+  id: string;
+  label: string;
+  key_setting: string;
+  requires_key: boolean;
+  api_key_set: boolean;
+  base_url: string;
+  docs: string;
+}
+
+export interface KeyValidationResult {
+  provider: string;
+  valid: boolean;
+  error: string | null;
+  models_count: number;
+  free_count?: number;
+  latency_ms?: number;
+  sample?: string[];
+}
+
+export async function getAvailableModels(
+  refresh = false,
+): Promise<AvailableModel[]> {
   return readJson<AvailableModel[]>(
-    await fetch(apiUrl("/api/models/available"), { headers: authHeaders() }),
+    await authenticatedFetch(
+      apiUrl(`/api/models/available${refresh ? "?refresh=true" : ""}`),
+    ),
+  );
+}
+
+/**
+ * Full catalog plus per-provider status.
+ *
+ * Prefer this over {@link getAvailableModels}: when a provider returns no
+ * models the UI can say *why* (missing key, rate limit, unreachable) instead
+ * of showing an unexplained empty list.
+ */
+export async function getModelCatalog(refresh = false): Promise<ModelCatalog> {
+  return readJson<ModelCatalog>(
+    await authenticatedFetch(
+      apiUrl(`/api/models/catalog${refresh ? "?refresh=true" : ""}`),
+    ),
+  );
+}
+
+export async function getProviderCatalog(): Promise<ProviderSpec[]> {
+  const data = await readJson<{ providers: ProviderSpec[] }>(
+    await authenticatedFetch(apiUrl("/api/providers/catalog")),
+  );
+  return data.providers ?? [];
+}
+
+export async function getProviderModels(
+  providerId: string,
+  refresh = false,
+): Promise<ProviderCatalogStatus & { models: AvailableModel[] }> {
+  return readJson<ProviderCatalogStatus & { models: AvailableModel[] }>(
+    await authenticatedFetch(
+      apiUrl(
+        `/api/providers/${encodeURIComponent(providerId)}/models${refresh ? "?refresh=true" : ""}`,
+      ),
+    ),
+  );
+}
+
+/**
+ * Test an API key without saving it.
+ *
+ * Pass `apiKey` to check a value the user just typed; omit it to re-test the
+ * key already stored on the server.
+ */
+export async function validateProviderKey(
+  providerId: string,
+  apiKey?: string,
+): Promise<KeyValidationResult> {
+  return readJson<KeyValidationResult>(
+    await authenticatedFetch(
+      apiUrl(`/api/providers/${encodeURIComponent(providerId)}/validate-key`),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: apiKey ?? null }),
+      },
+    ),
+  );
+}
+
+/** Drop the server-side catalog cache — call after saving a new API key. */
+export async function refreshProviderCatalog(
+  providerId?: string,
+): Promise<void> {
+  await authenticatedFetch(
+    apiUrl(
+      `/api/providers/refresh${providerId ? `?provider=${encodeURIComponent(providerId)}` : ""}`,
+    ),
+    { method: "POST" },
   );
 }
 
@@ -246,9 +407,53 @@ export async function executeTerminalCommand(
 
 export async function getTools(): Promise<Tool[]> {
   const data = await readJson<{ tools?: Tool[] }>(
-    await fetch(apiUrl("/api/tools"), { headers: authHeaders() }),
+    await authenticatedFetch(apiUrl("/api/tools")),
   );
   return data.tools ?? [];
+}
+
+export interface ToolExecutionResponse {
+  tool?: string;
+  result?: unknown;
+  error?: string;
+  duration_ms?: number;
+  confirmation_required?: boolean;
+  confirmation_id?: string;
+  suggestion?: string;
+  risk_level?: string;
+}
+
+export async function executeTool(
+  toolName: string,
+  args: Record<string, unknown>,
+  sessionId = "default",
+  confirmed = false,
+): Promise<ToolExecutionResponse> {
+  return readJson<ToolExecutionResponse>(
+    await fetch(apiUrl("/api/tools/execute"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tool_name: toolName,
+        args,
+        session_id: sessionId,
+        confirmed,
+      }),
+    }),
+  );
+}
+
+export async function confirmTool(
+  confirmationId: string,
+  approved: boolean,
+): Promise<{ confirmation_id: string; approved: boolean }> {
+  return readJson<{ confirmation_id: string; approved: boolean }>(
+    await fetch(apiUrl("/api/tools/confirm"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmation_id: confirmationId, approved }),
+    }),
+  );
 }
 
 export async function toggleTool(
@@ -293,7 +498,7 @@ export async function toggleTool(
 
 export async function getProjects(): Promise<Project[]> {
   const data = await readJson<{ projects?: Project[] }>(
-    await fetch(apiUrl("/api/projects"), { headers: authHeaders() }),
+    await authenticatedFetch(apiUrl("/api/projects")),
   );
   return data.projects ?? [];
 }
@@ -420,7 +625,7 @@ export async function createPlan(
   objective: string,
   sessionId: string = "default",
   context: string = "",
-  autoApprove: boolean = false,
+  autoApprove: boolean = true,
 ): Promise<PlanCreateResult> {
   return readJson<PlanCreateResult>(
     await fetch(apiUrl("/api/plan/create"), {
@@ -609,6 +814,42 @@ export async function interveneAgent(
   );
 }
 
+export type OverseerInterveneAction = "pause" | "resume" | "abort" | "escalate";
+
+export interface OverseerInterveneResult {
+  success: boolean;
+  agent: string;
+  action: string;
+  previous_status: string;
+  current_status: string;
+}
+
+/**
+ * Post a human-in-the-loop decision to the real overseer intervene endpoint.
+ *
+ * `agentName` is the real agent identifier tracked by the overseer (see
+ * `backend/orchestrator/routes/overseer.py`). Both `action` and `reason` are
+ * sent as query parameters, matching the backend contract.
+ */
+export async function interveneOverseerAgent(
+  agentName: string,
+  action: OverseerInterveneAction,
+  reason: string = "",
+): Promise<OverseerInterveneResult> {
+  const params = new URLSearchParams();
+  params.set("action", action);
+  if (reason) params.set("reason", reason);
+  return readJson<OverseerInterveneResult>(
+    await fetch(
+      apiUrl(`/api/overseer/agents/${encodeURIComponent(agentName)}/intervene?${params.toString()}`),
+      {
+        method: "POST",
+        headers: authHeaders(),
+      },
+    ),
+  );
+}
+
 export async function getBusMessages(topic?: string, limit: number = 50): Promise<BusMessageItem[]> {
   const params = new URLSearchParams();
   params.set("limit", String(limit));
@@ -634,11 +875,31 @@ export async function getSettings(): Promise<Record<string, unknown>> {
 export async function saveSettings(
   update: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
+  // The backend intentionally accepts a ``{ settings: Record<string, string> }``
+  // envelope.  Persist only scalar values, and omit an empty secret field so
+  // opening Settings and pressing Save never overwrites a stored API key with
+  // a masked/blank browser value.
+  const sensitiveKey = (key: string) =>
+    key.endsWith("_api_key") || key.endsWith("_secret") || key.endsWith("_password");
+  const settings = Object.fromEntries(
+    Object.entries(update).flatMap(([key, value]) => {
+      if (value === null || value === undefined) return [];
+      if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+        return [];
+      }
+      const serialized = String(value);
+      if (sensitiveKey(key) && (!serialized || serialized.includes("****"))) {
+        return [];
+      }
+      return [[key, serialized]];
+    }),
+  );
+
   return readJson<Record<string, unknown>>(
     await fetch(apiUrl("/api/settings"), {
       method: "PUT",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify(update),
+      body: JSON.stringify({ settings }),
     }),
   );
 }
@@ -777,7 +1038,7 @@ export async function getMetricsUsage(range: string = "24h"): Promise<Record<str
 
 export async function getProvidersStatus(): Promise<Record<string, unknown>> {
   return readJson<Record<string, unknown>>(
-    await fetch(apiUrl("/api/providers/status"), { headers: authHeaders() }),
+    await authenticatedFetch(apiUrl("/api/providers/status")),
   );
 }
 
@@ -1012,6 +1273,142 @@ export async function generateWizard(payload: unknown): Promise<Record<string, u
 export async function getWizardStatus(sessionId: string): Promise<Record<string, unknown>> {
   return readJson<Record<string, unknown>>(
     await fetch(apiUrl(`/api/wizard/status/${sessionId}`), { headers: authHeaders() }),
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// MCP Connector Wizard API
+// ═════════════════════════════════════════════════════════════════════════════
+
+export interface MCPTemplateSummary {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  icon: string;
+  transport: "stdio" | "http";
+  requires_env: string[];
+}
+
+export interface MCPTemplateParam {
+  key: string;
+  label: string;
+  placeholder?: string;
+  required?: boolean;
+  secret?: boolean;
+}
+
+export interface MCPTemplateEnvVar {
+  key: string;
+  label: string;
+  placeholder?: string;
+  required?: boolean;
+  secret?: boolean;
+}
+
+export interface MCPTemplateDetail extends MCPTemplateSummary {
+  command: string;
+  args: string[];
+  params: MCPTemplateParam[];
+  env: MCPTemplateEnvVar[];
+  docs_url?: string;
+}
+
+export interface MCPConnector {
+  id: string;
+  name: string;
+  template_id: string;
+  description: string;
+  transport: "stdio" | "http";
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  url: string;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+  last_test_status: "untested" | "ok" | "warning" | "error";
+  last_test_detail: string;
+  last_tested_at: number | null;
+}
+
+export interface MCPConnectorsSummary {
+  total: number;
+  enabled: number;
+  healthy: number;
+  warning: number;
+  error: number;
+  untested: number;
+}
+
+export async function getMCPTemplates(): Promise<MCPTemplateSummary[]> {
+  const data = await readJson<{ templates: MCPTemplateSummary[] }>(
+    await authenticatedFetch(apiUrl("/api/mcp/templates")),
+  );
+  return data.templates ?? [];
+}
+
+export async function getMCPTemplate(templateId: string): Promise<MCPTemplateDetail> {
+  return readJson<MCPTemplateDetail>(
+    await authenticatedFetch(apiUrl(`/api/mcp/templates/${encodeURIComponent(templateId)}`)),
+  );
+}
+
+export async function getMCPConnectors(): Promise<{ connectors: MCPConnector[]; summary: MCPConnectorsSummary }> {
+  return readJson<{ connectors: MCPConnector[]; summary: MCPConnectorsSummary }>(
+    await authenticatedFetch(apiUrl("/api/mcp/connectors")),
+  );
+}
+
+export async function createMCPConnector(payload: {
+  name: string;
+  template_id: string;
+  params?: Record<string, string>;
+  env?: Record<string, string>;
+}): Promise<MCPConnector> {
+  return readJson<MCPConnector>(
+    await authenticatedFetch(apiUrl("/api/mcp/connectors"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function updateMCPConnector(
+  connectorId: string,
+  payload: { name?: string; enabled?: boolean; env?: Record<string, string> },
+): Promise<MCPConnector> {
+  return readJson<MCPConnector>(
+    await authenticatedFetch(apiUrl(`/api/mcp/connectors/${connectorId}`), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function deleteMCPConnector(connectorId: string): Promise<{ status: string; id: string }> {
+  return readJson<{ status: string; id: string }>(
+    await authenticatedFetch(apiUrl(`/api/mcp/connectors/${connectorId}`), { method: "DELETE" }),
+  );
+}
+
+export async function testMCPConnector(connectorId: string): Promise<{ status: string; detail: string }> {
+  return readJson<{ status: string; detail: string }>(
+    await authenticatedFetch(apiUrl(`/api/mcp/connectors/${connectorId}/test`), { method: "POST" }),
+  );
+}
+
+export async function exportMCPConnector(connectorId: string): Promise<{ mcpServers: Record<string, unknown> }> {
+  return readJson<{ mcpServers: Record<string, unknown> }>(
+    await authenticatedFetch(apiUrl(`/api/mcp/connectors/${connectorId}/export`)),
+  );
+}
+
+export async function exportAllMCPConnectors(): Promise<{ mcpServers: Record<string, unknown> }> {
+  return readJson<{ mcpServers: Record<string, unknown> }>(
+    await authenticatedFetch(apiUrl("/api/mcp/export")),
   );
 }
 

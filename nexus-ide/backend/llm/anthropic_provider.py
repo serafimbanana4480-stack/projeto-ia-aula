@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from backend.config.settings import get_settings
+from backend.llm.openai_provider import _system_verify_context
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class AnthropicProvider:
             base_url=self._base_url,
             headers=headers,
             timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=5.0),
+            verify=_system_verify_context(),
         )
         # Internal — populated after each successful chat call
         self._last_usage: dict[str, int] = {}

@@ -1,17 +1,11 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, type ReactNode } from "react";
 import { motion } from "framer-motion";
-import {
-  Cpu,
-  RefreshCw,
-  AlertCircle,
-  CheckCircle2,
-  XCircle,
-  Zap,
-  Activity,
-  Clock,
-} from "lucide-react";
-import { authHeaders, apiUrl } from "../../lib/api";
+import { Cpu, RefreshCw, AlertCircle, Zap, Activity, Clock } from "lucide-react";
+import { apiUrl } from "../../lib/api";
+import { authenticatedFetch } from "../../lib/auth";
+import { Surface, SurfaceHeader } from "../ui/Surface";
+import { Badge, StatusDot, Meter, AnimatedNumber, EmptyState, Button } from "../ui/Primitives";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 interface CircuitBreakerState {
@@ -38,53 +32,25 @@ interface ProviderStatusResponse {
   note?: string;
 }
 
-function getStatusLabel(info: ProviderInfo): {
-  label: string;
-  dotClass: string;
-  icon: React.ReactNode;
-} {
+type StatusTone = "success" | "warning" | "danger";
+
+const CB_STATE_LABEL: Record<CircuitBreakerState["state"], string> = {
+  closed: "fechado",
+  open: "aberto",
+  half_open: "semiaberto",
+};
+
+function getStatusInfo(info: ProviderInfo): { tone: StatusTone; label: string } {
   const cb = info.circuit_breaker;
 
-  // Check circuit breaker first
-  if (cb?.state === "open") {
-    return {
-      label: "Down (circuit open)",
-      dotClass: "bg-red-500 animate-pulse",
-      icon: <XCircle className="h-3.5 w-3.5 text-red-400" />,
-    };
-  }
-  if (cb?.state === "half_open") {
-    return {
-      label: "Degradado (recovery)",
-      dotClass: "bg-yellow-500 animate-pulse",
-      icon: <AlertCircle className="h-3.5 w-3.5 text-yellow-400" />,
-    };
-  }
+  if (cb?.state === "open") return { tone: "danger", label: "Indisponível (circuito aberto)" };
+  if (cb?.state === "half_open") return { tone: "warning", label: "Degradado (a recuperar)" };
+  if (info.healthy === false) return { tone: "danger", label: "Indisponível" };
 
-  // Check health
-  if (info.healthy === false) {
-    return {
-      label: "Down",
-      dotClass: "bg-red-500",
-      icon: <XCircle className="h-3.5 w-3.5 text-red-400" />,
-    };
-  }
-
-  // Check success rate
   const sr = info.success_rate ?? 1.0;
-  if (sr < 0.5) {
-    return {
-      label: "Degradado",
-      dotClass: "bg-yellow-500 animate-pulse",
-      icon: <AlertCircle className="h-3.5 w-3.5 text-yellow-400" />,
-    };
-  }
+  if (sr < 0.5) return { tone: "warning", label: "Degradado" };
 
-  return {
-    label: "Healthy",
-    dotClass: "bg-emerald-500",
-    icon: <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />,
-  };
+  return { tone: "success", label: "Saudável" };
 }
 
 function formatLatency(ms: number | undefined): string {
@@ -117,6 +83,19 @@ function getProviderIcon(name: string): string {
   return "☁️";
 }
 
+function WidgetShell({ children }: { children: ReactNode }) {
+  return (
+    <Surface elevation={2} padding="md">
+      <SurfaceHeader
+        icon={<Cpu className="h-4 w-4" />}
+        title="Estado dos Providers"
+        subtitle="LLM providers e circuit breakers"
+      />
+      {children}
+    </Surface>
+  );
+}
+
 export default function ProviderStatusWidget() {
   const [data, setData] = useState<ProviderStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -124,8 +103,7 @@ export default function ProviderStatusWidget() {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const resp = await fetch(apiUrl("/api/providers/status"), {
-        headers: authHeaders(),
+      const resp = await authenticatedFetch(apiUrl("/api/providers/status"), {
         signal: AbortSignal.timeout(8000),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -150,170 +128,147 @@ export default function ProviderStatusWidget() {
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
-  const providerEntries = data?.providers
-    ? Object.entries(data.providers)
-    : [];
+  const providerEntries = data?.providers ? Object.entries(data.providers) : [];
 
   if (loading && !data) {
     return (
-      <div className="rounded-xl border border-nexus-border bg-[#13131f]/40 p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-500/10 text-violet-400">
-            <Cpu className="h-4 w-4" />
-          </div>
-          <div>
-            <h3 className="text-sm font-semibold text-white">Estado dos Providers</h3>
-            <p className="text-[10px] text-nexus-muted">LLM providers e circuit breakers</p>
-          </div>
+      <WidgetShell>
+        <div className="mt-4 space-y-2.5">
+          <div className="nx-shimmer h-[78px] rounded-lg" />
+          <div className="nx-shimmer h-[78px] rounded-lg" />
+          <div className="nx-shimmer h-[78px] rounded-lg" />
         </div>
-        <div className="flex items-center justify-center py-8">
-          <RefreshCw className="h-5 w-5 animate-spin text-nexus-muted" />
-        </div>
-      </div>
+      </WidgetShell>
     );
   }
 
   if (error) {
     return (
-      <div className="rounded-xl border border-nexus-border bg-[#13131f]/40 p-5">
-        <div className="flex items-center gap-2 mb-3">
-          <AlertCircle className="h-4 w-4 text-red-400" />
-          <span className="text-xs text-red-400">Erro ao carregar providers</span>
+      <WidgetShell>
+        <div className="mt-4">
+          <EmptyState
+            icon={<AlertCircle className="h-6 w-6" />}
+            title="Erro ao carregar providers"
+            hint={error}
+            action={
+              <Button
+                variant="secondary"
+                size="xs"
+                icon={<RefreshCw className="h-3 w-3" />}
+                onClick={() => {
+                  setLoading(true);
+                  fetchStatus();
+                }}
+              >
+                Tentar novamente
+              </Button>
+            }
+          />
         </div>
-        <p className="text-xs text-nexus-muted mb-3">{error}</p>
-        <button
-          onClick={() => { setLoading(true); fetchStatus(); }}
-          className="flex items-center gap-1 text-xs text-nexus-accent hover:underline"
-        >
-          <RefreshCw className="h-3 w-3" /> Tentar novamente
-        </button>
-      </div>
+      </WidgetShell>
     );
   }
 
   if (providerEntries.length === 0) {
     return (
-      <div className="rounded-xl border border-nexus-border bg-[#13131f]/40 p-5">
-        <div className="flex items-center gap-2 mb-3">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-500/10 text-violet-400">
-            <Cpu className="h-4 w-4" />
-          </div>
-          <div>
-            <h3 className="text-sm font-semibold text-white">Estado dos Providers</h3>
-            <p className="text-[10px] text-nexus-muted">LLM providers e circuit breakers</p>
-          </div>
+      <WidgetShell>
+        <div className="mt-4">
+          <EmptyState
+            icon={<Cpu className="h-6 w-6" />}
+            title="Nenhum provider registado"
+            hint={data?.note || "Configura um provider de LLM nas definições para começares a monitorizar o estado."}
+          />
         </div>
-        <p className="text-xs text-nexus-muted italic">
-          {data?.note || "Nenhum provider registado."}
-        </p>
-      </div>
+      </WidgetShell>
     );
   }
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="rounded-xl border border-nexus-border bg-[#13131f]/40 p-5 hover:border-nexus-accent/30 transition-all"
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-500/10 text-violet-400">
-            <Cpu className="h-4 w-4" />
-          </div>
-          <div>
-            <h3 className="text-sm font-semibold text-white">Estado dos Providers</h3>
-            <p className="text-[10px] text-nexus-muted">LLM providers e circuit breakers</p>
-          </div>
-        </div>
-        <button
-          onClick={() => { setLoading(true); fetchStatus(); }}
-          className="flex items-center gap-1 text-[10px] text-nexus-muted hover:text-nexus-accent transition-colors"
-        >
-          <RefreshCw className="h-3 w-3" />
-        </button>
-      </div>
-
-      {/* Provider cards */}
-      <div className="space-y-2.5">
-        {providerEntries.map(([name, info]) => {
-          const status = getStatusLabel(info);
-          const cb = info.circuit_breaker;
-          const sr = info.success_rate ?? 1.0;
-          return (
-            <motion.div
-              key={name}
-              initial={{ opacity: 0, x: -8 }}
-              animate={{ opacity: 1, x: 0 }}
-              className="bg-[#0b0b14]/40 border border-nexus-border/40 rounded-lg p-3 transition-colors hover:border-nexus-border/70"
+    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+      <Surface elevation={2} padding="md">
+        <SurfaceHeader
+          icon={<Cpu className="h-4 w-4" />}
+          title="Estado dos Providers"
+          subtitle="LLM providers e circuit breakers"
+          action={
+            <button
+              type="button"
+              onClick={() => {
+                setLoading(true);
+                fetchStatus();
+              }}
+              aria-label="Atualizar estado dos providers"
+              title="Atualizar"
+              className="flex h-7 w-7 items-center justify-center rounded-lg text-nexus-faint transition-colors hover:bg-white/[0.06] hover:text-[var(--nx-accent-bright)]"
             >
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-base" role="img" aria-label={name}>
-                    {getProviderIcon(name)}
-                  </span>
-                  <span className="text-xs font-semibold text-white truncate max-w-[140px]">
-                    {name}
-                  </span>
-                  <div className="flex items-center gap-1">
-                    <span className={`h-1.5 w-1.5 rounded-full ${status.dotClass}`} />
-                    <span className="text-[10px] text-nexus-muted">{status.label}</span>
+              <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+            </button>
+          }
+        />
+
+        {/* Provider cards */}
+        <div className="mt-4 space-y-2.5">
+          {providerEntries.map(([name, info]) => {
+            const status = getStatusInfo(info);
+            const cb = info.circuit_breaker;
+            const sr = info.success_rate ?? 1.0;
+            const srPct = sr >= 0.999 ? 100 : sr * 100;
+            return (
+              <motion.div key={name} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}>
+                <Surface elevation={0} padding="sm" tone={status.tone}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="text-base" role="img" aria-hidden="true">
+                        {getProviderIcon(name)}
+                      </span>
+                      <span className="truncate text-xs font-semibold text-nexus-text" title={name}>
+                        {name}
+                      </span>
+                      <StatusDot tone={status.tone} pulse={status.tone !== "success"} label={status.label} />
+                    </div>
+                    <Badge tone={status.tone}>{status.label}</Badge>
                   </div>
-                </div>
-                {status.icon}
-              </div>
 
-              <div className="grid grid-cols-3 gap-2 text-[10px]">
-                {/* Latency P95 */}
-                <div className="flex items-center gap-1 text-nexus-muted">
-                  <Activity className="h-3 w-3" />
-                  <span>Lat.: {formatLatency(info.latency)}</span>
-                </div>
+                  <div className="mt-2.5 grid grid-cols-3 gap-2 text-[10px] text-nexus-muted">
+                    <div className="flex min-w-0 items-center gap-1" title="Latência">
+                      <Activity className="h-3 w-3 shrink-0" />
+                      <span className="truncate tabular-nums">{formatLatency(info.latency)}</span>
+                    </div>
+                    <div className="flex min-w-0 items-center gap-1" title="Taxa de sucesso">
+                      <Zap className="h-3 w-3 shrink-0" />
+                      <span className="truncate tabular-nums">
+                        <AnimatedNumber value={srPct} decimals={1} />% sucesso
+                      </span>
+                    </div>
+                    <div className="flex min-w-0 items-center justify-end gap-1 text-right" title="Última verificação">
+                      <Clock className="h-3 w-3 shrink-0" />
+                      <span className="truncate">{formatTime(info.last_check)}</span>
+                    </div>
+                  </div>
+                  <Meter value={srPct} tone={status.tone} showThresholds={false} height={3} className="mt-2" />
 
-                {/* Success rate */}
-                <div className="flex items-center gap-1 text-nexus-muted">
-                  <Zap className="h-3 w-3" />
-                  <span>Sucesso: {sr >= 0.999 ? "100%" : `${(sr * 100).toFixed(1)}%`}</span>
-                </div>
-
-                {/* Last check */}
-                <div className="flex items-center gap-1 text-nexus-muted">
-                  <Clock className="h-3 w-3" />
-                  <span>Verif.: {formatTime(info.last_check)}</span>
-                </div>
-              </div>
-
-              {/* Circuit breaker state */}
-              {cb && (
-                <div className="mt-1.5 flex items-center gap-2 text-[10px]">
-                  <span className="text-nexus-muted">Circuit Breaker:</span>
-                  <span
-                    className={`font-mono font-semibold ${
-                      cb.state === "closed"
-                        ? "text-emerald-400"
-                        : cb.state === "half_open"
-                          ? "text-yellow-400"
-                          : "text-red-400"
-                    }`}
-                  >
-                    {cb.state}
-                  </span>
-                  {cb.failures > 0 && (
-                    <span className="text-nexus-muted">
-                      ({cb.failures} falha{cb.failures > 1 ? "s" : ""})
-                    </span>
+                  {/* Circuit breaker state */}
+                  {cb && (
+                    <div className="mt-2 flex items-center gap-2 text-[10px]">
+                      <span className="text-nexus-faint">Disjuntor:</span>
+                      <Badge tone={cb.state === "closed" ? "success" : cb.state === "half_open" ? "warning" : "danger"}>
+                        {CB_STATE_LABEL[cb.state]}
+                      </Badge>
+                      {cb.failures > 0 && (
+                        <span className="text-nexus-muted">
+                          ({cb.failures} falha{cb.failures > 1 ? "s" : ""})
+                        </span>
+                      )}
+                    </div>
                   )}
-                </div>
-              )}
-            </motion.div>
-          );
-        })}
-      </div>
+                </Surface>
+              </motion.div>
+            );
+          })}
+        </div>
 
-      {data?.note && (
-        <p className="mt-3 text-[10px] text-nexus-muted/60 italic">{data.note}</p>
-      )}
+        {data?.note && <p className="mt-3 text-[10px] italic text-nexus-faint">{data.note}</p>}
+      </Surface>
     </motion.div>
   );
 }

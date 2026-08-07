@@ -7,6 +7,8 @@ security validation and automatic backups.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
+import json
 import os
 import shutil
 import tempfile
@@ -25,6 +27,37 @@ from backend.core.workspace_security import (
 )
 
 _WINDOWS_TMP = None
+_IGNORED_PROJECT_DIRS = {
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".next",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "playwright-report",
+}
+_IGNORED_PROJECT_DIR_PREFIXES = (".next", ".pytest-", ".venv")
+_IGNORED_PROJECT_DIR_SUFFIXES = (".egg-info",)
+
+
+def _is_ignored_project_dir(name: str) -> bool:
+    return (
+        name in _IGNORED_PROJECT_DIRS
+        or name.startswith(_IGNORED_PROJECT_DIR_PREFIXES)
+        or name.endswith(_IGNORED_PROJECT_DIR_SUFFIXES)
+    )
+
+
+def _is_ignored_project_path(path: Path) -> bool:
+    """Return whether a project path is generated, cached, or dependency data."""
+    return any(_is_ignored_project_dir(part) for part in path.parts)
 
 
 def _resolve_posix_tmp(path: str) -> Path:
@@ -91,6 +124,103 @@ def _verify_written(path: Path, expected_content: str) -> dict[str, Any]:
         return {"ok": False, "error": f"Write-back verification failed: {exc}"}
 
 
+def _deepest_existing_ancestor(target: Path) -> Path | None:
+    """Return the deepest ancestor of *target* that actually exists on disk."""
+    current = target.parent
+    while True:
+        if current.exists():
+            return current
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+def _collect_not_found_diagnostic(target: Path) -> dict[str, Any]:
+    """Build recovery hints for a missing file.
+
+    Autonomous agents routinely hallucinate conventional layouts (for example
+    ``backend/app/main.py``) that do not exist in the real project. A bare
+    "File not found" forces the model to guess again; a structured diagnostic
+    (parent listing + same-name matches + same-suffix matches near the
+    project) lets it self-correct on the next turn instead of failing the task.
+    """
+    diagnostic: dict[str, Any] = {}
+
+    anchor = _deepest_existing_ancestor(target)
+    if anchor is None:
+        return diagnostic
+
+    diagnostic["existing_ancestor"] = str(anchor)
+
+    try:
+        entries = sorted(
+            entry.name + ("/" if entry.is_dir() else "") for entry in anchor.iterdir()
+        )
+        diagnostic["parent_listing"] = entries[:50]
+    except OSError:
+        pass
+
+    wanted_name = target.name.lower()
+    wanted_suffix = target.suffix.lower()
+    name_matches: list[str] = []
+    suffix_matches: list[str] = []
+    scanned = 0
+    try:
+        for root, dirs, files in os.walk(anchor):
+            dirs[:] = [d for d in dirs if not _is_ignored_project_dir(d)]
+            depth = len(Path(root).relative_to(anchor).parts)
+            if depth >= 4:
+                dirs[:] = []
+            for fname in files:
+                scanned += 1
+                if scanned > 4000 or len(name_matches) >= 10 and len(suffix_matches) >= 15:
+                    break
+                full = Path(root) / fname
+                lower = fname.lower()
+                if lower == wanted_name:
+                    name_matches.append(str(full))
+                elif wanted_suffix and lower.endswith(wanted_suffix) and len(suffix_matches) < 15:
+                    suffix_matches.append(str(full))
+            if scanned > 4000:
+                break
+    except OSError:
+        pass
+
+    if name_matches:
+        diagnostic["same_name_files"] = name_matches[:10]
+    if suffix_matches:
+        diagnostic["same_suffix_files"] = suffix_matches[:15]
+    return diagnostic
+
+
+def _file_not_found_result(path: str, target: Path) -> dict[str, Any]:
+    """Structured, recoverable "file not found" tool result."""
+    result: dict[str, Any] = {
+        "error": f"File not found: {path}",
+        "recoverable": True,
+        "resolved_path": str(target),
+        "hint": (
+            "The file does not exist at this exact path. Do NOT retry the same "
+            "path. Inspect 'existing_ancestor', 'parent_listing' and "
+            "'same_name_files' below to find the real location, or call "
+            "list_dir_absolute / search_files_absolute to locate it, then read "
+            "the corrected path."
+        ),
+    }
+    try:
+        result.update(_collect_not_found_diagnostic(target))
+    except Exception as exc:  # diagnostics must never break the tool result
+        logger.debug("not-found diagnostic failed for %s: %s", target, exc)
+    logger.warning(
+        "read_file_absolute: %s not found (ancestor=%s, %d same-name, %d same-suffix suggestions)",
+        path,
+        result.get("existing_ancestor"),
+        len(result.get("same_name_files", [])),
+        len(result.get("same_suffix_files", [])),
+    )
+    return result
+
+
 async def read_file_absolute(path: str) -> dict[str, Any]:
     """Read any file the user has permission to read (absolute path)."""
     logger.info("read_file_absolute: %s", path)
@@ -101,13 +231,35 @@ async def read_file_absolute(path: str) -> dict[str, Any]:
 
     try:
         target = await asyncio.to_thread(_resolve_path, path)
+        # Windows raises PermissionError — not IsADirectoryError — when
+        # read_text() is given a directory. The resulting "Permission denied"
+        # sent agents hunting for a non-existent access problem (session
+        # bf1e9435b9ec47c9, DEBUGGER iteration 5, on the project root) instead
+        # of simply switching tool. Name the real problem and the fix.
+        if await asyncio.to_thread(target.is_dir):
+            return {
+                "error": (
+                    f"'{path}' is a directory, not a file. Use list_dir_absolute "
+                    "to list its contents, or pass the path of a file inside it."
+                ),
+                "path": str(target),
+                "is_directory": True,
+            }
         ok, size, err = _check_file_size_limit(target)
         if not ok:
             return {"error": err, "path": str(target), "size": size}
         content = await asyncio.to_thread(target.read_text, encoding="utf-8")
         return {"path": str(target), "content": content, "size": len(content)}
     except FileNotFoundError:
-        return {"error": f"File not found: {path}"}
+        return _file_not_found_result(path, target)
+    except IsADirectoryError:
+        return {
+            "error": (
+                f"'{path}' is a directory, not a file. Use list_dir_absolute to "
+                "list its contents, or pass the path of a file inside it."
+            ),
+            "is_directory": True,
+        }
     except PermissionError:
         return {"error": f"Permission denied: {path}"}
     except Exception as exc:
@@ -150,7 +302,30 @@ async def write_file_absolute(
         await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
 
         def _write() -> None:
-            target.write_text(content, encoding="utf-8")
+            """Replace the destination atomically so readers never see a partial file."""
+            existing_mode = target.stat().st_mode if target.exists() else None
+            temp_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    newline="",
+                    dir=target.parent,
+                    prefix=f".{target.name}.",
+                    suffix=".nexus-tmp",
+                    delete=False,
+                ) as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    temp_path = Path(handle.name)
+                if existing_mode is not None:
+                    temp_path.chmod(existing_mode)
+                os.replace(temp_path, target)
+                temp_path = None
+            finally:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
 
         await asyncio.to_thread(_write)
 
@@ -218,46 +393,65 @@ async def list_dir_absolute(
         if not await asyncio.to_thread(target.is_dir):
             return {"error": f"Path is not a directory: {path}"}
 
-        if recursive:
-            raw_items = await asyncio.to_thread(lambda: list(target.rglob(glob_pattern or "*")))
-        else:
-            raw_items = await asyncio.to_thread(lambda: list(target.iterdir()))
-            if glob_pattern:
-                import fnmatch
+        def _scan() -> tuple[list[dict[str, Any]], int, bool]:
+            items: list[dict[str, Any]] = []
+            skipped_hidden = 0
+            truncated = False
+            pending = [target]
 
-                raw_items = [item for item in raw_items if fnmatch.fnmatch(item.name, glob_pattern)]
+            while pending:
+                current = pending.pop()
+                try:
+                    entries = list(os.scandir(current))
+                except (FileNotFoundError, PermissionError, OSError):
+                    continue
 
-        items = []
-        skipped_hidden = 0
-        for item in raw_items[:max_results]:
-            name = item.name
-            if not include_hidden and name.startswith("."):
-                skipped_hidden += 1
-                continue
+                for entry_index, entry in enumerate(entries):
+                    item = Path(entry.path)
+                    name = entry.name
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    if recursive and is_dir and not _is_ignored_project_dir(name):
+                        pending.append(item)
 
-            is_file = await asyncio.to_thread(item.is_file)
-            is_dir = await asyncio.to_thread(item.is_dir)
+                    if not include_hidden and name.startswith("."):
+                        skipped_hidden += 1
+                        continue
+                    if recursive and _is_ignored_project_path(item.relative_to(target)):
+                        continue
+                    if glob_pattern and not fnmatch.fnmatch(name, glob_pattern):
+                        continue
 
-            if is_file and not include_files:
-                continue
-            if is_dir and not include_dirs:
-                continue
+                    is_file = entry.is_file(follow_symlinks=False)
+                    if (is_file and not include_files) or (is_dir and not include_dirs):
+                        continue
+                    if not is_file and not is_dir:
+                        continue
 
-            size = (await asyncio.to_thread(item.stat)).st_size if is_file else 0
-            items.append(
-                {
-                    "path": str(item),
-                    "name": name,
-                    "type": "file" if is_file else "dir",
-                    "size": size,
-                }
-            )
+                    size = entry.stat(follow_symlinks=False).st_size if is_file else 0
+                    items.append(
+                        {
+                            "path": str(item),
+                            "name": name,
+                            "type": "file" if is_file else "dir",
+                            "size": size,
+                        }
+                    )
+                    if len(items) >= max_results:
+                        truncated = bool(pending) or entry_index + 1 < len(entries)
+                        return items, skipped_hidden, truncated
+
+                if not recursive:
+                    break
+
+            return items, skipped_hidden, truncated
+
+        items, skipped_hidden, truncated = await asyncio.to_thread(_scan)
 
         return {
             "path": str(target),
             "items": items,
             "count": len(items),
-            "truncated": len(raw_items) > max_results,
+            "truncated": truncated,
             "skipped_hidden": skipped_hidden,
             "include_hidden": include_hidden,
             "include_files": include_files,
@@ -601,44 +795,53 @@ async def read_multiple_files_absolute(
     else:
         skipped = []
 
-    files: dict[str, str] = {}
-    errors: dict[str, str] = {}
-    total_bytes = 0
+    def _read_batch() -> tuple[dict[str, str], dict[str, str], int]:
+        files: dict[str, str] = {}
+        errors: dict[str, str] = {}
+        total_bytes = 0
 
-    for raw_path in paths:
-        blocked, reason = _is_blocked_path(_path_for_security_check(raw_path))
-        if blocked:
-            errors[raw_path] = reason
-            continue
-
-        try:
-            target = await asyncio.to_thread(_resolve_path, raw_path)
-            ok, size, err = _check_file_size_limit(target)
-            if not ok:
-                errors[str(target)] = err or "File too large"
+        for raw_path in paths:
+            blocked, reason = _is_blocked_path(_path_for_security_check(raw_path))
+            if blocked:
+                errors[raw_path] = reason
                 continue
 
-            if not await asyncio.to_thread(target.exists):
-                errors[str(target)] = f"File not found: {raw_path}"
-                continue
-            if not await asyncio.to_thread(target.is_file):
-                errors[str(target)] = f"Not a file: {raw_path}"
-                continue
+            try:
+                target = _resolve_path(raw_path)
+                ok, _size, err = _check_file_size_limit(target)
+                if not ok:
+                    errors[str(target)] = err or "File too large"
+                    continue
+                if not target.exists():
+                    errors[str(target)] = f"File not found: {raw_path}"
+                    continue
+                if not target.is_file():
+                    errors[str(target)] = f"Not a file: {raw_path}"
+                    continue
 
-            content = await asyncio.to_thread(target.read_text, encoding="utf-8")
-            content_bytes = len(content.encode("utf-8"))
-            if total_bytes + content_bytes > max_total_bytes:
-                errors[str(target)] = (
-                    f"Skipped: would exceed max_total_bytes ({max_total_bytes} bytes)"
-                )
-                continue
+                # Writers in NEXUS use atomic replacement.  The before/after
+                # signature also detects external, non-atomic writes and
+                # retries once instead of returning torn content.
+                before = target.stat()
+                content = target.read_text(encoding="utf-8")
+                after = target.stat()
+                if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
+                    content = target.read_text(encoding="utf-8")
+                content_bytes = len(content.encode("utf-8"))
+                if total_bytes + content_bytes > max_total_bytes:
+                    errors[str(target)] = (
+                        f"Skipped: would exceed max_total_bytes ({max_total_bytes} bytes)"
+                    )
+                    continue
+                files[str(target)] = content
+                total_bytes += content_bytes
+            except PermissionError:
+                errors[raw_path] = f"Permission denied: {raw_path}"
+            except Exception as exc:
+                errors[raw_path] = f"Failed to read file: {exc}"
+        return files, errors, total_bytes
 
-            files[str(target)] = content
-            total_bytes += content_bytes
-        except PermissionError:
-            errors[raw_path] = f"Permission denied: {raw_path}"
-        except Exception as exc:
-            errors[raw_path] = f"Failed to read file: {exc}"
+    files, errors, total_bytes = await asyncio.to_thread(_read_batch)
 
     for skipped_path in skipped:
         errors[skipped_path] = f"Skipped: exceeded max_files ({max_files})"
@@ -653,7 +856,10 @@ async def read_multiple_files_absolute(
 
 
 async def search_files_absolute(
-    pattern: str, root_path: str, max_results: int = 100
+    pattern: str,
+    root_path: str,
+    max_results: int = 100,
+    glob_pattern: str | None = None,
 ) -> dict[str, Any]:
     """Grep-like search across files under *root_path*."""
     logger.info("search_files_absolute: pattern='%s' root='%s'", pattern, root_path)
@@ -667,41 +873,93 @@ async def search_files_absolute(
         if not await asyncio.to_thread(root.exists):
             return {"error": f"Root path not found: {root_path}"}
 
-        results = []
-        file_paths = await asyncio.to_thread(lambda: list(root.rglob("*")))
-        for file_path in file_paths:
-            if not await asyncio.to_thread(file_path.is_file):
-                continue
-            try:
-                stat = await asyncio.to_thread(file_path.stat)
-                if stat.st_size > MAX_FILE_SIZE_BYTES:
+        results: list[dict[str, Any]] = []
+        rg = shutil.which("rg")
+        if rg:
+            cmd = [
+                rg,
+                "--json",
+                "--fixed-strings",
+                "--ignore-case",
+                "--max-filesize",
+                str(MAX_FILE_SIZE_BYTES),
+            ]
+            if glob_pattern:
+                cmd.extend(["--glob", glob_pattern])
+            cmd.extend([pattern, str(root)])
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await proc.communicate()
+            by_path: dict[str, dict[str, Any]] = {}
+            for raw_line in stdout.splitlines():
+                try:
+                    event = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
-            except Exception:
-                continue
-
-            try:
-                content = await asyncio.to_thread(
-                    file_path.read_text, encoding="utf-8", errors="ignore"
+                if event.get("type") != "match":
+                    continue
+                data = event.get("data", {})
+                path_text = data.get("path", {}).get("text")
+                line_text = data.get("lines", {}).get("text", "").rstrip("\r\n")
+                if not path_text:
+                    continue
+                absolute = (
+                    str((root / path_text).resolve())
+                    if not Path(path_text).is_absolute()
+                    else path_text
                 )
-            except Exception:
-                continue
-
-            if pattern.lower() in content.lower():
-                lines = content.splitlines()
-                matches = [
-                    {"line": i + 1, "text": line}
-                    for i, line in enumerate(lines)
-                    if pattern.lower() in line.lower()
-                ]
-                results.append(
-                    {
-                        "path": str(file_path),
-                        "matches": matches[:5],
-                        "match_count": len(matches),
-                    }
-                )
-                if len(results) >= max_results:
+                if absolute not in by_path and len(by_path) >= max_results:
                     break
+                item = by_path.setdefault(
+                    absolute,
+                    {"path": absolute, "matches": [], "match_count": 0},
+                )
+                item["match_count"] += 1
+                if len(item["matches"]) < 5:
+                    item["matches"].append(
+                        {"line": int(data.get("line_number") or 0), "text": line_text}
+                    )
+            results = list(by_path.values())[:max_results]
+        else:
+
+            def _search_fallback() -> list[dict[str, Any]]:
+                found: list[dict[str, Any]] = []
+                lowered = pattern.lower()
+                for current, dirs, files in os.walk(root):
+                    dirs[:] = [d for d in dirs if not _is_ignored_project_dir(d)]
+                    for filename in files:
+                        if glob_pattern and not fnmatch.fnmatch(filename, glob_pattern):
+                            continue
+                        file_path = Path(current) / filename
+                        try:
+                            if file_path.stat().st_size > MAX_FILE_SIZE_BYTES:
+                                continue
+                            lines = file_path.read_text(
+                                encoding="utf-8", errors="ignore"
+                            ).splitlines()
+                        except (OSError, UnicodeError):
+                            continue
+                        matches = [
+                            {"line": index + 1, "text": line}
+                            for index, line in enumerate(lines)
+                            if lowered in line.lower()
+                        ]
+                        if matches:
+                            found.append(
+                                {
+                                    "path": str(file_path),
+                                    "matches": matches[:5],
+                                    "match_count": len(matches),
+                                }
+                            )
+                            if len(found) >= max_results:
+                                return found
+                return found
+
+            results = await asyncio.to_thread(_search_fallback)
 
         return {"pattern": pattern, "root": str(root), "results": results, "count": len(results)}
     except PermissionError:

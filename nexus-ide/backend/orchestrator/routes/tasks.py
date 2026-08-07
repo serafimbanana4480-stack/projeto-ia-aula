@@ -6,6 +6,7 @@ Provides endpoints for task pipeline and management backed by the real database.
 
 import json
 import logging
+import sqlite3
 from typing import AsyncIterator
 
 from fastapi import APIRouter
@@ -31,6 +32,7 @@ class TaskInfo(BaseModel):
 
 def _task_from_row(row) -> dict:
     """Map a workflow_steps or workflows row to a task dict."""
+    row = dict(row)
     return {
         "id": row["id"],
         "title": row.get("goal") or row.get("name") or "Untitled",
@@ -44,10 +46,14 @@ def _task_from_row(row) -> dict:
 @router.get("/tasks/pipeline")
 async def get_task_pipeline() -> dict:
     """Return current task pipeline status from real database."""
-    async with get_db() as conn:
-        rows = await (await conn.execute(
-            "SELECT status, COUNT(*) as count FROM workflows GROUP BY status"
-        )).fetchall()
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) as count FROM workflows GROUP BY status"
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        logger.warning("Task pipeline table is unavailable: %s", exc)
+        rows = []
         status_counts = {r["status"]: r["count"] for r in rows}
 
     return {
@@ -64,16 +70,20 @@ async def get_task_pipeline() -> dict:
 @router.get("/tasks/list")
 async def get_tasks_list() -> dict:
     """Return list of all tasks from the database."""
-    async with get_db() as conn:
-        active = await (await conn.execute(
-            "SELECT id, goal as name, status, stack, created_at FROM workflows WHERE status = 'running' ORDER BY created_at DESC LIMIT 20"
-        )).fetchall()
-        queued = await (await conn.execute(
-            "SELECT id, goal as name, status, stack, created_at FROM workflows WHERE status = 'pending' ORDER BY created_at DESC LIMIT 20"
-        )).fetchall()
-        completed = await (await conn.execute(
-            "SELECT id, goal as name, status, stack, created_at FROM workflows WHERE status = 'completed' ORDER BY created_at DESC LIMIT 20"
-        )).fetchall()
+    try:
+        with get_db() as conn:
+            active = conn.execute(
+                "SELECT id, goal as name, status, stack, created_at FROM workflows WHERE status = 'running' ORDER BY created_at DESC LIMIT 20"
+            ).fetchall()
+            queued = conn.execute(
+                "SELECT id, goal as name, status, stack, created_at FROM workflows WHERE status = 'pending' ORDER BY created_at DESC LIMIT 20"
+            ).fetchall()
+            completed = conn.execute(
+                "SELECT id, goal as name, status, stack, created_at FROM workflows WHERE status = 'completed' ORDER BY created_at DESC LIMIT 20"
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        logger.warning("Task list table is unavailable: %s", exc)
+        active, queued, completed = [], [], []
 
     return {
         "active": [_task_from_row(r) for r in active],
@@ -85,10 +95,14 @@ async def get_tasks_list() -> dict:
 @router.get("/tasks/active", tags=["tasks"])
 async def get_active_tasks() -> dict:
     """Return list of currently active tasks from the real database."""
-    async with get_db() as conn:
-        rows = await (await conn.execute(
-            "SELECT id, goal as name, status, stack, created_at FROM workflows WHERE status IN ('running', 'pending') ORDER BY created_at DESC LIMIT 50"
-        )).fetchall()
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT id, goal as name, status, stack, created_at FROM workflows WHERE status IN ('running', 'pending') ORDER BY created_at DESC LIMIT 50"
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        logger.warning("Active task table is unavailable: %s", exc)
+        rows = []
 
     return {
         "tasks": [_task_from_row(r) for r in rows],

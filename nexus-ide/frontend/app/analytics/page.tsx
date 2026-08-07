@@ -1,451 +1,366 @@
 "use client";
 
-import React, { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  BarChart2, Bot, Brain, Clock, Filter, Globe,
-  MessageSquare, RefreshCw, Search,
-  SlidersHorizontal, ThumbsDown, ThumbsUp, TrendingUp,
-  TrendingDown, Users, Zap, Download, ChevronDown,
-  Activity, CheckCircle2, XCircle, AlertCircle, FileSearch,
+  Activity,
+  ArrowDownRight,
+  ArrowUpRight,
+  BarChart3,
+  Bot,
+  CalendarDays,
+  Clock3,
+  Database,
+  Gauge,
+  Layers3,
+  RefreshCw,
+  Sparkles,
+  Zap,
 } from "lucide-react";
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, BarChart, Bar, AreaChart, Area,
-  PieChart, Pie, Cell, Legend,
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
 } from "recharts";
-import { apiUrl } from "../../lib/api";
 
-type Conv = {
-  id: string;
-  agent: string;
-  user_message: string;
-  agent_response: string;
-  timestamp: string;
-  response_time_ms: number;
-  tokens_generated: number;
-  sentiment: { score: number; label: string; positive_pct: number; neutral_pct: number; negative_pct: number };
-  success: boolean;
+import AppShell from "../../components/layout/AppShell";
+import { apiUrl, authHeaders } from "../../lib/api";
+import { formatRelativeTime } from "../../lib/format";
+
+type PeriodKey = "today" | "week" | "month" | "all";
+type ChartRange = "7d" | "30d" | "all";
+
+type PeriodStats = {
+  total_tokens: number;
+  tokens_in: number;
+  tokens_out: number;
+  requests: number;
+  sessions: number;
+  cost: number;
+  avg_tokens_per_second: number;
 };
 
-type TimeSeriesPoint = { timestamp: number; value: number };
-type AgentMetric = { agent: string; calls: number; avg_latency_ms: number; success_rate: number; total_tokens: number };
-type UsageSummary = {
-  total_conversations: number; total_messages: number; total_tokens: number;
-  unique_sessions: number; peak_concurrent_sessions: number;
-  avg_messages_per_conversation: number; uptime_seconds: number;
+type ModelUsage = {
+  name: string;
+  total_tokens: number;
+  tokens_in: number;
+  tokens_out: number;
+  requests: number;
+  cost: number;
+  avg_tokens_per_second: number;
 };
-type SentimentOverview = {
-  overall: { score: number; label: string; positive_pct: number; neutral_pct: number; negative_pct: number };
-  trend: Array<{ timestamp: number; score: number; label: string }>;
-  by_agent: Record<string, { score: number; label: string; positive_pct: number }>;
-  insights: string[];
+
+type TimelinePoint = {
+  day: string;
+  total_tokens: number;
+  tokens_in: number;
+  tokens_out: number;
+  requests: number;
+  avg_tokens_per_second: number;
 };
-type Report = { id: string; name: string; description: string; format: string[]; size_kb: number };
 
-const SENTIMENT_COLORS = { positive: "#10b981", neutral: "#f59e0b", negative: "#ef4444" };
-const AGENT_COLORS = ["#7c3aed", "#06b6d4", "#f59e0b", "#10b981", "#ec4899", "#f97316", "#3b82f6", "#8b5cf6"];
+type UsageOverview = {
+  periods: Record<PeriodKey, PeriodStats>;
+  timeline: TimelinePoint[];
+  by_model: ModelUsage[];
+  generated_at: number;
+  currency: string;
+  current?: {
+    tokens_per_second: number;
+    active_model?: string | null;
+    timestamp?: number;
+  };
+};
 
-function fmtTs(ts: number) {
-  return new Date(ts * 1000).toLocaleTimeString("pt-PT", { hour: "2-digit", minute: "2-digit" });
-}
-function fmtDate(ts: number) {
-  return new Date(ts * 1000).toLocaleDateString("pt-PT", { day: "2-digit", month: "short" });
-}
-function fmtMs(ms: number) { return `${ms.toLocaleString()} ms`; }
-function fmtNum(n: number) {
+const PERIODS: Array<{ key: PeriodKey; label: string; short: string }> = [
+  { key: "today", label: "Hoje", short: "hoje" },
+  { key: "week", label: "Esta semana", short: "esta semana" },
+  { key: "month", label: "Este mês", short: "este mês" },
+  { key: "all", label: "Desde sempre", short: "todo o histórico" },
+];
+
+const MODEL_COLORS = ["#8b7bff", "#31d6d1", "#ffb454", "#f27fa4", "#7ea7ff", "#9aa3b2"];
+
+function compact(value: number | null | undefined): string {
+  const n = Number(value || 0);
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toLocaleString();
-}
-function fmtUptime(s: number) {
-  const d = Math.floor(s / 86400); s %= 86400;
-  const h = Math.floor(s / 3600); s %= 3600;
-  return d > 0 ? `${d}d ${h}h` : `${h}h ${Math.floor(s / 60)}m`;
+  return n.toLocaleString("pt-PT");
 }
 
-function StatCard({ label, value, sub, icon: Icon, color }: { label: string; value: string; sub?: string; icon: React.ElementType; color: string }) {
+function exact(value: number | null | undefined): string {
+  return Number(value || 0).toLocaleString("pt-PT");
+}
+
+function dateLabel(day: string): string {
+  const date = new Date(`${day}T12:00:00Z`);
+  return date.toLocaleDateString("pt-PT", { day: "2-digit", month: "short" }).replace(".", "");
+}
+
+function percent(value: number): string {
+  return `${Math.min(100, Math.max(0, value)).toFixed(value < 10 ? 1 : 0)}%`;
+}
+
+function Panel({
+  title,
+  subtitle,
+  icon,
+  action,
+  children,
+  className = "",
+}: {
+  title: string;
+  subtitle?: string;
+  icon: ReactNode;
+  action?: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) {
   return (
-    <div className="ana-card flex items-center gap-4 p-4">
-      <div className={`shrink-0 w-12 h-12 rounded-xl flex items-center justify-center border`} style={{ background: `${color}18`, borderColor: `${color}40` }}>
-        <Icon size={22} style={{ color }} />
+    <section className={`nx-surface nx-elev-1 rounded-2xl border border-nexus-border/70 ${className}`}>
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-nexus-border/60 px-5 py-4">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-lg border border-nexus-accent/25 bg-nexus-accent/10 text-nexus-accent-bright">
+            {icon}
+          </div>
+          <div>
+            <h2 className="text-sm font-semibold text-nexus-text">{title}</h2>
+            {subtitle ? <p className="mt-0.5 text-[11px] text-nexus-muted">{subtitle}</p> : null}
+          </div>
+        </div>
+        {action}
       </div>
-      <div className="min-w-0">
-        <p className="text-[11px] uppercase tracking-widest text-slate-400 font-semibold">{label}</p>
-        <p className="text-2xl font-bold text-slate-100 mt-0.5 truncate">{value}</p>
-        {sub && <p className="text-[11px] text-slate-500 mt-0.5 truncate">{sub}</p>}
+      <div className="p-5">{children}</div>
+    </section>
+  );
+}
+
+function MetricCard({ period, stats, active }: { period: (typeof PERIODS)[number]; stats: PeriodStats; active: boolean }) {
+  return (
+    <article
+      className={`relative overflow-hidden rounded-2xl border p-4 transition-colors ${
+        active
+          ? "border-nexus-accent/45 bg-nexus-accent/[0.10] shadow-[0_0_24px_rgba(124,106,251,0.12)]"
+          : "border-nexus-border/70 bg-nexus-card/70 hover:border-nexus-accent/25"
+      }`}
+    >
+      {active ? <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-nexus-accent to-transparent" /> : null}
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-nexus-muted">{period.label}</span>
+        <CalendarDays className="h-3.5 w-3.5 text-nexus-faint" />
       </div>
+      <div className="mt-3 flex items-end gap-2">
+        <span className="font-mono text-2xl font-bold tabular-nums tracking-tight text-nexus-text">{compact(stats.total_tokens)}</span>
+        <span className="mb-1 text-[11px] text-nexus-muted">tokens</span>
+      </div>
+      <div className="mt-3 flex items-center gap-3 text-[10px]">
+        <span className="text-cyan-300">{compact(stats.tokens_in)} entrada</span>
+        <span className="text-nexus-faint">/</span>
+        <span className="text-nexus-accent-bright">{compact(stats.tokens_out)} saída</span>
+      </div>
+      <div className="mt-3 flex items-center justify-between border-t border-nexus-border/60 pt-3 text-[10px] text-nexus-muted">
+        <span>{exact(stats.requests)} pedidos</span>
+        <span className="font-mono tabular-nums text-nexus-text">{stats.avg_tokens_per_second > 0 ? `${stats.avg_tokens_per_second.toFixed(1)} t/s méd.` : "—"}</span>
+      </div>
+    </article>
+  );
+}
+
+function EmptyChart({ label }: { label: string }) {
+  return (
+    <div className="flex h-[278px] flex-col items-center justify-center rounded-xl border border-dashed border-nexus-border bg-nexus-card/30 text-center">
+      <BarChart3 className="h-6 w-6 text-nexus-faint" />
+      <p className="mt-2 text-xs font-medium text-nexus-muted">Ainda não há dados para {label}</p>
+      <p className="mt-1 max-w-xs text-[10px] leading-relaxed text-nexus-faint">A série começa a preencher assim que houver pedidos persistidos.</p>
     </div>
   );
 }
 
-function ChartPanel({ title, children, actions }: { title: string; children: React.ReactNode; actions?: React.ReactNode }) {
+function ChartTooltip({ active, payload, label, kind }: { active?: boolean; payload?: Array<{ value?: number; name?: string; color?: string }>; label?: string; kind: "tokens" | "speed" }) {
+  if (!active || !payload?.length) return null;
   return (
-    <div className="ana-card flex flex-col">
-      <div className="ana-panel-header">
-        <span className="ana-panel-title">{title}</span>
-        {actions && <div className="flex items-center gap-2">{actions}</div>}
-      </div>
-      <div className="flex-1 p-4">{children}</div>
+    <div className="nx-elev-2 rounded-xl border border-nexus-border bg-nexus-elevated px-3 py-2.5 shadow-xl">
+      <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">{label}</p>
+      {payload.map((entry) => (
+        <div key={entry.name} className="flex items-center justify-between gap-5 text-[11px]">
+          <span className="flex items-center gap-1.5 text-nexus-muted"><span className="h-1.5 w-1.5 rounded-full" style={{ background: entry.color }} />{entry.name === "tokens_in" ? "Entrada" : entry.name === "tokens_out" ? "Saída" : "Média"}</span>
+          <span className="font-mono font-semibold tabular-nums text-nexus-text">{kind === "speed" ? `${Number(entry.value || 0).toFixed(1)} t/s` : `${compact(Number(entry.value || 0))} tok`}</span>
+        </div>
+      ))}
     </div>
-  );
-}
-
-function SentimentBadge({ score, label }: { score: number; label: string }) {
-  const color = label === "positive" ? "#10b981" : label === "negative" ? "#ef4444" : "#f59e0b";
-  return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border" style={{ color, borderColor: `${color}50`, background: `${color}15` }}>
-      {label === "positive" ? <ThumbsUp size={10} /> : label === "negative" ? <ThumbsDown size={10} /> : <AlertCircle size={10} />}
-      {label}
-    </span>
-  );
-}
-
-function AgentBadge({ agent }: { agent: string }) {
-  const colorMap: Record<string, string> = {
-    ROUTER: "#7c3aed", ARCHITECT: "#06b6d4", RESEARCHER: "#f59e0b",
-    CODER: "#10b981", ANALYZER: "#3b82f6", DEBUGGER: "#ef4444",
-    DOCUMENTER: "#ec4899", OPTIMIZER: "#f97316",
-  };
-  const color = colorMap[agent] || "#8b5cf6";
-  return (
-    <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold border" style={{ color, borderColor: `${color}50`, background: `${color}15` }}>
-      {agent}
-    </span>
   );
 }
 
 export default function AnalyticsPage() {
-  const [conversations, setConversations] = useState<Conv[]>([]);
-  const [convsLoading, setConvsLoading] = useState(true);
-  const [totalConvs, setTotalConvs] = useState(0);
-  const [convOffset, setConvOffset] = useState(0);
-  const [filterAgent, setFilterAgent] = useState("");
-  const [filterSentiment, setFilterSentiment] = useState("");
-  const [responseTime, setResponseTime] = useState<{ data: TimeSeriesPoint[]; summary: Record<string, number> }>({ data: [], summary: {} });
-  const [throughput, setThroughput] = useState<{ data: TimeSeriesPoint[]; summary: Record<string, number> }>({ data: [], summary: {} });
-  const [accuracy, setAccuracy] = useState<{ data: TimeSeriesPoint[]; summary: Record<string, number> }>({ data: [], summary: {} });
-  const [agentMetrics, setAgentMetrics] = useState<AgentMetric[]>([]);
-  const [usage, setUsage] = useState<UsageSummary | null>(null);
-  const [sentimentOverview, setSentimentOverview] = useState<SentimentOverview | null>(null);
-  const [reports, setReports] = useState<Report[]>([]);
-  const [activeReport, setActiveReport] = useState<string | null>(null);
-  const [timeRange, setTimeRange] = useState(24);
-  const [lastRefresh, setLastRefresh] = useState(new Date());
+  const [data, setData] = useState<UsageOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [activePeriod, setActivePeriod] = useState<PeriodKey>("today");
+  const [chartRange, setChartRange] = useState<ChartRange>("30d");
+  const [lastRefresh, setLastRefresh] = useState<number | null>(null);
 
-  const fetchAll = useCallback(async () => {
-    setConvsLoading(true);
+  const fetchOverview = useCallback(async () => {
     try {
-      const [rt, tp, acc, ag, us, so, rep, cv] = await Promise.all([
-        fetch(apiUrl(`/api/analytics/performance/response-time?hours=${timeRange}`)).then(r => r.json()),
-        fetch(apiUrl(`/api/analytics/performance/throughput?hours=${timeRange}`)).then(r => r.json()),
-        fetch(apiUrl(`/api/analytics/performance/accuracy?days=${Math.ceil(timeRange / 24)}`)).then(r => r.json()),
-        fetch(apiUrl("/api/analytics/agents/metrics")).then(r => r.json()),
-        fetch(apiUrl("/api/analytics/usage/summary")).then(r => r.json()),
-        fetch(apiUrl("/api/analytics/sentiment/overview")).then(r => r.json()),
-        fetch(apiUrl("/api/analytics/reports/available")).then(r => r.json()),
-        fetch(apiUrl(`/api/analytics/conversations?limit=20&offset=${convOffset}&agent=${filterAgent}&sentiment=${filterSentiment}`)).then(r => r.json()),
-      ]);
-      setResponseTime(rt);
-      setThroughput(tp);
-      setAccuracy(acc);
-      setAgentMetrics(ag);
-      setUsage(us);
-      setSentimentOverview(so);
-      setReports(rep);
-      setConversations(cv.conversations || []);
-      setTotalConvs(cv.total || 0);
+      const response = await fetch(apiUrl("/api/metrics/usage/overview"), {
+        headers: authHeaders(),
+        cache: "no-store",
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const next = (await response.json()) as UsageOverview;
+      setData(next);
+      setLastRefresh(Date.now());
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Não foi possível carregar as métricas");
     } finally {
-      setConvsLoading(false);
-      setLastRefresh(new Date());
+      setLoading(false);
     }
-  }, [timeRange, convOffset, filterAgent, filterSentiment]);
-
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  }, []);
 
   useEffect(() => {
-    const t = setInterval(fetchAll, 15000);
-    return () => clearInterval(t);
-  }, [fetchAll]);
+    fetchOverview();
+    const interval = setInterval(fetchOverview, 30_000);
+    return () => clearInterval(interval);
+  }, [fetchOverview]);
 
-  const pieData = sentimentOverview ? [
-    { name: "Positivo", value: sentimentOverview.overall.positive_pct, color: "#10b981" },
-    { name: "Neutro", value: sentimentOverview.overall.neutral_pct, color: "#f59e0b" },
-    { name: "Negativo", value: sentimentOverview.overall.negative_pct, color: "#ef4444" },
-  ] : [];
+  const timeline = useMemo(() => {
+    const source = data?.timeline ?? [];
+    if (chartRange === "7d") return source.slice(-7);
+    return source;
+  }, [data, chartRange]);
+
+  const models = useMemo(() => {
+    const total = data?.periods.all.total_tokens ?? 0;
+    return (data?.by_model ?? []).map((model, index) => ({
+      ...model,
+      share: total > 0 ? (model.total_tokens / total) * 100 : 0,
+      color: MODEL_COLORS[index % MODEL_COLORS.length],
+    }));
+  }, [data]);
+
+  const tokenMix = useMemo(() => {
+    const stats = data?.periods[activePeriod];
+    return stats
+      ? [
+          { name: "Entrada", value: stats.tokens_in, color: "#31d6d1" },
+          { name: "Saída", value: stats.tokens_out, color: "#8b7bff" },
+        ]
+      : [];
+  }, [activePeriod, data]);
+
+  const selectedStats = data?.periods[activePeriod];
+  const hasTimeline = timeline.some((point) => point.total_tokens > 0);
+  const hasModels = models.some((model) => model.total_tokens > 0);
+  const currentTps = data?.current?.tokens_per_second ?? 0;
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[#06061a]">
-      {/* ─── SIDEBAR ─── */}
-      <aside className="w-60 shrink-0 border-r border-slate-800 bg-[#07071a] flex flex-col">
-        <div className="p-5 border-b border-slate-800">
-          <p className="text-[10px] uppercase tracking-[0.25em] text-cyan-400 font-bold">Nexus Omega</p>
-          <h2 className="text-base font-bold text-slate-100 mt-1">Analytics</h2>
-          <p className="text-[11px] text-slate-500 mt-0.5">Conversation Intelligence</p>
-        </div>
-        <nav className="flex-1 p-3 space-y-1">
-          {[
-            { label: "Overview", icon: BarChart2, active: true },
-            { label: "Conversations", icon: MessageSquare, active: false },
-            { label: "Reports", icon: Download, active: false },
-          ].map(({ label, icon: Icon, active }) => (
-            <button key={label} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${active ? "bg-violet-500/20 text-violet-300 border border-violet-500/30" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"}`}>
-              <Icon size={16} />{label}
-            </button>
-          ))}
-        </nav>
-        <div className="p-4 border-t border-slate-800 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] text-slate-500">Auto-refresh</span>
-            <span className="flex items-center gap-1 text-[11px] text-emerald-400"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> 15s</span>
-          </div>
-          <div className="text-[10px] text-slate-600">
-            Last: {lastRefresh.toLocaleTimeString("pt-PT")}
-          </div>
-          <button onClick={fetchAll} className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-violet-500/20 border border-violet-500/30 text-violet-300 text-xs font-semibold hover:bg-violet-500/30 transition-all">
-            <RefreshCw size={12} /> Refresh
-          </button>
-        </div>
-      </aside>
-
-      {/* ─── MAIN ─── */}
-      <main className="flex-1 flex flex-col overflow-hidden">
-        {/* Header */}
-        <header className="shrink-0 flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-[#07071a]/90 backdrop-blur">
-          <div>
-            <h1 className="text-lg font-bold text-slate-100">Conversation Analytics</h1>
-            <p className="text-xs text-slate-500 mt-0.5">Real-time performance, sentiment and usage insights</p>
-          </div>
-          <div className="flex items-center gap-3">
-            <select value={timeRange} onChange={e => setTimeRange(Number(e.target.value))} className="ana-select text-xs">
-              <option value={6}>Last 6 hours</option>
-              <option value={24}>Last 24 hours</option>
-              <option value={72}>Last 3 days</option>
-              <option value={168}>Last 7 days</option>
-            </select>
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-xs text-emerald-400 font-medium">Live</span>
+    <AppShell title="Métricas" noPadding>
+      <div className="min-h-full bg-nexus-bg pb-10">
+        <header className="relative overflow-hidden border-b border-nexus-border/70 px-6 py-7 sm:px-8">
+          <div className="pointer-events-none absolute inset-0 bg-nx-mesh opacity-60" />
+          <div className="relative mx-auto flex max-w-[1480px] flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+              <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.18em] text-nexus-accent-bright">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                Telemetria de uso
+              </div>
+              <h1 className="nx-title mt-2 text-3xl font-bold tracking-tight sm:text-4xl">Métricas</h1>
+              <p className="mt-2 max-w-2xl text-sm leading-relaxed text-nexus-muted">Entende o ritmo do teu workspace: tokens consumidos, velocidade de geração e os modelos que mais trabalham.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-2 rounded-lg border border-nexus-border bg-nexus-card/70 px-3 py-2 text-[11px] text-nexus-muted">
+                <Database className="h-3.5 w-3.5 text-emerald-400" /> Dados persistentes
+              </div>
+              <span className="text-[11px] text-nexus-faint">{lastRefresh ? `Atualizado ${formatRelativeTime(lastRefresh / 1000)}` : "A carregar…"}</span>
+              <button type="button" onClick={() => { setLoading(true); fetchOverview(); }} className="flex items-center gap-2 rounded-lg border border-nexus-border bg-nexus-card px-3 py-2 text-xs font-medium text-nexus-text transition hover:border-nexus-accent/45 hover:text-nexus-accent-bright" aria-label="Atualizar métricas">
+                <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} /> Atualizar
+              </button>
             </div>
           </div>
         </header>
 
-        {/* Scrollable content */}
-        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+        <main className="mx-auto max-w-[1480px] space-y-5 px-6 py-6 sm:px-8">
+          {error ? (
+            <div className="flex items-center justify-between gap-4 rounded-xl border border-rose-400/25 bg-rose-400/10 px-4 py-3 text-xs text-rose-200">
+              <span>Não foi possível carregar os dados de métricas ({error}).</span>
+              <button type="button" className="font-semibold underline" onClick={() => { setLoading(true); fetchOverview(); }}>Tentar novamente</button>
+            </div>
+          ) : null}
 
-          {/* ── KPI ROW ── */}
-          <div className="grid gap-4 grid-cols-2 xl:grid-cols-4">
-            <StatCard label="Total Conversations" value={usage ? fmtNum(usage.total_conversations) : "—"} sub={`${usage?.unique_sessions || 0} unique sessions`} icon={MessageSquare} color="#7c3aed" />
-            <StatCard label="Messages Processed" value={usage ? fmtNum(usage.total_messages) : "—"} sub={`avg ${usage?.avg_messages_per_conversation.toFixed(1) || 0} per session`} icon={Brain} color="#06b6d4" />
-            <StatCard label="Tokens Generated" value={usage ? fmtNum(usage.total_tokens) : "—"} sub={`peak ${throughput.summary?.peak_tokens_per_second?.toFixed(0) || 0} t/s`} icon={Zap} color="#f59e0b" />
-            <StatCard label="System Uptime" value={usage ? fmtUptime(usage.uptime_seconds) : "—"} sub={`${usage?.peak_concurrent_sessions || 0} peak sessions`} icon={Clock} color="#10b981" />
-          </div>
-
-          {/* ── PERFORMANCE CHARTS ROW ── */}
-          <div className="grid gap-4 xl:grid-cols-3">
-            <ChartPanel title="Response Time Distribution" actions={<span className="text-[11px] text-slate-500">p95: {fmtMs(responseTime.summary?.p95_ms || 0)}</span>}>
-              <ResponsiveContainer width="100%" height={200}>
-                <AreaChart data={[...responseTime.data].reverse()}>
-                  <defs>
-                    <linearGradient id="rtGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#7c3aed" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#7c3aed" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                  <XAxis dataKey="timestamp" tickFormatter={t => fmtTs(t)} tick={{ fontSize: 10, fill: "#64748b" }} />
-                  <YAxis tickFormatter={v => `${v}ms`} tick={{ fontSize: 10, fill: "#64748b" }} />
-                  <Tooltip formatter={(v: number) => [`${v} ms`]} labelFormatter={t => fmtTs(t as number)} contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, fontSize: 12 }} />
-                  <Area type="monotone" dataKey="value" stroke="#7c3aed" fill="url(#rtGrad)" strokeWidth={2} />
-                </AreaChart>
-              </ResponsiveContainer>
-            </ChartPanel>
-
-            <ChartPanel title="Token Throughput" actions={<span className="text-[11px] text-slate-500">peak: {throughput.summary?.peak_tokens_per_second?.toFixed(0) || 0} t/s</span>}>
-              <ResponsiveContainer width="100%" height={200}>
-                <LineChart data={[...throughput.data].reverse()}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                  <XAxis dataKey="timestamp" tickFormatter={t => fmtTs(t)} tick={{ fontSize: 10, fill: "#64748b" }} />
-                  <YAxis tick={{ fontSize: 10, fill: "#64748b" }} />
-                  <Tooltip formatter={(v: number) => [`${v} t/s`]} labelFormatter={t => fmtTs(t as number)} contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, fontSize: 12 }} />
-                  <Line type="monotone" dataKey="value" stroke="#06b6d4" strokeWidth={2} dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            </ChartPanel>
-
-            <ChartPanel title="Success Rate" actions={<span className="text-[11px] text-emerald-400 font-semibold">{accuracy.summary?.avg_success_rate?.toFixed(1) || 0}%</span>}>
-              <ResponsiveContainer width="100%" height={200}>
-                <AreaChart data={[...accuracy.data].reverse()}>
-                  <defs>
-                    <linearGradient id="accGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                  <XAxis dataKey="timestamp" tickFormatter={t => fmtDate(t)} tick={{ fontSize: 10, fill: "#64748b" }} />
-                  <YAxis domain={[80, 100]} tick={{ fontSize: 10, fill: "#64748b" }} />
-                  <Tooltip formatter={(v: number) => [`${v}%`]} labelFormatter={t => fmtDate(t as number)} contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, fontSize: 12 }} />
-                  <Area type="monotone" dataKey="value" stroke="#10b981" fill="url(#accGrad)" strokeWidth={2} />
-                </AreaChart>
-              </ResponsiveContainer>
-            </ChartPanel>
-          </div>
-
-          {/* ── SENTIMENT + AGENTS ROW ── */}
-          <div className="grid gap-4 xl:grid-cols-3">
-            <ChartPanel title="Sentiment Analysis">
-              {sentimentOverview && (
-                <div className="flex flex-col gap-4">
-                  <div className="flex items-center justify-center">
-                    <PieChart width={160} height={160}>
-                      <Pie data={pieData} cx={80} cy={80} innerRadius={45} outerRadius={70} paddingAngle={3} dataKey="value">
-                        {pieData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
-                      </Pie>
-                    </PieChart>
+          <section className="grid gap-4 xl:grid-cols-[1.08fr_2fr]" aria-label="Resumo de velocidade e tokens">
+            <div className="relative overflow-hidden rounded-2xl border border-nexus-accent/35 bg-gradient-to-br from-[#211d4d] via-[#171a39] to-[#111827] p-5 shadow-[0_18px_45px_rgba(35,29,91,0.28)]">
+              <div className="pointer-events-none absolute -right-14 -top-16 h-48 w-48 rounded-full bg-nexus-accent/20 blur-3xl" />
+              <div className="relative flex items-start justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-indigo-200/75"><Gauge className="h-3.5 w-3.5" /> Ritmo de geração</div>
+                  <div className="mt-5 flex items-end gap-2">
+                    <span className="font-mono text-5xl font-bold tabular-nums tracking-tight text-white">{currentTps.toFixed(1)}</span>
+                    <span className="mb-2 text-sm text-indigo-200/70">tokens/s</span>
                   </div>
-                  <div className="space-y-2">
-                    {pieData.map(d => (
-                      <div key={d.name} className="flex items-center justify-between text-xs">
-                        <div className="flex items-center gap-2">
-                          <span className="w-2.5 h-2.5 rounded-full" style={{ background: d.color }} />
-                          <span className="text-slate-300">{d.name}</span>
-                        </div>
-                        <span className="text-slate-400 font-mono">{d.value}%</span>
-                      </div>
-                    ))}
-                  </div>
-                  {sentimentOverview.insights?.length > 0 && (
-                    <div className="border-t border-slate-700/60 pt-3 space-y-1.5">
-                      {sentimentOverview.insights.slice(0, 2).map((ins, i) => (
-                        <p key={i} className="text-[11px] text-slate-400 leading-relaxed">• {ins}</p>
-                      ))}
-                    </div>
-                  )}
+                  <p className="mt-2 text-xs text-indigo-100/60">média de {selectedStats?.avg_tokens_per_second?.toFixed(1) ?? "0.0"} t/s em {PERIODS.find((period) => period.key === activePeriod)?.short}</p>
                 </div>
-              )}
-            </ChartPanel>
-
-            <ChartPanel title="Agent Performance">
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={agentMetrics} layout="vertical" margin={{ left: 20 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" horizontal={false} />
-                  <XAxis type="number" domain={[0, 1]} tickFormatter={v => `${(v * 100).toFixed(0)}%`} tick={{ fontSize: 10, fill: "#64748b" }} />
-                  <YAxis type="category" dataKey="agent" tick={{ fontSize: 10, fill: "#94a3b8" }} width={70} />
-                  <Tooltip formatter={(v: number) => [`${(v * 100).toFixed(1)}%`]} contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, fontSize: 12 }} />
-                  <Bar dataKey="success_rate" fill="#7c3aed" radius={[0, 4, 4, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </ChartPanel>
-
-            <ChartPanel title="Latency by Agent">
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={agentMetrics} layout="vertical" margin={{ left: 20 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" horizontal={false} />
-                  <XAxis type="number" tickFormatter={v => `${v}ms`} tick={{ fontSize: 10, fill: "#64748b" }} />
-                  <YAxis type="category" dataKey="agent" tick={{ fontSize: 10, fill: "#94a3b8" }} width={70} />
-                  <Tooltip formatter={(v: number) => [`${v} ms`]} contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, fontSize: 12 }} />
-                  <Bar dataKey="avg_latency_ms" fill="#06b6d4" radius={[0, 4, 4, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </ChartPanel>
-          </div>
-
-          {/* ── CONVERSATION FEED ── */}
-          <div className="ana-card">
-            <div className="ana-panel-header">
-              <span className="ana-panel-title flex items-center gap-2"><MessageSquare size={14} /> Recent Conversations</span>
-              <div className="flex items-center gap-2">
-                <select value={filterAgent} onChange={e => { setFilterAgent(e.target.value); setConvOffset(0); }} className="ana-select text-[11px]">
-                  <option value="">All agents</option>
-                  {agentMetrics.map(a => <option key={a.agent} value={a.agent}>{a.agent}</option>)}
-                </select>
-                <select value={filterSentiment} onChange={e => { setFilterSentiment(e.target.value); setConvOffset(0); }} className="ana-select text-[11px]">
-                  <option value="">All sentiments</option>
-                  <option value="positive">Positive</option>
-                  <option value="neutral">Neutral</option>
-                  <option value="negative">Negative</option>
-                </select>
-                <span className="text-[11px] text-slate-500">{totalConvs} total</span>
+                <div className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-300">LIVE</div>
+              </div>
+              <div className="relative mt-7 grid grid-cols-2 gap-3 border-t border-white/10 pt-4">
+                <div><p className="text-[10px] uppercase tracking-wider text-indigo-100/45">Modelo ativo</p><p className="mt-1 truncate font-mono text-xs font-semibold text-indigo-100">{data?.current?.active_model || "Automático"}</p></div>
+                <div><p className="text-[10px] uppercase tracking-wider text-indigo-100/45">Pedidos no período</p><p className="mt-1 font-mono text-xs font-semibold text-indigo-100">{exact(selectedStats?.requests)}</p></div>
               </div>
             </div>
-            <div className="divide-y divide-slate-800/60">
-              {convsLoading && conversations.length === 0 ? (
-                <div className="flex items-center justify-center h-40">
-                  <div className="w-8 h-8 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
-                </div>
-              ) : conversations.length === 0 ? (
-                <div className="flex items-center justify-center h-32 text-sm text-slate-500">No conversations found</div>
-              ) : conversations.map(conv => (
-                <div key={conv.id} className="p-4 hover:bg-slate-800/20 transition-colors">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                        <AgentBadge agent={conv.agent} />
-                        <SentimentBadge score={conv.sentiment.score} label={conv.sentiment.label} />
-                        <span className="text-[11px] text-slate-500">{new Date(conv.timestamp).toLocaleString("pt-PT")}</span>
-                        {conv.success
-                          ? <CheckCircle2 size={12} className="text-emerald-400" />
-                          : <XCircle size={12} className="text-red-400" />}
-                      </div>
-                      <p className="text-xs text-slate-300 mb-1.5 leading-relaxed">
-                        <span className="text-slate-500 font-semibold">Q: </span>{conv.user_message.slice(0, 120)}{conv.user_message.length > 120 ? "…" : ""}
-                      </p>
-                      <p className="text-xs text-slate-400 leading-relaxed">
-                        <span className="text-violet-400 font-semibold">A: </span>{conv.agent_response.slice(0, 160)}{conv.agent_response.length > 160 ? "…" : ""}
-                      </p>
-                    </div>
-                    <div className="shrink-0 text-right space-y-1">
-                      <p className="text-[11px] text-slate-500">{fmtMs(conv.response_time_ms)}</p>
-                      <p className="text-[11px] text-slate-500">{conv.tokens_generated} tok</p>
-                    </div>
-                  </div>
-                </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {PERIODS.map((period) => (
+                <button key={period.key} type="button" className="text-left" onClick={() => setActivePeriod(period.key)} aria-pressed={activePeriod === period.key}>
+                  <MetricCard period={period} stats={data?.periods[period.key] ?? { total_tokens: 0, tokens_in: 0, tokens_out: 0, requests: 0, sessions: 0, cost: 0, avg_tokens_per_second: 0 }} active={activePeriod === period.key} />
+                </button>
               ))}
             </div>
-            <div className="flex items-center justify-between px-4 py-3 border-t border-slate-800/60">
-              <span className="text-[11px] text-slate-500">Showing {convOffset + 1}–{convOffset + conversations.length} of {totalConvs}</span>
-              <div className="flex items-center gap-2">
-                <button disabled={convOffset === 0} onClick={() => setConvOffset(Math.max(0, convOffset - 20))} className="ana-btn text-xs px-3 py-1.5 disabled:opacity-30">Previous</button>
-                <button disabled={convOffset + 20 >= totalConvs} onClick={() => setConvOffset(convOffset + 20)} className="ana-btn text-xs px-3 py-1.5 disabled:opacity-30">Next</button>
-              </div>
-            </div>
-          </div>
+          </section>
 
-          {/* ── REPORTS ── */}
-          <div className="ana-card">
-            <div className="ana-panel-header">
-              <span className="ana-panel-title flex items-center gap-2"><Download size={14} /> Export Reports</span>
-            </div>
-            <div className="p-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              {reports.map(report => (
-                <div key={report.id} className="flex flex-col gap-2 p-3 rounded-xl border border-slate-700/60 bg-slate-800/30 hover:border-violet-500/40 transition-all">
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <p className="text-sm font-semibold text-slate-200">{report.name}</p>
-                      <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">{report.description}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between mt-1">
-                    <div className="flex gap-1.5">
-                      {report.format.map(f => (
-                        <span key={f} className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400 font-mono uppercase">{f}</span>
-                      ))}
-                      <span className="text-[10px] text-slate-600">{report.size_kb} KB</span>
-                    </div>
-                    <button
-                      onClick={() => setActiveReport(report.id)}
-                      className="flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 font-medium"
-                    >
-                      <Download size={11} /> Export
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+          <section className="grid gap-5 xl:grid-cols-[1.55fr_1fr]">
+            <Panel title="Consumo ao longo do tempo" subtitle="Entrada e saída de tokens por dia" icon={<Activity className="h-4 w-4" />} action={<div className="flex rounded-lg border border-nexus-border bg-nexus-card/60 p-0.5" role="tablist" aria-label="Janela do gráfico"><span className="sr-only">Janela:</span>{(["7d", "30d", "all"] as ChartRange[]).map((range) => <button key={range} type="button" role="tab" aria-selected={chartRange === range} onClick={() => setChartRange(range)} className={`rounded-md px-2.5 py-1 text-[10px] font-semibold transition ${chartRange === range ? "bg-nexus-accent/20 text-nexus-accent-bright" : "text-nexus-faint hover:text-nexus-text"}`}>{range === "7d" ? "7 dias" : range === "30d" ? "30 dias" : "Tudo"}</button>)}</div>}>
+              {hasTimeline ? <div className="h-[278px] w-full"><ResponsiveContainer width="100%" height="100%"><AreaChart data={timeline} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}><defs><linearGradient id="tokensInGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#31d6d1" stopOpacity={0.34} /><stop offset="100%" stopColor="#31d6d1" stopOpacity={0.02} /></linearGradient><linearGradient id="tokensOutGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8b7bff" stopOpacity={0.44} /><stop offset="100%" stopColor="#8b7bff" stopOpacity={0.04} /></linearGradient></defs><CartesianGrid vertical={false} stroke="var(--nx-line)" strokeDasharray="4 6" /><XAxis dataKey="day" tickFormatter={dateLabel} tick={{ fill: "var(--nx-muted)", fontSize: 10 }} axisLine={false} tickLine={false} minTickGap={28} /><YAxis tickFormatter={(value) => compact(value)} tick={{ fill: "var(--nx-muted)", fontSize: 10 }} axisLine={false} tickLine={false} /><Tooltip content={<ChartTooltip kind="tokens" />} /><Area type="monotone" dataKey="tokens_in" name="tokens_in" stackId="1" stroke="#31d6d1" strokeWidth={2} fill="url(#tokensInGradient)" /><Area type="monotone" dataKey="tokens_out" name="tokens_out" stackId="1" stroke="#8b7bff" strokeWidth={2} fill="url(#tokensOutGradient)" /></AreaChart></ResponsiveContainer></div> : <EmptyChart label="o período selecionado" />}
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-nexus-border/60 pt-3 text-[10px] text-nexus-muted"><div className="flex items-center gap-4"><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-cyan-300" />Entrada</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-nexus-accent" />Saída</span></div><span>O total geral permanece visível no resumo acima</span></div>
+            </Panel>
 
-        </div>
-      </main>
-    </div>
+            <Panel title="Velocidade média" subtitle="Tokens gerados por segundo" icon={<Zap className="h-4 w-4" />} action={<span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[10px] font-semibold text-emerald-300">{selectedStats?.avg_tokens_per_second ? `${selectedStats.avg_tokens_per_second.toFixed(1)} t/s` : "Sem dados"}</span>}>
+              {hasTimeline ? <div className="h-[278px] w-full"><ResponsiveContainer width="100%" height="100%"><LineChart data={timeline} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}><CartesianGrid vertical={false} stroke="var(--nx-line)" strokeDasharray="4 6" /><XAxis dataKey="day" tickFormatter={dateLabel} tick={{ fill: "var(--nx-muted)", fontSize: 10 }} axisLine={false} tickLine={false} minTickGap={28} /><YAxis tickFormatter={(value) => `${value}`} tick={{ fill: "var(--nx-muted)", fontSize: 10 }} axisLine={false} tickLine={false} /><Tooltip content={<ChartTooltip kind="speed" />} /><Line type="monotone" dataKey="avg_tokens_per_second" name="avg_tokens_per_second" stroke="#ffb454" strokeWidth={2.5} dot={false} activeDot={{ r: 4, fill: "#ffb454", stroke: "#171a39", strokeWidth: 2 }} /></LineChart></ResponsiveContainer></div> : <EmptyChart label="a velocidade" />}
+              <div className="mt-4 flex items-center justify-between border-t border-nexus-border/60 pt-3 text-[10px] text-nexus-muted"><span>Baseado em tokens de saída + latência</span><span className="flex items-center gap-1 text-amber-300"><ArrowUpRight className="h-3 w-3" /> picos destacam-se</span></div>
+            </Panel>
+          </section>
+
+          <section className="grid gap-5 xl:grid-cols-[1.4fr_0.9fr]">
+            <Panel title="Modelos mais usados" subtitle="Ranking por tokens consumidos desde sempre" icon={<Bot className="h-4 w-4" />} action={hasModels ? <span className="text-[10px] text-nexus-muted">{models.length} modelos identificados</span> : null}>
+              {hasModels ? <div className="space-y-4">{models.slice(0, 6).map((model, index) => <div key={model.name} className="group"><div className="flex items-center justify-between gap-4"><div className="flex min-w-0 items-center gap-3"><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-nexus-card font-mono text-[10px] font-bold text-nexus-muted">{String(index + 1).padStart(2, "0")}</span><div className="min-w-0"><p className="truncate text-xs font-semibold text-nexus-text" title={model.name}>{model.name}</p><p className="mt-0.5 text-[10px] text-nexus-muted">{exact(model.requests)} pedidos · {model.avg_tokens_per_second > 0 ? `${model.avg_tokens_per_second.toFixed(1)} t/s méd.` : "velocidade —"}</p></div></div><div className="shrink-0 text-right"><p className="font-mono text-xs font-semibold tabular-nums text-nexus-text">{compact(model.total_tokens)}</p><p className="mt-0.5 text-[10px] tabular-nums text-nexus-muted">{percent(model.share)}</p></div></div><div className="ml-9 mt-2 h-1.5 overflow-hidden rounded-full bg-nexus-card"><div className="h-full rounded-full transition-all duration-700" style={{ width: `${Math.max(2, model.share)}%`, background: `linear-gradient(90deg, ${model.color}, ${model.color}99)` }} /></div></div>)}</div> : <div className="flex min-h-[245px] flex-col items-center justify-center text-center"><Layers3 className="h-7 w-7 text-nexus-faint" /><p className="mt-3 text-xs font-medium text-nexus-muted">Nenhum modelo identificado</p><p className="mt-1 max-w-xs text-[10px] leading-relaxed text-nexus-faint">Os modelos aparecem aqui depois da primeira execução com uso de tokens persistido.</p></div>}
+            </Panel>
+
+            <Panel title="Composição do período" subtitle={`Entrada vs. saída · ${PERIODS.find((period) => period.key === activePeriod)?.label}`} icon={<BarChart3 className="h-4 w-4" />} action={<div className="flex gap-1">{PERIODS.slice(0, 3).map((period) => <button key={period.key} type="button" onClick={() => setActivePeriod(period.key)} className={`rounded-md px-2 py-1 text-[10px] ${activePeriod === period.key ? "bg-nexus-accent/20 text-nexus-accent-bright" : "text-nexus-faint hover:text-nexus-text"}`}>{period.key === "today" ? "Hoje" : period.key === "week" ? "7d" : "30d"}</button>)}</div>}>
+              <div className="h-[205px]"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={tokenMix} dataKey="value" nameKey="name" innerRadius={58} outerRadius={82} paddingAngle={4} stroke="none">{tokenMix.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Pie><Tooltip formatter={(value: number) => `${compact(value)} tokens`} contentStyle={{ background: "var(--nx-elevated)", border: "1px solid var(--nx-line)", borderRadius: 10, fontSize: 11 }} /></PieChart></ResponsiveContainer></div>
+              <div className="mt-1 grid grid-cols-2 gap-3">{tokenMix.map((entry) => { const total = (selectedStats?.total_tokens ?? 0) || 1; return <div key={entry.name} className="rounded-lg border border-nexus-border/60 bg-nexus-card/40 p-2.5"><div className="flex items-center gap-1.5 text-[10px] text-nexus-muted"><span className="h-2 w-2 rounded-full" style={{ background: entry.color }} />{entry.name}</div><p className="mt-1 font-mono text-sm font-semibold tabular-nums text-nexus-text">{compact(entry.value)}</p><p className="mt-0.5 text-[10px] text-nexus-faint">{percent((entry.value / total) * 100)}</p></div>; })}</div>
+            </Panel>
+          </section>
+
+          <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Indicadores auxiliares">
+            <div className="rounded-xl border border-nexus-border/70 bg-nexus-card/50 p-4"><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-nexus-muted"><ArrowDownRight className="h-3.5 w-3.5 text-cyan-300" />Tokens de entrada</div><p className="mt-2 font-mono text-xl font-semibold tabular-nums text-nexus-text">{compact(selectedStats?.tokens_in)}</p><p className="mt-1 text-[10px] text-nexus-faint">{PERIODS.find((period) => period.key === activePeriod)?.short}</p></div>
+            <div className="rounded-xl border border-nexus-border/70 bg-nexus-card/50 p-4"><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-nexus-muted"><ArrowUpRight className="h-3.5 w-3.5 text-nexus-accent-bright" />Tokens de saída</div><p className="mt-2 font-mono text-xl font-semibold tabular-nums text-nexus-text">{compact(selectedStats?.tokens_out)}</p><p className="mt-1 text-[10px] text-nexus-faint">{PERIODS.find((period) => period.key === activePeriod)?.short}</p></div>
+            <div className="rounded-xl border border-nexus-border/70 bg-nexus-card/50 p-4"><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-nexus-muted"><Clock3 className="h-3.5 w-3.5 text-amber-300" />Pedidos processados</div><p className="mt-2 font-mono text-xl font-semibold tabular-nums text-nexus-text">{exact(selectedStats?.requests)}</p><p className="mt-1 text-[10px] text-nexus-faint">{exact(selectedStats?.sessions)} sessões no período</p></div>
+            <div className="rounded-xl border border-nexus-border/70 bg-nexus-card/50 p-4"><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-nexus-muted"><Sparkles className="h-3.5 w-3.5 text-emerald-300" />Custo estimado</div><p className="mt-2 font-mono text-xl font-semibold tabular-nums text-nexus-text">{selectedStats?.cost ? `$${selectedStats.cost.toFixed(4)}` : "$0.0000"}</p><p className="mt-1 text-[10px] text-nexus-faint">Estimativa · USD</p></div>
+          </section>
+
+          <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-nexus-border/60 pt-4 text-[10px] text-nexus-faint"><span>As médias usam apenas respostas com latência registada.</span><span>Retenção visual: 30 dias · total acumulado: desde sempre</span></footer>
+        </main>
+      </div>
+    </AppShell>
   );
 }

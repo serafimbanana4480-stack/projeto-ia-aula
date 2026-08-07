@@ -23,6 +23,7 @@ from backend.persistence.db import (
     delete_session,
     get_messages,
     get_session,
+    list_session_runs,
     list_sessions_with_counts,
     update_session,
 )
@@ -129,6 +130,18 @@ async def get_messages_endpoint(
     if get_session(session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
     return {"messages": get_messages(session_id, limit=limit), "count": limit}
+
+
+@router.get("/{session_id}/runs")
+async def get_runs_endpoint(
+    session_id: str,
+    limit: int = 20,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Return durable run/checkpoint history for recovery and observability."""
+    if get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    return {"runs": list_session_runs(session_id, limit=limit)}
 
 
 __all__ = ["router"]

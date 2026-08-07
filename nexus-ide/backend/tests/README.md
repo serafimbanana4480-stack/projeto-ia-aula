@@ -145,6 +145,7 @@ def test_metadata():
 | `tests/llm/test_anthropic_provider.py` | Provider Anthropic: alias de modelos, normalização de mensagens, `chat_complete`, `chat_stream`, `embed`, `health_check` e registo na factory. |
 | `tests/orchestrator/test_chat_auto_swarm.py` | Modos `auto` (smart routing + upgrade para CODER) e `swarm` (ensemble/default agents) via `POST /api/chat`. |
 | `tests/tools/test_file_routes.py` | Rotas `POST /api/files/read`, `/api/files/list` e `/api/files/write` com validação de segurança. |
+| `tests/tools/test_registry_guards.py` | Guards de execução de tools: timeout hard (`NEXUS_TOOL_TIMEOUT`), circuit breaker de falhas consecutivas por sessão e gate de confirmação antes da cache. |
 | `tests/knowledge/test_rag_memory.py` | Contexto RAG, `remember_conversation`, tools `store_memory`/`recall_context` e rotas Second Brain. |
 | `scripts/e2e_main_flow_test.py` | Smoke test end-to-end: `health → providers → chat(auto) → chat(swarm)`. |
 

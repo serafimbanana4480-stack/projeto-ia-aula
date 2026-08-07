@@ -32,6 +32,13 @@ class TestCoderAgent:
             AgentAction.RECALL_CONTEXT,
             AgentAction.STORE_MEMORY,
             AgentAction.FETCH_URL,
+            # Added when the CODER gained the ability to verify its own output
+            # instead of reporting success from a written file alone.
+            AgentAction.RUN_SHELL,
+            AgentAction.RUN_TESTS,
+            AgentAction.RUN_LINT,
+            AgentAction.TYPE_CHECK,
+            AgentAction.SPAWN_TASK,
         }
         assert agent.supported_actions == expected
 

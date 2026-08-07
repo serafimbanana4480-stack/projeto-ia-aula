@@ -7,6 +7,7 @@ __pycache__/
 .venv312/
 venv/
 .pytest_cache/
+.pytest_tmp/
 .mypy_cache/
 .ruff_cache/
 htmlcov/
@@ -46,6 +47,10 @@ data/
 
 # Temp files
 _tmp_*
+tmp/
+backend/tmp/
+frontend/test-results/
+tmp_auth_*.py
 nul
 
 # Misc

@@ -8,7 +8,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from backend.orchestrator.limiter import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -103,7 +102,6 @@ def _simple_code_search(query: str, root: str, k: int = 8) -> list[dict[str, Any
 
 
 @router.post("/search/code", response_model=SearchResponse)
-@limiter.limit("60/minute")
 async def search_code(
     req: SearchRequest,
     mode: str = Query("semantic", description="Search mode: semantic, regex, or hybrid"),

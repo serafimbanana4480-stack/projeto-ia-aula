@@ -10,6 +10,7 @@ models:
     fallback_id: "minimax-m3"
     thinking_mode: false
     max_tokens: 512
+    context_window: 131072
     temperature: 0.3
     use_cases: [trivial_qa, routing, classification]
     estimated_latency_ms: 200
@@ -21,6 +22,7 @@ models:
     fallback_id: "minimax-m3"
     thinking_mode: false
     max_tokens: 2048
+    context_window: 131072
     temperature: 0.7
     use_cases: [simple_qa, formatting, summarization]
     estimated_latency_ms: 600
@@ -32,6 +34,7 @@ models:
     fallback_id: "deepseek-v4-flash"
     thinking_mode: false
     max_tokens: 8192
+    context_window: 131072
     temperature: 0.5
     use_cases: [code_generation, refactor, debug]
     estimated_latency_ms: 1200
@@ -43,6 +46,7 @@ models:
     fallback_id: "deepseek-v4-pro"
     thinking_mode: true
     max_tokens: 8192
+    context_window: 131072
     temperature: 0.5
     use_cases: [planning, multi_step_reasoning, problem_solving]
     estimated_latency_ms: 2000
@@ -54,6 +58,7 @@ models:
     fallback_id: "glm-5.2"
     thinking_mode: true
     max_tokens: 16384
+    context_window: 131072
     temperature: 0.4
     use_cases: [architecture, complex_analysis, large_codebases]
     estimated_latency_ms: 4000
@@ -64,6 +69,7 @@ models:
     fallback_id: "minimax-m3"
     thinking_mode: false
     max_tokens: 4096
+    context_window: 131072
     temperature: 0.5
     use_cases: [simple_qa, formatting, summarization]
   coder3b-4bit:
@@ -71,6 +77,7 @@ models:
     fallback_id: "deepseek-v4-flash"
     thinking_mode: false
     max_tokens: 4096
+    context_window: 131072
     temperature: 0.2
     use_cases: [code_generation, refactor, debug]
   nano:
@@ -78,6 +85,7 @@ models:
     fallback_id: "minimax-m3"
     thinking_mode: false
     max_tokens: 512
+    context_window: 131072
     temperature: 0.1
     use_cases: [trivial_qa, routing, classification]
   small:
@@ -85,6 +93,7 @@ models:
     fallback_id: "minimax-m3"
     thinking_mode: false
     max_tokens: 4096
+    context_window: 131072
     temperature: 0.7
     use_cases: [simple_qa, formatting, summarization]
   medium:
@@ -92,6 +101,7 @@ models:
     fallback_id: "deepseek-v4-flash"
     thinking_mode: false
     max_tokens: 8192
+    context_window: 131072
     temperature: 0.3
     use_cases: [code_generation, planning, multi_step_reasoning]
   large:
@@ -99,6 +109,7 @@ models:
     fallback_id: "deepseek-v4-pro"
     thinking_mode: true
     max_tokens: 8192
+    context_window: 131072
     temperature: 0.7
     use_cases: [architecture, complex_analysis, large_codebases]
   expert:
@@ -106,6 +117,7 @@ models:
     fallback_id: "glm-5.2"
     thinking_mode: true
     max_tokens: 16384
+    context_window: 131072
     temperature: 0.3
     use_cases: [architecture, complex_analysis, large_codebases]
   vision:
@@ -113,6 +125,7 @@ models:
     fallback_id: "glm-5.2"
     thinking_mode: false
     max_tokens: 2048
+    context_window: 131072
     temperature: 0.7
     use_cases: [image_analysis, vision_tasks]
   embed:
@@ -120,6 +133,7 @@ models:
     fallback_id: "deepseek-v4-flash"
     thinking_mode: false
     max_tokens: 512
+    context_window: 131072
     temperature: 0.0
     use_cases: [embedding, retrieval]
   dashboard:
@@ -127,6 +141,7 @@ models:
     fallback_id: "glm-5.2"
     thinking_mode: false
     max_tokens: 2048
+    context_window: 131072
     temperature: 0.5
     use_cases: [dashboard_queries, monitoring]
 
@@ -150,7 +165,10 @@ routing:
   complexity_thresholds:
     deep_thinking: 7
     iterative_react: 6
-  max_react_iterations: 7
+  # The request-level 0 value uses the bounded safety default rather than an
+  # unbounded loop. Override it with NEXUS_REACT_MAX_ITERATIONS (for example,
+  # 8 for a constrained multi-step task).
+  max_react_iterations: 4
   fallback_timeout_seconds: 45
   queue_timeout_seconds: 30
 

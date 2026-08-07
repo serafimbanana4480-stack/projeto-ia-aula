@@ -1,0 +1,4 @@
+audit_version: 1.0
+backup_enabled: true
+log_level: INFO
+metrics_endpoint: /metrics

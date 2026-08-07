@@ -54,6 +54,7 @@ async def consult_agent(
     context: str = "",
     timeout_seconds: int = 60,
     project_path: str = "",
+    autonomous: bool = False,
 ) -> dict[str, Any]:
     """Consult another agent for specialized input via A2A protocol.
 
@@ -147,6 +148,7 @@ async def consult_agent(
             client=client,
             project_path=project_path,
             context=extra_context,
+            autonomous=autonomous,
         )
 
         # Run the sub-agent with timeout and collect the response

@@ -108,10 +108,37 @@ def fresh_bus(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 
 @pytest.fixture
-def fresh_loop(monkeypatch: pytest.MonkeyPatch):
+def fresh_loop(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """Provide a fresh AutoCorrectionLoop and reset the singleton."""
     monkeypatch.setattr("backend.core.auto_correction._auto_correction_loop_instance", None)
-    return AutoCorrectionLoop()
+    return AutoCorrectionLoop(state_file=tmp_path / "auto_correction_state.json")
+
+
+async def wait_until(predicate, *, timeout: float = 4.0) -> None:
+    """Wait for a scheduled correction task without using timing-sensitive sleeps."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("condition was not met before timeout")
+
+
+async def wait_for_escalation(bus: AgentBus, artifact_id: str, *, timeout: float = 3.0):
+    """Wait until the asynchronous escalation status is persisted on the bus."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        history = await bus.get_history("auto_correction.status", limit=10)
+        messages = [
+            message
+            for message in history
+            if message.payload.get("status") == "escalated"
+            and message.payload.get("artifact_id") == artifact_id
+        ]
+        if messages:
+            return messages
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"no escalation status was published for {artifact_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +165,12 @@ class TestAutoCorrectionE2E:
                 payload={"failures": 2, "artifact_id": "calc.py", "output": "2 tests failed"},
             ),
         )
-        await asyncio.sleep(0.3)
+        await wait_until(
+            lambda: any(
+                c["artifact_id"] == "calc.py" and c["status"] == "completed"
+                for c in loop.get_status()["corrections"]
+            )
+        )
 
         status = loop.get_status()
         assert status["monitoring"] is True
@@ -154,7 +186,9 @@ class TestAutoCorrectionE2E:
         await loop.stop_monitoring()
 
     @pytest.mark.asyncio
-    async def test_detects_critical_error_and_spawns_fix_agents(self, fresh_bus, fresh_loop):
+    async def test_detects_critical_error_and_spawns_fix_agents(
+        self, fresh_bus, fresh_loop, tmp_path
+    ):
         """Publish an errors.found CRITICAL event and verify CODER + OVERSEER are spawned."""
         mock_lifecycle = MockLifecycleManager(
             outputs={"CODER": "Fixed the null pointer exception. Bug resolved."}
@@ -172,10 +206,16 @@ class TestAutoCorrectionE2E:
                     "severity": "CRITICAL",
                     "artifact_id": "auth.py",
                     "error_report": "Null pointer in login handler",
+                    "project_path": str(tmp_path),
                 },
             ),
         )
-        await asyncio.sleep(0.3)
+        await wait_until(
+            lambda: any(
+                c["artifact_id"] == "auth.py" and c["status"] == "completed"
+                for c in loop.get_status()["corrections"]
+            )
+        )
 
         status = loop.get_status()
         corrections = [c for c in status["corrections"] if c["artifact_id"] == "auth.py"]
@@ -207,7 +247,13 @@ class TestAutoCorrectionE2E:
                 payload={"failures": 3, "artifact_id": "loop.py", "output": "3 tests failed"},
             ),
         )
-        await asyncio.sleep(0.8)
+        await wait_until(
+            lambda: any(
+                c["artifact_id"] == "loop.py" and c["iterations"] == 5
+                for c in loop.get_status()["corrections"]
+            )
+            and "META_ANALYZER" in [call[0] for call in mock_lifecycle.spawn_calls]
+        )
 
         status = loop.get_status()
         corrections = [c for c in status["corrections"] if c["artifact_id"] == "loop.py"]
@@ -219,9 +265,7 @@ class TestAutoCorrectionE2E:
         assert "OVERSEER" in spawned
 
         # Verify escalation message was published on the bus
-        history = await fresh_bus.get_history("auto_correction.status", limit=10)
-        escalation_msgs = [m for m in history if m.payload.get("status") == "escalated"]
-        assert len(escalation_msgs) >= 1
+        escalation_msgs = await wait_for_escalation(fresh_bus, "loop.py")
         assert escalation_msgs[0].payload["artifact_id"] == "loop.py"
         assert "META_ANALYZER" in escalation_msgs[0].payload["escalation_targets"]
 
@@ -261,8 +305,15 @@ class TestAutoCorrectionE2E:
                 payload={"failures": 1, "artifact_id": "timeout.py", "output": "1 test failed"},
             ),
         )
-        # Wait long enough for the short timeout to fire across iterations
-        await asyncio.sleep(0.5)
+        # Wait for the short timeout to fire across iterations.
+        await wait_until(
+            lambda: any(
+                c["artifact_id"] == "timeout.py" and c["iterations"] == 5
+                for c in loop.get_status()["corrections"]
+            )
+            and "META_ANALYZER" in [call[0] for call in mock_lifecycle.spawn_calls],
+            timeout=5.0,
+        )
 
         status = loop.get_status()
         corrections = [c for c in status["corrections"] if c["artifact_id"] == "timeout.py"]
@@ -305,7 +356,12 @@ class TestAutoCorrectionE2E:
                 },
             ),
         )
-        await asyncio.sleep(0.3)
+        await wait_until(
+            lambda: any(
+                c["artifact_id"] == "slow_module.py" and c["status"] == "completed"
+                for c in loop.get_status()["corrections"]
+            )
+        )
 
         status = loop.get_status()
         corrections = [c for c in status["corrections"] if c["artifact_id"] == "slow_module.py"]
@@ -344,7 +400,12 @@ class TestAutoCorrectionE2E:
                 payload={"review_id": review.review_id},
             ),
         )
-        await asyncio.sleep(0.3)
+        await wait_until(
+            lambda: any(
+                c["artifact_id"] == "svc.py" and c["status"] == "completed"
+                for c in loop.get_status()["corrections"]
+            )
+        )
 
         status = loop.get_status()
         corrections = [c for c in status["corrections"] if c["artifact_id"] == "svc.py"]
@@ -358,7 +419,7 @@ class TestAutoCorrectionE2E:
         await loop.stop_monitoring()
 
     @pytest.mark.asyncio
-    async def test_multiple_artifacts_tracked_independently(self, fresh_bus, fresh_loop):
+    async def test_multiple_artifacts_tracked_independently(self, fresh_bus, fresh_loop, tmp_path):
         """Two different artifacts should each get their own tracker and independent iteration counts."""
         mock_lifecycle = MockLifecycleManager(
             outputs={
@@ -383,10 +444,19 @@ class TestAutoCorrectionE2E:
             BusMessage(
                 message_id="e2e_msg7b",
                 source_agent="BUG_HUNTER_RUNTIME",
-                payload={"severity": "HIGH", "artifact_id": "b.py"},
+                payload={
+                    "severity": "HIGH",
+                    "artifact_id": "b.py",
+                    "project_path": str(tmp_path),
+                },
             ),
         )
-        await asyncio.sleep(0.3)
+        await wait_until(
+            lambda: all(
+                any(c["artifact_id"] == artifact_id and c["status"] == "completed" for c in loop.get_status()["corrections"])
+                for artifact_id in ("a.py", "b.py")
+            )
+        )
 
         status = loop.get_status()
         a_corr = [c for c in status["corrections"] if c["artifact_id"] == "a.py"]

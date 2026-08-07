@@ -5,6 +5,8 @@ import { getAlerts } from "../../lib/api";
 import { useMetricsStore } from "../../stores/metricsStore";
 import { usePolling } from "../../hooks/usePolling";
 import { Bell, AlertTriangle, AlertCircle, Info, XCircle, X, Shield } from "lucide-react";
+import { Surface, SurfaceHeader } from "../ui/Surface";
+import { Badge, StatusDot, EmptyState } from "../ui/Primitives";
 
 export interface AlertData {
   id: string;
@@ -16,21 +18,23 @@ export interface AlertData {
 
 type Severity = AlertData["severity"];
 type Filter = "all" | "warning" | "error" | "critical";
+type SeverityTone = "info" | "warning" | "danger";
 
 const SEVERITY_CONFIG: Record<
   Severity,
   {
-    color: string;
+    tone: SeverityTone;
     icon: typeof Info;
     label: string;
     ariaRole: "alert" | "status";
     live: "assertive" | "polite";
+    pulse: boolean;
   }
 > = {
-  info: { color: "bg-blue-500/10 text-blue-400 border-blue-500/20", icon: Info, label: "Info", ariaRole: "status", live: "polite" },
-  warning: { color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20", icon: AlertTriangle, label: "Aviso", ariaRole: "status", live: "polite" },
-  error: { color: "bg-orange-500/10 text-orange-400 border-orange-500/20", icon: AlertCircle, label: "Erro", ariaRole: "alert", live: "assertive" },
-  critical: { color: "bg-red-500/10 text-red-400 border-red-500/20", icon: XCircle, label: "Crítico", ariaRole: "alert", live: "assertive" },
+  info: { tone: "info", icon: Info, label: "Info", ariaRole: "status", live: "polite", pulse: false },
+  warning: { tone: "warning", icon: AlertTriangle, label: "Aviso", ariaRole: "status", live: "polite", pulse: false },
+  error: { tone: "danger", icon: AlertCircle, label: "Erro", ariaRole: "alert", live: "assertive", pulse: false },
+  critical: { tone: "danger", icon: XCircle, label: "Crítico", ariaRole: "alert", live: "assertive", pulse: true },
 };
 
 const FILTER_LABELS: Record<Filter, string> = {
@@ -112,164 +116,149 @@ export default function AlertFeed() {
     return `há ${Math.floor(diff / 86400000)}d`;
   }, []);
 
+  const connected = backendOnline && alertsError === null;
+
   return (
-    <section
-      className="rounded border border-nexus-border bg-nexus-panel p-3"
-      aria-labelledby="alert-feed-title"
-    >
-      {!backendOnline && (
-        <div
-          role="alert"
-          className="mb-2 rounded border border-yellow-500/20 bg-yellow-500/5 px-3 py-1.5 text-xs text-yellow-400 flex items-center gap-2"
-        >
-          <AlertTriangle className="h-3 w-3" aria-hidden="true" />
-          Backend offline — alertas não disponíveis
-        </div>
-      )}
+    <section aria-label="Feed de Alertas">
+      <Surface elevation={1} padding="sm">
+        <SurfaceHeader
+          icon={<Bell className="h-4 w-4" />}
+          title="Feed de Alertas"
+          subtitle="Eventos e avisos do sistema, por ordem de chegada"
+          action={
+            <div className="flex items-center gap-1.5">
+              <StatusDot tone={connected ? "success" : "neutral"} label={connected ? "Ligado" : "Desligado"} />
+              {alerts.length > 0 && <Badge tone="accent">{alerts.length}</Badge>}
+            </div>
+          }
+        />
 
-      {alertsError && alerts.length === 0 && (
-        <div
-          role="alert"
-          className="mb-2 rounded border border-red-500/20 bg-red-500/5 px-3 py-1.5 text-xs text-red-400 flex items-center gap-2"
-        >
-          <AlertCircle className="h-3 w-3" aria-hidden="true" />
-          Falha ao carregar alertas: {alertsError}
-        </div>
-      )}
+        {!backendOnline && (
+          <div
+            role="alert"
+            className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300"
+          >
+            <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+            Backend offline — alertas não disponíveis
+          </div>
+        )}
 
-      <div className="mb-3 flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2 min-w-0">
-          <Bell className="h-4 w-4 text-nexus-accent" aria-hidden="true" />
-          <h3 id="alert-feed-title" className="text-sm font-semibold">
-            Feed de Alertas
-          </h3>
-          <span
-            className={`h-2 w-2 rounded-full ${
-              backendOnline && alertsError === null ? "bg-green-400" : "bg-gray-500"
-            }`}
-            aria-hidden="true"
-          />
-          <span className="sr-only">
-            {backendOnline && alertsError === null ? "Ligado" : "Desligado"}
-          </span>
-          {alerts.length > 0 && (
-            <span
-              className="rounded bg-nexus-accent/15 px-1.5 py-0.5 text-[10px] text-nexus-accent"
-              aria-label={`${alerts.length} alertas`}
-            >
-              {alerts.length}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="hidden sm:flex items-center gap-2 mr-2" aria-hidden="true">
+        {alertsError && alerts.length === 0 && (
+          <div
+            role="alert"
+            className="mt-3 flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300"
+          >
+            <AlertCircle className="h-3 w-3 shrink-0" aria-hidden="true" />
+            Falha ao carregar alertas: {alertsError}
+          </div>
+        )}
+
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="hidden items-center gap-1.5 sm:flex" aria-hidden="true">
             {(["critical", "error", "warning"] as const).map((sev) => {
               const count = getSeverityCount(sev);
               if (count === 0) return null;
               const config = SEVERITY_CONFIG[sev];
               return (
-                <span key={sev} className={`rounded px-1.5 py-0.5 text-[10px] ${config.color}`}>
+                <Badge key={sev} tone={config.tone}>
                   {count} {config.label}
-                </span>
+                </Badge>
               );
             })}
           </div>
 
-          <div className="flex gap-1 flex-wrap" role="group" aria-label="Filtrar alertas">
-            {(["all", "warning", "error", "critical"] as const).map((f) => (
-              <button
-                key={f}
-                type="button"
-                onClick={() => setFilter(f)}
-                aria-pressed={currentFilterPressed(filter, f)}
-                aria-label={`Filtrar: ${FILTER_LABELS[f]}`}
-                className={`rounded px-2 py-0.5 text-xs transition-colors ${
-                  filter === f
-                    ? "bg-nexus-accent text-black font-medium"
-                    : "bg-nexus-border text-gray-400 hover:text-gray-300"
-                }`}
-              >
-                {FILTER_LABELS[f]}
-              </button>
-            ))}
-          </div>
-          {alerts.length > 0 && (
-            <button
-              type="button"
-              onClick={dismissAll}
-              aria-label="Dispensar todos os alertas"
-              title="Dispensar todos"
-              className="rounded px-2 py-0.5 text-xs text-gray-500 hover:text-gray-300 transition-colors"
-            >
-              <X className="h-3 w-3" aria-hidden="true" />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {filteredAlerts.length > 0 ? (
-        <ul
-          role="list"
-          className="max-h-52 space-y-1.5 overflow-y-auto text-xs sm:text-sm"
-        >
-          <AnimatePresence mode="popLayout">
-            {filteredAlerts.map((alert) => {
-              const config = SEVERITY_CONFIG[alert.severity];
-              const IconComponent = config.icon;
-              return (
-                <motion.li
-                  key={alert.id}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: 10 }}
-                  layout
-                  role={config.ariaRole}
-                  aria-live={config.live}
-                  className={`flex items-center justify-between rounded border px-3 py-2 ${config.color}`}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="nx-inset flex flex-wrap gap-0.5 rounded-lg p-0.5" role="group" aria-label="Filtrar alertas">
+              {(["all", "warning", "error", "critical"] as const).map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  onClick={() => setFilter(f)}
+                  aria-pressed={filter === f}
+                  aria-label={`Filtrar: ${FILTER_LABELS[f]}`}
+                  className={`rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${
+                    filter === f
+                      ? "bg-nexus-accent/25 text-[var(--nx-accent-bright)]"
+                      : "text-nexus-faint hover:text-nexus-text"
+                  }`}
                 >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <IconComponent className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    <div className="min-w-0">
-                      <span className="block truncate">{alert.message}</span>
-                      <div className="sr-only">Severidade: {config.label}</div>
-                      <div className="flex items-center gap-2 mt-0.5">
-                        <span className="text-[10px] text-gray-500 truncate">{alert.source}</span>
-                        <span className="text-[10px] text-gray-600" aria-hidden="true">·</span>
-                        <span className="text-[10px] text-gray-500">{formatTimeAgo(alert.timestamp)}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => dismissAlert(alert.id)}
-                    aria-label={`Dispensar alerta: ${alert.message}`}
-                    className="shrink-0 ml-2 text-gray-500 hover:text-gray-300 transition-colors"
-                  >
-                    <X className="h-3 w-3" aria-hidden="true" />
-                  </button>
-                </motion.li>
-              );
-            })}
-          </AnimatePresence>
-        </ul>
-      ) : (
-        <div
-          className="flex h-20 flex-col items-center justify-center text-xs text-gray-500"
-          role="status"
-        >
-          <Shield className="h-6 w-6 text-gray-600 mb-1" aria-hidden="true" />
-          <span>
-            {filter !== "all" ? `Sem alertas de tipo ${FILTER_LABELS[filter]}` : "Sem alertas"}
-          </span>
-          {!backendOnline && filter === "all" && (
-            <span className="text-gray-600">Backend offline</span>
+                  {FILTER_LABELS[f]}
+                </button>
+              ))}
+            </div>
+            {alerts.length > 0 && (
+              <button
+                type="button"
+                onClick={dismissAll}
+                aria-label="Dispensar todos os alertas"
+                title="Dispensar todos"
+                className="flex h-6 w-6 items-center justify-center rounded-lg text-nexus-faint transition-colors hover:bg-white/[0.06] hover:text-nexus-text"
+              >
+                <X className="h-3 w-3" aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-3">
+          {filteredAlerts.length > 0 ? (
+            <ul role="list" className="max-h-52 space-y-1.5 overflow-y-auto text-xs sm:text-sm">
+              <AnimatePresence mode="popLayout">
+                {filteredAlerts.map((alert) => {
+                  const config = SEVERITY_CONFIG[alert.severity];
+                  const IconComponent = config.icon;
+                  return (
+                    <motion.li
+                      key={alert.id}
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: 10 }}
+                      layout
+                      role={config.ariaRole}
+                      aria-live={config.live}
+                    >
+                      <Surface elevation={0} tone={config.tone} padding="sm">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex min-w-0 items-center gap-2.5">
+                            <StatusDot tone={config.tone} pulse={config.pulse} />
+                            <IconComponent className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                            <div className="min-w-0">
+                              <span className="block truncate text-nexus-text">{alert.message}</span>
+                              <div className="sr-only">Severidade: {config.label}</div>
+                              <div className="mt-0.5 flex items-center gap-2">
+                                <span className="truncate text-[10px] text-nexus-faint">{alert.source}</span>
+                                <span className="text-[10px] text-nexus-faint" aria-hidden="true">
+                                  ·
+                                </span>
+                                <span className="text-[10px] text-nexus-faint">{formatTimeAgo(alert.timestamp)}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => dismissAlert(alert.id)}
+                            aria-label={`Dispensar alerta: ${alert.message}`}
+                            className="ml-2 shrink-0 text-nexus-faint transition-colors hover:text-nexus-text"
+                          >
+                            <X className="h-3 w-3" aria-hidden="true" />
+                          </button>
+                        </div>
+                      </Surface>
+                    </motion.li>
+                  );
+                })}
+              </AnimatePresence>
+            </ul>
+          ) : (
+            <EmptyState
+              compact
+              icon={<Shield className="h-5 w-5" />}
+              title={filter !== "all" ? `Sem alertas de tipo ${FILTER_LABELS[filter]}` : "Sem alertas"}
+              hint={!backendOnline && filter === "all" ? "Backend offline — os alertas retomam quando a ligação voltar." : "Tudo tranquilo por agora."}
+            />
           )}
         </div>
-      )}
+      </Surface>
     </section>
   );
-}
-
-function currentFilterPressed(active: Filter, candidate: Filter): boolean {
-  return active === candidate;
 }

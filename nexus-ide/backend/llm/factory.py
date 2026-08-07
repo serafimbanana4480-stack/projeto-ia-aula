@@ -41,6 +41,55 @@ def _load_runtime_overrides() -> dict[str, str]:
         return {}
 
 
+def _setting_value(settings: Any, overrides: dict[str, Any], name: str, default: Any = "") -> Any:
+    """Resolve an explicit/runtime override before the startup settings value."""
+    value = overrides.get(name)
+    candidate = value if value not in (None, "") else getattr(settings, name, default)
+
+    # Settings values ultimately come from Pydantic/environment or the JSON
+    # settings file.  Reject accidental mock/object values here: they are
+    # truthy, can be treated as API keys, and then fail much later while
+    # building an HTTP Authorization header.
+    if isinstance(candidate, (str, int, float, bool)) or candidate is None:
+        return candidate
+    return default
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """Parse settings persisted by the UI, which are stored as strings."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    return default
+
+
+def _usable_api_key(value: Any) -> str:
+    """Return a real-looking API key, ignoring template placeholder values.
+
+    ``.env.example`` values are sometimes copied into ``.env`` unchanged.
+    Treating ``your-...-api-key-here`` as configured makes the provider win
+    routing, then every request fails upstream before a healthy fallback gets
+    a chance.
+    """
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip()
+    lowered = candidate.lower()
+    if not candidate or lowered.startswith("your-") or lowered in {
+        "changeme",
+        "replace-me",
+        "replace_with_your_key",
+        "xxx",
+    }:
+        return ""
+    return candidate
+
+
 class MockProvider:
     """Graceful degradation provider that returns helpful messages when all
     real providers are down.
@@ -198,17 +247,33 @@ class ResilientLLMProvider:
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         for provider in [self.primary, *self.fallbacks]:
+            emitted_output = False
             try:
                 async for token in provider.chat_stream(model, messages, **kwargs):
+                    if token:
+                        emitted_output = True
                     yield token
+                if not emitted_output:
+                    raise RuntimeError(
+                        f"Provider {provider.__class__.__name__} returned an empty stream"
+                    )
                 return
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 logger.warning(
                     "Provider %s failed for chat_stream: %s",
                     provider.__class__.__name__,
                     exc,
                 )
+                if emitted_output:
+                    # The response has already been observed by the user. A
+                    # fallback here would splice a second answer onto it and
+                    # can repeat tool calls in a ReAct response.
+                    raise
                 continue
+            finally:
+                kwargs.pop("_stream_retry_attempt", None)
         raise RuntimeError("All providers failed for chat_stream")
 
     async def chat_complete(
@@ -287,107 +352,105 @@ def _build_fallback_chain(
         primary_provider = "ollama" if primary_is_local else None
 
     if primary_provider == "ollama":
-        fallback_host = overrides.get(
-            "ollama_dashboard_host",
-            getattr(settings, "ollama_dashboard_host", ""),
-        )
-        primary_host = overrides.get("ollama_host", getattr(settings, "ollama_host", ""))
+        fallback_host = _setting_value(settings, overrides, "ollama_dashboard_host", "")
+        primary_host = _setting_value(settings, overrides, "ollama_host", "")
         if fallback_host and fallback_host != primary_host:
             fallbacks.append(OllamaProvider(base_url=fallback_host))
             logger.info("Added Ollama fallback host %s to fallback chain", fallback_host)
 
-    if primary_provider == "airllm" and getattr(settings, "ollama_host", ""):
-        fallbacks.append(OllamaProvider(base_url=settings.ollama_host))
-        logger.info("Added Ollama fallback host %s to AirLLM chain", settings.ollama_host)
+    ollama_host = _setting_value(settings, overrides, "ollama_host", "")
+    if primary_provider == "airllm" and ollama_host:
+        fallbacks.append(OllamaProvider(base_url=ollama_host))
+        logger.info("Added Ollama fallback host %s to AirLLM chain", ollama_host)
 
-    if settings.openai_api_key:
+    if openai_api_key := _setting_value(settings, overrides, "openai_api_key", ""):
         from backend.llm.openai_provider import OpenAIProvider
 
         fallbacks.append(
             OpenAIProvider(
-                base_url="https://api.openai.com/v1",
-                api_key=settings.openai_api_key,
+                base_url=_setting_value(settings, overrides, "openai_base_url", "https://api.openai.com/v1"),
+                api_key=openai_api_key,
             )
         )
 
-    if settings.kimi_api_key:
+    if kimi_api_key := _setting_value(settings, overrides, "kimi_api_key", ""):
         from backend.llm.kimi_provider import KimiProvider
 
         fallbacks.append(
             KimiProvider(
-                base_url="https://api.moonshot.cn/v1",
-                api_key=settings.kimi_api_key,
+                base_url=_setting_value(settings, overrides, "kimi_base_url", "https://api.moonshot.cn/v1"),
+                api_key=kimi_api_key,
             )
         )
 
-    if settings.deepseek_api_key:
+    if deepseek_api_key := _setting_value(settings, overrides, "deepseek_api_key", ""):
         from backend.llm.openai_provider import OpenAIProvider
 
         fallbacks.append(
             OpenAIProvider(
-                base_url="https://api.deepseek.com/v1",
-                api_key=settings.deepseek_api_key,
+                base_url=_setting_value(settings, overrides, "deepseek_base_url", "https://api.deepseek.com/v1"),
+                api_key=deepseek_api_key,
             )
         )
 
-    if settings.groq_api_key:
+    if groq_api_key := _setting_value(settings, overrides, "groq_api_key", ""):
         from backend.llm.openai_provider import OpenAIProvider
 
         fallbacks.append(
             OpenAIProvider(
-                base_url="https://api.groq.com/openai/v1",
-                api_key=settings.groq_api_key,
+                base_url=_setting_value(settings, overrides, "groq_base_url", "https://api.groq.com/openai/v1"),
+                api_key=groq_api_key,
             )
         )
 
-    if settings.anthropic_api_key:
+    if anthropic_api_key := _setting_value(settings, overrides, "anthropic_api_key", ""):
         from backend.llm.anthropic_provider import AnthropicProvider
 
         fallbacks.append(
             AnthropicProvider(
-                base_url="https://api.anthropic.com",
-                api_key=settings.anthropic_api_key,
+                base_url=_setting_value(settings, overrides, "anthropic_base_url", "https://api.anthropic.com"),
+                api_key=anthropic_api_key,
             )
         )
 
-    if settings.gemini_api_key:
+    if gemini_api_key := _setting_value(settings, overrides, "gemini_api_key", ""):
         from backend.llm.gemini_provider import GeminiProvider
 
         fallbacks.append(
             GeminiProvider(
-                base_url=getattr(
-                    settings, "gemini_base_url", "https://generativelanguage.googleapis.com/v1beta"
+                base_url=_setting_value(
+                    settings,
+                    overrides,
+                    "gemini_base_url",
+                    "https://generativelanguage.googleapis.com/v1beta",
                 ),
-                api_key=settings.gemini_api_key,
+                api_key=gemini_api_key,
             )
         )
 
-    if settings.openrouter_api_key:
+    if openrouter_api_key := _setting_value(settings, overrides, "openrouter_api_key", ""):
         from backend.llm.openrouter_provider import OpenRouterProvider
 
         fallbacks.append(
             OpenRouterProvider(
-                base_url=getattr(settings, "openrouter_base_url", "https://openrouter.ai/api/v1"),
-                api_key=settings.openrouter_api_key,
+                base_url=_setting_value(settings, overrides, "openrouter_base_url", "https://openrouter.ai/api"),
+                api_key=openrouter_api_key,
             )
         )
 
-    # Always add Ollama local as a fallback for embeddings and basic chat
-    if settings.ollama_host:
-        try:
-            fallbacks.append(OllamaProvider(base_url=settings.ollama_host))
-            logger.info("Added Ollama fallback to chain")
-        except Exception:
-            pass
+    # A local host is already the primary in the Ollama path and is explicitly
+    # added above for AirLLM.  Do not append it to unrelated cloud chains:
+    # silently changing a cloud request into a local answer is surprising, and
+    # adding the same host twice only repeats a failing request.
 
     # Add DevProvider for zero-cost local development before the ultimate mock fallback
     has_any_real_provider = bool(
-        settings.openai_api_key
-        or settings.kimi_api_key
-        or settings.deepseek_api_key
-        or settings.groq_api_key
-        or settings.gemini_api_key
-        or settings.openrouter_api_key
+        openai_api_key
+        or kimi_api_key
+        or deepseek_api_key
+        or groq_api_key
+        or gemini_api_key
+        or openrouter_api_key
     )
     if not has_any_real_provider:
         fallbacks.append(DevProvider())
@@ -397,7 +460,7 @@ def _build_fallback_chain(
     return fallbacks
 
 
-def create_multi_llm_manager() -> MultiLLMManager:
+def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> MultiLLMManager:
     """Create and configure a MultiLLMManager with all available providers.
 
     **OpenCode Go is the primary cloud provider.** Other cloud providers
@@ -411,21 +474,43 @@ def create_multi_llm_manager() -> MultiLLMManager:
     from backend.llm.openai_provider import OpenAIProvider
 
     settings = get_settings()
+    # Settings written from the UI are strings and intentionally do not alter
+    # process environment.  Merge them here as well as in direct-provider
+    # mode, otherwise the default multi-provider path silently ignores a key
+    # the user just saved.
+    values: dict[str, Any] = {**_load_runtime_overrides(), **(overrides or {})}
+    preferred_provider = str(
+        _setting_value(
+            settings,
+            values,
+            "llm_provider",
+            _setting_value(settings, values, "default_provider", ""),
+        )
+    ).strip().lower()
+
+    def priority_for(name: str, default: int) -> int:
+        return 0 if name == preferred_provider else default
+
     manager = MultiLLMManager()
 
     # ------------------------------------------------------------------
-    # PRIMARY: OpenCode Go (always registered)
+    # PRIMARY: OpenCode Go (only registered when its API key is set)
     # ------------------------------------------------------------------
     from backend.llm.opencode_go_provider import OpenCodeGoProvider
 
-    if settings.opencode_go_api_key:
+    opencode_go_api_key = _usable_api_key(
+        _setting_value(settings, values, "opencode_go_api_key", "")
+    )
+    if opencode_go_api_key:
         manager.register_provider(
             "opencode_go",
             OpenCodeGoProvider(
-                base_url=settings.opencode_go_base_url,
-                api_key=settings.opencode_go_api_key,
+                base_url=_setting_value(
+                    settings, values, "opencode_go_base_url", "https://opencode.ai/zen/go/v1"
+                ),
+                api_key=opencode_go_api_key,
             ),
-            priority=0,  # Highest priority
+            priority=priority_for("opencode_go", 1),
         )
 
     # ------------------------------------------------------------------
@@ -433,110 +518,117 @@ def create_multi_llm_manager() -> MultiLLMManager:
     # ------------------------------------------------------------------
     import os
 
-    if os.environ.get("NEXUS_ENABLE_OLLAMA", "").lower() == "true":
-        ollama_provider = OllamaProvider(base_url=settings.ollama_host)
-        manager.register_provider("ollama", ollama_provider, priority=4)
-        manager.register_provider("local", ollama_provider, priority=4)
-        logger.info("Ollama provider registered (NEXUS_ENABLE_OLLAMA=true)")
+    ollama_enabled = _as_bool(
+        values.get("nexus_enable_ollama", os.environ.get("NEXUS_ENABLE_OLLAMA", ""))
+    ) or preferred_provider in {"ollama", "local"}
+    if ollama_enabled:
+        ollama_provider = OllamaProvider(base_url=_setting_value(settings, values, "ollama_host", ""))
+        manager.register_provider("ollama", ollama_provider, priority=priority_for("ollama", 4))
+        manager.register_provider("local", ollama_provider, priority=priority_for("local", 4))
+        logger.info("Ollama provider registered")
 
     # ------------------------------------------------------------------
     # OPTIONAL: AirLLM experimental (only if explicitly enabled)
     # ------------------------------------------------------------------
-    if settings.airllm_experimental_enabled:
+    if _as_bool(
+        _setting_value(settings, values, "airllm_experimental_enabled", False),
+        bool(getattr(settings, "airllm_experimental_enabled", False)),
+    ):
         manager.register_provider(
             "airllm",
             AirLLMProvider(
-                device=settings.local_llm_device,
-                compression=settings.local_llm_compression,
+                device=_setting_value(settings, values, "local_llm_device", "auto"),
+                compression=_setting_value(settings, values, "local_llm_compression", ""),
             ),
-            priority=5,  # Lowest priority (fallback)
+            priority=priority_for("airllm", 5),
         )
 
     # ------------------------------------------------------------------
     # OPTIONAL: Other cloud providers (only if API key is set)
     # ------------------------------------------------------------------
-    if settings.openai_api_key:
+    if openai_api_key := _setting_value(settings, values, "openai_api_key", ""):
         manager.register_provider(
             "openai",
             OpenAIProvider(
-                base_url="https://api.openai.com/v1",
-                api_key=settings.openai_api_key,
+                base_url=_setting_value(settings, values, "openai_base_url", "https://api.openai.com/v1"),
+                api_key=openai_api_key,
             ),
-            priority=3,
+            priority=priority_for("openai", 3),
         )
 
-    if settings.kimi_api_key:
+    if kimi_api_key := _setting_value(settings, values, "kimi_api_key", ""):
         manager.register_provider(
             "kimi",
             KimiProvider(
-                base_url="https://api.moonshot.cn/v1",
-                api_key=settings.kimi_api_key,
+                base_url=_setting_value(settings, values, "kimi_base_url", "https://api.moonshot.cn/v1"),
+                api_key=kimi_api_key,
             ),
-            priority=3,
+            priority=priority_for("kimi", 3),
         )
 
-    if settings.deepseek_api_key:
+    if deepseek_api_key := _setting_value(settings, values, "deepseek_api_key", ""):
         manager.register_provider(
             "deepseek",
             OpenAIProvider(
-                base_url="https://api.deepseek.com/v1",
-                api_key=settings.deepseek_api_key,
+                base_url=_setting_value(settings, values, "deepseek_base_url", "https://api.deepseek.com/v1"),
+                api_key=deepseek_api_key,
             ),
-            priority=3,
+            priority=priority_for("deepseek", 3),
         )
 
-    if settings.groq_api_key:
+    if groq_api_key := _setting_value(settings, values, "groq_api_key", ""):
         manager.register_provider(
             "groq",
             OpenAIProvider(
-                base_url="https://api.groq.com/openai/v1",
-                api_key=settings.groq_api_key,
+                base_url=_setting_value(settings, values, "groq_base_url", "https://api.groq.com/openai/v1"),
+                api_key=groq_api_key,
             ),
-            priority=3,
+            priority=priority_for("groq", 3),
         )
 
-    if settings.anthropic_api_key:
+    if anthropic_api_key := _setting_value(settings, values, "anthropic_api_key", ""):
         from backend.llm.anthropic_provider import AnthropicProvider
 
         manager.register_provider(
             "anthropic",
             AnthropicProvider(
-                base_url="https://api.anthropic.com",
-                api_key=settings.anthropic_api_key,
+                base_url=_setting_value(settings, values, "anthropic_base_url", "https://api.anthropic.com"),
+                api_key=anthropic_api_key,
             ),
-            priority=3,
+            priority=priority_for("anthropic", 3),
         )
 
-    if settings.gemini_api_key:
+    if gemini_api_key := _setting_value(settings, values, "gemini_api_key", ""):
         from backend.llm.gemini_provider import GeminiProvider
 
         manager.register_provider(
             "gemini",
             GeminiProvider(
-                base_url=getattr(
-                    settings, "gemini_base_url", "https://generativelanguage.googleapis.com/v1beta"
+                base_url=_setting_value(
+                    settings,
+                    values,
+                    "gemini_base_url",
+                    "https://generativelanguage.googleapis.com/v1beta",
                 ),
-                api_key=settings.gemini_api_key,
+                api_key=gemini_api_key,
             ),
-            priority=3,
+            priority=priority_for("gemini", 3),
         )
 
-    if settings.openrouter_api_key:
+    if openrouter_api_key := _setting_value(settings, values, "openrouter_api_key", ""):
         from backend.llm.openrouter_provider import OpenRouterProvider
 
         manager.register_provider(
             "openrouter",
             OpenRouterProvider(
-                base_url=getattr(settings, "openrouter_base_url", "https://openrouter.ai/api/v1"),
-                api_key=settings.openrouter_api_key,
+                base_url=_setting_value(settings, values, "openrouter_base_url", "https://openrouter.ai/api"),
+                api_key=openrouter_api_key,
             ),
-            priority=3,
+            priority=priority_for("openrouter", 3),
         )
 
     if not manager.list_providers() if hasattr(manager, "list_providers") else not manager.providers:
-        logger.warning(
-            "No providers configured! Set OPENCODE_GO_API_KEY in .env to enable cloud models."
-        )
+        logger.error("No providers configured; add an API key or enable a local provider.")
     return manager
 
 
@@ -566,30 +658,37 @@ def create_llm_client(**overrides: Any) -> Any:
     if _runtime:
         logger.info("Loaded %d runtime settings overrides", len(_runtime))
 
-    if overrides.get("multi_llm_enabled", settings.multi_llm_enabled):
+    effective_overrides: dict[str, Any] = {**_runtime, **overrides}
+    multi_llm_enabled = _as_bool(
+        _setting_value(settings, effective_overrides, "multi_llm_enabled", settings.multi_llm_enabled),
+        bool(settings.multi_llm_enabled),
+    )
+    if multi_llm_enabled:
         logger.info("Multi-LLM manager enabled")
-        return create_multi_llm_manager()
+        return create_multi_llm_manager(overrides=effective_overrides)
 
     provider = (
-        (overrides.get("llm_provider") or _runtime.get("llm_provider") or settings.llm_provider)
+        _setting_value(settings, effective_overrides, "llm_provider", settings.llm_provider)
         .lower()
         .strip()
     )
 
     if provider in ("local", "ollama"):
-        base_url = overrides.get("ollama_host", settings.ollama_host)
+        base_url = _setting_value(settings, effective_overrides, "ollama_host", settings.ollama_host)
         logger.info("Using Ollama provider at %s with fallback chain", base_url)
         primary = OllamaProvider(base_url=base_url)
         fallbacks = _build_fallback_chain(
             settings,
-            overrides,
+            effective_overrides,
             primary_provider="ollama",
         )
         return ResilientLLMProvider(primary, fallbacks)
 
     if provider == "airllm":
-        device = overrides.get("local_llm_device", settings.local_llm_device)
-        compression = overrides.get("local_llm_compression", settings.local_llm_compression)
+        device = _setting_value(settings, effective_overrides, "local_llm_device", settings.local_llm_device)
+        compression = _setting_value(
+            settings, effective_overrides, "local_llm_compression", settings.local_llm_compression
+        )
         logger.info(
             "Using AirLLM provider (device=%s, compression=%s) with fallback chain",
             device,
@@ -598,7 +697,7 @@ def create_llm_client(**overrides: Any) -> Any:
         primary = AirLLMProvider(device=device, compression=compression)
         fallbacks = _build_fallback_chain(
             settings,
-            overrides,
+            effective_overrides,
             primary_provider="airllm",
         )
         return ResilientLLMProvider(primary, fallbacks)
@@ -611,15 +710,13 @@ def create_llm_client(**overrides: Any) -> Any:
         from backend.llm.openai_provider import OpenAIProvider
 
         api_key = (
-            overrides.get("openai_api_key", "")
-            or _runtime.get("openai_api_key")
-            or getattr(settings, "openai_api_key", "")
+            _setting_value(settings, effective_overrides, "openai_api_key", "")
         )
         if not api_key:
             logger.warning("OPENAI_API_KEY not set — requests will fail")
         logger.info("Using OpenAI provider")
         return OpenAIProvider(
-            base_url=overrides.get("openai_base_url", "https://api.openai.com/v1"),
+            base_url=_setting_value(settings, effective_overrides, "openai_base_url", "https://api.openai.com/v1"),
             api_key=api_key,
         )
 
@@ -627,15 +724,13 @@ def create_llm_client(**overrides: Any) -> Any:
         from backend.llm.openai_provider import OpenAIProvider
 
         api_key = (
-            overrides.get("deepseek_api_key", "")
-            or _runtime.get("deepseek_api_key")
-            or getattr(settings, "deepseek_api_key", "")
+            _setting_value(settings, effective_overrides, "deepseek_api_key", "")
         )
         if not api_key:
             logger.warning("DEEPSEEK_API_KEY not set — requests will fail")
         logger.info("Using DeepSeek provider")
         return OpenAIProvider(
-            base_url=overrides.get("deepseek_base_url", "https://api.deepseek.com/v1"),
+            base_url=_setting_value(settings, effective_overrides, "deepseek_base_url", "https://api.deepseek.com/v1"),
             api_key=api_key,
         )
 
@@ -643,15 +738,13 @@ def create_llm_client(**overrides: Any) -> Any:
         from backend.llm.kimi_provider import KimiProvider
 
         api_key = (
-            overrides.get("kimi_api_key", "")
-            or _runtime.get("kimi_api_key")
-            or getattr(settings, "kimi_api_key", "")
+            _setting_value(settings, effective_overrides, "kimi_api_key", "")
         )
         if not api_key:
             logger.warning("KIMI_API_KEY not set — requests will fail")
         logger.info("Using Kimi provider")
         return KimiProvider(
-            base_url=overrides.get("kimi_base_url", "https://api.moonshot.cn/v1"),
+            base_url=_setting_value(settings, effective_overrides, "kimi_base_url", "https://api.moonshot.cn/v1"),
             api_key=api_key,
         )
 
@@ -659,15 +752,13 @@ def create_llm_client(**overrides: Any) -> Any:
         from backend.llm.openai_provider import OpenAIProvider
 
         api_key = (
-            overrides.get("groq_api_key", "")
-            or _runtime.get("groq_api_key")
-            or getattr(settings, "groq_api_key", "")
+            _setting_value(settings, effective_overrides, "groq_api_key", "")
         )
         if not api_key:
             logger.warning("GROQ_API_KEY not set — requests will fail")
         logger.info("Using Groq provider")
         return OpenAIProvider(
-            base_url=overrides.get("groq_base_url", "https://api.groq.com/openai/v1"),
+            base_url=_setting_value(settings, effective_overrides, "groq_base_url", "https://api.groq.com/openai/v1"),
             api_key=api_key,
         )
 
@@ -675,15 +766,13 @@ def create_llm_client(**overrides: Any) -> Any:
         from backend.llm.anthropic_provider import AnthropicProvider
 
         api_key = (
-            overrides.get("anthropic_api_key", "")
-            or _runtime.get("anthropic_api_key")
-            or getattr(settings, "anthropic_api_key", "")
+            _setting_value(settings, effective_overrides, "anthropic_api_key", "")
         )
         if not api_key:
             logger.warning("ANTHROPIC_API_KEY not set — requests will fail")
         logger.info("Using Anthropic provider")
         return AnthropicProvider(
-            base_url=overrides.get("anthropic_base_url", "https://api.anthropic.com"),
+            base_url=_setting_value(settings, effective_overrides, "anthropic_base_url", "https://api.anthropic.com"),
             api_key=api_key,
         )
 
@@ -691,19 +780,17 @@ def create_llm_client(**overrides: Any) -> Any:
         from backend.llm.gemini_provider import GeminiProvider
 
         api_key = (
-            overrides.get("gemini_api_key", "")
-            or _runtime.get("gemini_api_key")
-            or getattr(settings, "gemini_api_key", "")
+            _setting_value(settings, effective_overrides, "gemini_api_key", "")
         )
         if not api_key:
             logger.warning("GEMINI_API_KEY not set — requests will fail")
         logger.info("Using Gemini provider")
         return GeminiProvider(
-            base_url=overrides.get(
+            base_url=_setting_value(
+                settings,
+                effective_overrides,
                 "gemini_base_url",
-                getattr(
-                    settings, "gemini_base_url", "https://generativelanguage.googleapis.com/v1beta"
-                ),
+                "https://generativelanguage.googleapis.com/v1beta",
             ),
             api_key=api_key,
         )
@@ -712,17 +799,14 @@ def create_llm_client(**overrides: Any) -> Any:
         from backend.llm.openrouter_provider import OpenRouterProvider
 
         api_key = (
-            overrides.get("openrouter_api_key", "")
-            or _runtime.get("openrouter_api_key")
-            or getattr(settings, "openrouter_api_key", "")
+            _setting_value(settings, effective_overrides, "openrouter_api_key", "")
         )
         if not api_key:
             logger.warning("OPENROUTER_API_KEY not set — requests will fail")
         logger.info("Using OpenRouter provider")
         return OpenRouterProvider(
-            base_url=overrides.get(
-                "openrouter_base_url",
-                getattr(settings, "openrouter_base_url", "https://openrouter.ai/api/v1"),
+            base_url=_setting_value(
+                settings, effective_overrides, "openrouter_base_url", "https://openrouter.ai/api"
             ),
             api_key=api_key,
         )
@@ -731,27 +815,26 @@ def create_llm_client(**overrides: Any) -> Any:
         from backend.llm.opencode_go_provider import OpenCodeGoProvider
 
         api_key = (
-            overrides.get("opencode_go_api_key", "")
-            or _runtime.get("opencode_go_api_key")
-            or getattr(settings, "opencode_go_api_key", "")
+            _setting_value(settings, effective_overrides, "opencode_go_api_key", "")
         )
         if not api_key:
             logger.warning("OPENCODE_GO_API_KEY not set — requests will fail")
         logger.info("Using OpenCode Go provider at https://opencode.ai/zen/go/v1")
         return OpenCodeGoProvider(
-            base_url=overrides.get(
-                "opencode_go_base_url",
-                getattr(settings, "opencode_go_base_url", "https://opencode.ai/zen/go/v1"),
+            base_url=_setting_value(
+                settings, effective_overrides, "opencode_go_base_url", "https://opencode.ai/zen/go/v1"
             ),
             api_key=api_key,
         )
 
     # Fallback to Ollama for unknown providers
     logger.warning("Unknown LLM provider '%s' — falling back to Ollama", provider)
-    primary = OllamaProvider(base_url=overrides.get("ollama_host", settings.ollama_host))
+    primary = OllamaProvider(
+        base_url=_setting_value(settings, effective_overrides, "ollama_host", settings.ollama_host)
+    )
     fallbacks = _build_fallback_chain(
         settings,
-        overrides,
+        effective_overrides,
         primary_provider="ollama",
     )
     return ResilientLLMProvider(primary, fallbacks)

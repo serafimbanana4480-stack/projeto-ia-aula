@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from backend.orchestrator.limiter import limiter
 
 from backend.observability.event_system import get_event_bus
 from backend.tasks.autonomous_tasks import get_autonomous_task_manager, TaskType, TaskPriority
@@ -119,12 +118,11 @@ async def get_task(task_id: str) -> Dict[str, Any]:
 
 
 @router.post("/tasks")
-@limiter.limit("60/minute")
 async def create_task(
     name: str,
     task_type: str,
     priority: str = "normal",
-    handler_name: str,
+    handler_name: str = "",
     parameters: Optional[Dict] = None,
     interval: Optional[int] = None,
     max_retries: int = 3,
@@ -173,7 +171,6 @@ async def create_task(
 
 
 @router.post("/tasks/{task_id}/cancel")
-@limiter.limit("60/minute")
 async def cancel_task(task_id: str, request: Request) -> Dict[str, str]:
     """Cancel a task."""
     try:

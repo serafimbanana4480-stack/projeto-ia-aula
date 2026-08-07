@@ -250,4 +250,15 @@ class EventEmitter:
         content: str = "",
         data: dict[str, Any] | None = None,
     ) -> None:
-        """Emit an event scoped to this emitter's 
+        """Emit an event scoped to this emitter's source."""
+        if isinstance(event_type, str):
+            event_type = EventType(event_type)
+        await self.bus.publish(OrchestratorEvent(
+            event_type=event_type,
+            source=self.source,
+            session_id=self.session_id,
+            task_id=self.task_id,
+            correlation_id=self._correlation_id,
+            content=content,
+            data=data or {},
+        ))

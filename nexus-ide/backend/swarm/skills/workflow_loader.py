@@ -16,7 +16,7 @@ icon: wrench
 mode: review            # architecture | investigation | implementation | review | bugfix | planning | research
 strategy: ensemble      # divide | ensemble | pipeline | debate | adaptive
 agents: [ARCHITECT, REVIEWER]
-max_iterations: 5
+max_iterations: 1000
 tags: [experimental]
 variables:
   - name: target
@@ -114,7 +114,7 @@ def _yaml_to_skill(data: dict[str, Any]) -> Skill:
             for v in data.get("variables", [])
         ],
         tags=list(data.get("tags", [])),
-        max_iterations=int(data.get("max_iterations", 5)),
+        max_iterations=int(data.get("max_iterations", 1000)),
         estimated_seconds=int(data.get("estimated_seconds", 60)),
     )
 

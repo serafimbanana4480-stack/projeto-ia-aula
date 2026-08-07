@@ -24,10 +24,32 @@ def _utcnow() -> datetime:
 
 @dataclass
 class Event:
+    """A single bus event.
+
+    ``payload`` is the canonical field — 100+ call sites read ``event.payload``.
+    ``data`` exists because 50 call sites across 11 modules (reflection,
+    meta-cognition, human oversight, cross-session memory, analytics, ...) were
+    written against a ``data=`` keyword that this class never had. Every one of
+    them raised ``TypeError`` inside a broad ``except Exception``, so those
+    subsystems looked implemented while emitting nothing at all.
+
+    Accepting the alias is the smaller change: renaming 50 call sites risks
+    touching code paths that have no test coverage, while this keeps both
+    spellings valid and always in sync.
+    """
+
     type: str  # e.g. "agent_started", "token", "anomaly", "fallback"
     agent: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=_utcnow)
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Whichever spelling the caller used wins; both then point at the same
+        # dict so a mutation through one is visible through the other.
+        if self.data and not self.payload:
+            self.payload = self.data
+        self.data = self.payload
 
 
 class EventBus:
@@ -40,6 +62,18 @@ class EventBus:
     def __init__(self, max_queue_size: int = 1000) -> None:
         self._subscribers: dict[str, list[asyncio.Queue[Event]]] = defaultdict(list)
         self._max_queue_size = max_queue_size
+
+    async def emit(self, event: Event) -> None:
+        """Alias for :meth:`publish`.
+
+        50 call sites were written against ``bus.emit(...)``, which never
+        existed on this class. Each raised ``AttributeError`` into a broad
+        ``except Exception`` and was logged as a generic failure of the
+        surrounding feature — see ``supreme.py``'s "Failed to perform
+        orchestration reflection", where the reflection had in fact succeeded
+        and only its announcement was lost.
+        """
+        await self.publish(event)
 
     async def publish(self, event: Event) -> None:
         """Publish an event to all subscribers matching its type."""

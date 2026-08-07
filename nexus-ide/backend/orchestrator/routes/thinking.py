@@ -1,7 +1,8 @@
-"""Agent thinking feed.
+"""Agent progress feed.
 
-Surfaces the recent reasoning steps emitted by agents so the dashboard
-can show the AI's mind in real time. Backed by the AgentBus ``thinking.*``
+Surfaces concise, user-safe progress updates emitted by agents so the
+dashboard can show activity in real time. It is not a raw private
+chain-of-thought log. Backed by the AgentBus ``thinking.*``
 topics plus an in-memory ring buffer for the most recent events.
 """
 
@@ -20,7 +21,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
 
 from backend.middleware.auth import require_auth
-from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def publish_thought(
     model: str | None = None,
     duration_ms: int | None = None,
 ) -> dict[str, Any]:
-    """Called by agents / orchestrator to broadcast a thought."""
+    """Broadcast a concise progress update from an agent/orchestrator."""
     ev = ThoughtEvent(
         id=str(uuid.uuid4()),
         agent=agent,
@@ -77,7 +77,6 @@ def publish_thought(
 
 
 @router.get("/agents/thinking/recent")
-@limiter.limit("120/minute")
 async def recent_thoughts(
     request: Request,
     limit: int = Query(20, ge=1, le=100),

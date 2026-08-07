@@ -8,7 +8,6 @@ Uses real AgentPool and EventBus data when available.
 import asyncio
 import json
 import logging
-import random
 import time
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
@@ -49,23 +48,28 @@ def get_event_bus(request: Request) -> Optional[Any]:
 
 
 def build_agent_from_pool(agent_id: str, instance_data: dict) -> dict:
-    """Build agent topology data from pool instance."""
+    """Build agent topology data from pool instance.
+
+    Only real values present in ``instance_data`` are emitted. Any field that
+    is not available falls back to ``None`` so the dashboard never displays
+    fabricated data.
+    """
     return {
         "id": agent_id,
         "agentId": f"AGENT-{instance_data.get('instance_id', agent_id[:4].upper())}",
         "agentType": agent_id.upper(),
         "status": instance_data.get("status", "idle"),
-        "model": instance_data.get("model", random.choice(MODELS)),
-        "task": instance_data.get("task", f"Task from {agent_id}"),
-        "cpu": instance_data.get("cpu", random.randint(10, 85)),
-        "memory": instance_data.get("memory", random.randint(20, 90)),
-        "tokensPerSecond": instance_data.get("tokens_per_second", random.randint(50, 200)),
-        "reasoningDepth": instance_data.get("reasoning_depth", random.randint(1, 5)),
-        "confidence": instance_data.get("confidence", round(random.uniform(0.7, 0.99), 3)),
+        "model": instance_data.get("model"),
+        "task": instance_data.get("task"),
+        "cpu": instance_data.get("cpu"),
+        "memory": instance_data.get("memory"),
+        "tokensPerSecond": instance_data.get("tokens_per_second"),
+        "reasoningDepth": instance_data.get("reasoning_depth"),
+        "confidence": instance_data.get("confidence"),
         "retries": instance_data.get("retries", 0),
-        "workflow": instance_data.get("workflow", f"workflow-{random.randint(1, 10)}"),
-        "x": instance_data.get("x", random.randint(100, 700)),
-        "y": instance_data.get("y", random.randint(100, 500)),
+        "workflow": instance_data.get("workflow"),
+        "x": instance_data.get("x"),
+        "y": instance_data.get("y"),
     }
 
 
@@ -105,36 +109,25 @@ async def agents_topology_stream(request: Request) -> StreamingResponse:
                                     "instance_id": instance_id,
                                     "status": status,
                                     "task": getattr(instance, "task_id", None),
-                                    "cpu": random.randint(15, 90),
-                                    "memory": random.randint(25, 85),
+                                    "model": getattr(instance, "model", None)
+                                    or getattr(instance, "model_key", None),
+                                    "cpu": getattr(instance, "cpu", None),
+                                    "memory": getattr(instance, "memory", None),
+                                    "tokens_per_second": getattr(instance, "tokens_per_second", None),
+                                    "reasoning_depth": getattr(instance, "reasoning_depth", None),
+                                    "confidence": getattr(instance, "confidence", None),
+                                    "workflow": getattr(instance, "workflow", None),
+                                    "x": getattr(instance, "x", None),
+                                    "y": getattr(instance, "y", None),
                                 })
                                 agents.append(agent_data)
 
                     if agents:
                         yield f"data: {json.dumps(agents)}\n\n"
                 else:
-                    num_agents = random.randint(4, 8)
-                    agents = []
-                    for i in range(num_agents):
-                        agent_id = random.choice(AGENT_TYPES)
-                        agents.append({
-                            "id": f"{agent_id.lower()}-{i}",
-                            "agentId": f"AGENT-{agent_id[:3].upper()}-{1000+i}",
-                            "agentType": agent_id,
-                            "status": random.choice(["active", "busy", "idle"]),
-                            "model": random.choice(MODELS),
-                            "task": f"Processing task {random.randint(1, 100)}",
-                            "cpu": random.randint(20, 90),
-                            "memory": random.randint(30, 80),
-                            "tokensPerSecond": random.randint(50, 200),
-                            "reasoningDepth": random.randint(1, 5),
-                            "confidence": round(random.uniform(0.75, 0.98), 3),
-                            "retries": random.randint(0, 2),
-                            "workflow": f"workflow-{random.randint(1, 10)}",
-                            "x": random.randint(50, 750),
-                            "y": random.randint(50, 550),
-                        })
-                    yield f"data: {json.dumps(agents)}\n\n"
+                    # No real agent pool available: emit an empty topology
+                    # payload instead of fabricated agents.
+                    yield f"data: []\n\n"
 
                 tick_count += 1
                 await asyncio.sleep(2)
@@ -173,35 +166,39 @@ async def agents_connections_stream(request: Request) -> StreamingResponse:
                 if agent_pool and hasattr(agent_pool, "agent_instances"):
                     instances_by_type = agent_pool.agent_instances or {}
 
-                    agent_ids = []
+                    # Derive real edges from agents that collaborate on the
+                    # same task.  Source/target/type come from real data; the
+                    # line width ("frequency") uses the real number of
+                    # collaborators.  "messageRate" is only included when a
+                    # real measurement is available, otherwise it is omitted.
+                    task_to_agents: dict = {}
                     for agent_id, instances in instances_by_type.items():
                         if isinstance(instances, dict) and instances:
-                            agent_ids.append(agent_id)
+                            for instance in instances.values():
+                                task_id = getattr(instance, "task_id", None)
+                                if task_id:
+                                    task_to_agents.setdefault(task_id, []).append(agent_id)
 
-                    num_connections = min(len(agent_ids) * 2, 15)
-                    for _ in range(num_connections):
-                        if len(agent_ids) >= 2:
-                            source = random.choice(agent_ids)
-                            target = random.choice([a for a in agent_ids if a != source])
-                            connections.append({
-                                "source": source.upper(),
-                                "target": target.upper(),
-                                "type": random.choice(["coordination", "debate", "planning"]),
-                                "frequency": random.randint(1, 15),
-                                "messageRate": random.randint(1, 8),
-                            })
+                    seen_pairs = set()
+                    for task_id, agents in task_to_agents.items():
+                        for i in range(len(agents)):
+                            for j in range(i + 1, len(agents)):
+                                pair = tuple(sorted((agents[i].upper(), agents[j].upper())))
+                                if pair in seen_pairs:
+                                    continue
+                                seen_pairs.add(pair)
+                                connections.append({
+                                    "source": pair[0],
+                                    "target": pair[1],
+                                    "type": "coordination",
+                                    "frequency": max(len(agents) - 1, 1),
+                                    "messageRate": None,
+                                })
                 else:
-                    num_connections = random.randint(3, 8)
-                    for _ in range(num_connections):
-                        source_type = random.choice(AGENT_TYPES)
-                        target_type = random.choice([a for a in AGENT_TYPES if a != source_type])
-                        connections.append({
-                            "source": f"AGENT-{source_type[:3]}",
-                            "target": f"AGENT-{target_type[:3]}",
-                            "type": random.choice(["debate", "coordination", "planning"]),
-                            "frequency": random.randint(1, 20),
-                            "messageRate": random.randint(1, 10),
-                        })
+                    # No real agent pool: emit an empty connections payload
+                    # instead of fabricated edges.
+                    yield f"data: []\n\n"
+                    continue
 
                 yield f"data: {json.dumps(connections)}\n\n"
                 await asyncio.sleep(2.5)
@@ -240,7 +237,7 @@ async def reasoning_stream(request: Request) -> StreamingResponse:
                 messages = []
 
                 if event_bus and hasattr(event_bus, "get_recent_events"):
-                    recent_events = event_bus.get_recent_events(limit=50)
+                    recent_events = await event_bus.get_recent_events(limit=50)
                     for event in recent_events[-5:]:
                         if hasattr(event, "type") and hasattr(event, "agent"):
                             msg_type = "reasoning"
@@ -251,38 +248,32 @@ async def reasoning_stream(request: Request) -> StreamingResponse:
                             elif "think" in event.type.lower():
                                 msg_type = "thought"
 
-                            messages.append({
-                                "id": f"evt-{message_counter}",
-                                "type": msg_type,
-                                "agentId": event.agent or "SYSTEM",
-                                "agentType": (event.agent or "SYSTEM").upper(),
-                                "timestamp": event.timestamp if hasattr(event, "timestamp") else time.time(),
-                                "content": event.payload.get("content", str(event.payload)) if hasattr(event, "payload") else str(event),
-                                "metadata": {
-                                    "confidence": round(random.uniform(0.75, 0.95), 3),
-                                    "priority": random.choice(["HIGH", "MEDIUM", "LOW"]),
+                                message = {
+                                    "id": f"evt-{message_counter}",
+                                    "type": msg_type,
+                                    "agentId": event.agent or "SYSTEM",
+                                    "agentType": (event.agent or "SYSTEM").upper(),
+                                    "timestamp": event.timestamp if hasattr(event, "timestamp") else time.time(),
+                                    "content": event.payload.get("content", str(event.payload)) if hasattr(event, "payload") else str(event),
                                 }
-                            })
-                            message_counter += 1
+
+                                # Only include metadata fields that are really
+                                # present on the event; never fabricate values.
+                                metadata = {
+                                    key: getattr(event, key, None)
+                                    for key in ("confidence", "priority", "severity", "decision")
+                                    if getattr(event, key, None) is not None
+                                }
+                                if metadata:
+                                    message["metadata"] = metadata
+
+                                messages.append(message)
+                                message_counter += 1
 
                 if not messages:
-                    num_messages = random.randint(1, 2)
-                    for _ in range(num_messages):
-                        agent_type = random.choice(AGENT_TYPES)
-                        message = {
-                            "id": f"sim-{message_counter}",
-                            "type": random.choice(["reasoning", "planning", "reflection"]),
-                            "agentId": f"{agent_type}-{random.randint(1, 100)}",
-                            "agentType": agent_type,
-                            "timestamp": datetime.now(timezone.utc).timestamp(),
-                            "content": random.choice(REASONING_TEMPLATES),
-                            "metadata": {
-                                "confidence": round(random.uniform(0.70, 0.98), 3),
-                                "priority": random.choice(["HIGH", "MEDIUM", "LOW"]),
-                            }
-                        }
-                        messages.append(message)
-                        message_counter += 1
+                    # No real EventBus data available: emit an empty reasoning
+                    # payload instead of fabricated messages.
+                    messages = []
 
                 yield f"data: {json.dumps(messages)}\n\n"
                 await asyncio.sleep(1.5)
@@ -311,42 +302,11 @@ async def memory_visualization_stream(request: Request) -> StreamingResponse:
     Returns realistic memory data based on knowledge system when available.
     """
     async def event_generator() -> AsyncIterator[str]:
-        memory_types = ["graph", "episodic", "semantic"]
-        memory_contents = [
-            "User requested code refactoring for performance optimization",
-            "Previous task involved implementing authentication system",
-            "Code review identified security vulnerability in input validation",
-            "Database schema was modified to support new user roles",
-            "API endpoint was rate-limited due to high traffic",
-            "Unit tests were added for the payment processing module",
-            "Deployment failed due to missing environment variables",
-            "Cache strategy was updated to reduce database load",
-            "ML model trained on latest dataset with 94% accuracy",
-            "User preferences updated for personalized recommendations",
-            "Document embedding generated for semantic search",
-            "Agent conversation archived for future reference",
-        ]
-
         while True:
             try:
-                memories = []
-                num_memories = random.randint(4, 10)
-
-                for _ in range(num_memories):
-                    mem_type = random.choice(memory_types)
-                    memories.append({
-                        "id": f"mem-{random.randint(10000, 99999)}",
-                        "type": mem_type,
-                        "content": random.choice(memory_contents),
-                        "importance": random.randint(40, 100),
-                        "accessCount": random.randint(0, 50),
-                        "lastAccessed": datetime.now(timezone.utc).timestamp(),
-                        "position": {
-                            "x": random.randint(50, 750),
-                            "y": random.randint(50, 550),
-                        },
-                        "connections": [f"mem-{random.randint(10000, 99999)}" for _ in range(random.randint(0, 3))],
-                    })
+                # No real memory source wired into this stream: emit an empty
+                # memory payload instead of fabricated records.
+                memories: list = []
 
                 yield f"data: {json.dumps(memories)}\n\n"
                 await asyncio.sleep(3)
@@ -379,19 +339,20 @@ async def system_metrics_stream(request: Request) -> StreamingResponse:
             try:
                 metrics = {
                     "timestamp": datetime.now(timezone.utc).timestamp(),
-                    "cpu_usage": round(random.uniform(20, 85), 1),
-                    "memory_usage": round(random.uniform(40, 80), 1),
-                    "gpu_usage": round(random.uniform(30, 95), 1),
-                    "disk_usage": round(random.uniform(25, 70), 1),
-                    "network_in": round(random.uniform(5, 50), 2),
-                    "network_out": round(random.uniform(3, 30), 2),
-                    "active_connections": random.randint(10, 50),
-                    "queue_size": random.randint(0, 20),
-                    "requests_per_second": round(random.uniform(10, 100), 1),
-                    "avg_response_time_ms": random.randint(50, 500),
-                    "tokens_per_second": random.randint(100, 2000),
-                    "cache_hit_rate": round(random.uniform(75, 95), 1),
-                    "error_rate": round(random.uniform(0, 5), 2),
+                    "cpu_usage": None,
+                    "memory_usage": None,
+                    "gpu_usage": None,
+                    "disk_usage": None,
+                    "network_in": None,
+                    "network_out": None,
+                    "active_connections": None,
+                    "queue_size": None,
+                    "requests_per_second": None,
+                    "avg_response_time_ms": None,
+                    "tokens_per_second": None,
+                    "cache_hit_rate": None,
+                    "error_rate": None,
+                    "available": False,
                 }
 
                 yield f"data: {json.dumps(metrics)}\n\n"

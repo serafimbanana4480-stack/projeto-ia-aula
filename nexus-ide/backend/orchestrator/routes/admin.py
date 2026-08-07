@@ -13,7 +13,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.middleware.auth import require_admin
-from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -28,7 +27,6 @@ def _get_manager(request: Request) -> Any:
 
 
 @router.post("/gc/run")
-@limiter.limit("10/minute")
 async def run_gc(
     request: Request,
     _admin: dict = Depends(require_admin),
@@ -51,7 +49,6 @@ async def run_gc(
 
 
 @router.get("/gc/stats")
-@limiter.limit("30/minute")
 async def get_gc_stats(
     request: Request,
     _admin: dict = Depends(require_admin),

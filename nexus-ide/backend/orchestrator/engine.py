@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -35,6 +36,7 @@ from typing import Any
 
 from backend.agents.base import AgentBase
 from backend.config.settings import get_settings
+from backend.core.conversation_log import get_conversation_logger
 from backend.orchestrator.agent_pool import AgentPool, get_agent_pool
 from backend.orchestrator.cancellation_registry import CancellationRegistry
 from backend.orchestrator.dependency_graph import ExecutionPlan, TaskNode, TaskPriority
@@ -46,6 +48,15 @@ from backend.orchestrator.plan_executor import (
     iterate_agent_output,
 )
 from backend.orchestrator.retry_manager import RetryManager
+from backend.orchestrator.verification import (
+    VerificationOutcome,
+    _create_final_review_task,
+    _create_fix_tasks,
+    _create_verification_tasks,
+    _extract_inconclusive_verifications,
+    _extract_verification_issues,
+    _find_tasks_needing_verification,
+)
 from backend.tools.ollama_client import ChatMessage
 
 try:
@@ -199,6 +210,7 @@ class OrchestrationEngine:
             event_bus,
             self._agent_pool,
             default_timeout=default_timeout,
+            max_parallel=max_parallel,
         )
         self._retry_manager = retry_manager or RetryManager(base_delay=1.0, max_retries=max_retries)
         self._cancellation = cancellation_registry or CancellationRegistry()
@@ -214,13 +226,14 @@ class OrchestrationEngine:
         *,
         context: str = "",
         history: list[ChatMessage] | None = None,
-        auto_approve: bool = False,
+        auto_approve: bool = True,
+        project_path: str = ".",
     ) -> ExecutionPlan:
         """Create a structured execution plan for ``objective``.
 
-        If ``auto_approve`` is False (default), the engine transitions to
-        ``AWAITING_APPROVAL`` and emits a ``PLAN_AWAITING_APPROVAL`` event.
-        The caller must call :meth:`approve_plan` before execution.
+        Autonomous execution is the default. If ``auto_approve`` is False,
+        the engine transitions to ``AWAITING_APPROVAL`` and emits a
+        ``PLAN_AWAITING_APPROVAL`` event for an explicitly interactive caller.
         """
         self._state[session_id] = OrchestrationState.PLANNING
 
@@ -229,6 +242,7 @@ class OrchestrationEngine:
             session_id=session_id,
             context=context,
             history=history,
+            project_path=project_path,
         )
 
         # Store plan for later retrieval
@@ -585,6 +599,13 @@ class OrchestrationEngine:
             self._state[session_id] = OrchestrationState.CANCELLED
             raise
         else:
+            # Cancellation is terminal.  It may arrive while the executor is
+            # draining layer tasks, so it must win over an optimistic result.
+            if (
+                cancellation_event.is_set()
+                or self._state.get(session_id) == OrchestrationState.CANCELLED
+            ):
+                result.state = OrchestrationState.CANCELLED
             self._state[session_id] = result.state
             return result
         finally:
@@ -625,6 +646,7 @@ class OrchestrationEngine:
             context=context,
             history=history,
             auto_approve=True,
+            project_path=project_path,
         )
 
         await self._events.publish(
@@ -643,16 +665,62 @@ class OrchestrationEngine:
             auto_approve=True,
             project_path=project_path,
         )
+        # A failed or cancelled primary plan is terminal.  Starting a review
+        # afterwards can mask that outcome as a successful autonomous run.
+        if result.state in (OrchestrationState.CANCELLED, OrchestrationState.FAILED):
+            self._state[session_id] = result.state
+            return result
 
         # Phase 3: VERIFY & ITERATE
-        for verify_round in range(max_verify_iterations):
-            if result.state == OrchestrationState.CANCELLED:
-                break
+        #
+        # ``result`` is the aggregate returned to the caller and must keep the
+        # primary run's task_results.  ``latest_result`` is what the *next*
+        # verification round inspects.  Conflating the two (the original bug)
+        # made round N verify round N-1's fix tasks, which nested task names
+        # into "Fix: Verify: Fix: Verify: ..." and discarded the primary run.
+        latest_result = result
+        outcome = VerificationOutcome(max_rounds=max_verify_iterations)
+
+        # Budget guard: reduce verification intensity when provider quota is tight.
+        llm_call_budget = int(os.environ.get("NEXUS_AUTONOMOUS_LLM_BUDGET", "0")) or (
+            len(plan.steps) + max_verify_iterations * 2 + 2
+        ) * 3
+        llm_calls_used = 0
+
+        def _remaining_llm_budget() -> int:
+            return max(0, llm_call_budget - llm_calls_used)
+
+        def _adaptive_max_rounds() -> int:
+            remaining = _remaining_llm_budget()
+            if remaining <= 0:
+                return 0
+            return min(max_verify_iterations, max(0, remaining // 2))
+
+        effective_max_rounds = _adaptive_max_rounds()
+        if effective_max_rounds < max_verify_iterations:
+            logger.warning(
+                "Autonomous: LLM budget reduced verification rounds from %d to %d",
+                max_verify_iterations,
+                effective_max_rounds,
+            )
+
+        for verify_round in range(effective_max_rounds):
+            if (
+                latest_result.state == OrchestrationState.CANCELLED
+                or self._state.get(session_id) == OrchestrationState.CANCELLED
+            ):
+                result.state = OrchestrationState.CANCELLED
+                self._state[session_id] = OrchestrationState.CANCELLED
+                return result
+
+            outcome.rounds_run = verify_round + 1
 
             # Find tasks that produced code (CODER steps) and verify them
-            verification_needed = self._find_tasks_needing_verification(result)
+            verification_needed = _find_tasks_needing_verification(latest_result)
             if not verification_needed:
                 logger.info("Autonomous: no verification needed (round %d)", verify_round + 1)
+                outcome.resolved = True
+                outcome.rounds_run = verify_round
                 break
 
             logger.info(
@@ -663,7 +731,9 @@ class OrchestrationEngine:
             )
 
             # Create verification tasks
-            verify_tasks = self._create_verification_tasks(verification_needed, result, session_id)
+            verify_tasks = _create_verification_tasks(
+                verification_needed, latest_result, session_id
+            )
 
             # Execute verification
             verify_plan = ExecutionPlan.from_steps(
@@ -679,12 +749,54 @@ class OrchestrationEngine:
                 auto_approve=True,
                 project_path=project_path,
             )
+            if verify_result.state in (OrchestrationState.CANCELLED, OrchestrationState.FAILED):
+                self._state[session_id] = verify_result.state
+                return verify_result
 
-            # Check if verification found issues
-            issues_found = self._extract_verification_issues(verify_result)
+            self._merge_task_results(result, verify_result)
+
+            # Check if verification found issues.
+            #
+            # "Could not verify" is tracked separately from "verified, found
+            # nothing". A blocked tool or a 429 means the verifier learned
+            # nothing about the code; reporting that as a pass is exactly the
+            # false green this loop exists to prevent.
+            issues_found = _extract_verification_issues(verify_result)
+            inconclusive = _extract_inconclusive_verifications(verify_result)
+            get_conversation_logger(session_id).log_verification_round(
+                verify_round + 1,
+                issues_found=len(issues_found),
+                inconclusive=len(inconclusive),
+            )
+            if inconclusive:
+                logger.warning(
+                    "Autonomous: %d verification(s) could not run in round %d "
+                    "(blocked tool / provider failure); not treating as passed: %s",
+                    len(inconclusive),
+                    verify_round + 1,
+                    ", ".join(str(item["origin"]) for item in inconclusive[:5]),
+                )
+                outcome.inconclusive_verifications = inconclusive
             if not issues_found:
+                if inconclusive:
+                    # Do not mark fully resolved and do not keep re-running a
+                    # blocked verifier: repeated provider/tool failures only
+                    # consume the autonomous budget and make the run appear
+                    # stalled. The final review still runs and the outcome
+                    # remains explicitly inconclusive.
+                    logger.info(
+                        "Autonomous: round %d produced no findings, but %d verification(s) were inconclusive; "
+                        "stopping verification rounds without claiming a pass",
+                        verify_round + 1,
+                        len(inconclusive),
+                    )
+                    break
                 logger.info("Autonomous: verification passed (round %d)", verify_round + 1)
+                outcome.resolved = True
+                outcome.outstanding_issues = []
                 break
+
+            outcome.outstanding_issues = issues_found
 
             # Phase 4: ITERATE — create fix tasks for found issues
             logger.info(
@@ -693,7 +805,7 @@ class OrchestrationEngine:
                 verify_round + 1,
             )
 
-            fix_tasks = self._create_fix_tasks(issues_found, verify_tasks, session_id)
+            fix_tasks = _create_fix_tasks(issues_found, verify_tasks, session_id)
             fix_plan = ExecutionPlan.from_steps(
                 title=f"Fix Round {verify_round + 1}",
                 description=f"Fix issues found in verification round {verify_round + 1}",
@@ -701,48 +813,94 @@ class OrchestrationEngine:
                 session_id=session_id,
             )
 
-            result = await self.execute_plan(
+            fix_result = await self.execute_plan(
                 fix_plan,
                 session_id,
                 auto_approve=True,
                 project_path=project_path,
             )
+            if fix_result.state in (OrchestrationState.CANCELLED, OrchestrationState.FAILED):
+                self._state[session_id] = fix_result.state
+                return fix_result
+
+            self._merge_task_results(result, fix_result)
+            latest_result = fix_result
+
+        if self._state.get(session_id) == OrchestrationState.CANCELLED:
+            result.state = OrchestrationState.CANCELLED
+            return result
 
         # Phase 5: FINAL REVIEW with ANALYZER
-        final_review = self._create_final_review_task(objective, result, session_id)
+        final_review = _create_final_review_task(objective, result, session_id)
         review_plan = ExecutionPlan.from_steps(
             title="Final Quality Review",
             description="Comprehensive quality review of all changes",
             steps=[final_review],
             session_id=session_id,
         )
-        await self.execute_plan(
+        review_result = await self.execute_plan(
             review_plan,
             session_id,
             auto_approve=True,
             project_path=project_path,
         )
+        if review_result.state in (OrchestrationState.CANCELLED, OrchestrationState.FAILED):
+            self._state[session_id] = review_result.state
+            return review_result
 
-        self._state[session_id] = OrchestrationState.COMPLETED
+        # The review actually ran, so its findings belong in the result the
+        # caller sees.  Previously it was executed and then thrown away.
+        self._merge_task_results(result, review_result)
+
+        # Running out of fix rounds is NOT success.  Surface it explicitly so
+        # the caller (and the user) can tell "verified clean" from "gave up" —
+        # and mark the run FAILED, otherwise the dashboard prints
+        # "Execução Autónoma Concluída" over an unresolved verification issue.
+        result.verification = outcome
+        if outcome.exhausted:
+            logger.warning("Autonomous: %s", outcome.summary())
+            result.errors.append(outcome.summary())
+            result.state = OrchestrationState.FAILED
+
+        # Preserve the result of the actual execution instead of blindly
+        # reporting success after the review phase.
+        self._state[session_id] = result.state
         return result
+
+    @staticmethod
+    def _merge_task_results(
+        target: OrchestrationResult,
+        source: OrchestrationResult,
+    ) -> None:
+        """Fold ``source`` task results and counters into ``target``.
+
+        Keeps the aggregate returned by :meth:`execute_autonomous` complete
+        instead of letting each phase overwrite the previous one.
+        """
+        for task_id, artifact in source.task_results.items():
+            if task_id in target.task_results:
+                continue
+            target.task_results[task_id] = artifact
+        target.completed_tasks += source.completed_tasks
+        target.failed_tasks += source.failed_tasks
+        target.total_duration_ms += source.total_duration_ms
+        target.tokens_used += source.tokens_used
+        for err in source.errors:
+            if err not in target.errors:
+                target.errors.append(err)
+
+    # ------------------------------------------------------------------
+    # Verification helpers
+    #
+    # The implementations live in :mod:`backend.orchestrator.verification`.
+    # These methods are thin delegations kept for backwards compatibility —
+    # the logic was previously duplicated here *and* in verification.py,
+    # and the two copies had already drifted apart.
+    # ------------------------------------------------------------------
 
     def _find_tasks_needing_verification(self, result: OrchestrationResult) -> list[dict]:
         """Find completed CODER tasks that should be verified by DEBUGGER."""
-        tasks_needing_verify = []
-        for task_id, artifact in result.task_results.items():
-            if not isinstance(artifact, dict):
-                continue
-            agent = artifact.get("agent", "")
-            status = artifact.get("status", "")
-            if agent == "CODER" and status == "completed":
-                tasks_needing_verify.append(
-                    {
-                        "task_id": task_id,
-                        "name": artifact.get("name", "Unknown"),
-                        "output": artifact.get("output", ""),
-                    }
-                )
-        return tasks_needing_verify
+        return _find_tasks_needing_verification(result)
 
     def _create_verification_tasks(
         self,
@@ -751,61 +909,11 @@ class OrchestrationEngine:
         session_id: str,
     ) -> list[TaskNode]:
         """Create DEBUGGER verification tasks for completed CODER work."""
-        verify_steps: list[TaskNode] = []
-        for task_info in tasks_to_verify:
-            verify_task = TaskNode(
-                name=f"Verify: {task_info['name']}",
-                description=(
-                    f"Verify the output of task '{task_info['name']}'. "
-                    f"Check for: bugs, syntax errors, missing imports, "
-                    f"logic errors, edge cases. "
-                    f"Run any tests if available. "
-                    f"Original output:\n{task_info['output'][:1000]}"
-                ),
-                agent="DEBUGGER",
-                priority=TaskPriority.HIGH,
-                context=task_info["output"][:2000],
-            )
-            verify_steps.append(verify_task)
-        return verify_steps
+        return _create_verification_tasks(tasks_to_verify, result, session_id)
 
     def _extract_verification_issues(self, verify_result: OrchestrationResult) -> list[dict]:
-        """Extract issues found by DEBUGGER from verification results."""
-        issues = []
-        for task_id, artifact in verify_result.task_results.items():
-            if not isinstance(artifact, dict):
-                continue
-            output = artifact.get("output", "")
-            agent = artifact.get("agent", "")
-            # Only check DEBUGGER outputs for issues
-            if agent != "DEBUGGER":
-                continue
-            # Heuristic: look for error indicators in DEBUGGER output
-            error_indicators = [
-                "error",
-                "bug",
-                "issue",
-                "problem",
-                "fix",
-                "failed",
-                "incorrect",
-                "missing",
-                "broken",
-                "erro",
-                "problema",
-                "falha",  # Portuguese
-            ]
-            output_lower = output.lower()
-            if any(ind in output_lower for ind in error_indicators):
-                issues.append(
-                    {
-                        "task_id": task_id,
-                        "name": artifact.get("name", "Unknown verification"),
-                        "output": output,
-                        "agent": agent,
-                    }
-                )
-        return issues
+        """Extract issues genuinely reported by DEBUGGER verification tasks."""
+        return _extract_verification_issues(verify_result)
 
     def _create_fix_tasks(
         self,
@@ -814,21 +922,7 @@ class OrchestrationEngine:
         session_id: str,
     ) -> list[TaskNode]:
         """Create CODER fix tasks based on DEBUGGER findings."""
-        fix_steps: list[TaskNode] = []
-        for issue in issues:
-            fix_task = TaskNode(
-                name=f"Fix: {issue['name']}",
-                description=(
-                    f"Fix the issues found during verification of '{issue['name']}'. "
-                    f"DEBUGGER findings:\n{issue['output'][:2000]}\n\n"
-                    f"Apply all necessary fixes and ensure the code works correctly."
-                ),
-                agent="CODER",
-                priority=TaskPriority.HIGH,
-                context=issue["output"][:2000],
-            )
-            fix_steps.append(fix_task)
-        return fix_steps
+        return _create_fix_tasks(issues, verify_tasks, session_id)
 
     def _create_final_review_task(
         self,
@@ -837,22 +931,7 @@ class OrchestrationEngine:
         session_id: str,
     ) -> TaskNode:
         """Create a final ANALYZER review task."""
-        completed_summary = "\n".join(
-            f"- {a.get('name', 'Unknown')}: {a.get('status', '?')}"
-            for a in result.task_results.values()
-            if isinstance(a, dict)
-        )
-        return TaskNode(
-            name="Final Quality Review",
-            description=(
-                f"Perform a comprehensive quality review of all work done for: {objective}\n\n"
-                f"Completed tasks:\n{completed_summary}\n\n"
-                f"Check for: consistency, completeness, code quality, "
-                f"security issues, performance problems, missing documentation."
-            ),
-            agent="ANALYZER",
-            priority=TaskPriority.MEDIUM,
-        )
+        return _create_final_review_task(objective, result, session_id)
 
     def get_state(self, session_id: str) -> OrchestrationState:
         """Get the current state of an orchestration run."""

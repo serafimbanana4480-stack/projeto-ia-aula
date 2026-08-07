@@ -773,7 +773,7 @@ class AutonomousTaskManager:
             "learning_time": datetime.now().isoformat()
         }
     
-    async def _system_cleanup_handler(self, **kwargs) -> DeepClean
+    async def _system_cleanup_handler(self, **kwargs) -> Dict[str, Any]:
         """Handler for system cleanup tasks."""
         deep_clean = kwargs.get("deep_clean", False)
         

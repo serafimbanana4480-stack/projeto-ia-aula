@@ -12,6 +12,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -51,6 +52,7 @@ class EventType(StrEnum):
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     TOOL_ERROR = "tool_error"
+    TOOL_CONFIRMATION = "tool_confirmation"
 
     # Planning
     PLAN_CREATED = "plan_created"
@@ -67,6 +69,20 @@ class EventType(StrEnum):
     METRIC = "metric"
     HEARTBEAT = "heartbeat"
     DONE = "done"
+
+    # Mission Control — the supervised planning layer above the raw engine.
+    # These exist so the UI can show *why* work is happening, not only that it
+    # is. See backend/orchestrator/mission_control.py.
+    MISSION_BRIEF = "mission_brief"
+    MISSION_PLAN = "mission_plan"
+    MISSION_WAVES = "mission_waves"
+    MISSION_WAVE_STARTED = "mission_wave_started"
+    MISSION_WAVE_FINISHED = "mission_wave_finished"
+    MISSION_AGENT = "mission_agent"
+    MISSION_DECISION = "mission_decision"
+    MISSION_VERIFICATION = "mission_verification"
+    MISSION_TIMELINE = "mission_timeline"
+    MISSION_COMPLETED = "mission_completed"
 
     # Autonomy / self-repair
     AUTONOMY_DECISION = "autonomy_decision"
@@ -114,8 +130,15 @@ class EventBus:
     - Multiple subscribers per event type
     - Wildcard subscription ("*" matches all events)
     - Async subscriber callbacks
-    - Backpressure via bounded queues
+    - Bounded stream queues with an explicit ``drop_oldest`` overflow policy
+
+    ``publish`` is on the critical execution path.  A disconnected or slow
+    SSE consumer must never be able to stop an agent by filling its personal
+    event queue, so stream subscribers retain the newest events and discard
+    their oldest unread event when full.
     """
+
+    STREAM_OVERFLOW_POLICY = "drop_oldest"
 
     def __init__(self, max_queue_size: int = 1000) -> None:
         self._subscribers: dict[str, list[Subscriber]] = {}
@@ -178,11 +201,40 @@ class EventBus:
         Yields events until the queue is closed.
         """
         queue: asyncio.Queue[OrchestratorEvent | None] = asyncio.Queue(maxsize=self._max_queue_size)
+        dropped_events = 0
 
         async def on_event(event: OrchestratorEvent) -> None:
+            """Enqueue without ever applying subscriber backpressure upstream.
+
+            The event bus awaits subscriber callbacks in :meth:`publish`.
+            Using ``await queue.put`` here therefore made a full client queue
+            block every publisher (and, transitively, the orchestration run).
+            We intentionally use a lossy, latest-state-wins policy instead:
+            remove one oldest unread event and enqueue the newest one.
+            """
+            nonlocal dropped_events
             if session_id and event.session_id != session_id:
                 return
-            await queue.put(event)
+            try:
+                queue.put_nowait(event)
+                return
+            except asyncio.QueueFull:
+                # ``put_nowait`` and ``get_nowait`` do not yield, so there is
+                # no race with another callback running on this event loop.
+                # Keep the newest progress/error events visible to the client.
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+
+                with contextlib.suppress(asyncio.QueueFull):
+                    queue.put_nowait(event)
+                dropped_events += 1
+                if dropped_events == 1 or dropped_events % 100 == 0:
+                    logger.warning(
+                        "Dropped %d event(s) for a slow stream subscriber "
+                        "(overflow policy=%s)",
+                        dropped_events,
+                        self.STREAM_OVERFLOW_POLICY,
+                    )
 
         types = event_types or ["*"]
         for et in types:

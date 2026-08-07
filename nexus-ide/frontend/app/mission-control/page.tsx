@@ -2,8 +2,7 @@
 
 import { useEffect, useCallback, useState, Suspense } from "react";
 import dynamic from "next/dynamic";
-import TopBar from "../../components/layout/TopBar";
-import Sidebar from "../../components/layout/Sidebar";
+import AppShell from "../../components/layout/AppShell";
 import { useMissionStore } from "../../stores/missionStore";
 import { useMissionWebSocket } from "../../hooks/useMissionWebSocket";
 import {
@@ -116,76 +115,68 @@ export default function MissionControlPage() {
   }, [fetchAll]);
 
   return (
-    <div className="flex h-screen flex-col bg-nexus-bg text-nexus-text overflow-x-hidden">
-      <TopBar />
-
-      <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
-
-        <main className="flex-1 overflow-auto overflow-x-hidden min-w-0">
-          {/* ── Header ─────────────────────────────────────────────── */}
-          <div className="sticky top-0 z-10 border-b border-nexus-border bg-nexus-panel/90 px-4 py-2 backdrop-blur">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <h1 className="text-sm font-bold tracking-wide">Mission Control</h1>
-                <span className="rounded bg-nexus-accent/10 px-1.5 py-0.5 text-[10px] text-nexus-accent">
-                  Fase 6
-                </span>
-              </div>
-              <div className="flex items-center gap-3 text-xs text-nexus-muted">
-                <button
-                  onClick={fetchAll}
-                  className="rounded border border-nexus-border bg-nexus-card px-2 py-1 text-[10px] hover:border-nexus-accent/30 transition-colors"
-                >
-                  Refresh
-                </button>
-                <span className="hidden sm:inline">Updated {lastUpdate}</span>
-              </div>
-            </div>
+    <AppShell title="Mission Control" noPadding>
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <div className="sticky top-0 z-10 border-b border-nexus-border bg-nexus-panel/90 px-4 py-2 backdrop-blur">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <h1 className="text-sm font-bold tracking-wide">Mission Control</h1>
+            <span className="rounded bg-nexus-accent/10 px-1.5 py-0.5 text-[10px] text-nexus-accent">
+              Fase 6
+            </span>
           </div>
-
-          {/* Backend offline banner */}
-          {!backendOnline && (
-            <div className="mx-4 mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2">
-              <div className="flex items-center gap-2 text-xs text-red-400">
-                <WifiOff className="h-3.5 w-3.5" />
-                <span className="font-medium">Backend Offline</span>
-                <span className="text-red-300">— Dados em tempo real indisponíveis. Tentando reconectar...</span>
-              </div>
-            </div>
-          )}
-
-          <div className="p-4 space-y-4">
-            {/* ── Top Row: Missions + Agents ───────────────────────── */}
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <Suspense fallback={<WidgetSkeleton height="h-64" />}>
-                <ActiveMissionsPanel />
-              </Suspense>
-              <Suspense fallback={<WidgetSkeleton height="h-64" />}>
-                <AgentGrid />
-              </Suspense>
-            </div>
-
-            {/* ── Middle Row: Bus + Decisions + Quality Gates ──────── */}
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-              <Suspense fallback={<WidgetSkeleton height="h-64" />}>
-                <BusVisualizer />
-              </Suspense>
-              <Suspense fallback={<WidgetSkeleton height="h-64" />}>
-                <DecisionTimeline />
-              </Suspense>
-              <Suspense fallback={<WidgetSkeleton height="h-64" />}>
-                <QualityGateStatus />
-              </Suspense>
-            </div>
-
-            {/* ── Bottom Row: System Health ────────────────────────── */}
-            <Suspense fallback={<WidgetSkeleton height="h-64" />}>
-              <SystemHealthPanel />
-            </Suspense>
+          <div className="flex items-center gap-3 text-xs text-nexus-muted">
+            <button
+              onClick={fetchAll}
+              className="rounded border border-nexus-border bg-nexus-card px-2 py-1 text-[10px] hover:border-nexus-accent/30 transition-colors"
+            >
+              Refresh
+            </button>
+            <span className="hidden sm:inline">Updated {lastUpdate}</span>
           </div>
-        </main>
+        </div>
       </div>
-    </div>
+
+      {/* Backend offline banner */}
+      {!backendOnline && (
+        <div className="mx-4 mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2">
+          <div className="flex items-center gap-2 text-xs text-red-400">
+            <WifiOff className="h-3.5 w-3.5" />
+            <span className="font-medium">Backend Offline</span>
+            <span className="text-red-300">— Dados em tempo real indisponíveis. Tentando reconectar...</span>
+          </div>
+        </div>
+      )}
+
+      <div className="p-4 space-y-4">
+        {/* ── Top Row: Missions + Agents ───────────────────────── */}
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <Suspense fallback={<WidgetSkeleton height="h-64" />}>
+            <ActiveMissionsPanel />
+          </Suspense>
+          <Suspense fallback={<WidgetSkeleton height="h-64" />}>
+            <AgentGrid />
+          </Suspense>
+        </div>
+
+        {/* ── Middle Row: Bus + Decisions + Quality Gates ──────── */}
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <Suspense fallback={<WidgetSkeleton height="h-64" />}>
+            <BusVisualizer />
+          </Suspense>
+          <Suspense fallback={<WidgetSkeleton height="h-64" />}>
+            <DecisionTimeline />
+          </Suspense>
+          <Suspense fallback={<WidgetSkeleton height="h-64" />}>
+            <QualityGateStatus />
+          </Suspense>
+        </div>
+
+        {/* ── Bottom Row: System Health ────────────────────────── */}
+        <Suspense fallback={<WidgetSkeleton height="h-64" />}>
+          <SystemHealthPanel />
+        </Suspense>
+      </div>
+    </AppShell>
   );
 }

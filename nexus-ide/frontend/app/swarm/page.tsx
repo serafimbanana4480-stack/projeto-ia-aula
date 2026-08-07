@@ -1,5 +1,6 @@
 "use client";
 import { Suspense, useState, useCallback, useEffect } from "react";
+import AppShell from "../../components/layout/AppShell";
 import SwarmPanel from "../../components/swarm/SwarmPanel";
 import ThinkingBlock from "../../components/chat/ThinkingBlock";
 
@@ -20,7 +21,10 @@ function SwarmClient() {
   }, []);
 
   return (
-    <main className="flex h-full flex-col">
+    // A plain <div>, not <main> — AppShell already provides the page's
+    // <main> landmark, so this stays a nested content block instead of a
+    // second landmark.
+    <div className="flex h-full flex-col">
       <div className="grid h-full grid-cols-1 lg:grid-cols-[1fr_400px]">
         <div className="border-r border-nexus-border">
           <SwarmPanel sessionId="default" onInsertIntoChat={insertIntoChat} />
@@ -49,14 +53,16 @@ function SwarmClient() {
           </div>
         </aside>
       </div>
-    </main>
+    </div>
   );
 }
 
 export default function SwarmPage() {
   return (
-    <Suspense fallback={<div className="flex h-full items-center justify-center text-nexus-muted">A carregar SWARM...</div>}>
-      <SwarmClient />
-    </Suspense>
+    <AppShell title="SWARM" noPadding>
+      <Suspense fallback={<div className="flex h-full items-center justify-center text-nexus-muted">A carregar SWARM...</div>}>
+        <SwarmClient />
+      </Suspense>
+    </AppShell>
   );
 }

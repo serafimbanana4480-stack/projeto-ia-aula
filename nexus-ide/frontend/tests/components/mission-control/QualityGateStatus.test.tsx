@@ -4,13 +4,12 @@ import QualityGateStatus from "../../../components/mission-control/QualityGateSt
 import { useMissionStore } from "../../../stores/missionStore";
 
 describe("QualityGateStatus", () => {
-  it("renders placeholder gates when no data", () => {
+  it("renders a clear empty state when no gate data is available", () => {
     useMissionStore.setState({ qualityGates: [] });
     render(<QualityGateStatus />);
     expect(screen.getByText("Quality Gates")).toBeDefined();
-    expect(screen.getByText("Testes")).toBeDefined();
-    expect(screen.getByText("Segurança")).toBeDefined();
-    expect(screen.getByText("Performance")).toBeDefined();
+    expect(screen.getByText("Sem gates de qualidade disponíveis")).toBeDefined();
+    expect(screen.getByText("Aguardando eventos do backend")).toBeDefined();
   });
 
   it("renders gate values when provided", () => {

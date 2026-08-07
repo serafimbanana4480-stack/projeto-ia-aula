@@ -2,22 +2,109 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ==========================================================================
+   NEXUS DESIGN SYSTEM — "Deep Space" v2
+   --------------------------------------------------------------------------
+   A dark, dimensional UI language. Three ideas carry the whole system:
+
+   1. DEPTH IS LIGHT, NOT LINES.  Surfaces read as physical because each one
+      has a rim highlight on its top edge (light falls from above) and a
+      multi-layer tinted shadow below. Borders are a fallback, not the effect.
+   2. ELEVATION IS A SCALE, NOT A GUESS.  Four levels (0-3). A widget picks a
+      level; the level decides background, rim, shadow and blur together.
+   3. MOTION CONFIRMS STATE.  Animation exists to say "this is live" or "this
+      responded", never for decoration. Everything respects reduced-motion.
+   ========================================================================== */
+
 :root {
+  /* ---- Base surfaces: each step is a real luminance step, not opacity ---- */
+  --nx-void: #06060d;
+  --nx-bg: #0a0a13;
+  --nx-surface-1: #101018;
+  --nx-surface-2: #16161f;
+  --nx-surface-3: #1c1c28;
+  --nx-surface-4: #242433;
+
+  /* ---- Hairlines. Two weights: structural and decorative. ---- */
+  --nx-line: rgba(255, 255, 255, 0.07);
+  --nx-line-strong: rgba(255, 255, 255, 0.12);
+
+  /* ---- Rim light. The single most important 3D cue. ---- */
+  --nx-rim: rgba(255, 255, 255, 0.08);
+  --nx-rim-strong: rgba(255, 255, 255, 0.14);
+
+  /* ---- Accents ---- */
+  --nx-accent: #7c6afb;
+  --nx-accent-bright: #9b8cff;
+  --nx-accent-deep: #5b46e0;
+  --nx-cyan: #22d3ee;
+  --nx-emerald: #34d399;
+  --nx-amber: #fbbf24;
+  --nx-rose: #fb7185;
+
+  /* ---- Text ---- */
+  --nx-text: #ecedf3;
+  --nx-text-dim: #a4a6b8;
+  --nx-text-faint: #6e7085;
+
+  /* ---- Glows, derived from accents so retheming stays coherent ---- */
   --nexus-glow: rgba(124, 106, 251, 0.4);
-  --nexus-glow-strong: rgba(124, 106, 251, 0.6);
+  --nexus-glow-strong: rgba(124, 106, 251, 0.62);
   --nexus-gradient-start: #7c6afb;
   --nexus-gradient-end: #a78bfa;
-  --nexus-bg-deep: #08080f;
-  --nexus-surface: #12121e;
+  --nexus-bg-deep: #0a0a13;
+  --nexus-surface: #16161f;
+
+  /* ---- Elevation shadows. Layered: contact + diffuse + ambient tint. ---- */
+  --nx-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 6px -2px rgba(0, 0, 0, 0.35);
+  --nx-shadow-2: 0 1px 2px rgba(0, 0, 0, 0.45), 0 6px 16px -6px rgba(0, 0, 0, 0.55),
+    0 12px 32px -12px rgba(60, 45, 160, 0.28);
+  --nx-shadow-3: 0 2px 4px rgba(0, 0, 0, 0.5), 0 12px 28px -10px rgba(0, 0, 0, 0.62),
+    0 28px 64px -24px rgba(60, 45, 160, 0.4);
+  --nx-shadow-accent: 0 8px 24px -8px rgba(124, 106, 251, 0.5),
+    0 2px 6px -2px rgba(124, 106, 251, 0.35);
+
+  /* ---- Motion ---- */
+  --nx-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --nx-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --nx-dur-fast: 140ms;
+  --nx-dur: 240ms;
+  --nx-dur-slow: 420ms;
+
+  /* ---- Layout ---- */
+  --nx-radius: 14px;
+  --nx-radius-lg: 20px;
+}
+
+/* Light theme kept token-compatible so `.light` never breaks a component. */
+:root.light,
+.light {
+  --nx-void: #eef0f6;
+  --nx-bg: #f5f6fa;
+  --nx-surface-1: #ffffff;
+  --nx-surface-2: #fbfbfe;
+  --nx-surface-3: #f2f3f9;
+  --nx-surface-4: #e9ebf3;
+  --nx-line: rgba(10, 10, 25, 0.09);
+  --nx-line-strong: rgba(10, 10, 25, 0.16);
+  --nx-rim: rgba(255, 255, 255, 0.9);
+  --nx-rim-strong: rgba(255, 255, 255, 1);
+  --nx-text: #14141f;
+  --nx-text-dim: #4b4d61;
+  --nx-text-faint: #7a7c90;
+  --nx-shadow-1: 0 1px 2px rgba(20, 20, 45, 0.06), 0 2px 6px -2px rgba(20, 20, 45, 0.08);
+  --nx-shadow-2: 0 1px 2px rgba(20, 20, 45, 0.07), 0 8px 20px -8px rgba(20, 20, 45, 0.14);
+  --nx-shadow-3: 0 2px 4px rgba(20, 20, 45, 0.08), 0 16px 36px -14px rgba(20, 20, 45, 0.2);
 }
 
 html,
 body {
   height: 100%;
 }
+
 body {
-  background: var(--nexus-bg-deep);
-  color: #e8e8ed;
+  background: var(--nx-bg);
+  color: var(--nx-text);
   font-family:
     ui-sans-serif,
     system-ui,
@@ -25,19 +112,69 @@ body {
     "SF Pro Text",
     Inter,
     sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "ss01";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+textarea,
+input,
+select {
+  font: inherit;
+}
+
+/* Numbers in dashboards must not jitter as they tick. */
+.tabular,
+.font-mono {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Scrollbars: present but recessive ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--nx-surface-4) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--nx-surface-4);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--nx-accent) 45%, var(--nx-surface-4));
+  background-clip: content-box;
+}
+
+/* Visible, on-brand focus. Never remove the ring — move it. */
+:focus-visible {
+  outline: 2px solid var(--nx-accent);
+  outline-offset: 2px;
+  border-radius: 6px;
 }
 
 @layer base {
   ::selection {
-    background: rgba(124, 106, 251, 0.3);
+    background: rgba(124, 106, 251, 0.32);
     color: #fff;
   }
 }
 
+/* ==========================================================================
+   KEYFRAMES
+   ========================================================================== */
+
 @keyframes pulse-subtle {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
   }
   50% {
@@ -46,7 +183,8 @@ body {
 }
 
 @keyframes float {
-  0%, 100% {
+  0%,
+  100% {
     transform: translateY(0);
   }
   50% {
@@ -75,7 +213,8 @@ body {
 }
 
 @keyframes glow-pulse {
-  0%, 100% {
+  0%,
+  100% {
     box-shadow: 0 0 5px var(--nexus-glow);
   }
   50% {
@@ -83,21 +222,362 @@ body {
   }
 }
 
+@keyframes glow {
+  0% {
+    box-shadow: 0 0 5px rgba(167, 139, 250, 0.2);
+  }
+  100% {
+    box-shadow: 0 0 20px rgba(167, 139, 250, 0.6);
+  }
+}
+
+/* Slow drift for the ambient background blobs. */
+@keyframes aurora-drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  33% {
+    transform: translate3d(3%, -4%, 0) scale(1.08);
+  }
+  66% {
+    transform: translate3d(-3%, 3%, 0) scale(0.95);
+  }
+}
+
+/* Live-data cue: a highlight sweeping across a card's top edge. */
+@keyframes rim-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}
+
+/* Concentric rings for "agent is working" indicators. */
+@keyframes radar-ping {
+  0% {
+    transform: scale(0.7);
+    opacity: 0.6;
+  }
+  80%,
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ticker-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ==========================================================================
+   COMPONENT LAYER
+   ========================================================================== */
+
 @layer components {
+  /* ---- ELEVATION -------------------------------------------------------
+     `.nx-elev-N` is the whole 3D recipe in one class: background, rim light,
+     shadow. Compose it with `.nx-surface` for the specular sheen.
+     -------------------------------------------------------------------- */
+
+  .nx-elev-0 {
+    background: var(--nx-surface-1);
+    box-shadow: inset 0 1px 0 0 var(--nx-rim);
+    border: 1px solid var(--nx-line);
+  }
+
+  .nx-elev-1 {
+    background: linear-gradient(180deg, var(--nx-surface-2), var(--nx-surface-1));
+    box-shadow:
+      inset 0 1px 0 0 var(--nx-rim),
+      var(--nx-shadow-1);
+    border: 1px solid var(--nx-line);
+  }
+
+  .nx-elev-2 {
+    background: linear-gradient(180deg, var(--nx-surface-3), var(--nx-surface-1));
+    box-shadow:
+      inset 0 1px 0 0 var(--nx-rim-strong),
+      var(--nx-shadow-2);
+    border: 1px solid var(--nx-line);
+  }
+
+  .nx-elev-3 {
+    background: linear-gradient(180deg, var(--nx-surface-4), var(--nx-surface-2));
+    box-shadow:
+      inset 0 1px 0 0 var(--nx-rim-strong),
+      var(--nx-shadow-3);
+    border: 1px solid var(--nx-line-strong);
+  }
+
+  /* Sunken wells — inputs, code blocks, progress tracks. Light from above
+     means the shadow goes on the INSIDE TOP. */
+  .nx-inset {
+    background: var(--nx-void);
+    box-shadow:
+      inset 0 2px 6px rgba(0, 0, 0, 0.55),
+      inset 0 1px 0 rgba(0, 0, 0, 0.6),
+      0 1px 0 var(--nx-rim);
+    border: 1px solid var(--nx-line);
+  }
+
+  /* Specular sheen: a faint diagonal light wash across a raised surface.
+     This is what separates "a dark box" from "a lit object". */
+  .nx-surface {
+    position: relative;
+    isolation: isolate;
+  }
+  .nx-surface::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.055) 0%,
+      rgba(255, 255, 255, 0.012) 34%,
+      transparent 62%
+    );
+    pointer-events: none;
+    z-index: 0;
+  }
+  .nx-surface > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* ---- INTERACTION -----------------------------------------------------
+     Hover lifts the object toward the viewer: it rises, its shadow deepens
+     and spreads, and its rim brightens. All three together, or it reads flat.
+     -------------------------------------------------------------------- */
+
+  .nx-lift {
+    transition:
+      transform var(--nx-dur) var(--nx-ease),
+      box-shadow var(--nx-dur) var(--nx-ease),
+      border-color var(--nx-dur) var(--nx-ease);
+    will-change: transform;
+  }
+  .nx-lift:hover {
+    transform: translateY(-3px);
+    box-shadow:
+      inset 0 1px 0 0 var(--nx-rim-strong),
+      var(--nx-shadow-3);
+    border-color: rgba(124, 106, 251, 0.34);
+  }
+  .nx-lift:active {
+    transform: translateY(-1px);
+    transition-duration: var(--nx-dur-fast);
+  }
+
+  /* Pointer-tracked parallax tilt. JS sets --rx/--ry; CSS does the rest, so
+     it degrades to a static card if the script never runs. */
+  .nx-tilt {
+    transform-style: preserve-3d;
+    transform: perspective(1100px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg))
+      translateZ(0);
+    transition: transform var(--nx-dur) var(--nx-ease);
+  }
+  .nx-tilt-layer {
+    transform: translateZ(28px);
+  }
+
+  /* A cursor-following specular hotspot. Requires --mx/--my in %. */
+  .nx-spotlight {
+    position: relative;
+  }
+  .nx-spotlight::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: radial-gradient(
+      340px circle at var(--mx, 50%) var(--my, 50%),
+      rgba(124, 106, 251, 0.14),
+      transparent 62%
+    );
+    opacity: 0;
+    transition: opacity var(--nx-dur) var(--nx-ease);
+    pointer-events: none;
+  }
+  .nx-spotlight:hover::after {
+    opacity: 1;
+  }
+
+  /* ---- GLASS -----------------------------------------------------------
+     Saturation boost is what makes real frosted glass; blur alone looks grey.
+     -------------------------------------------------------------------- */
+
+  .nx-glass {
+    background: color-mix(in srgb, var(--nx-surface-2) 62%, transparent);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid var(--nx-line);
+    box-shadow:
+      inset 0 1px 0 0 var(--nx-rim),
+      var(--nx-shadow-2);
+  }
+
+  .glass {
+    background: rgba(18, 18, 30, 0.6);
+    backdrop-filter: blur(14px) saturate(160%);
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  /* ---- AMBIENT BACKGROUND ---------------------------------------------
+     Fixed, GPU-cheap, and behind everything. Gives the page a sense of
+     volume so panels look like they float in a space, not on a flat wall.
+     -------------------------------------------------------------------- */
+
+  .nx-ambient {
+    position: relative;
+    isolation: isolate;
+  }
+  .nx-ambient::before {
+    content: "";
+    position: fixed;
+    inset: -20%;
+    z-index: -2;
+    pointer-events: none;
+    background:
+      radial-gradient(38rem 30rem at 12% -8%, rgba(124, 106, 251, 0.16), transparent 68%),
+      radial-gradient(34rem 26rem at 92% 4%, rgba(34, 211, 238, 0.09), transparent 66%),
+      radial-gradient(40rem 34rem at 62% 108%, rgba(91, 70, 224, 0.11), transparent 70%);
+    filter: blur(12px);
+    animation: aurora-drift 34s var(--nx-ease-in-out) infinite;
+  }
+  /* Grid floor: a 1px lattice fading with distance. Reads as a horizon. */
+  .nx-ambient::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image:
+      linear-gradient(var(--nx-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--nx-line) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(ellipse 78% 62% at 50% 0%, #000 8%, transparent 76%);
+    -webkit-mask-image: radial-gradient(ellipse 78% 62% at 50% 0%, #000 8%, transparent 76%);
+    opacity: 0.5;
+  }
+
+  .nexus-shell {
+    background-image: radial-gradient(
+      circle at 52% -20%,
+      rgba(124, 92, 246, 0.1),
+      transparent 34rem
+    );
+  }
+
+  /* ---- LIVE INDICATORS -------------------------------------------------- */
+
+  /* Sweeping highlight along a card's top edge = "streaming". */
+  .nx-live-rim {
+    position: relative;
+    overflow: hidden;
+  }
+  .nx-live-rim::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 1px;
+    width: 40%;
+    background: linear-gradient(90deg, transparent, var(--nx-accent-bright), transparent);
+    animation: rim-sweep 2.8s var(--nx-ease-in-out) infinite;
+    pointer-events: none;
+  }
+
+  .nx-ping {
+    position: relative;
+  }
+  .nx-ping::before,
+  .nx-ping::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    border: 1px solid currentColor;
+    animation: radar-ping 2.4s var(--nx-ease-in-out) infinite;
+    pointer-events: none;
+  }
+  .nx-ping::after {
+    animation-delay: 1.2s;
+  }
+
+  /* ---- TEXT ------------------------------------------------------------- */
+
+  .nx-title {
+    background: linear-gradient(180deg, #ffffff 0%, color-mix(in srgb, var(--nx-text) 62%, transparent) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    letter-spacing: -0.022em;
+  }
+
+  .nx-accent-text {
+    background: linear-gradient(100deg, var(--nx-accent-bright), var(--nx-cyan));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* ---- LEGACY ALIASES ---------------------------------------------------
+     Kept so the ~100 files still using `.card` / `.card-hover` inherit the
+     new depth model for free instead of breaking.
+     -------------------------------------------------------------------- */
+
   .card {
-    background: #161622;
-    border: 1px solid #1e1e2d;
-    border-radius: 12px;
+    background: linear-gradient(180deg, var(--nx-surface-2), var(--nx-surface-1));
+    border: 1px solid var(--nx-line);
+    border-radius: var(--nx-radius);
+    box-shadow:
+      inset 0 1px 0 0 var(--nx-rim),
+      var(--nx-shadow-1);
   }
 
   .card-hover {
     transition:
-      border-color 0.2s ease,
-      background 0.2s ease;
+      transform var(--nx-dur) var(--nx-ease),
+      border-color var(--nx-dur) var(--nx-ease),
+      box-shadow var(--nx-dur) var(--nx-ease);
   }
   .card-hover:hover {
-    border-color: rgba(124, 106, 251, 0.25);
-    background: #1a1a28;
+    transform: translateY(-2px);
+    border-color: rgba(124, 106, 251, 0.3);
+    box-shadow:
+      inset 0 1px 0 0 var(--nx-rim-strong),
+      var(--nx-shadow-2);
+  }
+
+  .tool-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border: 1px solid var(--nx-line);
+    border-radius: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    color: var(--nx-text-dim);
+    background: var(--nx-surface-2);
+    box-shadow: inset 0 1px 0 0 var(--nx-rim);
+    font-size: 10px;
   }
 
   .scrollbar-hide::-webkit-scrollbar {
@@ -115,34 +595,74 @@ body {
     background: transparent;
   }
   .thin-scrollbar::-webkit-scrollbar-thumb {
-    background: #2a2a3e;
+    background: var(--nx-surface-4);
     border-radius: 4px;
   }
 
-  .glass {
-    background: rgba(18, 18, 30, 0.6);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
+  /* Gradient hairline border via mask-composite. */
   .gradient-border {
     position: relative;
-    border-radius: 12px;
-    background: #161622;
+    border-radius: var(--nx-radius);
+    background: var(--nx-surface-2);
   }
   .gradient-border::before {
     content: "";
     position: absolute;
     inset: 0;
-    border-radius: 12px;
+    border-radius: inherit;
     padding: 1px;
-    background: linear-gradient(135deg, var(--nexus-gradient-start), var(--nexus-gradient-end));
+    background: linear-gradient(
+      135deg,
+      var(--nexus-gradient-start),
+      var(--nexus-gradient-end)
+    );
     -webkit-mask:
       linear-gradient(#fff 0 0) content-box,
       linear-gradient(#fff 0 0);
     -webkit-mask-composite: xor;
     mask-composite: exclude;
     pointer-events: none;
+  }
+
+  /* Loading placeholder that actually looks like it is loading. */
+  .nx-shimmer {
+    background: linear-gradient(
+      90deg,
+      var(--nx-surface-2) 25%,
+      var(--nx-surface-4) 50%,
+      var(--nx-surface-2) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.6s linear infinite;
+  }
+}
+
+/* ==========================================================================
+   ACCESSIBILITY
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .nx-tilt,
+  .nx-lift:hover {
+    transform: none !important;
+  }
+}
+
+/* Backdrop-filter is expensive on low-end GPUs; drop to a solid fill. */
+@media (max-width: 640px) {
+  .nx-glass {
+    backdrop-filter: blur(10px) saturate(140%);
+    -webkit-backdrop-filter: blur(10px) saturate(140%);
+  }
+  .nx-ambient::after {
+    display: none;
   }
 }

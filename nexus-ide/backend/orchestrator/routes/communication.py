@@ -6,7 +6,6 @@ from pydantic import BaseModel
 import uuid
 from typing import Any, Optional
 
-from backend.orchestrator.limiter import limiter
 
 from backend.orchestrator.agent_communication_bus import (
     AgentCommunicationBus,
@@ -42,7 +41,6 @@ class MessageResponse(BaseModel):
 
 
 @router.post("/messages", response_model=MessageResponse)
-@limiter.limit("60/minute")
 async def send_message(request: SendMessageRequest, http_request: Request) -> MessageResponse:
     if _bus is None:
         raise HTTPException(status_code=503, detail="Communication bus not available")

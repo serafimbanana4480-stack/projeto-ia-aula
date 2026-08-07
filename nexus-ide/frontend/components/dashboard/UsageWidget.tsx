@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { DollarSign, Coins, BarChart3, RefreshCw, AlertCircle, Layers } from "lucide-react";
 import {
@@ -11,6 +11,9 @@ import {
   Legend,
 } from "recharts";
 import { authHeaders, apiUrl } from "../../lib/api";
+import { formatRelativeTime } from "../../lib/format";
+import { Surface, SurfaceHeader } from "../ui/Surface";
+import { Button, Meter, AnimatedNumber, EmptyState } from "../ui/Primitives";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 interface UsageData {
@@ -63,15 +66,58 @@ const CHART_COLORS = [
   "#06b6d4",
 ];
 
+// Consistent tone → text-colour lookup so status colour reads the same as
+// every other widget: emerald healthy, amber warning, rose critical.
+const TONE_TEXT: Record<"success" | "warning" | "danger", string> = {
+  success: "text-emerald-400",
+  warning: "text-amber-400",
+  danger: "text-rose-400",
+};
+
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toLocaleString();
+  return n.toLocaleString("pt-PT");
 }
 
 function formatCost(n: number): string {
   if (n < 0.01) return "$<0.01";
   return `$${n.toFixed(4)}`;
+}
+
+/** Splits a raw count into the {number, suffix} pair AnimatedNumber needs to
+ * ease a compact "1.2M" style value instead of ticking through every digit. */
+function splitCompact(value: number): { num: number; suffix: string; decimals: number } {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) return { num: value / 1_000_000, suffix: "M", decimals: 1 };
+  if (abs >= 1_000) return { num: value / 1_000, suffix: "K", decimals: 1 };
+  return { num: value, suffix: "", decimals: 0 };
+}
+
+function costTone(cost: number): "success" | "warning" | "danger" {
+  if (cost > 1) return "danger";
+  if (cost > 0.5) return "warning";
+  return "success";
+}
+
+function tokensTone(tokens: number): "success" | "warning" | "danger" {
+  if (tokens > 500_000) return "danger";
+  if (tokens > 250_000) return "warning";
+  return "success";
+}
+
+function WidgetShell({ children }: { children: ReactNode }) {
+  return (
+    <Surface elevation={2} padding="md">
+      <SurfaceHeader
+        icon={<DollarSign className="h-4 w-4" />}
+        title="Custos & Uso"
+        subtitle="Consumo de tokens e custo por modelo e agente"
+        tone="success"
+      />
+      {children}
+    </Surface>
+  );
 }
 
 export default function UsageWidget() {
@@ -129,238 +175,278 @@ export default function UsageWidget() {
     return entries.slice(0, 5).map(([name, info]) => ({
       name,
       tokens: info.total_tokens,
-      pct: total > 0 ? ((info.total_tokens / total) * 100).toFixed(1) : "0",
+      pct: total > 0 ? (info.total_tokens / total) * 100 : 0,
     }));
   }, [data]);
 
   if (loading && !data) {
     return (
-      <div className="rounded-xl border border-nexus-border bg-[#13131f]/40 p-5">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400">
-              <DollarSign className="h-4 w-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-white">Custos & Uso</h3>
-              <p className="text-[10px] text-nexus-muted">Consumo de tokens por modelo</p>
-            </div>
-          </div>
+      <WidgetShell>
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <div className="nx-shimmer h-[62px] rounded-lg" />
+          <div className="nx-shimmer h-[62px] rounded-lg" />
         </div>
-        <div className="flex items-center justify-center py-12">
-          <RefreshCw className="h-5 w-5 animate-spin text-nexus-muted" />
+        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div className="nx-shimmer h-44 rounded-lg" />
+          <div className="nx-shimmer h-44 rounded-lg" />
         </div>
-      </div>
+      </WidgetShell>
     );
   }
 
   if (error) {
     return (
-      <div className="rounded-xl border border-nexus-border bg-[#13131f]/40 p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <AlertCircle className="h-4 w-4 text-red-400" />
-          <span className="text-xs text-red-400">Erro ao carregar dados de uso</span>
+      <WidgetShell>
+        <div className="mt-4">
+          <EmptyState
+            icon={<AlertCircle className="h-6 w-6" />}
+            title="Erro ao carregar dados de uso"
+            hint={error}
+            action={
+              <Button
+                variant="secondary"
+                size="xs"
+                icon={<RefreshCw className="h-3 w-3" />}
+                onClick={() => {
+                  setLoading(true);
+                  fetchUsage();
+                }}
+              >
+                Tentar novamente
+              </Button>
+            }
+          />
         </div>
-        <p className="text-xs text-nexus-muted mb-3">{error}</p>
-        <button
-          onClick={() => { setLoading(true); fetchUsage(); }}
-          className="flex items-center gap-1 text-xs text-nexus-accent hover:underline"
-        >
-          <RefreshCw className="h-3 w-3" /> Tentar novamente
-        </button>
-      </div>
+      </WidgetShell>
     );
   }
 
   if (!data || data.total_tokens === 0) {
     return (
-      <div className="rounded-xl border border-nexus-border bg-[#13131f]/40 p-5">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400">
-              <DollarSign className="h-4 w-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-white">Custos & Uso</h3>
-              <p className="text-[10px] text-nexus-muted">Consumo de tokens por modelo</p>
-            </div>
-          </div>
+      <WidgetShell>
+        <div className="mt-4">
+          <EmptyState
+            icon={<Coins className="h-6 w-6" />}
+            title="Sem dados de uso registados"
+            hint="Os dados aparecem aqui assim que interagires com um modelo LLM — o sistema está pronto, falta apenas a primeira chamada."
+          />
         </div>
-        <div className="py-8 text-center">
-          <Coins className="h-8 w-8 mx-auto text-nexus-muted/50 mb-2" />
-          <p className="text-xs text-nexus-muted">Nenhum dado de uso registado ainda.</p>
-          <p className="text-[10px] text-nexus-muted/60 mt-1">
-            Os dados aparecerão após interagires com modelos LLM.
-          </p>
-        </div>
-      </div>
+      </WidgetShell>
     );
   }
 
-  const costColor = data.total_cost > 1.0 ? "text-red-400" : "text-emerald-400";
-  const tokensColor = data.total_tokens > 500_000 ? "text-red-400" : "text-emerald-400";
+  const tot = splitCompact(data.total_tokens);
+  const totIn = splitCompact(data.total_tokens_in);
+  const totOut = splitCompact(data.total_tokens_out);
+  const outShare = data.total_tokens > 0 ? (data.total_tokens_out / data.total_tokens) * 100 : 0;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="rounded-xl border border-nexus-border bg-[#13131f]/40 p-5 hover:border-nexus-accent/30 transition-all"
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400">
-            <DollarSign className="h-4 w-4" />
-          </div>
-          <div>
-            <h3 className="text-sm font-semibold text-white">Custos & Uso</h3>
-            <p className="text-[10px] text-nexus-muted">Consumo de tokens por modelo</p>
-          </div>
-        </div>
-
-        {/* Time range selector */}
-        <div className="flex gap-1 rounded-lg bg-[#0b0b14]/60 p-0.5">
-          {(Object.keys(RANGE_LABELS) as TimeRange[]).map((r) => (
-            <button
-              key={r}
-              onClick={() => setRange(r)}
-              className={`px-2 py-1 text-[10px] font-medium rounded-md transition-colors ${
-                range === r
-                  ? "bg-nexus-accent/20 text-nexus-accent"
-                  : "text-nexus-muted hover:text-white"
-              }`}
-            >
-              {r}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Big stat cards */}
-      <div className="grid grid-cols-2 gap-3 mb-5">
-        <div className="bg-[#0b0b14]/50 border border-nexus-border/40 p-3 rounded-lg">
-          <div className="flex items-center gap-1 text-[10px] text-nexus-muted mb-1">
-            <Coins className="h-3 w-3" />
-            <span>Total Tokens</span>
-          </div>
-          <div className={`text-lg font-mono font-bold ${tokensColor}`}>
-            {formatTokens(data.total_tokens)}
-          </div>
-          <div className="text-[10px] text-nexus-muted mt-0.5">
-            {formatTokens(data.total_tokens_in)} in / {formatTokens(data.total_tokens_out)} out
-          </div>
-        </div>
-        <div className="bg-[#0b0b14]/50 border border-nexus-border/40 p-3 rounded-lg">
-          <div className="flex items-center gap-1 text-[10px] text-nexus-muted mb-1">
-            <DollarSign className="h-3 w-3" />
-            <span>Custo Total</span>
-          </div>
-          <div className={`text-lg font-mono font-bold ${costColor}`}>
-            {formatCost(data.total_cost)}
-          </div>
-          <div className="text-[10px] text-nexus-muted mt-0.5">
-            {data.currency}
-          </div>
-        </div>
-      </div>
-
-      {/* Pie chart & Agent breakdown */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Model pie chart */}
-        <div>
-          <div className="flex items-center gap-1 text-[10px] text-nexus-muted mb-2 font-semibold uppercase tracking-wider">
-            <BarChart3 className="h-3 w-3" />
-            Por Modelo
-          </div>
-          {pieData.length > 0 ? (
-            <div className="h-44">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={pieData}
-                    dataKey="value"
-                    nameKey="name"
-                    cx="50%"
-                    cy="50%"
-                    outerRadius={70}
-                    innerRadius={30}
-                    paddingAngle={2}
+    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+      <Surface elevation={2} padding="md">
+        <SurfaceHeader
+          icon={<DollarSign className="h-4 w-4" />}
+          title="Custos & Uso"
+          subtitle="Consumo de tokens e custo por modelo e agente"
+          tone="success"
+          action={
+            <div className="flex items-center gap-1.5">
+              <div className="nx-inset flex gap-0.5 rounded-lg p-0.5" role="tablist" aria-label="Intervalo de tempo">
+                {(Object.keys(RANGE_LABELS) as TimeRange[]).map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    role="tab"
+                    aria-selected={range === r}
+                    onClick={() => setRange(r)}
+                    className={`rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${
+                      range === r
+                        ? "bg-nexus-accent/25 text-[var(--nx-accent-bright)]"
+                        : "text-nexus-faint hover:text-nexus-text"
+                    }`}
                   >
-                    {pieData.map((entry) => (
-                      <Cell key={entry.fullName} fill={entry.color} stroke="none" />
-                    ))}
-                  </Pie>
-                  <RechartsTooltip
-                    content={({ active, payload }) => {
-                      if (!active || !payload?.[0]) return null;
-                      const d = payload[0].payload;
-                      return (
-                        <div className="rounded-lg border border-nexus-border bg-[#1a1a2e] p-2 shadow-xl text-xs">
-                          <p className="font-semibold text-white">{d.fullName}</p>
-                          <p className="text-nexus-muted">{formatTokens(d.value)} tokens</p>
-                          <p className="text-emerald-400">{formatCost(d.cost)}</p>
-                        </div>
-                      );
-                    }}
-                  />
-                  <Legend
-                    wrapperStyle={{ fontSize: "10px", color: "#a0a0b0" }}
-                    formatter={(value: string) => (
-                      <span className="text-[10px] text-nexus-muted">{value}</span>
-                    )}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
+                    {r}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setLoading(true);
+                  fetchUsage();
+                }}
+                aria-label="Atualizar dados de uso"
+                title="Atualizar"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-nexus-faint transition-colors hover:bg-white/[0.06] hover:text-[var(--nx-accent-bright)]"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+              </button>
             </div>
-          ) : (
-            <p className="text-[11px] text-nexus-muted italic">Sem dados de modelo</p>
-          )}
-        </div>
+          }
+        />
 
-        {/* Agent ranking */}
-        <div>
-          <div className="flex items-center gap-1 text-[10px] text-nexus-muted mb-2 font-semibold uppercase tracking-wider">
-            <Layers className="h-3 w-3" />
-            Top Agentes
+        {/* Big stat cards */}
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <div className="nx-inset rounded-lg p-3">
+            <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-nexus-faint">
+              <Coins className="h-3 w-3" />
+              <span>Total de tokens</span>
+            </div>
+            <div className={`mt-1 font-mono text-lg font-bold tabular-nums ${TONE_TEXT[tokensTone(data.total_tokens)]}`}>
+              <AnimatedNumber value={tot.num} decimals={tot.decimals} />
+              {tot.suffix}
+            </div>
+            <div className="mt-0.5 flex items-center gap-1 text-[10px] text-nexus-muted">
+              <span className="text-cyan-400">
+                <AnimatedNumber value={totIn.num} decimals={totIn.decimals} />
+                {totIn.suffix} in
+              </span>
+              <span className="text-nexus-faint">/</span>
+              <span className="text-[var(--nx-accent-bright)]">
+                <AnimatedNumber value={totOut.num} decimals={totOut.decimals} />
+                {totOut.suffix} out
+              </span>
+            </div>
+            <Meter value={outShare} tone="accent" showThresholds={false} height={4} className="mt-2" />
           </div>
-          {agentRanking.length > 0 ? (
-            <div className="space-y-2">
-              {agentRanking.map((agent, idx) => (
-                <div key={agent.name} className="flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="shrink-0 w-4 text-[10px] text-nexus-muted font-mono">
-                      #{idx + 1}
-                    </span>
-                    <span className="truncate max-w-[100px] text-white font-medium">
-                      {agent.name}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="text-nexus-muted font-mono">
-                      {formatTokens(agent.tokens)}
-                    </span>
-                    <span className="text-[10px] text-nexus-muted/60 w-8 text-right">
-                      {agent.pct}%
-                    </span>
-                  </div>
-                </div>
-              ))}
+          <div className="nx-inset rounded-lg p-3">
+            <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-nexus-faint">
+              <DollarSign className="h-3 w-3" />
+              <span>Custo total</span>
             </div>
-          ) : (
-            <p className="text-[11px] text-nexus-muted italic">Sem dados de agente</p>
-          )}
+            <div className={`mt-1 font-mono text-lg font-bold tabular-nums ${TONE_TEXT[costTone(data.total_cost)]}`}>
+              {data.total_cost < 0.01 ? (
+                "$<0.01"
+              ) : (
+                <>
+                  $<AnimatedNumber value={data.total_cost} decimals={4} />
+                </>
+              )}
+            </div>
+            <div className="mt-0.5 text-[10px] text-nexus-muted">
+              {data.currency} · {RANGE_LABELS[range].toLowerCase()}
+            </div>
+            <Meter
+              value={Math.min(100, (data.total_cost / 1) * 100)}
+              tone={costTone(data.total_cost)}
+              showThresholds={false}
+              height={4}
+              className="mt-2"
+            />
+          </div>
         </div>
-      </div>
 
-      <div className="mt-4 pt-3 border-t border-nexus-border/40 flex items-center justify-between text-[10px] text-nexus-muted">
-        <span>{RANGE_LABELS[range]}</span>
-        <button
-          onClick={() => { setLoading(true); fetchUsage(); }}
-          className="flex items-center gap-1 hover:text-nexus-accent transition-colors"
-        >
-          <RefreshCw className="h-3 w-3" /> Atualizar
-        </button>
-      </div>
+        {/* Pie chart & Agent breakdown */}
+        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {/* Model pie chart */}
+          <div>
+            <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+              <BarChart3 className="h-3 w-3" />
+              Por modelo
+            </div>
+            {pieData.length > 0 ? (
+              <div className="h-44">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={pieData}
+                      dataKey="value"
+                      nameKey="name"
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={70}
+                      innerRadius={30}
+                      paddingAngle={2}
+                    >
+                      {pieData.map((entry) => (
+                        <Cell key={entry.fullName} fill={entry.color} stroke="none" />
+                      ))}
+                    </Pie>
+                    <RechartsTooltip
+                      content={({ active, payload }) => {
+                        if (!active || !payload?.[0]) return null;
+                        const d = payload[0].payload;
+                        return (
+                          <div className="nx-elev-2 nx-surface rounded-lg px-2.5 py-2 text-xs">
+                            <p className="font-semibold text-nexus-text">{d.fullName}</p>
+                            <p className="text-nexus-muted">{formatTokens(d.value)} tokens</p>
+                            <p className="text-emerald-400">{formatCost(d.cost)}</p>
+                          </div>
+                        );
+                      }}
+                    />
+                    <Legend
+                      wrapperStyle={{ fontSize: "10px", color: "#a4a6b8" }}
+                      formatter={(value: string) => (
+                        <span className="text-[10px] text-nexus-muted">{value}</span>
+                      )}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <EmptyState
+                compact
+                icon={<BarChart3 className="h-5 w-5" />}
+                title="Sem dados de modelo"
+                hint="Ainda não há utilização suficiente para agrupar por modelo."
+              />
+            )}
+          </div>
+
+          {/* Agent ranking */}
+          <div>
+            <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+              <Layers className="h-3 w-3" />
+              Top agentes
+            </div>
+            {agentRanking.length > 0 ? (
+              <div className="space-y-2.5">
+                {agentRanking.map((agent, idx) => (
+                  <div key={agent.name} className="min-w-0">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="w-4 shrink-0 font-mono text-[10px] text-nexus-faint">
+                          #{idx + 1}
+                        </span>
+                        <span className="truncate font-medium text-nexus-text" title={agent.name}>
+                          {agent.name}
+                        </span>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <span className="font-mono text-[11px] tabular-nums text-nexus-muted">
+                          {formatTokens(agent.tokens)}
+                        </span>
+                        <span className="w-9 text-right text-[10px] tabular-nums text-nexus-faint">
+                          <AnimatedNumber value={agent.pct} decimals={1} />%
+                        </span>
+                      </div>
+                    </div>
+                    <Meter
+                      value={agent.pct}
+                      tone={idx === 0 ? "accent" : "neutral"}
+                      showThresholds={false}
+                      height={4}
+                      className="mt-1"
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                compact
+                icon={<Layers className="h-5 w-5" />}
+                title="Sem dados de agente"
+                hint="Os agentes aparecem aqui depois de executarem pedidos."
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="mt-4 flex items-center justify-between border-t border-[var(--nx-line)] pt-3 text-[10px] text-nexus-faint">
+          <span>{RANGE_LABELS[range]} · atualiza a cada 30s</span>
+          <span>Gerado {formatRelativeTime(data.generated_at)}</span>
+        </div>
+      </Surface>
     </motion.div>
   );
 }

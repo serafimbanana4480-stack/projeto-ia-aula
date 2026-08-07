@@ -34,6 +34,10 @@ TOOL_TTL_CONFIG: dict[str, int] = {
     "list_dir": 60,
     "read_file": 120,  # 2 min — file may be edited
     "read_multiple_files": 120,
+    "read_file_absolute": 120,
+    "read_multiple_files_absolute": 120,
+    "list_dir_absolute": 60,
+    "search_files_absolute": 300,
     "web_search": 600,  # 10 min — web is stable short-term
     "search_web_v2": 600,
     "fetch_url": 300,
@@ -47,6 +51,7 @@ TOOL_TTL_CONFIG: dict[str, int] = {
     # Tools that should NEVER be cached
     "shell": 0,
     "execute_shell": 0,
+    "run_shell": 0,
     "execute_code": 0,
     "execute_python": 0,
     "execute_script": 0,
@@ -127,6 +132,56 @@ class ToolResultCache:
     def clear(self) -> None:
         """Clear all cached results."""
         self._cache.clear()
+
+    def invalidate_tools(self, tool_names: set[str]) -> int:
+        """Invalidate cached entries belonging to any tool in *tool_names*."""
+        removed = 0
+        for key in list(self._cache):
+            entry = self._cache[key]
+            result = entry[0]
+            cached_tool = result.get("tool") if isinstance(result, dict) else None
+            if cached_tool in tool_names:
+                del self._cache[key]
+                removed += 1
+        return removed
+
+    def invalidate_after_mutation(self, tool_name: str) -> int:
+        """Drop filesystem views after a successful mutating operation."""
+        mutations = {
+            "append_file",
+            "copy_file",
+            "copy_file_absolute",
+            "create_directory",
+            "create_dir_absolute",
+            "delete_directory",
+            "delete_dir_absolute",
+            "delete_file",
+            "delete_file_absolute",
+            "format_code",
+            "git_operation",
+            "move_file",
+            "move_file_absolute",
+            "run_shell",
+            "write_file",
+            "write_file_absolute",
+        }
+        if tool_name not in mutations:
+            return 0
+        return self.invalidate_tools(
+            {
+                "get_file_info",
+                "index_stats",
+                "list_dir",
+                "list_dir_absolute",
+                "read_file",
+                "read_file_absolute",
+                "read_multiple_files",
+                "read_multiple_files_absolute",
+                "search_codebase",
+                "search_files_absolute",
+                "search_in_files",
+            }
+        )
 
     def get_metrics(self) -> dict:
         total = self._hits + self._misses

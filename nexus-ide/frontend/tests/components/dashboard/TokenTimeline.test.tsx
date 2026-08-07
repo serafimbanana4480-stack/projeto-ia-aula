@@ -28,14 +28,15 @@ describe("TokenTimeline", () => {
   it("renderiza o título PT e o estado vazio quando não há dados", () => {
     render(<TokenTimeline />);
     expect(screen.getByText("Linha Temporal de Tokens")).toBeDefined();
-    expect(screen.getByText("sem dados")).toBeDefined();
     expect(screen.getByText("Sem dados disponíveis")).toBeDefined();
   });
 
   it("mostra o spinner de carregamento PT quando historyLoading é true", () => {
     useMetricsStore.setState({ historyLoading: true });
     render(<TokenTimeline />);
-    expect(screen.getByText("A carregar…")).toBeDefined();
+    expect(
+      screen.getByRole("status", { name: "A carregar histórico de tokens" }),
+    ).toBeDefined();
   });
 
   it("mostra o alerta de erro PT quando historyError está definido", () => {

@@ -1,7 +1,8 @@
 "use client";
-import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
-import { Users, Brain, Loader2, Sparkles, MessageSquare, Zap } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Users, Brain, Sparkles, MessageSquare, Zap } from "lucide-react";
+import { Surface, SurfaceHeader } from "../ui/Surface";
+import { Badge, StatusDot, Meter, AnimatedNumber, EmptyState } from "../ui/Primitives";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -25,17 +26,19 @@ function authHeaders(): Record<string, string> {
   return {};
 }
 
-const STATE_COLORS: Record<string, string> = {
-  proposed: "#64748b",
-  discussed: "#0ea5e9",
-  validated: "#f59e0b",
-  approved: "#10b981",
-  implementing: "#3b82f6",
-  implemented: "#10b981",
-  reviewing: "#f59e0b",
-  completed: "#10b981",
-  rejected: "#ef4444",
-  failed: "#ef4444",
+type RunTone = "neutral" | "info" | "accent" | "success" | "warning" | "danger";
+
+const STATE_TONE: Record<string, RunTone> = {
+  proposed: "neutral",
+  discussed: "info",
+  validated: "accent",
+  approved: "success",
+  implementing: "accent",
+  implemented: "success",
+  reviewing: "warning",
+  completed: "success",
+  rejected: "danger",
+  failed: "danger",
 };
 
 const STATE_LABELS_PT: Record<string, string> = {
@@ -43,13 +46,26 @@ const STATE_LABELS_PT: Record<string, string> = {
   discussed: "Discutido",
   validated: "Validado",
   approved: "Aprovado",
-  implementing: "Implementando",
+  implementing: "A implementar",
   implemented: "Implementado",
-  reviewing: "Revisando",
+  reviewing: "Em revisão",
   completed: "Concluído",
   rejected: "Rejeitado",
   failed: "Falhou",
 };
+
+function WidgetShell({ children }: { children: ReactNode }) {
+  return (
+    <Surface elevation={1} padding="sm">
+      <SurfaceHeader
+        icon={<Users className="h-4 w-4" />}
+        title="SWARM"
+        subtitle="Orquestração multi-agente"
+      />
+      {children}
+    </Surface>
+  );
+}
 
 export default function SwarmWidget() {
   const [data, setData] = useState<SwarmDashboardData | null>(null);
@@ -81,23 +97,34 @@ export default function SwarmWidget() {
     };
   }, []);
 
-  if (loading) {
+  if (loading && !data) {
     return (
-      <div className="flex h-64 items-center justify-center rounded-xl border border-nexus-border bg-nexus-card/30">
-        <Loader2 className="h-5 w-5 animate-spin text-nexus-muted" />
-      </div>
+      <WidgetShell>
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          <div className="nx-shimmer h-14 rounded-lg" />
+          <div className="nx-shimmer h-14 rounded-lg" />
+          <div className="nx-shimmer h-14 rounded-lg" />
+        </div>
+        <div className="mt-3 space-y-1.5">
+          <div className="nx-shimmer h-8 rounded-lg" />
+          <div className="nx-shimmer h-8 rounded-lg" />
+        </div>
+      </WidgetShell>
     );
   }
 
   if (error) {
     return (
-      <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
-        <div className="flex items-center gap-2 text-xs text-amber-400">
-          <Sparkles className="h-3.5 w-3.5" />
-          <span>SWARM backend offline</span>
+      <WidgetShell>
+        <div className="mt-3">
+          <EmptyState
+            compact
+            icon={<Sparkles className="h-5 w-5" />}
+            title="Backend do SWARM offline"
+            hint={error}
+          />
         </div>
-        <div className="mt-1 text-[10px] text-amber-300/70">{error}</div>
-      </div>
+      </WidgetShell>
     );
   }
 
@@ -112,107 +139,88 @@ export default function SwarmWidget() {
   const successRate = (recentCompleted / recentDenominator) * 100;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="rounded-xl border border-fuchsia-500/20 bg-gradient-to-br from-fuchsia-500/5 via-violet-500/5 to-transparent p-4 shadow-lg shadow-fuchsia-500/5"
-    >
-      <div className="mb-3 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-fuchsia-500/15 text-fuchsia-400">
-            <Users className="h-3.5 w-3.5" />
-          </div>
-          <div>
-            <h3 className="text-sm font-semibold text-nexus-text">SWARM</h3>
-            <p className="text-[10px] text-nexus-muted">Multi-agent orchestration</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className="rounded-full bg-fuchsia-500/15 px-2 py-0.5 text-[10px] font-medium text-fuchsia-400">
-            {data.total_runs} runs
-          </span>
-        </div>
-      </div>
+    <Surface elevation={1} padding="sm">
+      <SurfaceHeader
+        icon={<Users className="h-4 w-4" />}
+        title="SWARM"
+        subtitle="Orquestração multi-agente"
+        action={<Badge tone="accent"><AnimatedNumber value={data.total_runs} /> execuções</Badge>}
+      />
 
       {/* Top metrics */}
-      <div className="mb-3 grid grid-cols-3 gap-2">
-        <div className="rounded-lg border border-nexus-border/60 bg-nexus-bg/40 p-2">
-          <div className="flex items-center gap-1 text-[10px] text-nexus-muted">
-            <Brain className="h-3 w-3" /> Memory
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        <div className="nx-inset rounded-lg p-2">
+          <div className="flex items-center gap-1 text-[10px] text-nexus-faint">
+            <Brain className="h-3 w-3" /> Memória
           </div>
-          <div className="mt-0.5 font-mono text-sm text-nexus-text">{totalMemory}</div>
-          <div className="text-[9px] text-nexus-muted">5 layers</div>
+          <div className="mt-0.5 font-mono text-sm tabular-nums text-nexus-text">
+            <AnimatedNumber value={totalMemory} />
+          </div>
+          <div className="text-[9px] text-nexus-faint">5 camadas</div>
         </div>
-        <div className="rounded-lg border border-nexus-border/60 bg-nexus-bg/40 p-2">
-          <div className="flex items-center gap-1 text-[10px] text-nexus-muted">
+        <div className="nx-inset rounded-lg p-2">
+          <div className="flex items-center gap-1 text-[10px] text-nexus-faint">
             <MessageSquare className="h-3 w-3" /> RAG
           </div>
-          <div className="mt-0.5 font-mono text-sm text-nexus-text">{data.retriever.chunks}</div>
-          <div className="text-[9px] text-nexus-muted">{data.retriever.embeddings} embeddings</div>
-        </div>
-        <div className="rounded-lg border border-nexus-border/60 bg-nexus-bg/40 p-2">
-          <div className="flex items-center gap-1 text-[10px] text-nexus-muted">
-            <Zap className="h-3 w-3" /> Success
+          <div className="mt-0.5 font-mono text-sm tabular-nums text-nexus-text">
+            <AnimatedNumber value={data.retriever.chunks} />
           </div>
-          <div className="mt-0.5 font-mono text-sm text-nexus-text">{successRate.toFixed(0)}%</div>
-          <div className="text-[9px] text-nexus-muted">last {recentRuns.length}</div>
+          <div className="text-[9px] text-nexus-faint">{data.retriever.embeddings} embeddings</div>
+        </div>
+        <div className="nx-inset rounded-lg p-2">
+          <div className="flex items-center gap-1 text-[10px] text-nexus-faint">
+            <Zap className="h-3 w-3" /> Sucesso
+          </div>
+          <div className="mt-0.5 font-mono text-sm tabular-nums text-nexus-text">
+            <AnimatedNumber value={successRate} decimals={0} />%
+          </div>
+          <Meter value={successRate} tone="success" showThresholds={false} height={3} className="mt-1" />
         </div>
       </div>
 
       {/* Memory layers */}
-      <div className="mb-3 grid grid-cols-5 gap-1">
+      <div className="mt-3 grid grid-cols-5 gap-1">
         {Object.entries(data.memory).map(([layer, count]) => (
-          <div
-            key={layer}
-            className="rounded border border-nexus-border/40 bg-nexus-bg/20 px-1.5 py-1 text-center"
-          >
-            <div className="text-[9px] uppercase tracking-wider text-nexus-muted">{layer.slice(0, 4)}</div>
-            <div className="font-mono text-[11px] text-nexus-text">{count}</div>
+          <div key={layer} className="nx-elev-0 rounded-lg px-1.5 py-1 text-center">
+            <div className="truncate text-[9px] uppercase tracking-wider text-nexus-faint" title={layer}>
+              {layer.slice(0, 4)}
+            </div>
+            <div className="font-mono text-[11px] tabular-nums text-nexus-text">{count}</div>
           </div>
         ))}
       </div>
 
       {/* Recent runs */}
-      <div>
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
-          Recent runs
+      <div className="mt-3">
+        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+          Execuções recentes
         </div>
-        {data.recent_runs.length === 0 ? (
-          <div className="rounded-md border border-dashed border-nexus-border/50 px-3 py-4 text-center text-[11px] text-nexus-muted">
-            No runs yet. Launch one from the SWARM panel.
-          </div>
+        {recentRuns.length === 0 ? (
+          <EmptyState
+            compact
+            icon={<Users className="h-5 w-5" />}
+            title="Ainda sem execuções"
+            hint="Inicia uma execução a partir do painel SWARM."
+          />
         ) : (
-          <div className="max-h-44 space-y-1 overflow-y-auto thin-scrollbar">
+          <div className="nx-inset max-h-44 divide-y divide-[var(--nx-line)] overflow-y-auto rounded-lg thin-scrollbar">
             {recentRuns.slice(0, 6).map((r: any) => {
-              const color = STATE_COLORS[r.state] ?? "#64748b";
+              const tone = STATE_TONE[r.state] ?? "neutral";
               return (
-                <div
-                  key={r.run_id}
-                  className="flex items-center gap-2 rounded-md border border-nexus-border/40 bg-nexus-bg/30 px-2 py-1.5"
-                >
-                  <div
-                    className="h-1.5 w-1.5 shrink-0 rounded-full"
-                    style={{ backgroundColor: color }}
-                  />
-                  <span className="font-mono text-[10px] text-nexus-muted">
-                    {r.run_id.slice(0, 6)}
-                  </span>
-                  <span className="flex-1 truncate text-[11px] text-nexus-text">
+                <div key={r.run_id} className="flex items-center gap-2 px-2 py-1.5">
+                  <StatusDot tone={tone} pulse={r.state === "implementing"} />
+                  <span className="font-mono text-[10px] text-nexus-faint">{r.run_id.slice(0, 6)}</span>
+                  <span className="flex-1 truncate text-[11px] text-nexus-text" title={r.mode}>
                     {r.mode}
                   </span>
-                  <span className="text-[10px] text-nexus-muted">{r.duration_ms}ms</span>
-                  <span
-                    className="rounded px-1.5 py-0.5 text-[9px] font-medium"
-                    style={{ backgroundColor: `${color}20`, color }}
-                  >
-                    {STATE_LABELS_PT[r.state] ?? r.state}
-                  </span>
+                  <span className="text-[10px] tabular-nums text-nexus-faint">{r.duration_ms}ms</span>
+                  <Badge tone={tone}>{STATE_LABELS_PT[r.state] ?? r.state}</Badge>
                 </div>
               );
             })}
           </div>
         )}
       </div>
-    </motion.div>
+    </Surface>
   );
 }

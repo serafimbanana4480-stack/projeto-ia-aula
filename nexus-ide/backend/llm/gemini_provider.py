@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 
 from backend.config.settings import get_settings
+from backend.llm.openai_provider import _system_verify_context
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class GeminiProvider:
             base_url=self._base_url,
             headers={"Content-Type": "application/json"},
             timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=5.0),
+            verify=_system_verify_context(),
         )
         # Internal — set after each successful chat call
         self._last_usage: dict[str, int] = {}
@@ -158,26 +160,24 @@ class GeminiProvider:
         self._last_usage = {}
         resolved = self.resolve_model(model)
         payload: dict[str, Any] = self._convert_messages(messages)
-        # Gemini uses generationConfig
-        gen_config: dict[str, Any] = {}
-        if options:
-            for key in ("temperature", "max_output_tokens", "top_p", "top_k"):
-                if key in options:
-                    # Map common option names to Gemini equivalents
-                    if key == "max_output_tokens" or key == "top_k":
-                        gen_config[key] = options[key]
-                    else:
-                        gen_config[key] = options[key]
+        # Gemini uses camelCase generationConfig fields.  Accept the common
+        # OpenAI/Ollama option names too, since agents use one provider-neutral
+        # options dictionary.
+        gen_config = self._generation_config(options)
         if gen_config:
             payload["generationConfig"] = gen_config
 
         url = self._get_model_url(resolved, "streamGenerateContent")
+        # Gemini only delivers incremental SSE frames when ``alt=sse`` is
+        # requested.  Authentication uses the query key for this REST API.
+        params = {**self._key_param(), "alt": "sse"}
 
         max_retries = 3
         last_exc: Exception | None = None
+        emitted_text = False
         for attempt in range(1, max_retries + 1):
             try:
-                async with self._client.stream("POST", url, json=payload) as resp:
+                async with self._client.stream("POST", url, json=payload, params=params) as resp:
                     if resp.status_code != 200:
                         text = await resp.aread()
                         if resp.status_code >= 500 and attempt < max_retries:
@@ -192,50 +192,62 @@ class GeminiProvider:
                             await asyncio.sleep(wait)
                             continue
                         raise RuntimeError(f"Gemini API error {resp.status_code}: {text.decode()}")
-                    last_chunk: dict[str, Any] = {}
+
                     async for line in resp.aiter_lines():
                         line = line.strip()
-                        if not line or line == "data: []":
+                        if not line:
                             continue
-                        if line.startswith("["):
-                            # Gemini streaming returns raw JSON array (one entry per chunk)
-                            try:
-                                chunks = json.loads(line)
-                                for chunk in chunks:
-                                    last_chunk = chunk
-                                    candidates = chunk.get("candidates", [])
-                                    if candidates:
-                                        parts = candidates[0].get("content", {}).get("parts", [])
-                                        for part in parts:
-                                            text_piece = part.get("text", "")
-                                            if text_piece:
-                                                yield text_piece
-                            except json.JSONDecodeError:
+
+                        # REST streaming frames have the standard SSE ``data:``
+                        # prefix.  The parser also accepts the older raw JSON
+                        # array format for backwards-compatible proxies.
+                        if line.startswith("data:"):
+                            line = line[5:].lstrip()
+                        if line in ("[DONE]", "[]"):
+                            break
+
+                        try:
+                            decoded = json.loads(line)
+                        except json.JSONDecodeError:
+                            logger.debug(
+                                "Skipping malformed Gemini stream frame: %s", line[:200]
+                            )
+                            continue
+
+                        chunks = decoded if isinstance(decoded, list) else [decoded]
+                        for chunk in chunks:
+                            if not isinstance(chunk, dict):
                                 continue
-                            # Extract usage from the last chunk if available
-                            if last_chunk:
-                                usage_gemini = last_chunk.get("usageMetadata", {})
-                                if usage_gemini:
-                                    self._last_usage = {
-                                        "input_tokens": usage_gemini.get("promptTokenCount", 0) or 0,
-                                        "output_tokens": usage_gemini.get("candidatesTokenCount", 0) or 0,
-                                    }
-                            return
-                        if line.startswith("{"):
-                            try:
-                                chunk = json.loads(line)
-                                last_chunk = chunk
-                                candidates = chunk.get("candidates", [])
-                                if candidates:
-                                    parts = candidates[0].get("content", {}).get("parts", [])
-                                    for part in parts:
-                                        text_piece = part.get("text", "")
-                                        if text_piece:
-                                            yield text_piece
-                            except json.JSONDecodeError:
+                            usage_gemini = chunk.get("usageMetadata", {})
+                            if usage_gemini:
+                                self._last_usage = {
+                                    "input_tokens": usage_gemini.get("promptTokenCount", 0) or 0,
+                                    "output_tokens": (
+                                        usage_gemini.get("candidatesTokenCount", 0) or 0
+                                    ),
+                                    "total_tokens": usage_gemini.get("totalTokenCount", 0) or 0,
+                                }
+                            candidates = chunk.get("candidates", [])
+                            if not candidates:
                                 continue
-                    return
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            for part in parts:
+                                text_piece = part.get("text", "")
+                                if text_piece:
+                                    emitted_text = True
+                                    yield text_piece
+
+                    if emitted_text:
+                        return
+                    # A successful HTTP status with no parsed content used to
+                    # look like a successful blank assistant response.  Treat
+                    # it as a provider failure so the caller can fail over.
+                    raise RuntimeError("Gemini stream completed without text content")
             except (httpx.NetworkError, httpx.TimeoutException) as exc:
+                # Retrying after emitting any token duplicates the user-visible
+                # response.  Surface the interruption instead.
+                if emitted_text:
+                    raise
                 last_exc = exc
                 if attempt < max_retries:
                     wait = 2 ** (attempt - 1)
@@ -262,14 +274,7 @@ class GeminiProvider:
         """Non-streaming chat completion."""
         resolved = self.resolve_model(model)
         payload: dict[str, Any] = self._convert_messages(messages)
-        gen_config: dict[str, Any] = {}
-        if options:
-            for key in ("temperature", "max_output_tokens", "top_p", "top_k"):
-                if key in options:
-                    if key in ("max_output_tokens", "top_k"):
-                        gen_config[key] = options[key]
-                    else:
-                        gen_config[key] = options[key]
+        gen_config = self._generation_config(options)
         if gen_config:
             payload["generationConfig"] = gen_config
 
@@ -285,6 +290,26 @@ class GeminiProvider:
         content = candidates[0].get("content", {})
         parts = content.get("parts", [])
         return "".join(p.get("text", "") for p in parts)
+
+    @staticmethod
+    def _generation_config(options: dict[str, Any] | None) -> dict[str, Any]:
+        """Translate provider-neutral options into Gemini REST field names."""
+        if not options:
+            return {}
+
+        config: dict[str, Any] = {}
+        if "temperature" in options:
+            config["temperature"] = options["temperature"]
+        if "top_p" in options:
+            config["topP"] = options["top_p"]
+        if "top_k" in options:
+            config["topK"] = options["top_k"]
+
+        for source_key in ("max_output_tokens", "max_tokens", "num_predict"):
+            if source_key in options:
+                config["maxOutputTokens"] = options[source_key]
+                break
+        return config
 
     async def embed(
         self,

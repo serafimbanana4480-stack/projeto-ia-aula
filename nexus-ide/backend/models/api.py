@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 AgentName = Literal[
     "ROUTER",
+    "PLANNER",
     "ARCHITECT",
     "ARCHITECT_DESIGN",
     "ARCHITECT_COMPLEXITY",
@@ -49,9 +50,23 @@ EventType = Literal[
     "tool_call",
     "tool_result",
     "tool_error",
+    "tool_confirmation",
+    "progress",
     "agent_finished",
     "error",
+    "metric",
     "done",
+    # Mission Control. These carry the *why* of a run — the interpreted
+    # objective, the measured project state, the plan, and the contract each
+    # agent was spawned under. Emitted before any agent exists, so the client
+    # can render intent rather than only activity.
+    "mission_brief",
+    "mission_plan",
+    "mission_wave",
+    "mission_agent",
+    "mission_decision",
+    "mission_verification",
+    "mission_completed",
 ]
 
 
@@ -71,7 +86,12 @@ class ChatRequest(BaseModel):
     model: str = Field(
         default="",
         max_length=128,
-        description="Model tier key (e.g. 'coder','deep','reasoning') selected by the user in the UI. Empty string means auto-route.",
+        description=(
+            "Either a concrete provider model id ('anthropic/claude-sonnet-4', "
+            "'qwen2.5:7b') or a router tier key ('coder', 'deep', 'reasoning'). "
+            "A concrete id is used verbatim; a tier is resolved via "
+            "config/models.yaml. Empty string or 'auto' means auto-route."
+        ),
     )
     project_path: str = Field(
         default="",
@@ -87,6 +107,13 @@ class ChatRequest(BaseModel):
         default="",
         max_length=32,
         description="Thinking depth: '' (auto), 'low', 'medium', 'high'",
+    )
+    autonomous: bool = Field(
+        default=True,
+        description=(
+            "Continue without human feedback for reversible work. Set false "
+            "to use interactive confirmation gates for every risky tool."
+        ),
     )
     swarm_agents: list[str] = Field(
         default_factory=list, description="Agent names to use in swarm mode"

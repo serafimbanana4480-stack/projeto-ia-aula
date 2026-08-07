@@ -19,6 +19,71 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active);
 
+-- ---------------------------------------------------------------------------
+-- USER PROFILE — preferences, routines, and personal memories
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id                 TEXT PRIMARY KEY,
+    preferences_json        TEXT NOT NULL DEFAULT '{}',
+    routines_json           TEXT NOT NULL DEFAULT '[]',
+    favorite_projects_json  TEXT NOT NULL DEFAULT '[]',
+    learned_facts_json      TEXT NOT NULL DEFAULT '[]',
+    evolution_summary       TEXT NOT NULL DEFAULT '',
+    created_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_routines (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    description     TEXT,
+    schedule_cron   TEXT,
+    last_executed   TEXT,
+    execution_count INTEGER DEFAULT 0,
+    success_count   INTEGER DEFAULT 0,
+    active          INTEGER DEFAULT 1,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_memories (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    memory_type     TEXT NOT NULL CHECK (memory_type IN ('preference','fact','routine','insight')),
+    importance      REAL DEFAULT 0.5,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    access_count    INTEGER DEFAULT 0,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_routines_user ON user_routines(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_memories_type ON user_memories(memory_type);
+CREATE INDEX IF NOT EXISTS idx_user_memories_importance ON user_memories(importance DESC);
+CREATE INDEX IF NOT EXISTS idx_user_memories_created ON user_memories(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS email_accounts (
+    id                 TEXT PRIMARY KEY,
+    user_id            TEXT NOT NULL,
+    label              TEXT NOT NULL DEFAULT 'Email',
+    host               TEXT NOT NULL,
+    port               INTEGER NOT NULL DEFAULT 993,
+    username           TEXT NOT NULL,
+    password_encrypted TEXT NOT NULL,
+    use_ssl            INTEGER DEFAULT 1,
+    active             INTEGER DEFAULT 1,
+    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_accounts_user ON email_accounts(user_id);
+CREATE INDEX IF NOT EXISTS idx_email_accounts_active ON email_accounts(active);
+
 CREATE TABLE IF NOT EXISTS projects (
     id            TEXT PRIMARY KEY,
     name          TEXT NOT NULL,
@@ -49,6 +114,31 @@ CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_mode ON sessions(mode);
 CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(last_active_at DESC);
 
+-- ---------------------------------------------------------------------------
+-- SESSION RUNS / CHECKPOINTS — durable progress for long-running streams
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS session_runs (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),
+    agent           TEXT,
+    phase           TEXT NOT NULL DEFAULT 'starting',
+    prompt          TEXT NOT NULL DEFAULT '',
+    partial_output  TEXT NOT NULL DEFAULT '',
+    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+    usage_json      TEXT NOT NULL DEFAULT '{}',
+    error           TEXT,
+    started_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    finished_at     TEXT,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_runs_session ON session_runs(session_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_runs_active ON session_runs(status, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS messages (
     id            TEXT PRIMARY KEY,
     session_id    TEXT NOT NULL,
@@ -59,6 +149,7 @@ CREATE TABLE IF NOT EXISTS messages (
     tools_used_json TEXT,
     tokens_in     INTEGER DEFAULT 0,
     tokens_out    INTEGER DEFAULT 0,
+    cost_usd      REAL DEFAULT 0.0,
     latency_ms    INTEGER DEFAULT 0,
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -284,3 +375,45 @@ CREATE INDEX IF NOT EXISTS idx_pm_type ON persistent_memories(memory_type);
 CREATE INDEX IF NOT EXISTS idx_pm_source ON persistent_memories(source);
 CREATE INDEX IF NOT EXISTS idx_pm_accessed ON persistent_memories(last_accessed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pm_created ON persistent_memories(created_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- RBAC — roles, permissions, assignments
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS roles (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL UNIQUE,
+    description   TEXT DEFAULT '',
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS permissions (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL UNIQUE,
+    description   TEXT DEFAULT '',
+    resource      TEXT NOT NULL,
+    action        TEXT NOT NULL,
+    UNIQUE(resource, action)
+);
+
+CREATE TABLE IF NOT EXISTS user_roles (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL,
+    role_id       TEXT NOT NULL,
+    assigned_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(user_id, role_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+    id            TEXT PRIMARY KEY,
+    role_id       TEXT NOT NULL,
+    permission_id TEXT NOT NULL,
+    UNIQUE(role_id, permission_id),
+    FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
+    FOREIGN KEY (permission_id) REFERENCES permissions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id);
+CREATE INDEX IF NOT EXISTS idx_role_permissions_role ON role_permissions(role_id);

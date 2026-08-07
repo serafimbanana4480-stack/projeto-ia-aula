@@ -17,7 +17,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.core.background_workers import BackgroundWorkerManager
 from backend.middleware.auth import require_auth
-from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -28,7 +27,6 @@ def _get_manager(request: Request) -> BackgroundWorkerManager | None:
 
 
 @router.get("/workers")
-@limiter.limit("100/minute")
 async def list_workers(
     request: Request, _user: dict = Depends(require_auth)
 ) -> dict[str, list[dict[str, Any]]]:
@@ -40,7 +38,6 @@ async def list_workers(
 
 
 @router.post("/workers/{name}/start")
-@limiter.limit("60/minute")
 async def start_worker(
     name: str, request: Request, _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:
@@ -55,7 +52,6 @@ async def start_worker(
 
 
 @router.post("/workers/{name}/stop")
-@limiter.limit("60/minute")
 async def stop_worker(
     name: str, request: Request, _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:
@@ -70,7 +66,6 @@ async def stop_worker(
 
 
 @router.post("/workers/{name}/pause")
-@limiter.limit("60/minute")
 async def pause_worker(
     name: str, request: Request, _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:
@@ -85,7 +80,6 @@ async def pause_worker(
 
 
 @router.post("/workers/{name}/resume")
-@limiter.limit("60/minute")
 async def resume_worker(
     name: str, request: Request, _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:

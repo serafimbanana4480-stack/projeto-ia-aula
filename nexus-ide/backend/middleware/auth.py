@@ -1,4 +1,8 @@
-"""JWT Authentication middleware for NEXUS IDE."""
+"""JWT Authentication middleware for NEXUS IDE.
+
+Delegates to ``backend.auth.service.AuthService`` for token lifecycle and
+authorization checks so that all auth concerns flow through a single point.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +11,8 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
 
-from backend.config.settings import get_settings
+from backend.auth.service import get_auth_service
 
 logger = logging.getLogger(__name__)
 
@@ -18,42 +21,35 @@ security = HTTPBearer(auto_error=False)
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     """Create a JWT access token."""
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.now(UTC) + expires_delta
-    else:
-        expire = datetime.now(UTC) + timedelta(minutes=30)
-    to_encode.update({"exp": expire})
+    return get_auth_service().create_access_token(data, expires_delta)
 
-    settings = get_settings()
-    encoded_jwt = jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
-    return encoded_jwt
+
+def create_refresh_token(data: dict, expires_delta: timedelta | None = None) -> str:
+    """Create a long-lived JWT refresh token."""
+    return get_auth_service().create_refresh_token(data, expires_delta)
 
 
 def decode_access_token(token: str) -> dict:
     """Decode and validate a JWT access token."""
-    settings = get_settings()
-    try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
-        return payload
-    except JWTError as e:
-        logger.warning(f"JWT decode error: {e}")
+    return get_auth_service().decode_token(token)
+
+
+def decode_refresh_token(token: str) -> dict:
+    """Decode and validate a JWT refresh token (must have type=refresh)."""
+    payload = get_auth_service().decode_token(token)
+    if payload.get("type") != "refresh":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
+            detail="Invalid token type",
             headers={"WWW-Authenticate": "Bearer"},
-        ) from e
+        )
+    return payload
 
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict:
-    """Get the current authenticated user from JWT token.
-
-    This dependency can be used to protect endpoints that require authentication.
-    If no token is provided, it returns None (for optional auth).
-    If an invalid token is provided, it raises an HTTP 401 exception.
-    """
+    """Get the current authenticated user from JWT token."""
     if credentials is None:
         return None
 
@@ -76,11 +72,7 @@ async def get_current_user(
 
 
 async def require_auth(current_user: dict = Depends(get_current_user)) -> dict:
-    """Require authentication for an endpoint.
-
-    Use this dependency for endpoints that MUST have authentication.
-    Raises HTTP 401 if no valid token is provided.
-    """
+    """Require authentication for an endpoint."""
     if current_user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -93,27 +85,18 @@ async def require_auth(current_user: dict = Depends(get_current_user)) -> dict:
 async def require_admin(current_user: dict = Depends(require_auth)) -> dict:
     """Require admin privileges for an endpoint.
 
-    Checks that the authenticated user has an admin-like email or the
-    ``admin`` role assigned.  Falls back to checking the user's email
-    against the configured admin email or a hard-coded default so that
-    the local default admin (``admin@nexus-ide.com``) always has access.
+    Authorization is delegated to the DB-backed RBAC system via AuthService.
+    There is no hard-coded email fallback.
     """
     user_id = current_user.get("user_id", "")
-    email = current_user.get("email", "")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
 
-    # Allow the configured default admin email and development fallback
-    admin_email = "admin@nexus-ide.com"
-    if email and email == admin_email:
+    if get_auth_service().is_admin(user_id):
         return current_user
-
-    # Check via RBAC permission
-    try:
-        from backend.persistence.db import user_has_permission
-
-        if user_has_permission(user_id, resource="admin", action="*"):
-            return current_user
-    except Exception:
-        pass
 
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,

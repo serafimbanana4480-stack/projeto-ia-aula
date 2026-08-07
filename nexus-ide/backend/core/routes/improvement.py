@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.core.continuous_improvement import get_continuous_improvement_loop
+from backend.middleware.auth import require_auth
+from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +20,16 @@ router = APIRouter(prefix="/api/improvement", tags=["improvement"])
 
 
 @router.get("/stats")
-async def get_stats() -> dict:
+@limiter.limit("60/minute")
+async def get_stats(request: Request, _user: dict = Depends(require_auth)) -> dict:
     """Return self-improvement loop statistics."""
     loop = get_continuous_improvement_loop()
     return loop.stats.to_dict()
 
 
 @router.get("/proposals")
-async def list_proposals() -> dict:
+@limiter.limit("60/minute")
+async def list_proposals(request: Request, _user: dict = Depends(require_auth)) -> dict:
     """List all pending improvement proposals."""
     loop = get_continuous_improvement_loop()
     proposals = await loop.list_proposals()
@@ -33,7 +37,10 @@ async def list_proposals() -> dict:
 
 
 @router.get("/proposals/{proposal_id}")
-async def get_proposal(proposal_id: str) -> dict:
+@limiter.limit("60/minute")
+async def get_proposal(
+    proposal_id: str, request: Request, _user: dict = Depends(require_auth)
+) -> dict:
     """Get a specific proposal by ID."""
     loop = get_continuous_improvement_loop()
     proposal = await loop.get_proposal(proposal_id)
@@ -43,7 +50,10 @@ async def get_proposal(proposal_id: str) -> dict:
 
 
 @router.post("/proposals/{proposal_id}/apply")
-async def apply_proposal(proposal_id: str) -> dict:
+@limiter.limit("30/minute")
+async def apply_proposal(
+    proposal_id: str, request: Request, _user: dict = Depends(require_auth)
+) -> dict:
     """Manually apply a proposal (requires user approval; admin only)."""
     loop = get_continuous_improvement_loop()
     applied = await loop.apply_proposal(proposal_id)
@@ -56,7 +66,10 @@ async def apply_proposal(proposal_id: str) -> dict:
 
 
 @router.post("/proposals/{proposal_id}/reject")
-async def reject_proposal(proposal_id: str) -> dict:
+@limiter.limit("30/minute")
+async def reject_proposal(
+    proposal_id: str, request: Request, _user: dict = Depends(require_auth)
+) -> dict:
     """Reject (discard) a proposal."""
     loop = get_continuous_improvement_loop()
     rejected = await loop.reject_proposal(proposal_id)
@@ -66,7 +79,8 @@ async def reject_proposal(proposal_id: str) -> dict:
 
 
 @router.post("/run")
-async def run_now() -> dict:
+@limiter.limit("10/minute")
+async def run_now(request: Request, _user: dict = Depends(require_auth)) -> dict:
     """Trigger an immediate analysis run (admin only)."""
     loop = get_continuous_improvement_loop()
     result = await loop.run_once(force=True)

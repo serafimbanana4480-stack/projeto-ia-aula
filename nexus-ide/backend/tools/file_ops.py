@@ -329,15 +329,38 @@ async def _write_file_absolute_handler(
     return await _write_abs(path, content)
 
 
-async def _list_dir_absolute_handler(path: str, recursive: bool = False) -> dict:
+async def _list_dir_absolute_handler(
+    path: str,
+    recursive: bool = False,
+    max_results: int = 10_000,
+    include_hidden: bool = True,
+    include_files: bool = True,
+    include_dirs: bool = True,
+    glob_pattern: str | None = None,
+) -> dict:
     """List a directory at an absolute path.
 
     Delegates to ``workspace_fs.list_dir_absolute`` with the same
     security and recursion behaviour.
+
+    The full parameter set is exposed deliberately. The wrapper used to accept
+    only ``path``/``recursive`` while the underlying function supported six
+    parameters, so a model that (correctly) inferred ``include_hidden`` from
+    the behaviour got a raw ``TypeError`` — see session bf1e9435b9ec47c9,
+    DEBUGGER iteration 6. Narrowing a signature at the tool boundary hides
+    capability and converts a valid call into a hard failure.
     """
     from backend.core.workspace_fs import list_dir_absolute as _list_abs
 
-    return await _list_abs(path, recursive=recursive)
+    return await _list_abs(
+        path,
+        recursive=recursive,
+        max_results=max_results,
+        include_hidden=include_hidden,
+        include_files=include_files,
+        include_dirs=include_dirs,
+        glob_pattern=glob_pattern,
+    )
 
 
 register_tool(ToolSpec(
@@ -384,6 +407,30 @@ register_tool(ToolSpec(
                 "type": "boolean",
                 "description": "Recurse into subdirectories",
                 "default": False,
+            },
+            "max_results": {
+                "type": "integer",
+                "description": "Maximum entries to return",
+                "default": 10000,
+            },
+            "include_hidden": {
+                "type": "boolean",
+                "description": "Include entries whose name starts with '.'",
+                "default": True,
+            },
+            "include_files": {
+                "type": "boolean",
+                "description": "Include files in the listing",
+                "default": True,
+            },
+            "include_dirs": {
+                "type": "boolean",
+                "description": "Include directories in the listing",
+                "default": True,
+            },
+            "glob_pattern": {
+                "type": "string",
+                "description": "Optional glob filter, e.g. '*.py'",
             },
         },
         "required": ["path"],

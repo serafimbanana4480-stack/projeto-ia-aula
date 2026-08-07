@@ -5,6 +5,7 @@ import HydrateProvider from "./HydrateProvider";
 import DataInitProvider from "./DataInitProvider";
 import ErrorBoundary from "../components/ErrorBoundary";
 import AuthGuard from "../components/auth/AuthGuard";
+import InfrastructureProviders from "../components/InfrastructureProviders";
 
 export const metadata: Metadata = {
   title: "NEXUS IDE - Inteligência Artificial Local",
@@ -26,11 +27,13 @@ export default function RootLayout({
       <body className="h-screen overflow-hidden bg-nexus-bg text-nexus-text">
         <ErrorBoundary>
           <HydrateProvider>
-            <DataInitProvider>
-              <AuthGuard>
-                <ThemeProvider>{children}</ThemeProvider>
-              </AuthGuard>
-            </DataInitProvider>
+            <AuthGuard>
+              <ThemeProvider>
+                <DataInitProvider>
+                  <InfrastructureProviders>{children}</InfrastructureProviders>
+                </DataInitProvider>
+              </ThemeProvider>
+            </AuthGuard>
           </HydrateProvider>
         </ErrorBoundary>
       </body>

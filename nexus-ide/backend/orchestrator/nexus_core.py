@@ -99,9 +99,18 @@ class NexusCore:
 
     def get_system_status(self) -> dict[str, Any]:
         """Get a comprehensive system status summary."""
+        # AgentPool exposes `active_count(agent_id)` rather than a private
+        # `_instances` list. Sum active agents across the known registry.
+        try:
+            pool_agents = sum(
+                self.pool.active_count(name)
+                for name in getattr(self.pool, "registry", {})
+            )
+        except Exception:
+            pool_agents = 0
         return {
             "orchestrator": {
-                "pool_agents": len(self.pool._instances) if hasattr(self.pool, '_instances') else 0,
+                "pool_agents": pool_agents,
             },
             "execution": self.execution_engine.stats(),
             "communication": self.communication_bus.stats(),

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMetricsStore } from "../../stores/metricsStore";
 import { getMetricsFlow } from "../../lib/api";
 import {
@@ -14,10 +14,11 @@ import {
   Brain,
   MessageSquare,
   ArrowRight,
-  Activity,
   Power,
   Users,
 } from "lucide-react";
+import { Surface, SurfaceHeader } from "../ui/Surface";
+import { Meter, AnimatedNumber, StatusDot, EmptyState } from "../ui/Primitives";
 
 interface FlowSummary {
   total_requests: number;
@@ -37,6 +38,12 @@ interface AgentActivity {
   avg_latency_ms: number;
   last_activity: string;
 }
+
+const STATUS_TONE: Record<AgentStatus, "success" | "danger" | "neutral"> = {
+  active: "success",
+  error: "danger",
+  idle: "neutral",
+};
 
 const fmtLatency = (ms: number): string => {
   if (!Number.isFinite(ms)) return "—";
@@ -117,6 +124,8 @@ export default function RequestFlow() {
     return (summary.successful_requests / summary.total_requests) * 100;
   }, [summary]);
 
+  const successTone: "success" | "warning" | "danger" =
+    successRate >= 95 ? "success" : successRate >= 70 ? "warning" : "danger";
   const successLabel =
     successRate >= 95 ? "excelente" : successRate >= 70 ? "aceitável" : "crítico";
 
@@ -137,281 +146,222 @@ export default function RequestFlow() {
   }, [summary, activeCount, successRate, primaryAgent]);
 
   return (
-    <section
-      className="min-w-0 rounded border border-nexus-border bg-nexus-panel p-3"
-      aria-labelledby="request-flow-title"
-    >
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <GitBranch className="h-4 w-4 shrink-0 text-nexus-accent" aria-hidden />
-          <h3
-            id="request-flow-title"
-            className="truncate text-sm font-semibold"
-          >
-            Fluxo de Pedidos
-          </h3>
-        </div>
-        <div
-          className="flex items-center gap-3 text-[10px] text-gray-400"
-          aria-label={`Taxa de sucesso: ${successRate.toFixed(1)} por cento, ${successLabel}`}
-        >
-          <span className="flex items-center gap-1">
-            <CheckCircle2
-              className="h-3 w-3 text-green-400"
-              aria-hidden
-            />
-            {successRate.toFixed(1)}% sucesso
-          </span>
-        </div>
-      </div>
+    <section aria-label="Fluxo de Pedidos">
+      <Surface elevation={1} padding="sm" live={backendOnline && hasTraffic}>
+        <SurfaceHeader
+          icon={<GitBranch className="h-4 w-4" />}
+          title="Fluxo de Pedidos"
+          subtitle="Utilizador → Router → Agentes → LLM → Resposta"
+          action={
+            summary ? (
+              <div className="flex items-center gap-2" aria-label={`Taxa de sucesso: ${successRate.toFixed(1)} por cento, ${successLabel}`}>
+                <Meter value={successRate} tone={successTone} showThresholds={false} height={5} className="w-16" />
+                <span className="flex items-center gap-1 text-[10px] font-medium text-nexus-muted">
+                  <CheckCircle2 className="h-3 w-3 text-emerald-400" aria-hidden />
+                  <AnimatedNumber value={successRate} decimals={1} />%
+                </span>
+              </div>
+            ) : undefined
+          }
+        />
 
-      {backendOnline === false && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="mb-3 flex items-center gap-2 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
-        >
-          <Power className="h-3.5 w-3.5 shrink-0" aria-hidden />
-          <span>
-            Backend offline — os dados apresentados podem estar desatualizados.
-          </span>
-        </div>
-      )}
-
-      {!summary ? (
-        <div className="flex h-32 flex-col items-center justify-center gap-2 text-center text-xs text-gray-500">
-          <GitBranch className="h-8 w-8 text-gray-600" aria-hidden />
-          <div className="font-medium text-gray-400">Dados indisponíveis</div>
-          <div className="text-gray-600">
-            O backend não está a fornecer métricas de fluxo.
-          </div>
-        </div>
-      ) : (
-        <div className="min-w-0">
-          {/* Diagrama de fluxo dinâmico */}
+        {backendOnline === false && (
           <div
-            role="img"
-            aria-label={diagramLabel}
-            className="overflow-x-auto"
+            role="status"
+            aria-live="polite"
+            className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
           >
-            <div className="flex min-w-max items-stretch justify-center gap-1 py-4 sm:gap-2 sm:min-w-0 sm:flex-wrap">
-              <FlowNode
-                icon={<User className="h-5 w-5" aria-hidden />}
-                label="Utilizador"
-                color="#60a5fa"
-              />
-              <FlowLink active={hasTraffic} />
-              <FlowNode
-                icon={<Router className="h-5 w-5" aria-hidden />}
-                label="Router"
-                color="#7c6afb"
-                badge={
-                  connectionStatus === "connected"
-                    ? "online"
-                    : connectionStatus === "degraded"
-                      ? "degradado"
-                      : connectionStatus === "offline"
-                        ? "offline"
-                        : "a ligar"
-                }
-                badgeTone={
-                  connectionStatus === "connected"
-                    ? "ok"
-                    : connectionStatus === "degraded"
-                      ? "warn"
-                      : "off"
-                }
-              />
-              <FlowLink active={hasTraffic} />
-              <FlowNode
-                icon={<Bot className="h-5 w-5" aria-hidden />}
-                label={activeCount > 0 ? "Agentes" : "Agente"}
-                color="#5eead4"
-                pulse={activeCount > 0}
-                badge={`${activeCount} ativos`}
-                badgeTone={activeCount > 0 ? "ok" : "off"}
-                sub={
-                  idleCount > 0
-                    ? `${idleCount} inativos`
-                    : errorAgents.length > 0
-                      ? `${errorAgents.length} com erro`
-                      : primaryAgent ?? undefined
-                }
-              />
-              <FlowLink active={hasTraffic} />
-              <FlowNode
-                icon={<Brain className="h-5 w-5" aria-hidden />}
-                label="LLM"
-                color="#fbbf24"
-                badge={hasTraffic ? `${fmtNum(tokensPerSecond)} tok/s` : "ocioso"}
-                badgeTone={hasTraffic ? "ok" : "off"}
-              />
-              <FlowLink active={hasTraffic} />
-              <FlowNode
-                icon={<MessageSquare className="h-5 w-5" aria-hidden />}
-                label="Resposta"
-                color="#34d399"
-              />
-            </div>
+            <Power className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            <span>Backend offline — os dados apresentados podem estar desatualizados.</span>
           </div>
+        )}
 
-          {/* Lista de agentes ativos (dinâmica) */}
-          {agents.length > 0 && (
-            <ul
-              role="list"
-              aria-label="Estado dos agentes"
-              className="mb-3 flex flex-wrap gap-2 text-[11px]"
-            >
-              {agents.map((a) => (
-                <li
-                  key={a.agent}
-                  className="flex items-center gap-1.5 rounded border border-nexus-border/60 bg-nexus-bg/40 px-2 py-1"
-                  title={`Tarefas concluídas: ${a.tasks_completed} · falhadas: ${a.tasks_failed} · latência média: ${fmtLatency(a.avg_latency_ms)}`}
-                >
-                  <Activity
-                    className={
-                      a.status === "active"
-                        ? "h-3 w-3 animate-pulse text-green-400"
-                        : a.status === "error"
-                          ? "h-3 w-3 text-red-400"
-                          : "h-3 w-3 text-gray-500"
-                    }
-                    aria-hidden
-                  />
-                  <span className="font-medium text-gray-300">{a.agent}</span>
-                  <span className="text-gray-500">
-                    {a.status === "active"
-                      ? "ativo"
-                      : a.status === "error"
-                        ? "erro"
-                        : "inativo"}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
+        {!summary ? (
+          <div className="mt-3">
+            <EmptyState
+              icon={<GitBranch className="h-6 w-6" />}
+              title="Dados de fluxo indisponíveis"
+              hint="O backend não está a fornecer métricas de fluxo de pedidos."
+            />
+          </div>
+        ) : (
+          <div className="mt-3 min-w-0">
+            {/* Diagrama de fluxo dinâmico */}
+            <div role="img" aria-label={diagramLabel} className="overflow-x-auto">
+              <div className="flex min-w-max items-stretch justify-center gap-1 py-4 sm:gap-2 sm:min-w-0 sm:flex-wrap">
+                <FlowNode icon={<User className="h-5 w-5" aria-hidden />} label="Utilizador" color="#60a5fa" />
+                <FlowLink active={hasTraffic} />
+                <FlowNode
+                  icon={<Router className="h-5 w-5" aria-hidden />}
+                  label="Router"
+                  color="#7c6afb"
+                  badge={
+                    connectionStatus === "connected"
+                      ? "online"
+                      : connectionStatus === "degraded"
+                        ? "degradado"
+                        : connectionStatus === "offline"
+                          ? "offline"
+                          : "a ligar"
+                  }
+                  badgeTone={
+                    connectionStatus === "connected" ? "success" : connectionStatus === "degraded" ? "warning" : "neutral"
+                  }
+                />
+                <FlowLink active={hasTraffic} />
+                <FlowNode
+                  icon={<Bot className="h-5 w-5" aria-hidden />}
+                  label={activeCount > 0 ? "Agentes" : "Agente"}
+                  color="#5eead4"
+                  pulse={activeCount > 0}
+                  badge={`${activeCount} ativos`}
+                  badgeTone={activeCount > 0 ? "success" : "neutral"}
+                  sub={
+                    idleCount > 0
+                      ? `${idleCount} inativos`
+                      : errorAgents.length > 0
+                        ? `${errorAgents.length} com erro`
+                        : primaryAgent ?? undefined
+                  }
+                />
+                <FlowLink active={hasTraffic} />
+                <FlowNode
+                  icon={<Brain className="h-5 w-5" aria-hidden />}
+                  label="LLM"
+                  color="#fbbf24"
+                  badge={hasTraffic ? `${fmtNum(tokensPerSecond)} tok/s` : "ocioso"}
+                  badgeTone={hasTraffic ? "success" : "neutral"}
+                />
+                <FlowLink active={hasTraffic} />
+                <FlowNode icon={<MessageSquare className="h-5 w-5" aria-hidden />} label="Resposta" color="#34d399" />
+              </div>
+            </div>
 
-          {/* Sumário de métricas */}
-          <dl
-            aria-label="Resumo das métricas de fluxo"
-            className="mt-2 grid grid-cols-2 gap-2 rounded border border-nexus-border/50 bg-nexus-bg/50 px-3 py-2 text-xs text-gray-300 sm:grid-cols-3 lg:grid-cols-5"
-          >
-            <MetricItem
-              icon={<GitBranch className="h-3 w-3" aria-hidden />}
-              label="Total"
-              ariaLabel={`Pedidos totais: ${fmtNum(summary.total_requests)}`}
-              value={fmtNum(summary.total_requests)}
-              tone="neutral"
-            />
-            <MetricItem
-              icon={<CheckCircle2 className="h-3 w-3" aria-hidden />}
-              label="Sucesso"
-              ariaLabel={`Pedidos com sucesso: ${fmtNum(summary.successful_requests)}`}
-              value={fmtNum(summary.successful_requests)}
-              tone="ok"
-            />
-            <MetricItem
-              icon={<XCircle className="h-3 w-3" aria-hidden />}
-              label="Falhas"
-              ariaLabel={`Pedidos falhados: ${fmtNum(summary.failed_requests)}`}
-              value={fmtNum(summary.failed_requests)}
-              tone="err"
-            />
-            <MetricItem
-              icon={<Timer className="h-3 w-3" aria-hidden />}
-              label="Latência média"
-              ariaLabel={`Latência média: ${fmtLatency(summary.avg_latency_ms)}`}
-              value={fmtLatency(summary.avg_latency_ms)}
-              tone="neutral"
-            />
-            <MetricItem
-              icon={<Gauge className="h-3 w-3" aria-hidden />}
-              label="Tokens/s"
-              ariaLabel={`Tokens por segundo: ${fmtNum(summary.throughput_tps)}`}
-              value={fmtNum(summary.throughput_tps)}
-              tone="neutral"
-            />
-          </dl>
-
-          {/* Resumo textual de agentes (acessível, sem depender só de cor) */}
-          <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500">
-            <span className="flex items-center gap-1">
-              <Users className="h-3 w-3" aria-hidden />
-              {activeCount} ativo(s)
-            </span>
-            <span className="flex items-center gap-1">
-              <Bot className="h-3 w-3" aria-hidden />
-              {idleCount} inativo(s)
-            </span>
-            {errorAgents.length > 0 && (
-              <span className="flex items-center gap-1 text-red-400">
-                <XCircle className="h-3 w-3" aria-hidden />
-                {errorAgents.length} com erro
-              </span>
+            {/* Lista de agentes ativos (dinâmica) */}
+            {agents.length > 0 && (
+              <ul role="list" aria-label="Estado dos agentes" className="mb-3 flex flex-wrap gap-2 text-[11px]">
+                {agents.map((a) => (
+                  <li
+                    key={a.agent}
+                    className="nx-elev-0 flex items-center gap-1.5 rounded-lg px-2 py-1"
+                    title={`Tarefas concluídas: ${a.tasks_completed} · falhadas: ${a.tasks_failed} · latência média: ${fmtLatency(a.avg_latency_ms)}`}
+                  >
+                    <StatusDot tone={STATUS_TONE[a.status]} pulse={a.status === "active"} />
+                    <span className="font-medium text-nexus-text">{a.agent}</span>
+                    <span className="text-nexus-faint">
+                      {a.status === "active" ? "ativo" : a.status === "error" ? "erro" : "inativo"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
             )}
-          </p>
-        </div>
-      )}
+
+            {/* Sumário de métricas */}
+            <dl
+              aria-label="Resumo das métricas de fluxo"
+              className="nx-inset mt-2 grid grid-cols-2 gap-2 rounded-lg px-3 py-2 text-xs text-nexus-muted sm:grid-cols-3 lg:grid-cols-5"
+            >
+              <MetricItem
+                icon={<GitBranch className="h-3 w-3" aria-hidden />}
+                label="Total"
+                ariaLabel={`Pedidos totais: ${fmtNum(summary.total_requests)}`}
+                value={fmtNum(summary.total_requests)}
+                tone="neutral"
+              />
+              <MetricItem
+                icon={<CheckCircle2 className="h-3 w-3" aria-hidden />}
+                label="Sucesso"
+                ariaLabel={`Pedidos com sucesso: ${fmtNum(summary.successful_requests)}`}
+                value={fmtNum(summary.successful_requests)}
+                tone="success"
+              />
+              <MetricItem
+                icon={<XCircle className="h-3 w-3" aria-hidden />}
+                label="Falhas"
+                ariaLabel={`Pedidos falhados: ${fmtNum(summary.failed_requests)}`}
+                value={fmtNum(summary.failed_requests)}
+                tone="danger"
+              />
+              <MetricItem
+                icon={<Timer className="h-3 w-3" aria-hidden />}
+                label="Latência média"
+                ariaLabel={`Latência média: ${fmtLatency(summary.avg_latency_ms)}`}
+                value={fmtLatency(summary.avg_latency_ms)}
+                tone="neutral"
+              />
+              <MetricItem
+                icon={<Gauge className="h-3 w-3" aria-hidden />}
+                label="Tokens/s"
+                ariaLabel={`Tokens por segundo: ${fmtNum(summary.throughput_tps)}`}
+                value={fmtNum(summary.throughput_tps)}
+                tone="neutral"
+              />
+            </dl>
+
+            {/* Resumo textual de agentes (acessível, sem depender só de cor) */}
+            <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-nexus-faint">
+              <span className="flex items-center gap-1">
+                <Users className="h-3 w-3" aria-hidden />
+                {activeCount} ativo(s)
+              </span>
+              <span className="flex items-center gap-1">
+                <Bot className="h-3 w-3" aria-hidden />
+                {idleCount} inativo(s)
+              </span>
+              {errorAgents.length > 0 && (
+                <span className="flex items-center gap-1 text-rose-400">
+                  <XCircle className="h-3 w-3" aria-hidden />
+                  {errorAgents.length} com erro
+                </span>
+              )}
+            </p>
+          </div>
+        )}
+      </Surface>
     </section>
   );
 }
 
 interface FlowNodeProps {
-  icon: React.ReactNode;
+  icon: ReactNode;
   label: string;
   color: string;
   pulse?: boolean;
   badge?: string;
-  badgeTone?: "ok" | "warn" | "off";
+  badgeTone?: "success" | "warning" | "neutral";
   sub?: string;
 }
 
-function FlowNode({
-  icon,
-  label,
-  color,
-  pulse,
-  badge,
-  badgeTone = "ok",
-  sub,
-}: FlowNodeProps) {
-  const toneClass =
-    badgeTone === "ok"
-      ? "text-green-400 border-green-400/40"
-      : badgeTone === "warn"
-        ? "text-amber-300 border-amber-400/40"
-        : "text-gray-500 border-gray-500/40";
+const FLOW_BADGE_TONE: Record<"success" | "warning" | "neutral", string> = {
+  success: "text-emerald-400 border-emerald-400/40",
+  warning: "text-amber-300 border-amber-400/40",
+  neutral: "text-nexus-faint border-[var(--nx-line-strong)]",
+};
+
+function FlowNode({ icon, label, color, pulse, badge, badgeTone = "success", sub }: FlowNodeProps) {
   return (
     <div className="flex min-w-0 flex-col items-center gap-1 px-1">
       <div
-        className={`flex h-11 w-11 items-center justify-center rounded-full text-sm transition-all duration-300 sm:h-12 sm:w-12 ${
+        className={`nx-surface flex h-11 w-11 items-center justify-center rounded-full text-sm transition-all duration-300 sm:h-12 sm:w-12 ${
           pulse ? "animate-pulse ring-2 ring-offset-2 ring-offset-nexus-panel" : ""
         }`}
         style={{
           backgroundColor: `${color}20`,
           border: `2px solid ${color}66`,
-          ...(pulse ? { boxShadow: `0 0 0 2px ${color}` } : {}),
+          boxShadow: pulse ? `0 0 0 2px ${color}, 0 4px 12px -4px ${color}` : `0 2px 8px -4px ${color}`,
         }}
       >
         <span style={{ color }} aria-hidden>
           {icon}
         </span>
       </div>
-      <span className="text-[10px] font-medium text-gray-300 sm:text-[11px]">
-        {label}
-      </span>
+      <span className="text-[10px] font-medium text-nexus-muted sm:text-[11px]">{label}</span>
       {badge && (
-        <span
-          className={`rounded border px-1 text-[9px] leading-tight ${toneClass}`}
-        >
+        <span className={`rounded border px-1 text-[9px] leading-tight tabular-nums ${FLOW_BADGE_TONE[badgeTone]}`}>
           {badge}
         </span>
       )}
-      {sub && (
-        <span className="max-w-[80px] truncate text-[9px] text-gray-500">
-          {sub}
-        </span>
-      )}
+      {sub && <span className="max-w-[80px] truncate text-[9px] text-nexus-faint">{sub}</span>}
     </div>
   );
 }
@@ -422,55 +372,36 @@ interface FlowLinkProps {
 
 function FlowLink({ active }: FlowLinkProps) {
   return (
-    <div
-      className="flex shrink-0 items-center self-center text-gray-600"
-      aria-hidden
-    >
-      <span
-        className={`flex items-center transition-colors duration-300 ${
-          active ? "text-green-400" : "text-gray-700"
-        }`}
-      >
-        <ArrowRight
-          className={`h-4 w-4 ${active ? "animate-pulse" : ""}`}
-          aria-hidden
-        />
+    <div className="flex shrink-0 items-center self-center text-nexus-faint" aria-hidden>
+      <span className={`flex items-center transition-colors duration-300 ${active ? "text-emerald-400" : "text-nexus-faint/50"}`}>
+        <ArrowRight className={`h-4 w-4 ${active ? "animate-pulse" : ""}`} aria-hidden />
       </span>
     </div>
   );
 }
 
 interface MetricItemProps {
-  icon: React.ReactNode;
+  icon: ReactNode;
   label: string;
   ariaLabel: string;
   value: string;
-  tone: "ok" | "err" | "neutral";
+  tone: "success" | "danger" | "neutral";
 }
 
-function MetricItem({
-  icon,
-  label,
-  ariaLabel,
-  value,
-  tone,
-}: MetricItemProps) {
-  const valueClass =
-    tone === "ok"
-      ? "text-green-400"
-      : tone === "err"
-        ? "text-red-400"
-        : "text-white";
+const METRIC_VALUE_TONE: Record<"success" | "danger" | "neutral", string> = {
+  success: "text-emerald-400",
+  danger: "text-rose-400",
+  neutral: "text-nexus-text",
+};
+
+function MetricItem({ icon, label, ariaLabel, value, tone }: MetricItemProps) {
   return (
-    <div
-      className="flex min-w-0 flex-col items-center justify-center gap-0.5 text-center"
-      aria-label={ariaLabel}
-    >
-      <dt className="flex items-center justify-center gap-1 text-[10px] text-gray-500">
+    <div className="flex min-w-0 flex-col items-center justify-center gap-0.5 text-center" aria-label={ariaLabel}>
+      <dt className="flex items-center justify-center gap-1 text-[10px] text-nexus-faint">
         <span aria-hidden>{icon}</span>
         {label}
       </dt>
-      <dd className={`font-semibold ${valueClass}`}>{value}</dd>
+      <dd className={`font-semibold tabular-nums ${METRIC_VALUE_TONE[tone]}`}>{value}</dd>
     </div>
   );
 }

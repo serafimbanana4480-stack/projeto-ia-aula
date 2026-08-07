@@ -25,5 +25,12 @@ class TestDebuggerAgent:
             AgentAction.CONSULT_AGENT,
             AgentAction.RECALL_CONTEXT,
             AgentAction.STORE_MEMORY,
+            # Added when the DEBUGGER gained the ability to run its own
+            # verification instead of reasoning about code it never executed.
+            AgentAction.RUN_SHELL,
+            AgentAction.RUN_TESTS,
+            AgentAction.RUN_LINT,
+            AgentAction.TYPE_CHECK,
+            AgentAction.SPAWN_TASK,
         }
         assert agent.supported_actions == expected

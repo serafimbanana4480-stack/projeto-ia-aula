@@ -65,7 +65,9 @@ describe("AgentActivity", () => {
   it("renderiza o título PT e o carregamento quando não há métricas", () => {
     render(<AgentActivity />);
     expect(screen.getByText("Atividade de Agentes")).toBeDefined();
-    expect(screen.getByText("Carregando...")).toBeDefined();
+    expect(
+      screen.getByRole("status", { name: "A carregar atividade de agentes" }),
+    ).toBeDefined();
   });
 
   it("mostra o placeholder PT quando não há agentes ativos", () => {
@@ -73,7 +75,7 @@ describe("AgentActivity", () => {
     render(<AgentActivity />);
     expect(screen.getByText("Sem atividade de agentes")).toBeDefined();
     expect(
-      screen.getByText("Nenhuma sessão ativa no momento"),
+      screen.getByText(/Nenhuma sessão ativa no momento/),
     ).toBeDefined();
   });
 
@@ -95,6 +97,7 @@ describe("AgentActivity", () => {
     render(<AgentActivity />);
     expect(screen.getByText("CODER")).toBeDefined();
     expect(screen.getByText("5")).toBeDefined();
-    expect(screen.getByText("Agentes ativos: 1 · 6 tarefas")).toBeDefined();
+    expect(screen.getByText("6 no total")).toBeDefined();
+    expect(screen.getByText("1 ativo")).toBeDefined();
   });
 });

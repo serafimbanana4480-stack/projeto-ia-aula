@@ -91,6 +91,14 @@ class TestBackgroundWorker:
 
 
 class TestCodeWatcher:
+    def test_ignores_runtime_artifacts(self, tmp_path: Path) -> None:
+        watcher = CodeWatcher(watch_path=tmp_path)
+
+        assert watcher._is_relevant_file(tmp_path / "backend" / "main.py")
+        assert not watcher._is_relevant_file(tmp_path / "logs" / "backend.py")
+        assert not watcher._is_relevant_file(tmp_path / "tmp" / "generated.py")
+        assert not watcher._is_relevant_file(tmp_path / ".venv" / "lib" / "worker.py")
+
     async def test_detects_python_changes(self, tmp_path: Path) -> None:
         watcher = CodeWatcher(watch_path=str(tmp_path), interval_seconds=0.05)
         await watcher.start()
@@ -191,7 +199,14 @@ class TestBackgroundWorkerManager:
         manager = BackgroundWorkerManager()
         await manager.start_all()
         infos = manager.list_workers()
-        assert len(infos) == 4
+        assert {info.name for info in infos} == {
+            "CODE_WATCHER",
+            "DEPENDENCY_WATCHER",
+            "PERFORMANCE_WATCHER",
+            "MEMORY_WATCHER",
+            "SELF_IMPROVEMENT_WATCHER",
+            "ESCALATION_WATCHER",
+        }
         for info in infos:
             assert info.status == WorkerStatus.RUNNING.value
 

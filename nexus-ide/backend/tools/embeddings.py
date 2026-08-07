@@ -956,6 +956,7 @@ async def _search_symbols_handler(
 async def _index_symbols_handler(
     project_path: str = ".",
     force: bool = False,
+    force_reindex: bool | None = None,
 ) -> dict:
     """Index the project for symbol search.
 
@@ -967,7 +968,10 @@ async def _index_symbols_handler(
         return {"error": f"Path is not a directory: {project_path}"}
 
     try:
-        count = await index_codebase(str(root), force_reindex=force)
+        # ``force_reindex`` was the original public argument. Keep accepting
+        # it while exposing the shorter ``force`` name in new prompts.
+        should_force = force if force_reindex is None else force_reindex
+        count = await index_codebase(str(root), force_reindex=should_force)
     except Exception as exc:
         return {"error": f"Indexing failed: {exc}"}
 
@@ -1020,6 +1024,11 @@ register_tool(ToolSpec(
                 "type": "boolean",
                 "default": False,
                 "description": "Force re-index even if cache exists",
+            },
+            "force_reindex": {
+                "type": "boolean",
+                "default": False,
+                "description": "Deprecated alias for force; force a full re-index",
             },
         },
     },

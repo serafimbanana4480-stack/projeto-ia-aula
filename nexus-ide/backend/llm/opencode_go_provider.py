@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import logging
 
-from backend.llm.openai_provider import OpenAIProvider
+from backend.llm.openai_provider import OpenAIProvider, _system_verify_context
+from backend.observability.advanced_logging import get_structured_logger
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class OpenCodeGoProvider:
     """
 
     DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
+    provider_name = "opencode_go"
 
     # Canonical list of models offered by OpenCode Go. The chat API
     # accepts the same identifiers in the ``model`` field of the request.
@@ -125,6 +127,15 @@ class OpenCodeGoProvider:
     ):
         """Stream chat completion tokens from OpenCode Go."""
         resolved = self.resolve_model(model)
+        get_structured_logger().info(
+            "LLM SDK dispatch",
+            source="llm",
+            extra={
+                "event": "llm_sdk_dispatch",
+                "provider": self.provider_name,
+                "model": resolved,
+            },
+        )
         async for token in self._client.chat_stream(resolved, messages, options=options, **kwargs):
             yield token
 
@@ -147,7 +158,10 @@ class OpenCodeGoProvider:
 
             headers = {"Authorization": "Bearer " + str(self._api_key)} if self._api_key else {}
             async with httpx.AsyncClient(
-                base_url=self._base_url, headers=headers, timeout=5.0
+                base_url=self._base_url,
+                headers=headers,
+                timeout=5.0,
+                verify=_system_verify_context(),
             ) as c:
                 resp = await c.get("/models")
                 return resp.status_code == 200

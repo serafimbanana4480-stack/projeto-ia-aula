@@ -3,16 +3,31 @@
 
 export type AgentName =
   | "ROUTER"
+  | "PLANNER"
   | "ARCHITECT"
+  | "ARCHITECT_DESIGN"
+  | "ARCHITECT_COMPLEXITY"
   | "RESEARCHER"
+  | "RESEARCHER_WEB"
   | "CODER"
+  | "REVIEWER"
   | "ANALYZER"
   | "DEBUGGER"
   | "DOCUMENTER"
   | "OPTIMIZER"
+  | "REFACTOR_PERFORMANCE"
+  | "REFACTOR_CLEAN"
   | "DASHBOARD"
   | "ORCHESTRATOR"
   | "SWARM"
+  | "SUPERVISOR"
+  | "GUARDIAN"
+  | "TEST_RUNNER_UNIT"
+  | "TEST_RUNNER_E2E"
+  | "OVERSEER"
+  | "BUG_HUNTER_STATIC"
+  | "BUG_HUNTER_RUNTIME"
+  | "META_ANALYZER"
   | "MICRO"; // MICRO is used by ask mode
 
 export type ThinkingMode = "fast" | "deep" | "iterative";
@@ -39,13 +54,28 @@ export interface StreamEvent {
     | "tool_call"
     | "tool_result"
     | "tool_error"
+    | "tool_confirmation"
+    | "progress"
     | "metric"
     | "error"
     | "done"
-    | "routing";
+    | "routing"
+    // Mission Control. Mirrors ``EventType`` in backend/models/api.py — these
+    // carry the *why* of a run (interpreted objective, measured project state,
+    // plan, per-agent contract) and are emitted before any agent exists.
+    // Consumers that only render output can safely ignore them; ChatPanel's
+    // switch already falls through on unknown types.
+    | "mission_brief"
+    | "mission_plan"
+    | "mission_wave"
+    | "mission_agent"
+    | "mission_decision"
+    | "mission_verification"
+    | "mission_completed";
   agent?: AgentName;
   content?: string;
   metrics?: Record<string, number | string>;
+  data?: Record<string, unknown>;
   routing?: RoutingDecision;
   // Tool-call events
   tool_name?: string;
@@ -74,18 +104,34 @@ export interface ChatMessage {
   metrics?: Record<string, number | string>;
   timestamp: string;
   toolCalls?: ToolCallItem[];
+  activities?: ActivityItem[];
   metadata?: ChatMessageMetadata;
+}
+
+export interface ActivityItem {
+  id: string;
+  kind: "plan" | "agent" | "task" | "status" | "verification";
+  title: string;
+  detail?: string;
+  agent?: AgentName;
+  status: "pending" | "running" | "success" | "error";
+  timestamp: string;
+  data?: Record<string, unknown>;
 }
 
 export interface ToolCallItem {
   id: string;
   name: string;
   args: Record<string, unknown>;
-  status: "running" | "success" | "error";
+  status: "running" | "awaiting_confirmation" | "success" | "error";
   result?: unknown;
   error?: string;
   durationMs?: number;
   timestamp: string;
+  confirmationId?: string;
+  suggestion?: string;
+  riskLevel?: string;
+  retryResult?: unknown;
 }
 
 export interface SessionHistoryResponse {
@@ -141,6 +187,14 @@ export interface Tool {
   description: string;
   enabled: boolean;
   schema: Record<string, unknown>;
+  status?: "available" | "missing_dependency" | "blocked" | "requires_confirmation" | string;
+  category?: string;
+  risk_level?: string;
+  requires_confirmation?: boolean;
+  dependency?: string;
+  error?: string;
+  when_to_use?: string;
+  tags?: string[];
 }
 
 export interface Project {

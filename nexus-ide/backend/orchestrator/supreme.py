@@ -264,16 +264,24 @@ class SupremeOrchestrator:
             # Store reflection for future reference
             await self._store_reflection_insights(workflow_id, reflection_result)
             
-            # Emit reflection event
-            await self._bus.emit(Event(
-                type="orchestration_reflection_completed",
-                data={
+            # Emit reflection event.
+            #
+            # This used to call ``self._bus.emit(...)``. ``EventBus`` has no
+            # ``emit`` — only ``publish`` — so every reflection raised
+            # AttributeError straight into the broad ``except`` below and was
+            # logged as "Failed to perform orchestration reflection". The
+            # reflection itself had already succeeded; only its announcement
+            # was lost, and the log made it look like the whole step failed.
+            # The keyword is ``payload``, matching ``_publish_event`` above.
+            await self._publish_event(
+                "orchestration_reflection_completed",
+                {
                     "workflow_id": workflow_id,
                     "confidence_score": reflection_result.confidence_score,
                     "improvements_count": len(reflection_result.improvement_suggestions),
-                    "final_status": final_status
-                }
-            ))
+                    "final_status": final_status,
+                },
+            )
             
         except Exception as e:
             logger.error(f"Failed to perform orchestration reflection: {e}")

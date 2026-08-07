@@ -480,6 +480,31 @@ class TestResilientLLMProvider:
         tokens = [t async for t in rlp.chat_stream("m", [{"role": "user", "content": "hi"}])]
         assert tokens == ["fallback"]
 
+    async def test_chat_stream_does_not_retry_after_visible_output(self) -> None:
+        """Avoid appending a fallback response after a partial reply."""
+        fallback_calls = 0
+
+        async def partial_stream(*a: Any, **kw: Any) -> AsyncIterator[str]:
+            yield "partial"
+            raise RuntimeError("connection lost")
+
+        async def fallback_stream(*a: Any, **kw: Any) -> AsyncIterator[str]:
+            nonlocal fallback_calls
+            fallback_calls += 1
+            yield "must not be appended"
+
+        primary = AsyncMock()
+        primary.chat_stream = partial_stream
+        fb = AsyncMock()
+        fb.chat_stream = fallback_stream
+
+        rlp = ResilientLLMProvider(primary, [fb])
+        stream = rlp.chat_stream("m", [{"role": "user", "content": "hi"}])
+        assert await anext(stream) == "partial"
+        with pytest.raises(RuntimeError, match="connection lost"):
+            await anext(stream)
+        assert fallback_calls == 0
+
     async def test_all_failed_raises(self) -> None:
         primary = AsyncMock()
         primary.chat_complete = AsyncMock(side_effect=RuntimeError("primary down"))

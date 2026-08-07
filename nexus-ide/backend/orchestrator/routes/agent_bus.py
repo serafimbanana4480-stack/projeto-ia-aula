@@ -19,7 +19,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.core.agent_bus import BusMessage, get_agent_bus
 from backend.middleware.auth import require_auth
-from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -73,7 +72,6 @@ def _sse_payload(data: dict[str, Any]) -> str:
 
 
 @router.post("/bus/publish", response_model=BusPublishResponse)
-@limiter.limit("120/minute")
 async def bus_publish(
     req: BusPublishRequest, request: Request, _auth: Any = Depends(require_auth)
 ) -> Any:
@@ -100,7 +98,6 @@ async def bus_publish(
 
 
 @router.get("/bus/history/{topic}")
-@limiter.limit("120/minute")
 async def bus_history(
     request: Request,
     topic: str,
@@ -119,7 +116,6 @@ async def bus_history(
 
 
 @router.get("/bus/topics")
-@limiter.limit("120/minute")
 async def bus_topics(request: Request, _auth: Any = Depends(require_auth)) -> BusTopicsResponse:
     """Return all topics that currently have history or subscribers."""
     bus = get_agent_bus()

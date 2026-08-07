@@ -11,12 +11,65 @@ import {
   Loader2,
   Clock,
 } from "lucide-react";
+import { summarizeApproachContent } from "../../lib/chatPresentation";
 
 interface ThinkingBlockProps {
   content: string;
   isStreaming?: boolean;
   defaultOpen?: boolean;
   durationMs?: number;
+}
+
+export interface PlanTask {
+  name: string;
+  description: string;
+  agent?: string;
+  priority?: string;
+  dependencies?: number[];
+}
+
+/** Turns a planner JSON payload into a display-friendly task list. */
+export function extractStructuredPlan(content: string): PlanTask[] | null {
+  const start = content.indexOf("[");
+  const end = content.lastIndexOf("]");
+  if (start < 0 || end <= start) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(content.slice(start, end + 1));
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+
+    const tasks = parsed
+      .filter((item): item is Record<string, unknown> =>
+        Boolean(item) && typeof item === "object" && !Array.isArray(item),
+      )
+      .map((item) => ({
+        name: typeof item.name === "string" ? item.name : "Tarefa sem nome",
+        description: typeof item.description === "string" ? item.description : "",
+        agent: typeof item.agent === "string" ? item.agent : undefined,
+        priority: typeof item.priority === "string" ? item.priority : undefined,
+        dependencies: Array.isArray(item.depends_on)
+          ? item.depends_on.filter((dependency): dependency is number => typeof dependency === "number")
+          : undefined,
+      }));
+
+    return tasks.some((task) => task.description || task.agent) ? tasks : null;
+  } catch {
+    return null;
+  }
+}
+
+function priorityClass(priority?: string) {
+  switch (priority?.toLowerCase()) {
+    case "high":
+    case "alta":
+      return "border-rose-400/30 bg-rose-400/10 text-rose-200";
+    case "medium":
+    case "media":
+    case "média":
+      return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+    default:
+      return "border-sky-400/25 bg-sky-400/10 text-sky-100";
+  }
 }
 
 /**
@@ -44,11 +97,12 @@ export default function ThinkingBlock({
   useEffect(() => {
     if (isStreaming) {
       startRef.current = Date.now();
+      setNow(null);
       setOpen(true);
-    } else if (startRef.current && now === null) {
+    } else if (startRef.current !== null) {
       setNow(Date.now() - startRef.current);
     }
-  }, [isStreaming, now]);
+  }, [isStreaming]);
 
   useEffect(() => {
     if (!isStreaming || now !== null) return;
@@ -72,10 +126,9 @@ export default function ThinkingBlock({
 
   if (!content || !content.trim()) return null;
 
-  // Word count + approximate reading time
-  const words = content.trim().split(/\s+/).length;
-  const chars = content.length;
-  const readingSec = Math.max(1, Math.round(words / 200));
+  const plan = extractStructuredPlan(content);
+  const visibleContent = plan ? content : summarizeApproachContent(content);
+  if (!plan && !visibleContent) return null;
   const totalSec = now !== null ? Math.round(now / 1000) : 0;
 
   return (
@@ -103,15 +156,16 @@ export default function ThinkingBlock({
         <span className="flex items-center gap-1.5">
           <Sparkles className="h-3 w-3 text-sky-300/70" />
           <span className="uppercase tracking-wider text-sky-100/90">
-            {isStreaming ? "A pensar" : "Pensamento"}
+            {plan ? "Plano de execução" : isStreaming ? "A definir a abordagem" : "Resumo da abordagem"}
           </span>
         </span>
 
         {/* Word/chars counter */}
-        <span className="hidden text-[10px] text-sky-300/50 sm:inline">
-          {words} palavras · {chars} chars
-        </span>
-
+        {plan && (
+          <span className="hidden text-[10px] text-sky-300/50 sm:inline">
+            {plan.length} tarefas
+          </span>
+        )}
         {/* Duration */}
         <span className="ml-auto flex items-center gap-1 text-[10px] text-sky-300/60">
           {isStreaming ? (
@@ -119,7 +173,7 @@ export default function ThinkingBlock({
           ) : (
             <Clock className="h-2.5 w-2.5" />
           )}
-          {isStreaming ? `${totalSec}s` : `${Math.max(readingSec, totalSec)}s`}
+          {isStreaming ? `${totalSec}s` : totalSec > 0 ? `${totalSec}s` : "concluído"}
         </span>
 
         <ChevronDown
@@ -142,12 +196,50 @@ export default function ThinkingBlock({
               {/* Subtle left blue accent line */}
               <div className="absolute left-0 top-0 h-full w-0.5 bg-gradient-to-b from-sky-400/40 via-cyan-400/30 to-transparent" />
 
-              <pre className="whitespace-pre-wrap break-words px-4 py-2.5 pl-5 font-mono text-[11.5px] leading-relaxed text-sky-100/80 thin-scrollbar">
-                {content}
-                {isStreaming && (
-                  <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-sky-300/80" />
-                )}
-              </pre>
+              {plan ? (
+                <ol className="space-y-2 px-4 py-3 pl-5" aria-label="Tarefas do plano">
+                  {plan.map((task, index) => (
+                    <li
+                      key={`${task.name}-${index}`}
+                      className="rounded-lg border border-sky-500/15 bg-slate-950/20 px-3 py-2.5"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-sky-400/15 text-[10px] font-semibold text-sky-200">
+                          {index + 1}
+                        </span>
+                        <span className="text-xs font-medium text-sky-50">{task.name}</span>
+                        {task.agent && (
+                          <span className="rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-0.5 text-[9px] font-medium tracking-wide text-violet-200">
+                            {task.agent}
+                          </span>
+                        )}
+                        {task.priority && (
+                          <span className={`rounded border px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide ${priorityClass(task.priority)}`}>
+                            {task.priority}
+                          </span>
+                        )}
+                      </div>
+                      {task.description && (
+                        <p className="mt-1.5 pl-7 text-[11px] leading-relaxed text-sky-100/65">
+                          {task.description}
+                        </p>
+                      )}
+                      {task.dependencies && task.dependencies.length > 0 && (
+                        <p className="mt-1 pl-7 text-[10px] text-sky-300/45">
+                          Depende das tarefas {task.dependencies.map((dependency) => dependency + 1).join(", ")}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <pre className="whitespace-pre-wrap break-words px-4 py-2.5 pl-5 font-mono text-[11.5px] leading-relaxed text-sky-100/80 thin-scrollbar">
+                  {visibleContent}
+                  {isStreaming && (
+                    <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-sky-300/80" />
+                  )}
+                </pre>
+              )}
 
               {/* Footer with copy button */}
               <div className="flex items-center justify-end gap-1 border-t border-sky-500/10 bg-sky-500/[0.02] px-3 py-1">

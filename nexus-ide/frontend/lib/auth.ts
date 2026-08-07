@@ -1,9 +1,27 @@
 "use client";
 
-import { apiUrl } from "./api";
+import { apiUrl, ApiError } from "./api";
 
 const TOKEN_KEY = "nexus.access_token";
+const REFRESH_TOKEN_KEY = "nexus.refresh_token";
 const USER_KEY = "nexus.user";
+const AUTH_REQUEST_TIMEOUT_MS = 10000;
+
+async function fetchAuth(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    throw new ApiError(
+      "Failed to connect to the server",
+      0,
+      error instanceof Error ? error.message : "Unknown error",
+    );
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
 
 export interface User {
   id: string;
@@ -21,6 +39,7 @@ export interface LoginCredentials {
 export interface LoginResult {
   access_token: string;
   token_type: string;
+  refresh_token?: string;
   user: User;
 }
 
@@ -32,6 +51,16 @@ export function getAccessToken(): string | null {
 export function setAccessToken(token: string): void {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function getRefreshToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(REFRESH_TOKEN_KEY);
+}
+
+export function setRefreshToken(token: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(REFRESH_TOKEN_KEY, token);
 }
 
 export function setUser(user: User): void {
@@ -53,6 +82,7 @@ export function getUser(): User | null {
 export function clearAuth(): void {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem(TOKEN_KEY);
+  window.localStorage.removeItem(REFRESH_TOKEN_KEY);
   window.localStorage.removeItem(USER_KEY);
 }
 
@@ -92,12 +122,54 @@ export function authHeaders(): Record<string, string> {
   return headers;
 }
 
+/**
+ * Fetch an authenticated resource and transparently retry once after an
+ * expired access token is exchanged through the refresh-token endpoint.
+ *
+ * Requests passed here must have replayable bodies (or no body), because a
+ * 401 response may cause the request to be sent a second time.
+ */
+export async function authenticatedFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  const request = () => {
+    const headers = new Headers(init.headers);
+    for (const [key, value] of Object.entries(authHeaders())) {
+      headers.set(key, value);
+    }
+    return fetch(input, { ...init, headers });
+  };
+
+  try {
+    const response = await request();
+    if (response.status !== 401) return response;
+
+    if (!(await refreshAuth())) return response;
+    return request();
+  } catch (error) {
+    throw new ApiError(
+      "Failed to connect to the server",
+      0,
+      error instanceof Error ? error.message : "Unknown error",
+    );
+  }
+}
+
 export async function login(credentials: LoginCredentials): Promise<LoginResult> {
-  const response = await fetch(apiUrl("/api/auth/login"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(credentials),
-  });
+  let response: Response;
+  try {
+    response = await fetchAuth(apiUrl("/api/auth/login"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(credentials),
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("O backend não respondeu a tempo. Confirma que está ativo em localhost:8000.");
+    }
+    throw error;
+  }
 
   if (!response.ok) {
     let detail = "Login failed";
@@ -112,6 +184,7 @@ export async function login(credentials: LoginCredentials): Promise<LoginResult>
 
   const result = (await response.json()) as LoginResult;
   setAccessToken(result.access_token);
+  if (result.refresh_token) setRefreshToken(result.refresh_token);
   setUser(result.user);
   return result;
 }
@@ -122,13 +195,43 @@ export async function logout(): Promise<void> {
     try {
       await fetch(apiUrl("/api/auth/logout"), {
         method: "POST",
-        headers: { Authorization: `Bearer ${currentToken}` },
+        headers: { Authorization: `Bearer ${token}` },
       });
     } catch {
       // ignore network errors on logout
     }
   }
   clearAuth();
+}
+
+/**
+ * Attempt to obtain a fresh access token using the stored refresh token.
+ * Returns true on success (new access token stored), false if the refresh
+ * token is missing or rejected by the server. On failure the auth state is
+ * cleared so the caller can redirect to login.
+ */
+export async function refreshAuth(): Promise<boolean> {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) return false;
+  try {
+    const response = await fetchAuth(apiUrl("/api/auth/refresh"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    if (!response.ok) {
+      clearAuth();
+      return false;
+    }
+    const result = (await response.json()) as LoginResult;
+    setAccessToken(result.access_token);
+    if (result.refresh_token) setRefreshToken(result.refresh_token);
+    if (result.user) setUser(result.user);
+    return true;
+  } catch {
+    clearAuth();
+    return false;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

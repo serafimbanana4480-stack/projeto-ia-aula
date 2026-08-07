@@ -2,7 +2,7 @@
 
 import { create, type StoreApi } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
-import { apiUrl } from "../lib/api";
+import { apiUrl, authHeaders } from "../lib/api";
 
 export type AgentStatus =
   | "idle"
@@ -108,7 +108,7 @@ const AGENT_COLORS: Record<string, string> = {
   DOCUMENTER: "#ec4899", OPTIMIZER: "#f97316",
 };
 
-function mapApiAgent(apiAgent: any): Agent {
+export function mapApiAgent(apiAgent: any): Agent {
   const role = (apiAgent.name || apiAgent.role || "UNKNOWN").toUpperCase();
   return {
     id: apiAgent.id || apiAgent.name?.toLowerCase() || "unknown",
@@ -199,7 +199,9 @@ export const useAgentStore = create<AgentStore>()(
     fetchAgents: async () => {
       set({ isLoading: true, error: null });
       try {
-        const res = await fetch(apiUrl("/api/agents/status"));
+        const res = await fetch(apiUrl("/api/agents/instances"), {
+          headers: authHeaders(),
+        });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const agentList: any[] = data.agents ?? [];

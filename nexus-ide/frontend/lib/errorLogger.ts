@@ -19,34 +19,8 @@ interface ErrorLog {
 class ErrorLogger {
   private logs: ErrorLog[] = [];
   private maxLogs = 100;
-  private rateLimitCount = 0;
-  private rateLimitWindow = 60000; // 1 minute
-  private maxRateLimit = 10; // max 10 errors per minute
-
-  private isRateLimited(): boolean {
-    const now = Date.now();
-    if (this.rateLimitCount >= this.maxRateLimit) {
-      // Reset if window has passed
-      this.rateLimitCount = 0;
-      return false;
-    }
-    return false;
-  }
-
-  private incrementRateLimit() {
-    this.rateLimitCount++;
-    setTimeout(() => {
-      this.rateLimitCount = Math.max(0, this.rateLimitCount - 1);
-    }, this.rateLimitWindow);
-  }
 
   log(error: Error, context: ErrorContext = {}) {
-    if (this.isRateLimited()) {
-      console.warn("Error logger rate limited");
-      return;
-    }
-
-    this.incrementRateLimit();
 
     const errorLog: ErrorLog = {
       message: error.message,
@@ -82,7 +56,7 @@ class ErrorLogger {
 
   private async sendToBackend(errorLog: ErrorLog): Promise<void> {
     try {
-      const response = await fetch("/api/errors", {
+      const response = await fetch("/api/errors/report", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

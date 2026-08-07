@@ -31,7 +31,7 @@ class IndexRequest(BaseModel):
 
 class IndexResponse(BaseModel):
     chunks_indexed: int
-    total_chunks: int
+    total_chunks: int = 0
     project_path: str
 
 
@@ -45,9 +45,12 @@ class SearchResultItem(BaseModel):
     start_line: int
     end_line: int
     score: float
-    language: str
-    symbol_name: str
-    symbol_type: str
+    # Metadata was added after the initial API contract.  Keep it optional in
+    # responses so persisted/third-party indexes created before that change
+    # remain readable and callers can still construct a minimal result.
+    language: str = ""
+    symbol_name: str = ""
+    symbol_type: str = ""
     content: str
 
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { isTokenValid, clearAuth, autoLoginDev } from "../../lib/auth";
+import { isTokenValid, clearAuth, autoLoginDev, refreshAuth, getRefreshToken } from "../../lib/auth";
 
 const PUBLIC_PATHS = ["/login"];
 
@@ -18,13 +18,46 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blockedLoginRedirectRef = useRef(false);
   const autoLoginAttempted = useRef(false);
+  // Guards against running the auth check more than once per mount. Without
+  // this, including `checked` in the dependency array re-triggers the effect
+  // after `setChecked(true)`, which — combined with React StrictMode's
+  // double-invocation in dev — could leave the guard stuck on the loading
+  // spinner (the "blank screen" symptom).
+  const checkStartedRef = useRef(false);
 
   useEffect(() => {
+    if (checkStartedRef.current) return;
+    checkStartedRef.current = true;
     let mounted = true;
 
+    const finish = (err?: unknown) => {
+      if (!mounted) return;
+      if (err) {
+        setError(err instanceof Error ? err.message : "Authentication check failed.");
+      }
+      setChecked(true);
+    };
+
     const doCheck = async () => {
-      // Try auto-login in dev mode on first run
-      if (!autoLoginAttempted.current && process.env.NODE_ENV === "development") {
+      // Start the guard timeout before any network-backed auto-login attempt.
+      // A stalled backend must never keep the entire UI on an infinite spinner.
+      timeoutRef.current = setTimeout(() => {
+        if (mounted && !checked) {
+          const isPublic = PUBLIC_PATHS.includes(pathname);
+          if (!isPublic) {
+            clearAuth();
+            router.replace("/login?expired=1");
+          }
+          finish();
+        }
+      }, AUTH_TIMEOUT_MS);
+
+      const isPublic = PUBLIC_PATHS.includes(pathname);
+
+      // The login page owns its dev auto-login attempt. Running it here too
+      // creates two concurrent authentication requests and can overload the
+      // backend while the database pool is still warming up.
+      if (!isPublic && !autoLoginAttempted.current && process.env.NODE_ENV === "development") {
         autoLoginAttempted.current = true;
         try {
           await autoLoginDev();
@@ -33,22 +66,18 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
         }
       }
 
-      timeoutRef.current = setTimeout(() => {
-        if (mounted && !checked) {
-          const isPublic = PUBLIC_PATHS.includes(pathname);
-          if (!isPublic) {
-            clearAuth();
-            router.replace("/login?expired=1");
-          }
-          if (mounted) setChecked(true);
-        }
-      }, AUTH_TIMEOUT_MS);
-
       try {
-        const isPublic = PUBLIC_PATHS.includes(pathname);
         const valid = isTokenValid();
 
         if (!isPublic && !valid) {
+          // Access token expired — try a silent refresh before giving up.
+          if (getRefreshToken()) {
+            const refreshed = await refreshAuth();
+            if (refreshed && isTokenValid()) {
+              finish();
+              return;
+            }
+          }
           const alreadyBlocked = blockedLoginRedirectRef.current;
           clearAuth();
           if (!alreadyBlocked) {
@@ -56,17 +85,14 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
             router.replace("/login?expired=1");
           }
         }
+        finish();
       } catch (e) {
         clearAuth();
         if (!PUBLIC_PATHS.includes(pathname) && !blockedLoginRedirectRef.current) {
           blockedLoginRedirectRef.current = true;
           router.replace("/login?expired=1");
         }
-        if (mounted) {
-          setError(e instanceof Error ? e.message : "Authentication check failed.");
-        }
-      } finally {
-        if (mounted) setChecked(true);
+        finish(e);
       }
     };
 
@@ -76,7 +102,7 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
       mounted = false;
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
     };
-  }, [pathname, router, checked]);
+  }, [pathname, router]);
 
   if (!checked && !error) {
     return (

@@ -15,7 +15,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.core.self_improvement import SelfImprovementAnalyzer
 from backend.middleware.auth import require_auth
-from backend.middleware.rate_limit import limiter
 from backend.tools.web_search import search_web
 
 logger = logging.getLogger(__name__)
@@ -23,7 +22,6 @@ router = APIRouter()
 
 
 @router.get("/system/health")
-@limiter.limit("120/minute")
 async def get_system_health(request: Request) -> dict[str, Any]:
     """Return overall system health snapshot."""
     import httpx
@@ -74,7 +72,6 @@ async def get_system_health(request: Request) -> dict[str, Any]:
 
 
 @router.get("/system/healer/status")
-@limiter.limit("60/minute")
 async def get_healer_status(
     request: Request, _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:
@@ -86,7 +83,6 @@ async def get_healer_status(
 
 
 @router.get("/system/self-improvement")
-@limiter.limit("60/minute")
 async def get_self_improvement(
     request: Request, _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:
@@ -99,7 +95,6 @@ async def get_self_improvement(
 
 
 @router.post("/system/self-improvement/run")
-@limiter.limit("10/minute")
 async def run_self_improvement(
     request: Request, _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:
@@ -117,7 +112,6 @@ async def run_self_improvement(
 
 
 @router.post("/web_search")
-@limiter.limit("30/minute")
 async def web_search_endpoint(
     request: Request,
     payload: dict[str, Any],

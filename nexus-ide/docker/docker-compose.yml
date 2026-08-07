@@ -20,9 +20,9 @@ services:
     volumes:
       - nexus-data:/app/data
       - ../config:/app/config:ro
-      - C:/Users/rodri/Desktop:/mnt/host/Desktop
-      - C:/Users/rodri/Dev:/mnt/host/Dev
-      - ../../../PROJETO IA AULA GIT CLONE:/workspace
+      - ${HOST_DESKTOP_PATH:-}:/mnt/host/Desktop
+      - ${HOST_DEV_PATH:-}:/mnt/host/Dev
+      - ${HOST_WORKSPACE_PATH:-}:/workspace
     depends_on:
       redis:
         condition: service_healthy

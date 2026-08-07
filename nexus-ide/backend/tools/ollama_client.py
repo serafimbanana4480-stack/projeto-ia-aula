@@ -170,43 +170,118 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
         **_: Any,
     ) -> AsyncIterator[str]:
+        """Stream a response from Ollama without buffering the whole body.
+
+        ``AsyncClient.request`` reads a response before returning it, which
+        made the previous implementation appear to stream while actually
+        waiting for the full generation.  Keep the response context open while
+        yielding lines and retry only failures that happen before any content
+        is emitted, otherwise a retry would duplicate user-visible text.
+        """
         self._last_usage = {}
+        # ``AgentBase`` supplies portable output-budget aliases for cloud
+        # providers.  Ollama expects ``num_predict``; forwarding the other
+        # names inside its options object is unnecessary and can break strict
+        # server versions.
+        ollama_options = {
+            key: value
+            for key, value in (options or {}).items()
+            if key not in {"max_tokens", "max_output_tokens"}
+        }
         payload = {
             "model": self._resolve_model(model),
             "messages": self._normalize_messages(messages),
             "stream": True,
-            "options": options or {},
+            "options": ollama_options,
         }
-        response = await self._request_with_retries("POST", "/api/chat", json_payload=payload)
+        failures: list[str] = []
+        max_attempts = len(_BACKOFF_DELAYS) + 1
+        emitted_content = False
 
-        final_chunk: dict[str, Any] = {}
-        async for line in response.aiter_lines():
-            if not line:
-                continue
+        for attempt in range(1, max_attempts + 1):
+            retryable_failure: str | None = None
             try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                logger.debug("Skipping malformed Ollama stream line: %s", line)
+                async with self._client.stream(
+                    "POST", "/api/chat", json=payload
+                ) as response:
+                    if response.status_code >= 400:
+                        body = (await response.aread()).decode("utf-8", errors="replace").strip()
+                        error_message = (
+                            f"HTTP {response.status_code}: {body or response.reason_phrase}"
+                        )
+                        if response.status_code == 404:
+                            raise OllamaModelError(error_message)
+                        if response.status_code not in _RETRYABLE_STATUS_CODES:
+                            raise OllamaError(error_message)
+                        retryable_failure = error_message
+                    else:
+                        final_chunk: dict[str, Any] = {}
+                        async for line in response.aiter_lines():
+                            if not line:
+                                continue
+                            try:
+                                data = json.loads(line)
+                            except json.JSONDecodeError:
+                                logger.debug(
+                                    "Skipping malformed Ollama stream line: %s", line[:200]
+                                )
+                                continue
+
+                            if not isinstance(data, dict):
+                                continue
+                            if data.get("error"):
+                                raise OllamaError(f"Ollama stream error: {data['error']}")
+                            chunk = data.get("message", {}).get("content")
+                            if chunk:
+                                emitted_content = True
+                                yield chunk
+
+                            # Some compatible Ollama servers include the
+                            # final text delta and ``done`` in one frame.
+                            # Consume that delta before ending the stream so
+                            # the last word is never silently truncated.
+                            if data.get("done") is True:
+                                final_chunk = data
+                                break
+
+                        if final_chunk:
+                            if not emitted_content:
+                                retryable_failure = "Ollama stream completed without content"
+                            else:
+                                self._last_usage = {
+                                    "input_tokens": final_chunk.get("prompt_eval_count", 0) or 0,
+                                    "output_tokens": final_chunk.get("eval_count", 0) or 0,
+                                    "total_tokens": (
+                                        (final_chunk.get("prompt_eval_count", 0) or 0)
+                                        + (final_chunk.get("eval_count", 0) or 0)
+                                    ),
+                                }
+                                return
+                        else:
+                            retryable_failure = "Ollama stream ended before its final done frame"
+            except _RETRYABLE_EXCEPTIONS as exc:
+                if emitted_content:
+                    raise OllamaConnectionError(
+                        f"Ollama stream interrupted after output: {type(exc).__name__}: {exc}"
+                    ) from exc
+                retryable_failure = f"{type(exc).__name__}: {exc}"
+
+            if retryable_failure is None:
+                # All non-retryable errors are raised above.  Retain this guard
+                # so a future control-flow change cannot silently report success.
+                raise OllamaError("Ollama stream ended without a result")
+
+            failures.append(retryable_failure)
+            if emitted_content:
+                raise OllamaConnectionError(
+                    f"Ollama stream interrupted after output: {retryable_failure}"
+                )
+            if attempt < max_attempts:
+                await asyncio.sleep(_BACKOFF_DELAYS[attempt - 1])
                 continue
-
-            if data.get("done") is True:
-                final_chunk = data
-                break
-
-            chunk = data.get("message", {}).get("content")
-            if chunk:
-                yield chunk
-
-        # Extract usage from the final (done) chunk
-        if final_chunk:
-            self._last_usage = {
-                "input_tokens": final_chunk.get("prompt_eval_count", 0) or 0,
-                "output_tokens": final_chunk.get("eval_count", 0) or 0,
-                "total_tokens": (
-                    (final_chunk.get("prompt_eval_count", 0) or 0)
-                    + (final_chunk.get("eval_count", 0) or 0)
-                ),
-            }
+            raise OllamaConnectionError(
+                self._format_attempt_failure("POST", "/api/chat", max_attempts, failures)
+            )
 
     async def chat_complete(
         self,

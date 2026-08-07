@@ -5,13 +5,11 @@ Provides endpoints for commits, tools, web search, etc.
 """
 
 import logging
-import random
 import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from backend.orchestrator.limiter import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -46,50 +44,10 @@ async def get_recent_commits() -> list[dict]:
 
 @router.get("/tools")
 async def get_tools() -> dict:
-    """Return available tools."""
-    return {
-        "tools": [
-            {
-                "name": "read_file",
-                "description": "Read file contents",
-                "enabled": True,
-            },
-            {
-                "name": "write_file",
-                "description": "Write file contents",
-                "enabled": True,
-            },
-            {
-                "name": "execute_code",
-                "description": "Execute code in sandbox",
-                "enabled": True,
-            },
-            {
-                "name": "search_web",
-                "description": "Search the web",
-                "enabled": True,
-            },
-            {
-                "name": "database_query",
-                "description": "Query database",
-                "enabled": False,
-            },
-        ],
-    }
+    """Return the same live registry catalog as the canonical tools route."""
+    from backend.tools.registry import get_tool_catalog
 
-
-@router.post("/web_search")
-@limiter.limit("60/minute")
-async def web_search(query: dict, request: Request) -> list[dict]:
-    """Perform web search."""
-    # Mock data - in production this would use actual web search API
-    return [
-        {
-            "title": f"Results for {query.get('query', 'test')}",
-            "url": "https://example.com",
-            "snippet": "This is a mock search result for demonstration purposes.",
-        },
-    ]
+    return {"tools": get_tool_catalog()}
 
 
 @router.get("/system/status")
@@ -104,12 +62,13 @@ async def get_system_status(
             detail="min_agents must be less than or equal to max_agents"
         )
     
-    # Mock data - in production this would come from actual system monitoring
+    # No real source is available in this standalone router; report
+    # truthful, non-fabricated neutral defaults rather than random values.
     return {
         "status": "operational",
-        "agents_active": random.randint(min_agents, min(max_agents, min_agents + 5)),
-        "models_executing": random.randint(1, 3),
-        "tasks_running": random.randint(2, 5),
+        "agents_active": 0,
+        "models_executing": 0,
+        "tasks_running": 0,
         "self_improvement_enabled": False,
     }
 

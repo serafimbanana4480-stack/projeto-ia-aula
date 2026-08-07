@@ -2,9 +2,9 @@
 
 import React, { useEffect, useState, useCallback } from "react";
 import {
-  MessageSquare, Search, SlidersHorizontal, ChevronLeft,
-  ChevronRight, Filter, ArrowUpDown, CheckCircle2, XCircle,
-  Clock, Bot, TrendingUp, TrendingDown, Download, X,
+  MessageSquare, Search, ChevronLeft,
+  ChevronRight, Filter, CheckCircle2, XCircle,
+  Clock, TrendingUp, TrendingDown, X,
 } from "lucide-react";
 import { apiUrl } from "../../../lib/api";
 

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
+import os
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -34,21 +38,445 @@ class ToolSpec:
     handler: Callable[..., Awaitable[Any]] | None = None
     enabled: bool = True
     # --- Discovery metadata (used by AI agents and dashboard) ---
-    tags: list[str] = field(default_factory=list)
-    risk_level: str = "low"  # "low" | "medium" | "high"
-    requires_confirmation: bool = False
-    when_to_use: str = ""
-    examples: list[dict[str, Any]] = field(default_factory=list)
     category: str = ""  # file, web, code, git, docker, system, data, etc.
 
 
 _registry: dict[str, ToolSpec] = {}
+_unavailable_modules: dict[str, dict[str, Any]] = {}
+
+# --- Tool execution guards -------------------------------------------------
+# Hard timeout for a single tool handler call. Without it a wedged handler
+# (network fetch without timeout, deadlocked subprocess) suspends the whole
+# ReAct loop forever — the audit's "agent hangs silently" symptom.
+TOOL_TIMEOUT_SECONDS = float(os.environ.get("NEXUS_TOOL_TIMEOUT", "240"))
+
+# Consecutive-failure circuit breaker: after N consecutive failures of the
+# same tool within a session the tool is short-circuited and the agent is
+# told to stop retrying it (the audit's "blacklist failed tools" rule).
+TOOL_MAX_CONSECUTIVE_FAILURES = int(os.environ.get("NEXUS_TOOL_MAX_FAILURES", "3"))
+_tool_failures: dict[tuple[str, str], int] = {}
+
+
+def _failure_key(name: str, session_id: str | None) -> tuple[str, str]:
+    return (session_id or "default", name)
+
+
+def _record_tool_success(name: str, session_id: str | None) -> None:
+    _tool_failures.pop(_failure_key(name, session_id), None)
+
+
+def _record_tool_failure(name: str, session_id: str | None) -> int:
+    key = _failure_key(name, session_id)
+    count = _tool_failures.get(key, 0) + 1
+    _tool_failures[key] = count
+    return count
+
+
+def tool_failure_count(name: str, session_id: str | None) -> int:
+    """Current consecutive-failure count for a tool in a session."""
+    return _tool_failures.get(_failure_key(name, session_id), 0)
+
+
+def reset_tool_failures(session_id: str | None = None) -> None:
+    """Reset the failure circuit breaker (per session, or everything).
+
+    MUST be called at the start of every plan task. The breaker is keyed by
+    ``(session_id, tool)`` and a session spans the whole mission, so without a
+    reset a failure streak in one task permanently disables the tool for every
+    later task and every other agent.
+
+    Run 2026-08-03T21:53 session bf1e9435b9ec47c9 is the reference failure:
+    ``run_shell`` tripped the breaker during the ANALYZER phase (three blocked
+    PowerShell verbs), and when the DEBUGGER's ``Verify`` task started three
+    minutes later the tool was still short-circuited on its very first
+    iteration. The ``verification`` evidence gate can only be closed by an
+    executable check, so the task was unwinnable before it began and ended as
+    "Agent execution failed its runtime/tool evidence gate".
+    """
+    if session_id is None:
+        _tool_failures.clear()
+        return
+    for key in [k for k in _tool_failures if k[0] == (session_id or "default")]:
+        del _tool_failures[key]
+
+
+def reset_tool_failure(name: str, session_id: str | None = None) -> None:
+    """Reset the breaker for a single tool, leaving other tools untouched."""
+    _tool_failures.pop(_failure_key(name, session_id), None)
+
+_UNAVAILABLE_MODULE_TOOLS: dict[str, tuple[str, ...]] = {
+    "browser_automation": (
+        "browser_navigate",
+        "browser_click",
+        "browser_fill",
+        "browser_extract_text",
+        "browser_screenshot",
+        "browser_get_links",
+        "browser_close",
+    ),
+}
+
+_CONFIRMATION_TOOLS = {
+    "write_file_absolute",
+    "delete_file",
+    "delete_file_absolute",
+    "delete_directory",
+    "delete_dir_absolute",
+    "move_file",
+    "move_file_absolute",
+    "copy_file",
+    "copy_file_absolute",
+    "git_push",
+    "git_operation",
+    "install_dependency",
+    "execute_shell",
+    "run_shell",
+    "browser_navigate",
+    "browser_click",
+    "browser_fill",
+    "web_search",
+    "search_web_v2",
+    "fetch_url",
+    "deep_research",
+}
+
+# Operations that are safe to run unattended when the agent is operating in
+# an explicitly autonomous session.  The normal confirmation gate remains in
+# place for interactive sessions.  This list is intentionally narrow: an
+# autonomous agent must keep moving, but it must not silently turn an
+# external side effect (push, delete, browser interaction, email, etc.) into
+# an implicit approval.
+_AUTONOMOUS_READ_ONLY_TOOLS = frozenset(
+    {
+        "web_search",
+        "search_web_v2",
+        "fetch_url",
+        "deep_research",
+        "search_github",
+        "search_docs",
+        "read_file",
+        "list_files",
+        "list_workspace_files",
+        "read_workspace_file",
+        "get_settings",
+        "get_projects",
+        "get_metrics",
+        "get_health",
+        "get_system_health",
+    }
+)
+_SAFE_AUTONOMOUS_COMMANDS = frozenset(
+    {
+        "pytest",
+        "python -m pytest",
+        "ruff",
+        "python -m ruff",
+        "mypy",
+        "python -m mypy",
+        "pyright",
+        "python -m pyright",
+        "vitest",
+        "jest",
+        "npm test",
+        "npm run test",
+        "npm run build",
+        "pnpm test",
+        "pnpm build",
+        "yarn test",
+        "yarn build",
+        "git status",
+        "git diff",
+        "git log",
+        "git branch",
+        "git rev-parse",
+        "git show",
+        "pwd",
+        "ls",
+        "dir",
+        "cd",
+        "get-childitem",
+        "get-location",
+        "gci",
+        "rg",
+        # Interpreter/toolchain probes. A DEBUGGER step that cannot answer
+        # "which python am I running?" cannot produce verification evidence.
+        "python --version",
+        "python -v",
+        # ``python -c`` is deliberately absent. The execution gate
+        # (``workspace_security._validate_single_command``) refuses inline code
+        # unconditionally, so approving it here only produced a misleading
+        # "[autonomous_blocked] requires human approval" instead of the real
+        # reason. Inline code belongs in ``execute_code``, which is sandboxed.
+        "python -m pip list",
+        "python -m pip show",
+        "python -m pip freeze",
+        "pip list",
+        "pip show",
+        "pip freeze",
+        "node --version",
+        "node -v",
+        "npm --version",
+        "npm ls",
+        "npm list",
+        "pnpm --version",
+        "pnpm list",
+        "where",
+        "which",
+        "where.exe",
+        "get-command",
+        "tsc --noemit",
+        "npx tsc --noemit",
+        "npm run typecheck",
+        "npm run lint",
+        "pnpm typecheck",
+        "pnpm lint",
+        "cat",
+        "type",
+        "get-content",
+        "head",
+        "tail",
+        "wc",
+        "findstr",
+        "select-string",
+        "sort",
+        "uniq",
+        "grep",
+        "echo",
+        "test-path",
+        "measure-object",
+        "select-object",
+        "sort-object",
+        "where-object",
+        "foreach-object",
+        "format-table",
+        "format-list",
+        "out-string",
+        "convertto-json",
+    }
+)
+
+#: Characters that can redirect output, fork a background job, or hand the
+#: rest of the line to a subshell. These stay hard-blocked: unlike ``&&`` and
+#: ``|`` they can create or overwrite files, or hide a second command whose
+#: text we never inspect.
+_UNSAFE_SHELL_CHARS: tuple[str, ...] = (">", "<", "`", "$(")
+
+#: Stderr discards/merges. They cannot create a file with attacker-chosen
+#: contents, and models emit them constantly (``pip list 2>nul``), so they are
+#: stripped before the redirection check rather than failing the whole command.
+_BENIGN_REDIRECTS_RE = re.compile(r"\s*2\s*>\s*(?:&\s*1|nul|/dev/null)")
+
+
+def _strip_quoted_spans(command: str) -> str:
+    """Blank out quoted regions, preserving length and quote positions.
+
+    Separators inside quotes are data, not operators. Without this,
+    ``python -c "import sys; print(sys.version)"`` was split at the ``;``
+    into ``python -c "import sys`` + ``print(sys.version)"``; the second
+    fragment matched nothing and the whole command was refused
+    (session 8d7cd19a70934c81, iteration 7).
+    """
+    out = list(command)
+    quote: str | None = None
+    for index, char in enumerate(command):
+        if quote is None:
+            if char in ("'", '"'):
+                quote = char
+        elif char == quote:
+            quote = None
+        else:
+            out[index] = " "
+    return "".join(out)
+
+
+def _split_shell_segments(normalized: str) -> list[str]:
+    """Split a command line on *unquoted* separators we are willing to inspect.
+
+    ``&&``, ``||``, ``|`` and ``;`` chain commands whose text is fully visible
+    to us, so each side can be validated independently. A single ``&`` is
+    job control (or, on PowerShell, the call operator) and is refused by
+    :func:`_is_safe_autonomous_command` before this function runs.
+
+    Splitting is decided on a quote-masked copy so that positions are shared
+    with the original, then applied to the original text.
+    """
+    masked = _strip_quoted_spans(normalized)
+    cuts: list[tuple[int, int]] = []
+    index = 0
+    while index < len(masked):
+        for separator in ("&&", "||", "|", ";"):
+            if masked.startswith(separator, index):
+                cuts.append((index, index + len(separator)))
+                index += len(separator)
+                break
+        else:
+            index += 1
+
+    segments: list[str] = []
+    previous = 0
+    for start, end in cuts:
+        segments.append(normalized[previous:start])
+        previous = end
+    segments.append(normalized[previous:])
+    return [segment.strip() for segment in segments if segment.strip()]
+
+
+def _segment_is_safe(segment: str) -> bool:
+    return any(
+        segment == prefix or segment.startswith(f"{prefix} ")
+        for prefix in _SAFE_AUTONOMOUS_COMMANDS
+    )
+
+
+def _is_safe_autonomous_command(command: object) -> bool:
+    """Return True for a bounded, read-only validation/inspection command.
+
+    Every segment of a chained command must independently be a known
+    read-only probe. Blanket-refusing ``|`` and ``&&`` — the previous
+    behaviour — deadlocked autonomous runs: the DEBUGGER/Verify step is
+    *required* to produce runtime evidence, but the shell idioms it reaches
+    for on Windows (``cd ... && pytest``, ``Get-ChildItem | Select-Object``)
+    were rejected wholesale, so the evidence gate could never be satisfied
+    and every Verify task failed (run 2026-08-02T05:22, session
+    b9f0dfbd53ad402a: 5 blocked ``run_shell`` calls, all read-only).
+
+    Redirection, backticks and command substitution remain refused because
+    their effect is not visible in the text we validate.
+    """
+    if not isinstance(command, str):
+        return False
+    normalized = " ".join(command.strip().lower().split())
+    if not normalized:
+        return False
+    normalized = _BENIGN_REDIRECTS_RE.sub("", normalized)
+    # Operator checks run against a quote-masked copy: a ``>`` or ``&`` inside
+    # a quoted argument is data the shell never interprets.
+    masked = _strip_quoted_spans(normalized)
+    if any(token in masked for token in _UNSAFE_SHELL_CHARS):
+        return False
+    # A lone ``&`` is backgrounding / PowerShell's call operator. ``&&`` is a
+    # visible chain and is handled by the segment walk below.
+    if re.search(r"(?<!&)&(?!&)", masked):
+        return False
+    segments = _split_shell_segments(normalized)
+    if not segments:
+        return False
+    return all(_segment_is_safe(segment) for segment in segments)
+
+
+def _path_is_within_project(path: object, project_path: str) -> bool:
+    """Return whether an absolute target stays inside the selected project."""
+    if not isinstance(path, str) or not path.strip() or not project_path.strip():
+        return False
+    try:
+        target = os.path.normcase(os.path.realpath(os.path.abspath(path)))
+        root = os.path.normcase(os.path.realpath(os.path.abspath(project_path)))
+        return os.path.commonpath((target, root)) == root
+    except (OSError, ValueError):
+        return False
+
+
+def autonomous_confirmation_required(
+    spec: ToolSpec,
+    args: dict[str, Any],
+    *,
+    project_path: str = "",
+) -> bool:
+    """Decide whether an autonomous call still needs a human decision.
+
+    This is separate from :func:`tool_requires_confirmation` so the default
+    interactive safety contract is unchanged.  Autonomous mode may proceed
+    through reversible reads, research and verification, while every
+    irreversible or externally visible operation remains a real blocker.
+    """
+    if not tool_requires_confirmation(spec):
+        return False
+    if spec.name in _AUTONOMOUS_READ_ONLY_TOOLS:
+        return False
+    if spec.name in {"write_file_absolute", "write_file", "create_file"}:
+        # Writing a requested artifact inside the active project is a normal,
+        # recoverable implementation step. Paths outside that boundary keep
+        # the explicit approval gate.
+        path = args.get("path") or args.get("file_path") or args.get("filename")
+        return not _path_is_within_project(path, project_path)
+    if spec.name in {"delete_file", "delete_file_absolute", "delete_directory", "delete_dir_absolute", "move_file", "move_file_absolute", "copy_file", "copy_file_absolute"}:
+        return not _path_is_within_project(args.get("path") or args.get("src") or args.get("destination"), project_path)
+    if spec.name in {"execute_shell", "run_shell"}:
+        return not _is_safe_autonomous_command(args.get("command"))
+    return True
 
 
 def register_tool(spec: ToolSpec) -> ToolSpec:
     _registry[spec.name] = spec
     logger.info("Registered tool: %s", spec.name)
     return spec
+
+
+def record_unavailable_module(module_name: str, error: str) -> None:
+    """Record an optional module that could not be imported.
+
+    The dashboard uses this information to show a truthful ``missing_dependency``
+    state instead of silently omitting the affected tools.
+    """
+    _unavailable_modules[module_name] = {
+        "error": error,
+        "tools": _UNAVAILABLE_MODULE_TOOLS.get(module_name, ()),
+    }
+
+
+def tool_requires_confirmation(spec: ToolSpec) -> bool:
+    """Return whether a tool must be approved before execution."""
+    return (
+        spec.requires_confirmation
+        or spec.risk_level in {"high", "critical"}
+        or spec.name in _CONFIRMATION_TOOLS
+    )
+
+
+def get_tool_catalog() -> list[dict[str, Any]]:
+    """Return the registry plus unavailable optional tools for the UI."""
+    _maybe_register()
+    catalog: list[dict[str, Any]] = []
+    for spec in sorted(_registry.values(), key=lambda item: item.name):
+        requires_confirmation = tool_requires_confirmation(spec)
+        status = "blocked" if not spec.enabled else (
+            "requires_confirmation" if requires_confirmation else "available"
+        )
+        catalog.append(
+            {
+                "name": spec.name,
+                "description": spec.description,
+                "enabled": spec.enabled,
+                "status": status,
+                "schema": spec.schema,
+                "category": spec.category or "uncategorised",
+                "risk_level": spec.risk_level,
+                "requires_confirmation": requires_confirmation,
+                "when_to_use": spec.when_to_use,
+                "tags": spec.tags,
+            }
+        )
+
+    known_names = {item["name"] for item in catalog}
+    for module_name, info in sorted(_unavailable_modules.items()):
+        for tool_name in info["tools"]:
+            if tool_name in known_names:
+                continue
+            catalog.append(
+                {
+                    "name": tool_name,
+                    "description": f"Tool disponibilizada pelo módulo {module_name}.",
+                    "enabled": False,
+                    "status": "missing_dependency",
+                    "schema": {},
+                    "category": "browser" if module_name == "browser_automation" else "system",
+                    "risk_level": "medium",
+                    "requires_confirmation": True,
+                    "dependency": module_name,
+                    "error": info["error"],
+                }
+            )
+    return catalog
 
 
 def _maybe_register() -> None:
@@ -62,7 +490,12 @@ def _maybe_register() -> None:
 
 
 def get_tool(name: str) -> ToolSpec | None:
-    _maybe_register()
+    if name not in _registry:
+        from backend.tools import _ensure_tool_registered
+
+        _ensure_tool_registered(name)
+    if name not in _registry:
+        _maybe_register()
     return _registry.get(name)
 
 
@@ -224,8 +657,116 @@ def _handler_result_failed(result: Any) -> str | None:
     return None
 
 
-async def execute_tool(name: str, session_id: str | None, args: dict) -> dict:
-    # Check cache for idempotent tools
+def _drop_unsupported_args(spec: "ToolSpec", args: dict) -> tuple[dict, dict]:
+    """Split *args* into those the handler accepts and those it does not.
+
+    Returns ``(accepted, dropped)``. A handler that declares ``**kwargs`` is
+    treated as accepting everything. Required parameters are never dropped —
+    if one is missing the handler should still raise, so the model sees a
+    genuine signature error rather than a silent no-op.
+    """
+    handler = getattr(spec, "handler", None)
+    if handler is None or not isinstance(args, dict):
+        return args, {}
+    try:
+        signature = inspect.signature(handler)
+    except (TypeError, ValueError):  # builtins / C handlers
+        return args, {}
+    params = signature.parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return args, {}
+    accepted: dict = {}
+    dropped: dict = {}
+    for key, value in args.items():
+        if key in params:
+            accepted[key] = value
+        else:
+            dropped[key] = value
+    if dropped:
+        logger.warning(
+            "[TOOL ARGS] %s called with unsupported argument(s) %s — dropped; "
+            "valid arguments are %s",
+            spec.name,
+            sorted(dropped),
+            sorted(params),
+        )
+        return accepted, {
+            "dropped": sorted(dropped),
+            "valid_arguments": sorted(params),
+            "note": (
+                "These arguments are not part of this tool's signature and were "
+                "ignored. Do not pass them again."
+            ),
+        }
+    return accepted, {}
+
+
+async def execute_tool(
+    name: str,
+    session_id: str | None,
+    args: dict,
+    *,
+    confirmed: bool = False,
+    enforce_confirmation: bool = False,
+    autonomous: bool = False,
+    project_path: str = "",
+) -> dict:
+    spec = get_tool(name)
+    if not spec:
+        return {"error": f"Tool '{name}' not found"}
+    if not spec.enabled:
+        return {"error": f"Tool '{name}' is disabled"}
+    if not spec.handler:
+        return {"error": f"Tool '{name}' has no handler"}
+
+    # Circuit breaker: a tool that failed N times in a row in this session is
+    # short-circuited so the agent stops burning iterations retrying it.
+    failures = tool_failure_count(name, session_id)
+    if failures >= TOOL_MAX_CONSECUTIVE_FAILURES:
+        logger.warning(
+            "[TOOL CIRCUIT] %s short-circuited after %d consecutive failures (session=%s)",
+            name,
+            failures,
+            session_id,
+        )
+        return {
+            "tool": name,
+            "error": (
+                f"Tool '{name}' failed {failures} times in a row and is temporarily "
+                "disabled for this session. Do NOT call it again — use a different "
+                "tool or answer with the information you already have."
+            ),
+            "circuit_open": True,
+            "duration_ms": 0,
+        }
+
+    # Confirmation gate BEFORE cache: a cached hit must never bypass the
+    # user's explicit approval for confirmation-listed tools (e.g. fetch_url).
+    needs_confirmation = (
+        autonomous_confirmation_required(spec, args, project_path=project_path)
+        if autonomous
+        else tool_requires_confirmation(spec)
+    )
+    if enforce_confirmation and needs_confirmation and not confirmed and not args.get("confirm", False):
+        from backend.tools.confirmations import create_confirmation
+
+        confirmation_id = await create_confirmation(
+            session_id=session_id or "default",
+            tool_name=name,
+            args=args,
+        )
+        return {
+            "tool": name,
+            "error": f"Confirmation required before executing '{name}'.",
+            "confirmation_required": True,
+            "confirmation_id": confirmation_id,
+            "tool_args": args,
+            "risk_level": spec.risk_level,
+            "suggestion": "Review the arguments and approve the operation to continue.",
+            "duration_ms": 0,
+        }
+
+    # Check cache for idempotent tools (only after confirmation is satisfied)
     if _HAVE_TOOL_CACHE:
         try:
             cache = get_tool_cache()
@@ -236,21 +777,28 @@ async def execute_tool(name: str, session_id: str | None, args: dict) -> dict:
         except Exception:
             pass  # Cache is best-effort
 
-    _maybe_register()
-    spec = get_tool(name)
-    if not spec:
-        return {"error": f"Tool '{name}' not found"}
-    if not spec.enabled:
-        return {"error": f"Tool '{name}' is disabled"}
-    if not spec.handler:
-        return {"error": f"Tool '{name}' has no handler"}
+    # Drop arguments the handler cannot accept.
+    #
+    # Models routinely invent plausible-sounding parameters. Passing them
+    # straight through raised a bare TypeError that surfaced to the agent as
+    # "_list_dir_absolute_handler() got an unexpected keyword argument
+    # 'include_hidden'" (session bf1e9435b9ec47c9, DEBUGGER iteration 6) —
+    # unactionable, counted as a hard failure, and one iteration closer to the
+    # circuit breaker. Dropping the extras lets the call succeed and tells the
+    # model precisely which names are valid.
+    args, dropped_args = _drop_unsupported_args(spec, args)
 
     start = time.time()
     try:
-        result = await spec.handler(**args)
+        # Hard timeout: a wedged handler must never suspend the ReAct loop
+        # forever. On timeout the task is cancelled and an error is returned.
+        result = await asyncio.wait_for(spec.handler(**args), timeout=TOOL_TIMEOUT_SECONDS)
+        if dropped_args and isinstance(result, dict):
+            result = {**result, "ignored_arguments": dropped_args}
         duration_ms = int((time.time() - start) * 1000)
         handler_error = _handler_result_failed(result)
         if handler_error:
+            failure_count = _record_tool_failure(name, session_id)
             log_tool_execution(
                 session_id=session_id,
                 tool_name=name,
@@ -264,8 +812,10 @@ async def execute_tool(name: str, session_id: str | None, args: dict) -> dict:
                 "tool": name,
                 "error": handler_error,
                 "result": result,
+                "consecutive_failures": failure_count,
                 "duration_ms": duration_ms,
             }
+        _record_tool_success(name, session_id)
         log_tool_execution(
             session_id=session_id,
             tool_name=name,
@@ -279,12 +829,34 @@ async def execute_tool(name: str, session_id: str | None, args: dict) -> dict:
         if _HAVE_TOOL_CACHE:
             try:
                 cache = get_tool_cache()
+                cache.invalidate_after_mutation(name)
                 cache.store(name, args, response)
             except Exception:
                 pass  # Cache is best-effort
         return response
+    except TimeoutError:
+        duration_ms = int((time.time() - start) * 1000)
+        failure_count = _record_tool_failure(name, session_id)
+        error_msg = f"Tool '{name}' timed out after {TOOL_TIMEOUT_SECONDS:.0f}s"
+        logger.warning("[TOOL TIMEOUT] %s (session=%s)", error_msg, session_id)
+        log_tool_execution(
+            session_id=session_id,
+            tool_name=name,
+            args=args,
+            result=None,
+            success=False,
+            error=error_msg,
+            duration_ms=duration_ms,
+        )
+        return {
+            "tool": name,
+            "error": error_msg,
+            "consecutive_failures": failure_count,
+            "duration_ms": duration_ms,
+        }
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
+        failure_count = _record_tool_failure(name, session_id)
         log_tool_execution(
             session_id=session_id,
             tool_name=name,
@@ -294,4 +866,9 @@ async def execute_tool(name: str, session_id: str | None, args: dict) -> dict:
             error=str(e),
             duration_ms=duration_ms,
         )
-        return {"tool": name, "error": str(e), "duration_ms": duration_ms}
+        return {
+            "tool": name,
+            "error": str(e),
+            "consecutive_failures": failure_count,
+            "duration_ms": duration_ms,
+        }

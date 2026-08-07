@@ -28,6 +28,10 @@ class CancellationEntry:
     event: asyncio.Event = field(default_factory=asyncio.Event)
     created_at: float = field(default_factory=time.monotonic)
     cancelled: bool = False
+    # The task that is currently consuming the SSE body.  Setting the event
+    # alone is not enough when the upstream provider is blocked waiting for a
+    # token, so an explicit cancellation also interrupts this task.
+    stream_task: asyncio.Task[Any] | None = field(default=None, repr=False)
 
 
 class CancellationRegistry:
@@ -56,12 +60,15 @@ class CancellationRegistry:
 
     async def cancel(self, request_id: str) -> bool:
         """Cancel a request. Returns True if it existed and was cancelled."""
+        stream_task: asyncio.Task[Any] | None = None
         async with self._lock:
             entry = self._entries.get(request_id)
             if entry is None:
                 return False
             entry.cancelled = True
             entry.event.set()
+            stream_task = entry.stream_task
+        self._cancel_stream_task(stream_task)
         logger.info("Cancelled request %s", request_id)
         return True
 
@@ -72,8 +79,47 @@ class CancellationRegistry:
             return False
         entry.cancelled = True
         entry.event.set()
+        self._cancel_stream_task(entry.stream_task)
         logger.info("Cancelled request %s (sync)", request_id)
         return True
+
+    async def bind_stream_task(
+        self,
+        request_id: str,
+        task: asyncio.Task[Any] | None = None,
+    ) -> bool:
+        """Associate the active SSE consumer task with a request.
+
+        The task binding closes the gap between cooperative cancellation and
+        a provider that is currently blocked in an await.  If a cancel request
+        won the race before the stream starts, the newly bound task is
+        cancelled immediately.
+        """
+        stream_task = task or asyncio.current_task()
+        if stream_task is None:
+            return False
+
+        async with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is None:
+                return False
+            entry.stream_task = stream_task
+            already_cancelled = entry.cancelled
+
+        if already_cancelled:
+            self._cancel_stream_task(stream_task)
+        return True
+
+    @staticmethod
+    def _cancel_stream_task(task: asyncio.Task[Any] | None) -> None:
+        """Best-effort interruption of the task serving a cancelled stream."""
+        if task is None or task.done():
+            return
+        try:
+            task.cancel()
+        except RuntimeError:
+            # A task tied to a closing event loop is already going away.
+            logger.debug("Could not cancel stream task because its loop is closing")
 
     def is_cancelled(self, request_id: str) -> bool:
         """Non-blocking check whether a request is cancelled."""

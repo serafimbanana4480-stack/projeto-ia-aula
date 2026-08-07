@@ -9,7 +9,6 @@ from typing import AsyncIterator
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from backend.orchestrator.limiter import limiter
 
 from backend.models.api import ChatRequest
 from backend.observability.event_system import get_event_bus
@@ -20,7 +19,6 @@ router = APIRouter()
 
 
 @router.post("/chat")
-@limiter.limit("30/minute")
 async def enhanced_chat(req: ChatRequest, request: Request) -> StreamingResponse:
     """Enhanced chat endpoint with real-time events and dashboard integration."""
     
@@ -70,7 +68,6 @@ async def get_chat_session(session_id: str, request: Request) -> dict:
 
 
 @router.post("/chat/sessions/cleanup")
-@limiter.limit("30/minute")
 async def cleanup_inactive_sessions(request: Request) -> dict:
     """Clean up inactive chat sessions."""
     event_bus = await get_event_bus()

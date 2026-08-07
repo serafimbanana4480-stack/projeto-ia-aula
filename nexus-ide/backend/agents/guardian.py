@@ -54,7 +54,7 @@ class NexusGuardianAgent:
 
     Usage:
         guardian = NexusGuardianAgent()
-        asyncio.create_task(guardian.monitor_loop())
+        await guardian.start()
 
         # Query status
         status = guardian.get_status()
@@ -72,14 +72,22 @@ class NexusGuardianAgent:
         self._task: asyncio.Task | None = None
         self._slog = get_structured_logger()
 
-    async def start(self) -> None:
-        """Start the guardian monitoring loop."""
+    async def start(self) -> asyncio.Task[None]:
+        """Start the guardian monitoring loop and return its background task.
+
+        Starting through this method is important: :meth:`monitor_loop`
+        intentionally exits while ``_running`` is false, so scheduling that
+        method directly creates a task that immediately stops.
+        """
         if self._running:
-            return
+            if self._task is None:
+                raise RuntimeError("Guardian is marked running without a monitor task")
+            return self._task
         self._running = True
         self._task = asyncio.create_task(self.monitor_loop())
         logger.info("Nexus Guardian started")
         self._slog.info("Nexus Guardian started", agent="GUARDIAN", source="guardian")
+        return self._task
 
     async def stop(self) -> None:
         """Stop the guardian."""
@@ -88,6 +96,7 @@ class NexusGuardianAgent:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
+        self._task = None
         logger.info("Nexus Guardian stopped")
 
     async def monitor_loop(self) -> None:
@@ -176,7 +185,9 @@ class NexusGuardianAgent:
         try:
             from backend.persistence.db import list_projects
 
-            projects = list_projects()
+            # list_projects is synchronous and obtains a pooled SQLite
+            # connection. Never block the event loop while the pool is busy.
+            projects = await asyncio.to_thread(list_projects)
             for project in projects:
                 project_path = project.get("path", "")
                 if not project_path or not os.path.exists(project_path):

@@ -59,7 +59,14 @@ class TokenResponse(BaseModel):
 
     access_token: str
     token_type: str = "bearer"
+    refresh_token: str = ""
     user: UserResponse
+
+
+class RefreshRequest(BaseModel):
+    """Model for token refresh request."""
+
+    refresh_token: str
 
 
 class PasswordChange(BaseModel):

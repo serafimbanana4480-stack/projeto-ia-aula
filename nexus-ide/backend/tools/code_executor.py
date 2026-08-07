@@ -10,7 +10,6 @@ Uses SandboxExecutor which provides:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Any
 
 from backend.tools.registry import ToolSpec, register_tool
@@ -36,13 +35,35 @@ LANGUAGE_CONFIG: dict[str, dict[str, str]] = {
 }
 
 
-@dataclass
-class ExecutionResult:
-    stdout: str
-    stderr: str
-    exit_code: int
-    execution_time: float
-    timed_out: bool
+class ExecutionResult(dict[str, Any]):
+    """JSON-compatible execution result with both dict and attribute access.
+
+    The tool API historically returned dictionaries, while some callers used
+    the documented object-style fields. Keeping a dict subclass preserves JSON
+    serialization and supports both calling conventions during the transition.
+    """
+
+    def __init__(
+        self,
+        stdout: str,
+        stderr: str,
+        exit_code: int,
+        execution_time: float,
+        timed_out: bool,
+    ) -> None:
+        super().__init__(
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            execution_time=execution_time,
+            timed_out=timed_out,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
 
 
 # Global SandboxExecutor instance (lazy-initialized)
@@ -90,23 +111,23 @@ async def execute_code(code: str, language: str = "python", timeout: int = 30) -
             timeout=timeout,
         )
 
-        return {
-            "stdout": result.stdout[:100_000],
-            "stderr": result.stderr[:100_000],
-            "exit_code": result.exit_code,
-            "execution_time": result.duration_ms / 1000.0,
-            "timed_out": result.timed_out,
-        }
+        return ExecutionResult(
+            stdout=result.stdout[:100_000],
+            stderr=result.stderr[:100_000],
+            exit_code=result.exit_code,
+            execution_time=result.duration_ms / 1000.0,
+            timed_out=result.timed_out,
+        )
 
     except Exception as exc:
         logger.exception("Code execution failed: %s", exc)
-        return {
-            "stdout": "",
-            "stderr": f"Execution error: {exc}",
-            "exit_code": -1,
-            "execution_time": 0.0,
-            "timed_out": False,
-        }
+        return ExecutionResult(
+            stdout="",
+            stderr=f"Execution error: {exc}",
+            exit_code=-1,
+            execution_time=0.0,
+            timed_out=False,
+        )
 
 
 register_tool(

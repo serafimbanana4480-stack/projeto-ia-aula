@@ -14,12 +14,25 @@ import logging
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from backend.middleware.auth import require_auth
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class ToolExecuteRequest(BaseModel):
+    tool_name: str = Field(min_length=1, max_length=128)
+    args: dict = Field(default_factory=dict)
+    session_id: str = Field(default="default", min_length=1, max_length=128)
+    confirmed: bool = False
+
+
+class ToolConfirmationRequest(BaseModel):
+    confirmation_id: str = Field(min_length=1, max_length=128)
+    approved: bool
 
 
 def _load_modes() -> dict:
@@ -52,20 +65,9 @@ async def get_mode(mode_name: str, _user: dict = Depends(require_auth)) -> dict:
 @router.get("/tools")
 async def list_tools(_user: dict = Depends(require_auth)) -> dict:
     """List all available tools and their status."""
-    from backend.tools.registry import list_tools
+    from backend.tools.registry import get_tool_catalog
 
-    tools = list_tools(enabled_only=False)
-    return {
-        "tools": [
-            {
-                "name": t.name,
-                "description": t.description,
-                "enabled": t.enabled,
-                "schema": t.schema,
-            }
-            for t in tools
-        ]
-    }
+    return {"tools": get_tool_catalog()}
 
 
 @router.post("/tools/{tool_name}/toggle")
@@ -75,10 +77,41 @@ async def toggle_tool(
     _user: dict = Depends(require_auth),
 ) -> dict:
     """Enable or disable a tool."""
-    from backend.tools.registry import set_tool_enabled
+    from backend.tools.registry import get_tool, set_tool_enabled
 
+    if get_tool(tool_name) is None:
+        raise HTTPException(status_code=404, detail=f"Tool {tool_name} is not registered")
     set_tool_enabled(tool_name, enabled)
     return {"tool": tool_name, "enabled": enabled}
+
+
+@router.post("/tools/execute")
+async def execute_tool_endpoint(
+    req: ToolExecuteRequest, _user: dict = Depends(require_auth)
+) -> dict:
+    """Execute one tool for a retry action from the UI."""
+    from backend.tools.registry import execute_tool
+
+    return await execute_tool(
+        req.tool_name,
+        req.session_id,
+        req.args,
+        confirmed=req.confirmed,
+        enforce_confirmation=True,
+    )
+
+
+@router.post("/tools/confirm")
+async def confirm_tool_endpoint(
+    req: ToolConfirmationRequest, _user: dict = Depends(require_auth)
+) -> dict:
+    """Resolve a tool confirmation gate currently holding an agent stream."""
+    from backend.tools.confirmations import resolve_confirmation
+
+    resolved = await resolve_confirmation(req.confirmation_id, req.approved)
+    if not resolved:
+        raise HTTPException(status_code=404, detail="Confirmation expired or not found")
+    return {"confirmation_id": req.confirmation_id, "approved": req.approved}
 
 
 # ---------------------------------------------------------------------------

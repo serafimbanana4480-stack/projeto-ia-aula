@@ -1,0 +1,177 @@
+# Autonomous Continuous Improvement System Configuration
+# 
+# 12-Factor Precedence: Environment Variables (NEXUS_AI_*) > YAML Config > Code Defaults
+# 
+# All settings below can be overridden via environment variables:
+#   NEXUS_AI_ENABLED=true/false
+#   NEXUS_AI_MODE=dogfood|framework|ci_cd|production
+#   NEXUS_AI_TARGET_PROJECTS__0__PATH=.
+#   NEXUS_AI_TARGET_PROJECTS__0__NAME=nexus-ide
+#   NEXUS_AI_TARGET_PROJECTS__0__PRIORITY=1
+#   NEXUS_AI_CYCLE_INTERVAL_MINUTES=30
+#   NEXUS_AI_MAX_CONCURRENT_IMPROVEMENTS=3
+#   NEXUS_AI_AUTO_APPLY_THRESHOLD=0.85
+#   NEXUS_AI_REQUIRE_META_APPROVAL=true
+#   NEXUS_AI_CIRCUIT_BREAKER__MAX_FAILURES_PER_HOUR=5
+#   NEXUS_AI_CIRCUIT_BREAKER__COOLDOWN_MINUTES=30
+#   NEXUS_AI_SKILL_RETENTION_DAYS=30
+#   NEXUS_AI_CROSS_PROJECT_LEARNING=true
+#   NEXUS_AI_FAILURE_PATTERN_MIN_OCCURRENCES=3
+
+# ──────────────────────────────────────────────────────────────────────
+# Core Settings
+# ──────────────────────────────────────────────────────────────────────
+enabled: true
+mode: "dogfood"  # dogfood | framework | ci_cd | production
+
+target_projects:
+  - path: "."
+    name: "nexus-ide"
+    priority: 1
+
+# ──────────────────────────────────────────────────────────────────────
+# Cycle Configuration
+# ──────────────────────────────────────────────────────────────────────
+cycle_interval_minutes: 30
+max_concurrent_improvements: 3
+
+# Per-agent budget limits are NOT enforced here.
+# They are enforced by AgentLifecycleManager:
+#   MAX_CONCURRENT_AGENTS_GLOBAL=20
+#   MAX_CONCURRENT_AGENTS_PER_TYPE=5
+#   DEFAULT_TOKEN_BUDGET=100_000
+#   DEFAULT_TIME_BUDGET_SECONDS=600
+
+# ──────────────────────────────────────────────────────────────────────
+# Safety Rails
+# ──────────────────────────────────────────────────────────────────────
+# Confidence threshold for auto-applying improvements (0.0 - 1.0)
+# Improvements with confidence >= this threshold are auto-applied
+# Improvements below require META_ANALYZER approval
+auto_apply_threshold: 0.85
+
+# Require META_ANALYZER approval for improvements below auto_apply_threshold
+require_meta_approval: true
+
+# Circuit breaker to prevent cascade failures
+circuit_breaker:
+  # Maximum failures allowed per hour before circuit opens
+  max_failures_per_hour: 5
+  # Minutes to wait before allowing attempts again
+  cooldown_minutes: 30
+
+# ──────────────────────────────────────────────────────────────────────
+# Learning Settings
+# ──────────────────────────────────────────────────────────────────────
+# Days to retain learned skills and patterns before potential decay
+skill_retention_days: 30
+
+# Enable cross-project skill/pattern transfer (requires multiple target_projects)
+cross_project_learning: true
+
+# Minimum occurrences of a failure pattern before it's stored and matched
+failure_pattern_min_occurrences: 3
+
+# ──────────────────────────────────────────────────────────────────────
+# Quality Gate Configuration (applied by SelfHealingEngine)
+# ──────────────────────────────────────────────────────────────────────
+quality_gates:
+  # Required test pass rate (0.0 - 1.0)
+  min_test_pass_rate: 1.0
+  # Maximum allowed lint violations (ruff errors)
+  max_lint_errors: 0
+  # Maximum allowed security issues (bandit)
+  max_security_issues: 0
+  # Performance regression threshold (1.0 = no regression, 1.1 = 10% regression allowed)
+  max_perf_regression_factor: 1.05
+  # Require type checking to pass (mypy/pyright)
+  require_type_check: true
+
+# ──────────────────────────────────────────────────────────────────────
+# Skill Evolution Configuration
+# ──────────────────────────────────────────────────────────────────────
+skill_evolution:
+  # Minimum success rate for a skill to be promoted to auto_apply
+  promotion_threshold: 0.7
+  # Minimum uses before considering promotion
+  min_uses_for_promotion: 20
+  # Skills below this success rate after min_uses are deprecated
+  deprecation_threshold: 0.1
+  # Skills with success rate between deprecation and promotion are "review"
+  # Similarity threshold for merging similar skills (0.0 - 1.0)
+  merge_similarity_threshold: 0.85
+
+# ──────────────────────────────────────────────────────────────────────
+# Swarm Failure Analysis
+# ──────────────────────────────────────────────────────────────────────
+swarm_failure_analysis:
+  # Enable structured failure signature generation
+  enabled: true
+  # Fuzzy match threshold for normalized error matching (0.0 - 1.0)
+  fuzzy_match_threshold: 0.85
+  # Maximum stack frames to include in signature
+  max_stack_frames: 3
+
+# ──────────────────────────────────────────────────────────────────────
+# Predictive Failure Prevention
+# ──────────────────────────────────────────────────────────────────────
+predictive_failure:
+  enabled: true
+  # Risk score threshold to block execution (0.0 - 1.0)
+  block_threshold: 0.7
+  # Risk score threshold to require meta approval
+  require_approval_threshold: 0.4
+
+# ──────────────────────────────────────────────────────────────────────
+# Meta-Learning Optimization
+# ──────────────────────────────────────────────────────────────────────
+meta_learning:
+  enabled: true
+  # How many cycles before attempting optimization
+  optimization_interval_cycles: 20
+  # Thompson Sampling reward weights
+  reward_weights:
+    success_rate: 0.4
+    cycle_efficiency: 0.3
+    time_to_value: 0.2
+    regression_penalty: 0.1
+  # Hyperparameter search space
+  search_space:
+    cycle_interval_minutes: [15, 30, 60, 120]
+    auto_apply_threshold: [0.7, 0.8, 0.85, 0.9]
+    max_parallel: [2, 3, 5, 8]
+    strategy_preference: ["divide", "ensemble", "pipeline", "debate", "adaptive"]
+
+# ──────────────────────────────────────────────────────────────────────
+# Observability
+# ──────────────────────────────────────────────────────────────────────
+observability:
+  # Emit structured events to Agent Bus
+  emit_events: true
+  # Event topics to emit
+  event_topics:
+    - "improvement.cycle.started"
+    - "improvement.proposal.generated"
+    - "improvement.execution.started"
+    - "improvement.execution.completed"
+    - "improvement.execution.failed"
+    - "improvement.verification.passed"
+    - "improvement.verification.failed"
+    - "improvement.skill.evolved"
+    - "improvement.failure.diagnosed"
+    - "improvement.meta_learning.updated"
+  # Log level for improvement events
+  log_level: "INFO"
+
+# ──────────────────────────────────────────────────────────────────────
+# Persistence
+# ──────────────────────────────────────────────────────────────────────
+persistence:
+  # Knowledge base storage path (relative to project root)
+  knowledge_base_path: ".nexus/knowledge_base"
+  # Cycle history retention (days)
+  cycle_history_retention_days: 90
+  # Failure diagnosis retention (days)
+  failure_history_retention_days: 180
+  # Auto-commit optimized config to git
+  auto_commit_config: true

@@ -15,7 +15,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from backend.config.settings import get_settings
 from backend.middleware.auth import get_current_user, require_auth
-from backend.middleware.rate_limit import limiter
 from backend.persistence.db import (
     create_email_account,
     delete_email_account,
@@ -88,7 +87,6 @@ def _account_to_config(account: dict) -> dict[str, Any]:
 
 
 @router.get("/email/accounts")
-@limiter.limit("60/minute")
 async def get_accounts(
     request: Request,
     user: dict = Depends(get_current_user),
@@ -99,7 +97,6 @@ async def get_accounts(
 
 
 @router.post("/email/accounts")
-@limiter.limit("30/minute")
 async def create_account(
     request: Request,
     payload: dict[str, Any],
@@ -136,7 +133,6 @@ async def create_account(
 
 
 @router.delete("/email/accounts/{account_id}")
-@limiter.limit("30/minute")
 async def delete_account(
     request: Request,
     account_id: str,
@@ -153,7 +149,6 @@ async def delete_account(
 
 
 @router.get("/email/inbox")
-@limiter.limit("60/minute")
 async def get_inbox(
     request: Request,
     account_id: str = Query(...),
@@ -184,7 +179,6 @@ async def get_inbox(
 
 
 @router.get("/email/search")
-@limiter.limit("60/minute")
 async def search_email_endpoint(
     request: Request,
     q: str = Query(..., min_length=1),
@@ -214,7 +208,6 @@ async def search_email_endpoint(
 
 
 @router.post("/email/{email_id}/read")
-@limiter.limit("60/minute")
 async def mark_email_read(
     request: Request,
     email_id: str,
@@ -236,7 +229,6 @@ async def mark_email_read(
 
 
 @router.post("/email/triage")
-@limiter.limit("10/minute")
 async def triage_emails(
     request: Request,
     payload: dict[str, Any],

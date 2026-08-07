@@ -10,8 +10,10 @@ from backend.orchestrator.swarm import SwarmOrchestrator, SwarmResult
 class FakeAgent:
     def __init__(self, name: str):
         self.name = name
+        self.requests = []
 
     async def run(self, request):
+        self.requests.append(request)
         for token in [f"[{self.name}]", " result"]:
             yield token
 
@@ -65,6 +67,29 @@ async def test_swarm_ensemble(fake_registry):
     assert isinstance(result, SwarmResult)
     assert result.strategy_used == "ensemble"
     assert len(result.agent_results) == 2
+    assert all(
+        request.autonomous
+        for agent in fake_registry.values()
+        for request in agent.requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_swarm_respects_explicit_interactive_override(fake_registry):
+    swarm = SwarmOrchestrator(FakeLLM(), fake_registry, None, max_agents=3)
+    await swarm.execute_swarm(
+        objective="Review code interactively",
+        session_id="test-interactive",
+        agents=["CODER", "ANALYZER"],
+        strategy="ensemble",
+        autonomous=False,
+    )
+
+    assert all(
+        request.autonomous is False
+        for agent in fake_registry.values()
+        for request in agent.requests
+    )
 
 
 @pytest.mark.asyncio

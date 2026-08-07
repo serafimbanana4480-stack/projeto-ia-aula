@@ -40,7 +40,9 @@ class PlanCreateRequest(BaseModel):
     objective: str = Field(min_length=1, max_length=10_000)
     session_id: str = Field(default="default", min_length=1, max_length=128)
     context: str = Field(default="", max_length=10_000)
-    auto_approve: bool = False
+    # The product default is unattended execution. Callers that need a review
+    # gate can still send ``auto_approve=false`` explicitly.
+    auto_approve: bool = True
 
 
 class PlanApproveRequest(BaseModel):
@@ -130,9 +132,8 @@ async def create_plan(
 ) -> dict:
     """Generate a structured execution plan for an objective.
 
-    If ``auto_approve`` is ``False`` (default), the engine transitions to
-    ``AWAITING_APPROVAL``. The plan must be approved via
-    ``POST /api/plan/{plan_id}/approve`` before execution.
+    By default the plan is auto-approved for unattended execution. Send
+    ``auto_approve=false`` explicitly when a human review gate is required.
     """
     engine = _get_engine(request)
     plan = await engine.create_plan(

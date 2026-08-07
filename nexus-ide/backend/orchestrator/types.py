@@ -98,3 +98,9 @@ class OrchestrationResult:
     tokens_used: int = 0
     errors: list[str] = field(default_factory=list)
     task_results: dict[str, Any] = field(default_factory=dict)
+    #: Populated by ``execute_autonomous`` with a
+    #: :class:`backend.orchestrator.verification.VerificationOutcome`.
+    #: ``None`` means the verify/fix loop never ran.  A present outcome with
+    #: ``resolved=False`` means the loop gave up — which is deliberately NOT
+    #: the same thing as a clean run.
+    verification: Any | None = None

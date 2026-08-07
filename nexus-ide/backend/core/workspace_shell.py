@@ -87,37 +87,53 @@ async def execute_shell(
             merged_env.pop(key, None)
 
     try:
-        # Use asyncio.to_thread + subprocess.run for Windows compatibility.
-        # asyncio.create_subprocess_exec raises NotImplementedError on Windows
-        # with the default event loop policy.
         import subprocess
 
-        def _run_shell():
-            return subprocess.run(
-                command,
-                cwd=str(cwd_path) if cwd_path else None,
-                capture_output=True,
-                env=merged_env,
-                shell=True,
-                text=True,
-                errors="replace",
-            )
-
-        result = await asyncio.wait_for(
-            asyncio.to_thread(_run_shell),
-            timeout=float(timeout),
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd_path) if cwd_path else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=merged_env,
+            shell=True,
+            text=True,
+            errors="replace",
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+            ),
         )
-
-        return {
-            "command": command,
-            "stdout": result.stdout or "",
-            "stderr": result.stderr or "",
-            "exit_code": result.returncode,
-            "cwd": str(cwd_path) if cwd_path else None,
-        }
-    except TimeoutError:
-        logger.warning("Shell command timed out: %s", command)
-        return {"error": f"Command timed out after {timeout} seconds", "command": command}
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                asyncio.to_thread(process.communicate),
+                timeout=float(timeout),
+            )
+            return {
+                "command": command,
+                "stdout": stdout or "",
+                "stderr": stderr or "",
+                "exit_code": process.returncode,
+                "cwd": str(cwd_path) if cwd_path else None,
+            }
+        except TimeoutError:
+            logger.warning("Shell command timed out: %s", command)
+            if os.name == "nt":
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    capture_output=True,
+                    check=False,
+                )
+            else:
+                process.kill()
+            await asyncio.to_thread(process.communicate)
+            return {
+                "error": f"Command timed out after {timeout} seconds",
+                "command": command,
+                "stdout": "",
+                "stderr": "",
+                "exit_code": 124,
+                "timed_out": True,
+            }
     except FileNotFoundError:
         return {"error": "Shell executable not found", "command": command}
     except Exception as exc:
@@ -161,46 +177,48 @@ async def execute_python(
             f.write(code)
             temp_path = f.name
 
-        def _run_python():
-            import subprocess
+        import subprocess
 
-            return subprocess.run(
-                [sys.executable, temp_path],
-                cwd=str(cwd_path),
-                capture_output=True,
-                text=True,
-                errors="replace",
-            )
+        process = subprocess.Popen(
+            [sys.executable, temp_path],
+            cwd=str(cwd_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+            ),
+        )
 
         try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(_run_python),
+            stdout_text, stderr_text = await asyncio.wait_for(
+                asyncio.to_thread(process.communicate),
                 timeout=timeout,
             )
         except TimeoutError:
-            # Attempt to kill the Python process on timeout
             try:
-                import subprocess
-
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/IM", Path(sys.executable).name],
-                    capture_output=True,
-                    check=False,
-                )
+                if os.name == "nt":
+                    await asyncio.to_thread(
+                        subprocess.run,
+                        ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                        capture_output=True,
+                        check=False,
+                    )
+                else:
+                    process.kill()
+                await asyncio.to_thread(process.communicate)
             except Exception:
                 logger.debug("Failed to kill timed-out Python process", exc_info=True)
             return {"error": f"Python script timed out after {timeout}s", "returncode": -1}
         finally:
             Path(temp_path).unlink(missing_ok=True)
 
-        stdout_text = result.stdout or ""
-        stderr_text = result.stderr or ""
-
         return {
-            "returncode": result.returncode,
-            "stdout": stdout_text,
-            "stderr": stderr_text,
-            "success": result.returncode == 0,
+            "returncode": process.returncode,
+            "stdout": stdout_text or "",
+            "stderr": stderr_text or "",
+            "success": process.returncode == 0,
         }
     except Exception as exc:
         result = {"error": f"Python execution failed: {exc}"}

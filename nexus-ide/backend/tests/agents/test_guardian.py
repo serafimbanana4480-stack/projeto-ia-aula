@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from backend.agents.guardian import NexusGuardianAgent
@@ -60,3 +62,26 @@ class TestGuardianStatus:
 
     def test_health_trend_empty(self, guardian):
         assert guardian.get_health_trend() == []
+
+
+@pytest.mark.asyncio
+async def test_start_marks_guardian_running_and_returns_its_monitor_task(
+    guardian, monkeypatch: pytest.MonkeyPatch
+):
+    started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def monitor_loop() -> None:
+        started.set()
+        await blocked.wait()
+
+    monkeypatch.setattr(guardian, "monitor_loop", monitor_loop)
+
+    task = await guardian.start()
+    await started.wait()
+
+    assert guardian.get_status()["running"] is True
+    assert await guardian.start() is task
+
+    await guardian.stop()
+    assert task.cancelled()

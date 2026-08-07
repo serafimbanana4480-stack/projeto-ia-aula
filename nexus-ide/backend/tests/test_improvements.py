@@ -11,6 +11,8 @@ Validates:
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 # =========================================================================
@@ -31,14 +33,17 @@ class TestTokenCounting:
         assert isinstance(count, int), "Token count must be int"
 
     def test_dynamic_threshold_values(self):
-        """Dynamic threshold must be 85% of model's context window."""
-        from backend.token_management import dynamic_threshold
+        """Dynamic threshold must be 85% of the model's configured window.
 
-        assert dynamic_threshold("micro") == int(4096 * 0.85)
-        assert dynamic_threshold("fast") == int(8192 * 0.85)
-        assert dynamic_threshold("coder") == int(16384 * 0.85)
-        assert dynamic_threshold("reasoning") == int(32768 * 0.85)
-        assert dynamic_threshold("deep") == int(65536 * 0.85)
+        These used to be hardcoded (4096/8192/16384...), duplicating the
+        table they were supposed to be checking. The window now comes from
+        ``config/models.yaml``, so the test reads it from the same place the
+        production code does.
+        """
+        from backend.token_management import dynamic_threshold, get_context_limit
+
+        for tier in ("micro", "fast", "coder", "reasoning", "deep"):
+            assert dynamic_threshold(tier) == int(get_context_limit(tier) * 0.85)
 
     def test_dynamic_threshold_unknown_tier(self):
         """Unknown tier should fall back to 8192 default."""
@@ -49,10 +54,10 @@ class TestTokenCounting:
 
     def test_dynamic_threshold_custom_margin(self):
         """Custom safety margin must be respected."""
-        from backend.token_management import dynamic_threshold
+        from backend.token_management import dynamic_threshold, get_context_limit
 
         result = dynamic_threshold("coder", safety_margin=0.90)
-        assert result == int(16384 * 0.90)
+        assert result == int(get_context_limit("coder") * 0.90)
 
     def test_context_deduplication_removes_exact_duplicates(self):
         """Identical blocks must be deduplicated, preserving order."""
@@ -103,27 +108,40 @@ class TestTokenCounting:
 
     def test_validate_total_budget_overflow(self):
         """Validation must raise ContextOverflowError when exceeding limits."""
-        from backend.token_management import ContextOverflowError, validate_total_budget
+        from backend.token_management import (
+            ContextOverflowError,
+            get_context_limit,
+            validate_total_budget,
+        )
 
+        window = get_context_limit("micro")
         with pytest.raises(ContextOverflowError) as excinfo:
             validate_total_budget(
-                system_tokens=10000,
-                memory_tokens=5000,
-                history_tokens=3000,
+                system_tokens=window,
+                memory_tokens=window,
+                history_tokens=window,
                 query_tokens=500,
-                model_tier="micro",  # only 4096 context
+                model_tier="micro",
             )
         assert "Context overflow" in str(excinfo.value)
         assert "micro" in str(excinfo.value)
 
     def test_validate_total_budget_with_tool_results(self):
         """Tool result tokens must be included in the calculation."""
-        from backend.token_management import ContextOverflowError, validate_total_budget
+        from backend.token_management import (
+            ContextOverflowError,
+            get_context_limit,
+            validate_total_budget,
+        )
 
+        window = get_context_limit("micro")
+        # Fits comfortably without the tool result...
+        assert validate_total_budget(system_tokens=2000, model_tier="micro")
+        # ...and must overflow once the oversized tool result is counted.
         with pytest.raises(ContextOverflowError):
             validate_total_budget(
                 system_tokens=2000,
-                tool_result_tokens=5000,  # large tool result
+                tool_result_tokens=window,
                 model_tier="micro",
             )
 
@@ -244,7 +262,12 @@ class TestSemanticCache:
 
         cache.store("q1", "r1", "model", "sys", embed_fn)
         cache.get("q1", "model", "sys", embed_fn)  # hit
-        cache.get("unknown", "model", "sys", lambda t: [0.9] * 384)  # miss
+        # The miss vector must be near-ORTHOGONAL, not merely different in
+        # magnitude. The previous [0.9]*384 scored cos=0.913 against
+        # [0.1,0.2,0.3,0.4]*96 — above the 0.85 threshold — so this "miss"
+        # was actually a hit and the miss counter could never be exercised.
+        orthogonal = [0.4, -0.3, 0.2, -0.1] * 96
+        cache.get("unknown", "model", "sys", lambda t: orthogonal)  # miss
 
         metrics = cache.get_metrics()
         assert metrics["semantic_cache_hits_total"] >= 1
@@ -369,12 +392,20 @@ class TestToolResultCache:
 # =========================================================================
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("faiss") is None,
+    reason="optional faiss-cpu dependency is not installed",
+)
 class TestFAISSVectorStore:
-    """FAISS-based ANN vector search."""
+    """FAISS-based ANN vector search.
 
-    # Skip the entire class when faiss is not installed so the suite stays
-    # green without the optional faiss-cpu dependency.
-    faiss = pytest.importorskip("faiss")
+    NOTE: this used to call ``pytest.importorskip("faiss")`` in the class
+    body. That raises ``Skipped`` during *collection*, which aborts the whole
+    module — so on any machine without faiss, every token-management,
+    semantic-cache and cost-tracking test in this file silently vanished
+    ("no tests collected") while the suite still reported green. That is how
+    the coder-tier context misconfiguration reached production unnoticed.
+    ``skipif`` skips only this class, as intended."""
 
     @pytest.fixture
     def store(self, tmp_path):
@@ -589,8 +620,10 @@ class TestTokenManagementIntegration:
         )
 
         # Dynamic threshold
+        from backend.token_management import get_context_limit
+
         threshold = dynamic_threshold("coder")
-        assert threshold == int(16384 * 0.85)
+        assert threshold == int(get_context_limit("coder") * 0.85)
 
 
 class TestCacheIntegration:

@@ -9,12 +9,12 @@ from __future__ import annotations
 import ast
 import logging
 import os
-import platform
 import re
 import shlex
 import sys
 import tempfile
-from pathlib import Path
+from functools import lru_cache
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -233,6 +233,7 @@ def _log_operation(
         logger.exception("Failed to log workspace operation to database")
 
 
+@lru_cache(maxsize=1)
 def _get_allowed_base_paths() -> list[Path]:
     """Return a list of allowed base paths for absolute-path operations.
 
@@ -253,6 +254,30 @@ def _get_allowed_base_paths() -> list[Path]:
     return list(paths)
 
 
+@lru_cache(maxsize=256)
+def _resolved_blocked_system_path(path: str) -> Path:
+    """Resolve stable blocklist entries once instead of once per file check."""
+    return Path(path).resolve() if ":" not in path else Path(path)
+
+
+def _normalised_path_key(path: Path) -> str:
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _path_key_is_within(path_key: str, base: Path | str) -> bool:
+    """Fast boundary-aware containment check for a normalised path key."""
+    base_key = base if isinstance(base, str) else _normalised_path_key(base)
+    return path_key == base_key or path_key.startswith(base_key.rstrip("\\/") + os.sep)
+
+
+@lru_cache(maxsize=16)
+def _blocked_path_entries(blocked_paths: tuple[str, ...]) -> tuple[tuple[Path, str], ...]:
+    return tuple(
+        (resolved, _normalised_path_key(resolved))
+        for resolved in (_resolved_blocked_system_path(path) for path in blocked_paths)
+    )
+
+
 def _is_blocked_path(path: str) -> tuple[bool, str]:
     """Check whether *path* resolves to a blocked system directory.
 
@@ -265,6 +290,28 @@ def _is_blocked_path(path: str) -> tuple[bool, str]:
     if "\x00" in path:
         return True, "Null bytes in path are not allowed"
 
+    # Windows-style absolute paths (e.g. "C:\Windows\System32") must be
+    # checked with PureWindowsPath semantics *regardless of the host OS*.
+    # A POSIX pathlib.Path treats backslashes as ordinary filename
+    # characters (not separators), so on Linux/Mac hosts (Docker, CI, a
+    # WSL-hosted backend, ...) "C:\Windows" would otherwise be silently
+    # glued onto the current working directory as a harmless-looking
+    # relative subpath and slip straight past the prefix check below —
+    # even though the identical string is correctly recognised as the
+    # Windows system root when this same process runs natively on Windows.
+    # Agents supply paths as plain strings, so the guard must not depend on
+    # the host OS to interpret them safely.
+    if re.match(r"^[A-Za-z]:[\\/]", path):
+        win_path = PureWindowsPath(path)
+        for blocked in _BLOCKED_SYSTEM_PATHS:
+            if ":" not in blocked:
+                continue  # POSIX-style entry, not a Windows drive path
+            try:
+                win_path.relative_to(PureWindowsPath(blocked))
+                return True, f"Access to system path '{blocked}' is blocked"
+            except ValueError:
+                continue
+
     try:
         raw = Path(path).expanduser()
     except (OSError, ValueError) as exc:
@@ -275,18 +322,19 @@ def _is_blocked_path(path: str) -> tuple[bool, str]:
     if ".." in raw.parts:
         return True, "Path traversal ('..') is not allowed"
 
-    # Block Windows drive-relative paths (e.g. C:Windows\System32)
-    # These are treated as relative by pathlib but resolve to absolute system paths.
-    if platform.system() == "Windows":
-        import re as _re
-
-        if _re.search(r"^[A-Za-z]:[^/\\]", str(raw)):
-            return True, "Windows drive-relative paths are not allowed"
+    # Block Windows drive-relative paths (e.g. C:Windows\System32). These
+    # are treated as relative by pathlib on every host OS (not just
+    # Windows) but resolve to absolute system paths once combined with a
+    # working directory, so this must run unconditionally rather than only
+    # when this process itself happens to run on Windows.
+    if re.search(r"^[A-Za-z]:[^/\\]", str(raw)):
+        return True, "Windows drive-relative paths are not allowed"
 
     try:
         resolved = raw.resolve()
     except (OSError, ValueError) as exc:
         return True, f"Invalid path: {exc}"
+    resolved_key = _normalised_path_key(resolved)
 
     # Symlink check — if realpath differs from resolved path, the path
     # contains a symlink that may point outside allowed bases.
@@ -308,13 +356,10 @@ def _is_blocked_path(path: str) -> tuple[bool, str]:
     # 1. Blocked system paths (prefix matching) — checked FIRST so blocked
     #    always wins even when the path is inside an allowed base.
     # Longer paths are checked first so the most specific match wins.
-    for blocked in sorted(_BLOCKED_SYSTEM_PATHS, key=len, reverse=True):
-        bpath = Path(blocked).resolve() if ":" not in blocked else Path(blocked)
-        try:
-            resolved.relative_to(bpath)
+    blocked_paths = tuple(sorted(_BLOCKED_SYSTEM_PATHS, key=len, reverse=True))
+    for bpath, blocked_key in _blocked_path_entries(blocked_paths):
+        if _path_key_is_within(resolved_key, blocked_key):
             return True, f"Access to system path '{bpath}' is blocked"
-        except ValueError:
-            continue
 
     # 1b. Blocked path components — checked before allowed bases
     # Block any path that contains sensitive components (single segments).
@@ -345,11 +390,8 @@ def _is_blocked_path(path: str) -> tuple[bool, str]:
 
     # 2. Allowed bases (prefix matching)
     for allowed in _get_allowed_base_paths():
-        try:
-            resolved.relative_to(allowed)
+        if _path_key_is_within(resolved_key, allowed):
             return False, ""
-        except ValueError:
-            continue
 
     # 3. Implicit deny — path is outside all allowed roots.
     return True, "Path is outside allowed directories"
@@ -438,6 +480,57 @@ _SHELL_WHITELIST: set[str] = {
     "clear",
     "cls",
     "tree",
+    # Read-only PowerShell cmdlets.
+    #
+    # The host is Windows and the agent system prompt explicitly tells the
+    # model so ("This host is Windows with PowerShell", agents/base.py). Until
+    # this entry existed the prompt steered the model straight into commands
+    # the whitelist then rejected — session bf1e9435b9ec47c9 lost three
+    # iterations and tripped the circuit breaker on nothing worse than
+    # ``Get-ChildItem`` and ``Get-Location``.
+    #
+    # Only non-mutating verbs are listed. Anything that writes (Set-*, New-*,
+    # Remove-*, Start-*, Stop-*, Invoke-*) is deliberately absent, and the
+    # pattern blacklist plus the ``;``/``&&``/redirection rejection in
+    # ``_validate_shell_command`` still apply to every segment.
+    "get-childitem",
+    "get-content",
+    "get-location",
+    "get-item",
+    "get-itemproperty",
+    "get-command",
+    "get-date",
+    "get-host",
+    "get-member",
+    "get-process",
+    "select-object",
+    "select-string",
+    "where-object",
+    "foreach-object",
+    "sort-object",
+    "measure-object",
+    "format-list",
+    "format-table",
+    "out-string",
+    "test-path",
+    "resolve-path",
+    "split-path",
+    "join-path",
+    "compare-object",
+    "convertto-json",
+    "convertfrom-json",
+    "write-output",
+    "write-host",
+    # Common PowerShell aliases for the same read-only operations.
+    "gci",
+    "gc",
+    "gl",
+    "gi",
+    "gcm",
+    "gps",
+    "sls",
+    "ft",
+    "fl",
 }
 
 _GIT_BLOCKED_SUBCOMMANDS: set[str] = {"push", "reset", "clean", "rebase", "cherry-pick"}

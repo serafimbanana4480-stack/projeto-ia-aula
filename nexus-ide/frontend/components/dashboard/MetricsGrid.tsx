@@ -1,11 +1,18 @@
 "use client";
 import { useMemo, useState, useCallback } from "react";
 import { useMetricsStore } from "../../stores/metricsStore";
+import { Surface } from "../ui/Surface";
+import { Badge, StatusDot, AnimatedNumber } from "../ui/Primitives";
+import { Sparkline } from "../ui/Sparkline";
 
 interface MetricCell {
   key: string;
   label: string;
   value: string;
+  /** Raw numeric value for cells that can be eased with AnimatedNumber. */
+  rawValue?: number;
+  decimals?: number;
+  unit?: string;
   trend?: "up" | "down" | "neutral";
   sparkline?: number[];
   color?: string;
@@ -21,6 +28,19 @@ const TREND_ARROW: Record<"up" | "down" | "neutral", string> = {
 
 function trendLabel(trend: MetricCell["trend"]): string {
   return TREND_ARROW[trend ?? "neutral"];
+}
+
+function sparkColor(cell: MetricCell): string {
+  if (cell.critical) return "#fb7185";
+  if (cell.warning) return "#fbbf24";
+  return "#9b8cff";
+}
+
+function cellTone(cell: MetricCell, selected: boolean): "danger" | "warning" | "accent" | "neutral" {
+  if (cell.critical) return "danger";
+  if (cell.warning) return "warning";
+  if (selected) return "accent";
+  return "neutral";
 }
 
 export default function MetricsGrid() {
@@ -88,6 +108,8 @@ export default function MetricsGrid() {
         key: "tokens_per_second",
         label: "Tokens/s",
         value: displayValues.tokens_per_second || "—",
+        rawValue: metrics.tokens_per_second,
+        decimals: 1,
         trend: getTrend("tokens_per_second"),
         sparkline: getSparkline("tokens_per_second"),
         color: "text-nexus-accent",
@@ -97,13 +119,20 @@ export default function MetricsGrid() {
         key: "active_sessions",
         label: "Sessões",
         value: displayValues.active_sessions || "—",
+        rawValue: metrics.active_sessions,
+        decimals: 0,
         trend: getTrend("active_sessions"),
+        sparkline: getSparkline("active_sessions"),
       },
       {
         key: "cpu_percent",
         label: "CPU",
         value: displayValues.cpu_percent || "—",
+        rawValue: metrics.cpu_percent,
+        decimals: 1,
+        unit: "%",
         trend: getTrend("cpu_percent"),
+        sparkline: getSparkline("cpu_percent"),
         warning: metrics.cpu_percent > 70,
         critical: metrics.cpu_percent > 90,
       },
@@ -111,7 +140,11 @@ export default function MetricsGrid() {
         key: "ram_percent",
         label: "RAM",
         value: displayValues.ram_percent || "—",
+        rawValue: metrics.ram_percent,
+        decimals: 1,
+        unit: "%",
         trend: getTrend("ram_percent"),
+        sparkline: getSparkline("ram_percent"),
         warning: metrics.ram_percent > 75,
         critical: metrics.ram_percent > 90,
       },
@@ -119,7 +152,11 @@ export default function MetricsGrid() {
         key: "disk_percent",
         label: "Disco",
         value: displayValues.disk_percent || "—",
+        rawValue: metrics.disk_percent,
+        decimals: 1,
+        unit: "%",
         trend: getTrend("disk_percent"),
+        sparkline: getSparkline("disk_percent"),
         warning: metrics.disk_percent > 80,
         critical: metrics.disk_percent > 90,
       },
@@ -127,7 +164,10 @@ export default function MetricsGrid() {
         key: "queue_depth",
         label: "Fila",
         value: displayValues.queue_depth || "—",
+        rawValue: metrics.queue_depth,
+        decimals: 0,
         trend: getTrend("queue_depth"),
+        sparkline: getSparkline("queue_depth"),
         warning: metrics.queue_depth > 5,
         critical: metrics.queue_depth > 10,
       },
@@ -135,13 +175,20 @@ export default function MetricsGrid() {
         key: "requests_total",
         label: "Pedidos",
         value: displayValues.requests_total || "—",
+        rawValue: metrics.requests_total,
+        decimals: 0,
         trend: getTrend("requests_total"),
+        sparkline: getSparkline("requests_total"),
       },
       {
         key: "avg_latency_ms",
         label: "Latência",
         value: displayValues.avg_latency || "—",
+        rawValue: metrics.avg_latency_ms,
+        decimals: 0,
+        unit: " ms",
         trend: getTrend("avg_latency_ms"),
+        sparkline: getSparkline("avg_latency_ms"),
         warning: metrics.avg_latency_ms > 500,
         critical: metrics.avg_latency_ms > 1000,
       },
@@ -149,79 +196,22 @@ export default function MetricsGrid() {
     ];
   }, [metrics, displayValues, getTrend, getSparkline]);
 
-  const renderSparkline = (data: number[], ariaLabel: string) => {
-    if (!data || data.length < 2) return null;
-    const min = Math.min(...data);
-    const max = Math.max(...data);
-    const range = max - min || 1;
-    const points = data
-      .map((val, i) => {
-        const x = (i / (data.length - 1)) * 100;
-        const y = 100 - ((val - min) / range) * 100;
-        return `${x},${y}`;
-      })
-      .join(" ");
-    return (
-      <svg
-        className="h-8 w-full"
-        viewBox="0 0 100 100"
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={ariaLabel}
-      >
-        <title>{ariaLabel}</title>
-        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2" className="opacity-70" />
-      </svg>
-    );
-  };
-
-  const getCellBorderColor = (cell: MetricCell) => {
-    if (cell.critical) return "border-red-500/50 bg-gradient-to-br from-red-500/10 to-red-500/5";
-    if (cell.warning) return "border-yellow-500/50 bg-gradient-to-br from-yellow-500/10 to-yellow-500/5";
-    if (selectedMetric === cell.key) return "border-nexus-accent/50 bg-gradient-to-br from-nexus-accent/10 to-nexus-accent/5";
-    return "border-nexus-border bg-gradient-to-br from-nexus-panel to-nexus-bg hover:border-nexus-border/80";
-  };
-
-  const getCellTextColor = (cell: MetricCell) => {
-    if (cell.critical) return "text-red-400";
-    if (cell.warning) return "text-yellow-400";
-    if (cell.color) return cell.color;
-    return "text-white";
-  };
-
-  const getTrendIcon = (trend?: string) => {
-    if (trend === "up") return "▲";
-    if (trend === "down") return "▼";
-    return "—";
-  };
-
   const getTrendColor = (trend: string | undefined, key: string) => {
     const badUp = ["avg_latency_ms", "queue_depth", "requests_failed", "cpu_percent", "ram_percent", "disk_percent"];
     const isBadUp = badUp.includes(key);
-    if (trend === "up") return isBadUp ? "text-red-400" : "text-green-400";
-    if (trend === "down") return isBadUp ? "text-green-400" : "text-red-400";
-    return "text-gray-500";
+    if (trend === "up") return isBadUp ? "text-rose-400" : "text-emerald-400";
+    if (trend === "down") return isBadUp ? "text-emerald-400" : "text-rose-400";
+    return "text-nexus-faint";
   };
-
-  const handleCellKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLDivElement>, key: string) => {
-      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
-        e.preventDefault();
-        setSelectedMetric(key);
-      }
-    },
-    []
-  );
 
   if (!backendOnline && !metrics) {
     return (
-      <div
-        role="status"
-        aria-live="polite"
-        className="rounded border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-400"
-      >
-        Backend offline — a aguardar ligação…
-      </div>
+      <Surface elevation={1} padding="sm" tone="warning">
+        <div role="status" aria-live="polite" className="flex items-center gap-2 text-xs text-amber-300">
+          <StatusDot tone="warning" pulse />
+          Backend offline — a aguardar ligação…
+        </div>
+      </Surface>
     );
   }
 
@@ -231,7 +221,7 @@ export default function MetricsGrid() {
     <div className="space-y-3" aria-label="Grelha de Métricas" role="group">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
         {cells.map((cell) => {
-          const sparklineAria = `${cell.label}: ${cell.value}, tendência ${trendLabel(cell.trend)}`;
+          const selected = selectedMetric === cell.key;
           const cellAria = `${cell.label}: ${cell.value}${
             cell.critical ? ", Crítico" : cell.warning ? ", Aviso" : ""
           }${cell.trend ? `, tendência ${trendLabel(cell.trend)}` : ""}`;
@@ -240,65 +230,89 @@ export default function MetricsGrid() {
               key={cell.key}
               role="button"
               tabIndex={0}
-              aria-pressed={selectedMetric === cell.key}
+              aria-pressed={selected}
               aria-label={cellAria}
               title={`${cell.label}: ${cell.value} | Histórico: ${cell.sparkline?.slice(-5).join(", ") ?? "N/A"}`}
               onClick={() => setSelectedMetric(cell.key)}
-              onKeyDown={(e) => handleCellKeyDown(e, cell.key)}
-              className={`min-w-0 cursor-pointer rounded border p-2.5 transition-all duration-200 hover:scale-[1.02] hover:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent ${getCellBorderColor(cell)}`}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setSelectedMetric(cell.key);
+                }
+              }}
+              className="min-w-0 cursor-pointer rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent"
             >
-              <div className="mb-1 flex items-center justify-between gap-1">
-                <span className="truncate text-[10px] uppercase tracking-wider text-gray-500 sm:text-xs">
-                  {cell.label}
-                </span>
-                <span className="flex shrink-0 items-center gap-1">
-                  {(cell.critical || cell.warning) && (
-                    <span className="text-[10px] font-semibold sm:text-xs">
-                      {cell.critical ? (
-                        <span className="text-red-400" aria-label="Crítico">Crítico</span>
-                      ) : (
-                        <span className="text-yellow-400" aria-label="Aviso">Aviso</span>
-                      )}
-                    </span>
+              <Surface elevation={0} tone={cellTone(cell, selected)} interactive padding="xs" className="h-full">
+                <div className="mb-1 flex items-center justify-between gap-1">
+                  <span className="truncate text-[10px] uppercase tracking-wider text-nexus-faint">
+                    {cell.label}
+                  </span>
+                  <span className="flex shrink-0 items-center gap-1">
+                    {(cell.critical || cell.warning) && (
+                      <Badge tone={cell.critical ? "danger" : "warning"}>
+                        {cell.critical ? "Crítico" : "Aviso"}
+                      </Badge>
+                    )}
+                    {cell.trend && (
+                      <span className={`text-[10px] ${getTrendColor(cell.trend, cell.key)}`} aria-hidden="true">
+                        {trendLabel(cell.trend)}
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <div
+                  className={`truncate font-mono text-sm font-bold tabular-nums sm:text-base ${
+                    cell.critical ? "text-rose-400" : cell.warning ? "text-amber-400" : cell.color || "text-nexus-text"
+                  }`}
+                >
+                  {cell.rawValue != null ? (
+                    <>
+                      <AnimatedNumber value={cell.rawValue} decimals={cell.decimals ?? 0} />
+                      {cell.unit}
+                    </>
+                  ) : (
+                    cell.value
                   )}
-                  {cell.trend && (
-                    <span className={`text-[10px] sm:text-xs ${getTrendColor(cell.trend, cell.key)}`} aria-hidden="true">
-                      {getTrendIcon(cell.trend)}
-                    </span>
-                  )}
-                </span>
-              </div>
-              <div className={`truncate text-sm font-bold sm:text-base ${getCellTextColor(cell)}`}>
-                {cell.value}
-              </div>
-              {cell.sparkline && (
-                <div className="mt-1 text-nexus-accent">{renderSparkline(cell.sparkline, sparklineAria)}</div>
-              )}
+                </div>
+                {cell.sparkline && cell.sparkline.length > 1 && (
+                  <Sparkline
+                    data={cell.sparkline}
+                    color={sparkColor(cell)}
+                    width={100}
+                    height={28}
+                    filled={false}
+                    className="mt-1 h-7 w-full"
+                  />
+                )}
+              </Surface>
             </div>
           );
         })}
       </div>
 
       {metrics && selectedCell && (
-        <div
-          className="rounded border border-nexus-accent/30 bg-gradient-to-br from-nexus-accent/8 to-nexus-accent/3 p-3"
-          aria-label="Detalhe da métrica selecionada"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs sm:text-sm">
-            <span className="flex items-center gap-2 min-w-0 truncate text-gray-400">
-              <span className="font-medium text-gray-300">{selectedCell.label}</span>
-              <span className="rounded bg-nexus-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-nexus-accent">
-                {getBaselineComparison(selectedMetric)}
+        <div aria-label="Detalhe da métrica selecionada">
+          <Surface elevation={0} tone="accent" padding="sm" as="section">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs sm:text-sm">
+              <span className="flex min-w-0 items-center gap-2 truncate text-nexus-muted">
+                <span className="font-medium text-nexus-text">{selectedCell.label}</span>
+                <Badge tone="accent">{getBaselineComparison(selectedMetric)}</Badge>
               </span>
-            </span>
-            <span className="text-gray-500">{history.length} amostras</span>
-          </div>
-          <div className="mt-2 h-16 text-nexus-accent">
-            {renderSparkline(
-              getSparkline(selectedMetric as keyof typeof metrics),
-              `${selectedCell.label}: ${selectedCell.value}, tendência ${trendLabel(selectedCell.trend)}`
-            )}
-          </div>
+              <span className="text-nexus-faint">{history.length} amostras</span>
+            </div>
+            <div className="mt-2 h-16">
+              {(() => {
+                const series = getSparkline(selectedMetric);
+                return series.length > 1 ? (
+                  <Sparkline data={series} color="#9b8cff" width={600} height={64} className="h-16 w-full" />
+                ) : (
+                  <div className="flex h-full items-center justify-center text-[11px] text-nexus-faint">
+                    Sem histórico suficiente
+                  </div>
+                );
+              })()}
+            </div>
+          </Surface>
         </div>
       )}
     </div>

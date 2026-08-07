@@ -1,0 +1,14 @@
+1) arranque:          {"pid":13,"runs":{}}
+2) user manda msg:    {"started":true,"pid":13}
+3) IA a trabalhar 3s: {"pid":13,"runs":{"run-1":3}}
+
+>>> a IA escreve um .py no workspace <<<
+4) logo a seguir:     {"pid":20,"runs":{}}
+5) +6s, IA retomou?:  {"pid":20,"runs":{}}
+
+--- log uvicorn ---
+INFO:     Started reloader process [10] using WatchFiles
+INFO:     Started server process [13]
+WARNING:  WatchFiles detected changes in 'agent_output.py'. Reloading...
+INFO:     Shutting down
+INFO:     Started server process [20]

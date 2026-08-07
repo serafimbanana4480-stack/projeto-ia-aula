@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from backend.history_sanitizer import sanitize_history_content
 from backend.orchestrator.context_manager import AgentScratchpad, ContextStore
+from backend.persistence.db import add_message, create_session, get_messages
 from backend.tools.ollama_client import ChatMessage
 
 
@@ -30,6 +32,46 @@ class TestContextStoreHistory:
             await store.append_message("s1", ChatMessage(role="user", content=str(i)))
         history = await store.get_history("s1")
         assert [m.content for m in history] == ["2", "3", "4"]
+
+    def test_tool_transport_is_removed_from_legacy_assistant_history(self) -> None:
+        content = (
+            "A executar.\n"
+            '```tool\n{"name":"list_dir","arguments":{"path":"."}}\n```\n'
+            "Resultado final."
+        )
+        assert sanitize_history_content("assistant", content) == (
+            "A executar.\n\nResultado final."
+        )
+
+    def test_repeated_tool_payloads_are_quarantined(self) -> None:
+        content = "\n".join(
+            [
+                '{"name":"list_dir","arguments":{"path":"."}}',
+                '{"name":"list_dir","arguments":{"path":"src"}}',
+                '{"name":"list_dir","arguments":{"path":"tests"}}',
+                "⚠ O modelo repetiu chamadas de ferramenta.",
+            ]
+        )
+        cleaned = sanitize_history_content("assistant", content)
+        assert "list_dir" not in cleaned
+        assert "nenhuma dessas chamadas" in cleaned
+        assert "⚠ O modelo repetiu" in cleaned
+
+    def test_user_content_is_never_sanitized(self) -> None:
+        content = 'Mostra este exemplo: {"name":"tool","arguments":{}}'
+        assert sanitize_history_content("user", content) == content
+
+    def test_legacy_duplicate_turns_are_collapsed_without_deleting_history(self) -> None:
+        session_id = "legacy-duplicate-session"
+        create_session(title="Legacy", session_id=session_id)
+        add_message(session_id, "user", "verifica o projeto")
+        add_message(session_id, "user", "verifica o projeto", tier_used="CODER")
+        add_message(session_id, "assistant", "Concluído.", tier_used="CODER")
+
+        messages = get_messages(session_id)
+
+        assert [message["role"] for message in messages] == ["user", "assistant"]
+        assert messages[0]["content"] == "verifica o projeto"
 
 
 class TestContextStoreScratchpad:

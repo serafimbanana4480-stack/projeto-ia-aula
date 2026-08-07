@@ -33,26 +33,6 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
   const [filter, setFilter] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
-  const [online, setOnline] = useState<boolean | null>(null);
-
-  // Lightweight health check
-  useEffect(() => {
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const res = await fetch("/api/swarm/health", { headers: { "Content-Type": "application/json" } });
-        if (!cancelled) setOnline(res.ok);
-      } catch {
-        if (!cancelled) setOnline(false);
-      }
-    };
-    check();
-    const id = setInterval(check, 15000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, []);
 
   const visible = sessions.filter(
     (s) =>
@@ -79,32 +59,14 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
   }, [create]);
 
   if (collapsed) {
-    return (
-      <div className="flex w-10 shrink-0 flex-col items-center border-r border-nexus-border bg-nexus-panel/40 py-2">
-        <button
-          onClick={onToggle}
-          className="mb-2 rounded-md p-1.5 text-nexus-muted hover:bg-nexus-bg/60 hover:text-nexus-text"
-          title="Expandir lista de sessões"
-        >
-          <MessageSquare className="h-3.5 w-3.5" />
-        </button>
-        <div className="flex-1" />
-        <span
-          className={`mt-2 h-1.5 w-1.5 rounded-full ${
-            online === null
-              ? "bg-nexus-muted"
-              : online
-                ? "bg-emerald-400"
-                : "bg-rose-400"
-          }`}
-          title={online === null ? "A verificar..." : online ? "Backend online" : "Backend offline"}
-        />
-      </div>
-    );
+    return null;
   }
 
   return (
-    <div className="flex w-64 shrink-0 flex-col border-r border-nexus-border bg-nexus-panel/40">
+    <aside
+      className="absolute inset-y-0 left-0 z-50 flex w-[min(18rem,calc(100%-1rem))] flex-col border-r border-nexus-border bg-nexus-panel shadow-2xl shadow-black/30"
+      aria-label="Sessões de chat"
+    >
       {/* Header */}
       <div className="flex items-center justify-between border-b border-nexus-border px-3 py-2.5">
         <div className="flex items-center gap-2">
@@ -117,16 +79,6 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
           </span>
         </div>
         <div className="flex items-center gap-1">
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${
-              online === null
-                ? "bg-nexus-muted"
-                : online
-                  ? "bg-emerald-400"
-                  : "bg-rose-400"
-            }`}
-            title={online === null ? "A verificar..." : online ? "Backend online" : "Backend offline"}
-          />
           <button
             onClick={handleNew}
             title="Nova sessão"
@@ -264,7 +216,7 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
           </button>
         </div>
       )}
-    </div>
+    </aside>
   );
 }
 

@@ -1,12 +1,20 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { apiUrl } from "./api";
+import {
+  clearAuth,
+  getAccessToken,
+  getUser,
+  login as loginWithEmail,
+  logout as logoutAuth,
+  refreshAuth,
+} from "./auth";
 
-type User = { username: string; role: string; authenticated: boolean };
+type LegacyUser = { username: string; role: string; authenticated: boolean };
 
 type AuthContextType = {
-  user: User;
+  user: LegacyUser;
   token: string | null;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -14,8 +22,14 @@ type AuthContextType = {
   error: string | null;
 };
 
+const ANONYMOUS: LegacyUser = {
+  username: "anonymous",
+  role: "guest",
+  authenticated: false,
+};
+
 const AuthContext = createContext<AuthContextType>({
-  user: { username: "anonymous", role: "guest", authenticated: false },
+  user: ANONYMOUS,
   token: null,
   login: async () => {},
   logout: async () => {},
@@ -23,83 +37,65 @@ const AuthContext = createContext<AuthContextType>({
   error: null,
 });
 
-function getStoredToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem("nexus_token");
-}
-
-function setStoredToken(token: string | null) {
-  if (typeof window === "undefined") return;
-  if (token) localStorage.setItem("nexus_token", token);
-  else localStorage.removeItem("nexus_token");
+function toLegacyUser(data: Record<string, unknown>): LegacyUser {
+  return {
+    username: String(data.email || data.username || data.full_name || "user"),
+    role: String(data.role || "user"),
+    authenticated: true,
+  };
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User>({
-    username: "anonymous",
-    role: "guest",
-    authenticated: false,
+  const [user, setUser] = useState<LegacyUser>(() => {
+    const stored = getUser();
+    return stored ? toLegacyUser(stored as unknown as Record<string, unknown>) : ANONYMOUS;
   });
-  const [token, setToken] = useState<string | null>(getStoredToken);
+  const [token, setToken] = useState<string | null>(() => getAccessToken());
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchMe = useCallback(async (currentToken: string | null) => {
     if (!currentToken) {
-      setUser({ username: "anonymous", role: "guest", authenticated: false });
+      setUser(ANONYMOUS);
       setIsLoading(false);
       return;
     }
+
+    const requestMe = async () =>
+      fetch(apiUrl("/api/auth/me"), {
+        headers: { Authorization: `Bearer ${getAccessToken() || currentToken}` },
+      });
+
     try {
-          const res = await fetch(apiUrl("/api/auth/me"), {
-            headers: { Authorization: `Bearer ${currentToken}` },
-          });
-      if (!res.ok) throw new Error("Session expired");
-      const data = await res.json();
-      if (data.authenticated) {
-        setUser({
-          username: data.username || "unknown",
-          role: data.role || "user",
-          authenticated: true,
-        });
-      } else {
-        setStoredToken(null);
-        setToken(null);
-        setUser({ username: "anonymous", role: "guest", authenticated: false });
+      let response = await requestMe();
+      if (response.status === 401 && (await refreshAuth())) {
+        const refreshed = getAccessToken();
+        setToken(refreshed);
+        response = await requestMe();
       }
+      if (!response.ok) throw new Error("Session expired");
+      const data = (await response.json()) as Record<string, unknown>;
+      setUser(toLegacyUser(data));
     } catch {
-      setStoredToken(null);
+      clearAuth();
       setToken(null);
-      setUser({ username: "anonymous", role: "guest", authenticated: false });
+      setUser(ANONYMOUS);
     } finally {
       setIsLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchMe(token);
+    void fetchMe(token);
   }, [token, fetchMe]);
 
   async function login(username: string, password: string) {
     setError(null);
     setIsLoading(true);
     try {
-      const res = await fetch(apiUrl("/api/auth/login"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.detail || "Login failed");
-      }
-      setStoredToken(data.access_token);
-      setToken(data.access_token);
-      setUser({
-        username: data.username || username,
-        role: data.role || "user",
-        authenticated: true,
-      });
+      const result = await loginWithEmail({ email: username, password });
+      setToken(result.access_token);
+      setUser(toLegacyUser(result.user as unknown as Record<string, unknown>));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
       throw err;
@@ -110,19 +106,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   async function logout() {
     try {
-      const currentToken = getStoredToken();
-      if (currentToken) {
-              await fetch(apiUrl("/api/auth/logout"), {
-                method: "POST",
-                headers: { Authorization: `Bearer ${currentToken}` },
-              });
-      }
-    } catch {
-      // ignore logout errors
+      await logoutAuth();
     } finally {
-      setStoredToken(null);
+      clearAuth();
       setToken(null);
-      setUser({ username: "anonymous", role: "guest", authenticated: false });
+      setUser(ANONYMOUS);
     }
   }
 

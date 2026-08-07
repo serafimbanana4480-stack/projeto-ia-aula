@@ -17,7 +17,6 @@ from pydantic import BaseModel
 
 from backend.agents.base import AgentRequest
 from backend.agents.dashboard_agent import DashboardAgent
-from backend.config.settings import get_settings
 from backend.middleware.auth import require_auth
 from backend.orchestrator.registry import get_registry
 
@@ -35,23 +34,6 @@ class DashboardDiagnoseRequest(BaseModel):
     session_id: str = "dashboard"
 
 
-def _is_dev_mode() -> bool:
-    try:
-        return get_settings().environment == "development"
-    except Exception:
-        return True
-
-
-async def _dev_user():
-    return {"user_id": "dev", "email": "dev@nexus.local"}
-
-
-def _maybe_auth():
-    if _is_dev_mode():
-        return _dev_user
-    return require_auth
-
-
 def _get_dashboard_agent(request: Request) -> DashboardAgent:
     """Resolve the dashboard agent from app state or registry."""
     agent = getattr(request.app.state, "dashboard_agent", None)
@@ -67,17 +49,27 @@ def _get_dashboard_agent(request: Request) -> DashboardAgent:
 @router.get("/dashboard/status")
 async def dashboard_status(
     request: Request,
-    _user: dict[str, Any] = Depends(_maybe_auth),
+    _user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Return current system health status, latest snapshot, and score."""
     agent = _get_dashboard_agent(request)
     snapshot = agent.get_latest_snapshot()
     alerts = agent.get_alerts()
+
+    try:
+        from backend.mcp.store import mcp_store
+
+        mcp_summary = mcp_store.health()
+    except Exception:
+        logger.exception("Failed to read MCP connector summary for dashboard status")
+        mcp_summary = {"total": 0, "enabled": 0, "healthy": 0, "warning": 0, "error": 0, "untested": 0}
+
     return {
         "health_score": agent.get_health_score(),
         "snapshot": snapshot,
         "active_alerts": len(alerts),
         "critical_alerts": len([a for a in alerts if a.get("severity") == "critical"]),
+        "mcp_connectors": mcp_summary,
     }
 
 
@@ -86,7 +78,7 @@ async def dashboard_alerts(
     request: Request,
     severity: str | None = None,
     limit: int = 50,
-    _user: dict[str, Any] = Depends(_maybe_auth),
+    _user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Return recent alerts, optionally filtered by severity."""
     agent = _get_dashboard_agent(request)
@@ -99,7 +91,7 @@ async def dashboard_alerts(
 @router.get("/dashboard/metrics")
 async def dashboard_metrics(
     request: Request,
-    _user: dict[str, Any] = Depends(_maybe_auth),
+    _user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Return the latest raw metrics snapshot."""
     agent = _get_dashboard_agent(request)
@@ -113,7 +105,7 @@ async def dashboard_metrics(
 async def dashboard_ask(
     req: DashboardAskRequest,
     request: Request,
-    _user: dict[str, Any] = Depends(_maybe_auth),
+    _user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Answer a natural-language question about system metrics."""
     agent = _get_dashboard_agent(request)
@@ -141,7 +133,7 @@ async def dashboard_ask(
 async def dashboard_diagnose(
     req: DashboardDiagnoseRequest,
     request: Request,
-    _user: dict[str, Any] = Depends(_maybe_auth),
+    _user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Run a deeper diagnostic by consulting the ANALYZER specialist."""
     agent = _get_dashboard_agent(request)

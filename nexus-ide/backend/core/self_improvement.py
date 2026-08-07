@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import subprocess
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -481,7 +482,12 @@ class SelfImprovementAnalyzer:
             await bus.publish(
                 "system.improvement_proposed",
                 BusMessage(
-                    message_id=f"si_{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}",
+                    # Multiple analysis loops can finish in the same second;
+                    # the bus persists message_id as a primary key.
+                    message_id=(
+                        f"si_{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}_"
+                        f"{uuid.uuid4().hex[:8]}"
+                    ),
                     source_agent="SELF_IMPROVEMENT",
                     payload={
                         "proposal_count": len(report.proposals),

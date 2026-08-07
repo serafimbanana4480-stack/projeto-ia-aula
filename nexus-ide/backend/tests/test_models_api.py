@@ -26,7 +26,7 @@ class TestChatRequest:
         request = ChatRequest(message="Hello", session_id="test-session")
         assert request.message == "Hello"
         assert request.session_id == "test-session"
-        assert request.mode == "agent"
+        assert request.mode == "auto"
         assert request.model == ""
         assert request.project_path == ""
 

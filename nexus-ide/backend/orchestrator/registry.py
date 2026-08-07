@@ -1,4 +1,4 @@
-"""Single source of truth mapping :class:`AgentName` → :class:`AgentBase` instance.
+"""Single source of truth mapping :class:`AgentName` â†’ :class:`AgentBase` instance.
 
 The registry is constructed once at process startup and reused across requests.
 Tests can inject a custom registry via :func:`set_registry`.
@@ -15,7 +15,7 @@ from backend.models.api import AgentName
 
 AgentRegistry = Mapping[AgentName, AgentBase]
 
-# Agent class map — instances are created lazily on first resolve().
+# Agent class map â€” instances are created lazily on first resolve().
 _AGENT_CLASSES: dict[AgentName, Any] = {}
 
 
@@ -29,7 +29,7 @@ def _get_agent_classes() -> dict[AgentName, Any]:
     if _AGENT_CLASSES:
         return _AGENT_CLASSES
 
-    # Deferred imports — only executed on first registry use.
+    # Deferred imports â€” only executed on first registry use.
     from backend.agents.analyzer import AnalyzerAgent
     from backend.agents.architect import ArchitectAgent
     from backend.agents.architect_complexity import ArchitectComplexityAgent
@@ -45,16 +45,19 @@ def _get_agent_classes() -> dict[AgentName, Any]:
     from backend.agents.micro import MicroAgent
     from backend.agents.optimizer import OptimizerAgent
     from backend.agents.overseer import OverseerAgent
+    from backend.agents.planner import PlannerAgent
     from backend.agents.refactor_clean import RefactorCleanAgent
     from backend.agents.refactor_performance import RefactorPerformanceAgent
     from backend.agents.researcher import ResearcherAgent
     from backend.agents.researcher_web import ResearcherWebAgent
+    from backend.agents.advisor import AdvisorAgent
     from backend.agents.reviewer import ReviewerAgent
     from backend.agents.supervisor import SupervisorAgent
     from backend.agents.test_runner_e2e import TestRunnerE2EAgent
     from backend.agents.test_runner_unit import TestRunnerUnitAgent
 
     _AGENT_CLASSES = {
+        "PLANNER": PlannerAgent,
         "ARCHITECT": ArchitectAgent,
         "ARCHITECT_DESIGN": ArchitectDesignAgent,
         "ARCHITECT_COMPLEXITY": ArchitectComplexityAgent,
@@ -71,6 +74,7 @@ def _get_agent_classes() -> dict[AgentName, Any]:
         "MICRO": MicroAgent,
         "DASHBOARD": DashboardAgent,
         "SUPERVISOR": SupervisorAgent,
+        "ADVISOR": AdvisorAgent,
         "OVERSEER": OverseerAgent,
         "GUARDIAN": NexusGuardianAgent,
         "TEST_RUNNER_UNIT": TestRunnerUnitAgent,

@@ -7,9 +7,14 @@ import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from backend.config.settings import get_settings
-from backend.middleware.auth import create_access_token, require_auth
-from backend.middleware.rate_limit import limiter
+from backend.middleware.auth import (
+    create_access_token,
+    create_refresh_token,
+    decode_refresh_token,
+    require_auth,
+)
 from backend.models.auth import (
+    RefreshRequest,
     TokenResponse,
     UserLogin,
     UserRegister,
@@ -17,6 +22,7 @@ from backend.models.auth import (
 )
 from backend.persistence.db import (
     create_user,
+    ensure_dev_default_user,
     get_user_by_email,
     get_user_with_password,
 )
@@ -27,7 +33,6 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-@limiter.limit("5/minute")
 async def register(request: Request, user_data: UserRegister):
     """Register a new user.
 
@@ -60,24 +65,32 @@ async def register(request: Request, user_data: UserRegister):
         data={"sub": user["id"], "email": user["email"]},
         expires_delta=access_token_expires,
     )
+    refresh_token = create_refresh_token(
+        data={"sub": user["id"], "email": user["email"]},
+    )
 
     logger.info(f"New user registered: {user_data.email}")
 
     return TokenResponse(
         access_token=access_token,
+        refresh_token=refresh_token,
         user=UserResponse(**user),
     )
 
 
 @router.post("/login", response_model=TokenResponse)
-@limiter.limit("5/minute")
 async def login(request: Request, user_data: UserLogin):
     """Login with email and password.
 
     Rate limited to 10 requests per minute to prevent brute force attacks.
     """
-    # Get user with password hash
+    # Get user with password hash. If the database is empty (common in dev/test
+    # setups), create the default development user before validating credentials.
     user = get_user_with_password(user_data.email)
+    if not user:
+        ensure_dev_default_user()
+        user = get_user_with_password(user_data.email)
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -116,8 +129,13 @@ async def login(request: Request, user_data: UserLogin):
     user_dict = dict(user)
     user_dict.pop("password_hash", None)
 
+    refresh_token = create_refresh_token(
+        data={"sub": user["id"], "email": user["email"]},
+    )
+
     return TokenResponse(
         access_token=access_token,
+        refresh_token=refresh_token,
         user=UserResponse(**user_dict),
     )
 
@@ -138,6 +156,46 @@ async def get_current_user(current_user: dict = Depends(require_auth)):
         )
 
     return UserResponse(**user)
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh(request: Request, body: RefreshRequest):
+    """Exchange a valid refresh token for a new access token (and refresh token).
+
+    This keeps the user authenticated without forcing a new login when the
+    short-lived access token expires.
+    """
+    try:
+        payload = decode_refresh_token(body.refresh_token)
+    except HTTPException:
+        raise
+
+    user = get_user_by_email(payload.get("email", ""))
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User no longer exists",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    settings = get_settings()
+    access_token_expires = timedelta(minutes=settings.jwt_expiration_minutes)
+    access_token = create_access_token(
+        data={"sub": user["id"], "email": user["email"]},
+        expires_delta=access_token_expires,
+    )
+    refresh_token = create_refresh_token(
+        data={"sub": user["id"], "email": user["email"]},
+    )
+
+    user_dict = dict(user)
+    user_dict.pop("password_hash", None)
+
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user=UserResponse(**user_dict),
+    )
 
 
 @router.post("/logout")

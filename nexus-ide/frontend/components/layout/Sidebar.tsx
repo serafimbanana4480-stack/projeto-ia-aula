@@ -1,76 +1,229 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
-  LayoutDashboard,
   MessageSquare,
   FolderKanban,
   Cpu,
   Database,
   Globe,
   BarChart3,
+  Activity,
   FileText,
   Settings,
-  HardDrive,
   Plus,
   Wrench,
+  ChevronLeft,
   ChevronRight,
-  Radar,
   Menu,
   X,
   FileCode2,
+  Search,
+  Plug,
+  Bot,
 } from "lucide-react";
-import { useProjectStore } from "../../stores/projectStore";
-import { useMetricsStore } from "../../stores/metricsStore";
+
+/**
+ * Routes linked from this sidebar. Next's `typedRoutes` (next.config.mjs)
+ * validates every `<Link href>` against real app routes at build time, so
+ * `href` values are cast through this union instead of being left as a bare
+ * `string`. Add new routes here — and make sure a matching `app/**\/page.tsx`
+ * exists — when adding a nav item.
+ */
+type KnownRoute =
+  | "/"
+  | "/editor"
+  | "/projects"
+  | "/swarm"
+  | "/analysis"
+  | "/analytics"
+  | "/models"
+  | "/mcp"
+  | "/tools"
+  | "/database"
+  | "/documents"
+  | "/pdf"
+  | "/search"
+  | "/scraping"
+  | "/settings";
 
 interface NavItem {
   id: string;
   label: string;
   icon: React.ReactNode;
-  path: string;
+  path: KnownRoute;
 }
 
-const navItems: NavItem[] = [
-  { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard className="h-4 w-4" />, path: "/dashboard" },
-  { id: "chat", label: "Chat", icon: <MessageSquare className="h-4 w-4" />, path: "/" },
-  { id: "editor", label: "Editor", icon: <FileCode2 className="h-4 w-4" />, path: "/editor" },
-  { id: "mission-control", label: "Mission Control", icon: <Radar className="h-4 w-4" />, path: "/mission-control" },
-  { id: "projects", label: "Projetos", icon: <FolderKanban className="h-4 w-4" />, path: "/projects" },
-  { id: "tools", label: "Ferramentas", icon: <Wrench className="h-4 w-4" />, path: "/tools" },
-  { id: "models", label: "Modelos IA", icon: <Cpu className="h-4 w-4" />, path: "/models" },
-  { id: "database", label: "Base de Dados", icon: <Database className="h-4 w-4" />, path: "/database" },
-  { id: "scraping", label: "Scraping", icon: <Globe className="h-4 w-4" />, path: "/scraping" },
-  { id: "analysis", label: "Análises", icon: <BarChart3 className="h-4 w-4" />, path: "/analysis" },
-  { id: "documents", label: "Documentos", icon: <FileText className="h-4 w-4" />, path: "/documents" },
-  { id: "settings", label: "Definições", icon: <Settings className="h-4 w-4" />, path: "/settings" },
+interface NavGroup {
+  id: string;
+  label: string;
+  items: NavItem[];
+}
+
+// Grouped by what the user is trying to do, not alphabetically — the old
+// sidebar was 15 flat links with no hierarchy. `/nexus` and SWARM used to
+// have no entry point at all; `/analytics` (the conversation-intelligence
+// dashboard) was reachable only by typing the URL.
+const NAV_GROUPS: NavGroup[] = [
+  {
+    id: "work",
+    label: "Trabalho",
+    items: [
+      { id: "chat", label: "Chat", icon: <MessageSquare className="h-4 w-4" />, path: "/" },
+      { id: "editor", label: "Editor", icon: <FileCode2 className="h-4 w-4" />, path: "/editor" },
+      { id: "projects", label: "Projetos", icon: <FolderKanban className="h-4 w-4" />, path: "/projects" },
+    ],
+  },
+  {
+    id: "intelligence",
+    label: "Inteligência",
+    items: [
+      { id: "swarm", label: "SWARM", icon: <Bot className="h-4 w-4" />, path: "/swarm" },
+      { id: "analysis", label: "Métricas", icon: <BarChart3 className="h-4 w-4" />, path: "/analysis" },
+      { id: "analytics", label: "Analytics", icon: <Activity className="h-4 w-4" />, path: "/analytics" },
+    ],
+  },
+  {
+    id: "resources",
+    label: "Recursos",
+    items: [
+      { id: "models", label: "Modelos IA", icon: <Cpu className="h-4 w-4" />, path: "/models" },
+      { id: "mcp", label: "Conectores MCP", icon: <Plug className="h-4 w-4" />, path: "/mcp" },
+      { id: "tools", label: "Ferramentas", icon: <Wrench className="h-4 w-4" />, path: "/tools" },
+      { id: "database", label: "Base de Dados", icon: <Database className="h-4 w-4" />, path: "/database" },
+    ],
+  },
+  {
+    id: "content",
+    label: "Conteúdo",
+    items: [
+      { id: "documents", label: "Documentos", icon: <FileText className="h-4 w-4" />, path: "/documents" },
+      { id: "pdf", label: "Leitor PDF", icon: <FileText className="h-4 w-4" />, path: "/pdf" },
+      { id: "search", label: "Web Search", icon: <Search className="h-4 w-4" />, path: "/search" },
+      { id: "scraping", label: "Scraping", icon: <Globe className="h-4 w-4" />, path: "/scraping" },
+    ],
+  },
 ];
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1e6) return `${(bytes / 1e3).toFixed(0)} KB`;
-  if (bytes < 1e9) return `${(bytes / 1e6).toFixed(1)} MB`;
-  return `${(bytes / 1e9).toFixed(1)} GB`;
+const SETTINGS_ITEM: NavItem = {
+  id: "settings",
+  label: "Definições",
+  icon: <Settings className="h-4 w-4" />,
+  path: "/settings",
+};
+
+const SIDEBAR_COLLAPSE_KEY = "nexus:sidebar-collapsed";
+
+/** True when `pathname` equals `path` or is nested under it (`/dashboard/agents` under `/dashboard`). */
+function isRouteActive(pathname: string, path: string): boolean {
+  if (path === "/") return pathname === "/";
+  return pathname === path || pathname.startsWith(`${path}/`);
 }
 
-const projectColors = ["#7c6afb", "#60a5fa", "#fbbf24", "#5eead4", "#f87171"];
+function SidebarLink({
+  item,
+  active,
+  collapsed,
+}: {
+  item: NavItem;
+  active: boolean;
+  collapsed: boolean;
+}) {
+  const router = useRouter();
+  const prefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prefetchedRef = useRef(false);
+
+  const prefetchOnIntent = useCallback(() => {
+    if (prefetchedRef.current || prefetchTimerRef.current !== null) return;
+    // Only compile a route after a real hover/focus intent. Eagerly
+    // prefetching every sidebar item makes next dev compile all heavy pages at
+    // once and starves the route the user actually wants to open.
+    prefetchTimerRef.current = setTimeout(() => {
+      prefetchTimerRef.current = null;
+      prefetchedRef.current = true;
+      void router.prefetch(item.path as any);
+    }, 120);
+  }, [item.path, router]);
+
+  const cancelPrefetch = useCallback(() => {
+    if (prefetchTimerRef.current !== null) {
+      clearTimeout(prefetchTimerRef.current);
+      prefetchTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => cancelPrefetch, [cancelPrefetch]);
+
+  return (
+    <Link
+      href={item.path as any}
+      prefetch={false}
+      onMouseEnter={prefetchOnIntent}
+      onFocus={prefetchOnIntent}
+      onMouseLeave={cancelPrefetch}
+      onBlur={cancelPrefetch}
+      title={collapsed ? item.label : undefined}
+      aria-current={active ? "page" : undefined}
+      className={`group relative flex items-center gap-3 rounded-lg py-2 text-sm transition-all duration-150 ease-nx ${
+        collapsed ? "justify-center px-0" : "px-3"
+      } ${
+        active
+          ? "border border-[rgba(124,106,251,0.30)] bg-gradient-to-b from-[rgba(124,106,251,0.16)] to-[rgba(124,106,251,0.05)] font-medium text-nexus-text shadow-[inset_0_1px_0_var(--nx-rim),0_0_0_1px_rgba(124,106,251,0.12),0_8px_18px_-10px_rgba(124,106,251,0.55)]"
+          : "border border-transparent text-nexus-muted hover:border-white/[0.06] hover:bg-white/[0.05] hover:text-nexus-text"
+      }`}
+    >
+      {/* Active-state accent rail */}
+      {active && (
+        <span className="absolute left-0 top-1/2 h-5 w-[2px] -translate-y-1/2 rounded-full bg-nexus-accent-bright shadow-[0_0_10px_var(--nx-accent)]" />
+      )}
+      <span className={`shrink-0 ${active ? "text-nexus-accent-bright" : ""}`}>{item.icon}</span>
+      {!collapsed && <span className="truncate">{item.label}</span>}
+      {collapsed && (
+        <span className="nx-elev-2 pointer-events-none absolute left-full top-1/2 z-50 ml-3 -translate-y-1/2 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs font-medium text-nexus-text opacity-0 shadow-nx-2 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100">
+          {item.label}
+        </span>
+      )}
+    </Link>
+  );
+}
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const currentProject = useProjectStore((s) => s.currentProject);
-  const setCurrentProject = useProjectStore((s) => s.setCurrentProject);
-  const projects = useProjectStore((s) => s.projects);
-  const diskPercent = useMetricsStore((s) => s.metrics?.disk_percent ?? null);
-  const diskUsed = useMetricsStore((s) => s.metrics?.disk_used_bytes ?? null);
-  const diskTotal = useMetricsStore((s) => s.metrics?.disk_total_bytes ?? null);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const [isDesktop, setIsDesktop] = useState(false);
 
   // Close mobile menu on route change
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
 
-  const recentProjects = useMemo(() => projects.slice(0, 5), [projects]);
+  // Restore the collapsed preference client-side only — reading localStorage
+  // during render would make the server and client markup diverge.
+  useEffect(() => {
+    const stored = window.localStorage.getItem(SIDEBAR_COLLAPSE_KEY);
+    if (stored === "true") setCollapsed(true);
+  }, []);
+
+  // Persist the collapsed preference whenever it changes.
+  useEffect(() => {
+    window.localStorage.setItem(SIDEBAR_COLLAPSE_KEY, String(collapsed));
+  }, [collapsed]);
+
+  // The icon-rail treatment is a desktop affordance only — the mobile drawer
+  // always shows full labels regardless of the persisted desktop preference,
+  // so a "collapsed on desktop" choice never breaks the mobile drawer.
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 768px)");
+    setIsDesktop(mq.matches);
+    const handler = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
+  const effectiveCollapsed = collapsed && isDesktop;
 
   const formatProjectDate = useCallback((dateStr: string) => {
     try {
@@ -86,18 +239,13 @@ export default function Sidebar() {
     }
   }, []);
 
-  const activeItemId = useMemo(() => {
-    const active = navItems.find((item) => item.path === pathname);
-    return active?.id ?? "chat";
-  }, [pathname]);
-
   return (
     <>
       {/* Mobile hamburger toggle */}
       <button
         onClick={() => setMobileOpen(!mobileOpen)}
         className="fixed top-3 left-3 z-50 flex h-8 w-8 items-center justify-center rounded-lg border border-nexus-border bg-nexus-panel md:hidden"
-        aria-label="Toggle menu"
+        aria-label="Alternar menu"
       >
         {mobileOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
       </button>
@@ -110,115 +258,69 @@ export default function Sidebar() {
         />
       )}
 
-      <aside className={`fixed inset-y-0 left-0 z-40 flex w-[260px] shrink-0 flex-col border-r border-nexus-border bg-nexus-panel transition-transform duration-200 md:relative md:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}>
-      {/* New Project Button */}
-      <div className="p-4">
-        <Link
-          href="/projects"
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-nexus-accent px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-nexus-accent/20 hover:bg-nexus-accent/90 transition-colors"
-        >
-          <Plus className="h-4 w-4" />
-          Novo Projeto
-        </Link>
-      </div>
-
-      {/* Navigation */}
-      <nav className="flex-1 space-y-0.5 px-3">
-        {navItems.map((item) => {
-          const isActive = activeItemId === item.id;
-          return (
-            <Link
-              key={item.id}
-              href={item.path as "/dashboard" | "/" | "/mission-control" | "/projects" | "/tools" | "/models" | "/database" | "/scraping" | "/analysis" | "/documents" | "/settings"}
-              prefetch={true}
-              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
-                isActive
-                  ? "bg-nexus-accent/15 text-nexus-accent font-medium"
-                  : "text-nexus-muted hover:bg-nexus-card hover:text-nexus-text"
-              }`}
-            >
-              <span className={isActive ? "text-nexus-accent" : ""}>{item.icon}</span>
-              <span>{item.label}</span>
-            </Link>
-          );
-        })}
-      </nav>
-
-      {/* Recent Projects */}
-      <div className="px-4 pb-2">
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-nexus-muted">
-          Projetos Recentes
+      <aside
+        className={`nx-elev-1 fixed inset-y-0 left-0 z-40 flex w-[260px] shrink-0 flex-col transition-[transform,width] duration-200 ease-nx md:relative md:translate-x-0 ${
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        } ${collapsed ? "md:w-[68px]" : "md:w-[260px]"}`}
+      >
+        {/* New Project + collapse toggle */}
+        <div className={`flex items-center gap-2 p-3 ${effectiveCollapsed ? "flex-col" : ""}`}>
+          <Link
+            href="/projects"
+            prefetch={false}
+            title="Novo Projeto"
+            className={`flex h-10 items-center justify-center gap-2 rounded-xl bg-gradient-to-b from-[var(--nx-accent-bright)] to-[var(--nx-accent)] text-sm font-semibold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),var(--nx-shadow-accent)] transition-all duration-150 hover:brightness-110 ${
+              effectiveCollapsed ? "w-10 shrink-0 px-0" : "flex-1 px-4"
+            }`}
+          >
+            <Plus className="h-4 w-4 shrink-0" />
+            {!effectiveCollapsed && <span>Novo Projeto</span>}
+          </Link>
+          <button
+            onClick={() => setCollapsed((c) => !c)}
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg text-nexus-faint transition-colors hover:bg-white/[0.06] hover:text-nexus-text md:flex"
+            title={collapsed ? "Expandir barra lateral" : "Colapsar barra lateral"}
+            aria-label={collapsed ? "Expandir barra lateral" : "Colapsar barra lateral"}
+            aria-pressed={collapsed}
+          >
+            {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+          </button>
         </div>
-        <div className="space-y-1">
-          {recentProjects.length > 0 ? (
-            recentProjects.map((p, index) => (
-              <button
-                key={p.id}
-                onClick={() =>
-                  setCurrentProject({
-                    id: p.id,
-                    name: p.name,
-                    path: p.path,
-                    description: p.description,
-                    mode: p.mode,
-                    preferred_model: p.preferred_model,
-                    trust: p.trust,
-                    created_at: p.created_at,
-                    updated_at: p.updated_at,
-                  })
-                }
-                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors ${
-                  currentProject?.id === p.id ? "bg-nexus-accent/10" : "hover:bg-nexus-card"
-                }`}
-              >
-                <span
-                  className="h-2 w-2 rounded-full shrink-0"
-                  style={{ background: projectColors[index % projectColors.length] }}
-                />
-                <div className="flex-1 overflow-hidden">
-                  <div className="truncate text-xs font-medium">{p.name}</div>
-                  <div className="text-[10px] text-nexus-muted">
-                    Atualizado {formatProjectDate(p.updated_at)}
-                  </div>
+
+        {/* Navigation */}
+        <nav className="flex-1 space-y-4 px-3">
+          {NAV_GROUPS.map((group) => (
+            <div key={group.id}>
+              {effectiveCollapsed ? (
+                <div className="mx-1 mb-1.5 h-px bg-nexus-border" />
+              ) : (
+                <div className="mb-1.5 px-3 text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+                  {group.label}
                 </div>
-              </button>
-            ))
-          ) : (
-            <div className="px-3 py-2 text-xs text-nexus-muted">Nenhum projeto ainda</div>
-          )}
-        </div>
-        <Link
-          href="/projects"
-          className="mt-2 flex items-center gap-1 text-[11px] text-nexus-accent hover:underline"
-        >
-          Ver todos os projetos
-          <ChevronRight className="h-3 w-3" />
-        </Link>
-      </div>
+              )}
+              <div className="space-y-0.5">
+                {group.items.map((item) => (
+                  <SidebarLink
+                    key={item.id}
+                    item={item}
+                    active={isRouteActive(pathname, item.path)}
+                    collapsed={effectiveCollapsed}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+        </nav>
 
-      {/* Storage */}
-      <div className="border-t border-nexus-border p-4">
-        <div className="mb-2 flex items-center justify-between text-xs text-nexus-muted">
-          <div className="flex items-center gap-1.5">
-            <HardDrive className="h-3.5 w-3.5" />
-            Armazenamento
-          </div>
-          <span className="font-medium text-nexus-text">
-            {diskPercent != null ? `${diskPercent.toFixed(0)}% usado` : "—"}
-          </span>
-        </div>
-        <div className="h-1.5 overflow-hidden rounded-full bg-nexus-border">
-          <div
-            className="h-full rounded-full bg-nexus-accent transition-all duration-700"
-            style={{ width: diskPercent != null ? `${diskPercent}%` : "0%" }}
+        {/* Definições — pinned below the topic groups, not inside any of them */}
+        <div className="px-3 pt-3">
+          <SidebarLink
+            item={SETTINGS_ITEM}
+            active={isRouteActive(pathname, SETTINGS_ITEM.path)}
+            collapsed={effectiveCollapsed}
           />
         </div>
-        <div className="mt-1 text-[10px] text-nexus-muted">
-          {diskUsed != null && diskTotal != null
-            ? `${formatBytes(diskUsed)} / ${formatBytes(diskTotal)}`
-            : "A carregar..."}
-        </div>
-      </div>
+
       </aside>
     </>
   );

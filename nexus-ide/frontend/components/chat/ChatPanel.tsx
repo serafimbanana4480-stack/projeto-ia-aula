@@ -1,25 +1,30 @@
 "use client";
-import { useMemo, useState, useEffect, useRef, useCallback } from "react";
+import { useMemo, useState, useEffect, useRef, useCallback, type ReactNode } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAgentStream } from "../../hooks/useAgentStream";
 import { useChatSessions } from "../../hooks/useChatSessions";
 import { useToast } from "./Toast";
-import { getSessionHistory, createPlan, approvePlan, executePlan, getPlanStatus, cancelPlan } from "../../lib/api";
+import { ApiError, getSessionHistory, createPlan, approvePlan, executePlan, getPlanStatus, cancelPlan, getProvidersStatus } from "../../lib/api";
 import type { PlanCreateResult, PlanStatus as PlanStatusType } from "../../lib/api";
 import { useModeStore, type Mode } from "../../stores/modeStore";
 import { useModelStore } from "../../stores/modelStore";
+import { useProjectStore } from "../../stores/projectStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import MessageBubble from "./MessageBubble";
+import ModelSelector from "./ModelSelector";
 import VirtualMessageList from "./VirtualMessageList";
 import SessionList from "./SessionList";
+import AdvancedModeHeaderIndicator from "./AdvancedModeHeaderIndicator";
+import { useAdvancedModeStore } from "../../stores/advancedModeStore";
 import {
   Sparkles,
   Plus,
   Share2,
   PanelRightClose,
   PanelRightOpen,
-  Wand2,
   Paperclip,
   Mic,
   Send,
@@ -44,10 +49,17 @@ import {
   BarChart3,
   ChevronDown,
   X,
+  Search,
+  MessageSquare,
 } from "lucide-react";
 import type { AgentName, ChatMessage, StreamEvent } from "../../lib/types";
 import { log } from "../../lib/log";
 import { stripAnsiCodes } from "../../lib/utils";
+import {
+  activityFromProgress,
+  agentActivity,
+  sanitizeAssistantContent,
+} from "../../lib/chatPresentation";
 
 interface ChatPanelProps {
   rightOpen?: boolean;
@@ -95,6 +107,37 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
     let currentAgent: AgentName = "CODER";
     let lastThinkingIteration = 0;
 
+    const ensureCurrent = (event: StreamEvent) => {
+      if (current) return current;
+      current = {
+        id: `a-${out.length}-${event.timestamp}`,
+        role: "assistant",
+        agent: currentAgent,
+        content: "",
+        timestamp: event.timestamp,
+        toolCalls: [],
+        activities: [],
+      };
+      out.push(current);
+      return current;
+    };
+
+    const upsertActivity = (activity: NonNullable<ChatMessage["activities"]>[number]) => {
+      const message = ensureCurrent({ type: "progress", timestamp: activity.timestamp });
+      message.activities = message.activities || [];
+      const existing = message.activities.findIndex((item) => item.id === activity.id);
+      if (existing >= 0) {
+        const previous = message.activities[existing];
+        message.activities[existing] = {
+          ...previous,
+          ...activity,
+          detail: activity.detail ?? previous.detail,
+        };
+      } else {
+        message.activities.push(activity);
+      }
+    };
+
     const findRunningTool = (name?: string) => {
       if (!current?.toolCalls) return -1;
       const calls = current.toolCalls;
@@ -109,15 +152,9 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
       switch (e.type) {
         case "agent_started": {
           currentAgent = (e.agent ?? "CODER") as AgentName;
-          current = {
-            id: `a-${out.length}-${e.timestamp}`,
-            role: "assistant",
-            agent: currentAgent,
-            content: "",
-            timestamp: e.timestamp,
-            toolCalls: [],
-          };
-          out.push(current);
+          const message = ensureCurrent(e);
+          if (!message.agent || message.agent === "CODER") message.agent = currentAgent;
+          upsertActivity(agentActivity(e, out.length, "running"));
           break;
         }
         case "token": {
@@ -125,18 +162,7 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
           if (e.content && e.content.startsWith("<event>thinking|iteration:")) {
             break;
           }
-          if (!current) {
-            current = {
-              id: `a-${out.length}-${e.timestamp}`,
-              role: "assistant",
-              agent: currentAgent,
-              content: "",
-              timestamp: e.timestamp,
-              toolCalls: [],
-            };
-            out.push(current);
-          }
-          current.content += e.content ?? "";
+          ensureCurrent(e).content += e.content ?? "";
           break;
         }
         case "thinking": {
@@ -149,32 +175,13 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
             }
             lastThinkingIteration = iteration;
           }
-          if (!current) {
-            current = {
-              id: `a-${out.length}-${e.timestamp}`,
-              role: "assistant",
-              agent: currentAgent,
-              content: "",
-              timestamp: e.timestamp,
-              toolCalls: [],
-            };
-            out.push(current);
-          }
-          current.thinking = (current.thinking ?? "") + (e.content ?? "");
+          const message = ensureCurrent(e);
+          const separator = message.thinking && e.content ? "\n" : "";
+          message.thinking = (message.thinking ?? "") + separator + (e.content ?? "");
           break;
         }
         case "tool_call": {
-          if (!current) {
-            current = {
-              id: `a-${out.length}-${e.timestamp}`,
-              role: "assistant",
-              agent: currentAgent,
-              content: "",
-              timestamp: e.timestamp,
-              toolCalls: [],
-            };
-            out.push(current);
-          }
+          current = ensureCurrent(e);
           current.toolCalls = current.toolCalls || [];
           current.toolCalls.push({
             id: `tc-${current.toolCalls.length}-${e.timestamp}`,
@@ -185,19 +192,50 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
           });
           break;
         }
+        case "progress": {
+          upsertActivity(activityFromProgress(e, out.length));
+          break;
+        }
         case "tool_result": {
           const idx = findRunningTool(e.tool_name);
           if (idx >= 0 && current) {
             current.toolCalls![idx].status = "success";
             current.toolCalls![idx].result = e.tool_result;
+            const duration = e.data?.duration_ms;
+            if (typeof duration === "number") current.toolCalls![idx].durationMs = duration;
           }
           break;
         }
         case "tool_error": {
-          const idx = findRunningTool();
+          const idx = findRunningTool(e.tool_name);
           if (idx >= 0 && current) {
             current.toolCalls![idx].status = "error";
             current.toolCalls![idx].error = e.tool_error;
+          }
+          break;
+        }
+        case "tool_confirmation": {
+          const idx = findRunningTool(e.tool_name);
+          if (idx >= 0 && current) {
+            const confirmation = e.data ?? {};
+            current.toolCalls![idx].status = "awaiting_confirmation";
+            current.toolCalls![idx].confirmationId = String(confirmation.confirmation_id ?? "");
+            current.toolCalls![idx].suggestion = String(confirmation.suggestion ?? "");
+            current.toolCalls![idx].riskLevel = String(confirmation.risk_level ?? "medium");
+          }
+          break;
+        }
+        case "metric": {
+          current = ensureCurrent(e);
+          const usage = e.data?.usage;
+          if (usage && typeof usage === "object") {
+            const u = usage as Record<string, unknown>;
+            current.metrics = {
+              "Input": String(u.input_tokens ?? 0),
+              "Output": String(u.output_tokens ?? 0),
+              "Raciocínio": String(u.reasoning_tokens ?? 0),
+              "Total": String(u.total_tokens ?? 0),
+            };
           }
           break;
         }
@@ -218,7 +256,10 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
           // will see the agent badge on the first token event.
           break;
         }
-        case "agent_finished":
+        case "agent_finished": {
+          upsertActivity(agentActivity(e, out.length, "success"));
+          break;
+        }
         case "done": {
           current = null;
           break;
@@ -227,27 +268,6 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
           break;
       }
     }
-
-    const normalizeCodeBlocks = (text: string) =>
-      text
-        .replace(/```(\w*)\s*\n([\s\S]*?)```/g, (_, lang, body) => {
-          const trimmed = body.replace(/^\s+|\s+$/g, "");
-          return trimmed ? `\`\`\`${lang}\n${trimmed}\n\`\`\`` : "";
-        })
-        .replace(/```(\w*)(?:\n|$)/g, "")
-        .replace(/``+/g, "");
-
-    const stripToolMarkup = (text: string) =>
-      normalizeCodeBlocks(
-        stripAnsiCodes(
-          text
-          .replace(/<event>[^]*?<\/event>/g, "")
-          .replace(/```tool\s*[\s\S]*?```/g, "")
-          .split("\n")
-          .filter((line) => !/^```tool\s*$/.test(line.trim()))
-          .join("\n"),
-        )
-      )
 
   const extractThinking = (text: string) => {
     const thinkingParts: string[] = [];
@@ -263,7 +283,7 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
 
   for (const m of out) {
     if (m.content) {
-      m.content = stripToolMarkup(m.content);
+      m.content = sanitizeAssistantContent(stripAnsiCodes(m.content));
       const { content, thinking } = extractThinking(m.content);
       m.content = content;
       if (thinking) m.thinking = thinking;
@@ -281,23 +301,15 @@ export default function ChatPanel({
   const sessions = useChatSessions();
   const toast = useToast();
   const { currentMode, modes, modesLoaded, loadModes } = useModeStore();
-  const { activeModel, models, modelsLoaded, loadModels, setActiveModel } = useModelStore();
-  // Map an OpenCode Go model id to a tier name that the backend accepts.
-  // The chat route validates the model field against ALLOWED_MODEL_TIERS,
-  // so we cannot send raw OpenCode Go model ids (e.g. "minimax-m3").
-  const MODEL_TO_TIER: Record<string, string> = {
-    "minimax-m3": "fast",
-    "deepseek-v4-flash": "fast",
-    "deepseek-v4-pro": "deep",
-    "glm-5.2": "reasoning",
-    "kimi-k2.7-code": "coder",
-    "qwen3.7-max": "large",
-    "mimo-v2-pro": "medium",
-  };
-  const resolveActiveTier = (): string => {
-    if (!activeModel) return "";
-    return MODEL_TO_TIER[activeModel] || "";
-  };
+  const { activeModel, activeProvider, modelsLoaded, loadModels } = useModelStore();
+  const { currentProject } = useProjectStore();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // The chosen model id is sent to /api/chat as-is. A hardcoded
+  // MODEL_TO_TIER map used to translate it to a router tier first, so the
+  // backend resolved that tier through config/models.yaml and ran a
+  // *different* model than the one shown in the UI. `/api/chat` now accepts
+  // concrete provider model ids; "" still means auto-route.
 
   const { events, streaming, error: streamError, send, cancel, reset } = useAgentStream(sessionId);
   const [input, setInput] = useState("");
@@ -316,13 +328,19 @@ export default function ChatPanel({
   const [showMentions, setShowMentions] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
   const [mentionStart, setMentionStart] = useState(-1);
+  const [showCommands, setShowCommands] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
+  const [commandStart, setCommandStart] = useState(-1);
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   // Search state
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<number[]>([]);
   const [searchIdx, setSearchIdx] = useState(0);
-  const [modelSelectorOpen, setModelSelectorOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Open/close state now lives inside <ModelSelector />.
+  // Sessions are useful on demand, but should not compete with the chat for
+  // horizontal space while the user is reading or writing.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [thinkingStrength, setThinkingStrength] = useState<ThinkingStrength>(() => {
     if (typeof window !== "undefined") {
       const stored = localStorage.getItem("nexus.thinkingStrength");
@@ -331,15 +349,24 @@ export default function ChatPanel({
     return "medium";
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [activePlan, setActivePlan] = useState<PlanCreateResult | null>(null);
   const [planStatus, setPlanStatus] = useState<PlanStatusType | null>(null);
   const [planExecuting, setPlanExecuting] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
   const [backendOffline, setBackendOffline] = useState(false);
+  const [demoMode, setDemoMode] = useState(false);
   const errorLoggedRef = useRef(false);
   const planPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastUserMessageRef = useRef<string>("");
+
+  // The dashboard can hand off a prompt through the URL. Pre-fill it without
+  // replacing anything the user has already started typing.
+  useEffect(() => {
+    const prompt = searchParams.get("prompt")?.trim();
+    if (prompt) setInput((current) => current || prompt);
+  }, [searchParams]);
 
   // Sync the session list's currentId with local sessionId state
   useEffect(() => {
@@ -360,6 +387,44 @@ export default function ChatPanel({
     }
   }, [historyError]);
 
+  // Proactively detect demo mode: no LLM provider/API key configured.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = (await getProvidersStatus()) as {
+          providers?: unknown[];
+          active_provider?: string;
+          llm_available?: boolean;
+          demo_mode?: boolean;
+        };
+        if (cancelled) return;
+        if (data.demo_mode === true || data.llm_available === false) {
+          setDemoMode(true);
+        }
+      } catch {
+        // Ignore — don't crash if the status endpoint is unavailable.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Reactively detect the demo stub: backend streams text beginning with "MODO DEMO".
+  useEffect(() => {
+    if (
+      events.some(
+        (e) =>
+          e.type === "token" &&
+          typeof e.content === "string" &&
+          e.content.includes("MODO DEMO"),
+      )
+    ) {
+      setDemoMode(true);
+    }
+  }, [events]);
+
 
   useEffect(() => {
     localStorage.setItem("nexus.thinkingStrength", thinkingStrength);
@@ -369,14 +434,13 @@ export default function ChatPanel({
     try {
       setHistoryError(null);
       const history = await getSessionHistory(sessionId);
-      const stripToolMarkup = (text: string) =>
-        text
-          .replace(/<event>[^]*?<\/event>/g, "")
-          .replace(/```tool\s*\n[\s\S]*?```/g, "");
       const normalized = history.map((msg, index) => ({
         ...msg,
         id: `${msg.role}-${index}-${msg.timestamp}`,
-        content: stripAnsiCodes(stripToolMarkup(msg.content)),
+        content:
+          msg.role === "assistant"
+            ? sanitizeAssistantContent(stripAnsiCodes(msg.content))
+            : stripAnsiCodes(msg.content),
       }));
       setHistoryMessages(normalized);
       setPendingUser([]);
@@ -385,17 +449,25 @@ export default function ChatPanel({
       setBackendOffline(false);
       errorLoggedRef.current = false;
     } catch (error) {
-      setBackendOffline(true);
-      if (!errorLoggedRef.current) {
-        log.warn("Backend offline — chat history unavailable");
+      const isNetworkFailure =
+        error instanceof ApiError && error.status === 0;
+      setBackendOffline(isNetworkFailure);
+      if (!isNetworkFailure && !errorLoggedRef.current) {
+        log.warn("Chat history unavailable", error);
         errorLoggedRef.current = true;
+        setHistoryError(
+          error instanceof Error ? error.message : "Failed to load chat history",
+        );
       }
-      setHistoryError(
-        error instanceof Error ? error.message : "Failed to load chat history",
-      );
       setHistoryLoaded(true);
     }
   }, [sessionId, reset]);
+
+  const advancedLoadCommands = useAdvancedModeStore((s) => s.loadCommands);
+  const advancedLoadModes = useAdvancedModeStore((s) => s.loadModes);
+  const commandsLoading = useAdvancedModeStore((s) => s.commandsLoading);
+  const commandsError = useAdvancedModeStore((s) => s.commandsError);
+  const advancedModes = useAdvancedModeStore((s) => s.modes);
 
   useEffect(() => {
     loadHistory();
@@ -405,7 +477,17 @@ export default function ChatPanel({
     if (!modelsLoaded) {
       void loadModels();
     }
-  }, [loadHistory, loadModes, modesLoaded, loadModels, modelsLoaded]);
+    void advancedLoadCommands();
+    void advancedLoadModes();
+  }, [
+    advancedLoadCommands,
+    advancedLoadModes,
+    loadHistory,
+    loadModes,
+    modesLoaded,
+    loadModels,
+    modelsLoaded,
+  ]);
 
   const { toggleTheme } = useThemeStore();
 
@@ -461,7 +543,8 @@ export default function ChatPanel({
           : trimmed,
       );
       setAttachedFiles([]);
-      await send(messageToSend, currentMode, resolveActiveTier(), "", thinkingStrength);
+      const projectPath = currentProject?.path || ".";
+      await send(messageToSend, currentMode, activeModel, projectPath, thinkingStrength, undefined, activeProvider);
     } catch (err) {
       setPendingUser((prev) => prev.filter((m) => m.id !== pendingUserMessage.id));
       setInput(previousInput);
@@ -470,7 +553,9 @@ export default function ChatPanel({
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
-    await loadHistory();
+    if (!streamError && !backendOffline) {
+      await loadHistory();
+    }
   };
 
   // -----------------------------------------------------------------------
@@ -553,10 +638,27 @@ export default function ChatPanel({
       setMentionQuery(match[1]);
       setMentionStart(cursorPos - match[1].length - 1);
       setShowMentions(true);
+      setShowCommands(false);
     } else {
       setShowMentions(false);
       setMentionQuery("");
       setMentionStart(-1);
+    }
+    // Detect /command
+    // The backend only resolves a slash command when it is the first token.
+    // Keeping the trigger aligned avoids offering commands in URLs or prose
+    // where they would be sent as ordinary text.
+    const cmdMatch = before.match(/^\s*\/([a-zA-Z0-9-]*)$/);
+    if (cmdMatch) {
+      setCommandQuery(cmdMatch[1]);
+      setCommandStart(before.lastIndexOf("/"));
+      setShowCommands(true);
+      setShowMentions(false);
+      setSelectedCommandIndex(0);
+    } else {
+      setShowCommands(false);
+      setCommandQuery("");
+      setCommandStart(-1);
     }
   };
 
@@ -571,6 +673,23 @@ export default function ChatPanel({
     setMentionStart(-1);
   };
 
+  const insertCommand = (cmdAlias: string) => {
+    if (commandStart < 0) return;
+    const before = input.slice(0, commandStart);
+    const after = input.slice(commandStart + 1 + commandQuery.length);
+    const newInput = `${before}/${cmdAlias} ${after}`;
+    setInput(newInput);
+    setShowCommands(false);
+    setCommandQuery("");
+    setCommandStart(-1);
+    setSelectedCommandIndex(0);
+    requestAnimationFrame(() => {
+      const cursor = before.length + cmdAlias.length + 2;
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(cursor, cursor);
+    });
+  };
+
   // Filter agents based on mention query
   const filteredAgents = useMemo(() => {
     if (!showMentions) return [];
@@ -578,6 +697,32 @@ export default function ChatPanel({
     const q = mentionQuery.toLowerCase();
     return agents.filter((a) => a.startsWith(q));
   }, [showMentions, mentionQuery]);
+
+  // Filter commands based on /command query
+  const advancedCommands = useAdvancedModeStore((s) => s.commands);
+  const filteredCommands = useMemo(() => {
+    if (!showCommands) return [];
+    const q = commandQuery.toLowerCase();
+    return Object.entries(advancedCommands)
+      .map(([modeId, info], order) => {
+        const aliases = info.aliases.map((alias) =>
+          alias.replace(/^\//, "").toLowerCase()
+        );
+        let rank = 4;
+        if (!q) rank = 0;
+        else if (aliases.some((alias) => alias === q)) rank = 0;
+        else if (aliases.some((alias) => alias.startsWith(q))) rank = 1;
+        else if (modeId.toLowerCase().startsWith(q)) rank = 2;
+        else if (
+          modeId.toLowerCase().includes(q) ||
+          info.description.toLowerCase().includes(q)
+        ) rank = 3;
+        return { modeId, info, order, rank };
+      })
+      .filter((command) => command.rank < 4)
+      .sort((left, right) => left.rank - right.rank || left.order - right.order)
+      .map(({ modeId, info }) => [modeId, info] as const);
+  }, [showCommands, commandQuery, advancedCommands]);
 
   // -----------------------------------------------------------------------
   // Search within messages (Ctrl+K)
@@ -642,6 +787,36 @@ export default function ChatPanel({
     [historyMessages, pendingUser, events],
   );
 
+  // True while streaming but before the first token/thinking event arrives.
+  const waitingForFirstToken =
+    streaming &&
+    !events.some(
+      (e) => (e.type === "token" || e.type === "thinking") && e.content,
+    );
+
+  // Most recent meaningful streaming status, scanned from the end of the event list.
+  const streamStatus = useMemo<string | null>(() => {
+    if (!streaming) return null;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      switch (e.type) {
+        case "agent_started":
+          return `${e.agent ?? "IA"} a pensar…`;
+        case "thinking":
+          return `${e.agent ?? "IA"} a raciocinar…`;
+        case "tool_call":
+          return `A usar ferramenta: ${e.tool_name ?? ""}`;
+        case "tool_result":
+          return "Ferramenta concluída";
+        case "routing":
+          return "A encaminhar…";
+        default:
+          break;
+      }
+    }
+    return "A pensar…";
+  }, [streaming, events]);
+
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const previousMessagesLength = useRef(messages.length);
   const userScrolledUp = useRef(false);
@@ -688,6 +863,31 @@ export default function ChatPanel({
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (showCommands) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setShowCommands(false);
+        return;
+      }
+      if (e.key === "ArrowDown" && filteredCommands.length > 0) {
+        e.preventDefault();
+        setSelectedCommandIndex((index) => (index + 1) % filteredCommands.length);
+        return;
+      }
+      if (e.key === "ArrowUp" && filteredCommands.length > 0) {
+        e.preventDefault();
+        setSelectedCommandIndex(
+          (index) => (index - 1 + filteredCommands.length) % filteredCommands.length,
+        );
+        return;
+      }
+      if ((e.key === "Enter" || e.key === "Tab") && filteredCommands.length > 0) {
+        e.preventDefault();
+        const [modeId, info] = filteredCommands[selectedCommandIndex] ?? filteredCommands[0];
+        insertCommand(info.aliases[0]?.replace(/^\//, "") || modeId);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       const form = e.currentTarget.closest("form");
@@ -742,7 +942,8 @@ export default function ChatPanel({
     if (streaming) return;
     const last = lastUserMessage || lastUserMessageRef.current;
     if (!last) return;
-    void send(last, currentMode, resolveActiveTier(), "", thinkingStrength).then(() => loadHistory());
+    const projectPath = currentProject?.path || ".";
+    void send(last, currentMode, activeModel, projectPath, thinkingStrength, undefined, activeProvider).then(() => loadHistory());
   }
 
   // Retry the prompt from an error bubble (passed to MessageBubble)
@@ -784,6 +985,33 @@ export default function ChatPanel({
     setTimeout(() => setShared(false), 2000);
   }
 
+  const startPlanExecution = useCallback(async (planId: string) => {
+    if (planExecuting) return;
+    setPlanError(null);
+    setPlanExecuting(true);
+    try {
+      await executePlan(planId, sessionId, currentProject?.path || ".");
+      planPollRef.current = setInterval(async () => {
+        try {
+          const status = await getPlanStatus(planId);
+          setPlanStatus(status);
+          if (["completed", "failed", "cancelled"].includes(status.status)) {
+            if (planPollRef.current) clearInterval(planPollRef.current);
+            setPlanExecuting(false);
+          }
+        } catch {
+          if (planPollRef.current) clearInterval(planPollRef.current);
+          setPlanExecuting(false);
+        }
+      }, 2000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to execute plan";
+      setPlanError(msg);
+      setPlanExecuting(false);
+      log.error("Failed to execute plan:", err);
+    }
+  }, [currentProject?.path, planExecuting, sessionId]);
+
   const handlePlanCreate = useCallback(async (objective: string) => {
     setPlanError(null);
     try {
@@ -791,12 +1019,18 @@ export default function ChatPanel({
       setActivePlan(plan);
       const status = await getPlanStatus(plan.plan_id);
       setPlanStatus(status);
+      // Plan mode is an autonomous workflow by default. The legacy approve
+      // endpoint remains available for callers that explicitly request
+      // manual approval, but the UI must not strand a plan waiting for a click.
+      if (status.approved && !["completed", "failed", "cancelled"].includes(status.status)) {
+        void startPlanExecution(plan.plan_id);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to create plan";
       setPlanError(msg);
       log.error("Failed to create plan:", err);
     }
-  }, [sessionId]);
+  }, [sessionId, startPlanExecution]);
 
   const handlePlanApprove = useCallback(async () => {
     if (!activePlan) return;
@@ -814,28 +1048,8 @@ export default function ChatPanel({
 
   const handlePlanExecute = useCallback(async () => {
     if (!activePlan || planExecuting) return;
-    setPlanError(null);
-    setPlanExecuting(true);
-    try {
-      await executePlan(activePlan.plan_id, sessionId);
-      planPollRef.current = setInterval(async () => {
-        try {
-          const status = await getPlanStatus(activePlan.plan_id);
-          setPlanStatus(status);
-          if (["completed", "failed", "cancelled"].includes(status.status)) {
-            if (planPollRef.current) clearInterval(planPollRef.current);
-            setPlanExecuting(false);
-          }
-        } catch {
-          if (planPollRef.current) clearInterval(planPollRef.current);
-          setPlanExecuting(false);
-        }
-      }, 2000);
-    } catch (err) {
-      log.error("Failed to execute plan:", err);
-      setPlanExecuting(false);
-    }
-  }, [activePlan, planExecuting, sessionId]);
+    await startPlanExecution(activePlan.plan_id);
+  }, [activePlan, planExecuting, startPlanExecution]);
 
   const handlePlanCancel = useCallback(async () => {
     try {
@@ -864,15 +1078,39 @@ export default function ChatPanel({
     }
   }, [currentMode, messages, activePlan, handlePlanCreate]);
 
-  const suggestions = [
-    "Análise de mercado",
-    "Comparar zonas",
-    "Gerar relatório",
-    "Encontrar leads",
+  const suggestions: { label: string; prompt: string; icon: ReactNode }[] = [
+    {
+      label: "Analisar projeto",
+      prompt: "Analisa a estrutura deste projeto e explica a arquitetura",
+      icon: <Search className="h-3.5 w-3.5" />,
+    },
+    {
+      label: "Corrigir erros",
+      prompt: "Procura erros e código problemático neste projeto e propõe correções",
+      icon: <Bug className="h-3.5 w-3.5" />,
+    },
+    {
+      label: "Executar testes",
+      prompt: "Executa os testes do projeto e resume os resultados",
+      icon: <Zap className="h-3.5 w-3.5" />,
+    },
+    {
+      label: "Gerar código",
+      prompt: "Ajuda-me a escrever código novo para este projeto",
+      icon: <Code className="h-3.5 w-3.5" />,
+    },
   ];
 
   return (
-    <div className="flex h-full">
+    <div className="relative flex h-full" data-testid="ai-cockpit">
+      {!sidebarCollapsed && (
+        <button
+          type="button"
+          aria-label="Fechar sessões"
+          onClick={() => setSidebarCollapsed(true)}
+          className="absolute inset-0 z-40 bg-black/25 backdrop-blur-[1px]"
+        />
+      )}
       <SessionList
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed((c) => !c)}
@@ -881,6 +1119,20 @@ export default function ChatPanel({
       {/* Chat header */}
       <div className="flex shrink-0 items-center justify-between border-b border-nexus-border px-5 py-2.5">
         <div className="flex items-center gap-2.5">
+          <motion.button
+            type="button"
+            whileTap={{ scale: 0.95 }}
+            onClick={() => setSidebarCollapsed(false)}
+            className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-2.5 py-1.5 text-xs font-medium text-nexus-muted transition-colors hover:border-nexus-accent/30 hover:text-nexus-text"
+            title="Abrir sessões"
+            aria-label="Abrir sessões"
+          >
+            <MessageSquare className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Conversas</span>
+            <span className="rounded-full bg-nexus-bg/70 px-1.5 py-0.5 font-mono text-[10px] tabular-nums">
+              {sessions.sessions.length}
+            </span>
+          </motion.button>
           <motion.div
             whileHover={{ scale: 1.05, rotate: -3 }}
             whileTap={{ scale: 0.95 }}
@@ -888,11 +1140,15 @@ export default function ChatPanel({
           >
             <Sparkles className="h-3.5 w-3.5" />
           </motion.div>
-          <div className="leading-tight">
-            <div className="text-sm font-semibold text-nexus-text">Chat com IA</div>
-              <div className="text-[11px] text-nexus-muted">
-                {"Sem projeto ativo — seleciona um projeto para usar ferramentas"}
-              </div>
+          <div className="min-w-0 leading-tight">
+            <h1 className="text-sm font-semibold text-nexus-text">Chat</h1>
+            {/* This line was hardcoded to the "no project" warning, so it
+                showed even with a project open. Reflect the real state. */}
+            <div className="truncate text-[11px] text-nexus-muted">
+              {currentProject?.name
+                ? currentProject.name
+                : "Sem projeto ativo — seleciona um projeto para usar ferramentas"}
+            </div>
           </div>
         </div>
 
@@ -930,55 +1186,11 @@ export default function ChatPanel({
             })}
           </motion.div>
 
-          {/* Model selector */}
-          <div className="relative">
-            <motion.button
-              type="button"
-              onClick={() => setModelSelectorOpen((open) => !open)}
-              whileTap={{ scale: 0.97 }}
-              className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-2.5 py-1.5 text-[11px] font-medium text-nexus-muted hover:text-nexus-text transition-all duration-200"
-            >
-              <Sparkles className="h-3.5 w-3.5 text-nexus-accent/70" />
-              <span className="hidden sm:inline max-w-[120px] truncate">{modelsLoaded ? models.find((m) => m.id === activeModel)?.name || activeModel : activeModel}</span>
-              <ChevronDown className="h-3 w-3 text-nexus-muted" />
-            </motion.button>
-            {modelSelectorOpen && (
-              <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-lg border border-nexus-border bg-nexus-card shadow-xl">
-                <div className="max-h-72 overflow-y-auto py-1 thin-scrollbar">
-                  {(modelsLoaded ? models : []).length === 0 && (
-                    <div className="px-3 py-2 text-[11px] text-nexus-muted">No models available</div>
-                  )}
-                  {(modelsLoaded ? models : []).map((model) => {
-                    const active = model.id === activeModel;
-                    const label = model.name || model.id;
-                    return (
-                      <button
-                        key={model.id}
-                        type="button"
-                        onClick={() => {
-                          setActiveModel(model.id);
-                          setModelSelectorOpen(false);
-                        }}
-                        className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors ${
-                          active ? "bg-nexus-accent/10 text-nexus-text" : "text-nexus-muted hover:bg-nexus-bg hover:text-nexus-text"
-                        }`}
-                      >
-                        <span className="truncate text-xs">{label}</span>
-                        <span className="flex items-center gap-2">
-                          {model.pricing === "free" && (
-                            <span className="rounded bg-green-500/15 px-1.5 py-0.5 text-[10px] font-medium text-green-400">FREE</span>
-                          )}
-                          {typeof model.estimated_tokens_per_sec === "number" && model.estimated_tokens_per_sec > 0 && (
-                            <span className="text-[10px] text-nexus-muted">{model.estimated_tokens_per_sec} t/s</span>
-                          )}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
+          {/* Advanced mode indicator + toggle */}
+          <AdvancedModeHeaderIndicator />
+
+          {/* Model selector — search, provider grouping, price/context */}
+          <ModelSelector />
 
           {/* Thinking strength selector */}
           <motion.div
@@ -1067,6 +1279,8 @@ export default function ChatPanel({
       {/* Messages area */}
       <div
         ref={messagesContainerRef}
+        data-testid="messages"
+        aria-label="Histórico da conversa"
         className="min-h-0 flex-1 overflow-y-auto thin-scrollbar px-5 py-3"
         style={{
           background: "linear-gradient(180deg, rgba(13,17,28,0) 0%, rgba(13,17,28,0.4) 50%, rgba(13,17,28,0) 100%)",
@@ -1145,19 +1359,19 @@ export default function ChatPanel({
             <p className="mb-8 max-w-xs text-sm text-nexus-muted leading-relaxed">
               Pergunte, analise, crie. A sua IA, os seus dados.
             </p>
-            <div className="flex flex-wrap justify-center gap-2.5">
+            <div className="grid w-full max-w-md grid-cols-2 gap-2.5">
               {suggestions.map((s) => (
                 <motion.button
-                  key={s}
-                  onClick={() => setInput(s)}
-                  whileHover={{ scale: 1.03, y: -1 }}
+                  key={s.label}
+                  onClick={() => setInput(s.prompt)}
+                  whileHover={{ scale: 1.03, y: -2 }}
                   whileTap={{ scale: 0.97 }}
-                  className="group rounded-full border border-nexus-border bg-nexus-card/80 px-4 py-2 text-xs text-nexus-muted hover:border-nexus-accent/40 hover:text-nexus-text transition-all duration-200 hover:shadow-md hover:shadow-nexus-accent/5"
+                  className="group flex items-center gap-2.5 rounded-xl border border-nexus-border bg-nexus-card/80 px-4 py-3 text-left text-xs text-nexus-muted transition-all duration-200 hover:border-nexus-accent/40 hover:text-nexus-text hover:shadow-md hover:shadow-nexus-accent/10"
                 >
-                  <span className="flex items-center gap-1.5">
-                    <Wand2 className="h-3 w-3 text-nexus-accent/60 group-hover:text-nexus-accent transition-colors" />
-                    {s}
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-nexus-accent/10 text-nexus-accent/70 transition-colors group-hover:bg-nexus-accent/20 group-hover:text-nexus-accent">
+                    {s.icon}
                   </span>
+                  <span className="font-medium">{s.label}</span>
                 </motion.button>
               ))}
             </div>
@@ -1175,7 +1389,7 @@ export default function ChatPanel({
               <div className="flex items-center gap-2">
                 <ListChecks className="h-4 w-4 text-nexus-accent" />
                 <span className="text-sm font-semibold text-nexus-accent">
-                  Execution Plan
+                  Plano autónomo
                 </span>
                 {planStatus && (
                   <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
@@ -1280,6 +1494,7 @@ export default function ChatPanel({
             <MessageBubble
               key={m.id}
               message={m}
+              sessionId={sessionId}
               isStreaming={streaming && idx === messages.length - 1}
               onRetry={handleRetryFromError}
               onEdit={handleEditMessage}
@@ -1290,16 +1505,62 @@ export default function ChatPanel({
           className="space-y-4"
         />
         <div ref={messagesEndRef} />
+
+        {/* "Thinking / typing" placeholder shown while awaiting the first token */}
+        {waitingForFirstToken && (
+          <div className="mb-4 flex justify-start">
+            <div className="rounded-2xl border border-nexus-border bg-nexus-card px-4 py-3">
+              <div className="flex items-center gap-1.5">
+                {[0, 1, 2].map((i) => (
+                  <motion.span
+                    key={i}
+                    className="h-2 w-2 rounded-full bg-nexus-muted"
+                    animate={{ y: [0, -5, 0] }}
+                    transition={{
+                      duration: 0.6,
+                      repeat: Infinity,
+                      ease: "easeInOut",
+                      delay: i * 0.15,
+                    }}
+                  />
+                ))}
+              </div>
+              <div className="mt-1 text-[10px] text-nexus-muted">a pensar…</div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Input area — fixed at bottom */}
       <div className="shrink-0 border-t border-nexus-border bg-nexus-panel px-5 pt-3 pb-2">
+        {/* Live streaming-status pill */}
+        {streamStatus && (
+          <div className="mb-2 flex justify-start">
+            <span className="rounded-full border border-nexus-border bg-nexus-card px-2 py-0.5 text-[10px] text-nexus-muted">
+              {streamStatus}
+            </span>
+          </div>
+        )}
+
         {/* Backend offline indicator */}
         {backendOffline && (
           <div className="mb-2 flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-400">
             <WifiOff className="h-3.5 w-3.5 shrink-0" />
             <span className="font-medium">Backend offline</span>
             <span className="text-red-300">— Aguardando reconexão para enviar mensagens.</span>
+          </div>
+        )}
+
+        {/* DEMO-MODE warning banner (no LLM provider configured) */}
+        {demoMode && (
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            <span>
+              ⚠️ MODO DEMO — nenhum provedor LLM configurado. A IA não gera respostas reais.{" "}
+              <Link href="/settings" className="text-amber-200 underline font-medium">
+                Definições
+              </Link>
+            </span>
           </div>
         )}
 
@@ -1391,11 +1652,15 @@ export default function ChatPanel({
             </button>
 
             <textarea
+              ref={inputRef}
               className="min-h-[40px] max-h-[160px] flex-1 resize-none bg-transparent px-2 py-2 text-sm text-nexus-text placeholder-nexus-muted outline-none"
               value={input}
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
-              placeholder="Pergunte qualquer coisa... (use @ para mencionar agents, Ctrl+K para procurar)"
+              placeholder="Pergunte qualquer coisa... (use @ para agents, / para comandos, Ctrl+K para procurar)"
+              aria-autocomplete="list"
+              aria-controls={showCommands ? "slash-command-menu" : undefined}
+              aria-expanded={showCommands}
               disabled={streaming}
               rows={1}
               style={{ fieldSizing: "content" }}
@@ -1416,6 +1681,23 @@ export default function ChatPanel({
               <Mic className="h-4 w-4" />
             </button>
 
+            {/* Web Search button */}
+            <button
+              type="button"
+              onClick={() => {
+                const value = input.trim();
+                if (value) {
+                  router.push(("/search?q=" + encodeURIComponent(value)) as any);
+                }
+              }}
+              disabled={!input.trim()}
+              className="shrink-0 rounded-lg border border-nexus-border/70 p-2 text-nexus-muted transition-colors hover:border-nexus-accent/40 hover:text-nexus-text disabled:cursor-not-allowed disabled:opacity-40"
+              title="Pesquisar na web"
+              aria-label="Web Search"
+            >
+              <Search className="h-4 w-4" />
+            </button>
+
             {/* @mentions autocomplete */}
             {showMentions && filteredAgents.length > 0 && (
               <div className="absolute bottom-full left-12 mb-1 max-h-40 w-48 overflow-y-auto rounded-lg border border-nexus-border bg-nexus-panel/95 shadow-lg backdrop-blur-md">
@@ -1429,6 +1711,79 @@ export default function ChatPanel({
                     <span className="text-nexus-accent">@{a}</span>
                   </button>
                 ))}
+              </div>
+            )}
+
+            {/* /command autocomplete */}
+            {showCommands && (
+              <div
+                id="slash-command-menu"
+                data-testid="slash-command-menu"
+                role="listbox"
+                aria-label="Comandos de IA"
+                className="absolute bottom-full left-12 z-50 mb-1 max-h-64 w-[min(24rem,calc(100%-3rem))] overflow-y-auto rounded-lg border border-nexus-border bg-nexus-panel/95 p-1 shadow-xl backdrop-blur-md"
+              >
+                <div className="flex items-center justify-between border-b border-nexus-border/70 px-2 py-1.5">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
+                    Comandos de IA
+                  </span>
+                  <span className="text-[10px] text-nexus-muted">↑↓ navegar · Tab/Enter escolher · Esc fechar</span>
+                </div>
+                {commandsLoading && filteredCommands.length === 0 && (
+                  <div className="px-3 py-3 text-xs text-nexus-muted">A carregar comandos…</div>
+                )}
+                {!commandsLoading && commandsError && filteredCommands.length === 0 && (
+                  <div className="flex items-center justify-between gap-3 px-3 py-3">
+                    <span className="text-xs text-amber-300">{commandsError}</span>
+                    <button
+                      type="button"
+                      onClick={() => void advancedLoadCommands()}
+                      className="shrink-0 rounded-md border border-nexus-border px-2 py-1 text-[10px] text-nexus-text hover:border-nexus-accent/50"
+                    >
+                      Tentar novamente
+                    </button>
+                  </div>
+                )}
+                {!commandsLoading && !commandsError && filteredCommands.length === 0 && (
+                  <div className="px-3 py-3 text-xs text-nexus-muted">
+                    Nenhum comando corresponde a “/{commandQuery}”.
+                  </div>
+                )}
+                {filteredCommands.map(([modeId, info], index) => {
+                  const mode = advancedModes[modeId];
+                  const selected = index === selectedCommandIndex;
+                  return (
+                    <button
+                      key={modeId}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      onMouseEnter={() => setSelectedCommandIndex(index)}
+                      onClick={() => insertCommand(info.aliases[0]?.replace(/^\//, "") || modeId)}
+                      className={`mt-0.5 flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs text-nexus-text ${
+                        selected ? "bg-nexus-accent/20" : "hover:bg-nexus-accent/10"
+                      }`}
+                    >
+                      <span
+                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-bold text-white"
+                        style={{ backgroundColor: mode?.color || "#8B5CF6" }}
+                      >
+                        {mode?.icon === "infinity" ? "∞" : mode?.icon === "shield" ? "🛡" : mode?.icon === "hammer" ? "⚒" : mode?.icon === "layers" ? "◈" : mode?.icon === "git-branch" ? "↗" : mode?.icon === "check-circle" ? "✓" : mode?.icon === "flask" ? "⚗" : mode?.icon === "search" ? "🔍" : mode?.icon === "brain" ? "🧠" : mode?.icon === "eye" ? "👁" : mode?.icon?.[0]?.toUpperCase() || "∞"}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-medium text-nexus-accent">{info.aliases[0]}</span>
+                          <span className="truncate text-nexus-muted">— {info.description}</span>
+                        </div>
+                        {info.aliases.length > 1 && (
+                          <div className="mt-0.5 truncate text-[10px] text-nexus-faint">
+                            Também: {info.aliases.slice(1).join(", ")}
+                          </div>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             )}
 

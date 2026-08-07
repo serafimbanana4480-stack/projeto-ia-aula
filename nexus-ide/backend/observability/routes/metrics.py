@@ -6,22 +6,12 @@ Provides real-time metrics streaming and historical data.
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-
-from backend.config.settings import get_settings as _get_settings
-from backend.middleware.auth import decode_access_token
-
-
-def _is_dev_mode() -> bool:
-    try:
-        return _get_settings().environment == "development"
-    except Exception:
-        return True
-
 
 from backend.llm.circuit_breaker import all_breakers  # noqa: E402
 from backend.middleware.auth import require_auth  # noqa: E402
@@ -33,6 +23,7 @@ from backend.persistence.db import (  # noqa: E402
     get_agent_activity,
     get_change_statistics,
     get_message_statistics,
+    get_token_usage_overview,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,20 +87,22 @@ async def _build_current_metrics_payload(request: Request) -> dict[str, Any]:
     }
 
 
-def _validate_stream_auth(request: Request, token: str | None) -> None:
-    """Authenticate SSE clients that cannot send Authorization headers."""
+def _validate_stream_auth(request: Request, token: str | None = None) -> None:
+    """Authenticate SSE clients without accepting bearer tokens in URLs."""
+    # ``token`` remains an ignored compatibility argument for integrations
+    # that called this helper directly; query-string credentials are never
+    # accepted for the actual stream endpoint.
+    del token
     auth_header = request.headers.get("Authorization", "")
-    bearer = (
-        auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else None
-    )
-    jwt_token = bearer or token
-    if not jwt_token:
+    if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authentication required")
-    decode_access_token(jwt_token)
+    from backend.middleware.auth import decode_access_token
+
+    decode_access_token(auth_header.removeprefix("Bearer ").strip())
 
 
 @router.get("/metrics")
-async def get_metrics_index(request: Request) -> dict:
+async def get_metrics_index(request: Request, _user: dict = Depends(require_auth)) -> dict:
     """Return available metrics endpoints."""
     return {
         "endpoints": {
@@ -122,23 +115,21 @@ async def get_metrics_index(request: Request) -> dict:
 
 
 @router.get("/metrics/current")
-async def get_current_metrics(request: Request) -> dict:
-    """Get current metrics snapshot. No auth required in dev mode."""
+async def get_current_metrics(request: Request, _user: dict = Depends(require_auth)) -> dict:
+    """Get current metrics snapshot for authenticated users."""
     return await _build_current_metrics_payload(request)
 
 
 @router.get("/dashboard/stream")
 async def dashboard_metrics_stream(
     request: Request,
-    token: str | None = None,
 ) -> StreamingResponse:
     """Stream metrics snapshots over SSE for the dashboard.
 
-    In development mode, no auth is required. In production, requires
-    a valid JWT token as query parameter or Authorization header.
+    Requires a valid JWT in the Authorization header. Bearer tokens in query
+    strings are deliberately rejected so URLs cannot become credential logs.
     """
-    if not _is_dev_mode():
-        _validate_stream_auth(request, token)
+    _validate_stream_auth(request)
 
     async def event_stream() -> AsyncIterator[str]:
         while True:
@@ -161,7 +152,8 @@ async def dashboard_metrics_stream(
 async def get_metrics_history(
     seconds: int = Query(3600, ge=1, description="Time window in seconds"),
     metric: str = Query("tokens_per_second", description="Metric name to retrieve history for"),
-) -> dict:
+    _user: dict = Depends(require_auth),
+) -> list[Any]:
     """Return historical timeline data for a single metric.
 
     Uses the in-memory metrics store (1h deque). Falls back to an empty
@@ -179,15 +171,33 @@ async def get_metrics_history(
         )
         timeline = []
 
-    return {
-        "metric": metric,
-        "seconds": seconds,
-        "data": timeline,
-    }
+    # Return the timeline directly for compatibility with the original API.
+    # Frontend consumers accept both this list and the newer wrapped shape.
+    return timeline
+
+
+@router.get("/metrics/history/multi")
+async def get_metrics_history_multi(
+    seconds: int = Query(3600, ge=1, description="Time window in seconds"),
+    _user: dict = Depends(require_auth),
+) -> dict[str, list[Any]]:
+    """Return timelines for all metrics without failing on a partial series."""
+    store = get_metrics_store()
+    names = getattr(store, "metric_names", None)
+    if callable(names):
+        names = names()
+    names = names or ["tokens_per_second", "cpu_percent", "ram_percent"]
+    result: dict[str, list[Any]] = {}
+    for name in names:
+        try:
+            result[str(name)] = await store.get_timeline(seconds=seconds, metric=str(name))
+        except Exception:
+            result[str(name)] = []
+    return result
 
 
 @router.get("/models/status")
-async def get_models_status() -> list[dict]:
+async def get_models_status(_user: dict = Depends(require_auth)) -> list[dict]:
     """Return status of available models from Ollama."""
     try:
         import httpx
@@ -212,6 +222,8 @@ async def get_models_status() -> list[dict]:
             return models
     except Exception as e:
         logger.warning("Failed to fetch models from Ollama: %s", e)
+        # Preserve an explicit service-unavailable signal so the dashboard can
+        # distinguish an empty inventory from an offline Ollama daemon.
         raise HTTPException(
             status_code=503,
             detail="Ollama model inventory is unavailable",
@@ -219,7 +231,7 @@ async def get_models_status() -> list[dict]:
 
 
 @router.get("/metrics/flow")
-async def get_request_flow() -> dict:
+async def get_request_flow(_user: dict = Depends(require_auth)) -> dict:
     """Return request flow data for visualization.
 
     Shows the flow of requests through the system:
@@ -244,7 +256,7 @@ async def get_request_flow() -> dict:
 
 
 @router.get("/metrics/timeline")
-async def get_token_timeline() -> dict:
+async def get_token_timeline(_user: dict = Depends(require_auth)) -> dict:
     """Return token generation timeline data for visualization.
 
     Shows token generation over time for the current session.
@@ -267,7 +279,7 @@ async def get_token_timeline() -> dict:
 
 
 @router.get("/metrics/analytics")
-async def get_analytics(request: Request) -> dict:
+async def get_analytics(request: Request, _user: dict = Depends(require_auth)) -> dict:
     """Return analytics data for the dashboard.
 
     Provides comprehensive analytics including usage patterns, performance metrics,
@@ -325,6 +337,37 @@ async def get_usage(
     return await store.get_usage(range_seconds=seconds)
 
 
+@router.get("/metrics/usage/overview")
+async def get_usage_overview(
+    request: Request,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Return the durable metrics overview used by the Metrics page.
+
+    Unlike ``/metrics/usage`` (kept for widget compatibility), this endpoint
+    includes calendar periods, a 30-day daily series and all-time model usage.
+    """
+    overview = await asyncio.to_thread(get_token_usage_overview)
+    try:
+        active_sessions = await _get_active_session_count(request)
+        snapshot = await get_metrics_collector().get_snapshot(
+            active_sessions=active_sessions,
+            queue_depth=0,
+        )
+        overview["current"] = {
+            "tokens_per_second": snapshot.tokens_per_second,
+            "active_model": snapshot.active_model,
+            "timestamp": snapshot.timestamp,
+        }
+    except Exception:
+        overview["current"] = {
+            "tokens_per_second": 0.0,
+            "active_model": None,
+            "timestamp": time.time(),
+        }
+    return overview
+
+
 @router.get("/providers/status")
 async def get_providers_status(
     request: Request,
@@ -368,3 +411,28 @@ async def get_providers_status(
             "providers": providers,
             "breakers": all_breakers(),
         }
+
+    # A single configured provider (OpenRouterProvider, OpenAIProvider, etc.)
+    # is also a healthy runtime. Treating it as "unsupported" made the
+    # dashboard claim that no provider was registered while chat was actively
+    # using that same client.
+    name = llm_client.__class__.__name__.replace("Provider", "").lower()
+    if name:
+        return {
+            "providers": {
+                name: {
+                    "healthy": True,
+                    "latency": 0.0,
+                    "last_check": 0.0,
+                    "circuit_breaker": all_breakers().get(name, {}),
+                }
+            },
+            "breakers": all_breakers(),
+        }
+
+    # Keep the endpoint total for truly unknown custom objects.
+    return {
+        "providers": {},
+        "breakers": all_breakers(),
+        "note": f"Unsupported LLM client: {llm_client.__class__.__name__}",
+    }

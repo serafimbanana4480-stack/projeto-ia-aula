@@ -17,7 +17,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.core.agent_lifecycle import AgentLifecycleManager
 from backend.middleware.auth import require_auth
-from backend.middleware.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -28,7 +27,6 @@ def _get_lifecycle(request: Request) -> AgentLifecycleManager | None:
 
 
 @router.get("/agents/instances")
-@limiter.limit("100/minute")
 async def list_instances(request: Request, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     """Return all active (non-terminal) agent instances."""
     lifecycle = _get_lifecycle(request)
@@ -43,7 +41,6 @@ async def list_instances(request: Request, _user: dict = Depends(require_auth)) 
 
 
 @router.get("/agents/instances/{instance_id}")
-@limiter.limit("100/minute")
 async def get_instance(
     instance_id: str, request: Request, _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:
@@ -58,7 +55,6 @@ async def get_instance(
 
 
 @router.post("/agents/instances/{instance_id}/pause")
-@limiter.limit("60/minute")
 async def pause_instance(
     instance_id: str, request: Request, _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:
@@ -74,7 +70,6 @@ async def pause_instance(
 
 
 @router.post("/agents/instances/{instance_id}/resume")
-@limiter.limit("60/minute")
 async def resume_instance(
     instance_id: str, request: Request, _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:
@@ -90,7 +85,6 @@ async def resume_instance(
 
 
 @router.post("/agents/instances/{instance_id}/abort")
-@limiter.limit("60/minute")
 async def abort_instance(
     instance_id: str, request: Request, reason: str = "", _user: dict = Depends(require_auth)
 ) -> dict[str, Any]:

@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from backend.history_sanitizer import sanitize_history_content
 from backend.tools.ollama_client import ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -123,7 +124,7 @@ class ContextStore:
             messages: list[ChatMessage] = []
             for row in db_messages:
                 role = row.get("role", "user")
-                content = row.get("content", "")
+                content = sanitize_history_content(role, row.get("content", ""))
                 timestamp = row.get("created_at", "")
                 messages.append(ChatMessage(role=role, content=content, timestamp=timestamp))
 

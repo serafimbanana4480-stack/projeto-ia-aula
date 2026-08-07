@@ -2,57 +2,32 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Dashboard E2E Tests', () => {
   test('should load dashboard page', async ({ page }) => {
-    await page.goto('/');
-    
-    // Wait for page to load
-    await page.waitForLoadState('networkidle');
-    
-    // Check that the page title is correct
-    await expect(page).toHaveTitle(/NEXUS IDE/);
-    
-    // Check that main dashboard container is visible
-    const dashboard = page.locator('main, .dashboard, [data-testid="dashboard"]');
-    if (await dashboard.count() > 0) {
-      await expect(dashboard.first()).toBeVisible();
-    }
+    await page.goto('/dashboard', { waitUntil: 'domcontentloaded' });
+
+    await expect(page).toHaveTitle(/Dashboard.*NEXUS IDE/);
+    await expect(page.getByRole('heading', { name: 'Painel de Operações' })).toBeVisible();
   });
 
   test('should display system metrics', async ({ page }) => {
-    await page.goto('/');
-    
-    // Wait for metrics to load
-    await page.waitForTimeout(2000);
-    
-    // Check for metrics indicators
-    const metrics = page.locator('[data-testid="metrics"], .metrics, [class*="metric"]');
-    if (await metrics.count() > 0) {
-      await expect(metrics.first()).toBeVisible();
-    }
+    await page.goto('/dashboard', { waitUntil: 'domcontentloaded' });
+
+    await expect(page.getByText('Latência p95', { exact: true })).toBeVisible();
+    await expect(page.getByText('Taxa de sucesso', { exact: true })).toBeVisible();
   });
 
   test('should display agent network topology', async ({ page }) => {
-    await page.goto('/');
-    
-    // Wait for topology to load
-    await page.waitForTimeout(2000);
-    
-    // Check for topology visualization
-    const topology = page.locator('[data-testid="topology"], .topology, [class*="topology"]');
-    if (await topology.count() > 0) {
-      await expect(topology.first()).toBeVisible();
-    }
+    await page.goto('/dashboard', { waitUntil: 'domcontentloaded' });
+
+    await expect(page.getByRole('heading', { name: 'Orquestração multi-agente' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Abrir Swarm' })).toBeVisible();
   });
 
   test('should handle navigation', async ({ page }) => {
-    await page.goto('/');
-    
-    // Wait for page to load
-    await page.waitForLoadState('networkidle');
-    
-    // Check if there are navigation elements
-    const nav = page.locator('nav, .navigation, [data-testid="nav"]');
-    if (await nav.count() > 0) {
-      await expect(nav.first()).toBeVisible();
-    }
+    await page.goto('/dashboard', { waitUntil: 'domcontentloaded' });
+
+    await Promise.all([
+      page.waitForURL(/\/editor$/, { timeout: 20_000 }),
+      page.getByRole('link', { name: 'Editor' }).click(),
+    ]);
   });
 });

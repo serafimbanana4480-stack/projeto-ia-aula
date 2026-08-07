@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 
+import pytest
+
 from backend.observability.events import Event, EventBus
 
 
@@ -83,3 +85,50 @@ class TestEventBus:
         assert bus.subscriber_count("topic_a") == 2
         assert bus.subscriber_count("topic_b") == 1
         assert bus.subscriber_count() == 3
+
+
+class TestEmitAliasAndDataKeyword:
+    """50 call sites in 11 modules were dead code until these aliases existed.
+
+    ``reflection_system``, ``meta_cognition``, ``approval_queue``,
+    ``intervention_points``, ``oversight_interface``, ``cross_session_memory``,
+    ``advanced_analytics``, ``edge_computing``, ``federated_learning``,
+    ``neural_architecture_search`` and ``quantum_computing`` all call::
+
+        await self.event_bus.emit(Event(type="...", data={...}))
+
+    Neither ``EventBus.emit`` nor ``Event(data=...)`` existed. Both raised
+    inside a broad ``except Exception``, so each subsystem logged a generic
+    failure of its *own* feature and nobody traced it back to the bus.
+    """
+
+    def test_event_accepts_the_data_keyword(self) -> None:
+        event = Event(type="reflection_completed", data={"score": 0.9})
+        assert event.payload == {"score": 0.9}
+
+    def test_data_and_payload_are_the_same_dict(self) -> None:
+        event = Event(type="x", data={"a": 1})
+        event.payload["b"] = 2
+        assert event.data == {"a": 1, "b": 2}
+
+    def test_payload_keyword_still_wins(self) -> None:
+        event = Event(type="x", payload={"canonical": True})
+        assert event.payload == {"canonical": True}
+        assert event.data == {"canonical": True}
+
+    def test_default_is_an_empty_dict_not_none(self) -> None:
+        event = Event(type="x")
+        assert event.payload == {}
+        assert event.data == {}
+
+    @pytest.mark.asyncio
+    async def test_emit_delivers_like_publish(self) -> None:
+        bus = EventBus()
+        stream = bus.subscribe("reflection_completed")
+        pending = asyncio.create_task(stream.__anext__())
+        await asyncio.sleep(0)
+
+        await bus.emit(Event(type="reflection_completed", data={"score": 0.9}))
+
+        received = await asyncio.wait_for(pending, timeout=2)
+        assert received.payload == {"score": 0.9}

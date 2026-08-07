@@ -1,0 +1,4 @@
+{"timestamp":"2026-07-27T05:12:15.632460+00:00","source":"chat_routing","session_id":"audit_openrouter_green_20260727","event":"chat_provider_resolved","requested_provider":"openrouter","effective_provider":"openrouter","client":"OpenRouterProvider","model":"cohere/north-mini-code:free"}
+{"timestamp":"2026-07-27T05:12:16.697210+00:00","source":"llm","session_id":"audit_openrouter_green_20260727","event":"llm_dispatch_resolved","provider":"openrouter","model":"cohere/north-mini-code:free"}
+{"timestamp":"2026-07-27T05:12:16.697395+00:00","source":"llm","session_id":"","event":"llm_sdk_dispatch","provider":"openrouter","model":"cohere/north-mini-code:free"}
+

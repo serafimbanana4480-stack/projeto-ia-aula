@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { Clock, Zap } from "lucide-react";
 import { AreaChart, Area, ResponsiveContainer } from "recharts";
 import { useMetricsStore } from "../../stores/metricsStore";
+import { StatusDot } from "../ui/Primitives";
 
 function MiniSpark({ data, color }: { data: { v: number }[]; color: string }) {
   return (
@@ -47,6 +48,7 @@ function formatUptime(seconds: number): string {
 export default function BottomHUD() {
   const metrics = useMetricsStore((s) => s.metrics);
   const backendOnline = useMetricsStore((s) => s.backendOnline);
+  const connectionStatus = useMetricsStore((s) => s.connectionStatus);
 
   // Derive sparkline data from history
   const history = useMetricsStore((s) => s.history);
@@ -63,64 +65,60 @@ export default function BottomHUD() {
     [history]
   );
 
+  const hasActiveModel = Boolean(metrics && metrics.active_model && metrics.active_model !== "none");
+
   return (
-    <div className="flex h-10 items-center justify-between border-t border-nexus-border bg-nexus-panel px-5 text-[11px]">
+    <div className="nx-glass relative z-20 flex h-10 shrink-0 items-center justify-between px-5 text-[11px]">
       <div className="flex items-center gap-5">
         {/* System status */}
         <div className="flex items-center gap-1.5">
-          <span
-            className={`inline-block h-1.5 w-1.5 rounded-full ${backendOnline ? "bg-green-500" : "bg-red-500"}`}
-          />
-          <span className={backendOnline ? "text-green-400" : "text-red-400"}>
+          <StatusDot tone={backendOnline ? "success" : "danger"} pulse={connectionStatus === "connecting"} size={7} />
+          <span className={backendOnline ? "text-emerald-400" : "text-rose-400"}>
             {backendOnline ? "Online" : "Offline"}
           </span>
-          <span className="text-nexus-muted">Sistema</span>
+          <span className="text-nexus-faint">Sistema</span>
         </div>
 
-        {/* Ollama status — derived from active_model */}
+        {/* Modelo ativo — dado real do backend (cloud-only, sem Ollama local) */}
         <div className="flex items-center gap-1.5">
-          <Zap
-            className={`h-3 w-3 ${metrics && metrics.active_model !== "none" ? "text-green-400" : "text-yellow-400"}`}
-          />
-          <span
-            className={metrics && metrics.active_model !== "none" ? "text-green-400" : "text-yellow-400"}
-          >
-            {metrics && metrics.active_model !== "none" ? "Conectado" : "Standby"}
+          <Zap className={`h-3 w-3 ${hasActiveModel ? "text-emerald-400" : "text-nexus-faint"}`} />
+          <span className={hasActiveModel ? "text-emerald-400" : "text-nexus-faint"}>
+            {hasActiveModel ? metrics!.active_model : "—"}
           </span>
-          <span className="text-nexus-muted">Ollama</span>
+          <span className="text-nexus-faint">Modelo</span>
         </div>
 
         <div className="h-4 w-px bg-nexus-border" />
 
         {/* CPU */}
-        <div className="flex items-center gap-2 text-nexus-muted">
+        <div className="flex items-center gap-2 text-nexus-faint">
           <span>CPU</span>
-          <span className="font-medium text-nexus-text">
+          <span className="tabular font-medium text-nexus-text">
             {metrics?.cpu_percent != null ? `${metrics.cpu_percent.toFixed(0)}%` : "—"}
           </span>
           {cpuHistory.length > 1 && <MiniSpark data={cpuHistory} color="#60a5fa" />}
         </div>
 
         {/* RAM */}
-        <div className="flex items-center gap-2 text-nexus-muted">
+        <div className="flex items-center gap-2 text-nexus-faint">
           <span>RAM</span>
-          <span className="font-medium text-nexus-text">
+          <span className="tabular font-medium text-nexus-text">
             {metrics?.ram_percent != null ? `${metrics.ram_percent.toFixed(0)}%` : "—"}
           </span>
           {ramHistory.length > 1 && <MiniSpark data={ramHistory} color="#a78bfa" />}
         </div>
 
         {/* Disk */}
-        <div className="flex items-center gap-2 text-nexus-muted">
+        <div className="flex items-center gap-2 text-nexus-faint">
           <span>Disk</span>
-          <span className="font-medium text-nexus-text">
+          <span className="tabular font-medium text-nexus-text">
             {metrics?.disk_percent != null ? `${metrics.disk_percent.toFixed(0)}%` : "—"}
           </span>
           {diskHistory.length > 1 && <MiniSpark data={diskHistory} color="#5eead4" />}
         </div>
       </div>
 
-      <div className="flex items-center gap-4 text-nexus-muted">
+      <div className="flex items-center gap-4 text-nexus-faint">
         <div className="flex items-center gap-1.5">
           <Clock className="h-3 w-3" />
           <span>Uptime: {metrics?.uptime_seconds ? formatUptime(metrics.uptime_seconds) : "—"}</span>

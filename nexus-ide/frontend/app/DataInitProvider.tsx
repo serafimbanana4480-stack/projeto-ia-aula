@@ -6,7 +6,7 @@ import { useModeStore } from "../stores/modeStore";
 import { useToolsStore } from "../stores/toolsStore";
 import { useModelStore } from "../stores/modelStore";
 import { initMetricsStream } from "../stores/metricsStore";
-import { isAuthenticated, autoLoginDev } from "../lib/auth";
+import { isTokenValid } from "../lib/auth";
 
 export default function DataInitProvider({
   children,
@@ -25,25 +25,20 @@ export default function DataInitProvider({
     initializedRef.current = true;
 
     const init = async () => {
-      // Try dev auto-login first
-      if (!isAuthenticated() && process.env.NODE_ENV === "development") {
-        try {
-          await autoLoginDev();
-        } catch {
-          // silent
-        }
-      }
+      // AuthGuard owns login and refresh. Keeping data initialization behind
+      // it prevents requests from racing a silent token refresh.
+      if (!isTokenValid()) return;
 
-      if (isAuthenticated()) {
-        initMetricsStream();
+      // Start the metrics stream. In dev mode this works even without auth
+      // (backend endpoints are open); in production it waits for auth.
+      initMetricsStream();
 
-        void Promise.allSettled([
+      void Promise.allSettled([
           (async () => { try { await loadProjects(); } catch { /* ignore */ } })(),
           (async () => { try { await loadModes(); } catch { /* ignore */ } })(),
           (async () => { try { await loadTools(); } catch { /* ignore */ } })(),
           (async () => { try { await loadModels(); } catch { /* ignore */ } })(),
-        ]);
-      }
+      ]);
     };
 
     init();

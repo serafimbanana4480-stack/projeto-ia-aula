@@ -17,8 +17,21 @@ import logging
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Model context limits (must match / be sourced from models.yaml)
+# Model context limits
 # ---------------------------------------------------------------------------
+#
+# These are LAST-RESORT fallbacks only. The authoritative value is the
+# ``context_window`` field on each model entry in ``config/models.yaml``;
+# ``get_context_limit()`` reads that first.
+#
+# History: this table used to be the only source of truth, with a comment
+# claiming it "must match models.yaml" — but models.yaml had no context field
+# at all, so nothing could match and nothing could drift-check. The numbers
+# below were written for local 7B Ollama models and were never updated when
+# the project moved to cloud providers (Kimi/DeepSeek/GLM, all >=128k). The
+# result: the ``coder`` tier was capped at 16 384 while reserving 8 192 for
+# output, leaving 8 192 for input against a ~9 800-token system prompt. The
+# CODER agent could not run *at all*, on any query, including an empty one.
 MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "micro": 4_096,
     "fast": 8_192,
@@ -34,11 +47,54 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "dashboard": 4_096,
 }
 
+#: An output reserve may never consume more than this fraction of the context
+#: window. Beyond it the model can technically answer but has no room to be
+#: told what to answer, which is the degenerate case that broke the CODER tier.
+MAX_RESERVE_FRACTION = 0.5
+
+#: Never leave the input with less than this, regardless of configuration.
+MIN_INPUT_TOKENS = 2_048
+
 
 class ContextOverflowError(ValueError):
     """Raised when the assembled context exceeds the model's context window capacity."""
 
     pass
+
+
+def get_context_limit(model_tier: str) -> int:
+    """Return the context window for ``model_tier``.
+
+    Resolution order: ``config/models.yaml`` → :data:`MODEL_CONTEXT_LIMITS`
+    → 8 192. Config is authoritative so adding a model does not require
+    editing this module.
+    """
+    try:
+        from backend.config.settings import get_model_config
+
+        window = get_model_config(model_tier).get("context_window")
+        if isinstance(window, int) and window > 0:
+            return window
+    except Exception as exc:  # Config is advisory; never block a request on it.
+        logger.debug("context_window lookup failed for %r: %s", model_tier, exc)
+    return MODEL_CONTEXT_LIMITS.get(model_tier, 8_192)
+
+
+def resolve_output_reserve(model_tier: str, requested_reserve: int) -> int:
+    """Clamp ``requested_reserve`` so the input always has usable room.
+
+    A model's configured ``max_tokens`` is an output *ceiling*, not a
+    reservation that must be subtracted from the window up front. Treating it
+    as the latter is what made a 8 192-token ``max_tokens`` on a 16 384-token
+    window unusable. The reserve is capped at
+    :data:`MAX_RESERVE_FRACTION` of the window and further reduced so at least
+    :data:`MIN_INPUT_TOKENS` remain for the prompt.
+    """
+    limit = get_context_limit(model_tier)
+    reserve = max(1, int(requested_reserve))
+    reserve = min(reserve, int(limit * MAX_RESERVE_FRACTION))
+    reserve = min(reserve, max(1, limit - MIN_INPUT_TOKENS))
+    return max(1, reserve)
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +208,7 @@ def dynamic_threshold(model_tier: str, safety_margin: float = 0.85) -> int:
     Returns:
         Maximum input tokens allowed.
     """
-    limit = MODEL_CONTEXT_LIMITS.get(model_tier, 8_192)
-    return int(limit * safety_margin)
+    return int(get_context_limit(model_tier) * safety_margin)
 
 
 # ---------------------------------------------------------------------------
@@ -225,12 +280,22 @@ def validate_total_budget(
         ContextOverflowError: If total + output_reserve > model context limit.
     """
     total = system_tokens + memory_tokens + history_tokens + query_tokens + tool_result_tokens
-    limit = MODEL_CONTEXT_LIMITS.get(model_tier, 8_192)
+    limit = get_context_limit(model_tier)
 
     if total + output_reserve > limit:
+        # Distinguish the two very different causes, because they need
+        # different remedies and the old message conflated them.
+        if system_tokens + output_reserve > limit:
+            cause = (
+                f"the system prompt alone ({system_tokens}) plus the output reserve "
+                f"({output_reserve}) already exceeds the window — this is a "
+                f"configuration problem, not an oversized conversation"
+            )
+        else:
+            cause = "the accumulated conversation exceeds the window"
         raise ContextOverflowError(
             f"Context overflow: {total} tokens + {output_reserve} output reserve "
-            f"exceeds {limit} limit (model_tier={model_tier}). "
+            f"exceeds {limit} limit (model_tier={model_tier}); {cause}. "
             f"Breakdown: system={system_tokens}, memory={memory_tokens}, "
             f"history={history_tokens}, query={query_tokens}, tools={tool_result_tokens}"
         )
