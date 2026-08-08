@@ -145,25 +145,39 @@ async def _safe_shutdown(label: str, operation: Any) -> None:
     except BaseException:
         logger.exception("Runtime shutdown failed for %s", label)
 
+async def _stop_workers_safely(manager: Any) -> None:
+    for name, worker in getattr(manager, "_workers", {}).items():
+        try:
+            operation = worker.stop()
+        except BaseException:
+            logger.exception("Runtime shutdown failed for worker:%s", name)
+            continue
+        await _safe_shutdown(f"worker:{name}", operation)
+
 
 async def _cleanup_failed_lifespan(app: FastAPI) -> None:
     """Release partial startup state when setup fails before the lifespan yield."""
-    await _cancel_owned_task(getattr(app.state, "dashboard_monitor_task", None))
-    await _cancel_owned_task(getattr(app.state, "dashboard_summary_task", None))
     owned = getattr(app.state, "worker_ownership", set())
+    if "dashboard_agent" in owned:
+        await _cancel_owned_task(getattr(app.state, "dashboard_monitor_task", None))
+        await _cancel_owned_task(getattr(app.state, "dashboard_summary_task", None))
     services = (
-        ("guardian", getattr(app.state, "guardian_agent", None), "stop"),
+        ("guardian_agent", getattr(app.state, "guardian_agent", None), "stop"),
         ("auto_correction", getattr(app.state, "auto_correction", None), "stop_monitoring"),
-        ("healer", getattr(app.state, "healer", None), "stop"),
+        ("self_healing", getattr(app.state, "healer", None), "stop"),
         ("ai_orchestrator", getattr(app.state, "ai_orchestrator", None), "stop"),
         ("auto_trigger", getattr(app.state, "auto_trigger", None), "stop"),
-        ("improvement", getattr(app.state, "improvement_loop", None), "stop"),
+        ("continuous_improvement", getattr(app.state, "improvement_loop", None), "stop"),
         ("session_gc", getattr(app.state, "session_lifecycle", None), "stop"),
-        ("background_workers", getattr(app.state, "worker_manager", None), "stop_all"),
     )
-    for label, service, method in services:
-        if service is not None:
-            await _safe_shutdown(label, getattr(service, method)())
+    for name, service, method in services:
+        if name in owned and service is not None:
+            await _safe_shutdown(name, getattr(service, method)())
+    if "background_workers" in owned:
+        await _stop_workers_safely(getattr(app.state, "worker_manager", None))
+    if getattr(app.state, "llm_client", None) is not None:
+        from backend.orchestrator.llm_client_lifecycle import close_all_llm_clients
+        await _safe_shutdown("llm_clients", close_all_llm_clients(app))
     for name in tuple(owned):
         _release_worker(name, owned)
 
@@ -583,8 +597,9 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await _cancel_owned_task(monitor_task)
-        await _cancel_owned_task(summary_task)
+        if dashboard_owned:
+            await _cancel_owned_task(monitor_task)
+            await _cancel_owned_task(summary_task)
         await _safe_shutdown("guardian", guardian.stop() if guardian_owned else asyncio.sleep(0))
         await _safe_shutdown("cancellation_registry", get_cancellation_registry().shutdown())
         await _safe_shutdown(
@@ -601,7 +616,7 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
         )
         await _safe_shutdown(
             "background_workers",
-            worker_manager.stop_all() if workers_owned and worker_manager else asyncio.sleep(0),
+            _stop_workers_safely(worker_manager) if workers_owned and worker_manager else asyncio.sleep(0),
         )
         for name in tuple(owned_workers):
             _release_worker(name, owned_workers)

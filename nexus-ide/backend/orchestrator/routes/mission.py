@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.middleware.auth import require_auth
+from backend.core.disk_guard import DiskPressureError
 from backend.orchestrator.mission_control import (
     MISSIONS_DIR,
     REPORTS_DIR,
@@ -239,8 +240,13 @@ async def analyze_project(body: dict, _user: dict = Depends(require_auth)) -> di
         project_path=body.get("project_path", "."),
         deep_scan=bool(body.get("deep_scan", True)),
     )
-    register_mission(tracker)
-    tracker.persist()
+    try:
+        tracker.persist()
+    except DiskPressureError as exc:
+        raise HTTPException(
+            status_code=507,
+            detail={"error": "disk_pressure", **exc.to_dict()},
+        ) from exc
     return {
         "mission_id": tracker.mission.id,
         "mission": tracker.mission.to_dict(),
@@ -264,7 +270,13 @@ async def generate_report(mission_id: str, _user: dict = Depends(require_auth)) 
     if tracker is None:
         raise HTTPException(status_code=404, detail="Mission not found or no longer live")
     report = MissionReport(tracker.mission)
-    path = report.write()
+    try:
+        path = report.write()
+    except DiskPressureError as exc:
+        raise HTTPException(
+            status_code=507,
+            detail={"error": "disk_pressure", **exc.to_dict()},
+        ) from exc
     return {
         "written": path is not None,
         "path": str(path) if path else None,
