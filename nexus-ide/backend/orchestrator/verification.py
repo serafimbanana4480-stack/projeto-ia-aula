@@ -489,9 +489,9 @@ def _extract_inconclusive_verifications(verify_result: OrchestrationResult) -> l
         name = str(artifact.get("name", "Unknown verification"))
         output = str(artifact.get("output", ""))
         evidence_error = _failed_verification_evidence(artifact)
-        expired = bool(artifact.get("a2a_expired")) or a2a_message_expired(
-            artifact.get("a2a_message")
-        ) if artifact.get("a2a_message") else False
+        expired = bool(artifact.get("a2a_expired"))
+        if artifact.get("a2a_message"):
+            expired = expired or a2a_message_expired(artifact["a2a_message"])
         if not evidence_error and not expired and not output_is_inconclusive(output, name):
             continue
         inconclusive.append(

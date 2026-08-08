@@ -47,7 +47,7 @@ def _tool_names(agent_class: Any) -> tuple[str, ...]:
 
 
 def _model_names(agent_class: Any) -> tuple[str, ...]:
-    key = str(getattr(agent_class, "model_key", "")).strip()
+    key = str(getattr(agent_class, "model_key", "") or "coder").strip()
     names = {key} if key else set()
     if key:
         try:
@@ -59,8 +59,6 @@ def _model_names(agent_class: Any) -> tuple[str, ...]:
                 if value:
                     names.add(str(value))
         except Exception:
-            # An invalid model is reported by validate_agent_contract rather
-            # than being hidden by a best-effort matrix build.
             pass
     return tuple(sorted(names))
 
@@ -97,7 +95,6 @@ def _build_matrix() -> dict[str, AgentCapability]:
             success_criteria=criteria,
         )
     return matrix
-
 
 def capability_matrix() -> dict[str, AgentCapability]:
     """Return a copy of the lazily built capability matrix."""

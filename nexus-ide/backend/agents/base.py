@@ -1384,11 +1384,20 @@ class AgentBase(ABC):
         requirement = str(
             request.context.get("_tool_evidence_requirement") or ""
         ).strip().lower()
+        evidence = request.context.get("_tool_evidence") or []
+        verified_evidence = any(
+            isinstance(item, dict)
+            and item.get("verified") is True
+            and not item.get("timed_out")
+            and item.get("exit_code") in (None, 0)
+            for item in evidence
+        )
         return (
             not requirement
             or (
                 requirement == "verification"
                 and bool(successful_tools & self._VERIFICATION_TOOLS)
+                and (not evidence or verified_evidence)
             )
             or (
                 requirement == "substantive"
@@ -2019,6 +2028,19 @@ class AgentBase(ABC):
 
             # Parse tool calls
             tool_calls = self._parse_tool_calls(answer)
+            runtime_allowed = {
+                str(name).strip() for name in request.context.get("_allowed_tools", ()) if str(name).strip()
+            }
+            if runtime_allowed:
+                permitted_calls: list[tuple[str, dict[str, Any]]] = []
+                for tool_name, args in tool_calls:
+                    if tool_name in runtime_allowed:
+                        permitted_calls.append((tool_name, args))
+                    else:
+                        tool_errors_seen = True
+                        message = f"Agent contract forbids tool '{tool_name}'"
+                        yield f"<event>tool_error|{tool_name}|{message}</event>"
+                tool_calls = permitted_calls
             logger.info(
                 "[%s] Tool calls parsed | iteration=%d | count=%d",
                 self.name,
@@ -2359,6 +2381,9 @@ class AgentBase(ABC):
 
                 outcomes = await asyncio.gather(*tasks)
                 for tool_name, _args, result, elapsed in outcomes:
+                    evidence = result.get("evidence")
+                    if isinstance(evidence, dict):
+                        request.context.setdefault("_tool_evidence", []).append(evidence)
                     if "error" in result:
                         tool_errors_seen = True
                         logger.warning(
@@ -2478,6 +2503,9 @@ class AgentBase(ABC):
                                 "duration_ms": int((time.monotonic() - tool_start) * 1000),
                             }
                 tool_elapsed = time.monotonic() - tool_start
+                evidence = result.get("evidence")
+                if isinstance(evidence, dict):
+                    request.context.setdefault("_tool_evidence", []).append(evidence)
 
                 if "error" in result:
                     tool_errors_seen = True

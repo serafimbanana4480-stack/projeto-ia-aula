@@ -942,13 +942,14 @@ async def execute_tool(
         except Exception:
             pass  # Cache is best-effort
 
-    # Drop arguments the handler cannot accept.
-    #
-    # Models routinely invent plausible-sounding parameters. Passing them
-    # straight through raised a bare TypeError that surfaced to the agent as
-    # "_list_dir_absolute_handler() got an unexpected keyword argument
-    # 'include_hidden'" (session bf1e9435b9ec47c9, DEBUGGER iteration 6) —
-    # unactionable, counted as a hard failure, and one iteration closer to the
+    args, dropped_args = _drop_unsupported_args(spec, args)
+    timeout_seconds = (
+        float(spec.timeout_seconds)
+        if spec.timeout_seconds is not None
+        else TOOL_TIMEOUT_SECONDS
+    )
+    start = time.time()
+    try:
         result = await asyncio.wait_for(spec.handler(**args), timeout=timeout_seconds)
         if dropped_args and isinstance(result, dict):
             result = {**result, "ignored_arguments": dropped_args}
@@ -979,10 +980,7 @@ async def execute_tool(
             return response
         _record_tool_success(name, session_id)
         response = _typed_tool_response(
-            name,
-            ok=True,
-            result=result,
-            duration_ms=duration_ms,
+            name, ok=True, result=result, duration_ms=duration_ms
         )
         log_tool_execution(
             session_id=session_id,
@@ -998,7 +996,7 @@ async def execute_tool(
                 cache.invalidate_after_mutation(name)
                 cache.store(name, args, response)
             except Exception:
-                pass  # Cache is best-effort
+                pass
         return response
     except TimeoutError:
         duration_ms = int((time.time() - start) * 1000)

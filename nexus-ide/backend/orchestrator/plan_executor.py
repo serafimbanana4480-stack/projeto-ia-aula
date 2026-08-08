@@ -427,9 +427,10 @@ class PlanExecutor:
         cancellation_event: asyncio.Event | None = None,
     ) -> dict[str, Any]:
         scopes = self._task_scopes(task)
+        task_owner = f"{run_id}:{task.task_id}"
         acquired: list[str] = []
         for scope in scopes:
-            if not file_locks.acquire(scope, run_id):
+            if not file_locks.acquire(scope, task_owner):
                 task.status = TaskStatus.FAILED
                 task.error_message = f"Scope lock conflict for {scope!r} (owner={file_locks.owner(scope)!r})"
                 task.completed_at = time.time()
@@ -441,7 +442,7 @@ class PlanExecutor:
             )
         finally:
             for scope in reversed(acquired):
-                file_locks.release(scope, run_id)
+                file_locks.release(scope, task_owner)
 
     async def _execute_task_unlocked(
         self,
@@ -532,6 +533,7 @@ class PlanExecutor:
                             or task.name.strip().lower().startswith("verify")
                             else "substantive"
                         ),
+                        "_tool_evidence": [],
                     },
                     max_iterations=self._task_max_iterations,
                     autonomous=True,
@@ -578,6 +580,7 @@ class PlanExecutor:
                             "agent": task.agent,
                             "output": output,
                             "status": "failed",
+                            "evidence": request.context.get("_tool_evidence", []),
                             "incomplete": True,
                         }
                     await self._events.publish(
@@ -630,6 +633,7 @@ class PlanExecutor:
                             "output": output,
                             "status": "failed",
                             "tool_errors": unrecovered_errors,
+                            "evidence": request.context.get("_tool_evidence", []),
                             "recovered_tool_errors": recovered_errors,
                         }
 
@@ -682,6 +686,7 @@ class PlanExecutor:
                             "output": output,
                             "status": "failed",
                             "incomplete": True,
+                            "evidence": request.context.get("_tool_evidence", []),
                             "recovered_tool_errors": recovered_errors,
                         }
 
@@ -715,6 +720,7 @@ class PlanExecutor:
                         "output": output,
                         "status": "completed",
                         "recovered_tool_errors": recovered_errors,
+                        "evidence": request.context.get("_tool_evidence", []),
                     }
                     ctx._global_context_parts.append(f"\n[{task.name}]: {output[:500]}")
 

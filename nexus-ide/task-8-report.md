@@ -23,3 +23,13 @@
 - Capability/lock smoke check — passed (25 registered agents; same-scope conflict and release verified).
 - Typed tool smoke check — passed (successful process evidence and malformed required-argument rejection).
 - Focused pytest invocation was attempted: `python -m pytest backend/tests/orchestrator/test_verification.py backend/tests/orchestrator/test_tool_error_recovery.py -q`. It was blocked during pytest fixture cleanup by existing Windows SQLite `.pytest_tmp` file locks. The Task 8 test module could not be collected while Task 7's concurrent `plan_validation.py` edit had a transient `IndentationError`; no Task 7 file was edited here.
+
+
+## Follow-up hardening
+
+- Repaired typed handler outcomes so nonzero exit codes, `success=False`/`ok=False`, and timeout results cannot be recorded as successful evidence; restored `get_tool_stats()` and `set_tool_enabled()`.
+- Scope owners are now per task (`run_id:task_id`), so even re-entry from the same run cannot bypass a lock conflict.
+- Runtime `_allowed_tools` from request context is enforced before execution, while verification evidence is collected into PlanExecutor artifacts and the completion gate requires verified, non-timeout evidence.
+- Expanded schema checks cover unions, numeric/string/collection bounds, typed `additionalProperties`, and nested arrays.
+- Follow-up contract regression: `python -m pytest backend/tests/orchestrator/test_agent_contracts.py -q` — 4 passed.
+- Focused tool guard pytest was retried but blocked by an unrelated circular import in concurrently modified `backend/models/api.py`/orchestrator modules; Task 8 modules compile successfully.
