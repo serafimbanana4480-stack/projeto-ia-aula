@@ -1755,6 +1755,10 @@ async def _run_pipeline(
         req.thinking_strength == "medium" and not _is_fast_chat_turn(req.message)
     ):
         mode_enable_thinking = True
+    if fast_candidate:
+        # ``auto`` enables thinking for complex work, but that default must
+        # not leak a thinking preamble into an ordinary informational turn.
+        mode_enable_thinking = False
 
     effective_message = req.message
 
