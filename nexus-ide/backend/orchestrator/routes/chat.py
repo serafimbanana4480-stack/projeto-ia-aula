@@ -2430,6 +2430,15 @@ async def _run_pipeline(
                 context_needed="high",
                 task_type="implementation",
             )
+    if execution_mode is ExecutionMode.CHAT:
+        decision = decision.model_copy(
+            update={
+                "primary_agent": "MICRO",
+                "secondary_agents": [],
+                "requires_web_search": False,
+                "routing_reason": "chat:validated-micro",
+            }
+        )
     decision = decision.model_copy(
         update={
             "mode": execution_mode,
