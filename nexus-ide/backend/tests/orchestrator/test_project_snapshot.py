@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from backend.config.settings import ProjectContextError, resolve_mission_project
 from backend.orchestrator.mission_control import ProjectIntelligence
+from backend.orchestrator.routes.mission import analyze_project
 
 
 def test_snapshot_captures_project_context(tmp_path: Path) -> None:
@@ -37,6 +40,9 @@ def test_snapshot_captures_project_context(tmp_path: Path) -> None:
         "measured", "inferred", "not_validated"
     }
     json.dumps(snapshot.to_dict())
+    summary = "\n".join(snapshot.summary_lines())
+    for marker in ("Comandos declarados:", "Disco:", "Serviços:", "Erros recentes:", "Classificações:", "Restrições:", "Comandos não validados:"):
+        assert marker in summary
 
 
 def test_failed_manifest_probe_is_unknown(tmp_path: Path) -> None:
@@ -68,3 +74,15 @@ def test_mission_project_resolver_rejects_non_strings(tmp_path: Path) -> None:
             assert exc.code == "BLOCKED_PROJECT_CONTEXT"
         else:
             raise AssertionError("non-string mission context was accepted")
+
+
+
+@pytest.mark.asyncio
+async def test_mission_route_rejects_non_string_objective(tmp_path: Path) -> None:
+    with pytest.raises(Exception) as caught:
+        await analyze_project(
+            {"objective": 7, "project_path": str(tmp_path)},
+            {},
+        )
+    assert getattr(caught.value, "status_code", None) == 400
+    assert caught.value.detail["error"] == "BLOCKED_PROJECT_CONTEXT"

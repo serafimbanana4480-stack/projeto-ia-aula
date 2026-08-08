@@ -2,15 +2,15 @@
 
 ## Implemented
 
-- Added `SnapshotFact` with explicit measured/inferred/unknown/not_validated classifications and provenance.
-- Extended `ProjectSnapshot` with absolute path, declared commands, disk measurement, static service markers, bounded recent log errors, facts, unknowns, request constraints, modified files, and risks while preserving existing Git/language/framework/test/manifest/findings fields.
-- Kept `ProjectIntelligence.scan()` deterministic and side-effect free: sorted traversal, inner file/TODO deadline checks, bounded log traversal/reads, bounded Git subprocess probes, no command execution, and truthful probe failures.
-- Added strict `resolve_mission_project()` and `ProjectContextError` (`BLOCKED_PROJECT_CONTEXT`) without Nexus-root fallback.
-- Made `/mission/analyze` and `/mission/scan` share strict resolution and the same serialized snapshot schema; analyze exposes the snapshot at the response top level as well as in the brief.
-- Added focused `backend/tests/orchestrator/test_project_snapshot.py` coverage for absolute paths, command/service/disk/error probes, classifications, malformed manifests, serialization, and missing-root provenance.
+- Added `SnapshotFact` with measured/inferred/unknown/not_validated classifications and provenance.
+- Extended `ProjectSnapshot` with absolute path, commands, disk, services, bounded recent errors, facts, unknowns, request constraints, modified files, and risks while preserving existing fields.
+- Kept scanning deterministic and side-effect free with sorted traversal, bounded Git/log probes, inner file/TODO deadlines, and unknown provenance for failed/truncated probes.
+- Added strict `resolve_mission_project()` and `ProjectContextError` (`BLOCKED_PROJECT_CONTEXT`) without Nexus-root fallback. Mission routes reject invalid project/session context and non-string objectives with structured 400 responses.
+- Made `/mission/analyze` and `/mission/scan` share strict resolution and serialized snapshot schema; rendered Mission Brief summaries now visibly include commands, disk, services, errors, fact classifications, constraints, validation state, modified files, risks, and unknowns.
+- Added focused `backend/tests/orchestrator/test_project_snapshot.py` coverage for snapshot fields, rendered context, malformed manifests, missing roots, strict resolver types, and invalid mission objectives.
 
 ## Verification
 
 - `python -m py_compile backend/orchestrator/mission_control.py backend/orchestrator/routes/mission.py backend/config/settings.py backend/tests/orchestrator/test_project_snapshot.py` — passed.
-- Direct temporary-project smoke checks — passed for absolute path, command catalog, bounded recent errors, classifications, JSON serialization, malformed JSON unknowns, and missing-root unknowns.
-- `python -m pytest backend/tests/orchestrator/test_project_snapshot.py backend/tests/orchestrator/test_mission_control.py -q` — 39 passed, 4 unrelated environment failures: Windows `python3` alias returned 9009 in an existing verification test; three existing persistence/report tests hit the repository's 0.74% disk headroom guard (7.6 GB free below 5% threshold). No project-wide suite, formatter, or linter was run.
+- Direct temporary-project smoke checks — passed for absolute path, command catalog, bounded recent errors, TODO evidence, rendered context, classifications, JSON serialization, malformed JSON unknowns, missing-root unknowns, and resolver type guards.
+- Focused snapshot pytest previously passed all 5 tests. A subsequent rerun was blocked during pytest temporary-directory cleanup by an unrelated locked `test_nexus.db` (`WinError 32`); no project-wide suite, formatter, or linter was run.

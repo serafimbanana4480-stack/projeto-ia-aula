@@ -84,6 +84,7 @@ MAX_RECENT_LOG_BYTES = 64_000
 MAX_RECENT_LOG_SCAN_FILES = 2_048
 MAX_GIT_PROBE_SECONDS = 2
 MAX_GIT_OUTPUT_BYTES = 128_000
+GIT_OUTPUT_TRUNCATED = "\n__NEXUS_GIT_OUTPUT_TRUNCATED__"
 MAX_CONCURRENT_AGENTS = 6
 
 
@@ -245,14 +246,40 @@ class ProjectSnapshot:
         if self.todo_count:
             out.append(f"Marcadores TODO/FIXME/HACK: {self.todo_count}")
         if self.git_branch:
-            dirty = (
-                f", {self.git_dirty_files} ficheiros por commitar"
-                if self.git_dirty_files
-                else ", árvore limpa"
-            )
+            if self.git_dirty_files is None:
+                dirty = ", estado da árvore desconhecido"
+            elif self.git_dirty_files:
+                dirty = f", {self.git_dirty_files} ficheiros por commitar"
+            else:
+                dirty = ", árvore limpa"
             out.append(f"Git: {self.git_branch}{dirty}")
+        elif self.git_dirty_files is None:
+            out.append("Git: estado desconhecido")
         if self.dependency_manifests:
             out.append("Manifestos: " + ", ".join(self.dependency_manifests[:5]))
+        out.append("Comandos declarados: " + (
+            "; ".join(f"{kind}={', '.join(values)}" for kind, values in self.commands.items())
+            or "nenhum"
+        ))
+        if self.disk is not None:
+            out.append(
+                f"Disco: {self.disk.get('free_bytes', 'unknown')} bytes livres/"
+                f"{self.disk.get('total_bytes', 'unknown')} totais"
+            )
+        else:
+            out.append("Disco: desconhecido")
+        out.append("Serviços: " + (", ".join(str(s.get("name", "")) for s in self.services) or "nenhum marcador"))
+        out.append(f"Erros recentes: {len(self.recent_errors)}")
+        if self.facts:
+            out.append("Classificações: " + ", ".join(sorted({fact.classification for fact in self.facts})))
+        out.append("Comandos não validados: " + (", ".join(self.commands) or "nenhum"))
+        if self.request_constraints:
+            out.append("Restrições: " + "; ".join(self.request_constraints))
+        else:
+            out.append("Restrições: nenhuma")
+        out.append("Ficheiros modificados: " + (", ".join(self.modified_files[:20]) or "nenhum"))
+        out.append("Riscos: " + ("; ".join(self.risks[:8]) or "nenhum"))
+        out.append("Desconhecidos: " + ("; ".join(self.unknowns[:12]) or "nenhum"))
         return out
 
 
@@ -337,7 +364,7 @@ class ProjectIntelligence:
         self._read_commands(snap)
         self._measure_disk(snap)
         self._measure_services(snap)
-        self._read_recent_errors(snap)
+        self._read_recent_errors(snap, started)
         self._derive_findings(snap)
         self._classify_facts(snap)
         snap.scan_seconds = round(time.monotonic() - started, 3)
@@ -448,9 +475,10 @@ class ProjectIntelligence:
                     services.append({"name": rel, "source": rel, "kind": "directory"})
         snap.services = sorted(services, key=lambda service: str(service["name"]))
 
-    def _read_recent_errors(self, snap: ProjectSnapshot) -> None:
+    def _read_recent_errors(self, snap: ProjectSnapshot, started: float | None = None) -> None:
         candidates: list[Path] = []
         inspected = 0
+        capped = False
         for dirpath, dirnames, filenames in os.walk(self.root):
             dirnames[:] = sorted(
                 d for d in dirnames
@@ -459,14 +487,21 @@ class ProjectIntelligence:
             for name in sorted(filenames):
                 inspected += 1
                 if inspected > MAX_RECENT_LOG_SCAN_FILES:
+                    capped = True
+                    break
+                if started is not None and time.monotonic() - started > MAX_SCAN_SECONDS:
+                    capped = True
                     break
                 if not name.endswith(".log"):
                     continue
                 candidates.append(Path(dirpath) / name)
                 if len(candidates) >= MAX_RECENT_LOG_FILES:
+                    capped = True
                     break
-            if inspected > MAX_RECENT_LOG_SCAN_FILES or len(candidates) >= MAX_RECENT_LOG_FILES:
+            if capped:
                 break
+        if capped:
+            snap.unknowns.append("recent errors scan (bounded or deadline exceeded)")
         errors: list[str] = []
         for path in candidates:
             try:
@@ -489,7 +524,8 @@ class ProjectIntelligence:
             SnapshotFact(snap.absolute_path, "measured", "Path.resolve", "resolved project directory"),
             SnapshotFact(
                 snap.languages,
-                "unknown" if "filesystem scan" in snap.unknowns else "measured",
+                "unknown" if any(item.startswith("filesystem scan") for item in snap.unknowns)
+                else "measured",
                 "filesystem walk",
                 f"files={snap.file_count}",
             ),
@@ -548,7 +584,9 @@ class ProjectIntelligence:
     def _walk(self, snap: ProjectSnapshot, *, deep: bool, started: float) -> None:
         todo_samples: list[str] = []
 
-        for dirpath, dirnames, filenames in os.walk(self.root):
+        def onerror(exc: OSError) -> None:
+            snap.unknowns.append(f"filesystem scan: {exc}")
+        for dirpath, dirnames, filenames in os.walk(self.root, onerror=onerror):
             # Prune in place — os.walk honours mutation of ``dirnames``.
             dirnames[:] = sorted(
                 d for d in dirnames
@@ -558,8 +596,9 @@ class ProjectIntelligence:
 
             if snap.file_count >= MAX_SCAN_FILES or (time.monotonic() - started) > MAX_SCAN_SECONDS:
                 snap.truncated = True
+                if "filesystem scan (truncated)" not in snap.unknowns:
+                    snap.unknowns.append("filesystem scan (truncated)")
                 break
-
             rel_dir = Path(dirpath).relative_to(self.root)
 
             for name in filenames:
@@ -598,10 +637,15 @@ class ProjectIntelligence:
 
                 if deep and ext in (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs"):
                     hits = self._scan_todos(Path(dirpath) / name)
-                    snap.todo_count += hits
-                    if hits and len(todo_samples) < 10:
+                    if hits is None:
                         rel = str(rel_dir / name) if str(rel_dir) != "." else name
-                        todo_samples.append(f"{rel} ({hits})")
+                        snap.unknowns.append(f"TODO scan: {rel}")
+                    else:
+                        snap.todo_count += hits
+                        if hits and len(todo_samples) < 10:
+                            rel = str(rel_dir / name) if str(rel_dir) != "." else name
+                            todo_samples.append(f"{rel} ({hits})")
+        snap.todo_samples = todo_samples
         self._detect_test_frameworks(snap)
 
     #: Extensions a test file can actually have. Without this, the name-only
@@ -627,16 +671,15 @@ class ProjectIntelligence:
             or ".spec." in low
         )
 
-    def _scan_todos(self, path: Path) -> int:
-        """Count TODO-family markers. Silent on unreadable files by design —
-        a permissions error in one file must not abort the whole scan."""
+    def _scan_todos(self, path: Path) -> int | None:
+        """Count TODO markers; return ``None`` when the probe failed."""
         try:
             if path.stat().st_size > 512_000:
                 return 0
             with path.open("r", encoding="utf-8", errors="ignore") as fh:
                 return sum(1 for line in fh if self.TODO_RE.search(line))
         except (OSError, ValueError):
-            return 0
+            return None
 
     def _detect_test_frameworks(self, snap: ProjectSnapshot) -> None:
         checks = {
@@ -667,12 +710,16 @@ class ProjectIntelligence:
                 out = subprocess.run(
                     ["git", *args],
                     cwd=self.root,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
                     text=True,
                     timeout=MAX_GIT_PROBE_SECONDS,
                     check=False,
                 )
-                return out.stdout[:MAX_GIT_OUTPUT_BYTES].strip() if out.returncode == 0 else None
+                output = out.stdout or ""
+                if len(output) > MAX_GIT_OUTPUT_BYTES:
+                    output = output[:MAX_GIT_OUTPUT_BYTES] + GIT_OUTPUT_TRUNCATED
+                return output.strip() if out.returncode == 0 else None
             except (OSError, subprocess.SubprocessError):
                 return None
         if not (self.root / ".git").exists():
@@ -689,6 +736,13 @@ class ProjectIntelligence:
             snap.unknowns.append("git last commit")
         if status is None:
             snap.unknowns.append("git modified files")
+        elif GIT_OUTPUT_TRUNCATED in status:
+            snap.unknowns.append("git modified files (output truncated)")
+            rows = [
+                ln for ln in status.replace(GIT_OUTPUT_TRUNCATED, "").splitlines()
+                if ln.strip()
+            ]
+            snap.modified_files = [ln[3:].strip() for ln in rows[:500]]
         else:
             rows = [ln for ln in status.splitlines() if ln.strip()]
             snap.git_dirty_files = len(rows)

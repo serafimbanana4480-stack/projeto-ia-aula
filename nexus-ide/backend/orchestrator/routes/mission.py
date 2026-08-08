@@ -44,9 +44,14 @@ _MISSIONS: OrderedDict[str, MissionTracker] = OrderedDict()
 def _resolve_mission_body(body: dict[str, Any]):
     """Resolve the same strict project context for both mission endpoints."""
     try:
+        session_project = (
+            body["session_project"]
+            if "session_project" in body
+            else body.get("session_project_path")
+        )
         return resolve_mission_project(
             body.get("project_path", ""),
-            body.get("session_project") or body.get("session_project_path"),
+            session_project,
         )
     except ProjectContextError as exc:
         raise HTTPException(
@@ -243,9 +248,13 @@ async def analyze_project(body: dict, _user: dict = Depends(require_auth)) -> di
     This is the "look before you leap" endpoint: it answers "what would you do
     and why" without touching a single file.
     """
-    objective = (body.get("objective") or "").strip()
-    if not objective:
-        raise HTTPException(status_code=400, detail="Missing 'objective'")
+    raw_objective = body.get("objective")
+    if not isinstance(raw_objective, str) or not raw_objective.strip():
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "BLOCKED_PROJECT_CONTEXT", "reason": "objective must be a non-empty string"},
+        )
+    objective = raw_objective.strip()
     project_path = _resolve_mission_body(body)
     tracker = start_mission(
         objective,
