@@ -2236,7 +2236,7 @@ async def _run_pipeline(
     # semantic memory, or fallback resolution. This prevents a silent gap
     # before the first provider token arrives.
     yield _sse(StreamEvent(type="agent_started", agent=decision.primary_agent))
-    if mode_enable_thinking:
+    if mode_enable_thinking and not _is_fast_chat_turn(effective_message):
         yield _sse(
             StreamEvent(
                 type="thinking",
@@ -2375,7 +2375,7 @@ async def _run_pipeline(
     }
     fast_chat_turn = mode in {"ask", "fast"} or (
         mode in {"auto", "agent"}
-        and not _advanced_force_autonomous
+        and not _advanced_command_mode
         and _is_fast_chat_turn(effective_message)
     )
     if req.thinking_strength in strength_guidance and not fast_chat_turn:
@@ -2461,7 +2461,7 @@ async def _run_pipeline(
             # more patient default for local model loading.
             stream_start_timeout=(
                 6.0
-                if not _advanced_force_autonomous and _is_fast_chat_turn(effective_message)
+                if fast_chat_turn
                 else None
             ),
         )
