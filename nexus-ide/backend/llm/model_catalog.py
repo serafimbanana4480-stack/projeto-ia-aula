@@ -707,7 +707,7 @@ async def discover_models(provider: str, *, refresh: bool = False) -> DiscoveryR
         raw_models = entry.get("models", [])
         models = [ModelInfo(**m) for m in raw_models]
         current = time.time()
-        if age < CACHE_TTL_SECONDS and all(
+        if age < ttl and all(
             m.validated_at is not None and current - m.validated_at <= ttl for m in models
         ):
             return DiscoveryResult(

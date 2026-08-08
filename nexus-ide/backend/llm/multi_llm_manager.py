@@ -688,6 +688,7 @@ class MultiLLMManager:
                 model=model,
                 retry_after=breaker.retry_after,
             )
+        started = time.time()
         try:
             if hasattr(candidate, "batch_complete"):
                 result = await candidate.batch_complete(
@@ -700,6 +701,8 @@ class MultiLLMManager:
                         provider=target,
                         model=model,
                     )
+                await breaker.record_success()
+                self._update_health(target, True, (time.time() - started) * 1000)
                 return result
             return list(
                 await asyncio.gather(
@@ -760,6 +763,7 @@ class MultiLLMManager:
                         model=model,
                     )
                 await breaker.record_success()
+                self._update_health(name, True, 0.0)
                 return name, result
             except Exception as exc:
                 await breaker.record_failure()
@@ -833,10 +837,12 @@ class MultiLLMManager:
                         model=model,
                     )
                 await breaker.record_success()
+                self._update_health(name, True, 0.0)
                 results[name] = result
             except Exception as exc:
+                await breaker.record_failure()
+                self._update_health(name, False, 0.0)
                 logger.warning("Consensus provider '%s' failed: %s", name, exc)
-
         await asyncio.gather(*(_call(name) for name in valid_providers))
         if not results:
             raise ProviderUnavailableError(

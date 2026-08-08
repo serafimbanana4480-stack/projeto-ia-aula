@@ -102,17 +102,36 @@ async def list_providers(_user: dict = Depends(require_auth)) -> dict:
 
 @router.get("/providers/status")
 async def providers_status(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    """Runtime LLM availability — drives the UI DEMO-mode banner."""
+    """Runtime LLM availability and typed provider eligibility state."""
     is_demo = True
     client = None
+    runtime: dict[str, Any] = {}
+    blocked: dict[str, Any] | None = None
     try:
         client = create_llm_client()
         if isinstance(client, MultiLLMManager):
             is_demo = len(getattr(client, "providers", {}) or {}) == 0
+            runtime = client.provider_status()
         else:
-            is_demo = False
-    except Exception:
+            is_demo = bool(getattr(client, "simulation", False))
+            runtime = {
+                getattr(client, "provider_name", client.__class__.__name__.lower()): {
+                    "simulation": bool(getattr(client, "simulation", False)),
+                    "free_only": bool(getattr(client, "free_only", False)),
+                    "eligibility_reason": getattr(client, "eligibility_reason", ""),
+                    "quota_available": getattr(client, "quota_available", None),
+                    "validated_at": getattr(client, "validated_at", None),
+                }
+            }
+    except Exception as exc:
         is_demo = True
+        blocked = {
+            "category": getattr(exc, "category", "provider_unavailable"),
+            "error": str(exc),
+            "provider": getattr(exc, "provider", None),
+            "model": getattr(exc, "model", None),
+            "retry_after": getattr(exc, "retry_after", None),
+        }
     finally:
         close = getattr(client, "aclose", None)
         if callable(close):
@@ -124,7 +143,9 @@ async def providers_status(_user: dict = Depends(require_auth)) -> dict[str, Any
     return {
         "providers": prov.get("providers", []),
         "active_provider": prov.get("active_provider", ""),
-        "llm_available": not is_demo,
+        "runtime": runtime,
+        "blocked": blocked,
+        "llm_available": not is_demo and blocked is None,
         "demo_mode": is_demo,
     }
 
