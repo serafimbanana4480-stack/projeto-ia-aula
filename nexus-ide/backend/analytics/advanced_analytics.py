@@ -1010,7 +1010,6 @@ class AdvancedAnalyticsEngine:
         # KPI summary
         if kpis:
             top_kpis = sorted(kpis.items(), key=lambda x: x[1].get("average", 0), reverse=True)[:3]
-           summary_parts.append(f"Top KPIs: {', '.join([f'{k}({v["average"]:.2f})' for k, v in top_kpis])}")
             kpi_summary = ", ".join(
                 f"{k}({v.get('average', 0):.2f})" for k, v in top_kpis
             )

@@ -102,6 +102,22 @@ class TestSpawn:
         iid = await manager_with_overseer.spawn("CODER", "Write tests", mission_id="m1")
         assert any(e["event"] == "agent_started" and e["instance_id"] == iid for e in overseer_log)
 
+    async def test_state_callback_covers_background_completion(self, manager: AgentLifecycleManager) -> None:
+        events: list[tuple[str, str]] = []
+
+        async def callback(iid: str, event: str, data: dict[str, Any]) -> None:
+            events.append((iid, event))
+
+        manager.set_state_callback(callback)
+        iid = await manager.spawn("ANALYZER", "Inspect the project", mission_id="session-1")
+        await manager.complete(iid, output="analysis result", tokens_used=3)
+
+        assert (iid, "agent_started") in events
+        assert (iid, "agent_finished") in events
+        instance = manager.get_status(iid)
+        assert instance is not None
+        assert instance.context["output"] == "analysis result"
+
 
 # ---------------------------------------------------------------------------
 # Pause / Resume / Abort

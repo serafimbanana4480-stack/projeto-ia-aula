@@ -2450,7 +2450,7 @@ async def _run_pipeline(
             # global 180s stream-start budget. Complex/explicit work keeps the
             # more patient default for local model loading.
             stream_start_timeout=(
-                12.0
+                8.0
                 if not _advanced_force_autonomous and _is_fast_chat_turn(effective_message)
                 else None
             ),
@@ -2461,7 +2461,7 @@ async def _run_pipeline(
         err_text = (
             "O provedor LLM não conseguiu responder. "
             f"Causa técnica: {detail or 'erro upstream desconhecido'}. "
-            "Confirma a OPENROUTER_API_KEY, tenta outro modelo gratuito e repete."
+            "Para respostas reais, usa uma chave/provider com quota disponível ou liga um Ollama local."
         )
         yield _sse(StreamEvent(type="error", content=err_text))
         yield _sse(StreamEvent(type="done"))
