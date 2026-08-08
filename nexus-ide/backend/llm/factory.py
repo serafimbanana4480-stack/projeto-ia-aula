@@ -244,6 +244,9 @@ class ResilientLLMProvider:
             ):
                 continue
             try:
+                validator = getattr(provider, "validate_model", None)
+                if self.free_only and callable(validator) and method in {"chat_complete", "embed"}:
+                    validator(args[0])
                 return await getattr(provider, method)(*args, **kwargs)
             except Exception as exc:
                 logger.warning(
@@ -779,6 +782,9 @@ def create_llm_client(**overrides: Any) -> Any:
         logger.info("Using Ollama provider at %s with fallback chain", base_url)
         primary = OllamaProvider(base_url=base_url)
         primary._free_validated = _local_models_ready(effective_overrides.get("local_models"))
+        primary._free_candidates = effective_overrides.get("local_models", {}).get(
+            "models", []
+        ) if isinstance(effective_overrides.get("local_models"), dict) else []
         fallbacks = _build_fallback_chain(
             settings,
             effective_overrides,
@@ -923,6 +929,7 @@ def create_llm_client(**overrides: Any) -> Any:
             ),
             local_embed_host=_setting_value(settings, effective_overrides, "ollama_host", ""),
         )
+        primary._local_embed_host = _setting_value(settings, effective_overrides, "ollama_host", "")
         fallbacks = _build_fallback_chain(
             settings, effective_overrides, primary_provider="openrouter"
         )
