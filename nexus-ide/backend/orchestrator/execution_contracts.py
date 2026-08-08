@@ -190,12 +190,10 @@ class ExecutionOutcome:
             )
         except (TypeError, ValueError):
             return False
-        evidence_proven = any(
-            (
-                item.get("verified") is True
-                if isinstance(item, Mapping) and "verified" in item
-                else True
-            )
+        if not self.evidence:
+            return False
+        evidence_proven = all(
+            isinstance(item, Mapping) and item.get("verified") is True
             for item in self.evidence
         )
         return (

@@ -70,6 +70,17 @@ def test_completion_requires_verification_and_no_failures() -> None:
     ).to_dict()["completion_proven"] is False
 
 
+def test_completion_requires_every_evidence_item_to_be_verified() -> None:
+    context = RunContext("s1", "r1", "c1", None, None, ExecutionMode.CHAT)
+    for evidence in ([{"verified": True}, {"verified": False}], [{"result": "ok"}]):
+        outcome = ExecutionOutcome(
+            context=context,
+            state=ExecutionState.COMPLETED,
+            evidence=evidence,
+        )
+        assert outcome.to_dict()["completion_proven"] is False
+
+
 def test_context_rejects_empty_correlation_ids() -> None:
     with pytest.raises(ValueError):
         RunContext("", "r1", "c1", None, None, ExecutionMode.CHAT)
