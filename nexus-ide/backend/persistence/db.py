@@ -287,14 +287,7 @@ def _ensure_git_commits_table() -> None:
 
 
 def _ensure_message_cost_column() -> None:
-    """Repair databases created from older/stamped schemas.
-
-    Some existing development databases were stamped at the current Alembic
-    head while their ``messages`` table still came from an older SQL schema.
-    Chat persistence then failed after the model had already streamed tokens,
-    truncating the SSE response. Keep this compatibility migration idempotent
-    so startup repairs that drift without requiring a destructive rebuild.
-    """
+    """Repair databases created from older/stamped schemas."""
     try:
         with sqlite3.connect(str(DB_PATH)) as conn:
             columns = {
@@ -308,7 +301,8 @@ def _ensure_message_cost_column() -> None:
                 conn.commit()
                 logger.info("Added missing messages.cost_usd compatibility column")
     except Exception as exc:
-        logger.warning("Failed to ensure messages.cost_usd column: %s", exc)
+        logger.exception("Failed to ensure messages.cost_usd column")
+        raise RuntimeError("Messages schema readiness failed") from exc
 
 
 def _ensure_current_schema() -> None:
@@ -394,6 +388,8 @@ def init_db(run_migrations: bool = True) -> None:
             _ensure_execution_envelope_schema()
         _seed_default_user()
         _seed_default_rbac()
+    _ensure_message_cost_column()
+
 
     # Stale-run recovery is performed by the startup lifespan immediately
     # after this function returns, once structured logging is available.
@@ -1065,6 +1061,10 @@ def mark_run_terminal(
     error: str | None = None,
 ) -> dict[str, Any] | None:
     """Atomically record terminal metadata and the completion timestamp."""
+    terminal_statuses = {"completed", "failed", "cancelled", "interrupted"}
+    if status not in terminal_statuses:
+        raise ValueError(f"mark_run_terminal requires a terminal status, got {status!r}")
+    terminal_state = execution_state or status
     now = _now_iso()
     evidence_json = (
         json.dumps(evidence, ensure_ascii=False, default=str)
@@ -1076,7 +1076,7 @@ def mark_run_terminal(
             """
             UPDATE session_runs
                SET status = ?,
-                   execution_state = COALESCE(?, execution_state, ?),
+                   execution_state = ?,
                    provider = COALESCE(?, provider),
                    model = COALESCE(?, model),
                    error_category = COALESCE(?, error_category),
@@ -1084,13 +1084,12 @@ def mark_run_terminal(
                    evidence_json = COALESCE(?, evidence_json),
                    error = COALESCE(?, error),
                    updated_at = ?,
-                   finished_at = COALESCE(finished_at, ?)
+                   finished_at = ?
              WHERE id = ?
             """,
             (
                 status,
-                execution_state,
-                status,
+                terminal_state,
                 provider,
                 model,
                 error_category,
@@ -1139,20 +1138,12 @@ def interrupt_active_session_runs(
 
 
 def recover_interrupted_runs(max_age_seconds: int = 120) -> list[dict[str, Any]]:
-    """Recover stale running rows left behind by a crashed process."""
+    """Atomically recover stale running rows left behind by a crashed process."""
     cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat()
     now = _now_iso()
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id FROM session_runs WHERE status = 'running' AND updated_at < ?",
-            (cutoff,),
-        ).fetchall()
-        if not rows:
-            return []
-        ids = [str(row["id"]) for row in rows]
-        placeholders = ",".join("?" for _ in ids)
-        conn.execute(
-            f"""
+        recovered = conn.execute(
+            """
             UPDATE session_runs
                SET status = 'interrupted',
                    execution_state = 'interrupted',
@@ -1160,13 +1151,10 @@ def recover_interrupted_runs(max_age_seconds: int = 120) -> list[dict[str, Any]]
                    error = COALESCE(error, 'Backend restarted before the run completed'),
                    finished_at = COALESCE(finished_at, ?),
                    updated_at = ?
-             WHERE id IN ({placeholders})
+             WHERE status = 'running' AND updated_at < ?
+            RETURNING *
             """,
-            (now, now, *ids),
-        )
-        recovered = conn.execute(
-            f"SELECT * FROM session_runs WHERE id IN ({placeholders})",
-            ids,
+            (now, now, cutoff),
         ).fetchall()
     result = [_session_run_row(row) for row in recovered if row is not None]
     if result:

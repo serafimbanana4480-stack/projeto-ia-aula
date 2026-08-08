@@ -55,7 +55,6 @@ def test_terminal_update_sets_finished_at_and_correlation_lookup() -> None:
     row = mark_run_terminal(
         "run-terminal",
         status="completed",
-        execution_state="completed",
         evidence=[{"verified": True}],
     )
 
@@ -82,3 +81,20 @@ def test_recover_interrupted_runs_marks_stale_running_rows() -> None:
     assert recovered[0]["status"] == "interrupted"
     assert recovered[0]["execution_state"] == "interrupted"
     assert recovered[0]["finished_at"]
+
+
+
+def test_recovery_does_not_rewrite_terminal_rows() -> None:
+    from backend.persistence.db import DB_PATH, mark_run_terminal, recover_interrupted_runs
+    from backend.persistence.db import upsert_session_run
+
+    session_id = _make_session()
+    upsert_session_run("run-completed", session_id, execution_state="running")
+    mark_run_terminal("run-completed", status="completed")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE session_runs SET updated_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00Z", "run-completed"),
+        )
+
+    assert recover_interrupted_runs(max_age_seconds=1) == []

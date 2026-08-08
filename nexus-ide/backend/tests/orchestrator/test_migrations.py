@@ -57,3 +57,43 @@ def test_pre_migration_session_runs_rows_survive_schema_readiness(tmp_path) -> N
     assert "correlation_id" in columns
     assert "evidence_json" in columns
     assert legacy == ("completed",)
+
+
+def test_stamped_head_repairs_missing_message_cost_column(tmp_path, monkeypatch) -> None:
+    import backend.persistence.db as db
+
+    db_path = tmp_path / "stamped-head.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(db.SCHEMA_PATH.read_text(encoding="utf-8"))
+        conn.execute("ALTER TABLE messages RENAME TO messages_full")
+        conn.execute("DROP TABLE messages_full")
+        conn.execute(
+            """
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                tier_used TEXT,
+                model_used TEXT,
+                tools_used_json TEXT,
+                tokens_in INTEGER DEFAULT 0,
+                tokens_out INTEGER DEFAULT 0,
+                latency_ms INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+        conn.execute(
+            "INSERT INTO alembic_version (version_num) VALUES ('006_execution_envelope')"
+        )
+        conn.commit()
+
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+    db.close_pool()
+    db.init_db()
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    assert "cost_usd" in columns
