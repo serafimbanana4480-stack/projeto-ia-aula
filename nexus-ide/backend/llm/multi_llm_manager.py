@@ -392,16 +392,30 @@ class MultiLLMManager:
         if callable(validator):
             validator(model)
             return
-        policy_names = {
-            str(getattr(item, "provider", None) or (
+        now = time.time()
+        for item in self.policy_candidates:
+            candidate_provider = str(getattr(item, "provider", None) or (
                 item.get("provider") if isinstance(item, dict) else ""
             ))
-            for item in self.policy_candidates
-            if bool(getattr(item, "free", False) if not isinstance(item, dict) else item.get("free"))
-            and (getattr(item, "quota_available", True) if not isinstance(item, dict) else item.get("quota_available", True)) is not False
-        }
-        if name in policy_names:
-            return
+            candidate_id = str(getattr(item, "model_id", None) or getattr(item, "id", None) or (
+                item.get("model_id", item.get("id", "")) if isinstance(item, dict) else ""
+            ))
+            free = bool(getattr(item, "free", False) if not isinstance(item, dict) else item.get("free"))
+            quota = getattr(item, "quota_available", None) if not isinstance(item, dict) else item.get("quota_available")
+            validated = getattr(item, "validated_at", None) if not isinstance(item, dict) else item.get("validated_at")
+            try:
+                validated = float(validated)
+            except (TypeError, ValueError):
+                validated = None
+            if (
+                candidate_provider == name
+                and candidate_id == str(model)
+                and free
+                and quota is True
+                and validated is not None
+                and 0 <= now - validated <= self.policy.validation_ttl_seconds
+            ):
+                return
         raise ProviderUnavailableError(
             f"Provider '{name}' has no validated free model for '{model}'",
             category="eligibility",

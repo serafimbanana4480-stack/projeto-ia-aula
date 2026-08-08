@@ -250,23 +250,20 @@ class FreeModelPolicy:
                     )
                 )
                 continue
-            item = _eligibility(value)
+            installed = _bool_value(_value(value, "installed", True), False)
+            healthy = _bool_value(_value(value, "healthy", True), False)
             if item.provider != "ollama":
                 item = ModelEligibility(
                     model_id=item.model_id,
                     provider="ollama",
-                    free=item.free,
+                    free=installed and healthy,
                     capabilities=item.capabilities,
                     context_window=item.context_window,
-                    quota_available=item.quota_available,
-                    latency_ms=item.latency_ms,
-                    validated_at=item.validated_at,
-                    reason=item.reason,
+                    quota_available=True if installed and healthy else item.quota_available,
+                    latency_ms=item.latency_ms if item.latency_ms is not None else 0.0,
+                    validated_at=item.validated_at or (time.time() if installed and healthy else None),
+                    reason=item.reason or "verified installed Ollama model",
                 )
-            if (
-                _bool_value(_value(value, "installed", True), False)
-                and _bool_value(_value(value, "healthy", True), False)
-                and item.validated_at is not None
-            ):
+            if installed and healthy and item.validated_at is not None:
                 result.append(item)
         return result
