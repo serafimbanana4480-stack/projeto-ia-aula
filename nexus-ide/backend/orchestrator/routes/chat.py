@@ -2811,8 +2811,21 @@ async def _run_pipeline(
     except Exception as exc:
         logger.exception("Stream interrupted: %s", exc)
         err_text = f"Stream interrupted: {exc}"
-        yield _sse(StreamEvent(type="error", content="Stream interrupted. Please try again."))
-        yield _sse(StreamEvent(type="done"))
+        yield _sse(
+            StreamEvent(
+                type="error",
+                content="Stream interrupted. Please try again.",
+                data={
+                    "error_category": ErrorCategory.PROVIDER.value,
+                    "run_id": run_context.run_id,
+                    "correlation_id": run_context.correlation_id,
+                    "provider": getattr(req, "provider", "") or None,
+                    "model": model_override or user_model or None,
+                    "message": str(exc)[:500],
+                },
+            )
+        )
+        yield _sse(StreamEvent(type="done", data=run_context.to_dict()))
         # Persist the user message + an explicit error assistant message so
         # the error stays visible after a refresh (otherwise it would be
         # silently lost when getSessionHistory loads from the DB).
@@ -2832,6 +2845,7 @@ async def _run_pipeline(
                 agent=str(outcome.used_agent),
                 partial_output="".join(parts),
                 error=err_text,
+                error_category=ErrorCategory.PROVIDER.value,
                 checkpoint={"tools": tool_names[-20:]},
                 finished=True,
             )
