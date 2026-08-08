@@ -601,8 +601,11 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             "nexus_enable_ollama",
             getattr(settings, "nexus_enable_ollama", os.environ.get("NEXUS_ENABLE_OLLAMA", "")),
         )
-    ) 
-    if ollama_enabled and _local_models_ready(values.get("local_models")):
+    ) or preferred_provider in {"ollama", "local"}
+    if ollama_enabled and (
+        _local_models_ready(values.get("local_models"))
+        or preferred_provider in {"ollama", "local"}
+    ):
         ollama_provider = OllamaProvider(base_url=_setting_value(settings, values, "ollama_host", ""))
         manager.register_provider("ollama", ollama_provider, priority=priority_for("ollama", 4))
         manager.register_provider("local", ollama_provider, priority=priority_for("local", 4))
