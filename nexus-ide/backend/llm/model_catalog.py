@@ -635,6 +635,7 @@ def _stale_models(raw_models: list[dict[str, Any]]) -> list[ModelInfo]:
             continue
         model.free = False
         model.pricing = "unknown"
+        model.reason = "stale catalog validation"
         model.validated_at = None
         model.quota_available = False
         models.append(model)

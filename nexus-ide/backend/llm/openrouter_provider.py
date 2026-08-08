@@ -185,6 +185,7 @@ class OpenRouterProvider:
         self, model: str, requirement: FreeModelRequirement | None = None
     ) -> str:
         resolved = self.resolve_model(model)
+        router_alias = model == "openrouter/free" and resolved == model
         if not self.free_only:
             return resolved
         entries = self._catalog
@@ -198,7 +199,7 @@ class OpenRouterProvider:
             entry_provider = getattr(entry, "provider", None) or (
                 entry.get("provider") if isinstance(entry, dict) else None
             )
-            if model == "openrouter/free":
+            if router_alias:
                 if str(entry_id) != "openrouter/free":
                     continue
             elif str(entry_id) != str(resolved):
@@ -232,18 +233,20 @@ class OpenRouterProvider:
                 )
             )
             latency = field("latency_ms")
+            try:
+                validated_value = float(validated_at)
+                latency_value = float(latency)
+            except (TypeError, ValueError):
+                continue
             if (
                 input_price == 0
                 and output_price == 0
                 and requirement_ok
-                and latency is not None
                 and quota is True
-                and validated_at is not None
-                and now - float(validated_at) <= self._validation_ttl_seconds
-                and float(latency) <= self._max_latency_ms
+                and now - validated_value <= self._validation_ttl_seconds
+                and latency_value <= self._max_latency_ms
             ):
-                self.quota_available = True
-                self.validated_at = float(validated_at)
+                self.validated_at = validated_value
                 self.eligibility_reason = "catalog confirmed zero prices, quota and freshness"
                 return resolved
         self.quota_available = False

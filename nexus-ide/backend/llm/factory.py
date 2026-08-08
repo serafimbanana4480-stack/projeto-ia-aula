@@ -246,7 +246,8 @@ class ResilientLLMProvider:
             try:
                 validator = getattr(provider, "validate_model", None)
                 if self.free_only and callable(validator) and method in {"chat_complete", "embed"}:
-                    validator(args[0])
+                    validation_model = args[1] if method == "embed" else args[0]
+                    validator(validation_model)
                 return await getattr(provider, method)(*args, **kwargs)
             except Exception as exc:
                 logger.warning(
@@ -276,6 +277,7 @@ class ResilientLLMProvider:
                 )
             ):
                 continue
+            emitted_output = False
             try:
                 validator = getattr(provider, "validate_model", None)
                 if self.free_only and callable(validator):
@@ -344,6 +346,9 @@ class ResilientLLMProvider:
             ):
                 continue
             try:
+                validator = getattr(provider, "validate_model", None)
+                if self.free_only and callable(validator):
+                    validator(model or "")
                 if hasattr(provider, "batch_complete"):
                     return await provider.batch_complete(
                         messages_list,
@@ -783,10 +788,13 @@ def create_llm_client(**overrides: Any) -> Any:
         base_url = _setting_value(settings, effective_overrides, "ollama_host", settings.ollama_host)
         logger.info("Using Ollama provider at %s with fallback chain", base_url)
         primary = OllamaProvider(base_url=base_url)
-        primary._free_validated = _local_models_ready(effective_overrides.get("local_models"))
-        primary._free_candidates = effective_overrides.get("local_models", {}).get(
-            "models", []
-        ) if isinstance(effective_overrides.get("local_models"), dict) else []
+        local_models = effective_overrides.get("local_models")
+        primary._free_validated = _local_models_ready(local_models)
+        primary._free_candidates = (
+            local_models.get("models", local_models.get("installed", []))
+            if isinstance(local_models, dict)
+            else local_models or []
+        )
         fallbacks = _build_fallback_chain(
             settings,
             effective_overrides,

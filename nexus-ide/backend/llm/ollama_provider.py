@@ -30,13 +30,15 @@ class OllamaProvider(OllamaClient):
             raise RuntimeError("local model catalog is not validated")
         entries = getattr(self, "_free_candidates", None) or []
         for entry in entries:
-            entry_id = entry.get("id") if isinstance(entry, dict) else getattr(entry, "id", None)
-            if str(entry_id) != str(model):
-                continue
-            if isinstance(entry, dict):
-                if entry.get("installed", True) is False or entry.get("healthy", True) is False:
-                    continue
-            return model
+            if isinstance(entry, str):
+                entry_id = entry
+                installed = healthy = True
+            else:
+                entry_id = entry.get("id") if isinstance(entry, dict) else getattr(entry, "id", None)
+                installed = entry.get("installed", True) if isinstance(entry, dict) else True
+                healthy = entry.get("healthy", True) if isinstance(entry, dict) else True
+            if str(entry_id) == str(model) and installed is not False and healthy is not False:
+                return model
         raise RuntimeError(f"local model '{model}' is not validated")
 
     async def batch_complete(
