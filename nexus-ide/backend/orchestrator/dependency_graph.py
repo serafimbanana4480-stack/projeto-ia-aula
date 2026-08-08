@@ -75,6 +75,14 @@ class TaskNode:
     # Subtasks
     subtasks: list[str] = field(default_factory=list)
 
+    # Planner contract metadata
+    file_scope: list[str] = field(default_factory=list)
+    completion_criteria: list[str] = field(default_factory=list)
+    verification_commands: list[str] = field(default_factory=list)
+    risk: str = ""
+    rollback: str = ""
+    lock_scope: str = ""
+
     # Tool configuration
     allowed_tools: list[str] = field(default_factory=list)
     sandboxed: bool = False
@@ -94,6 +102,13 @@ class TaskNode:
             "retry_count": self.retry_count,
             "timeout_seconds": self.timeout_seconds,
             "error_message": self.error_message,
+            "file_scope": self.file_scope,
+            "completion_criteria": self.completion_criteria,
+            "verification_commands": self.verification_commands,
+            "risk": self.risk,
+            "rollback": self.rollback,
+            "lock_scope": self.lock_scope,
+            "allowed_tools": self.allowed_tools,
             "sandboxed": self.sandboxed,
         }
 
@@ -137,65 +152,56 @@ class DependencyGraph:
         self._in_degree[to_task_id] += 1
 
     def validate(self) -> tuple[bool, str]:
-        """Validate that the graph is acyclic.
-
-        Returns (is_valid, error_message).
-        """
+        """Validate dependencies and DAG shape without rewriting the graph."""
         if not self._nodes:
             return False, "Graph is empty"
-
-        # Check all dependencies exist
+        in_degree = {task_id: 0 for task_id in self._nodes}
+        adjacency: dict[str, list[str]] = defaultdict(list)
         for task in self._nodes.values():
             for dep_id in task.depends_on:
                 if dep_id not in self._nodes:
                     return False, f"Task {task.task_id} depends on non-existent {dep_id}"
-
-        # Detect cycles using Kahn's algorithm
-        in_degree = dict(self._in_degree)
+                in_degree[task.task_id] += 1
+                adjacency[dep_id].append(task.task_id)
         queue: deque[str] = deque(tid for tid, deg in in_degree.items() if deg == 0)
         visited = 0
-
         while queue:
             node_id = queue.popleft()
             visited += 1
-            for neighbor in self._adjacency.get(node_id, []):
+            for neighbor in adjacency.get(node_id, []):
                 in_degree[neighbor] -= 1
                 if in_degree[neighbor] == 0:
                     queue.append(neighbor)
-
         if visited != len(self._nodes):
             return False, "Graph contains a cycle"
-
         return True, ""
 
     def topological_layers(self) -> list[list[str]]:
-        """Compute execution layers for parallel execution.
-
-        Each layer contains tasks that can execute in parallel.
-        Tasks in layer N depend only on tasks in layers < N.
-        """
-        in_degree = dict(self._in_degree)
+        """Compute execution layers without mutating dependencies."""
+        in_degree = {task_id: 0 for task_id in self._nodes}
+        adjacency: dict[str, list[str]] = defaultdict(list)
+        for task in self._nodes.values():
+            for dep_id in task.depends_on:
+                in_degree[task.task_id] += 1
+                adjacency[dep_id].append(task.task_id)
         queue: deque[str] = deque(tid for tid, deg in in_degree.items() if deg == 0)
         layers: list[list[str]] = []
         processed = 0
-
         while queue:
             layer: list[str] = []
             for _ in range(len(queue)):
                 node_id = queue.popleft()
                 layer.append(node_id)
                 processed += 1
-                for neighbor in self._adjacency.get(node_id, []):
+                for neighbor in adjacency.get(node_id, []):
                     in_degree[neighbor] -= 1
                     if in_degree[neighbor] == 0:
                         queue.append(neighbor)
             if layer:
                 layers.append(layer)
-
         if processed != len(self._nodes):
             logger.error("Cycle detected during topological sort")
             return []
-
         return layers
 
     def get_ready_tasks(self) -> list[TaskNode]:

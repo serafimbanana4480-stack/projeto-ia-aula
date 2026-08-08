@@ -43,6 +43,7 @@ from backend.orchestrator.cancellation_registry import CancellationRegistry
 from backend.orchestrator.dependency_graph import ExecutionPlan, TaskNode, TaskPriority
 from backend.orchestrator.events import EventBus, EventType, OrchestratorEvent
 from backend.orchestrator.plan_creator import PlanCreator
+from backend.orchestrator.plan_validation import PlanningResult
 from backend.orchestrator.plan_executor import (
     PlanExecutor,
     extract_tool_errors,
@@ -67,10 +68,10 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-
 class OrchestrationState(StrEnum):
     IDLE = "idle"
     PLANNING = "planning"
+    PLANNING_BLOCKED = "planning_blocked"
     AWAITING_APPROVAL = "awaiting_approval"
     EXECUTING = "executing"
     PAUSED = "paused"
@@ -200,6 +201,7 @@ class OrchestrationEngine:
         # Approval tracking
         self._approval_requests: dict[str, PlanApprovalRequest] = {}
         self._approval_timeouts: dict[str, asyncio.Task[None]] = {}
+        self._planning_results: dict[str, PlanningResult] = {}
         self._rejection_reasons: dict[str, str] = {}
         self._modifications: dict[str, dict[str, Any]] = {}
 
@@ -229,41 +231,38 @@ class OrchestrationEngine:
         history: list[ChatMessage] | None = None,
         auto_approve: bool = True,
         project_path: str = ".",
-    ) -> ExecutionPlan:
-        """Create a structured execution plan for ``objective``.
-
-        Autonomous execution is the default. If ``auto_approve`` is False,
-        the engine transitions to ``AWAITING_APPROVAL`` and emits a
-        ``PLAN_AWAITING_APPROVAL`` event for an explicitly interactive caller.
-        """
+        snapshot: dict[str, Any] | None = None,
+    ) -> PlanningResult:
+        """Create a plan and stop explicitly when planning is blocked."""
         self._state[session_id] = OrchestrationState.PLANNING
-
-        plan = await self._plan_creator.create(
+        raw_result = await self._plan_creator.create(
             objective=objective,
             session_id=session_id,
             context=context,
             history=history,
             project_path=project_path,
+            snapshot=snapshot,
         )
+        result = (
+            raw_result
+            if isinstance(raw_result, PlanningResult)
+            else PlanningResult(status="ready", plan=raw_result, source="legacy")
+        )
+        self._planning_results[session_id] = result
+        if result.status == "blocked" or result.plan is None:
+            self._state[session_id] = OrchestrationState.PLANNING_BLOCKED
+            logger.warning("Planning blocked for session %s: %s", session_id, result.error)
+            return result
 
-        # Store plan for later retrieval
+        plan = result.plan
         self._plans[plan.plan_id] = plan
         self._session_plans[session_id] = plan.plan_id
-
         if auto_approve:
-            # Skip approval — mark approved and move to executing
             plan.approved = True
             self._state[session_id] = OrchestrationState.IDLE
-            logger.info(
-                "Plan %s auto-approved (auto_approve=True) for session %s",
-                plan.plan_id,
-                session_id,
-            )
-            return plan
+            return result
 
         self._state[session_id] = OrchestrationState.AWAITING_APPROVAL
-
-        # Build approval request metadata
         approval_request = PlanApprovalRequest(
             plan_id=plan.plan_id,
             session_id=session_id,
@@ -276,8 +275,6 @@ class OrchestrationEngine:
             created_at=plan.created_at,
         )
         self._approval_requests[plan.plan_id] = approval_request
-
-        # Publish awaiting_approval event (frontend will show modal)
         asyncio.ensure_future(
             self._events.publish(
                 OrchestratorEvent(
@@ -289,21 +286,34 @@ class OrchestrationEngine:
                 )
             )
         )
-
-        # Start approval timeout task
         timeout = get_settings().plan_approval_timeout
         if timeout > 0:
             self._approval_timeouts[plan.plan_id] = asyncio.create_task(
                 self._approval_timeout_worker(plan.plan_id, session_id, timeout)
             )
-            logger.info(
-                "Plan %s awaiting approval (timeout=%ds) for session %s",
-                plan.plan_id,
-                timeout,
-                session_id,
-            )
+        return result
 
-        return plan
+    async def continue_planning(self, session_id: str) -> PlanningResult | None:
+        """Expose the deterministic proposal only after explicit continuation."""
+        result = self._planning_results.get(session_id)
+        if result is None or result.status != "blocked" or result.deterministic_proposal is None:
+            return None
+        proposal = result.deterministic_proposal
+        proposal.approved = False
+        continued = PlanningResult(
+            status="ready",
+            plan=proposal,
+            source="deterministic_continue",
+            deterministic_proposal=proposal,
+        )
+        self._planning_results[session_id] = continued
+        self._plans[proposal.plan_id] = proposal
+        self._session_plans[session_id] = proposal.plan_id
+        self._state[session_id] = OrchestrationState.AWAITING_APPROVAL
+        return continued
+
+    async def continue_plan(self, session_id: str) -> PlanningResult | None:
+        return await self.continue_planning(session_id)
 
     # ------------------------------------------------------------------
     # Plan Approval Workflow
@@ -554,39 +564,37 @@ class OrchestrationEngine:
         """Background task: auto-reject plan if not approved within timeout."""
         try:
             await asyncio.sleep(timeout)
-
-            # Double-check still awaiting approval
             if self._state.get(session_id) == OrchestrationState.AWAITING_APPROVAL:
-                logger.warning(
-                    "Plan %s auto-rejected after %ds timeout (session %s)",
-                    plan_id,
-                    timeout,
-                    session_id,
-                )
                 await self.reject_plan(plan_id, reason="Approval timeout")
         except asyncio.CancelledError:
-            pass  # Plan was approved/rejected before timeout
+            pass
 
     async def execute_plan(
         self,
-        plan: ExecutionPlan,
+        plan: ExecutionPlan | PlanningResult,
         session_id: str,
         *,
         auto_approve: bool = False,
         project_path: str = ".",
     ) -> OrchestrationResult:
-        """Execute a plan, running tasks in dependency order with parallelism."""
+        """Execute a ready plan; blocked planning never reaches the executor."""
+        if isinstance(plan, PlanningResult):
+            if plan.status == "blocked" or plan.plan is None:
+                return OrchestrationResult(
+                    run_id=uuid.uuid4().hex[:12],
+                    state=OrchestrationState.PLANNING_BLOCKED,
+                    plan=plan.deterministic_proposal,
+                    errors=[plan.error] if plan.error else ["planning blocked"],
+                )
+            plan = plan.plan
         if not auto_approve and plan.requires_approval and not plan.approved:
             raise ValueError("Plan requires approval before execution")
 
         run_id = uuid.uuid4().hex[:12]
         self._state[session_id] = OrchestrationState.EXECUTING
-
-        # Register a fresh cancellation event for this run
         cancellation_event = self._cancellation.create(session_id)
         active_tasks: list[asyncio.Task[Any]] = []
         self._cancellation.register_tasks(session_id, active_tasks)
-
         try:
             result, _ctx = await self._plan_executor.execute(
                 plan,
@@ -600,8 +608,6 @@ class OrchestrationEngine:
             self._state[session_id] = OrchestrationState.CANCELLED
             raise
         else:
-            # Cancellation is terminal.  It may arrive while the executor is
-            # draining layer tasks, so it must win over an optimistic result.
             if (
                 cancellation_event.is_set()
                 or self._state.get(session_id) == OrchestrationState.CANCELLED
@@ -610,8 +616,8 @@ class OrchestrationEngine:
             self._state[session_id] = result.state
             return result
         finally:
-            # Clean up active task references to avoid memory leaks
             self._cancellation.pop_tasks(session_id)
+
 
     async def cancel(self, session_id: str) -> None:
         """Cancel an active orchestration run."""
@@ -651,6 +657,13 @@ class OrchestrationEngine:
             auto_approve=True,
             project_path=project_path,
         )
+        if isinstance(plan, PlanningResult) and plan.status == "blocked":
+            return OrchestrationResult(
+                run_id=uuid.uuid4().hex[:12],
+                state=OrchestrationState.PLANNING_BLOCKED,
+                plan=plan.deterministic_proposal,
+                errors=[plan.error] if plan.error else ["planning blocked"],
+            )
 
         await self._events.publish(
             OrchestratorEvent(
@@ -668,9 +681,12 @@ class OrchestrationEngine:
             auto_approve=True,
             project_path=project_path,
         )
-        # A failed or cancelled primary plan is terminal.  Starting a review
-        # afterwards can mask that outcome as a successful autonomous run.
-        if result.state in (OrchestrationState.CANCELLED, OrchestrationState.FAILED):
+        # A failed, cancelled, or blocked primary plan is terminal.
+        if result.state in (
+            OrchestrationState.CANCELLED,
+            OrchestrationState.FAILED,
+            OrchestrationState.PLANNING_BLOCKED,
+        ):
             self._state[session_id] = result.state
             return result
 

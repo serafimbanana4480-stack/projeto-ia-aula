@@ -12,11 +12,16 @@ import json
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from backend.config.settings import get_model_config, load_prompt
 from backend.orchestrator.dependency_graph import ExecutionPlan, TaskNode, TaskPriority
 from backend.orchestrator.events import EventEmitter, EventType, OrchestratorEvent
+from backend.orchestrator.plan_validation import (
+    PlanningResult,
+    build_deterministic_plan,
+    validate_execution_plan,
+)
 from backend.tools.ollama_client import ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -86,13 +91,13 @@ class PlanCreator:
         context: str = "",
         history: list[ChatMessage] | None = None,
         project_path: str = ".",
-    ) -> ExecutionPlan:
-        """Create a structured execution plan using the coder model for clean JSON.
+        snapshot: Mapping[str, Any] | None = None,
+    ) -> PlanningResult:
+        """Create a validated local proposal, then optionally enrich it.
 
-        Uses the coder model (qwen2.5-coder:7b) directly for planning because
-        it follows structured output instructions much better than reasoning models.
-        The ARCHITECT agent (reasoning model) is still used during plan execution
-        for deep design tasks.
+        Provider failures are represented as ``blocked`` results.  In
+        particular, this method never turns an unavailable model into an
+        implicitly approved execution plan.
         """
         await self._events.publish(
             OrchestratorEvent(
@@ -102,41 +107,36 @@ class PlanCreator:
                 data={"objective": objective, "phase": "planning"},
             )
         )
+        facts: Mapping[str, Any] = snapshot or {
+            "absolute_path": project_path,
+            "root": project_path,
+        }
+        deterministic = build_deterministic_plan(objective, facts, session_id)
+        baseline_validation = validate_execution_plan(
+            deterministic, facts, self.MAX_PLAN_STEPS
+        )
+        if not baseline_validation.valid:
+            error = "; ".join(baseline_validation.errors)
+            return PlanningResult(
+                status="blocked",
+                source="deterministic",
+                error=error,
+                deterministic_proposal=deterministic,
+            )
 
-        # Feed the planner recalled project knowledge before it decomposes the
-        # goal.  Specialist consultation is targeted rather than unconditional
-        # so routine plans do not spend budget on irrelevant sub-agents.
         planning_context = await self._gather_planning_context(
             objective, session_id, context, project_path
         )
         planning_prompt = self._build_planning_prompt(objective, planning_context)
-
-        # Use coder model directly for clean JSON output (not the architect agent)
         planner_cfg = get_model_config("coder")
-        planner_models = self._planner_model_chain(planner_cfg)
-        # Keep planning policy in a first-class agent prompt.  The planner
-        # prompt requires recalled context, specialist consultation where it
-        # is useful, and an executable verification step.
+        planner_models = self._eligible_planner_models(self._planner_model_chain(planner_cfg))
         system_prompt = load_prompt("planner")
-
         messages = [
             ChatMessage(role="system", content=system_prompt),
             ChatMessage(role="user", content=planning_prompt),
         ]
-
-        # Stream planning, walking the model chain on transient provider errors.
-        #
-        # Why this loop exists: ``PlanCreator`` used to dispatch to a *single*
-        # model. Every agent already had a fallback cascade in
-        # ``AgentBase.stream_llm``, but planning did not — so one HTTP 429 from
-        # the primary model produced an empty ``plan_content``, which
-        # ``_parse_plan`` degraded into the three-step fallback plan. A request
-        # for a deep multi-phase audit silently became "Execute Objective", and
-        # the run reported ``completed`` after touching almost nothing.
-        # Evidence: session 27437d6cc61e4753, 2026-07-27T08:18:55Z —
-        # "Planner failed ... 429" immediately followed by
-        # "creating single-step plan".
         plan_content = ""
+        last_error: BaseException | None = None
         async with EventEmitter(self._events, "PLANNER", session_id) as emit:
             for attempt, planner_model in enumerate(planner_models):
                 plan_content_parts: list[str] = []
@@ -147,48 +147,16 @@ class PlanCreator:
                             messages=[{"role": m.role, "content": m.content} for m in messages],
                             options={
                                 "temperature": planner_cfg.get("temperature", 0.2),
-                                "num_predict": 16384,  # Large plans need more tokens
+                                "num_predict": 16384,
                             },
                         ):
-                            if not isinstance(token, str):
-                                logger.warning(
-                                    "Ignoring non-text token from planner: %s",
-                                    type(token).__name__,
-                                )
-                                continue
-                            plan_content_parts.append(token)
-                            # Planner output is machine-readable JSON, not an
-                            # assistant answer. Publishing it as TOKEN streamed
-                            # the raw plan into chat and made a live run appear
-                            # to stop after a JSON dump. PLAN_CREATED below
-                            # exposes structured progress without polluting the
-                            # user-facing reply.
-                except TimeoutError as exc:  # asyncio.TimeoutError is an alias on 3.11+
-                    logger.warning(
-                        "Planner model %s timed out after %.1fs for session %s (attempt %d/%d)",
-                        planner_model,
-                        self.PLAN_STREAM_TIMEOUT_SECONDS,
-                        session_id,
-                        attempt + 1,
-                        len(planner_models),
-                    )
-                    if not await self._retry_planning(
-                        emit, planner_models, attempt, exc, retryable=True
-                    ):
-                        break
-                    continue
+                            if isinstance(token, str):
+                                plan_content_parts.append(token)
                 except asyncio.CancelledError:
-                    # A user cancellation is a decision, never a provider fault.
                     raise
-                except Exception as exc:  # noqa: BLE001 - provider errors must not strand a run
-                    logger.warning(
-                        "Planner model %s failed for session %s (attempt %d/%d): %s",
-                        planner_model,
-                        session_id,
-                        attempt + 1,
-                        len(planner_models),
-                        exc,
-                    )
+                except Exception as exc:  # provider failures become blocked results
+                    last_error = exc
+                    logger.warning("Planner model %s failed: %s", planner_model, exc)
                     if not await self._retry_planning(
                         emit,
                         planner_models,
@@ -198,28 +166,13 @@ class PlanCreator:
                     ):
                         break
                     continue
-
                 candidate = "".join(plan_content_parts)
-                # An empty or whitespace-only body is a failure even when the
-                # provider returned HTTP 200; treat it like any other dud so
-                # the next model gets a turn instead of falling straight
-                # through to the degraded plan.
                 if candidate.strip():
                     plan_content = candidate
-                    if attempt:
-                        logger.info(
-                            "Planner recovered on fallback model %s for session %s",
-                            planner_model,
-                            session_id,
-                        )
                     break
-                logger.warning(
-                    "Planner model %s returned an empty body for session %s",
-                    planner_model,
-                    session_id,
-                )
+                last_error = RuntimeError(f"planner model {planner_model} returned an empty body")
                 if not await self._retry_planning(
-                    emit, planner_models, attempt, None, retryable=True
+                    emit, planner_models, attempt, last_error, retryable=True
                 ):
                     break
 
@@ -227,29 +180,92 @@ class PlanCreator:
                 await emit.emit(
                     EventType.WARNING,
                     content=(
-                        "Planning failed on every available model "
-                        f"({', '.join(planner_models)}); continuing with a reduced plan."
+                        "Planning blocked: no eligible model produced a plan; "
+                        "every available model was unavailable"
+                        + (f" ({self._format_provider_error(last_error)})" if last_error else "")
                     ),
                 )
 
-        # Parse plan into structured steps
-        plan = self._parse_plan(plan_content, objective, session_id)
-        plan.created_at = time.time()
+        if not plan_content.strip():
+            return PlanningResult(
+                status="blocked",
+                source="deterministic",
+                error=self._format_provider_error(last_error)
+                if last_error
+                else "no eligible planning model produced output",
+                deterministic_proposal=deterministic,
+            )
 
-        # The author of the plan is the PLANNER path, not the ARCHITECT agent.
-        # Reporting "ARCHITECT" here made the UI attribute planning to an agent
-        # that never ran, which sent every debugging session looking in the
-        # wrong module.
+        candidate_plan = self._parse_plan(plan_content, objective, session_id)
+        if candidate_plan is None:
+            return PlanningResult(
+                status="blocked",
+                source="model",
+                error="planner output was not a parseable structured plan",
+                deterministic_proposal=deterministic,
+            )
+        candidate_plan.created_at = time.time()
+        candidate_validation = validate_execution_plan(
+            candidate_plan, facts, self.MAX_PLAN_STEPS
+        )
+        if not candidate_validation.valid:
+            return PlanningResult(
+                status="blocked",
+                source="model",
+                error="; ".join(candidate_validation.errors),
+                deterministic_proposal=deterministic,
+            )
         await self._events.publish(
             OrchestratorEvent(
                 event_type=EventType.PLAN_CREATED,
                 source="PLANNER",
                 session_id=session_id,
-                data=plan.to_dict(),
+                data=candidate_plan.to_dict(),
             )
         )
+        return PlanningResult(
+            status="ready",
+            plan=candidate_plan,
+            source="model",
+            deterministic_proposal=deterministic,
+        )
 
-        return plan
+    @staticmethod
+    def _format_provider_error(exc: BaseException | None) -> str:
+        if exc is None:
+            return ""
+        details = [f"{type(exc).__name__}: {exc}"]
+        for label in ("category", "provider", "model", "retry_after", "quota"):
+            value = getattr(exc, label, None)
+            if value not in (None, ""):
+                details.append(f"{label}={value}")
+        return " | ".join(details)
+
+    @staticmethod
+    def _eligible_planner_models(models: list[str]) -> list[str]:
+        """Keep known free/local aliases and explicit ``:free`` IDs only."""
+        free_aliases = {
+            "kimi-k2.7-code",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "glm-5.2",
+            "minimax-m3",
+            "qwen3.7-max",
+            "mimo-v2.5",
+            "mimo-v2-pro",
+            "coder",
+        }
+        eligible = [
+            model for model in models
+            if model in free_aliases
+            or model.lower().endswith(("/free", ":free"))
+            or model.lower().startswith(("ollama:", "ollama/"))
+        ]
+        # Test doubles and explicitly injected local model IDs are allowed
+        # when the chain contains no provider-qualified paid model.
+        if not eligible and models and all("/" not in model for model in models):
+            return models
+        return eligible
 
     @staticmethod
     def _planner_model_chain(planner_cfg: dict[str, Any]) -> list[str]:
@@ -462,284 +478,82 @@ Make steps SPECIFIC and ACTIONABLE. Each step must produce a concrete deliverabl
 Include at least 10 steps. More complex objectives should have 15-25 steps.
 Use phase prefixes in step names: "Phase N: Name - Description"."""
 
-    @staticmethod
-    def _fallback_plan(
-        objective: str,
-        session_id: str,
-        *,
-        reason: str = "planner output unusable",
-        raw_output: str = "",
-    ) -> ExecutionPlan:
-        """Return a minimal but *real* plan when planner output is unusable.
-
-        The previous version emitted a single opaque CODER task literally
-        named ``"Execute Objective"``.  That had two bad consequences:
-
-        * A rich request ("audit the whole codebase deeply") silently
-          collapsed into one generic step, so the run looked complete while
-          almost nothing had been done.
-        * The failure was invisible — a ``logger.warning`` with no trace of
-          *what* the planner actually returned, so nobody could debug it.
-
-        The fallback now degrades into an explicit analyse → execute → verify
-        triple that at least matches the shape of a real plan, and logs the
-        offending planner output so the root cause is diagnosable.
-        """
-        logger.warning(
-            "Planner fallback engaged (%s) for objective %.120r; raw planner output: %.500r",
-            reason,
-            objective,
-            raw_output,
-        )
-
-        short_title = objective.strip().splitlines()[0][:80] if objective.strip() else "Objective"
-
-        analyse = TaskNode(
-            name=f"Analyse: {short_title}",
-            description=(
-                "Break the objective below into concrete work items before "
-                "changing anything. Identify the files, modules and risks "
-                "involved, and state explicitly what is in and out of scope.\n\n"
-                f"OBJECTIVE:\n{objective}"
-            ),
-            agent="ANALYZER",
-            priority=TaskPriority.HIGH,
-        )
-        execute = TaskNode(
-            name=f"Implement: {short_title}",
-            description=(
-                "Carry out the objective using the analysis from the previous "
-                "step. Produce concrete, reviewable changes — do not stop at a "
-                "summary.\n\n"
-                f"OBJECTIVE:\n{objective}"
-            ),
-            agent="CODER",
-            priority=TaskPriority.HIGH,
-        )
-        verify = TaskNode(
-            name=f"Verify: {short_title}",
-            description=(
-                "Verify the implementation actually satisfies the objective. "
-                "Run available tests, check for syntax and import errors, and "
-                "report findings.\n\n"
-                "End with a final line of exactly 'VERDICT: PASS' or "
-                "'VERDICT: FAIL' followed by the problems found.\n\n"
-                f"OBJECTIVE:\n{objective}"
-            ),
-            agent="DEBUGGER",
-            priority=TaskPriority.HIGH,
-        )
-
-        execute.depends_on.append(analyse.task_id)
-        analyse.required_by.append(execute.task_id)
-        verify.depends_on.append(execute.task_id)
-        execute.required_by.append(verify.task_id)
-
-        return ExecutionPlan.from_steps(
-            title=objective[:100],
-            description=objective,
-            steps=[analyse, execute, verify],
-            session_id=session_id,
-        )
-
     def _parse_plan(
         self,
         plan_content: str,
         objective: str,
         session_id: str,
-    ) -> ExecutionPlan:
-        """Parse the Architect's JSON output into an ExecutionPlan."""
-        # Remove thinking blocks first (common with reasoning models)
+    ) -> ExecutionPlan | None:
+        """Parse model JSON without repairing or completing it."""
         cleaned = re.sub(r"<thinking>.*?</thinking>", "", plan_content, flags=re.DOTALL)
-        # Remove markdown code fences
         cleaned = re.sub(r"```json\s*", "", cleaned)
         cleaned = re.sub(r"```\s*", "", cleaned)
-        # Remove any text before the first [ and after the last ]
         json_match = re.search(r"\[.*\]", cleaned, re.DOTALL)
-
         if not json_match:
-            # Try to parse as natural text with numbered steps
             text_plan = self._parse_text_plan(cleaned, objective)
             if text_plan is not None and len(text_plan.steps) > 1:
                 text_plan.session_id = session_id
                 return text_plan
-
-            return self._fallback_plan(
-                objective,
-                session_id,
-                reason="no JSON array found in planner output",
-                raw_output=plan_content,
-            )
-
+            return None
+        raw_text = json_match.group(0)
         try:
-            raw_steps = json.loads(json_match.group(0))
+            raw_steps = json.loads(raw_text)
         except json.JSONDecodeError:
-            # Try to fix common JSON issues (trailing commas, etc.)
-            raw_text = json_match.group(0)
-            # Remove trailing commas before ] or }
-            raw_text = re.sub(r",\s*([}\]])", r"\1", raw_text)
             try:
-                raw_steps = json.loads(raw_text)
+                raw_steps = json.loads(re.sub(r",\s*([}\]])", r"\1", raw_text))
             except json.JSONDecodeError:
-                return self._fallback_plan(
-                    objective,
-                    session_id,
-                    reason="planner JSON failed to parse",
-                    raw_output=raw_text,
-                )
-
-        if not isinstance(raw_steps, list) or len(raw_steps) == 0:
-            return self._fallback_plan(
-                objective,
-                session_id,
-                reason="planner JSON is not a non-empty list",
-                raw_output=json_match.group(0),
-            )
-
+                return None
+        if not isinstance(raw_steps, list) or not raw_steps:
+            return None
         valid_raw_steps = [raw for raw in raw_steps if isinstance(raw, dict)]
-        if not valid_raw_steps:
-            return self._fallback_plan(
-                objective,
-                session_id,
-                reason="planner JSON contained no object steps",
-                raw_output=json_match.group(0),
-            )
-        if len(valid_raw_steps) > self.MAX_PLAN_STEPS:
-            logger.warning(
-                "Planner returned %d steps; limiting execution plan to %d",
-                len(valid_raw_steps),
-                self.MAX_PLAN_STEPS,
-            )
-            valid_raw_steps = valid_raw_steps[: self.MAX_PLAN_STEPS]
-
+        if not valid_raw_steps or len(valid_raw_steps) > self.MAX_PLAN_STEPS:
+            return None
         steps: list[TaskNode] = []
         for i, raw in enumerate(valid_raw_steps):
             raw_priority = raw.get("priority", "medium")
-            if not isinstance(raw_priority, str):
-                raw_priority = "medium"
-            priority_upper = raw_priority.strip().upper()
-            resolved_priority = (
-                TaskPriority[priority_upper]
-                if priority_upper in TaskPriority.__members__
-                else TaskPriority.MEDIUM
-            )
-            raw_name = raw.get("name")
-            name = raw_name.strip() if isinstance(raw_name, str) else ""
-            if not name:
-                name = f"Step {i + 1}"
-            raw_description = raw.get("description", "")
-            description = raw_description.strip() if isinstance(raw_description, str) else ""
-            raw_agent = raw.get("agent", "CODER")
-            agent = raw_agent.strip().upper() if isinstance(raw_agent, str) else "CODER"
-            if agent not in SUPPORTED_PLAN_AGENTS:
-                logger.warning("Unknown planner agent %r; assigning task to CODER", raw_agent)
-                agent = "CODER"
+            priority_upper = str(raw_priority).strip().upper()
+            priority = TaskPriority[priority_upper] if priority_upper in TaskPriority.__members__ else TaskPriority.MEDIUM
+            name = raw.get("name") if isinstance(raw.get("name"), str) else ""
+            description = raw.get("description") if isinstance(raw.get("description"), str) else ""
+            agent = raw.get("agent") if isinstance(raw.get("agent"), str) else ""
             task = TaskNode(
-                name=name,
-                description=description,
-                agent=agent,
-                priority=resolved_priority,
+                name=name.strip(),
+                description=description.strip(),
+                agent=agent.strip().upper(),
+                model_key=str(raw.get("model_key", "")).strip(),
+                priority=priority,
                 sandboxed=raw.get("sandboxed", False) is True,
+                file_scope=raw.get("file_scope", []),
+                completion_criteria=raw.get("completion_criteria", []),
+                verification_commands=raw.get("verification_commands", []),
+                risk=str(raw.get("risk", "")),
+                rollback=str(raw.get("rollback", "")),
+                lock_scope=str(raw.get("lock_scope", "")),
+                allowed_tools=raw.get("allowed_tools", []),
             )
             steps.append(task)
-
-        if not steps:
-            return self._fallback_plan(
-                objective,
-                session_id,
-                reason="no valid steps survived parsing",
-                raw_output=json_match.group(0),
-            )
-
-        # Resolve dependencies (convert indices OR names to task_ids)
-        # Build a name→index lookup for string-based depends_on
         name_to_idx: dict[str, int] = {}
         for idx, step in enumerate(steps):
-            name_to_idx[step.name.lower().strip()] = idx
-            # Also register shortened forms (e.g. "Phase 1: Setup" → "Setup")
-            if ":" in step.name:
-                short = step.name.split(":", 1)[-1].strip().lower()
-                name_to_idx[short] = idx
-            if "-" in step.name:
-                short = step.name.split("-", 1)[-1].strip().lower()
-                name_to_idx[short] = idx
-
+            if step.name:
+                name_to_idx[step.name.lower()] = idx
         for i, raw in enumerate(valid_raw_steps):
             raw_deps = raw.get("depends_on", [])
-            if not isinstance(raw_deps, list):
-                raw_deps = [raw_deps] if raw_deps else []
-            seen_dependencies: set[str] = set()
-            for dep_ref in raw_deps:
+            refs = raw_deps if isinstance(raw_deps, list) else [raw_deps]
+            for dep_ref in refs:
                 dep_idx = self._resolve_dep_ref(dep_ref, len(steps), name_to_idx)
-                if dep_idx is not None and dep_idx != i:
-                    dependency_id = steps[dep_idx].task_id
-                    if dependency_id in seen_dependencies:
-                        continue
-                    seen_dependencies.add(dependency_id)
-                    steps[i].depends_on.append(dependency_id)
-                    steps[dep_idx].required_by.append(steps[i].task_id)
-
-        self._ensure_verification_step(steps)
-
-        plan = ExecutionPlan.from_steps(
-            title=objective[:100],
-            description=objective,
-            steps=steps,
-            session_id=session_id,
-        )
-        valid, error = plan.dependency_graph.validate()
-        if valid:
-            return plan
-
-        # A cyclic dependency means the executor can never find a ready task.
-        # Recover deterministically by preserving every generated task but
-        # executing them in their declared order.
-        logger.warning("Invalid planner dependency graph (%s); rebuilding sequentially", error)
-        for step in steps:
-            step.depends_on.clear()
-            step.required_by.clear()
-        for previous, current in zip(steps, steps[1:], strict=False):
-            current.depends_on.append(previous.task_id)
-            previous.required_by.append(current.task_id)
+                if dep_idx is not None:
+                    if dep_idx != i and steps[dep_idx].task_id not in steps[i].depends_on:
+                        steps[i].depends_on.append(steps[dep_idx].task_id)
+                        steps[dep_idx].required_by.append(steps[i].task_id)
+                elif dep_ref not in (None, ""):
+                    # Preserve an unresolvable reference for validator output.
+                    steps[i].depends_on.append(str(dep_ref))
         return ExecutionPlan.from_steps(
             title=objective[:100],
             description=objective,
             steps=steps,
             session_id=session_id,
         )
-
-    @staticmethod
-    def _ensure_verification_step(steps: list[TaskNode]) -> None:
-        """Append one executable DEBUGGER gate unless the plan already has one.
-
-        LLM-generated plans can omit their final test step.  A deterministic
-        gate keeps verification part of the execution graph rather than a
-        best-effort instruction in an agent prompt.
-        """
-        has_verification = any(
-            step.agent == "DEBUGGER"
-            and any(
-                marker in f"{step.name} {step.description}".lower()
-                for marker in ("verify", "verification", "test", "validate", "lint", "build")
-            )
-            for step in steps
-        )
-        if has_verification:
-            return
-
-        verification = TaskNode(
-            name="Verification - run relevant checks",
-            description=(
-                "Use execute_code to run the narrowest relevant test, build, lint, "
-                "or reproduction command. Report the command and its result."
-            ),
-            agent="DEBUGGER",
-            priority=TaskPriority.HIGH,
-        )
-        for step in steps:
-            verification.depends_on.append(step.task_id)
-            step.required_by.append(verification.task_id)
-        steps.append(verification)
 
     @staticmethod
     def _resolve_dep_ref(

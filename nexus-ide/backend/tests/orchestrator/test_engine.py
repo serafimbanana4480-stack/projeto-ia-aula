@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import backend.orchestrator.engine as engine_module
 from backend.orchestrator.dependency_graph import (
     DependencyGraph,
     ExecutionPlan,
@@ -546,7 +547,10 @@ class TestOrchestrationEngine:
         assert artifact["status"] == "failed"
 
     @pytest.mark.asyncio
-    async def test_autonomous_primary_failure_is_preserved(self, event_bus: EventBus) -> None:
+    async def test_autonomous_primary_failure_is_preserved(
+        self, event_bus: EventBus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "require_disk_headroom", lambda _path: None)
         """A failed primary plan must not be overwritten by final review success."""
         plan = ExecutionPlan.from_steps(
             "Primary plan",
@@ -580,7 +584,10 @@ class TestOrchestrationEngine:
         assert plan_executor.execute.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_autonomous_primary_cancellation_is_preserved(self, event_bus: EventBus) -> None:
+    async def test_autonomous_primary_cancellation_is_preserved(
+        self, event_bus: EventBus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "require_disk_headroom", lambda _path: None)
         """Cancellation must stop the autonomous cycle before later phases."""
         plan = ExecutionPlan.from_steps(
             "Primary plan",
@@ -611,7 +618,10 @@ class TestOrchestrationEngine:
         assert plan_executor.execute.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_autonomous_final_review_failure_is_preserved(self, event_bus: EventBus) -> None:
+    async def test_autonomous_final_review_failure_is_preserved(
+        self, event_bus: EventBus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "require_disk_headroom", lambda _path: None)
         """A failed final review cannot turn a run into COMPLETED."""
         plan = ExecutionPlan.from_steps(
             "Primary plan",

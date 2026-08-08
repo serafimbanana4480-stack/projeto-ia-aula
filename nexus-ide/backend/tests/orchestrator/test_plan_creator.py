@@ -77,19 +77,14 @@ def test_parse_plan_normalizes_invalid_steps_and_dependencies() -> None:
     )
 
     plan = creator._parse_plan(content, "Ship it", "session_1")
-
-    assert [step.name for step in plan.steps] == [
-        "Step 1",
-        "Second",
-        "Verification - run relevant checks",
-    ]
-    assert plan.steps[0].agent == "CODER"
+    assert plan is not None
+    assert [step.name for step in plan.steps] == ["", "Second"]
+    assert plan.steps[0].agent == "UNKNOWN-AGENT"
     assert plan.steps[0].description == ""
     assert plan.steps[0].sandboxed is False
-    assert plan.steps[1].depends_on == [plan.steps[0].task_id]
-    assert plan.steps[2].agent == "DEBUGGER"
-    assert set(plan.steps[2].depends_on) == {plan.steps[0].task_id, plan.steps[1].task_id}
-    assert plan.dependency_graph.validate() == (True, "")
+    assert plan.steps[1].depends_on == [plan.steps[0].task_id, "True"]
+    assert not any(step.agent == "DEBUGGER" for step in plan.steps)
+    assert plan.dependency_graph.validate() == (False, f"Task {plan.steps[1].task_id} depends on non-existent True")
 
 
 def test_planning_prompt_uses_bounded_economical_step_count() -> None:
@@ -99,7 +94,7 @@ def test_planning_prompt_uses_bounded_economical_step_count() -> None:
     assert "10-25 steps" not in prompt
 
 
-def test_parse_plan_repairs_cyclic_dependencies_into_an_executable_order() -> None:
+def test_parse_plan_rejects_cyclic_dependencies_without_repairing() -> None:
     creator = _creator()
     content = json.dumps(
         [
@@ -108,17 +103,12 @@ def test_parse_plan_repairs_cyclic_dependencies_into_an_executable_order() -> No
             {"name": "Test", "depends_on": [1]},
         ]
     )
-
     plan = creator._parse_plan(content, "Ship it", "session_1")
-
-    assert plan.dependency_graph.validate() == (True, "")
-    assert plan.steps[0].depends_on == []
-    assert plan.steps[1].depends_on == [plan.steps[0].task_id]
-    assert plan.steps[2].depends_on == [plan.steps[1].task_id]
-
+    assert plan is not None
+    assert plan.dependency_graph.validate() == (False, "Graph contains a cycle")
 
 @pytest.mark.asyncio
-async def test_planner_timeout_emits_warning_and_returns_a_safe_fallback(
+async def test_planner_timeout_blocks_with_deterministic_proposal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bus = RecordingEventBus()
@@ -131,29 +121,19 @@ async def test_planner_timeout_emits_warning_and_returns_a_safe_fallback(
     )
     monkeypatch.setattr(plan_creator_module, "load_prompt", lambda _name: "system prompt")
 
-    plan = await creator.create("Ship it", "session_timeout")
-
-    # The fallback degrades into analyse -> implement -> verify rather than a
-    # single opaque "Execute Objective" CODER task.  The old single-step
-    # fallback let a rich objective silently collapse into one generic step
-    # that reported "completed" without doing the work.
-    assert len(plan.steps) == 3
-    assert [s.agent for s in plan.steps] == ["ANALYZER", "CODER", "DEBUGGER"]
-    assert [s.name for s in plan.steps] == [
-        "Analyse: Ship it",
-        "Implement: Ship it",
-        "Verify: Ship it",
-    ]
-    # Every step must carry the full objective, not just the title.
-    assert all("Ship it" in s.description for s in plan.steps)
-    # And the chain must be ordered, not three parallel no-ops.
-    assert plan.steps[0].depends_on == []
-    assert plan.steps[1].depends_on == [plan.steps[0].task_id]
-    assert plan.steps[2].depends_on == [plan.steps[1].task_id]
-    assert plan.dependency_graph.validate() == (True, "")
-    assert plan.session_id == "session_timeout"
+    result = await creator.create("Ship it", "session_timeout")
+    assert result.status == "blocked"
+    assert result.plan is None
+    assert result.deterministic_proposal is not None
+    proposal = result.deterministic_proposal
+    assert len(proposal.steps) == 3
+    assert [s.agent for s in proposal.steps] == ["ANALYZER", "CODER", "DEBUGGER"]
+    assert all("Ship it" in s.description for s in proposal.steps)
+    assert proposal.steps[1].depends_on == [proposal.steps[0].task_id]
+    assert proposal.steps[2].depends_on == [proposal.steps[1].task_id]
+    assert proposal.approved is False
     assert any(event.event_type == EventType.WARNING for event in bus.events)
-    assert any(event.event_type == EventType.PLAN_CREATED for event in bus.events)
+    assert not any(event.event_type == EventType.PLAN_CREATED for event in bus.events)
 
 
 class FlakyPlanner:
@@ -220,7 +200,7 @@ class TestPlannerModelCascade:
         assert len(chain) == len(set(chain))
 
     @pytest.mark.asyncio
-    async def test_rate_limited_primary_recovers_on_fallback(
+    async def test_rate_limited_primary_blocks_without_auto_approval(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _patch_planner_config(monkeypatch)
@@ -228,15 +208,12 @@ class TestPlannerModelCascade:
         creator = PlanCreator(llm_client=client, event_bus=RecordingEventBus())
         creator.PLAN_RETRY_BACKOFF_SECONDS = (0.0,)
 
-        plan = await creator.create("Audit everything", "s1")
-
+        result = await creator.create("Audit everything", "s1")
         assert client.models_tried == ["kimi-k2.7-code", "deepseek-v4-flash"]
-        # A real plan, not the three-step degraded fallback.
-        assert [s.name for s in plan.steps][:2] == [
-            "Phase 1: Setup - Map modules",
-            "Phase 2: Build - Implement",
-        ]
-        assert not any(s.name.startswith("Implement: ") for s in plan.steps)
+        assert result.status == "blocked"
+        assert result.plan is None
+        assert result.deterministic_proposal is not None
+        assert result.deterministic_proposal.approved is False
 
     @pytest.mark.asyncio
     async def test_empty_body_is_treated_as_failure(
@@ -262,13 +239,13 @@ class TestPlannerModelCascade:
         creator = PlanCreator(llm_client=client, event_bus=RecordingEventBus())
         creator.PLAN_RETRY_BACKOFF_SECONDS = (0.0,)
 
-        plan = await creator.create("Audit everything", "s1")
-
+        result = await creator.create("Audit everything", "s1")
         assert client.models_tried == ["kimi-k2.7-code"]
-        assert [s.agent for s in plan.steps] == ["ANALYZER", "CODER", "DEBUGGER"]
+        assert result.status == "blocked"
+        assert result.error
 
     @pytest.mark.asyncio
-    async def test_all_models_rate_limited_falls_back_and_says_so(
+    async def test_all_models_rate_limited_blocks_and_says_so(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _patch_planner_config(monkeypatch)
@@ -277,28 +254,15 @@ class TestPlannerModelCascade:
         creator = PlanCreator(llm_client=client, event_bus=bus)
         creator.PLAN_RETRY_BACKOFF_SECONDS = (0.0,)
 
-        plan = await creator.create("Audit everything", "s1")
-
+        result = await creator.create("Audit everything", "s1")
         assert len(client.models_tried) >= 3
-        assert [s.agent for s in plan.steps] == ["ANALYZER", "CODER", "DEBUGGER"]
+        assert result.status == "blocked"
+        assert result.deterministic_proposal is not None
         warnings = [e for e in bus.events if e.event_type == EventType.WARNING]
-        # The user must be told the plan is degraded *and* why — a silent
-        # collapse into the fallback is what made the 158-second run look
-        # successful.
         assert any("every available model" in e.content for e in warnings)
         assert any("kimi-k2.7-code" in e.content for e in warnings)
 
-    @pytest.mark.asyncio
-    async def test_plan_created_event_is_attributed_to_the_planner(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The UI showed ARCHITECT for work the ARCHITECT never did."""
-        _patch_planner_config(monkeypatch)
-        bus = RecordingEventBus()
-        creator = PlanCreator(llm_client=FlakyPlanner([], _GOOD_PLAN), event_bus=bus)
-
         await creator.create("Audit everything", "s1")
-
         created = [e for e in bus.events if e.event_type == EventType.PLAN_CREATED]
-        assert created and created[0].source == "PLANNER"
+        assert not created
         assert not any(e.event_type == EventType.TOKEN for e in bus.events)
