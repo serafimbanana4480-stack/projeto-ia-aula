@@ -346,7 +346,7 @@ export default function ChatPanel({
       const stored = localStorage.getItem("nexus.thinkingStrength");
       if (stored === "low" || stored === "medium" || stored === "high") return stored;
     }
-    return "medium";
+    return "low";
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);

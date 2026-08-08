@@ -505,6 +505,12 @@ class AgentBase(ABC):
             args["source_agent"] = self.name
         if tool_name == "consult_agent":
             args["autonomous"] = request.autonomous
+        if tool_name == "spawn_task":
+            # Preserve the principal conversation and project boundary while
+            # allowing the spawned specialist to run independently.
+            args.setdefault("session_id", request.session_id)
+            args.setdefault("project_path", request.project_path)
+            args.setdefault("autonomous", request.autonomous)
         return tool_name, args
 
     def _fit_messages_to_budget(

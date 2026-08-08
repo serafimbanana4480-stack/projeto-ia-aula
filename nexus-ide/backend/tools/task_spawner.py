@@ -23,6 +23,9 @@ async def spawn_task(
     context: str = "",
     parent_id: str | None = None,
     depends_on: list[str] | None = None,
+    session_id: str = "",
+    project_path: str = "",
+    autonomous: bool = True,
 ) -> dict[str, Any]:
     """Spawn a new task dynamically in the active orchestration run.
 
@@ -53,9 +56,7 @@ async def spawn_task(
             "task_name": name,
         }
 
-    # Return structured spawn request that the OrchestrationEngine will intercept
-    # from the tool result event and inject into the dependency graph.
-    return {
+    result: dict[str, Any] = {
         "status": "spawned",
         "task_name": name,
         "agent": agent,
@@ -65,6 +66,39 @@ async def spawn_task(
         "parent_id": parent_id,
         "depends_on": depends_on or [],
     }
+
+    # In normal chat there is no active OrchestrationEngine to intercept the
+    # old declarative result. Attach it to the real lifecycle manager so the
+    # principal can answer immediately while the specialist continues in the
+    # background and remains visible in Agent Instances.
+    try:
+        from backend.orchestrator.main import app
+
+        lifecycle = getattr(app.state, "agent_lifecycle", None)
+        if lifecycle is not None:
+            instance_id = await lifecycle.spawn(
+                agent_type=agent,
+                objective=description,
+                context={
+                    "project_path": project_path or ".",
+                    "parent_context": context,
+                    "depends_on": depends_on or [],
+                    "autonomous": autonomous,
+                },
+                mission_id=session_id,
+                parent_task_id=parent_id or "",
+            )
+            result.update(
+                {
+                    "background": True,
+                    "instance_id": instance_id,
+                    "message": f"{agent} continua em background; a conversa principal permanece livre.",
+                }
+            )
+    except Exception as exc:  # pragma: no cover - runtime fallback
+        logger.warning("Could not attach spawned task to agent lifecycle: %s", exc)
+
+    return result
 
 
 register_tool(

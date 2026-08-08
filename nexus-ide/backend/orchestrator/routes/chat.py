@@ -663,6 +663,29 @@ def _is_complex_task(query: str) -> bool:
     return intent_count >= 2
 
 
+_FAST_CHAT_ACTION_RE = _compile_marker_pattern(
+    (
+        "create", "build", "implement", "write", "develop", "design", "refactor",
+        "optimize", "fix", "debug", "analyze", "review", "add", "remove", "update",
+        "modify", "generate", "install", "deploy", "test", "criar", "construir",
+        "implementar", "escrever", "desenvolver", "projetar", "otimizar", "corrigir",
+        "depurar", "analisar", "auditar", "verificar", "testar", "melhorar",
+    )
+)
+
+
+def _is_fast_chat_turn(query: str) -> bool:
+    """Keep ordinary questions out of the autonomous ReAct loop."""
+    stripped = query.strip()
+    if not stripped or len(stripped.split()) > 12:
+        return False
+    if _FAST_CHAT_ACTION_RE.search(stripped):
+        return False
+    if _is_informational_question(stripped):
+        return True
+    return fast_route(stripped) == "MICRO"
+
+
 _RUNTIME_EVIDENCE_ACTION_RE = _compile_marker_pattern(
     (
         "analisa", "analisar", "audita", "auditar", "auditoria", "investiga",
@@ -1708,7 +1731,11 @@ async def _run_pipeline(
         mode_enable_thinking = bool(mode_cfg.get("enable_thinking", False))
     # The UI control used to be transported but never applied. It now opts in
     # to the public progress/approach stream even for modes such as swarm.
-    if req.thinking_strength in {"low", "medium", "high"}:
+    # ``medium`` is the historical UI default, but it must not make every
+    # ordinary question enter a long visible reasoning path.
+    if req.thinking_strength == "high" or (
+        req.thinking_strength == "medium" and not _is_fast_chat_turn(req.message)
+    ):
         mode_enable_thinking = True
 
     effective_message = req.message
@@ -1861,7 +1888,11 @@ async def _run_pipeline(
         # Auto mode: for COMPLEX tasks, use the full Plan→Execute→Verify pipeline
         # via OrchestrationEngine.execute_autonomous(). For simple tasks, fall
         # through to the normal smart-routed single-agent ReAct loop.
-        if _is_complex_task(req.message) and event_bus is not None:
+        # Keep the default ``auto`` lane principal-first. The synchronous
+        # Plan->Execute->Verify path is reserved for an explicitly activated
+        # advanced autonomous mode; otherwise a complex request is handled by
+        # the principal, which may use ``spawn_task`` for independent work.
+        if _is_complex_task(req.message) and event_bus is not None and _advanced_force_autonomous:
             logger.info(
                 "Auto mode: complex task detected, routing to execute_autonomous | session=%s | query=%.80s",
                 req.session_id,
@@ -1943,7 +1974,7 @@ async def _run_pipeline(
         try:
             decision = await _decide_route(req.message, llm_client)
             # Auto mode needs an agent with tool support. Upgrade lightweight picks.
-            if decision.primary_agent in ("MICRO", "DOCUMENTER"):
+            if decision.primary_agent in ("MICRO", "DOCUMENTER") and not _is_fast_chat_turn(req.message):
                 logger.info(
                     "Auto mode upgraded agent %s -> CODER for tool autonomy",
                     decision.primary_agent,
@@ -2360,6 +2391,9 @@ async def _run_pipeline(
                 if evidence_requirement:
                     agent_context["_tool_evidence_requirement"] = evidence_requirement
 
+            fast_chat_turn = mode in {"ask", "fast"} or (
+                mode in {"auto", "agent"} and _is_fast_chat_turn(effective_message)
+            )
             agent_req = AgentRequest(
                 session_id=req.session_id,
                 query=effective_message,
@@ -2367,9 +2401,13 @@ async def _run_pipeline(
                 history=history,
                 project_path=project_path,
                 context=agent_context,
-                max_iterations=mode_max_iterations,
-                enable_thinking=mode_enable_thinking,
-                autonomous=bool(req.autonomous and mode not in {"ask", "fast"}),
+                max_iterations=2 if fast_chat_turn else mode_max_iterations,
+                enable_thinking=mode_enable_thinking and not fast_chat_turn,
+                autonomous=bool(
+                    req.autonomous
+                    and mode not in {"ask", "fast"}
+                    and not fast_chat_turn
+                ),
             )
             resolved_model_id = agent.resolve_model_id(agent_req)
             return agent.run(agent_req)
