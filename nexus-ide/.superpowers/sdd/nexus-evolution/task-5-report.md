@@ -2,18 +2,25 @@
 
 ## Evidence
 
-- `python -m pytest backend/tests/orchestrator/test_chat_complexity.py backend/tests/orchestrator/test_chat_modes.py -q` — **13 passed**.
-- `python -m py_compile backend/models/api.py backend/orchestrator/events.py backend/orchestrator/routes/chat.py` — **passed**.
-- The required endpoint test file was attempted. Normal startup is blocked by the repository disk guard (`free_percent=0.75%`, threshold `5.00%`). After the shared Task 7 syntax error was fixed, a guard-bypassed attempt reached the Task 4 provider policy and rejected the test's mocked Ollama because `NEXUS_ENABLE_OLLAMA` is disabled; all four endpoint cases failed during lifespan setup. No Task 4/7 files were modified by Task 5.
+- `python -m pytest backend/tests/orchestrator/test_chat_complexity.py backend/tests/orchestrator/test_chat_modes.py -q` — **13 passed** before the final shared Task 8 tool-registry edits. The added action-only and CHAT project-memory regressions compile successfully but cannot currently import while `backend/tools/registry.py` has an in-flight `IndentationError` at line 719.
+- `python -m py_compile backend/models/api.py backend/orchestrator/events.py backend/orchestrator/routes/chat.py backend/tests/orchestrator/test_chat_modes.py` — **passed** after the final safeguards.
+- The required endpoint test file was attempted. Normal startup was blocked by the repository disk guard (`free_percent=0.75%`, threshold `5.00%`). A guard-bypassed attempt later reached the provider policy and rejected the mocked Ollama because `NEXUS_ENABLE_OLLAMA` is disabled; all four endpoint cases failed during lifespan setup.
 
 ## Implemented
 
-- Added explicit `CHAT`, `ASSISTED`, and `MISSION` classification, including question hard overrides, `/mission`, and multi-phase intent detection.
-- Added execution-envelope routing metadata (`mode`, `run_id`, `correlation_id`, `provider`, `model`, `reason`) and `RunContext` propagation.
-- Emitted one routing SSE frame before agent/provider output and added event correlation metadata.
-- CHAT and ASSISTED invoke one registry agent without fallback-agent spawning; ASSISTED receives bounded iteration/evidence policy; CHAT disables project memory/tool context.
-- Removed the demo/fake provider response path and exposed structured provider/validation error metadata.
+- Explicit CHAT/ASSISTED/MISSION classification with hard informational-question override, `/mission`, action-only ASSISTED routing, and multi-phase mission detection.
+- Routing metadata (`mode`, `run_id`, `correlation_id`, `provider`, `model`, `reason`) and RunContext propagation; one routing frame precedes output.
+- CHAT is clamped to validated MICRO routing, invokes one registry agent without fallback-agent spawning, and avoids project-memory writes or completion markers when no project is selected.
+- ASSISTED receives bounded iterations/evidence policy. Provider stream errors are terminal structured failures with no fake answer/completion; provider-missing errors include envelope metadata.
+- Autonomous OrchestratorEvent-to-SSE frames carry correlation/run/mission metadata.
 
 ## Concerns
 
-- Endpoint evidence requires the shared test environment to provide sufficient disk headroom and explicitly enable the mocked Ollama provider; no Task 5 code is implicated by those setup blockers.
+- Full focused tests require the shared Task 8 tool-registry syntax repair, sufficient disk headroom, and explicit mocked Ollama enablement. No Task 4/6/7/8 files were modified by Task 5.
+
+## Commits
+
+- `7cdf479 feat(chat): separate execution modes`
+- `a4c71e9 fix(chat): structure provider stream errors`
+- `34a1740 fix(chat): tighten mode routing metadata`
+- `84c2ad8 fix(chat): guard mode completion state`
