@@ -51,7 +51,6 @@ from backend.orchestrator.routes.auth import router as auth_router
 from backend.orchestrator.routes.autonomous_improvement import (
     router as autonomous_improvement_router,
 )
-from backend.orchestrator.routes.mission import router as mission_router
 from backend.orchestrator.routes.thinking import router as thinking_router
 
 try:
@@ -71,6 +70,7 @@ from backend.orchestrator.routes.dashboard import router as dashboard_router
 from backend.orchestrator.routes.email import router as email_router
 from backend.orchestrator.routes.embeddings import router as embeddings_router
 from backend.orchestrator.routes.errors import router as errors_router
+from backend.orchestrator.routes.evolution import router as evolution_router
 from backend.orchestrator.routes.files import router as files_router
 from backend.orchestrator.routes.guardian import router as guardian_router
 from backend.orchestrator.routes.knowledge import router as knowledge_router
@@ -496,7 +496,7 @@ app.include_router(workflows_router, prefix="/api")
 app.include_router(sessions_router)
 app.include_router(swarm_router)
 app.include_router(advanced_modes_router, prefix="/api")
-app.include_router(mission_router, prefix="/api")
+app.include_router(evolution_router, prefix="/api")
 
 from backend.orchestrator.routes.meta import mission_websocket as _meta_ws  # noqa: E402
 

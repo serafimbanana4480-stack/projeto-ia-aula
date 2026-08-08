@@ -88,6 +88,9 @@ class SandboxResult:
     memory_used_mb: float = 0.0
     risk_level: RiskLevel = RiskLevel.SAFE
     sandbox_healthy: bool = True
+    snapshot_hash: str | None = None
+    dependencies_installed: list[str] = field(default_factory=list)
+    policy_violations: list[str] = field(default_factory=list)
 
 
 class DangerousCommandDetector:

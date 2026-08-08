@@ -1,0 +1,23 @@
+{
+  "timestamp": "2026-08-08T05:36:55.388262+00:00",
+  "before": {
+    "success_rate": 1.0,
+    "components": 7,
+    "failures_found": 3
+  },
+  "after": {
+    "success_rate": 1.0,
+    "components": 7,
+    "experiments_run": 3,
+    "promoted": [
+      "planner",
+      "coder",
+      "prompt"
+    ],
+    "rejected": []
+  },
+  "delta": {
+    "success_rate": 0.0,
+    "promotions": 3
+  }
+}
