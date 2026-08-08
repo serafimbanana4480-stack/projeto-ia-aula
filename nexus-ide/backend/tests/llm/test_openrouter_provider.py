@@ -50,6 +50,7 @@ async def test_interactive_slot_does_not_sleep_through_quota_cooldown(
     provider = OpenRouterProvider(api_key="test")
     provider._min_request_interval = 0.0
     monkeypatch.setattr(openrouter_module.time, "monotonic", lambda: 100.0)
+    await openrouter_module._process_quota_lock()
     openrouter_module._quota_cooldown_until = 160.0
 
     with pytest.raises(RuntimeError, match="refusing to queue"):
