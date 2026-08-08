@@ -92,6 +92,8 @@ class OpenRouterProvider:
         *,
         free_only: bool = False,
         catalog: Any = None,
+        validation_ttl_seconds: int = 600,
+        max_latency_ms: int = 30_000,
     ) -> None:
         # OpenRouter's canonical ``/api`` URL and legacy config values ending
         # in ``/api/v1`` without ever producing ``/v1/v1``.
@@ -110,8 +112,8 @@ class OpenRouterProvider:
         self.eligibility_reason = "not checked"
         self.quota_available = None
         self.validated_at = None
-        self._catalog = catalog
-        self._max_latency_ms = 30_000.0
+        self._validation_ttl_seconds = max(1, int(validation_ttl_seconds))
+        self._max_latency_ms = float(max_latency_ms)
         try:
             self._min_request_interval = min(
                 5.0,
@@ -204,7 +206,7 @@ class OpenRouterProvider:
                 and output_price == 0
                 and quota is True
                 and validated_at is not None
-                and now - float(validated_at) <= 600
+                and now - float(validated_at) <= self._validation_ttl_seconds
                 and (latency is None or float(latency) <= self._max_latency_ms)
             ):
                 self.quota_available = True
@@ -286,23 +288,11 @@ class OpenRouterProvider:
             # 3-D array of shape (1, n, dim). Use the batch API instead.
             return await ollama.embed(texts, model="nomic-embed-text")
         except Exception as exc:
-            # Fall back to hash-based embedding if Ollama is unavailable
-            logger.warning("Ollama embed unavailable, using fallback: %s", exc)
-            import hashlib
-            import math
-
-            def _hash_embed(text: str, dim: int = 384) -> list[float]:
-                seed = hashlib.sha256(text.encode("utf-8")).digest()
-                vec = []
-                r = 0
-                while len(vec) < dim:
-                    block = hashlib.sha256(seed + r.to_bytes(4, "big")).digest()
-                    vec.extend(((b / 255.0) - 0.5) * 2.0 for b in block)
-                    r += 1
-                vec = vec[:dim]
-                norm = math.sqrt(sum(v * v for v in vec))
-                return vec if norm == 0 else [v / norm for v in vec]
-
-            return [_hash_embed(t) for t in texts]
+            raise ProviderUnavailableError(
+                "Ollama embedding service is unavailable; no synthetic embedding was produced",
+                category="provider_unavailable",
+                provider="ollama",
+                model="nomic-embed-text",
+            ) from exc
         finally:
             await ollama.aclose()

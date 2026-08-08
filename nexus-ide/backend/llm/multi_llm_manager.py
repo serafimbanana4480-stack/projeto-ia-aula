@@ -241,6 +241,7 @@ class MultiLLMManager:
         self.requirement = requirement or FreeModelRequirement(max_latency_ms=max_latency_ms)
         self._selected_provider: str | None = None
 
+        self._selected_model: str | None = None
     def register_provider(self, name: str, provider: Any, priority: int = 1) -> None:
         """Register a provider with priority (lower = higher priority)."""
         self.providers[name] = provider
@@ -438,23 +439,33 @@ class MultiLLMManager:
     def _select_policy_model(self, model: str) -> str:
         if not self.free_only:
             return model
-        if self.policy_candidates or self.local_models is not None:
-            selection = self.policy.select(
-                self.requirement,
-                self.policy_candidates,
-                {name: get_breaker(name) for name in self.providers},
-                self.local_models,
+        candidates = list(self.policy_candidates)
+        for name, provider in self.providers.items():
+            catalog = getattr(provider, "_catalog", None)
+            if isinstance(catalog, dict):
+                catalog = catalog.get("models", catalog.get("data", []))
+            if catalog:
+                candidates.extend(catalog)
+        local_models = self.local_models
+        if local_models is None:
+            ollama = self.providers.get("ollama") or self.providers.get("local")
+            if ollama is not None:
+                local_models = getattr(ollama, "local_models", None)
+        selection = self.policy.select(
+            self.requirement,
+            candidates,
+            {name: get_breaker(name) for name in self.providers},
+            local_models,
+        )
+        if selection is None:
+            raise ProviderUnavailableError(
+                "No validated free provider satisfies the request",
+                category="eligibility",
+                model=model,
             )
-            if selection is None:
-                raise ProviderUnavailableError(
-                    "No validated free provider satisfies the request",
-                    category="eligibility",
-                    model=model,
-                )
-            self._selected_provider = selection.provider
-            return selection.model
-        return model
-
+        self._selected_provider = selection.provider
+        self._selected_model = selection.model
+        return selection.model
     async def chat_complete(
         self,
         model: str,
@@ -531,7 +542,8 @@ class MultiLLMManager:
         provider: str | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
-        target = provider or self.get_best_provider()
+        model = self._select_policy_model(model)
+        target = provider or self._selected_provider or self.get_best_provider()
         if target not in self.providers:
             raise ProviderUnavailableError(
                 f"Provider '{target}' not registered",
@@ -539,7 +551,6 @@ class MultiLLMManager:
                 provider=target,
                 model=model,
             )
-        model = self._select_policy_model(model)
         last_error: ProviderUnavailableError | None = None
         for name in self._attempt_names(target):
             breaker = get_breaker(name)
@@ -600,8 +611,8 @@ class MultiLLMManager:
         provider: str | None = None,
         **kwargs: Any,
     ) -> list[list[float]]:
-        target = provider or self.get_best_provider()
         model = self._select_policy_model(model)
+        target = provider or self._selected_provider or self.get_best_provider()
         if target not in self.providers:
             raise ProviderUnavailableError(
                 f"Provider '{target}' not registered",
@@ -657,8 +668,8 @@ class MultiLLMManager:
             return []
         if not model:
             raise ValueError("MultiLLMManager.batch_complete requires an explicit model")
-        target = provider or self.get_best_provider()
         model = self._select_policy_model(model)
+        target = provider or self._selected_provider or self.get_best_provider()
         if target not in self.providers:
             raise ProviderUnavailableError(
                 f"Provider '{target}' not registered",
@@ -715,6 +726,8 @@ class MultiLLMManager:
         **kwargs: Any,
     ) -> str:
         model = self._select_policy_model(model)
+        if self.free_only and self._selected_provider:
+            providers = [self._selected_provider]
         valid_providers = self._attempt_names(providers[0]) if providers else []
         valid_providers = [name for name in valid_providers if name in providers]
         if not valid_providers:
@@ -780,6 +793,8 @@ class MultiLLMManager:
         **kwargs: Any,
     ) -> str:
         model = self._select_policy_model(model)
+        if self.free_only and self._selected_provider:
+            providers = [self._selected_provider]
         valid_providers: list[str] = []
         seen: set[int] = set()
         for name in providers:

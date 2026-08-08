@@ -401,7 +401,7 @@ def _parse_openrouter(payload: dict[str, Any]) -> list[ModelInfo]:
                     output_price_per_1m=_price_to_per_1m(pricing.get("completion")),
                     capabilities=caps,
                     description=str(entry.get("description") or "")[:280],
-                    quota_available=entry.get("quota_available", True),
+                    quota_available=entry.get("quota_available"),
                     latency_ms=entry.get("latency_ms"),
                     validated_at=validated_at,
                 )

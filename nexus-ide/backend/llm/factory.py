@@ -598,8 +598,8 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             "nexus_enable_ollama",
             getattr(settings, "nexus_enable_ollama", os.environ.get("NEXUS_ENABLE_OLLAMA", "")),
         )
-    ) or preferred_provider in {"ollama", "local"}
-    if ollama_enabled:
+    ) 
+    if ollama_enabled and _local_models_ready(values.get("local_models")):
         ollama_provider = OllamaProvider(base_url=_setting_value(settings, values, "ollama_host", ""))
         manager.register_provider("ollama", ollama_provider, priority=priority_for("ollama", 4))
         manager.register_provider("local", ollama_provider, priority=priority_for("local", 4))
@@ -701,6 +701,8 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
                 api_key=openrouter_api_key,
                 free_only=free_only,
                 catalog=policy_candidates if isinstance(policy_candidates, list) else None,
+                validation_ttl_seconds=int(validation_ttl),
+                max_latency_ms=int(max_latency),
             ),
             priority=priority_for("openrouter", 3),
         )
@@ -788,9 +790,14 @@ def create_llm_client(**overrides: Any) -> Any:
         return ResilientLLMProvider(primary, fallbacks, free_only=free_only)
 
     if provider == "dev":
+        if free_only:
+            raise ProviderUnavailableError(
+                "Dev provider is simulation-only and cannot complete a real run",
+                category="simulation",
+                provider="dev",
+            )
         logger.info("Using DevProvider (zero-cost development mode)")
         return DevProvider()
-
     if provider == "openai":
         from backend.llm.openai_provider import OpenAIProvider
 
@@ -883,9 +890,7 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "openrouter":
         from backend.llm.openrouter_provider import OpenRouterProvider
 
-        api_key = (
-            _setting_value(settings, effective_overrides, "openrouter_api_key", "")
-        )
+        api_key = _setting_value(settings, effective_overrides, "openrouter_api_key", "")
         if not api_key:
             logger.warning("OPENROUTER_API_KEY not set — requests will fail")
         logger.info("Using OpenRouter provider")
@@ -895,6 +900,13 @@ def create_llm_client(**overrides: Any) -> Any:
             ),
             api_key=api_key,
             free_only=free_only,
+            catalog=effective_overrides.get("policy_candidates"),
+            validation_ttl_seconds=int(
+                _setting_value(settings, effective_overrides, "provider_validation_ttl_seconds", 600)
+            ),
+            max_latency_ms=int(
+                _setting_value(settings, effective_overrides, "max_provider_latency_ms", 30_000)
+            ),
         )
 
     if provider == "opencode_go":
