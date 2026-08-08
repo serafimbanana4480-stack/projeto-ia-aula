@@ -35,6 +35,7 @@ from enum import StrEnum
 from typing import Any
 
 from backend.agents.base import AgentBase
+from backend.core.disk_guard import require_disk_headroom
 from backend.config.settings import get_settings
 from backend.core.conversation_log import get_conversation_logger
 from backend.orchestrator.agent_pool import AgentPool, get_agent_pool
@@ -639,6 +640,8 @@ class OrchestrationEngine:
 
         Returns the final OrchestrationResult with all verification data.
         """
+        require_disk_headroom(project_path)
+
         # Phase 1: PLAN (auto-approve — autonomous mode skips user approval)
         plan = await self.create_plan(
             objective=objective,

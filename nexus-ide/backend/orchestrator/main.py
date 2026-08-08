@@ -103,6 +103,43 @@ from backend.orchestrator.routes.wizard import router as wizard_router
 from backend.orchestrator.routes.workers import router as workers_router
 from backend.orchestrator.routes.workspace import router as workspace_router
 from backend.swarm.api.routes import router as swarm_router
+from backend.core.disk_guard import (
+    WorkerOwnershipGuard,
+    disk_pressure_status,
+    require_disk_headroom,
+)
+
+_WORKER_OWNERSHIP = WorkerOwnershipGuard()
+
+
+def _runtime_root() -> str:
+    return str(__file__)
+
+
+def _disk_pressure_payload() -> dict[str, Any]:
+    return disk_pressure_status(_runtime_root())
+
+
+def _claim_worker(name: str, owned: set[str]) -> bool:
+    if not _WORKER_OWNERSHIP.acquire(name):
+        logger.warning("Background service ownership already held: %s", name)
+        return False
+    owned.add(name)
+    return True
+
+
+def _release_worker(name: str, owned: set[str]) -> None:
+    if name in owned:
+        _WORKER_OWNERSHIP.release(name)
+        owned.discard(name)
+
+
+async def _cancel_owned_task(task: asyncio.Task[Any] | None) -> None:
+    if task is None or task.done():
+        return
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +190,9 @@ def _log_code_fingerprint() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create long-lived singletons and guarantee clean shutdown."""
+    owned_workers: set[str] = set()
+    app.state.worker_ownership = owned_workers
+
     from backend.core.auto_correction import get_auto_correction_loop
     from backend.llm import create_llm_client
     from backend.observability.advanced_logging import get_structured_logger
@@ -190,6 +230,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         source="startup",
         extra={"recovered_count": len(recovered_runs)},
     )
+    # Check the reserve before provider construction or any background start.
+    disk_snapshot = require_disk_headroom(_runtime_root())
+    app.state.disk_pressure = disk_snapshot.to_dict()
+
 
     # Background services are individually opt-out via NEXUS_ENABLE_<SERVICE>=false.
     # They default ON in every environment, including development: NEXUS is a
@@ -372,40 +416,45 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from backend.core.background_workers import BackgroundWorkerManager
 
     worker_manager = BackgroundWorkerManager() if enable_workers else None
-    if worker_manager:
+    workers_owned = bool(worker_manager and _claim_worker("background_workers", owned_workers))
+    if worker_manager and workers_owned:
         await worker_manager.start_all()
-    app.state.worker_manager = worker_manager
-    if worker_manager:
+    app.state.worker_manager = worker_manager if workers_owned else None
+    if worker_manager and workers_owned:
         logger.info("Background workers started")
 
     from backend.agents.dashboard_agent import DashboardAgent
 
     dashboard = DashboardAgent()
     app.state.dashboard_agent = dashboard
-    monitor_task = asyncio.create_task(dashboard.monitor_loop()) if enable_dashboard else None
-    summary_task = asyncio.create_task(dashboard.session_summary_loop()) if enable_dashboard else None
+    dashboard_owned = enable_dashboard and _claim_worker("dashboard_agent", owned_workers)
+    monitor_task = asyncio.create_task(dashboard.monitor_loop()) if dashboard_owned else None
+    summary_task = asyncio.create_task(dashboard.session_summary_loop()) if dashboard_owned else None
     app.state.dashboard_monitor_task = monitor_task
     app.state.dashboard_summary_task = summary_task
-    if enable_dashboard:
+    if dashboard_owned:
         logger.info("Dashboard agent loops started")
+
 
     from backend.agents.guardian import NexusGuardianAgent
 
     guardian = NexusGuardianAgent()
-    guardian_task = await guardian.start() if enable_guardian else None
+    guardian_owned = enable_guardian and _claim_worker("guardian_agent", owned_workers)
+    guardian_task = await guardian.start() if guardian_owned else None
     app.state.guardian_agent = guardian
     app.state.guardian_task = guardian_task
-    if enable_guardian:
+    if guardian_owned:
         logger.info("Guardian agent loop started")
 
     auto_correction = get_auto_correction_loop(lifecycle_manager=lifecycle)
-    if enable_auto_correct:
+    auto_correction_owned = enable_auto_correct and _claim_worker("auto_correction", owned_workers)
+    if auto_correction_owned:
         await auto_correction.start_monitoring()
     app.state.auto_correction = auto_correction
-    if enable_auto_correct:
+    if auto_correction_owned:
         logger.info("Auto-correction loop started")
-
     from backend.orchestrator.autonomous_execution_engine import AutonomousExecutionEngine
+
 
     exec_engine = AutonomousExecutionEngine(max_concurrent=5)
     app.state.autonomous_execution_engine = exec_engine
@@ -415,10 +464,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from backend.core.continuous_improvement import get_continuous_improvement_loop
 
     improvement_loop = get_continuous_improvement_loop()
-    if enable_improvement:
+    improvement_owned = enable_improvement and _claim_worker("continuous_improvement", owned_workers)
+    if improvement_owned:
         await improvement_loop.start()
     app.state.improvement_loop = improvement_loop
-    if enable_improvement:
+    if improvement_owned:
         logger.info("Continuous improvement loop started")
 
     from backend.orchestrator.self_improvement_loop import SelfImprovementLoop
@@ -437,10 +487,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         min_confidence=0.7,
         analysis_interval=3600,
     )
-    if enable_self_healing:
+    healer_owned = enable_self_healing and _claim_worker("self_healing", owned_workers)
+    if healer_owned:
         await healer.start()
     app.state.healer = healer
-    if enable_self_healing:
+    if healer_owned:
         logger.info("Self-healing engine started (auto_apply=%s, dry_run=%s)", auto_apply, settings.environment == "development")
 
     from backend.config.settings import get_autonomous_improvement_config
@@ -456,19 +507,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         registry=registry,
         event_bus=app.state.event_bus,
     )
-    if enable_ai_orchestrator:
+    ai_owned = enable_ai_orchestrator and _claim_worker("ai_orchestrator", owned_workers)
+    if ai_owned:
         await ai_orchestrator.start()
     app.state.ai_orchestrator = ai_orchestrator
-    if enable_ai_orchestrator:
+    if ai_owned:
         logger.info("Autonomous improvement orchestrator started (interval=%sm)", ai_config.get("cycle_interval_minutes", 30))
-
     from backend.orchestrator.auto_trigger_engine import AutoTriggerEngine
 
     auto_trigger = AutoTriggerEngine(orchestrator=ai_orchestrator)
-    if enable_auto_trigger:
+    auto_trigger_owned = enable_auto_trigger and _claim_worker("auto_trigger", owned_workers)
+    if auto_trigger_owned:
         await auto_trigger.start()
     app.state.auto_trigger = auto_trigger
-    if enable_auto_trigger:
+    if auto_trigger_owned:
         logger.info("Auto trigger engine started (rules=%d)", len(AutoTriggerEngine.TRIGGER_RULES))
 
     from pathlib import Path
@@ -487,48 +539,42 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from backend.orchestrator.session_lifecycle import SessionLifecycleManager
 
     session_lifecycle = SessionLifecycleManager(event_bus=app.state.event_bus)
-    if enable_session_gc:
+    session_gc_owned = enable_session_gc and _claim_worker("session_gc", owned_workers)
+    if session_gc_owned:
         session_lifecycle.start()
     app.state.session_lifecycle = session_lifecycle
-    if enable_session_gc:
-        logger.info("Session lifecycle GC started (ttl=%dh, interval=%dmin)", session_lifecycle.ttl_hours, session_lifecycle.gc_interval_minutes)
+    if session_gc_owned:
+        logger.info(
+            "Session lifecycle GC started (ttl=%dh, interval=%dmin)",
+            session_lifecycle.ttl_hours,
+            session_lifecycle.gc_interval_minutes,
+        )
 
     logger.info("NEXUS orchestrator ready (provider=%s)", settings.llm_provider)
     try:
         yield
     finally:
-        if monitor_task:
-            monitor_task.cancel()
-        if summary_task:
-            summary_task.cancel()
-        if enable_guardian:
+        await _cancel_owned_task(monitor_task)
+        await _cancel_owned_task(summary_task)
+        if guardian_owned:
             await guardian.stop()
         await get_cancellation_registry().shutdown()
-        if enable_auto_correct:
+        if auto_correction_owned:
             await auto_correction.stop_monitoring()
-        healer = getattr(app.state, "healer", None)
-        if healer:
+        if healer_owned:
             await healer.stop()
-        ai_orchestrator = getattr(app.state, "ai_orchestrator", None)
-        if ai_orchestrator:
+        if ai_owned:
             await ai_orchestrator.stop()
-        auto_trigger = getattr(app.state, "auto_trigger", None)
-        if auto_trigger:
+        if auto_trigger_owned:
             await auto_trigger.stop()
-        improvement_loop = getattr(app.state, "improvement_loop", None)
-        if improvement_loop:
+        if improvement_owned:
             await improvement_loop.stop()
-        logger.info("Autonomous execution engine shut down")
-        session_lifecycle = getattr(app.state, "session_lifecycle", None)
-        if session_lifecycle:
+        if session_gc_owned:
             await session_lifecycle.stop()
-        worker_manager = getattr(app.state, "worker_manager", None)
-        if worker_manager:
+        if workers_owned and worker_manager:
             await worker_manager.stop_all()
-        await asyncio.gather(
-            *(task for task in (monitor_task, summary_task, guardian_task) if task is not None),
-            return_exceptions=True,
-        )
+        for name in tuple(owned_workers):
+            _release_worker(name, owned_workers)
         from backend.orchestrator.llm_client_lifecycle import close_all_llm_clients
         await close_all_llm_clients(app)
 
@@ -623,8 +669,10 @@ async def health(request: Request) -> dict[str, Any]:
     # enforces authentication; this compatibility form exposes only the same
     # bounded component statuses needed by the local runtime dashboard.
     if request.query_params.get("deep", "").lower() in {"1", "true", "yes"}:
-        return await HealthChecker(request.app.state).check_all()
-    return {"status": "ok"}
+        data = await HealthChecker(request.app.state).check_all()
+        data["disk_pressure"] = _disk_pressure_payload()
+        return data
+    return {"status": "ok", "disk_pressure": _disk_pressure_payload()}
 
 
 @app.get("/health/deep")
@@ -633,7 +681,9 @@ async def health_deep(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     checker = HealthChecker(request.app.state)
-    return await checker.check_all()
+    data = await checker.check_all()
+    data["disk_pressure"] = _disk_pressure_payload()
+    return data
 
 
 @app.get("/api/sessions/{session_id}/history")

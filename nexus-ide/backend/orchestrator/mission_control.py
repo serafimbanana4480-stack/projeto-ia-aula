@@ -53,6 +53,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from backend.core.disk_guard import require_disk_headroom
 
 logger = logging.getLogger(__name__)
 
@@ -1470,6 +1471,7 @@ class MissionReport:
         return REPORTS_DIR / f"nexus-run-{stamp}.md"
 
     def write(self) -> Path | None:
+        require_disk_headroom(REPORTS_DIR.parent)
         try:
             REPORTS_DIR.mkdir(parents=True, exist_ok=True)
             p = self.path()

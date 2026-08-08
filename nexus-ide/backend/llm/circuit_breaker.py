@@ -7,8 +7,8 @@ States:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -25,25 +25,25 @@ class CircuitState(StrEnum):
 
 @dataclass
 class CircuitBreaker:
-    """Thread-safe circuit breaker for async operations."""
-    
+    """Thread-safe circuit breaker usable from independently-created loops."""
+
     name: str
     failure_threshold: int = 3
     cooldown_seconds: float = 30.0
     half_open_max_calls: int = 1
-    
+
     _state: CircuitState = field(default=CircuitState.CLOSED)
     _failures: int = 0
     _last_failure_time: float = 0.0
     _half_open_calls: int = 0
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+
     @property
     def state(self) -> CircuitState:
         return self._state
-    
+
     async def is_call_permitted(self) -> bool:
-        async with self._lock:
+        with self._lock:
             if self._state == CircuitState.CLOSED:
                 return True
             if self._state == CircuitState.OPEN:
@@ -59,17 +59,17 @@ class CircuitBreaker:
                     return True
                 return False
             return False
-    
+
     async def record_success(self) -> None:
-        async with self._lock:
+        with self._lock:
             if self._state == CircuitState.HALF_OPEN:
                 logger.info("Circuit breaker [%s]: HALF_OPEN → CLOSED (recovery successful)", self.name)
             self._state = CircuitState.CLOSED
             self._failures = 0
             self._half_open_calls = 0
-    
+
     async def record_failure(self) -> None:
-        async with self._lock:
+        with self._lock:
             self._failures += 1
             self._last_failure_time = time.monotonic()
             if self._state == CircuitState.HALF_OPEN:
@@ -79,36 +79,50 @@ class CircuitBreaker:
                 if self._state != CircuitState.OPEN:
                     logger.warning(
                         "Circuit breaker [%s]: CLOSED → OPEN (%d failures)",
-                        self.name, self._failures
+                        self.name,
+                        self._failures,
                     )
                 self._state = CircuitState.OPEN
-    
+
     def snapshot(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "state": self._state.value,
-            "failures": self._failures,
-            "last_failure_time": self._last_failure_time,
-        }
+        with self._lock:
+            return {
+                "name": self.name,
+                "state": self._state.value,
+                "failures": self._failures,
+                "last_failure_time": self._last_failure_time,
+            }
 
 
-# Global registry
 _breakers: dict[str, CircuitBreaker] = {}
+_registry_lock = threading.RLock()
 
 
 def get_breaker(name: str, **kwargs: Any) -> CircuitBreaker:
-    if name not in _breakers:
-        _breakers[name] = CircuitBreaker(name=name, **kwargs)
-    return _breakers[name]
+    with _registry_lock:
+        if name not in _breakers:
+            _breakers[name] = CircuitBreaker(name=name, **kwargs)
+        return _breakers[name]
 
 
 def all_breakers() -> dict[str, dict[str, Any]]:
-    return {name: cb.snapshot() for name, cb in _breakers.items()}
+    with _registry_lock:
+        return {name: cb.snapshot() for name, cb in _breakers.items()}
 
 
 def reset_breaker(name: str) -> None:
     """Manually reset a circuit breaker (admin action)."""
-    if name in _breakers:
-        _breakers[name]._state = CircuitState.CLOSED
-        _breakers[name]._failures = 0
+    with _registry_lock:
+        breaker = _breakers.get(name)
+    if breaker is not None:
+        with breaker._lock:
+            breaker._state = CircuitState.CLOSED
+            breaker._failures = 0
+            breaker._half_open_calls = 0
         logger.info("Circuit breaker [%s] manually reset", name)
+
+
+def reset_all_breakers() -> None:
+    """Clear all global breaker state for lifespan/test teardown."""
+    with _registry_lock:
+        _breakers.clear()

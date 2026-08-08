@@ -28,6 +28,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.agents.base import AgentBase
+from backend.core.disk_guard import require_disk_headroom
 from backend.config.settings import get_model_config
 from backend.core.agent_state import AgentStateStore
 from backend.orchestrator.dependency_graph import (
@@ -222,6 +223,8 @@ class MetaOrchestrator:
         mission = self._get_mission(mission_id)
         if mission is None:
             raise ValueError(f"Mission {mission_id} not found")
+        require_disk_headroom(mission.metadata.get("project_path", "."))
+
 
         mission.status = MissionStatus.RUNNING
         await self._persist_mission(mission)
