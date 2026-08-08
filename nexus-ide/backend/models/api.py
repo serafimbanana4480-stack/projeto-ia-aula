@@ -56,6 +56,9 @@ EventType = Literal[
     "error",
     "metric",
     "done",
+    "execution_state",
+    "execution_error",
+    "execution_completed",
     # Mission Control. These carry the *why* of a run — the interpreted
     # objective, the measured project state, the plan, and the contract each
     # agent was spawned under. Emitted before any agent exists, so the client
@@ -259,6 +262,7 @@ class StreamEvent(BaseModel):
     agent: AgentName | None = None
     content: str | None = None
     routing: RoutingDecision | None = None
+    execution: dict[str, Any] | None = None
     # Tool-call events (type in tool_call / tool_result / tool_error)
     tool_name: str | None = None
     tool_args: dict[str, Any] | None = None

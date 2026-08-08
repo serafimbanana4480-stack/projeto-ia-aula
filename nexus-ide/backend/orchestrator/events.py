@@ -45,6 +45,10 @@ class EventType(StrEnum):
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
     TASK_CANCELLED = "task_cancelled"
+    ROUTING = "routing"
+    EXECUTION_STATE = "execution_state"
+    EXECUTION_ERROR = "execution_error"
+    EXECUTION_COMPLETED = "execution_completed"
 
     # Streaming
     TOKEN = "token"
