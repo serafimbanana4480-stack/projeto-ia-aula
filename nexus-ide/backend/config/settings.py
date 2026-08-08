@@ -193,7 +193,12 @@ class Settings(BaseSettings):
     csp_policy: str = Field(default="")
 
     # CORS - Comma-separated string for environment variable
-    allowed_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000")
+    allowed_origins: str = Field(
+        default=(
+            "http://localhost:3000,http://127.0.0.1:3000,"
+            "http://localhost:3001,http://127.0.0.1:3001"
+        )
+    )
 
     # JWT Authentication
     jwt_secret: str = Field(default="development-jwt-secret-change-in-production")
