@@ -43,7 +43,7 @@ from backend.orchestrator.cancellation_registry import CancellationRegistry
 from backend.orchestrator.dependency_graph import ExecutionPlan, TaskNode, TaskPriority
 from backend.orchestrator.events import EventBus, EventType, OrchestratorEvent
 from backend.orchestrator.plan_creator import PlanCreator
-from backend.orchestrator.plan_validation import PlanningResult
+from backend.orchestrator.plan_validation import PlanningResult, validate_execution_plan
 from backend.orchestrator.plan_executor import (
     PlanExecutor,
     extract_tool_errors,
@@ -253,6 +253,22 @@ class OrchestrationEngine:
             self._state[session_id] = OrchestrationState.PLANNING_BLOCKED
             logger.warning("Planning blocked for session %s: %s", session_id, result.error)
             return result
+        if result.source != "legacy":
+            validation = validate_execution_plan(
+                result.plan,
+                snapshot or {"absolute_path": project_path},
+                PlanCreator.MAX_PLAN_STEPS,
+            )
+            if not validation.valid:
+                result = PlanningResult(
+                    status="blocked",
+                    source=result.source,
+                    error="; ".join(validation.errors),
+                    deterministic_proposal=result.deterministic_proposal,
+                )
+                self._planning_results[session_id] = result
+                self._state[session_id] = OrchestrationState.PLANNING_BLOCKED
+                return result
 
         plan = result.plan
         self._plans[plan.plan_id] = plan

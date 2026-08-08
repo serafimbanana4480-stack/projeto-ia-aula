@@ -15,3 +15,10 @@
 - `python -m pytest backend/tests/orchestrator/test_plan_validation.py backend/tests/orchestrator/test_plan_creator.py backend/tests/orchestrator/test_engine.py -q` — **52 passed**.
 
 Task 7 does not modify chat, mission snapshot, tools, frontend, or free-model policy files.
+
+## Capability follow-up
+
+- Deterministic tasks now derive tool scopes from the live `AgentCapability` matrix, use registered model values, and use the DEBUGGER's permitted `coder` model.
+- `validate_execution_plan()` invokes `validate_agent_contract()` for every non-legacy task.
+- `OrchestrationEngine.create_plan()` revalidates non-legacy `PlanningResult` values before approval or execution and transitions invalid results to `PLANNING_BLOCKED`.
+- Follow-up module `py_compile` passed. The focused pytest rerun was blocked by an unrelated concurrent Task 8 `backend/tools/registry.py` syntax error at line 1003; the previously recorded 52-test pass remains valid before that race.
