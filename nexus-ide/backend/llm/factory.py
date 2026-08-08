@@ -276,8 +276,10 @@ class ResilientLLMProvider:
                 )
             ):
                 continue
-            emitted_output = False
             try:
+                validator = getattr(provider, "validate_model", None)
+                if self.free_only and callable(validator):
+                    validator(model)
                 async for token in provider.chat_stream(model, messages, **kwargs):
                     if token:
                         emitted_output = True
@@ -920,6 +922,7 @@ def create_llm_client(**overrides: Any) -> Any:
                 settings, effective_overrides, "openrouter_base_url", "https://openrouter.ai/api"
             ),
             api_key=api_key,
+            free_only=free_only,
             catalog=effective_overrides.get("policy_candidates"),
             validation_ttl_seconds=int(
                 _setting_value(settings, effective_overrides, "provider_validation_ttl_seconds", 600)
