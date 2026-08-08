@@ -288,6 +288,7 @@ async def get_available_reports() -> list[dict[str, Any]]:
             "size_kb": 520,
         },
     ]
+@router.post("/analytics/reports/generate")
 
 
 async def generate_report(payload: dict, request: Request) -> dict[str, Any]:

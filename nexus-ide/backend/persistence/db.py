@@ -432,8 +432,9 @@ def _seed_default_user() -> None:
     ``NEXUS_DEFAULT_PASSWORD`` environment variables, falling back to
     ``admin@nexus-ide.com`` / ``admin123`` in development.
     """
+    import bcrypt
+    import os
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
             if row and row[0] > 0:
                 logger.debug("Users already exist, skipping default user seed")
