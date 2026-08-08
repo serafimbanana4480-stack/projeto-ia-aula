@@ -170,7 +170,7 @@ class FreeModelPolicy:
         candidates: Iterable[Any],
         breakers: Mapping[str, Any] | None = None,
         local_models: Any = None,
-    ):
+    ) -> ProviderSelection | None:
         breakers = breakers or {}
         normalized = [_eligibility(item) for item in candidates]
         local = self._local_eligibilities(local_models)
