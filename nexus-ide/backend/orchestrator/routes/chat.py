@@ -1151,6 +1151,8 @@ async def _stream_autonomous_execution(
         _cancelled = True
         yield _sse(StreamEvent(type="done"))
         raise
+    except DiskPressureError:
+        raise
     except Exception as exc:
         logger.warning("execute_autonomous failed: %s", exc)
         text = str(exc)
