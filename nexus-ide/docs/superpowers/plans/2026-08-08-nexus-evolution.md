@@ -634,11 +634,11 @@ Expected: PASS with no network or live quota dependency.
 
 Update `frontend/e2e/evolution.spec.ts` to exercise routing label, mission brief search, blocked quota state, evidence, and cancel/replan controls against deterministic backend fixtures. Start the actual frontend/backend test services only after disk/provider gates pass. If Playwright browsers are missing, record the exact install/runtime failure and leave the test result `not_validated`; do not convert it to a pass.
 
-- [ ] **Step 6: Run frontend tests**
+- [ ] **Step 6: Run focused frontend tests**
 
-Run from `frontend`: `npm test -- --run` and, when the browser runtime is available, `npx playwright test e2e/evolution.spec.ts`.
+Run from `frontend`: `npm test -- --run tests/components/dashboard/MissionPanel.test.tsx tests/stores/missionStore.test.ts` and, when the browser runtime is available, `npx playwright test e2e/evolution.spec.ts`.
 
-Expected: Vitest PASS; Playwright PASS only when the browser actually launches and exercises the scenarios.
+Expected: the focused Vitest tests PASS; Playwright PASS only when the browser actually launches and exercises the scenarios. The full frontend suite remains a Task 12 verification command.
 
 - [ ] **Step 7: Commit**
 
