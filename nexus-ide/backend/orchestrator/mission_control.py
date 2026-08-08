@@ -79,6 +79,9 @@ MAX_SCAN_SECONDS = 12.0
 # agents start colliding on the same files and burning context re-reading each
 # other's half-written edits.
 MIN_CONCURRENT_AGENTS = 3
+MAX_RECENT_LOG_FILES = 8
+MAX_RECENT_LOG_BYTES = 64_000
+MAX_GIT_PROBE_SECONDS = 2
 MAX_CONCURRENT_AGENTS = 6
 
 
@@ -357,6 +360,8 @@ class ProjectIntelligence:
         for manifest in (self.root / "package.json", self.root / "frontend" / "package.json"):
             try:
                 data = json.loads(manifest.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("manifest root must be an object")
             except FileNotFoundError:
                 continue
             except (OSError, ValueError) as exc:
@@ -379,6 +384,9 @@ class ProjectIntelligence:
             snap.unknowns.append("Python commands from pyproject.toml")
             snap.notes.append(f"pyproject.toml ilegível: {exc}")
             data = {}
+        if not isinstance(data, dict):
+            snap.unknowns.append("Python commands from pyproject.toml")
+            data = {}
         if snap.test_files and (
             "pytest" in snap.test_frameworks
             or pyproject.is_file()
@@ -386,7 +394,11 @@ class ProjectIntelligence:
         ):
             add("test", "python -m pytest")
         if data:
-            deps = str(data.get("project", {}).get("optional-dependencies", {})).lower()
+            project = data.get("project", {})
+            if not isinstance(project, dict):
+                snap.unknowns.append("Python commands from pyproject.toml")
+                project = {}
+            deps = str(project.get("optional-dependencies", {})).lower()
             if "pytest" in deps or (self.root / "pytest.ini").exists():
                 add("test", "python -m pytest")
             if "ruff" in deps:
@@ -436,19 +448,22 @@ class ProjectIntelligence:
 
     def _read_recent_errors(self, snap: ProjectSnapshot) -> None:
         candidates: list[Path] = []
-        for path in sorted(self.root.glob("**/*.log"))[:20]:
+        for path in self.root.rglob("*.log"):
             if any(part in SKIP_DIRS for part in path.relative_to(self.root).parts):
                 continue
             candidates.append(path)
+            if len(candidates) >= MAX_RECENT_LOG_FILES:
+                break
+        candidates.sort()
         errors: list[str] = []
-        for path in candidates[:8]:
+        for path in candidates:
             try:
                 with path.open("r", encoding="utf-8", errors="ignore") as handle:
                     try:
-                        handle.seek(max(0, path.stat().st_size - 64_000))
+                        handle.seek(max(0, path.stat().st_size - MAX_RECENT_LOG_BYTES))
                     except OSError:
                         pass
-                    lines = handle.read(64_000).splitlines()
+                    lines = handle.read(MAX_RECENT_LOG_BYTES).splitlines()
             except OSError:
                 snap.unknowns.append(f"recent errors from {path.relative_to(self.root)}")
                 continue
@@ -460,7 +475,12 @@ class ProjectIntelligence:
     def _classify_facts(self, snap: ProjectSnapshot) -> None:
         snap.facts = [
             SnapshotFact(snap.absolute_path, "measured", "Path.resolve", "resolved project directory"),
-            SnapshotFact(snap.languages, "measured", "filesystem walk", f"files={snap.file_count}"),
+            SnapshotFact(
+                snap.languages,
+                "unknown" if "filesystem scan" in snap.unknowns else "measured",
+                "filesystem walk",
+                f"files={snap.file_count}",
+            ),
             SnapshotFact(
                 snap.commands,
                 "unknown" if any(item.startswith("commands") for item in snap.unknowns)
@@ -534,7 +554,9 @@ class ProjectIntelligence:
                 if snap.file_count >= MAX_SCAN_FILES:
                     snap.truncated = True
                     break
-
+                if (time.monotonic() - started) > MAX_SCAN_SECONDS:
+                    snap.truncated = True
+                    return
                 ext = Path(name).suffix.lower()
                 lang = self.LANG_BY_EXT.get(ext)
                 if lang:
@@ -567,8 +589,6 @@ class ProjectIntelligence:
                     if hits and len(todo_samples) < 10:
                         rel = str(rel_dir / name) if str(rel_dir) != "." else name
                         todo_samples.append(f"{rel} ({hits})")
-
-        snap.todo_samples = todo_samples
         self._detect_test_frameworks(snap)
 
     #: Extensions a test file can actually have. Without this, the name-only
@@ -636,7 +656,7 @@ class ProjectIntelligence:
                     cwd=self.root,
                     capture_output=True,
                     text=True,
-                    timeout=8,
+                    timeout=MAX_GIT_PROBE_SECONDS,
                     check=False,
                 )
                 return out.stdout.strip() if out.returncode == 0 else None
