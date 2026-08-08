@@ -91,3 +91,23 @@ async def test_explicit_ollama_selection_enables_the_local_provider(
     assert {"ollama", "local"}.issubset(manager.providers)
     assert manager.get_best_provider() == "ollama"
     await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_single_provider_ollama_selection_is_an_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Settings provider dropdown must be sufficient for local chat."""
+    settings = _settings()
+    settings.multi_llm_enabled = False
+    settings.llm_provider = "ollama"
+    settings.nexus_enable_ollama = False
+    settings.free_only = False
+    monkeypatch.setattr(factory, "get_settings", lambda: settings)
+    monkeypatch.setattr(factory, "_load_runtime_overrides", lambda: {})
+
+    client = factory.create_llm_client()
+    assert client.__class__.__name__ == "ResilientLLMProvider"
+    assert client.primary.__class__.__name__ == "OllamaProvider"
+    assert client.provider_name == "ollama"
+    await client.aclose()

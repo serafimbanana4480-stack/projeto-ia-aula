@@ -1344,6 +1344,16 @@ export interface MCPConnector {
   last_test_status: "untested" | "ok" | "warning" | "error";
   last_test_detail: string;
   last_tested_at: number | null;
+  tools?: Array<{ name: string; title?: string; calls?: number; success_rate?: number | null }>;
+  tool_count?: number;
+  calls_today?: number;
+  success_rate?: number | null;
+  latency_ms?: number | null;
+  last_activity_tool?: string;
+  last_activity_at?: number | null;
+  source_root?: string;
+  health_score?: number | null;
+  index_stats?: Record<string, number> | null;
 }
 
 export interface MCPConnectorsSummary {
@@ -1353,6 +1363,27 @@ export interface MCPConnectorsSummary {
   warning: number;
   error: number;
   untested: number;
+  calls_today?: number;
+  avg_latency_ms?: number | null;
+  last_health_check?: number | null;
+}
+
+export interface MCPActivityItem {
+  at: number;
+  connector_id: string;
+  connector: string;
+  tool: string;
+  status: "untested" | "ok" | "warning" | "error";
+  latency_ms: number | null;
+  detail: string;
+}
+
+export interface MCPOverview {
+  connectors: MCPConnector[];
+  summary: MCPConnectorsSummary;
+  activity: MCPActivityItem[];
+  generated_at: number;
+  data_source: string;
 }
 
 export async function getMCPTemplates(): Promise<MCPTemplateSummary[]> {
@@ -1372,6 +1403,10 @@ export async function getMCPConnectors(): Promise<{ connectors: MCPConnector[]; 
   return readJson<{ connectors: MCPConnector[]; summary: MCPConnectorsSummary }>(
     await authenticatedFetch(apiUrl("/api/mcp/connectors")),
   );
+}
+
+export async function getMCPOverview(): Promise<MCPOverview> {
+  return readJson<MCPOverview>(await authenticatedFetch(apiUrl("/api/mcp/overview")));
 }
 
 export async function createMCPConnector(payload: {

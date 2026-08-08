@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
+import sqlite3
+import subprocess
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -54,6 +58,13 @@ class MCPConnector:
     last_test_status: str = "untested"  # untested | ok | warning | error
     last_test_detail: str = ""
     last_tested_at: float | None = None
+    tools: list[dict[str, Any]] = field(default_factory=list)
+    calls_today: int = 0
+    success_rate: float | None = None
+    latency_ms: float | None = None
+    last_activity_tool: str = ""
+    last_activity_at: float | None = None
+    source_root: str = ""
 
     def to_public_dict(self) -> dict[str, Any]:
         """Serialize with secrets masked — safe to send to the frontend."""
@@ -61,7 +72,32 @@ class MCPConnector:
         d["env"] = {k: (_SECRET_MASK if _looks_secret(k) and v else v) for k, v in self.env.items()}
         if self.url and any(_looks_secret(k) for k in ("url",)):
             pass  # URLs themselves aren't treated as secret
+        d["tool_count"] = len(self.tools)
+        d["health_score"] = self._health_score()
+        d["index_stats"] = self._index_stats()
         return d
+
+    def _health_score(self) -> int | None:
+        if self.last_test_status == "error":
+            return 0
+        if self.last_test_status == "warning":
+            return 60
+        if self.last_test_status == "ok":
+            return 100
+        return None
+
+    def _index_stats(self) -> dict[str, int] | None:
+        if self.template_id != "projectmind" or not self.source_root:
+            return None
+        database = Path(self.source_root) / ".projectmind" / "projectmind.db"
+        if not database.exists():
+            return None
+        tables = ("files", "nodes", "edges", "memories", "plans", "telemetry_events")
+        try:
+            with sqlite3.connect(database) as connection:
+                return {table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in tables}
+        except (OSError, sqlite3.Error):
+            return None
 
 
 class MCPConnectorStore:
@@ -132,6 +168,10 @@ class MCPConnectorStore:
             args = extra_args.split() if isinstance(extra_args, str) else list(extra_args)
         elif template_id == "http-remote":
             url = params.get("url", "")
+        elif template_id == "projectmind":
+            root_path = params.get("root_path", "")
+            command = self._projectmind_python(root_path)
+            args = [a.format(root_path=root_path) if "{" in a else a for a in args]
         else:
             # Substitute {placeholder} tokens in args with user-supplied params
             args = [a.format(**params) if "{" in a else a for a in args]
@@ -148,7 +188,9 @@ class MCPConnectorStore:
                 k: v for k, v in env_values.items() if k not in {e["key"] for e in template.get("env", [])}
             },
             url=url,
+            source_root=params.get("root_path", "") if template_id in {"filesystem", "serena", "projectmind"} else "",
         )
+        connector.tools = self._discover_tools(connector)
         self._connectors[connector.id] = connector
         self._save()
         logger.info("Created MCP connector %s (%s)", connector.id, connector.name)
@@ -216,6 +258,10 @@ class MCPConnectorStore:
             return result
 
         # stdio transport
+        if connector.template_id == "projectmind":
+            result = self._probe_projectmind(connector)
+            self._record_test_result(connector, result)
+            return result
         if not connector.command:
             result = {"status": "error", "detail": "Comando não definido"}
         elif shutil.which(connector.command) is None:
@@ -230,10 +276,89 @@ class MCPConnectorStore:
         self._record_test_result(connector, result)
         return result
 
+    @staticmethod
+    def _probe_projectmind(connector: MCPConnector) -> dict[str, Any]:
+        """Perform a real initialize + tools/list probe for the local server."""
+        probe = (
+            "import asyncio, json, sys\n"
+            "from mcp import ClientSession, StdioServerParameters\n"
+            "from mcp.client.stdio import stdio_client\n"
+            "async def main():\n"
+            "    p = StdioServerParameters(command=sys.argv[1], args=json.loads(sys.argv[2]))\n"
+            "    async with stdio_client(p) as rw:\n"
+            "        async with ClientSession(*rw) as s:\n"
+            "            await s.initialize()\n"
+            "            r = await s.list_tools()\n"
+            "            print('MCP_HANDSHAKE_OK', len(r.tools))\n"
+            "asyncio.run(main())"
+        )
+        started = time.perf_counter()
+        try:
+            completed = subprocess.run(
+                [connector.command, "-c", probe, connector.command, json.dumps(connector.args)],
+                capture_output=True,
+                text=True,
+                timeout=35,
+                cwd=connector.source_root or None,
+                check=False,
+            )
+            elapsed = round((time.perf_counter() - started) * 1000, 1)
+            if completed.returncode == 0 and "MCP_HANDSHAKE_OK" in completed.stdout:
+                count = completed.stdout.split("MCP_HANDSHAKE_OK", 1)[1].strip().split()[0]
+                return {"status": "ok", "detail": f"MCP handshake OK · {count} tools descobertas", "latency_ms": elapsed}
+            detail = (completed.stderr or completed.stdout or "Falha no handshake MCP").strip().splitlines()[-1]
+            return {"status": "error", "detail": f"Handshake falhou: {detail[:240]}", "latency_ms": elapsed}
+        except subprocess.TimeoutExpired:
+            return {"status": "error", "detail": "Timeout durante o handshake MCP (35s)", "latency_ms": 35000}
+        except OSError as exc:
+            return {"status": "error", "detail": f"Não foi possível iniciar o ProjectMind: {exc}", "latency_ms": None}
+
+    @staticmethod
+    def _projectmind_python(root_path: str) -> str:
+        """Resolve the interpreter from the user-owned ProjectMind checkout."""
+        root = Path(root_path).expanduser() if root_path else Path()
+        candidates = [
+            root / ".venv" / "Scripts" / "python.exe",
+            root / ".venv" / "bin" / "python",
+            root / "_audit" / "venv312" / "Scripts" / "python.exe",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return sys.executable
+
+    @staticmethod
+    def _discover_tools(connector: MCPConnector) -> list[dict[str, Any]]:
+        """Discover local ProjectMind tools from its registered source symbols.
+
+        This is deliberately read-only. Other MCPs are left with no fabricated
+        tool list until a real MCP session is available.
+        """
+        if connector.template_id != "projectmind" or not connector.source_root:
+            return []
+        server_file = Path(connector.source_root) / "src" / "projectmind" / "server.py"
+        if not server_file.exists():
+            return []
+        try:
+            source = server_file.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        pattern = re.compile(
+            r'@tracked_tool\(title="(?P<title>[^"]+)"[^\n]*\)\s+def (?P<name>[A-Za-z0-9_]+)\(',
+            re.MULTILINE,
+        )
+        return [
+            {"name": match.group("name"), "title": match.group("title"), "calls": 0, "success_rate": None}
+            for match in pattern.finditer(source)
+        ]
+
     def _record_test_result(self, connector: MCPConnector, result: dict[str, Any]) -> None:
         connector.last_test_status = result["status"]
         connector.last_test_detail = result["detail"]
         connector.last_tested_at = time.time()
+        if result.get("latency_ms") is not None:
+            connector.latency_ms = float(result["latency_ms"])
+        connector.tools = self._discover_tools(connector) or connector.tools
         self._save()
 
     # ── Export ───────────────────────────────────────────────────────
@@ -267,6 +392,7 @@ class MCPConnectorStore:
 
     def health(self) -> dict[str, Any]:
         connectors = list(self._connectors.values())
+        latencies = [c.latency_ms for c in connectors if c.latency_ms is not None]
         return {
             "total": len(connectors),
             "enabled": sum(1 for c in connectors if c.enabled),
@@ -274,6 +400,9 @@ class MCPConnectorStore:
             "warning": sum(1 for c in connectors if c.last_test_status == "warning"),
             "error": sum(1 for c in connectors if c.last_test_status == "error"),
             "untested": sum(1 for c in connectors if c.last_test_status == "untested"),
+            "calls_today": sum(c.calls_today for c in connectors),
+            "avg_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
+            "last_health_check": max((c.last_tested_at or 0 for c in connectors), default=0) or None,
         }
 
 

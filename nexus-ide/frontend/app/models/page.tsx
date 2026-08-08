@@ -64,7 +64,7 @@ export default function ModelsPage() {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: index * 0.03 }}
-                  onClick={() => setActiveModel(model.id)}
+                  onClick={() => setActiveModel(model.id, model.provider)}
                   className={`card w-full text-left transition-colors ${
                     isActive
                       ? "border-nexus-accent"

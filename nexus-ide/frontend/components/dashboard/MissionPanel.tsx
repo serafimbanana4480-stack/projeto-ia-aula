@@ -247,7 +247,7 @@ export default function MissionPanel() {
       padding="lg"
       tone="accent"
       live={mission.state === "executing"}
-     
+
     >
       <SurfaceHeader
         icon={<Radar className="h-4 w-4" />}
@@ -353,7 +353,6 @@ export default function MissionPanel() {
     </Surface>
   );
 }
-
 // ── Tabs ───────────────────────────────────────────────────────────────────
 
 function BriefTab({ mission }: { mission: Mission }) {
@@ -726,4 +725,3 @@ function Block({
     </div>
   );
 }
-

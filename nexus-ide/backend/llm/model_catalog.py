@@ -703,7 +703,10 @@ async def discover_models(provider: str, *, refresh: bool = False) -> DiscoveryR
         enabled = os.environ.get("NEXUS_ENABLE_OLLAMA", "").strip().lower() in {"1", "true", "yes", "on"}
         if not enabled:
             configured = getattr(get_settings(), "nexus_enable_ollama", False)
+            runtime_provider = _runtime_overrides().get("llm_provider", "").strip().lower()
+            configured_provider = runtime_provider or str(getattr(get_settings(), "llm_provider", "")).strip().lower()
             enabled = str(configured).strip().lower() in {"1", "true", "yes", "on"} or configured is True
+            enabled = enabled or configured_provider in {"ollama", "local"}
         if not enabled:
             return DiscoveryResult(provider, [], error="Ollama discovery is disabled", configured=False)
     if provider not in PROVIDER_SPECS:

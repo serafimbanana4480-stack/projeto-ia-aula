@@ -9,6 +9,7 @@ hand-writing config.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -54,6 +55,40 @@ async def get_template_detail(template_id: str, _user: dict = Depends(require_au
 @router.get("/connectors")
 async def list_connectors(_user: dict = Depends(require_auth)) -> dict[str, Any]:
     return {"connectors": mcp_store.list_connectors(), "summary": mcp_store.health()}
+
+
+@router.get("/overview")
+async def get_overview(_user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Return the operational view used by the MCP Control Center.
+
+    Activity is intentionally sourced from persisted connector tests. When no
+    MCP calls have been observed, the response stays empty instead of showing
+    decorative/sample traffic.
+    """
+    connectors = mcp_store.list_connectors()
+    activity = []
+    for connector in connectors:
+        tested_at = connector.get("last_tested_at")
+        if tested_at:
+            activity.append(
+                {
+                    "at": tested_at,
+                    "connector_id": connector["id"],
+                    "connector": connector["name"],
+                    "tool": connector.get("last_activity_tool") or "health_check",
+                    "status": connector.get("last_test_status", "untested"),
+                    "latency_ms": connector.get("latency_ms"),
+                    "detail": connector.get("last_test_detail", ""),
+                }
+            )
+    activity.sort(key=lambda item: item["at"], reverse=True)
+    return {
+        "connectors": connectors,
+        "summary": mcp_store.health(),
+        "activity": activity[:30],
+        "generated_at": time.time(),
+        "data_source": "NEXUS connector store + local ProjectMind source inspection",
+    }
 
 
 @router.post("/connectors")

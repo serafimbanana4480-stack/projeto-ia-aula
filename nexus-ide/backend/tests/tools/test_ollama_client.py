@@ -130,6 +130,32 @@ class TestChatStream:
         finally:
             await client.aclose()
 
+    async def test_disables_qwen_thinking_by_default_but_allows_explicit_override(self) -> None:
+        captured: list[dict] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured.append(json.loads(req.content.decode()))
+            return make_stream_response(["ok"])
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            async for _ in client.chat_stream(
+                "hf.co/zaakirio/Ornith-1.0-9B-uncensored-GGUF:Q4_K_M",
+                [ChatMessage(role="user", content="hi")],
+            ):
+                pass
+            assert captured[0]["think"] is False
+
+            async for _ in client.chat_stream(
+                "qwen2.5:0.5b",
+                [ChatMessage(role="user", content="hi")],
+                options={"think": True},
+            ):
+                pass
+            assert captured[1]["think"] is True
+        finally:
+            await client.aclose()
+
     async def test_skips_malformed_lines(self) -> None:
         body = (
             "not json\n"

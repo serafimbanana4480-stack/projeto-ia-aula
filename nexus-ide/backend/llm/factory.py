@@ -226,6 +226,11 @@ class ResilientLLMProvider:
         self.fallbacks = fallbacks
         self.free_only = free_only
 
+    @property
+    def provider_name(self) -> str:
+        """Expose the active provider identity through the fallback wrapper."""
+        return str(getattr(self.primary, "provider_name", "") or "")
+
     async def aclose(self) -> None:
         await self.primary.aclose()
         for fb in self.fallbacks:
@@ -779,7 +784,13 @@ def create_llm_client(**overrides: Any) -> Any:
             provider=provider,
         )
     if provider in ("local", "ollama"):
-        if not _as_bool(_setting_value(settings, effective_overrides, "nexus_enable_ollama", False)):
+        # Selecting Ollama in the Settings UI is an explicit local-provider
+        # opt-in.  Requiring a second hidden environment flag made the UI
+        # selection look successful while every chat request was rejected.
+        if not (
+            _as_bool(_setting_value(settings, effective_overrides, "nexus_enable_ollama", False))
+            or provider in {"local", "ollama"}
+        ):
             raise ProviderUnavailableError(
                 "Ollama is disabled; enable NEXUS_ENABLE_OLLAMA explicitly",
                 category="eligibility",
@@ -789,6 +800,22 @@ def create_llm_client(**overrides: Any) -> Any:
         logger.info("Using Ollama provider at %s with fallback chain", base_url)
         primary = OllamaProvider(base_url=base_url)
         local_models = effective_overrides.get("local_models")
+        if not _local_models_ready(local_models):
+            # The model catalog is refreshed by the Models UI. Reuse its
+            # validated local entries so the free-only policy can authorize
+            # the exact installed models without another async network call.
+            try:
+                from backend.llm.model_catalog import load_validated_models
+
+                cached_local_models = load_validated_models("ollama")
+                if cached_local_models:
+                    local_models = {
+                        "enabled": True,
+                        "healthy": True,
+                        "models": [model.id for model in cached_local_models],
+                    }
+            except Exception:  # noqa: BLE001 - live chat can still report the provider error
+                logger.debug("Could not load cached Ollama model validation", exc_info=True)
         primary._free_validated = _local_models_ready(local_models)
         primary._free_candidates = (
             local_models.get("models", local_models.get("installed", []))

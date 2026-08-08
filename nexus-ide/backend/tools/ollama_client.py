@@ -64,6 +64,8 @@ class OllamaModelError(OllamaError):
 
 
 class OllamaClient:
+    provider_name = "ollama"
+
     """Small async wrapper around the Ollama HTTP API."""
 
     def __init__(
@@ -188,12 +190,21 @@ class OllamaClient:
             for key, value in (options or {}).items()
             if key not in {"max_tokens", "max_output_tokens"}
         }
+        resolved_model = self._resolve_model(model)
         payload = {
-            "model": self._resolve_model(model),
+            "model": resolved_model,
             "messages": self._normalize_messages(messages),
             "stream": True,
             "options": ollama_options,
         }
+        # Qwen-derived local models can spend the entire output budget in the
+        # Ollama ``message.thinking`` field, leaving ``message.content`` empty
+        # and making the chat appear broken. Keep thinking opt-in for these
+        # models; callers can still pass ``options={"think": True}``.
+        if "think" in (options or {}):
+            payload["think"] = bool(options["think"])
+        elif any(marker in resolved_model.lower() for marker in ("qwen", "ornith")):
+            payload["think"] = False
         failures: list[str] = []
         max_attempts = len(_BACKOFF_DELAYS) + 1
         emitted_content = False
