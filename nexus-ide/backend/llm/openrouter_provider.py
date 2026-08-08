@@ -214,7 +214,10 @@ class OpenRouterProvider:
             quota = field("quota_available")
             validated_at = field("validated_at")
             capabilities = field("capabilities", ()) or ()
-            context_window = int(field("context_window", 0) or 0)
+            try:
+                context_window = int(field("context_window", 0) or 0)
+            except (TypeError, ValueError):
+                continue
             caps = {str(cap).lower().replace("-", "_") for cap in capabilities}
             if isinstance(capabilities, str):
                 caps = {capabilities.lower().replace("-", "_")}
@@ -243,8 +246,8 @@ class OpenRouterProvider:
                 and output_price == 0
                 and requirement_ok
                 and quota is True
-                and now - validated_value <= self._validation_ttl_seconds
-                and latency_value <= self._max_latency_ms
+                and 0 <= now - validated_value <= self._validation_ttl_seconds
+                and 0 <= latency_value <= self._max_latency_ms
             ):
                 self.quota_available = True
                 self.validated_at = validated_value

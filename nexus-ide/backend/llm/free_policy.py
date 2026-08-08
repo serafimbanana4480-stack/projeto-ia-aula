@@ -120,14 +120,21 @@ def _eligibility(candidate: Any) -> ModelEligibility:
     quota_available = _value(candidate, "quota_available", None)
     latency_ms = _number(_value(candidate, "latency_ms", None))
     validated_at = _number(_value(candidate, "validated_at", None))
+    reason = str(_value(candidate, "reason", "") or "")
+    if not free and not reason:
+        reason = "prices are not confirmed as zero" if provider != "ollama" else "local model is not installed"
+    try:
+        context_window = int(_value(candidate, "context_window", 0) or 0)
+    except (TypeError, ValueError):
+        context_window = 0
     return ModelEligibility(
         model_id=model_id,
         provider=provider,
         free=free,
         capabilities=caps,
-        context_window=int(_value(candidate, "context_window", 0) or 0),
+        context_window=max(0, context_window),
         quota_available=quota_available,
-        latency_ms=latency_ms,
+        latency_ms=latency_ms if latency_ms is None or latency_ms >= 0 else None,
         validated_at=validated_at,
         reason=reason,
     )
