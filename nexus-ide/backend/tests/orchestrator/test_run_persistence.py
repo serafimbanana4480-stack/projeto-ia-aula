@@ -87,6 +87,22 @@ def test_terminal_update_rejects_nonterminal_status_or_state() -> None:
         )
 
 
+def test_failed_run_can_store_blocked_execution_state() -> None:
+    from backend.persistence.db import mark_run_terminal, upsert_session_run
+
+    session_id = _make_session()
+    upsert_session_run("run-blocked", session_id, execution_state="running")
+    row = mark_run_terminal(
+        "run-blocked",
+        status="failed",
+        execution_state="blocked",
+    )
+
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["execution_state"] == "blocked"
+
+
 def test_recover_interrupted_runs_marks_stale_running_rows() -> None:
     from backend.persistence.db import recover_interrupted_runs, upsert_session_run
     from backend.persistence.db import DB_PATH

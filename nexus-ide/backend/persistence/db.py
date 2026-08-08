@@ -1062,9 +1062,10 @@ def mark_run_terminal(
 ) -> dict[str, Any] | None:
     """Atomically record terminal metadata and the completion timestamp."""
     terminal_statuses = {"completed", "failed", "cancelled", "interrupted"}
+    terminal_execution_states = terminal_statuses | {"blocked"}
     if status not in terminal_statuses:
         raise ValueError(f"mark_run_terminal requires a terminal status, got {status!r}")
-    if execution_state is not None and execution_state not in terminal_statuses:
+    if execution_state is not None and execution_state not in terminal_execution_states:
         raise ValueError(
             f"mark_run_terminal requires a terminal execution state, got {execution_state!r}"
         )
