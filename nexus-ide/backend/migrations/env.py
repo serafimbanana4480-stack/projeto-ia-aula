@@ -31,9 +31,6 @@ if config.config_file_name is not None:
 # target_metadata = mymodel.Base.metadata
 target_metadata = None
 
-# Set the database URL dynamically
-db_path = Path(__file__).resolve().parent.parent.parent / "data" / "nexus.db"
-config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
 
 
 def get_sqlite_connection(url: str) -> sqlite3.Connection:

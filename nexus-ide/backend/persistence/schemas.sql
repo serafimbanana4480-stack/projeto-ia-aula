@@ -130,14 +130,26 @@ CREATE TABLE IF NOT EXISTS session_runs (
     checkpoint_json TEXT NOT NULL DEFAULT '{}',
     usage_json      TEXT NOT NULL DEFAULT '{}',
     error           TEXT,
+    mission_id      TEXT,
+    correlation_id  TEXT,
+    mode            TEXT,
+    execution_state TEXT,
+    provider        TEXT,
+    model           TEXT,
+    error_category  TEXT,
+    retry_after     INTEGER,
+    evidence_json   TEXT,
     started_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     finished_at     TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
-
+ 
 CREATE INDEX IF NOT EXISTS idx_session_runs_session ON session_runs(session_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_session_runs_active ON session_runs(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_runs_session_updated ON session_runs(session_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_session_runs_correlation_updated ON session_runs(correlation_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_session_runs_mission_updated ON session_runs(mission_id, updated_at);
 
 CREATE TABLE IF NOT EXISTS messages (
     id            TEXT PRIMARY KEY,

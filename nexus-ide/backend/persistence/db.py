@@ -312,94 +312,92 @@ def _ensure_message_cost_column() -> None:
 
 
 def _ensure_current_schema() -> None:
-    """Create any tables added since an existing database was first made.
-
-    Early NEXUS databases predate Alembic tracking.  The old startup fast-path
-    saw that the SQLite file existed and skipped both ``schemas.sql`` and
-    migrations, leaving newer routes (profile, RBAC, email) pointed at tables
-    that did not exist.  ``schemas.sql`` is intentionally idempotent, so
-    replaying its CREATE IF NOT EXISTS statements is the safe compatibility
-    path for both tracked and untracked databases.
-    """
+    """Create any tables added since an existing database was first made."""
     try:
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
         with sqlite3.connect(str(DB_PATH)) as conn:
             conn.executescript(schema)
             conn.commit()
     except Exception as exc:
-        logger.warning("Failed to ensure current database schema: %s", exc)
+        logger.exception("Failed to ensure current database schema")
+        raise RuntimeError("Database schema readiness failed") from exc
 
 
-def init_db(run_migrations: bool = False) -> None:
-    """Initialize the database with migration support.
+_EXECUTION_ENVELOPE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("mission_id", "TEXT"),
+    ("correlation_id", "TEXT"),
+    ("mode", "TEXT"),
+    ("execution_state", "TEXT"),
+    ("provider", "TEXT"),
+    ("model", "TEXT"),
+    ("error_category", "TEXT"),
+    ("retry_after", "INTEGER"),
+    ("evidence_json", "TEXT"),
+)
 
-    Creates directory and applies schema if needed.
-    Uses Alembic for schema management if available.
 
-    Args:
-        run_migrations: If True, always run alembic migrations on existing DB.
-            Defaults to False for fast startup — migrations are skipped unless
-            the DB is fresh or this flag is set.
-    """
+def _ensure_execution_envelope_schema() -> None:
+    """Repair untracked/partially stamped databases before run persistence."""
+    try:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(session_runs)").fetchall()
+            }
+            if columns:
+                for name, column_type in _EXECUTION_ENVELOPE_COLUMNS:
+                    if name not in columns:
+                        conn.execute(
+                            f"ALTER TABLE session_runs ADD COLUMN {name} {column_type}"
+                        )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_session_runs_session_updated "
+                    "ON session_runs(session_id, updated_at)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_session_runs_correlation_updated "
+                    "ON session_runs(correlation_id, updated_at)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_session_runs_mission_updated "
+                    "ON session_runs(mission_id, updated_at)"
+                )
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Failed to ensure execution envelope schema")
+        raise RuntimeError("Execution envelope schema readiness failed") from exc
+
+
+def init_db(run_migrations: bool = True) -> None:
+    """Initialize the database and make its schema ready before use."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    # Check if this is a fresh database (no alembic_version table)
     is_fresh_db = not DB_PATH.exists()
 
     if is_fresh_db:
-        # Fresh database: apply the initial schema from SQL file
         logger.info("Fresh database, applying initial schema")
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
         with sqlite3.connect(str(DB_PATH)) as conn:
             conn.executescript(schema)
             conn.commit()
+        _ensure_execution_envelope_schema()
         logger.info("DB initialized at %s", DB_PATH)
-
-        # Seed default admin user for fresh databases
         _seed_default_user()
-
-        # Seed default RBAC roles and permissions
         _seed_default_rbac()
-
-        # Try to stamp with alembic if available
         _stamp_alembic()
     else:
-        # Repair pre-Alembic and partially stamped databases before any seed
-        # operation touches tables introduced after the original schema.
+        # Compatibility repair must precede migrations and all seed work.
         _ensure_current_schema()
-        # Ensure git_commits table exists for existing databases (migration)
+        _ensure_execution_envelope_schema()
         _ensure_git_commits_table()
-        # Safety net: if the database exists but the users table is still empty,
-        # seed the development default user so auth flows keep working.
-        _seed_default_user()
-        _seed_default_rbac()
         if run_migrations:
             _run_alembic_migrations()
-        else:
-            # Existing database: fast-path skip — only check if schema is present
-            try:
-                with sqlite3.connect(str(DB_PATH)) as conn:
-                    row = conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'"
-                    ).fetchone()
-                    if row is None:
-                        logger.debug("No alembic_version table found, skipping migrations")
-                    else:
-                        logger.debug(
-                            "Alembic tracked DB found, migrations skipped (use run_migrations=True to force)"
-                        )
-            except Exception:
-                logger.debug("Alembic check failed, continuing", exc_info=True)
+            _ensure_execution_envelope_schema()
+        _seed_default_user()
+        _seed_default_rbac()
 
-    # A process restart cannot resume a live provider generator, but it must
-    # never leave the run looking active forever. Keep its durable checkpoint
-    # and mark it recoverable/interrupted for the UI and future resume logic.
-    mark_stale_session_runs()
+    # Stale-run recovery is performed by the startup lifespan immediately
+    # after this function returns, once structured logging is available.
 
-    # Run small idempotent compatibility repairs regardless of Alembic state.
-    # This also covers databases that were stamped without executing a newer
-    # schema change.
-    _ensure_message_cost_column()
 
 
 def _seed_default_user() -> None:
@@ -524,45 +522,56 @@ def _seed_default_rbac() -> None:
 
 
 def _stamp_alembic() -> None:
-    """Stamp a fresh database with the current alembic head."""
+    """Stamp a fresh database with the current Alembic head."""
     try:
         from alembic import command
         from alembic.config import Config
 
         alembic_dir = Path(__file__).resolve().parent.parent / "migrations"
         alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
-
-        if alembic_dir.exists() and alembic_ini.exists():
-            logger.info("Stamping database with initial migration")
-            config = Config(str(alembic_ini))
-            config.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
-            command.stamp(config, "head")
-            logger.info("Database stamped successfully")
-    except ImportError:
-        logger.warning("Alembic not available, skipping migration stamp")
-    except Exception as e:
-        logger.warning("Failed to stamp database with Alembic: %s", e)
+        if not alembic_dir.exists() or not alembic_ini.exists():
+            raise RuntimeError("Alembic configuration is unavailable")
+        logger.info("Stamping database with initial migration")
+        config = Config(str(alembic_ini))
+        config.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
+        command.stamp(config, "head")
+        logger.info("Database stamped successfully")
+    except Exception as exc:
+        logger.exception("Failed to stamp database with Alembic")
+        raise RuntimeError("Database migration stamp failed") from exc
 
 
 def _run_alembic_migrations() -> None:
-    """Run alembic migrations on an existing database."""
+    """Run pending Alembic migrations on an existing tracked database."""
     try:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            tracked = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='alembic_version'"
+            ).fetchone()
+        if tracked is None:
+            # Pre-Alembic databases are repaired by the compatibility schema
+            # path; replaying the initial migration would be unsafe.
+            logger.info("Untracked database repaired without Alembic replay")
+            return
+
         from alembic import command
         from alembic.config import Config
 
         alembic_dir = Path(__file__).resolve().parent.parent / "migrations"
         alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
+        if not alembic_dir.exists() or not alembic_ini.exists():
+            raise RuntimeError("Alembic configuration is unavailable")
+        logger.info("Running database migrations")
+        config = Config(str(alembic_ini))
+        config.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
+        command.upgrade(config, "head")
+        logger.info("Migrations completed successfully")
+    except Exception as exc:
+        logger.exception("Failed to run migrations")
+        raise RuntimeError("Database migration failed") from exc
 
-        if alembic_dir.exists() and alembic_ini.exists():
-            logger.info("Running database migrations")
-            config = Config(str(alembic_ini))
-            config.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
-            command.upgrade(config, "head")
-            logger.info("Migrations completed successfully")
-    except ImportError:
-        logger.warning("Alembic not available, skipping migrations")
-    except Exception as e:
-        logger.warning("Failed to run migrations: %s", e)
+
 
 
 def close_pool() -> None:
@@ -909,6 +918,21 @@ def get_messages(session_id: str, limit: int = 200) -> list[dict]:
         return messages
 
 
+def _session_run_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    result = dict(row)
+    raw_evidence = result.get("evidence_json")
+    if raw_evidence:
+        try:
+            result["evidence"] = json.loads(raw_evidence)
+        except (TypeError, json.JSONDecodeError):
+            result["evidence"] = raw_evidence
+    else:
+        result["evidence"] = []
+    return result
+
+
 def upsert_session_run(
     run_id: str,
     session_id: str,
@@ -922,22 +946,33 @@ def upsert_session_run(
     usage: dict[str, Any] | None = None,
     error: str | None = None,
     finished: bool = False,
+    mission_id: str | None = None,
+    correlation_id: str | None = None,
+    mode: str | None = None,
+    execution_state: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    error_category: str | None = None,
+    retry_after: int | None = None,
+    evidence: Any | None = None,
 ) -> dict[str, Any] | None:
-    """Persist a durable, privacy-preserving checkpoint for a chat run.
-
-    Checkpoints contain progress metadata and the visible partial answer only;
-    they never contain provider credentials or private chain-of-thought.
-    ``INSERT .. ON CONFLICT`` makes this safe to call from the streaming loop.
-    """
+    """Persist a durable checkpoint and its execution-envelope metadata."""
     now = _now_iso()
     finished_at = now if finished else None
+    evidence_json = (
+        json.dumps(evidence, ensure_ascii=False, default=str)
+        if evidence is not None
+        else None
+    )
     with get_db() as conn:
         conn.execute(
             """
             INSERT INTO session_runs
                 (id, session_id, status, agent, phase, prompt, partial_output,
-                 checkpoint_json, usage_json, error, started_at, updated_at, finished_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 checkpoint_json, usage_json, error, mission_id, correlation_id,
+                 mode, execution_state, provider, model, error_category,
+                 retry_after, evidence_json, started_at, updated_at, finished_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 status = excluded.status,
                 agent = COALESCE(excluded.agent, session_runs.agent),
@@ -947,8 +982,17 @@ def upsert_session_run(
                 checkpoint_json = excluded.checkpoint_json,
                 usage_json = excluded.usage_json,
                 error = excluded.error,
+                mission_id = COALESCE(excluded.mission_id, session_runs.mission_id),
+                correlation_id = COALESCE(excluded.correlation_id, session_runs.correlation_id),
+                mode = COALESCE(excluded.mode, session_runs.mode),
+                execution_state = COALESCE(excluded.execution_state, session_runs.execution_state),
+                provider = COALESCE(excluded.provider, session_runs.provider),
+                model = COALESCE(excluded.model, session_runs.model),
+                error_category = COALESCE(excluded.error_category, session_runs.error_category),
+                retry_after = COALESCE(excluded.retry_after, session_runs.retry_after),
+                evidence_json = COALESCE(excluded.evidence_json, session_runs.evidence_json),
                 updated_at = excluded.updated_at,
-                finished_at = excluded.finished_at
+                finished_at = COALESCE(excluded.finished_at, session_runs.finished_at)
             """,
             (
                 run_id,
@@ -961,6 +1005,15 @@ def upsert_session_run(
                 json.dumps(checkpoint or {}, ensure_ascii=False),
                 json.dumps(usage or {}, ensure_ascii=False),
                 error,
+                mission_id,
+                correlation_id,
+                mode,
+                execution_state,
+                provider,
+                model,
+                error_category,
+                retry_after,
+                evidence_json,
                 now,
                 now,
                 finished_at,
@@ -968,14 +1021,14 @@ def upsert_session_run(
         )
         row = conn.execute("SELECT * FROM session_runs WHERE id = ?", (run_id,)).fetchone()
     touch_session(session_id)
-    return dict(row) if row else None
+    return _session_run_row(row)
 
 
 def get_session_run(run_id: str) -> dict[str, Any] | None:
     """Return a single durable run checkpoint, if it exists."""
     with get_db() as conn:
         row = conn.execute("SELECT * FROM session_runs WHERE id = ?", (run_id,)).fetchone()
-    return dict(row) if row else None
+    return _session_run_row(row)
 
 
 def list_session_runs(session_id: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -985,7 +1038,72 @@ def list_session_runs(session_id: str, limit: int = 20) -> list[dict[str, Any]]:
             "SELECT * FROM session_runs WHERE session_id = ? ORDER BY updated_at DESC LIMIT ?",
             (session_id, max(1, min(limit, 100))),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_session_run_row(row) for row in rows if row is not None]
+
+
+def get_runs_by_correlation(correlation_id: str) -> list[dict[str, Any]]:
+    """Return durable runs associated with one correlation identifier."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM session_runs WHERE correlation_id = ? "
+            "ORDER BY updated_at DESC",
+            (correlation_id,),
+        ).fetchall()
+    return [_session_run_row(row) for row in rows if row is not None]
+
+
+def mark_run_terminal(
+    run_id: str,
+    *,
+    status: str = "completed",
+    execution_state: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    error_category: str | None = None,
+    retry_after: int | None = None,
+    evidence: Any | None = None,
+    error: str | None = None,
+) -> dict[str, Any] | None:
+    """Atomically record terminal metadata and the completion timestamp."""
+    now = _now_iso()
+    evidence_json = (
+        json.dumps(evidence, ensure_ascii=False, default=str)
+        if evidence is not None
+        else None
+    )
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE session_runs
+               SET status = ?,
+                   execution_state = COALESCE(?, execution_state, ?),
+                   provider = COALESCE(?, provider),
+                   model = COALESCE(?, model),
+                   error_category = COALESCE(?, error_category),
+                   retry_after = COALESCE(?, retry_after),
+                   evidence_json = COALESCE(?, evidence_json),
+                   error = COALESCE(?, error),
+                   updated_at = ?,
+                   finished_at = COALESCE(finished_at, ?)
+             WHERE id = ?
+            """,
+            (
+                status,
+                execution_state,
+                status,
+                provider,
+                model,
+                error_category,
+                retry_after,
+                evidence_json,
+                error,
+                now,
+                now,
+                run_id,
+            ),
+        )
+        row = conn.execute("SELECT * FROM session_runs WHERE id = ?", (run_id,)).fetchone()
+    return _session_run_row(row)
 
 
 def interrupt_active_session_runs(
@@ -994,13 +1112,7 @@ def interrupt_active_session_runs(
     except_run_id: str | None = None,
     reason: str = "Superseded by a newer request in the same session",
 ) -> int:
-    """Close obsolete runs before starting a replacement chat request.
-
-    The frontend intentionally permits only one active stream per session.
-    If a user sends again, every older ``running`` row for that session is no
-    longer live even when the browser disconnect happened during routing,
-    before the normal streaming cancellation checkpoint was installed.
-    """
+    """Close obsolete runs before starting a replacement chat request."""
     now = _now_iso()
     params: list[Any] = [reason, now, now, session_id]
     exclude = ""
@@ -1012,6 +1124,7 @@ def interrupt_active_session_runs(
             f"""
             UPDATE session_runs
                SET status = 'interrupted',
+                   execution_state = 'interrupted',
                    phase = 'superseded',
                    error = COALESCE(error, ?),
                    updated_at = ?,
@@ -1025,25 +1138,45 @@ def interrupt_active_session_runs(
         return int(cursor.rowcount or 0)
 
 
-def mark_stale_session_runs(max_age_seconds: int = 120) -> int:
-    """Mark runs left behind by a crashed/restarted process as interrupted."""
+def recover_interrupted_runs(max_age_seconds: int = 120) -> list[dict[str, Any]]:
+    """Recover stale running rows left behind by a crashed process."""
     cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat()
+    now = _now_iso()
     with get_db() as conn:
-        cursor = conn.execute(
-            """
+        rows = conn.execute(
+            "SELECT id FROM session_runs WHERE status = 'running' AND updated_at < ?",
+            (cutoff,),
+        ).fetchall()
+        if not rows:
+            return []
+        ids = [str(row["id"]) for row in rows]
+        placeholders = ",".join("?" for _ in ids)
+        conn.execute(
+            f"""
             UPDATE session_runs
                SET status = 'interrupted',
+                   execution_state = 'interrupted',
                    phase = 'process_restart',
                    error = COALESCE(error, 'Backend restarted before the run completed'),
                    finished_at = COALESCE(finished_at, ?),
                    updated_at = ?
-             WHERE status = 'running' AND updated_at < ?
+             WHERE id IN ({placeholders})
             """,
-            (_now_iso(), _now_iso(), cutoff),
+            (now, now, *ids),
         )
-    if cursor.rowcount:
-        logger.warning("Marked %d stale session run(s) as interrupted", cursor.rowcount)
-    return int(cursor.rowcount)
+        recovered = conn.execute(
+            f"SELECT * FROM session_runs WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+    result = [_session_run_row(row) for row in recovered if row is not None]
+    if result:
+        logger.warning("Marked %d stale session run(s) as interrupted", len(result))
+    return result
+
+
+def mark_stale_session_runs(max_age_seconds: int = 120) -> int:
+    """Backward-compatible count-returning stale-run recovery wrapper."""
+    return len(recover_interrupted_runs(max_age_seconds))
 
 
 @monitor_query_performance

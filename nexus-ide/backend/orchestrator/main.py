@@ -163,7 +163,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from backend.orchestrator.events import EventBus as OrchestrationEventBus
     from backend.orchestrator.registry import get_registry
     from backend.persistence import init_db
-
+    from backend.persistence.db import recover_interrupted_runs
     setup_logging(level="DEBUG", json_format=True, log_file="logs/backend.log")
     slog = get_structured_logger()
     app.state.structured_logger = slog
@@ -183,6 +183,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info("Configuration validated successfully for environment: %s", settings.environment)
     init_db()
+    recovered_runs = recover_interrupted_runs()
+    slog.info(
+        "Recovered stale execution runs",
+        agent="SYSTEM",
+        source="startup",
+        extra={"recovered_count": len(recovered_runs)},
+    )
 
     # Background services are individually opt-out via NEXUS_ENABLE_<SERVICE>=false.
     # They default ON in every environment, including development: NEXUS is a
