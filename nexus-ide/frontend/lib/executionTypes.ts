@@ -454,6 +454,7 @@ export function normalizeStreamEvent(event: StreamEvent | Record<string, unknown
   // Skip non-execution events early — token / thinking / tool_result / etc.
   if (
     type !== "routing" &&
+    type !== "done" &&
     type !== "execution_state" &&
     type !== "execution_error" &&
     type !== "execution_completed" &&

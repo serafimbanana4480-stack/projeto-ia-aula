@@ -28,9 +28,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.agents.base import AgentBase
-from backend.core.disk_guard import DiskPressureError, require_disk_headroom
 from backend.config.settings import get_model_config
 from backend.core.agent_state import AgentStateStore
+from backend.core.disk_guard import DiskPressureError, require_disk_headroom
 from backend.orchestrator.dependency_graph import (
     TaskStatus,
 )
@@ -470,11 +470,26 @@ class MetaOrchestrator:
             await asyncio.sleep(0.5)
 
         # Build a DAG plan for this phase via the engine
-        plan = await self._engine.create_plan(
+        planning = await self._engine.create_plan(
             objective=f"[{phase.name}] {mission.objective}",
             session_id=mission.id,
             context=self._build_phase_context(mission, phase),
         )
+        if planning.status == "blocked" or planning.plan is None:
+            phase.status = MissionStatus.FAILED
+            phase_error = planning.error or "planning blocked"
+            phase.result_summary = phase_error
+            await self._emit(
+                EventType.ORCHESTRATOR_FINISHED,
+                mission_id=mission.id,
+                data={
+                    "phase": phase.name,
+                    "status": "planning_blocked",
+                    "error": phase_error,
+                },
+            )
+            return
+        plan = planning.plan
         plan.approved = True  # Auto-approve under MetaOrchestrator
 
         # Spawn tracker agents for every step in the plan

@@ -8,8 +8,9 @@ when the model service is unavailable.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 from backend.orchestrator.dependency_graph import ExecutionPlan, TaskNode, TaskPriority
 
@@ -52,6 +53,20 @@ class PlanningResult:
     @property
     def blocked(self) -> bool:
         return self.status == "blocked"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the status envelope without hiding a blocked result."""
+        return {
+            "status": self.status,
+            "source": self.source,
+            "error": self.error,
+            "plan": self.plan.to_dict() if self.plan is not None else None,
+            "deterministic_proposal": (
+                self.deterministic_proposal.to_dict()
+                if self.deterministic_proposal is not None
+                else None
+            ),
+        }
 
 
 def _snapshot_value(snapshot: Mapping[str, Any], *keys: str) -> Any:
@@ -146,7 +161,10 @@ def _registered_planning_tools(preferred: list[str], agent: str | None = None) -
             if tool in available and (allowed is None or tool in allowed)
         ]
     except Exception:
-        return [tool for tool in preferred if allowed is None or tool in allowed]
+        # A plan built without the live registry cannot be executable. Returning
+        # guessed names here made the validator appear healthy while the
+        # runtime had no trustworthy allowlist.
+        return []
 
 
 
@@ -289,6 +307,8 @@ def validate_execution_plan(
     try:
         from backend.orchestrator.agent_capabilities import (
             capability_matrix as get_capability_matrix,
+        )
+        from backend.orchestrator.agent_capabilities import (
             validate_agent_contract,
         )
 
@@ -299,12 +319,14 @@ def validate_execution_plan(
     except Exception as exc:
         warnings.append(f"agent capability matrix unavailable: {exc}")
     registered_tools: set[str] = set()
+    registry_available = False
     try:
         from backend.tools.registry import list_tools
 
         registered_tools = {str(spec.name) for spec in list_tools(enabled_only=False)}
+        registry_available = True
     except Exception:
-        warnings.append("tool registry unavailable while validating plan")
+        errors.append("tool registry unavailable while validating plan")
     known_model_keys = {
         "micro", "fast", "coder", "reasoning", "deep",
         "analyzer", "debugger", "researcher", "documenter",
@@ -351,7 +373,7 @@ def validate_execution_plan(
             errors.append(f"task {task.task_id} is missing rollback")
         if not str(task.lock_scope).strip():
             errors.append(f"task {task.task_id} is missing lock_scope")
-        if registered_tools:
+        if registry_available:
             for tool in task.allowed_tools:
                 if tool not in registered_tools:
                     errors.append(f"task {task.task_id} uses unknown tool {tool!r}")

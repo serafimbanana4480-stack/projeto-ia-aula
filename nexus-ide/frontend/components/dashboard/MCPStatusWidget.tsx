@@ -96,12 +96,12 @@ export default function MCPStatusWidget() {
               title="Nenhum conector MCP configurado"
               hint="Liga um servidor MCP para dares aos agentes acesso a ferramentas externas."
               action={
-                <Link
+                <a
                   href="/mcp"
                   className="inline-flex items-center gap-1 text-xs font-medium text-[var(--nx-accent-bright)] hover:underline"
                 >
                   Ligar o primeiro servidor <ArrowRight className="h-3 w-3" />
-                </Link>
+                </a>
               }
             />
           ) : (
@@ -149,12 +149,12 @@ export default function MCPStatusWidget() {
                   </div>
                 ))}
               </div>
-              <Link
+              <a
                 href="/mcp"
                 className="mt-3 flex items-center gap-1 text-[11px] font-medium text-[var(--nx-accent-bright)] hover:underline"
               >
                 Gerir conectores <ArrowRight className="h-3 w-3" />
-              </Link>
+              </a>
             </>
           )}
         </div>

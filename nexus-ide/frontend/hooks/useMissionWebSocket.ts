@@ -96,6 +96,10 @@ function parseDecision(data: Record<string, unknown>): Decision | null {
 
 export function useMissionWebSocket(missionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
+  const esRef = useRef<EventSource | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttempt = useRef(0);
+  const bindingRef = useRef(false);
   const dispatch = useCallback((raw: unknown) => {
     // The stream normalizer accepts anything that looks like an SSE/WS
     // envelope. When the event is not a known execution shape we fall back to

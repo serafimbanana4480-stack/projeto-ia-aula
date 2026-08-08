@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.contracts.a2a import A2AMessage, MessagePriority, TaskType
@@ -101,6 +102,8 @@ async def consult_agent(
         context_hash=uuid.uuid4().hex[:12],
         payload={"question": question, "session_id": session_id},
         requires_validation=False,
+        ttl_seconds=max(1, int(timeout_seconds)),
+        deadline=datetime.now(UTC) + timedelta(seconds=max(1, int(timeout_seconds))),
     )
 
     logger.info(
@@ -175,6 +178,16 @@ async def consult_agent(
                 "agent": agent_upper,
                 "a2a_message_id": a2a_msg.message_id,
                 "a2a_correlation_id": a2a_msg.correlation_id,
+                "timed_out": True,
+                "error_category": "timeout",
+                "evidence": {
+                    "kind": "a2a_consultation",
+                    "verified": False,
+                    "timed_out": True,
+                    "ttl_seconds": a2a_msg.ttl_seconds,
+                    "deadline": a2a_msg.deadline.isoformat() if a2a_msg.deadline else None,
+                    "message_id": a2a_msg.message_id,
+                },
             }
 
         response_text = "".join(parts)
@@ -201,6 +214,15 @@ async def consult_agent(
             "a2a_message_id": a2a_msg.message_id,
             "a2a_correlation_id": a2a_msg.correlation_id,
             "a2a_task_type": task_type.value,
+            "timed_out": False,
+            "evidence": {
+                "kind": "a2a_consultation",
+                "verified": True,
+                "timed_out": False,
+                "ttl_seconds": a2a_msg.ttl_seconds,
+                "deadline": a2a_msg.deadline.isoformat() if a2a_msg.deadline else None,
+                "message_id": a2a_msg.message_id,
+            },
         }
 
     except Exception as exc:

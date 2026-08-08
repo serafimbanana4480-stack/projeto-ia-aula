@@ -10,6 +10,7 @@ import os
 import time
 from typing import Any
 
+from backend.core.workspace import WorkspaceManager
 from backend.tools.registry import ToolSpec, register_tool
 
 
@@ -75,8 +76,6 @@ async def run_python_script(
     timeout: int = 30,
 ) -> dict:
     """Run a Python script string in the project directory."""
-    from backend.core.workspace import WorkspaceManager
-
     manager = WorkspaceManager(project_path)
     effective_timeout = max(
         1,

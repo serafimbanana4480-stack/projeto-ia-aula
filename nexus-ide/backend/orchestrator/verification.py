@@ -29,8 +29,8 @@ report ``completed`` without doing real work:
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime, timedelta
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.orchestrator.dependency_graph import TaskNode, TaskPriority
@@ -456,7 +456,10 @@ def _extract_verification_issues(verify_result: OrchestrationResult) -> list[dic
         name = str(artifact.get("name", "Unknown verification"))
         output = str(artifact.get("output", ""))
         evidence_error = _failed_verification_evidence(artifact)
-        if not evidence_error and not output_reports_issues(output, name):
+        # A failed/timeout tool proves that verification could not run; it is
+        # not, by itself, evidence that the project contains a defect. Only an
+        # explicit verifier finding enters the fix loop.
+        if not output_reports_issues(output, name):
             continue
         issues.append(
             {
@@ -492,6 +495,9 @@ def _extract_inconclusive_verifications(verify_result: OrchestrationResult) -> l
         expired = bool(artifact.get("a2a_expired"))
         if artifact.get("a2a_message"):
             expired = expired or a2a_message_expired(artifact["a2a_message"])
+        has_code_finding = output_reports_issues(output, name)
+        if has_code_finding:
+            continue
         if not evidence_error and not expired and not output_is_inconclusive(output, name):
             continue
         inconclusive.append(

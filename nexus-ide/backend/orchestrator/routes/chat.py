@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
-from backend.core.disk_guard import DiskPressureError
 from fastapi.responses import StreamingResponse
 
 from backend.agents.base import AgentRequest
@@ -36,12 +35,13 @@ from backend.config.settings import (
     REPO_ROOT,
     get_mode_config,
 )
+from backend.core.disk_guard import DiskPressureError
 from backend.llm.multi_llm_manager import MultiLLMManager
 from backend.middleware.auth import require_auth
 from backend.models.api import AgentName, ChatRequest, RoutingDecision, StreamEvent
-from backend.orchestrator.execution_contracts import ErrorCategory, ExecutionMode, RunContext
 from backend.observability.advanced_logging import get_structured_logger
 from backend.orchestrator.cancellation import get_cancellation_registry
+from backend.orchestrator.execution_contracts import ErrorCategory, ExecutionMode, RunContext
 from backend.orchestrator.fallback import FallbackOutcome, invoke_with_fallback
 from backend.orchestrator.llm_client_lifecycle import acquire_llm_client, release_llm_client
 from backend.orchestrator.registry import get_registry, resolve
@@ -1035,10 +1035,13 @@ async def _stream_autonomous_execution(
                     if value
                 }
 
-                def _event_sse(event: StreamEvent) -> str:
+                def _event_sse(
+                    event: StreamEvent,
+                    metadata: dict[str, Any] = event_metadata,
+                ) -> str:
                     return _sse(
                         event.model_copy(
-                            update={"data": {**event.data, **event_metadata}}
+                            update={"data": {**event.data, **metadata}}
                         )
                     )
 
@@ -2016,11 +2019,41 @@ async def _run_pipeline(
                 registry=registry,
                 event_bus=event_bus,
             )
-            plan = await engine.create_plan(
+            planning = await engine.create_plan(
                 objective=req.message,
                 session_id=req.session_id,
                 history=history,
             )
+            if planning.status == "blocked" or planning.plan is None:
+                error = planning.error or "planning blocked"
+                _checkpoint(
+                    status="failed",
+                    phase="planning_blocked",
+                    agent="ARCHITECT",
+                    error=error,
+                    checkpoint={"status": "planning_blocked", "source": planning.source},
+                    finished=True,
+                )
+                yield _sse(
+                    StreamEvent(
+                        type="error",
+                        agent="ARCHITECT",
+                        content=f"Planning blocked: {error}",
+                        data={
+                            "status": "planning_blocked",
+                            "source": planning.source,
+                            "error": error,
+                            "deterministic_proposal": (
+                                planning.deterministic_proposal.to_dict()
+                                if planning.deterministic_proposal is not None
+                                else None
+                            ),
+                        },
+                    )
+                )
+                yield _sse(StreamEvent(type="done"))
+                return
+            plan = planning.plan
             # Stream the plan as structured output
             yield _sse(StreamEvent(type="agent_started", agent="ARCHITECT"))
             plan_text = "# Execution Plan\n\n"

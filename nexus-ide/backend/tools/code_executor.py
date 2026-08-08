@@ -121,12 +121,13 @@ async def execute_code(code: str, language: str = "python", timeout: int = 30) -
 
     except Exception as exc:
         logger.exception("Code execution failed: %s", exc)
+        timed_out = isinstance(exc, TimeoutError)
         return ExecutionResult(
             stdout="",
-            stderr=f"Execution error: {exc}",
-            exit_code=-1,
+            stderr=("Execution timed out" if timed_out else f"Execution error: {exc}"),
+            exit_code=124 if timed_out else -1,
             execution_time=0.0,
-            timed_out=False,
+            timed_out=timed_out,
         )
 
 

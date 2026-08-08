@@ -20,6 +20,7 @@ from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
 from backend.core.conversation_log import get_conversation_logger
+from backend.orchestrator.agent_capabilities import file_locks, validate_agent_contract
 from backend.orchestrator.agent_pool import AgentPool
 from backend.orchestrator.dependency_graph import (
     DependencyGraph,
@@ -28,7 +29,6 @@ from backend.orchestrator.dependency_graph import (
     TaskStatus,
 )
 from backend.orchestrator.events import EventBus, EventEmitter, EventType, OrchestratorEvent
-from backend.orchestrator.agent_capabilities import file_locks, validate_agent_contract
 from backend.tools.registry import reset_tool_failures
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ def partition_tool_errors(output: str) -> tuple[list[str], list[str]]:
 
     unrecovered: list[str] = []
     recovered: list[str] = []
-    for index, (pos, kind, payload) in enumerate(events):
+    for index, (_pos, kind, payload) in enumerate(events):
         if kind != "tool_error" or not payload:
             continue
         has_later_success = any(
@@ -409,10 +409,18 @@ class PlanExecutor:
     # Internal: Task Execution
     # ------------------------------------------------------------------
     def _task_scopes(self, task: TaskNode) -> list[str]:
+        # ``lock_scope`` is the planner's authoritative concurrency boundary.
+        # Legacy callers may still put a plural scope list in input_data, and
+        # unvalidated tasks can lack lock metadata altogether; fall back to
+        # their measured file scope rather than silently executing unlocked.
         raw = getattr(task, "lock_scopes", None)
         if raw is None:
+            raw = getattr(task, "lock_scope", None)
+        if not raw:
             data = getattr(task, "input_data", {}) or {}
             raw = data.get("lock_scopes") or data.get("lock_scope") or data.get("file_scope")
+        if not raw:
+            raw = getattr(task, "file_scope", None)
         if isinstance(raw, str):
             raw = [raw]
         return [str(scope).strip() for scope in (raw or ()) if str(scope).strip()]
@@ -429,14 +437,17 @@ class PlanExecutor:
         scopes = self._task_scopes(task)
         task_owner = f"{run_id}:{task.task_id}"
         acquired: list[str] = []
-        for scope in scopes:
-            if not file_locks.acquire(scope, task_owner):
-                task.status = TaskStatus.FAILED
-                task.error_message = f"Scope lock conflict for {scope!r} (owner={file_locks.owner(scope)!r})"
-                task.completed_at = time.time()
-                return {"error": task.error_message, "error_category": "scope_conflict"}
-            acquired.append(scope)
         try:
+            for scope in scopes:
+                if not file_locks.acquire(scope, task_owner):
+                    task.status = TaskStatus.FAILED
+                    task.error_message = (
+                        f"Scope lock conflict for {scope!r} "
+                        f"(owner={file_locks.owner(scope)!r})"
+                    )
+                    task.completed_at = time.time()
+                    return {"error": task.error_message, "error_category": "scope_conflict"}
+                acquired.append(scope)
             return await self._execute_task_unlocked(
                 task, ctx, graph, session_id, run_id, cancellation_event
             )

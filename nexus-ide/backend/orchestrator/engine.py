@@ -35,20 +35,20 @@ from enum import StrEnum
 from typing import Any
 
 from backend.agents.base import AgentBase
-from backend.core.disk_guard import require_disk_headroom
 from backend.config.settings import get_settings
 from backend.core.conversation_log import get_conversation_logger
+from backend.core.disk_guard import require_disk_headroom
 from backend.orchestrator.agent_pool import AgentPool, get_agent_pool
 from backend.orchestrator.cancellation_registry import CancellationRegistry
 from backend.orchestrator.dependency_graph import ExecutionPlan, TaskNode, TaskPriority
 from backend.orchestrator.events import EventBus, EventType, OrchestratorEvent
 from backend.orchestrator.plan_creator import PlanCreator
-from backend.orchestrator.plan_validation import PlanningResult, validate_execution_plan
 from backend.orchestrator.plan_executor import (
     PlanExecutor,
     extract_tool_errors,
     iterate_agent_output,
 )
+from backend.orchestrator.plan_validation import PlanningResult, validate_execution_plan
 from backend.orchestrator.retry_manager import RetryManager
 from backend.orchestrator.verification import (
     VerificationOutcome,
@@ -710,7 +710,7 @@ class OrchestrationEngine:
         require_disk_headroom(project_path)
 
         # Phase 1: PLAN (auto-approve — autonomous mode skips user approval)
-        plan = await self.create_plan(
+        planning = await self.create_plan(
             objective=objective,
             session_id=session_id,
             context=context,
@@ -718,13 +718,14 @@ class OrchestrationEngine:
             auto_approve=True,
             project_path=project_path,
         )
-        if isinstance(plan, PlanningResult) and plan.status == "blocked":
+        if planning.status == "blocked" or planning.plan is None:
             return OrchestrationResult(
                 run_id=uuid.uuid4().hex[:12],
                 state=OrchestrationState.PLANNING_BLOCKED,
-                plan=plan.deterministic_proposal,
-                errors=[plan.error] if plan.error else ["planning blocked"],
+                plan=planning.deterministic_proposal,
+                errors=[planning.error] if planning.error else ["planning blocked"],
             )
+        plan = planning.plan
 
         await self._events.publish(
             OrchestratorEvent(

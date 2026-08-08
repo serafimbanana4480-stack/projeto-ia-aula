@@ -131,7 +131,15 @@ def validate_agent_contract(name: str, model: str, tools: list[str] | tuple[str,
     try:
         from backend.tools.registry import get_tool
 
-        for raw_tool in tools or ():
+        if tools is None:
+            requested_tools: tuple[Any, ...] = ()
+        elif isinstance(tools, (str, bytes)):
+            requested_tools = (tools,)
+        elif isinstance(tools, (list, tuple, set)):
+            requested_tools = tuple(tools)
+        else:
+            return ["allowed_tools must be a list, tuple, set, string, or null"]
+        for raw_tool in requested_tools:
             tool = str(raw_tool).strip()
             if not tool:
                 errors.append("tool name must not be empty")

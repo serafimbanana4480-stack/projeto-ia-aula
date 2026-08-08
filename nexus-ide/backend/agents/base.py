@@ -1397,7 +1397,8 @@ class AgentBase(ABC):
             or (
                 requirement == "verification"
                 and bool(successful_tools & self._VERIFICATION_TOOLS)
-                and (not evidence or verified_evidence)
+                and bool(evidence)
+                and verified_evidence
             )
             or (
                 requirement == "substantive"
@@ -1794,7 +1795,6 @@ class AgentBase(ABC):
         max_iterations = request.max_iterations if request.max_iterations > 0 else max(
             1, min(configured_budget, 1000)
         )
-        previous_tool_calls: list[tuple[str, dict]] | None = None
         # Every distinct tool-call payload issued this run. Consecutive-only
         # comparison let A/B/A/B discovery loops run to the iteration cap.
         seen_tool_call_keys: set[str] = set()
@@ -2028,10 +2028,13 @@ class AgentBase(ABC):
 
             # Parse tool calls
             tool_calls = self._parse_tool_calls(answer)
+            allowed_tools_configured = "_allowed_tools" in request.context
             runtime_allowed = {
-                str(name).strip() for name in request.context.get("_allowed_tools", ()) if str(name).strip()
+                str(name).strip()
+                for name in (request.context.get("_allowed_tools") or ())
+                if str(name).strip()
             }
-            if runtime_allowed:
+            if allowed_tools_configured:
                 permitted_calls: list[tuple[str, dict[str, Any]]] = []
                 for tool_name, args in tool_calls:
                     if tool_name in runtime_allowed:
@@ -2333,13 +2336,29 @@ class AgentBase(ABC):
                 repeated_tool_nudge_sent = True
                 continue
             seen_tool_call_keys.add(current_key)
-            previous_tool_calls = tool_calls
             repeated_tool_nudge_sent = False
 
             prepared_calls = [
                 self._prepare_tool_call(request, tool_name, args)
                 for tool_name, args in tool_calls
             ]
+
+            # Absolute-path preparation can turn read_file/list_dir/write_file
+            # into their *_absolute variants. Re-check the final executable
+            # name so a relative alias in the allowlist cannot authorize a
+            # different tool after path normalization.
+            if allowed_tools_configured:
+                filtered_calls: list[tuple[str, dict[str, Any]]] = []
+                for tool_name, args in prepared_calls:
+                    if tool_name in runtime_allowed:
+                        filtered_calls.append((tool_name, args))
+                    else:
+                        tool_errors_seen = True
+                        yield (
+                            f"<event>tool_error|{tool_name}|"
+                            f"Agent contract forbids tool '{tool_name}'</event>"
+                        )
+                prepared_calls = filtered_calls
 
             # Independent read/search calls are the common exploration hot
             # path. Execute them concurrently while keeping all mutations,

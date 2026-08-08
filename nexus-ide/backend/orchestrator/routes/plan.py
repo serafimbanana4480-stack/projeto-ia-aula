@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -136,17 +136,17 @@ async def create_plan(
     ``auto_approve=false`` explicitly when a human review gate is required.
     """
     engine = _get_engine(request)
-    plan = await engine.create_plan(
+    planning = await engine.create_plan(
         objective=req.objective,
         session_id=req.session_id,
         context=req.context,
         auto_approve=req.auto_approve,
     )
 
-    result = plan.to_dict()
+    result = planning.to_dict()
     # Add approval-request metadata when the plan is blocked
-    if not req.auto_approve:
-        approval_req = engine.request_approval(plan.plan_id)
+    if planning.plan is not None and not req.auto_approve:
+        approval_req = engine.request_approval(planning.plan.plan_id)
         if approval_req:
             result["approval"] = approval_req.to_dict()
 
@@ -204,12 +204,16 @@ async def execute_plan(
     if plan is None:
         return {"error": f"Plan {req.plan_id} not found. Create a plan first via /api/plan/create"}
 
-    plan.approved = True  # Mark as approved for execution
+    if plan.requires_approval and not plan.approved:
+        raise HTTPException(
+            status_code=409,
+            detail="Plan requires explicit approval before execution",
+        )
 
     result = await engine.execute_plan(
         plan=plan,
         session_id=req.session_id,
-        auto_approve=True,
+        auto_approve=False,
         project_path=req.project_path,
     )
     return {
