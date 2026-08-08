@@ -78,6 +78,7 @@
 ```python
 from backend.orchestrator.execution_contracts import (
     ErrorCategory,
+    ExecutionError,
     ExecutionMode,
     ExecutionOutcome,
     ExecutionState,
