@@ -61,6 +61,7 @@ def _load_chain(primary: str) -> list[str]:
 async def invoke_with_fallback(
     primary_agent: str,
     invoke: Callable[[str], Awaitable[AsyncIterator[str]]],
+    stream_start_timeout: float | None = _STREAM_START_TIMEOUT_SECONDS,
 ) -> tuple[FallbackOutcome, AsyncIterator[str]]:
     """Invoke ``primary_agent`` via ``invoke`` and fall back on failure.
 
@@ -85,7 +86,7 @@ async def invoke_with_fallback(
     for attempt, candidate in enumerate(chain, start=1):
         try:
             stream = await invoke(candidate)
-            stream = await _prime_stream(stream)
+            stream = await _prime_stream(stream, start_timeout=stream_start_timeout)
             outcome = FallbackOutcome(
                 used_agent=candidate,
                 attempts=attempt,
@@ -131,7 +132,11 @@ async def _prepend_tokens(prefix: list[str], stream: AsyncIterator[str]) -> Asyn
         yield token
 
 
-async def _prime_stream(stream: AsyncIterator[str], max_retries: int = 2) -> AsyncIterator[str]:
+async def _prime_stream(
+    stream: AsyncIterator[str],
+    max_retries: int = 2,
+    start_timeout: float | None = _STREAM_START_TIMEOUT_SECONDS,
+) -> AsyncIterator[str]:
     """Wait for the first substantive stream token and preserve all tokens.
 
     An empty stream is considered a failed attempt: returning a blank answer
@@ -148,8 +153,8 @@ async def _prime_stream(stream: AsyncIterator[str], max_retries: int = 2) -> Asy
         try:
             next_token = anext(stream)
             token = (
-                await asyncio.wait_for(next_token, timeout=_STREAM_START_TIMEOUT_SECONDS)
-                if _STREAM_START_TIMEOUT_SECONDS is not None
+                await asyncio.wait_for(next_token, timeout=start_timeout)
+                if start_timeout is not None
                 else await next_token
             )
         except StopAsyncIteration as exc:

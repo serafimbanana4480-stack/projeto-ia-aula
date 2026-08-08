@@ -2419,6 +2419,10 @@ async def _run_pipeline(
         outcome, token_stream = await invoke_with_fallback(
             decision.primary_agent,
             lambda name: make_invocation(name)(),
+            # A stalled provider must not hold a normal question for the
+            # global 180s stream-start budget. Complex/explicit work keeps the
+            # more patient default for local model loading.
+            stream_start_timeout=12.0 if _is_fast_chat_turn(effective_message) else None,
         )
     except Exception as exc:
         logger.exception("All fallbacks exhausted: %s", exc)
