@@ -5,16 +5,61 @@
  * Falls back to SSE on `/api/bus/stream?topics=mission.update,agent.status`
  * if the WebSocket is unavailable.
  *
- * Integrates directly with the missionStore so any component can subscribe
- * to store changes without knowing the transport layer.
+ * Every event the backend emits — whether it arrives as a routing decision,
+ * an execution_state/execution_error checkpoint, or one of the legacy
+ * bus / mission_update envelopes — is normalized through
+ * :func:`normalizeStreamEvent` and merged into the store via
+ * :func:`mergeCheckpoint`. The panel therefore reads exactly one shape.
+ *
+ * The hook also wires the store's cancelMission / resumeMission / replanMission
+ * actions to the matching REST verbs, keeping the dashboard free of fetch
+ * boilerplate.
  */
 import { useEffect, useRef, useCallback } from "react";
-import { apiUrl } from "../lib/api";
+
+import {
+  cancelMission as apiCancelMission,
+  replanMission as apiReplanMission,
+  resumeMission as apiResumeMission,
+  apiUrl,
+} from "../lib/api";
+import { normalizeStreamEvent } from "../lib/executionTypes";
 import { useMissionStore, type BusMessage, type Decision } from "../stores/missionStore";
 
-interface WebSocketMessage {
-  type: "agent_status" | "bus_message" | "phase_complete" | "decision" | "quality_gate" | "system_health" | "mission_update";
-  payload: unknown;
+/** Maximum reconnect delay — keeps exponential growth bounded. */
+const MAX_RECONNECT_DELAY = 30_000;
+
+/** Topics the SSE stream subscribes to. Mirrors the backend bus topics. */
+const SSE_TOPICS =
+  "mission.update,agent.status,code.changes,review.completed," +
+  "architecture.proposals,routing,execution_state,execution_error," +
+  "execution_completed,mission_brief,mission_plan,mission_wave," +
+  "mission_agent,mission_decision,mission_verification,mission_completed";
+
+type LegacyMessageType =
+  | "agent_status"
+  | "bus_message"
+  | "phase_complete"
+  | "decision"
+  | "quality_gate"
+  | "system_health"
+  | "mission_update"
+  | "routing"
+  | "execution_state"
+  | "execution_error"
+  | "execution_completed"
+  | "mission_brief"
+  | "mission_plan"
+  | "mission_wave"
+  | "mission_agent"
+  | "mission_decision"
+  | "mission_verification"
+  | "mission_completed";
+
+interface LegacyEnvelope {
+  type: LegacyMessageType;
+  payload?: unknown;
+  data?: unknown;
   timestamp?: string;
 }
 
@@ -51,23 +96,40 @@ function parseDecision(data: Record<string, unknown>): Decision | null {
 
 export function useMissionWebSocket(missionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
-  const esRef = useRef<EventSource | null>(null);
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reconnectAttempt = useRef(0);
-  const maxReconnectDelay = 30000;
+  const dispatch = useCallback((raw: unknown) => {
+    // The stream normalizer accepts anything that looks like an SSE/WS
+    // envelope. When the event is not a known execution shape we fall back to
+    // legacy field-by-field dispatch so the rest of the dashboard keeps
+    // working until the backend emits the new envelope shape.
+    const normalized = normalizeStreamEvent(raw as never);
+    if (normalized) {
+      useMissionStore.getState().mergeCheckpoint(normalized);
+      return;
+    }
+    if (raw && typeof raw === "object" && "data" in raw) {
+      const inner = normalizeStreamEvent((raw as { data: unknown }).data as never);
+      if (inner) {
+        useMissionStore.getState().mergeCheckpoint(inner);
+        return;
+      }
+    }
 
-  const handleMessage = useCallback((msg: WebSocketMessage) => {
+    const legacy = raw as LegacyEnvelope;
     const store = useMissionStore.getState();
-    switch (msg.type) {
-      case "mission_update": {
-        const payload = msg.payload as Record<string, unknown>;
+    switch (legacy.type) {
+      case "mission_update":
+      case "phase_complete": {
+        const payload = (legacy.payload ?? legacy.data ?? {}) as Record<string, unknown>;
         if (payload.mission) {
           store.updateMission(payload.mission as Parameters<typeof store.updateMission>[0]);
+        }
+        if (payload.envelope) {
+          store.mergeCheckpoint(payload.envelope);
         }
         break;
       }
       case "agent_status": {
-        const payload = msg.payload as Record<string, unknown>;
+        const payload = (legacy.payload ?? legacy.data ?? {}) as Record<string, unknown>;
         if (payload.agent_id && payload.status) {
           store.updateAgentStatus(
             payload.agent_id as string,
@@ -78,50 +140,43 @@ export function useMissionWebSocket(missionId: string | null) {
         break;
       }
       case "bus_message": {
-        const parsed = parseBusMessage(msg.payload as Record<string, unknown>);
+        const parsed = parseBusMessage((legacy.payload ?? legacy.data ?? {}) as Record<string, unknown>);
         if (parsed) store.addBusMessage(parsed);
         break;
       }
-      case "phase_complete": {
-        const payload = msg.payload as Record<string, unknown>;
-        if (payload.mission) {
-          store.updateMission(payload.mission as Parameters<typeof store.updateMission>[0]);
-        }
-        break;
-      }
       case "decision": {
-        const parsed = parseDecision(msg.payload as Record<string, unknown>);
+        const parsed = parseDecision((legacy.payload ?? legacy.data ?? {}) as Record<string, unknown>);
         if (parsed) store.addDecision(parsed);
         break;
       }
       case "quality_gate": {
-        const payload = msg.payload as Record<string, unknown>;
+        const payload = (legacy.payload ?? legacy.data ?? {}) as Record<string, unknown>;
         if (payload.gates && Array.isArray(payload.gates)) {
           store.setQualityGates(payload.gates as Parameters<typeof store.setQualityGates>[0]);
         }
         break;
       }
       case "system_health": {
-        const payload = msg.payload as Record<string, unknown>;
+        const payload = (legacy.payload ?? legacy.data ?? {}) as Record<string, unknown>;
         if (payload.health) {
           store.setSystemHealth(payload.health as Parameters<typeof store.setSystemHealth>[0]);
         }
         break;
       }
+      default:
+        // Unknown type — nothing to do.
+        break;
     }
   }, []);
 
   const startSSE = useCallback(() => {
-    if (!missionId) return;
     if (esRef.current) {
       esRef.current.close();
       esRef.current = null;
     }
 
     try {
-      const es = new EventSource(
-        apiUrl("/api/bus/stream?topics=mission.update,agent.status,code.changes,review.completed,architecture.proposals"),
-      );
+      const es = new EventSource(apiUrl(`/api/bus/stream?topics=${SSE_TOPICS}`));
       esRef.current = es;
 
       es.onopen = () => {
@@ -132,13 +187,13 @@ export function useMissionWebSocket(missionId: string | null) {
       es.onmessage = (e) => {
         try {
           const data = JSON.parse(e.data) as Record<string, unknown>;
-          const msg: WebSocketMessage = {
-            type: "bus_message",
-            payload: data,
-          };
-          handleMessage(msg);
+          // Route SSE bus messages through the same dispatcher. The bus
+          // sometimes wraps execution envelopes under ``data``.
+          if (data && typeof data === "object") {
+            dispatch({ type: "bus_message", data });
+          }
 
-          // Derive decisions from certain bus topics
+          // Keep legacy behaviour: certain bus topics imply a decision.
           const topic = (data.topic as string) || "";
           if (topic === "architecture.proposals" || topic === "review.completed") {
             const decision = parseDecision({
@@ -148,7 +203,7 @@ export function useMissionWebSocket(missionId: string | null) {
               timestamp: data.timestamp,
             });
             if (decision) {
-              handleMessage({ type: "decision", payload: decision as unknown as Record<string, unknown> });
+              dispatch({ type: "decision", payload: decision as unknown as Record<string, unknown> });
             }
           }
         } catch {
@@ -159,7 +214,7 @@ export function useMissionWebSocket(missionId: string | null) {
       es.onerror = () => {
         es.close();
         esRef.current = null;
-        const delay = Math.min(1000 * 2 ** reconnectAttempt.current, maxReconnectDelay);
+        const delay = Math.min(1000 * 2 ** reconnectAttempt.current, MAX_RECONNECT_DELAY);
         reconnectAttempt.current += 1;
         if (reconnectAttempt.current > 2) {
           useMissionStore.getState().setBackendOnline(false);
@@ -169,7 +224,7 @@ export function useMissionWebSocket(missionId: string | null) {
     } catch {
       /* SSE not available */
     }
-  }, [missionId, handleMessage]);
+  }, [dispatch]);
 
   const startWebSocket = useCallback(() => {
     if (!missionId) return;
@@ -189,8 +244,8 @@ export function useMissionWebSocket(missionId: string | null) {
 
       ws.onmessage = (event) => {
         try {
-          const msg = JSON.parse(event.data) as WebSocketMessage;
-          handleMessage(msg);
+          const msg = JSON.parse(event.data) as LegacyEnvelope;
+          dispatch(msg);
         } catch {
           /* ignore parse errors */
         }
@@ -198,7 +253,7 @@ export function useMissionWebSocket(missionId: string | null) {
 
       ws.onclose = () => {
         wsRef.current = null;
-        const delay = Math.min(1000 * 2 ** reconnectAttempt.current, maxReconnectDelay);
+        const delay = Math.min(1000 * 2 ** reconnectAttempt.current, MAX_RECONNECT_DELAY);
         reconnectAttempt.current += 1;
         if (reconnectAttempt.current > 2) {
           useMissionStore.getState().setBackendOnline(false);
@@ -217,7 +272,41 @@ export function useMissionWebSocket(missionId: string | null) {
     } catch {
       startSSE();
     }
-  }, [missionId, handleMessage, startSSE]);
+  }, [missionId, dispatch, startSSE]);
+
+  // Wire the store's action verbs to REST calls. We bind once per mount; the
+  // store keeps the binding for the lifetime of the hook, and any later
+  // mount overwrites the previous binding.
+  useEffect(() => {
+    if (bindingRef.current) return;
+    bindingRef.current = true;
+    useMissionStore.setState({
+      cancelMission: async (id: string) => {
+        useMissionStore.getState().setEnvelopePending(true);
+        try {
+          return await apiCancelMission(id);
+        } finally {
+          useMissionStore.getState().setEnvelopePending(false);
+        }
+      },
+      resumeMission: async (id: string) => {
+        useMissionStore.getState().setEnvelopePending(true);
+        try {
+          return await apiResumeMission(id);
+        } finally {
+          useMissionStore.getState().setEnvelopePending(false);
+        }
+      },
+      replanMission: async (id: string) => {
+        useMissionStore.getState().setEnvelopePending(true);
+        try {
+          return await apiReplanMission(id);
+        } finally {
+          useMissionStore.getState().setEnvelopePending(false);
+        }
+      },
+    });
+  }, []);
 
   useEffect(() => {
     if (!missionId) return;
