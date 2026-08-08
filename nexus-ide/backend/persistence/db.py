@@ -1064,6 +1064,10 @@ def mark_run_terminal(
     terminal_statuses = {"completed", "failed", "cancelled", "interrupted"}
     if status not in terminal_statuses:
         raise ValueError(f"mark_run_terminal requires a terminal status, got {status!r}")
+    if execution_state is not None and execution_state not in terminal_statuses:
+        raise ValueError(
+            f"mark_run_terminal requires a terminal execution state, got {execution_state!r}"
+        )
     terminal_state = execution_state or status
     now = _now_iso()
     evidence_json = (

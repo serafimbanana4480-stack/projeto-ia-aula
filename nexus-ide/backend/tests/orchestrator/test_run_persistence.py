@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime, timedelta
+import pytest
 
 
 def _make_session() -> str:
@@ -51,7 +52,12 @@ def test_terminal_update_sets_finished_at_and_correlation_lookup() -> None:
     )
 
     session_id = _make_session()
-    upsert_session_run("run-terminal", session_id, correlation_id="corr-terminal")
+    upsert_session_run(
+        "run-terminal",
+        session_id,
+        correlation_id="corr-terminal",
+        execution_state="running",
+    )
     row = mark_run_terminal(
         "run-terminal",
         status="completed",
@@ -63,6 +69,22 @@ def test_terminal_update_sets_finished_at_and_correlation_lookup() -> None:
     assert row["execution_state"] == "completed"
     assert row["finished_at"]
     assert any(item["id"] == "run-terminal" for item in get_runs_by_correlation("corr-terminal"))
+
+
+def test_terminal_update_rejects_nonterminal_status_or_state() -> None:
+    from backend.persistence.db import mark_run_terminal, upsert_session_run
+
+    session_id = _make_session()
+    upsert_session_run("run-invalid-terminal", session_id, execution_state="running")
+
+    with pytest.raises(ValueError):
+        mark_run_terminal("run-invalid-terminal", status="running")
+    with pytest.raises(ValueError):
+        mark_run_terminal(
+            "run-invalid-terminal",
+            status="completed",
+            execution_state="running",
+        )
 
 
 def test_recover_interrupted_runs_marks_stale_running_rows() -> None:
@@ -84,17 +106,33 @@ def test_recover_interrupted_runs_marks_stale_running_rows() -> None:
 
 
 
-def test_recovery_does_not_rewrite_terminal_rows() -> None:
-    from backend.persistence.db import DB_PATH, mark_run_terminal, recover_interrupted_runs
-    from backend.persistence.db import upsert_session_run
+def test_recovery_does_not_overwrite_concurrent_terminalization() -> None:
+    from backend.persistence.db import DB_PATH, recover_interrupted_runs, upsert_session_run
 
     session_id = _make_session()
-    upsert_session_run("run-completed", session_id, execution_state="running")
-    mark_run_terminal("run-completed", status="completed")
+    upsert_session_run("run-race", session_id, execution_state="running")
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             "UPDATE session_runs SET updated_at = ? WHERE id = ?",
-            ("2000-01-01T00:00:00Z", "run-completed"),
+            ("2000-01-01T00:00:00Z", "run-race"),
+        )
+        conn.executescript(
+            """
+            CREATE TRIGGER terminalize_before_recovery
+            BEFORE UPDATE OF status ON session_runs
+            WHEN OLD.id = 'run-race' AND NEW.status = 'interrupted'
+            BEGIN
+                UPDATE session_runs
+                   SET status = 'completed',
+                       execution_state = 'completed'
+                 WHERE id = OLD.id;
+                SELECT RAISE(IGNORE);
+            END;
+            """
         )
 
     assert recover_interrupted_runs(max_age_seconds=1) == []
+    with sqlite3.connect(DB_PATH) as conn:
+        assert conn.execute(
+            "SELECT status, execution_state FROM session_runs WHERE id = 'run-race'"
+        ).fetchone() == ("completed", "completed")
