@@ -246,6 +246,7 @@ class OpenRouterProvider:
                 and now - validated_value <= self._validation_ttl_seconds
                 and latency_value <= self._max_latency_ms
             ):
+                self.quota_available = True
                 self.validated_at = validated_value
                 self.eligibility_reason = "catalog confirmed zero prices, quota and freshness"
                 return resolved

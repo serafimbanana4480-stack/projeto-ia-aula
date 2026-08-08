@@ -7,6 +7,7 @@ installed, enabled local catalog entry.
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
@@ -91,6 +92,14 @@ def _bool_value(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _eligibility(candidate: Any) -> ModelEligibility:
     if isinstance(candidate, ModelEligibility):
         return candidate
@@ -108,18 +117,18 @@ def _eligibility(candidate: Any) -> ModelEligibility:
     free = bool(_value(candidate, "free", False)) and (verified_prices or local_verified)
     if local_verified:
         free = True
-    reason = str(_value(candidate, "reason", "") or "")
-    if not free and not reason:
-        reason = "prices are not confirmed as zero" if provider != "ollama" else "local model is not installed"
+    quota_available = _value(candidate, "quota_available", None)
+    latency_ms = _number(_value(candidate, "latency_ms", None))
+    validated_at = _number(_value(candidate, "validated_at", None))
     return ModelEligibility(
         model_id=model_id,
         provider=provider,
         free=free,
         capabilities=caps,
         context_window=int(_value(candidate, "context_window", 0) or 0),
-        quota_available=_value(candidate, "quota_available", None),
-        latency_ms=_value(candidate, "latency_ms", None),
-        validated_at=_value(candidate, "validated_at", None),
+        quota_available=quota_available,
+        latency_ms=latency_ms,
+        validated_at=validated_at,
         reason=reason,
     )
 
@@ -154,7 +163,7 @@ class FreeModelPolicy:
         candidates: Iterable[Any],
         breakers: Mapping[str, Any] | None = None,
         local_models: Any = None,
-    ) -> ProviderSelection | None:
+    ):
         breakers = breakers or {}
         normalized = [_eligibility(item) for item in candidates]
         local = self._local_eligibilities(local_models)
@@ -163,11 +172,12 @@ class FreeModelPolicy:
         for item in ordered:
             if not item.model_id or not item.free:
                 continue
-            if item.provider != "ollama" and (
-                item.validated_at is None
-                or now - item.validated_at > self.validation_ttl_seconds
-            ):
-                continue
+            if item.provider != "ollama":
+                if item.validated_at is None:
+                    continue
+                age = now - item.validated_at
+                if age < 0 or age > self.validation_ttl_seconds:
+                    continue
             open_, _ = _breaker_open(breakers.get(item.provider))
             if open_:
                 continue
