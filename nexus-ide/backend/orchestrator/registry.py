@@ -12,6 +12,13 @@ from typing import Any
 
 from backend.agents.base import AgentBase
 from backend.models.api import AgentName
+from backend.orchestrator.agent_capabilities import (
+    AgentCapability,
+    FileLockRegistry,
+    get_agent_capability,
+    validate_agent_contract,
+)
+
 
 AgentRegistry = Mapping[AgentName, AgentBase]
 

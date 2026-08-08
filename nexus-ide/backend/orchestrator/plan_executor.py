@@ -28,6 +28,7 @@ from backend.orchestrator.dependency_graph import (
     TaskStatus,
 )
 from backend.orchestrator.events import EventBus, EventEmitter, EventType, OrchestratorEvent
+from backend.orchestrator.agent_capabilities import file_locks, validate_agent_contract
 from backend.tools.registry import reset_tool_failures
 
 logger = logging.getLogger(__name__)
@@ -407,8 +408,42 @@ class PlanExecutor:
     # ------------------------------------------------------------------
     # Internal: Task Execution
     # ------------------------------------------------------------------
+    def _task_scopes(self, task: TaskNode) -> list[str]:
+        raw = getattr(task, "lock_scopes", None)
+        if raw is None:
+            data = getattr(task, "input_data", {}) or {}
+            raw = data.get("lock_scopes") or data.get("lock_scope") or data.get("file_scope")
+        if isinstance(raw, str):
+            raw = [raw]
+        return [str(scope).strip() for scope in (raw or ()) if str(scope).strip()]
 
     async def _execute_task(
+        self,
+        task: TaskNode,
+        ctx: Any,
+        graph: DependencyGraph,
+        session_id: str,
+        run_id: str,
+        cancellation_event: asyncio.Event | None = None,
+    ) -> dict[str, Any]:
+        scopes = self._task_scopes(task)
+        acquired: list[str] = []
+        for scope in scopes:
+            if not file_locks.acquire(scope, run_id):
+                task.status = TaskStatus.FAILED
+                task.error_message = f"Scope lock conflict for {scope!r} (owner={file_locks.owner(scope)!r})"
+                task.completed_at = time.time()
+                return {"error": task.error_message, "error_category": "scope_conflict"}
+            acquired.append(scope)
+        try:
+            return await self._execute_task_unlocked(
+                task, ctx, graph, session_id, run_id, cancellation_event
+            )
+        finally:
+            for scope in reversed(acquired):
+                file_locks.release(scope, run_id)
+
+    async def _execute_task_unlocked(
         self,
         task: TaskNode,
         ctx: Any,
@@ -445,6 +480,17 @@ class PlanExecutor:
                 )
             )
             return {"error": task.error_message}
+        contract_errors = validate_agent_contract(
+            task.agent,
+            task.model_key or getattr(agent, "model_key", ""),
+            task.allowed_tools,
+        )
+        if contract_errors:
+            task.status = TaskStatus.FAILED
+            task.error_message = "Agent contract rejected: " + "; ".join(contract_errors)
+            task.completed_at = time.time()
+            return {"error": task.error_message, "error_category": "agent_contract"}
+
 
         # Build context from dependencies
         dep_context = self._build_dependency_context(task, ctx)
@@ -477,10 +523,9 @@ class PlanExecutor:
                         "task": task.to_dict(),
                         "shared_memory": ctx.shared_memory,
                         "project_path": ctx.project_path,
-                        # A plan step is executable work. Production agents
-                        # must not turn "I'll start" or a directory listing into
-                        # TASK_COMPLETED. DEBUGGER/Verify steps need an actual
-                        # command/test; other steps must inspect beyond discovery.
+                        "_enforce_agent_contract": True,
+                        "_allowed_tools": list(task.allowed_tools),
+                        "model": task.model_key or getattr(agent, "model_key", ""),
                         "_tool_evidence_requirement": (
                             "verification"
                             if task.agent == "DEBUGGER"

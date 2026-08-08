@@ -29,14 +29,46 @@ report ``completed`` without doing real work:
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Any
 
 from backend.orchestrator.dependency_graph import TaskNode, TaskPriority
 from backend.orchestrator.types import OrchestrationResult
 
+
+def a2a_message_expired(message: Any, now: datetime | None = None) -> bool:
+    """Return whether an A2A message deadline/TTL has elapsed.
+
+    Expiry is a timeout, never a successful verification result.  The helper
+    accepts the Pydantic message as well as a plain mapping for transport
+    adapters that deserialize A2A envelopes themselves.
+    """
+    now = now or datetime.now(UTC)
+    get = message.get if isinstance(message, dict) else lambda key, default=None: getattr(message, key, default)
+    deadline = get("deadline")
+    created = get("created_at")
+    ttl = get("ttl_seconds")
+    if isinstance(deadline, str):
+        deadline = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+    if isinstance(created, str):
+        created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+    if isinstance(deadline, datetime):
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=UTC)
+        return now >= deadline
+    if isinstance(created, datetime) and ttl is not None:
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=UTC)
+        return now >= created + timedelta(seconds=max(0, int(ttl)))
+    return False
+
+
+is_a2a_expired = a2a_message_expired
 __all__ = [
     "VerificationOutcome",
+    "a2a_message_expired",
+    "is_a2a_expired",
     "output_is_inconclusive",
     "output_reports_issues",
     "strip_cycle_prefixes",
@@ -376,6 +408,8 @@ def _create_verification_tasks(
     for task_info in tasks_to_verify:
         origin = task_info.get("origin") or strip_cycle_prefixes(str(task_info.get("name", "")))
         verify_task = TaskNode(
+
+
             name=f"Verify: {origin}",
             description=(
                 f"Verify the output of task '{origin}'. "
@@ -396,6 +430,21 @@ def _create_verification_tasks(
     return verify_steps
 
 
+def _failed_verification_evidence(artifact: dict[str, Any]) -> str | None:
+    """Return a concrete execution failure from typed verification evidence."""
+    raw = artifact.get("evidence")
+    evidence_items = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
+    for evidence in evidence_items:
+        if not isinstance(evidence, dict):
+            continue
+        if evidence.get("timed_out"):
+            return "verification command timed out"
+        exit_code = evidence.get("exit_code")
+        if exit_code not in (None, 0):
+            return f"verification command exited with code {exit_code}"
+        if evidence.get("ok") is False or evidence.get("verified") is False:
+            return "verification command did not produce passing evidence"
+    return None
 def _extract_verification_issues(verify_result: OrchestrationResult) -> list[dict]:
     """Extract genuine issues reported by DEBUGGER verification tasks."""
     issues: list[dict] = []
@@ -406,7 +455,8 @@ def _extract_verification_issues(verify_result: OrchestrationResult) -> list[dic
             continue
         name = str(artifact.get("name", "Unknown verification"))
         output = str(artifact.get("output", ""))
-        if not output_reports_issues(output, name):
+        evidence_error = _failed_verification_evidence(artifact)
+        if not evidence_error and not output_reports_issues(output, name):
             continue
         issues.append(
             {
@@ -415,6 +465,7 @@ def _extract_verification_issues(verify_result: OrchestrationResult) -> list[dic
                 "origin": artifact.get("origin") or strip_cycle_prefixes(name),
                 "output": output,
                 "agent": "DEBUGGER",
+                "evidence_error": evidence_error,
             }
         )
     return issues
@@ -437,7 +488,11 @@ def _extract_inconclusive_verifications(verify_result: OrchestrationResult) -> l
             continue
         name = str(artifact.get("name", "Unknown verification"))
         output = str(artifact.get("output", ""))
-        if not output_is_inconclusive(output, name):
+        evidence_error = _failed_verification_evidence(artifact)
+        expired = bool(artifact.get("a2a_expired")) or a2a_message_expired(
+            artifact.get("a2a_message")
+        ) if artifact.get("a2a_message") else False
+        if not evidence_error and not expired and not output_is_inconclusive(output, name):
             continue
         inconclusive.append(
             {
@@ -445,7 +500,12 @@ def _extract_inconclusive_verifications(verify_result: OrchestrationResult) -> l
                 "name": name,
                 "origin": artifact.get("origin") or strip_cycle_prefixes(name),
                 "output": output,
-                "reason": "verification tooling failed; the code was never inspected",
+                "reason": (
+                    "A2A response expired before verification"
+                    if expired
+                    else evidence_error
+                    or "verification tooling failed; the code was never inspected"
+                ),
             }
         )
     return inconclusive

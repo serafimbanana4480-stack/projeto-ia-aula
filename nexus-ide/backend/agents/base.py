@@ -461,31 +461,41 @@ class AgentBase(ABC):
         if not self.supported_actions:
             return None
         action_registry = get_action_registry()
+        from backend.tools.registry import get_tool
+
         schemas: list[dict[str, Any]] = []
         seen: set[str] = set()
         for action in self.supported_actions:
             mapping = action_registry.get(action.name)
             if not mapping or mapping.tool in seen:
                 continue
+            spec = get_tool(mapping.tool)
+            # Optional browser/Playwright modules are catalogued for truthful
+            # UI reporting, but unavailable tools must never be advertised to
+            # a model that cannot execute them.
+            if spec is None or not spec.available or not spec.enabled:
+                continue
             seen.add(mapping.tool)
             example_args = mapping.example_args if isinstance(mapping.example_args, dict) else {}
             properties = {
                 key: {"type": self._json_type_for(val)} for key, val in example_args.items()
             }
+            parameters = (
+                spec.schema
+                if isinstance(spec.schema, dict) and spec.schema
+                else {
+                    "type": "object",
+                    "properties": properties,
+                    "additionalProperties": True,
+                }
+            )
             schemas.append(
                 {
                     "type": "function",
                     "function": {
                         "name": mapping.tool,
                         "description": (mapping.when_to_use or f"Invoke {mapping.tool}.")[:512],
-                        "parameters": {
-                            "type": "object",
-                            "properties": properties,
-                            # Small/free models over-constrain when required is
-                            # non-empty; keep args permissive and let the tool
-                            # registry validate the executed call.
-                            "additionalProperties": True,
-                        },
+                        "parameters": parameters,
                     },
                 }
             )
@@ -2649,6 +2659,24 @@ class AgentBase(ABC):
         before calling :meth:`_execute`, then persists a short-term memory
         entry after the iterator completes.
         """
+        if request.context.get("_enforce_agent_contract"):
+            from backend.orchestrator.agent_capabilities import validate_agent_contract
+
+            model = str(
+                request.context.get("_model_override")
+                or request.context.get("model")
+                or self.model_key
+            )
+            errors = validate_agent_contract(
+                self.name,
+                model,
+                request.context.get("_allowed_tools") or (),
+            )
+            if errors:
+                self._last_run_success = False
+                yield f"<event>agent_contract_error|{json.dumps(errors)}</event>"
+                return
+
         from backend.core.agent_state import AgentStateStore
         from backend.core.shared_memory import get_shared_memory
 

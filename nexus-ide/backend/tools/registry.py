@@ -31,15 +31,27 @@ class ToolSpec:
     description: str
     tags: list[str] = field(default_factory=list)
     risk_level: str = "low"
+    # ``risk`` is the concise contract spelling; ``risk_level`` remains for
+    # compatibility with existing tool declarations.
+    risk: str | None = None
     requires_confirmation: bool = False
     when_to_use: str = ""
     examples: list[dict] = field(default_factory=list)
     schema: dict[str, Any] = field(default_factory=dict)
     handler: Callable[..., Awaitable[Any]] | None = None
     enabled: bool = True
+    available: bool = True
+    unavailable_reason: str = ""
+    missing_dependency: str = ""
+    timeout_seconds: float | None = None
     # --- Discovery metadata (used by AI agents and dashboard) ---
     category: str = ""  # file, web, code, git, docker, system, data, etc.
 
+    def __post_init__(self) -> None:
+        if self.risk:
+            self.risk_level = str(self.risk).strip().lower()
+        else:
+            self.risk = self.risk_level
 
 _registry: dict[str, ToolSpec] = {}
 _unavailable_modules: dict[str, dict[str, Any]] = {}
@@ -434,29 +446,41 @@ def tool_requires_confirmation(spec: ToolSpec) -> bool:
 
 
 def get_tool_catalog() -> list[dict[str, Any]]:
-    """Return the registry plus unavailable optional tools for the UI."""
+    """Return truthful availability and safety metadata for the UI."""
     _maybe_register()
     catalog: list[dict[str, Any]] = []
     for spec in sorted(_registry.values(), key=lambda item: item.name):
         requires_confirmation = tool_requires_confirmation(spec)
-        status = "blocked" if not spec.enabled else (
-            "requires_confirmation" if requires_confirmation else "available"
+        status = (
+            "missing_dependency"
+            if not spec.available and spec.missing_dependency
+            else "unavailable"
+            if not spec.available
+            else "blocked"
+            if not spec.enabled
+            else "requires_confirmation"
+            if requires_confirmation
+            else "available"
         )
         catalog.append(
             {
                 "name": spec.name,
                 "description": spec.description,
                 "enabled": spec.enabled,
+                "available": spec.available,
                 "status": status,
                 "schema": spec.schema,
                 "category": spec.category or "uncategorised",
+                "risk": spec.risk or spec.risk_level,
                 "risk_level": spec.risk_level,
                 "requires_confirmation": requires_confirmation,
                 "when_to_use": spec.when_to_use,
                 "tags": spec.tags,
+                "unavailable_reason": spec.unavailable_reason,
+                "missing_dependency": spec.missing_dependency,
+                "timeout_seconds": spec.timeout_seconds,
             }
         )
-
     known_names = {item["name"] for item in catalog}
     for module_name, info in sorted(_unavailable_modules.items()):
         for tool_name in info["tools"]:
@@ -467,12 +491,15 @@ def get_tool_catalog() -> list[dict[str, Any]]:
                     "name": tool_name,
                     "description": f"Tool disponibilizada pelo módulo {module_name}.",
                     "enabled": False,
+                    "available": False,
                     "status": "missing_dependency",
                     "schema": {},
                     "category": "browser" if module_name == "browser_automation" else "system",
+                    "risk": "medium",
                     "risk_level": "medium",
                     "requires_confirmation": True,
-                    "dependency": module_name,
+                    "missing_dependency": module_name,
+                    "unavailable_reason": info["error"],
                     "error": info["error"],
                 }
             )
@@ -503,15 +530,8 @@ def list_tools(enabled_only: bool = True) -> list[ToolSpec]:
     _maybe_register()
     tools = list(_registry.values())
     if enabled_only:
-        tools = [t for t in tools if t.enabled]
+        tools = [t for t in tools if t.enabled and t.available]
     return tools
-
-
-def set_tool_enabled(name: str, enabled: bool) -> None:
-    if name in _registry:
-        _registry[name].enabled = enabled
-
-
 # ---------------------------------------------------------------------------
 # Discovery helpers (used by AI agents, dashboard, and the orchestrator)
 # ---------------------------------------------------------------------------
@@ -634,20 +654,16 @@ def get_tool_stats() -> dict[str, Any]:
         by_risk[t.risk_level] = by_risk.get(t.risk_level, 0) + 1
         if t.requires_confirmation:
             confirmation_count += 1
-    return {
-        "total": len(tools),
-        "by_category": by_cat,
-        "by_risk": by_risk,
-        "requires_confirmation": confirmation_count,
-    }
-
-
 def _handler_result_failed(result: Any) -> str | None:
     """Return an error message when a handler result dict indicates failure."""
     if not isinstance(result, dict):
         return None
     if result.get("error"):
         return str(result["error"])
+    if result.get("timed_out"):
+        return str(result.get("error") or "Tool process timed out")
+    if result.get("exit_code") not in (None, 0):
+        return str(result.get("stderr") or f"Command exited with code {result['exit_code']}")
     if result.get("written") is False:
         return str(result.get("error") or "Write operation failed")
     if result.get("deleted") is False:
@@ -663,6 +679,7 @@ def _drop_unsupported_args(spec: "ToolSpec", args: dict) -> tuple[dict, dict]:
     Returns ``(accepted, dropped)``. A handler that declares ``**kwargs`` is
     treated as accepting everything. Required parameters are never dropped —
     if one is missing the handler should still raise, so the model sees a
+
     genuine signature error rather than a silent no-op.
     """
     handler = getattr(spec, "handler", None)
@@ -699,6 +716,105 @@ def _drop_unsupported_args(spec: "ToolSpec", args: dict) -> tuple[dict, dict]:
             ),
         }
     return accepted, {}
+def validate_tool_args(spec: ToolSpec, args: dict[str, Any]) -> list[str]:
+    """Validate arguments against a JSON-schema subset used by tool specs."""
+    schema = spec.schema or {}
+    if not isinstance(args, dict):
+        return ["arguments must be an object"]
+    if not schema:
+        return []
+    errors: list[str] = []
+
+    def check(value: Any, rule: dict[str, Any], path: str) -> None:
+        expected = rule.get("type")
+        if expected == "object":
+            if not isinstance(value, dict):
+                errors.append(f"{path} must be an object")
+                return
+            for required in rule.get("required", []):
+                if required not in value:
+                    errors.append(f"{path}.{required} is required")
+            properties = rule.get("properties", {})
+            additional = rule.get("additionalProperties", True)
+            for key, item in value.items():
+                child = f"{path}.{key}"
+                if key not in properties and additional is False:
+                    errors.append(f"{child} is not allowed")
+                elif key in properties and isinstance(properties[key], dict):
+                    check(item, properties[key], child)
+        elif expected == "array":
+            if not isinstance(value, list):
+                errors.append(f"{path} must be an array")
+            elif isinstance(rule.get("items"), dict):
+                for index, item in enumerate(value):
+                    check(item, rule["items"], f"{path}[{index}]")
+        elif expected == "string":
+            if not isinstance(value, str):
+                errors.append(f"{path} must be a string")
+            elif "minLength" in rule and len(value) < int(rule["minLength"]):
+                errors.append(f"{path} is shorter than minLength")
+        elif expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
+            errors.append(f"{path} must be an integer")
+        elif expected == "number" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
+            errors.append(f"{path} must be a number")
+        elif expected == "boolean" and not isinstance(value, bool):
+            errors.append(f"{path} must be a boolean")
+        elif expected == "null" and value is not None:
+            errors.append(f"{path} must be null")
+        if "enum" in rule and value not in rule["enum"]:
+            errors.append(f"{path} must be one of {rule['enum']!r}")
+
+    check(args, schema, "arguments")
+    return errors
+
+
+def _typed_tool_response(
+    name: str,
+    *,
+    ok: bool,
+    result: Any = None,
+    error: str | None = None,
+    error_category: str = "none",
+    command: str | None = None,
+    exit_code: int | None = None,
+    duration_ms: int = 0,
+    timed_out: bool = False,
+    **extra: Any,
+) -> dict[str, Any]:
+    raw = result if isinstance(result, dict) else {}
+    command = command or raw.get("command")
+    if exit_code is None and raw.get("exit_code") is not None:
+        try:
+            exit_code = int(raw["exit_code"])
+        except (TypeError, ValueError):
+            exit_code = None
+    timed_out = bool(timed_out or raw.get("timed_out", False))
+    evidence = raw.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = {
+            "kind": "tool_execution",
+            "tool": name,
+            "verified": bool(ok and not timed_out and (exit_code is None or exit_code == 0)),
+            "command": command,
+            "exit_code": exit_code,
+            "duration_ms": duration_ms,
+            "timed_out": timed_out,
+        }
+    payload: dict[str, Any] = {
+        "tool": name,
+        "ok": bool(ok),
+        "result": result,
+        "error_category": error_category,
+        "command": command,
+        "exit_code": exit_code,
+        "duration_ms": int(duration_ms),
+        "evidence": evidence,
+        "timed_out": timed_out,
+    }
+    if error:
+        payload["error"] = error
+    payload.update(extra)
+    return payload
 
 
 async def execute_tool(
@@ -713,11 +829,31 @@ async def execute_tool(
 ) -> dict:
     spec = get_tool(name)
     if not spec:
-        return {"error": f"Tool '{name}' not found"}
+        return _typed_tool_response(
+            name, ok=False, error=f"Tool '{name}' not found", error_category="unknown_tool"
+        )
+    if not spec.available:
+        reason = spec.unavailable_reason or spec.missing_dependency or "unavailable"
+        return _typed_tool_response(
+            name, ok=False, error=f"Tool '{name}' is unavailable: {reason}",
+            error_category="unavailable",
+        )
     if not spec.enabled:
-        return {"error": f"Tool '{name}' is disabled"}
+        return _typed_tool_response(
+            name, ok=False, error=f"Tool '{name}' is disabled", error_category="disabled"
+        )
     if not spec.handler:
-        return {"error": f"Tool '{name}' has no handler"}
+        return _typed_tool_response(
+            name, ok=False, error=f"Tool '{name}' has no handler", error_category="tool"
+        )
+    arg_errors = validate_tool_args(spec, args)
+    if arg_errors:
+        return _typed_tool_response(
+            name,
+            ok=False,
+            error="Malformed tool arguments: " + "; ".join(arg_errors),
+            error_category="invalid_args",
+        )
 
     # Circuit breaker: a tool that failed N times in a row in this session is
     # short-circuited so the agent stops burning iterations retrying it.
@@ -729,16 +865,17 @@ async def execute_tool(
             failures,
             session_id,
         )
-        return {
-            "tool": name,
-            "error": (
+        return _typed_tool_response(
+            name,
+            ok=False,
+            error=(
                 f"Tool '{name}' failed {failures} times in a row and is temporarily "
                 "disabled for this session. Do NOT call it again — use a different "
                 "tool or answer with the information you already have."
             ),
-            "circuit_open": True,
-            "duration_ms": 0,
-        }
+            error_category="tool",
+            circuit_open=True,
+        )
 
     # Confirmation gate BEFORE cache: a cached hit must never bypass the
     # user's explicit approval for confirmation-listed tools (e.g. fetch_url).
@@ -755,16 +892,17 @@ async def execute_tool(
             tool_name=name,
             args=args,
         )
-        return {
-            "tool": name,
-            "error": f"Confirmation required before executing '{name}'.",
-            "confirmation_required": True,
-            "confirmation_id": confirmation_id,
-            "tool_args": args,
-            "risk_level": spec.risk_level,
-            "suggestion": "Review the arguments and approve the operation to continue.",
-            "duration_ms": 0,
-        }
+        return _typed_tool_response(
+            name,
+            ok=False,
+            error=f"Confirmation required before executing '{name}'.",
+            error_category="confirmation_required",
+            confirmation_required=True,
+            confirmation_id=confirmation_id,
+            tool_args=args,
+            risk_level=spec.risk_level,
+            suggestion="Review the arguments and approve the operation to continue.",
+        )
 
     # Check cache for idempotent tools (only after confirmation is satisfied)
     if _HAVE_TOOL_CACHE:
@@ -773,7 +911,16 @@ async def execute_tool(
             cached = cache.get(name, args)
             if cached is not None:
                 logger.debug("[TOOL CACHE] Hit for %s: %s", name, cached.get("_cached_preview", ""))
-                return {**cached, "_from_cache": True, "_cache_hit": True}
+                return _typed_tool_response(
+                    name,
+                    ok=bool(cached.get("ok", True)) and not bool(cached.get("error")),
+                    result=cached.get("result"),
+                    error=cached.get("error"),
+                    error_category=cached.get("error_category", "none"),
+                    duration_ms=int(cached.get("duration_ms", 0)),
+                    _from_cache=True,
+                    _cache_hit=True,
+                )
         except Exception:
             pass  # Cache is best-effort
 
@@ -787,45 +934,54 @@ async def execute_tool(
     # circuit breaker. Dropping the extras lets the call succeed and tells the
     # model precisely which names are valid.
     args, dropped_args = _drop_unsupported_args(spec, args)
-
+    timeout_seconds = (
+        float(spec.timeout_seconds)
+        if spec.timeout_seconds is not None
+        else TOOL_TIMEOUT_SECONDS
+    )
     start = time.time()
     try:
-        # Hard timeout: a wedged handler must never suspend the ReAct loop
-        # forever. On timeout the task is cancelled and an error is returned.
-        result = await asyncio.wait_for(spec.handler(**args), timeout=TOOL_TIMEOUT_SECONDS)
+        result = await asyncio.wait_for(spec.handler(**args), timeout=timeout_seconds)
         if dropped_args and isinstance(result, dict):
             result = {**result, "ignored_arguments": dropped_args}
         duration_ms = int((time.time() - start) * 1000)
         handler_error = _handler_result_failed(result)
         if handler_error:
             failure_count = _record_tool_failure(name, session_id)
+            response = _typed_tool_response(
+                name,
+                ok=False,
+                result=result,
+                error=handler_error,
+                error_category="tool",
+                duration_ms=duration_ms,
+                consecutive_failures=failure_count,
+            )
             log_tool_execution(
                 session_id=session_id,
                 tool_name=name,
                 args=args,
-                result=result,
+                result=response,
                 success=False,
                 error=handler_error,
                 duration_ms=duration_ms,
             )
-            return {
-                "tool": name,
-                "error": handler_error,
-                "result": result,
-                "consecutive_failures": failure_count,
-                "duration_ms": duration_ms,
-            }
+            return response
         _record_tool_success(name, session_id)
+        response = _typed_tool_response(
+            name,
+            ok=True,
+            result=result,
+            duration_ms=duration_ms,
+        )
         log_tool_execution(
             session_id=session_id,
             tool_name=name,
             args=args,
-            result=result,
+            result=response,
             success=True,
             duration_ms=duration_ms,
         )
-        response = {"tool": name, "result": result, "duration_ms": duration_ms}
-        # Store in cache after successful execution
         if _HAVE_TOOL_CACHE:
             try:
                 cache = get_tool_cache()
@@ -837,38 +993,47 @@ async def execute_tool(
     except TimeoutError:
         duration_ms = int((time.time() - start) * 1000)
         failure_count = _record_tool_failure(name, session_id)
-        error_msg = f"Tool '{name}' timed out after {TOOL_TIMEOUT_SECONDS:.0f}s"
+        error_msg = f"Tool '{name}' timed out after {timeout_seconds:.0f}s"
         logger.warning("[TOOL TIMEOUT] %s (session=%s)", error_msg, session_id)
+        response = _typed_tool_response(
+            name,
+            ok=False,
+            error=error_msg,
+            error_category="timeout",
+            duration_ms=duration_ms,
+            timed_out=True,
+            exit_code=124,
+            consecutive_failures=failure_count,
+        )
         log_tool_execution(
             session_id=session_id,
             tool_name=name,
             args=args,
-            result=None,
+            result=response,
             success=False,
             error=error_msg,
             duration_ms=duration_ms,
         )
-        return {
-            "tool": name,
-            "error": error_msg,
-            "consecutive_failures": failure_count,
-            "duration_ms": duration_ms,
-        }
-    except Exception as e:
+        return response
+    except Exception as exc:
         duration_ms = int((time.time() - start) * 1000)
         failure_count = _record_tool_failure(name, session_id)
+        error_msg = str(exc)
+        response = _typed_tool_response(
+            name,
+            ok=False,
+            error=error_msg,
+            error_category="tool",
+            duration_ms=duration_ms,
+            consecutive_failures=failure_count,
+        )
         log_tool_execution(
             session_id=session_id,
             tool_name=name,
             args=args,
-            result=None,
+            result=response,
             success=False,
-            error=str(e),
+            error=error_msg,
             duration_ms=duration_ms,
         )
-        return {
-            "tool": name,
-            "error": str(e),
-            "consecutive_failures": failure_count,
-            "duration_ms": duration_ms,
-        }
+        return response
