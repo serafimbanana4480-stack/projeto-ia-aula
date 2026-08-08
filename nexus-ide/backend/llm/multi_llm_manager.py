@@ -588,6 +588,11 @@ class MultiLLMManager:
     ) -> AsyncIterator[str]:
         model = self._select_policy_model(model)
         target = provider or self._selected_provider or self.get_best_provider()
+        if self.free_only and provider and provider != self._selected_provider:
+            raise ProviderUnavailableError(
+                "Explicit provider is not policy-selected", category="eligibility",
+                provider=provider, model=model,
+            )
         if target not in self.providers:
             raise ProviderUnavailableError(
                 f"Provider '{target}' not registered",
@@ -657,6 +662,11 @@ class MultiLLMManager:
     ) -> list[list[float]]:
         model = self._select_policy_model(model)
         target = provider or self._selected_provider or self.get_best_provider()
+        if self.free_only and provider and provider != self._selected_provider:
+            raise ProviderUnavailableError(
+                "Explicit provider is not policy-selected", category="eligibility",
+                provider=provider, model=model,
+            )
         if target not in self.providers:
             raise ProviderUnavailableError(
                 f"Provider '{target}' not registered",
@@ -714,6 +724,11 @@ class MultiLLMManager:
             raise ValueError("MultiLLMManager.batch_complete requires an explicit model")
         model = self._select_policy_model(model)
         target = provider or self._selected_provider or self.get_best_provider()
+        if self.free_only and provider and provider != self._selected_provider:
+            raise ProviderUnavailableError(
+                "Explicit provider is not policy-selected", category="eligibility",
+                provider=provider, model=model,
+            )
         if target not in self.providers:
             raise ProviderUnavailableError(
                 f"Provider '{target}' not registered",

@@ -840,6 +840,8 @@ def load_validated_models(provider: str) -> list[ModelInfo]:
             model = ModelInfo(**raw)
         except (TypeError, ValueError):
             continue
+        if model.provider != provider:
+            continue
         if model.validated_at is None or now - model.validated_at > ttl:
             continue
         if model.quota_available is not True:

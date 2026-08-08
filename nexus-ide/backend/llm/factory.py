@@ -60,6 +60,8 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     """Parse settings persisted by the UI, which are stored as strings."""
     if isinstance(value, bool):
         return value
+    if isinstance(value, (int, float)):
+        return bool(value) if value in (0, 1) else default
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in {"1", "true", "yes", "on"}:
@@ -77,13 +79,11 @@ def _free_only_enabled(settings: Any, overrides: dict[str, Any]) -> bool:
     value = _setting_value(settings, overrides, "free_only", configured)
     return _as_bool(value, True)
 
-
-
 def _local_models_ready(value: Any) -> bool:
-    if not isinstance(value, dict) or not value.get("enabled", False):
+    if not isinstance(value, dict) or not _as_bool(value.get("enabled"), False):
         return False
     models = value.get("models", value.get("installed", []))
-    return bool(models) and bool(value.get("healthy", True))
+    return bool(models) and _as_bool(value.get("healthy", True), False)
 def _usable_api_key(value: Any) -> str:
     """Return a real-looking API key, ignoring template placeholder values.
 

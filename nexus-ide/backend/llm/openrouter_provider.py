@@ -192,7 +192,10 @@ class OpenRouterProvider:
             entry_id = getattr(entry, "id", None) or (
                 entry.get("id") if isinstance(entry, dict) else None
             )
-            if entry_id != resolved:
+            entry_provider = getattr(entry, "provider", None) or (
+                entry.get("provider") if isinstance(entry, dict) else None
+            )
+            if entry_provider != "openrouter":
                 continue
             def field(name: str, default: Any = None) -> Any:
                 value = getattr(entry, name, default)

@@ -81,6 +81,16 @@ def _value(candidate: Any, key: str, default: Any = None) -> Any:
     return getattr(candidate, key, default)
 
 
+def _bool_value(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
 def _eligibility(candidate: Any) -> ModelEligibility:
     if isinstance(candidate, ModelEligibility):
         return candidate
@@ -193,7 +203,6 @@ class FreeModelPolicy:
                 simulation=simulation,
                 eligibility=item,
             )
-        return None
 
     @staticmethod
     def _local_eligibilities(local_models: Any) -> list[ModelEligibility]:
@@ -202,7 +211,9 @@ class FreeModelPolicy:
         enabled = True
         values: Any = local_models
         if isinstance(local_models, Mapping):
-            enabled = bool(local_models.get("enabled", local_models.get("ollama_enabled", False)))
+            enabled = _bool_value(
+                local_models.get("enabled", local_models.get("ollama_enabled", False))
+            )
             values = local_models.get("models", local_models.get("installed", []))
         if not enabled:
             return []
@@ -235,6 +246,10 @@ class FreeModelPolicy:
                     validated_at=item.validated_at,
                     reason=item.reason,
                 )
-            if bool(_value(value, "installed", True)):
+            if (
+                _bool_value(_value(value, "installed", True), False)
+                and _bool_value(_value(value, "healthy", True), False)
+                and item.validated_at is not None
+            ):
                 result.append(item)
         return result
