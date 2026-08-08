@@ -230,6 +230,7 @@ class RedisBackend:
                 last_accessed_at=float(data.get("last_accessed_at", 0)),
                 access_count=int(data.get("access_count", 0)),
                 importance=float(data.get("importance", 0.5)),
+                kind=data.get("kind", "semantic"),
                 related_memory_ids=related,
             )
         except Exception as exc:

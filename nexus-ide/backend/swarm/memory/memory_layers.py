@@ -238,6 +238,7 @@ class MemoryStore:
                         content=_entry.content,
                         memory_type=MemoryType.DOCUMENTATION,
                         session_id=_entry.session_id,
+                        project_id=_entry.project_id,
                         tags=_entry.tags + [f"swarm:{layer}", f"run:{run_id}"],
                         importance=_entry.importance,
                         source=f"SWARM_{layer.upper()}",

@@ -39,8 +39,8 @@ from backend.llm.multi_llm_manager import MultiLLMManager
 from backend.middleware.auth import require_auth
 from backend.models.api import AgentName, ChatRequest, RoutingDecision, StreamEvent
 from backend.observability.advanced_logging import get_structured_logger
-from backend.orchestrator.fallback import invoke_with_fallback
 from backend.orchestrator.cancellation import get_cancellation_registry
+from backend.orchestrator.fallback import invoke_with_fallback
 from backend.orchestrator.llm_client_lifecycle import acquire_llm_client, release_llm_client
 from backend.orchestrator.registry import get_registry, resolve
 from backend.orchestrator.router import fast_route, route_with_model
@@ -1718,6 +1718,18 @@ async def _run_pipeline(
             req.session_id,
         )
 
+    # Create/read the compact project bootstrap on first use.  This is kept
+    # outside the semantic memory store so the project can carry a small,
+    # human-reviewable architecture map independently of transcripts and
+    # embeddings.
+    project_memory = ""
+    try:
+        from backend.knowledge.project_memory import read_project_memory
+
+        project_memory = read_project_memory(project_path)
+    except Exception as exc:
+        logger.warning("Could not load project memory for %s: %s", project_path, exc)
+
     # Load mode configuration once; every mode can contribute a system-prompt
     # addon, iteration budget, and thinking preference.
     mode_cfg = get_mode_config("auto" if mode in ("agent", "auto") else mode)
@@ -1985,12 +1997,13 @@ async def _run_pipeline(
                         "routing_reason": f"auto:upgraded-from-{decision.primary_agent}",
                     }
                 )
+            fast_chat_turn = _is_fast_chat_turn(req.message) and not _advanced_force_autonomous
             decision = decision.model_copy(
                 update={
                     "routing_reason": f"auto:{decision.routing_reason}",
-                    "thinking_mode": "iterative",
-                    "context_needed": "high",
-                    "task_type": "autonomous",
+                    "thinking_mode": "fast" if fast_chat_turn else "iterative",
+                    "context_needed": "low" if fast_chat_turn else "high",
+                    "task_type": "question" if fast_chat_turn else "autonomous",
                 }
             )
         except Exception as exc:
@@ -2350,8 +2363,18 @@ async def _run_pipeline(
             "and surface only a concise user-facing approach summary, never private chain-of-thought."
         ),
     }
-    if req.thinking_strength in strength_guidance:
+    fast_chat_turn = mode in {"ask", "fast"} or (
+        mode in {"auto", "agent"}
+        and not _advanced_force_autonomous
+        and _is_fast_chat_turn(effective_message)
+    )
+    if req.thinking_strength in strength_guidance and not fast_chat_turn:
         enriched_addon += f"\n\n[REASONING DEPTH]\n{strength_guidance[req.thinking_strength]}"
+    if fast_chat_turn:
+        enriched_addon += (
+            "\n\n[FAST CHAT LANE] Answer directly in one concise response. "
+            "Do not use tools, planning, thinking markers, or subagents."
+        )
     if decision is not None:
         routing_info = (
             f"\n\n[ROUTING INFO] Primary agent: {decision.primary_agent}. "
@@ -2373,6 +2396,8 @@ async def _run_pipeline(
             agent_context: dict[str, Any] = {}
             if project_path:
                 agent_context["project_path"] = project_path
+            if project_memory:
+                agent_context["_project_memory"] = project_memory
             if enriched_addon:
                 agent_context["_system_addon"] = enriched_addon
             if _advanced_profile:
@@ -2391,9 +2416,6 @@ async def _run_pipeline(
                 if evidence_requirement:
                     agent_context["_tool_evidence_requirement"] = evidence_requirement
 
-            fast_chat_turn = mode in {"ask", "fast"} or (
-                mode in {"auto", "agent"} and _is_fast_chat_turn(effective_message)
-            )
             agent_req = AgentRequest(
                 session_id=req.session_id,
                 query=effective_message,
@@ -2422,7 +2444,11 @@ async def _run_pipeline(
             # A stalled provider must not hold a normal question for the
             # global 180s stream-start budget. Complex/explicit work keeps the
             # more patient default for local model loading.
-            stream_start_timeout=12.0 if _is_fast_chat_turn(effective_message) else None,
+            stream_start_timeout=(
+                12.0
+                if not _advanced_force_autonomous and _is_fast_chat_turn(effective_message)
+                else None
+            ),
         )
     except Exception as exc:
         logger.exception("All fallbacks exhausted: %s", exc)
@@ -2699,6 +2725,23 @@ async def _run_pipeline(
             )
     except Exception as exc:
         logger.debug("Semantic memory store failed (non-critical): %s", exc)
+
+    # Keep the per-project bootstrap useful over time without turning it into
+    # a transcript.  The topic is reduced to inert keywords by AgentBase and
+    # only a bounded, verified completion marker is persisted.
+    try:
+        from backend.agents.base import AgentBase
+        from backend.knowledge.project_memory import record_verified_session
+
+        record_verified_session(
+            project_path,
+            session_id=req.session_id,
+            status="completed" if not stream_aborted else "interrupted",
+            topic=AgentBase._memory_topic(req.message),
+            evidence=(f"agent={outcome.used_agent}; tools={','.join(tool_names[-8:])}"),
+        )
+    except Exception as exc:
+        logger.debug("Project memory update failed (non-critical): %s", exc)
 
     yield _sse(StreamEvent(type="agent_finished", agent=outcome.used_agent))  # type: ignore[arg-type]
     yield _sse(StreamEvent(type="done"))

@@ -100,3 +100,27 @@ class TestKeywordSearch:
         results = emb._keyword_search("multiply", k=5)
         assert len(results) > 0
         assert any("multiply" in r.content for r in results)
+
+    @pytest.mark.asyncio
+    async def test_offline_index_keeps_chunks_and_scopes_search(self, tmp_path: Path, monkeypatch) -> None:
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        (first / "a.txt").write_text("alpha project only", encoding="utf-8")
+        (second / "b.txt").write_text("beta project only", encoding="utf-8")
+
+        async def no_embeddings(texts, model):
+            return [None for _ in texts]
+
+        monkeypatch.setattr(emb, "_embed_batch_with_fallback", no_embeddings)
+        monkeypatch.setattr(emb, "INDEX_SNAPSHOT_PATH", tmp_path / "index.json")
+        monkeypatch.setattr(emb, "INDEX_META_PATH", tmp_path / "meta.json")
+        emb._store.clear()
+
+        assert await emb.index_codebase(str(first), force_reindex=True) == 1
+        assert await emb.index_codebase(str(second)) == 1
+        assert len(emb._store) == 2
+
+        results = await emb.search_codebase("alpha", project_path=str(second))
+        assert results == []

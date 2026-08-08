@@ -328,6 +328,7 @@ class PlanCreator:
             recalled = await recall_context(
                 query=objective,
                 session_id=session_id,
+                project_id=project_path if project_path and project_path != "." else "",
                 top_k=3,
             )
             memories = recalled.get("memories", [])

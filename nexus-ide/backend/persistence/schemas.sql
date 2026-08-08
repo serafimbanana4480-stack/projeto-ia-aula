@@ -361,6 +361,7 @@ CREATE TABLE IF NOT EXISTS persistent_memories (
     source          TEXT,
     file_path       TEXT,
     language        TEXT,
+    kind            TEXT DEFAULT 'semantic',
     related_memory_ids TEXT,
     importance      REAL,
     created_at      REAL,

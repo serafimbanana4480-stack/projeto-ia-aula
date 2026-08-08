@@ -59,6 +59,14 @@ async def create_project_endpoint(
             preferred_model=req.preferred_model,
             trust=req.trust,
         )
+        # Bootstrap the project-scoped memory immediately.  It is deliberately
+        # a compact local Markdown file, not a copy of the repository.
+        try:
+            from backend.knowledge.project_memory import ensure_project_memory
+
+            ensure_project_memory(project_path)
+        except Exception as exc:
+            logger.warning("Project created but bootstrap memory failed: %s", exc)
         return {"project": project}
     except HTTPException:
         raise

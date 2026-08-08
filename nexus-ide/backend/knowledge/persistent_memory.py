@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS persistent_memories (
     source TEXT,
     file_path TEXT,
     language TEXT,
+    kind TEXT DEFAULT 'semantic',
     related_memory_ids TEXT,
     importance REAL,
     created_at REAL,
@@ -92,6 +93,7 @@ class PersistentMemoryStore(MemoryStore):
             ("project_id", "TEXT"),
             ("file_path", "TEXT"),
             ("language", "TEXT"),
+            ("kind", "TEXT DEFAULT 'semantic'"),
             ("related_memory_ids", "TEXT"),
         ]
         for col, dtype in additions:
@@ -104,9 +106,9 @@ class PersistentMemoryStore(MemoryStore):
             conn.execute(
                 """INSERT OR REPLACE INTO persistent_memories
                    (id, user_id, session_id, project_id, content, summary, embedding_json,
-                    memory_type, tags, source, file_path, language, related_memory_ids,
+                    memory_type, tags, source, file_path, language, kind, related_memory_ids,
                     importance, created_at, last_accessed_at, access_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     memory.memory_id,
                     user_id,
@@ -120,6 +122,7 @@ class PersistentMemoryStore(MemoryStore):
                     memory.source,
                     memory.file_path,
                     memory.language,
+                    memory.kind,
                     json.dumps(memory.related_memory_ids),
                     memory.importance,
                     memory.created_at,
@@ -173,6 +176,7 @@ class PersistentMemoryStore(MemoryStore):
             source=row["source"] or "",
             file_path=row["file_path"] or "",
             language=row["language"] or "",
+            kind=row["kind"] or "semantic",
             related_memory_ids=(
                 json.loads(row["related_memory_ids"]) if row["related_memory_ids"] else []
             ),
@@ -202,6 +206,7 @@ class PersistentMemoryStore(MemoryStore):
         importance: float = 0.5,
         file_path: str = "",
         language: str = "",
+        kind: str = "semantic",
         related_memory_ids: list[str] | None = None,
     ) -> Memory:
         """Store a new memory and persist it to SQLite."""
@@ -216,6 +221,7 @@ class PersistentMemoryStore(MemoryStore):
             importance=importance,
             file_path=file_path,
             language=language,
+            kind=kind,
             related_memory_ids=related_memory_ids,
         )
         self._save_memory(memory, user_id=user_id)
@@ -238,3 +244,10 @@ class PersistentMemoryStore(MemoryStore):
         stats = super().stats()
         stats["persistent_db"] = str(DB_PATH)
         return stats
+
+    async def search(self, *args: Any, **kwargs: Any) -> list[tuple[Memory, float]]:
+        """Search and persist access telemetry for the returned memories."""
+        results = await super().search(*args, **kwargs)
+        for memory, _score in results:
+            self._save_memory(memory)
+        return results

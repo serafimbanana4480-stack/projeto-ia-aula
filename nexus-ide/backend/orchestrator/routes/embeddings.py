@@ -38,6 +38,7 @@ class IndexResponse(BaseModel):
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=1000, description="Natural-language search query")
     k: int = Field(default=8, ge=1, le=50, description="Maximum number of results")
+    project_path: str = Field(default="", max_length=2000, description="Optional project root filter")
 
 
 class SearchResultItem(BaseModel):
@@ -102,7 +103,11 @@ async def search_endpoint(
     Returns the top-k most relevant code chunks for the query.
     The codebase must be indexed first via /api/embeddings/index.
     """
-    results = await search_codebase(req.query, k=req.k)
+    if req.project_path:
+        blocked, reason = _is_blocked_path(req.project_path)
+        if blocked:
+            raise HTTPException(status_code=400, detail=f"Blocked path: {reason}")
+    results = await search_codebase(req.query, k=req.k, project_path=req.project_path or None)
     return SearchResponse(
         query=req.query,
         results=[

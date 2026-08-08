@@ -36,10 +36,12 @@ class TestPersistentMemoryStore:
             importance=0.8,
             file_path="backend/auth.py",
             language="python",
+            kind="episodic",
         )
         assert mem.session_id == "s1"
         assert mem.project_id == "proj_1"
         assert mem.file_path == "backend/auth.py"
+        assert mem.kind == "episodic"
 
         # Simulate restart by loading from DB into a new instance
         new_store = PersistentMemoryStore(
@@ -49,6 +51,7 @@ class TestPersistentMemoryStore:
         project_mems = await new_store.get_project_memories("proj_1")
         assert len(project_mems) > 0
         assert project_mems[0].content == "Authentication uses JWT tokens"
+        assert project_mems[0].kind == "episodic"
 
         # Search with the same text to guarantee similarity with fallback embeddings
         loaded = await new_store.search("Authentication uses JWT tokens", top_k=1)

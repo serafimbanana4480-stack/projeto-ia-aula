@@ -534,11 +534,18 @@ async def index_codebase(
         current_file_chunks: set[str] = set()
 
         for filepath in root_path.rglob("*"):
-            if any(part.startswith(".") for part in filepath.parts):
+            try:
+                relative_parts = filepath.relative_to(root_path).parts
+            except ValueError:
+                continue
+            # Inspect only project-relative components.  Checking
+            # ``filepath.parts`` rejects valid projects located under a
+            # hidden temporary directory such as pytest's ``.pytest_tmp``.
+            if any(part.startswith(".") for part in relative_parts):
                 continue
             if filepath.suffix not in CODE_EXTENSIONS:
                 continue
-            if any(part in exclude for part in filepath.parts):
+            if any(part in exclude for part in relative_parts):
                 continue
 
             try:
@@ -587,7 +594,11 @@ async def index_codebase(
                     embeddings = await _embed_batch_with_fallback(batch_texts, model)
                     for emb, (cid, cc) in zip(embeddings, batch_meta, strict=False):
                         if emb is None:
-                            continue
+                            # Keep the chunk even when the embedding provider
+                            # is unavailable.  Search can still use the
+                            # keyword fallback and the project remains
+                            # discoverable offline.
+                            emb = []
                         # Normalise provider output to a flat list[float] so
                         # the FAISS indexer always sees 2-D arrays.
                         try:
@@ -600,8 +611,8 @@ async def index_codebase(
                                 emb = arr.tolist()
                         except Exception:
                             pass
-                            _store[cid] = (emb, cc)
-                            chunk_count += 1
+                        _store[cid] = (emb, cc)
+                        chunk_count += 1
                     batch_texts = []
                     batch_meta = []
 
@@ -613,7 +624,7 @@ async def index_codebase(
             embeddings = await _embed_batch_with_fallback(batch_texts, model)
             for emb, (cid, cc) in zip(embeddings, batch_meta, strict=False):
                 if emb is None:
-                    continue
+                    emb = []
                 # Normalise provider output to a flat list[float] so the
                 # FAISS indexer always sees 2-D arrays.
                 try:
@@ -636,7 +647,11 @@ async def index_codebase(
     return chunk_count
 
 
-async def search_codebase(query: str, k: int = 8) -> list[CodeChunk]:
+async def search_codebase(
+    query: str,
+    k: int = 8,
+    project_path: str | None = None,
+) -> list[CodeChunk]:
     """Semantic search returning top-k code chunks.
 
     Uses FAISS ANN index when available (O(log n)), falls back to
@@ -645,13 +660,27 @@ async def search_codebase(query: str, k: int = 8) -> list[CodeChunk]:
     if not _store:
         return []
 
+    project_root = Path(project_path).expanduser().resolve() if project_path else None
+
+    def _matches_project(chunk: CodeChunk) -> bool:
+        if project_root is None:
+            return True
+        try:
+            Path(chunk.file).resolve().relative_to(project_root)
+            return True
+        except (OSError, ValueError):
+            return False
+
     try:
         query_embedding = await embed(query)
     except RuntimeError:
-        return _keyword_search(query, k)
+        return _keyword_search(query, k, project_path=project_path)
 
     # Try FAISS first (O(log n))
-    if _HAVE_FAISS and _faiss_index is not None and _faiss_index.ntotal > 0:
+    # A project-scoped query must not use the global ANN result list before
+    # filtering: the nearest chunks from another project could otherwise
+    # consume all k slots.  The linear path is bounded and correct here.
+    if project_root is None and _HAVE_FAISS and _faiss_index is not None and _faiss_index.ntotal > 0:
         try:
             query_vec = np.array([query_embedding], dtype=np.float32)
             if query_vec.shape[1] != _faiss_index.d:
@@ -677,6 +706,8 @@ async def search_codebase(query: str, k: int = 8) -> list[CodeChunk]:
     # Fallback: linear O(n) scan (original behavior)
     scored: list[tuple[float, CodeChunk]] = []
     for _chunk_id, (embedding, chunk) in _store.items():
+        if not _matches_project(chunk):
+            continue
         sim = _cosine_sim(query_embedding, embedding)
         chunk.score = sim
         scored.append((sim, chunk))
@@ -685,12 +716,23 @@ async def search_codebase(query: str, k: int = 8) -> list[CodeChunk]:
     return [chunk for _, chunk in scored[:k]]
 
 
-def _keyword_search(query: str, k: int = 8) -> list[CodeChunk]:
+def _keyword_search(
+    query: str,
+    k: int = 8,
+    *,
+    project_path: str | None = None,
+) -> list[CodeChunk]:
     """Simple keyword fallback when embedding is unavailable."""
     terms = set(query.lower().split())
     results: list[CodeChunk] = []
 
+    project_root = Path(project_path).expanduser().resolve() if project_path else None
     for _chunk_id, (_, chunk) in _store.items():
+        if project_root is not None:
+            try:
+                Path(chunk.file).resolve().relative_to(project_root)
+            except (OSError, ValueError):
+                continue
         content_lower = chunk.content.lower()
         matches = sum(1 for t in terms if t in content_lower)
         if matches > 0:
@@ -756,7 +798,7 @@ async def _search_codebase_tool(
         return {"error": "Query cannot be empty."}
 
     try:
-        results = await search_codebase(query, k=k)
+        results = await search_codebase(query, k=k, project_path=project_path)
     except RuntimeError as exc:
         return {"error": f"Semantic search unavailable: {exc}"}
 
@@ -896,6 +938,7 @@ async def _search_symbols_handler(
     query: str = "",
     kind: str = "any",
     limit: int = 20,
+    project_path: str = ".",
 ) -> dict:
     """Search for symbols (functions, classes, variables) in the indexed codebase.
 
@@ -906,7 +949,7 @@ async def _search_symbols_handler(
         return {"error": "Query cannot be empty."}
 
     try:
-        results = await search_codebase(query, k=limit)
+        results = await search_codebase(query, k=limit, project_path=project_path)
     except RuntimeError as exc:
         return {"error": f"Semantic search unavailable: {exc}"}
 
@@ -1003,6 +1046,11 @@ register_tool(ToolSpec(
                 "type": "integer",
                 "default": 20,
                 "description": "Maximum number of results",
+            },
+            "project_path": {
+                "type": "string",
+                "default": ".",
+                "description": "Project root used to isolate symbol results",
             },
         },
         "required": ["query"],
