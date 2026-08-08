@@ -147,6 +147,14 @@ async def update_settings(
 
     try:
         _save_runtime_settings(current)
+        from backend.llm.model_catalog import invalidate_cache
+        changed_providers = {
+            key.removesuffix("_api_key").removesuffix("_base_url")
+            for key in update.settings
+            if key.endswith(("_api_key", "_base_url"))
+        }
+        for changed_provider in changed_providers:
+            invalidate_cache(changed_provider)
     except OSError as exc:
         close = getattr(replacement_client, "aclose", None)
         if callable(close):

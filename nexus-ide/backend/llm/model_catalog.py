@@ -705,7 +705,14 @@ async def discover_models(provider: str, *, refresh: bool = False) -> DiscoveryR
             int(getattr(get_settings(), "provider_validation_ttl_seconds", CACHE_TTL_SECONDS)),
         )
         raw_models = entry.get("models", [])
-        models = [ModelInfo(**m) for m in raw_models]
+        models: list[ModelInfo] = []
+        for raw in raw_models if isinstance(raw_models, list) else []:
+            try:
+                model = ModelInfo(**raw)
+            except (TypeError, ValueError):
+                continue
+            if model.provider == provider:
+                models.append(model)
         current = time.time()
         if age < ttl and all(
             m.validated_at is not None and current - m.validated_at <= ttl for m in models
