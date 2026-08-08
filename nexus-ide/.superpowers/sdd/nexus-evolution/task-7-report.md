@@ -22,3 +22,10 @@ Task 7 does not modify chat, mission snapshot, tools, frontend, or free-model po
 - `validate_execution_plan()` invokes `validate_agent_contract()` for every non-legacy task.
 - `OrchestrationEngine.create_plan()` revalidates non-legacy `PlanningResult` values before approval or execution and transitions invalid results to `PLANNING_BLOCKED`.
 - Follow-up module `py_compile` passed. The focused pytest rerun was blocked by an unrelated concurrent Task 8 `backend/tools/registry.py` syntax error at line 1003; the previously recorded 52-test pass remains valid before that race.
+
+## Regression follow-up
+
+- Restored DAG validation in `validate_execution_plan()` (including the task-id set), added the deterministic dependency-layer regression, and preserved self-dependency cycles during model parsing.
+- Enriched the planner JSON contract with required metadata fields and agent/model/tool constraints.
+- Engine validates non-legacy execution results, rejects malformed modified plans, and applies graph/generic checks at legacy boundaries without breaking fixed legacy doubles.
+- Verification: Task 7 focused suite **54 passed**; all Task 7 module/test compile checks passed.

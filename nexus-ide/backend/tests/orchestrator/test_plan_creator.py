@@ -106,6 +106,15 @@ def test_parse_plan_rejects_cyclic_dependencies_without_repairing() -> None:
     plan = creator._parse_plan(content, "Ship it", "session_1")
     assert plan is not None
     assert plan.dependency_graph.validate() == (False, "Graph contains a cycle")
+def test_parse_plan_preserves_self_dependency_cycle() -> None:
+    plan = _creator()._parse_plan(
+        json.dumps([{"name": "Loop", "depends_on": [0]}]),
+        "Ship it",
+        "session_1",
+    )
+    assert plan is not None
+    assert plan.steps[0].depends_on == [plan.steps[0].task_id]
+    assert plan.dependency_graph.validate() == (False, "Graph contains a cycle")
 
 @pytest.mark.asyncio
 async def test_planner_timeout_blocks_with_deterministic_proposal(

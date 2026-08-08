@@ -536,6 +536,25 @@ class OrchestrationEngine:
             s.timeout_seconds for s in plan.steps
         )
 
+        if any(
+            step.file_scope
+            or step.completion_criteria
+            or step.verification_commands
+            or "execute objective" in step.name.lower()
+            for step in plan.steps
+        ):
+            validation = validate_execution_plan(
+                plan,
+                {"absolute_path": "."},
+                PlanCreator.MAX_PLAN_STEPS,
+            )
+            if not validation.valid:
+                logger.warning(
+                    "modify_plan rejected invalid plan %s: %s",
+                    plan_id,
+                    "; ".join(validation.errors),
+                )
+                return None
         # Update approval request metadata
         req = self._approval_requests.get(plan_id)
         if req:
@@ -602,6 +621,32 @@ class OrchestrationEngine:
                     plan=plan.deterministic_proposal,
                     errors=[plan.error] if plan.error else ["planning blocked"],
                 )
+            if plan.source != "legacy":
+                validation = validate_execution_plan(
+                    plan.plan,
+                    {"absolute_path": project_path},
+                    PlanCreator.MAX_PLAN_STEPS,
+                )
+                if not validation.valid:
+                    return OrchestrationResult(
+                        run_id=uuid.uuid4().hex[:12],
+                        state=OrchestrationState.PLANNING_BLOCKED,
+                        plan=plan.plan,
+                        errors=validation.errors,
+                    )
+            else:
+                graph_valid, graph_error = plan.plan.dependency_graph.validate()
+                generic = any(
+                    "execute objective" in f"{step.name} {step.description}".lower()
+                    for step in plan.plan.steps
+                )
+                if not graph_valid or generic:
+                    return OrchestrationResult(
+                        run_id=uuid.uuid4().hex[:12],
+                        state=OrchestrationState.PLANNING_BLOCKED,
+                        plan=plan.plan,
+                        errors=[graph_error] if not graph_valid else ["generic plan step"],
+                    )
             plan = plan.plan
         if not auto_approve and plan.requires_approval and not plan.approved:
             raise ValueError("Plan requires approval before execution")

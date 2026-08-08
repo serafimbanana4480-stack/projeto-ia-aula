@@ -315,6 +315,10 @@ def validate_execution_plan(
         for capability in capability_matrix.values()
         for model in capability.allowed_models
     }
+    task_ids = {task.task_id for task in plan.steps}
+    graph_valid, graph_error = plan.dependency_graph.validate()
+    if not graph_valid:
+        errors.append(graph_error)
     known_model_keys.update(known_models)
     for task in plan.steps:
         if task.agent.upper() not in known_agents:

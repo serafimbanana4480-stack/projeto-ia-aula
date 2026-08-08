@@ -24,6 +24,17 @@ def test_deterministic_plan_has_concrete_three_phase_contract() -> None:
     assert plan.steps[-1].verification_commands == ["python -m pytest -q"]
     assert validate_execution_plan(plan, _snapshot(), 50).valid
 
+def test_deterministic_plan_dependencies_are_registered_and_ordered() -> None:
+    plan = build_deterministic_plan("Add a health endpoint", _snapshot(), "s1")
+    assert plan.steps[1].depends_on == [plan.steps[0].task_id]
+    assert plan.steps[2].depends_on == [plan.steps[1].task_id]
+    assert plan.steps[0].task_id in plan.steps[1].depends_on
+    assert plan.dependency_graph.topological_layers() == [
+        [plan.steps[0].task_id],
+        [plan.steps[1].task_id],
+        [plan.steps[2].task_id],
+    ]
+
 
 def test_validator_rejects_unknown_dependency_without_repairing() -> None:
     task = TaskNode(

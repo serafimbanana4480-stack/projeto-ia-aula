@@ -473,6 +473,15 @@ Respond with ONLY a JSON array. No markdown, no explanation, just the JSON:
 ]
 
 The depends_on field uses 0-based index of the step this depends on.
+Every step MUST include:
+- "file_scope": an array of measured project-relative or absolute paths
+- "completion_criteria": an array of observable acceptance criteria
+- "verification_commands": an array of concrete commands (required for DEBUGGER)
+- "risk": "low", "medium", or "high"
+- "rollback": a concrete rollback instruction
+- "lock_scope": the smallest read/write scope
+- "allowed_tools": an array containing only tools available to the selected agent
+Use a registered agent and model key for every step; do not emit "Execute Objective".
 Priority values: "high", "medium", "low".
 Make steps SPECIFIC and ACTIONABLE. Each step must produce a concrete deliverable.
 Include at least 10 steps. More complex objectives should have 15-25 steps.
@@ -509,41 +518,46 @@ Use phase prefixes in step names: "Phase N: Name - Description"."""
         if not valid_raw_steps or len(valid_raw_steps) > self.MAX_PLAN_STEPS:
             return None
         steps: list[TaskNode] = []
-        for i, raw in enumerate(valid_raw_steps):
+        for raw in valid_raw_steps:
             raw_priority = raw.get("priority", "medium")
             priority_upper = str(raw_priority).strip().upper()
-            priority = TaskPriority[priority_upper] if priority_upper in TaskPriority.__members__ else TaskPriority.MEDIUM
+            priority = (
+                TaskPriority[priority_upper]
+                if priority_upper in TaskPriority.__members__
+                else TaskPriority.MEDIUM
+            )
             name = raw.get("name") if isinstance(raw.get("name"), str) else ""
             description = raw.get("description") if isinstance(raw.get("description"), str) else ""
             agent = raw.get("agent") if isinstance(raw.get("agent"), str) else ""
-            task = TaskNode(
-                name=name.strip(),
-                description=description.strip(),
-                agent=agent.strip().upper(),
-                model_key=str(raw.get("model_key", "")).strip(),
-                priority=priority,
-                sandboxed=raw.get("sandboxed", False) is True,
-                file_scope=raw.get("file_scope", []),
-                completion_criteria=raw.get("completion_criteria", []),
-                verification_commands=raw.get("verification_commands", []),
-                risk=str(raw.get("risk", "")),
-                rollback=str(raw.get("rollback", "")),
-                lock_scope=str(raw.get("lock_scope", "")),
-                allowed_tools=raw.get("allowed_tools", []),
+            steps.append(
+                TaskNode(
+                    name=name.strip(),
+                    description=description.strip(),
+                    agent=agent.strip().upper(),
+                    model_key=str(raw.get("model_key", "")).strip(),
+                    priority=priority,
+                    sandboxed=raw.get("sandboxed", False) is True,
+                    file_scope=raw.get("file_scope", []),
+                    completion_criteria=raw.get("completion_criteria", []),
+                    verification_commands=raw.get("verification_commands", []),
+                    risk=str(raw.get("risk", "")),
+                    rollback=str(raw.get("rollback", "")),
+                    lock_scope=str(raw.get("lock_scope", "")),
+                    allowed_tools=raw.get("allowed_tools", []),
+                )
             )
-            steps.append(task)
-        name_to_idx: dict[str, int] = {}
-        for idx, step in enumerate(steps):
-            if step.name:
-                name_to_idx[step.name.lower()] = idx
+        name_to_idx: dict[str, int] = {
+            step.name.lower(): idx for idx, step in enumerate(steps) if step.name
+        }
         for i, raw in enumerate(valid_raw_steps):
             raw_deps = raw.get("depends_on", [])
             refs = raw_deps if isinstance(raw_deps, list) else [raw_deps]
             for dep_ref in refs:
                 dep_idx = self._resolve_dep_ref(dep_ref, len(steps), name_to_idx)
                 if dep_idx is not None:
-                    if dep_idx != i and steps[dep_idx].task_id not in steps[i].depends_on:
-                        steps[i].depends_on.append(steps[dep_idx].task_id)
+                    dependency_id = steps[dep_idx].task_id
+                    if dependency_id not in steps[i].depends_on:
+                        steps[i].depends_on.append(dependency_id)
                         steps[dep_idx].required_by.append(steps[i].task_id)
                 elif dep_ref not in (None, ""):
                     # Preserve an unresolvable reference for validator output.
