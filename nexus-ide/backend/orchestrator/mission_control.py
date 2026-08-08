@@ -82,6 +82,7 @@ MIN_CONCURRENT_AGENTS = 3
 MAX_RECENT_LOG_FILES = 8
 MAX_RECENT_LOG_BYTES = 64_000
 MAX_GIT_PROBE_SECONDS = 2
+MAX_GIT_OUTPUT_BYTES = 128_000
 MAX_CONCURRENT_AGENTS = 6
 
 
@@ -496,7 +497,8 @@ class ProjectIntelligence:
             ),
             SnapshotFact(
                 snap.services,
-                "unknown" if "services" in snap.unknowns else "inferred",
+                "unknown" if any(item.startswith("services") for item in snap.unknowns)
+                else "inferred",
                 "compose/package directory markers",
                 "static service markers; no processes started",
             ),
@@ -659,7 +661,7 @@ class ProjectIntelligence:
                     timeout=MAX_GIT_PROBE_SECONDS,
                     check=False,
                 )
-                return out.stdout.strip() if out.returncode == 0 else None
+                return out.stdout[:MAX_GIT_OUTPUT_BYTES].strip() if out.returncode == 0 else None
             except (OSError, subprocess.SubprocessError):
                 return None
         if not (self.root / ".git").exists():
