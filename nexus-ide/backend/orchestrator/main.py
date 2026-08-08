@@ -139,6 +139,35 @@ async def _cancel_owned_task(task: asyncio.Task[Any] | None) -> None:
         return
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
+async def _safe_shutdown(label: str, operation: Any) -> None:
+    try:
+        await operation
+    except BaseException:
+        logger.exception("Runtime shutdown failed for %s", label)
+
+
+async def _cleanup_failed_lifespan(app: FastAPI) -> None:
+    """Release partial startup state when setup fails before the lifespan yield."""
+    await _cancel_owned_task(getattr(app.state, "dashboard_monitor_task", None))
+    await _cancel_owned_task(getattr(app.state, "dashboard_summary_task", None))
+    owned = getattr(app.state, "worker_ownership", set())
+    services = (
+        ("guardian", getattr(app.state, "guardian_agent", None), "stop"),
+        ("auto_correction", getattr(app.state, "auto_correction", None), "stop_monitoring"),
+        ("healer", getattr(app.state, "healer", None), "stop"),
+        ("ai_orchestrator", getattr(app.state, "ai_orchestrator", None), "stop"),
+        ("auto_trigger", getattr(app.state, "auto_trigger", None), "stop"),
+        ("improvement", getattr(app.state, "improvement_loop", None), "stop"),
+        ("session_gc", getattr(app.state, "session_lifecycle", None), "stop"),
+        ("background_workers", getattr(app.state, "worker_manager", None), "stop_all"),
+    )
+    for label, service, method in services:
+        if service is not None:
+            await _safe_shutdown(label, getattr(service, method)())
+    for name in tuple(owned):
+        _release_worker(name, owned)
+
+
 
 
 logger = logging.getLogger(__name__)
@@ -188,7 +217,7 @@ def _log_code_fingerprint() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     """Create long-lived singletons and guarantee clean shutdown."""
     owned_workers: set[str] = set()
     app.state.worker_ownership = owned_workers
@@ -416,10 +445,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from backend.core.background_workers import BackgroundWorkerManager
 
     worker_manager = BackgroundWorkerManager() if enable_workers else None
+    app.state.worker_manager = worker_manager
     workers_owned = bool(worker_manager and _claim_worker("background_workers", owned_workers))
     if worker_manager and workers_owned:
         await worker_manager.start_all()
-    app.state.worker_manager = worker_manager if workers_owned else None
     if worker_manager and workers_owned:
         logger.info("Background workers started")
 
@@ -439,18 +468,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from backend.agents.guardian import NexusGuardianAgent
 
     guardian = NexusGuardianAgent()
+    app.state.guardian_agent = guardian
     guardian_owned = enable_guardian and _claim_worker("guardian_agent", owned_workers)
     guardian_task = await guardian.start() if guardian_owned else None
-    app.state.guardian_agent = guardian
     app.state.guardian_task = guardian_task
     if guardian_owned:
         logger.info("Guardian agent loop started")
 
     auto_correction = get_auto_correction_loop(lifecycle_manager=lifecycle)
+    app.state.auto_correction = auto_correction
     auto_correction_owned = enable_auto_correct and _claim_worker("auto_correction", owned_workers)
     if auto_correction_owned:
         await auto_correction.start_monitoring()
-    app.state.auto_correction = auto_correction
     if auto_correction_owned:
         logger.info("Auto-correction loop started")
     from backend.orchestrator.autonomous_execution_engine import AutonomousExecutionEngine
@@ -464,10 +493,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from backend.core.continuous_improvement import get_continuous_improvement_loop
 
     improvement_loop = get_continuous_improvement_loop()
+    app.state.improvement_loop = improvement_loop
     improvement_owned = enable_improvement and _claim_worker("continuous_improvement", owned_workers)
     if improvement_owned:
         await improvement_loop.start()
-    app.state.improvement_loop = improvement_loop
     if improvement_owned:
         logger.info("Continuous improvement loop started")
 
@@ -487,10 +516,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         min_confidence=0.7,
         analysis_interval=3600,
     )
+    app.state.healer = healer
     healer_owned = enable_self_healing and _claim_worker("self_healing", owned_workers)
     if healer_owned:
         await healer.start()
-    app.state.healer = healer
     if healer_owned:
         logger.info("Self-healing engine started (auto_apply=%s, dry_run=%s)", auto_apply, settings.environment == "development")
 
@@ -507,19 +536,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         registry=registry,
         event_bus=app.state.event_bus,
     )
+    app.state.ai_orchestrator = ai_orchestrator
     ai_owned = enable_ai_orchestrator and _claim_worker("ai_orchestrator", owned_workers)
     if ai_owned:
         await ai_orchestrator.start()
-    app.state.ai_orchestrator = ai_orchestrator
     if ai_owned:
         logger.info("Autonomous improvement orchestrator started (interval=%sm)", ai_config.get("cycle_interval_minutes", 30))
     from backend.orchestrator.auto_trigger_engine import AutoTriggerEngine
 
     auto_trigger = AutoTriggerEngine(orchestrator=ai_orchestrator)
+    app.state.auto_trigger = auto_trigger
     auto_trigger_owned = enable_auto_trigger and _claim_worker("auto_trigger", owned_workers)
     if auto_trigger_owned:
         await auto_trigger.start()
-    app.state.auto_trigger = auto_trigger
     if auto_trigger_owned:
         logger.info("Auto trigger engine started (rules=%d)", len(AutoTriggerEngine.TRIGGER_RULES))
 
@@ -539,10 +568,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from backend.orchestrator.session_lifecycle import SessionLifecycleManager
 
     session_lifecycle = SessionLifecycleManager(event_bus=app.state.event_bus)
+    app.state.session_lifecycle = session_lifecycle
     session_gc_owned = enable_session_gc and _claim_worker("session_gc", owned_workers)
     if session_gc_owned:
         session_lifecycle.start()
-    app.state.session_lifecycle = session_lifecycle
     if session_gc_owned:
         logger.info(
             "Session lifecycle GC started (ttl=%dh, interval=%dmin)",
@@ -556,27 +585,38 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await _cancel_owned_task(monitor_task)
         await _cancel_owned_task(summary_task)
-        if guardian_owned:
-            await guardian.stop()
-        await get_cancellation_registry().shutdown()
-        if auto_correction_owned:
-            await auto_correction.stop_monitoring()
-        if healer_owned:
-            await healer.stop()
-        if ai_owned:
-            await ai_orchestrator.stop()
-        if auto_trigger_owned:
-            await auto_trigger.stop()
-        if improvement_owned:
-            await improvement_loop.stop()
-        if session_gc_owned:
-            await session_lifecycle.stop()
-        if workers_owned and worker_manager:
-            await worker_manager.stop_all()
+        await _safe_shutdown("guardian", guardian.stop() if guardian_owned else asyncio.sleep(0))
+        await _safe_shutdown("cancellation_registry", get_cancellation_registry().shutdown())
+        await _safe_shutdown(
+            "auto_correction",
+            auto_correction.stop_monitoring() if auto_correction_owned else asyncio.sleep(0),
+        )
+        await _safe_shutdown("healer", healer.stop() if healer_owned else asyncio.sleep(0))
+        await _safe_shutdown("ai_orchestrator", ai_orchestrator.stop() if ai_owned else asyncio.sleep(0))
+        await _safe_shutdown("auto_trigger", auto_trigger.stop() if auto_trigger_owned else asyncio.sleep(0))
+        await _safe_shutdown("improvement", improvement_loop.stop() if improvement_owned else asyncio.sleep(0))
+        await _safe_shutdown(
+            "session_gc",
+            session_lifecycle.stop() if session_gc_owned else asyncio.sleep(0),
+        )
+        await _safe_shutdown(
+            "background_workers",
+            worker_manager.stop_all() if workers_owned and worker_manager else asyncio.sleep(0),
+        )
         for name in tuple(owned_workers):
             _release_worker(name, owned_workers)
         from backend.orchestrator.llm_client_lifecycle import close_all_llm_clients
-        await close_all_llm_clients(app)
+        await _safe_shutdown("llm_clients", close_all_llm_clients(app))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    try:
+        async with _lifespan_impl(app):
+            yield
+    except BaseException:
+        await _cleanup_failed_lifespan(app)
+        raise
 
 
 app = FastAPI(title="NEXUS IDE Orchestrator", version="0.1.0", lifespan=lifespan)

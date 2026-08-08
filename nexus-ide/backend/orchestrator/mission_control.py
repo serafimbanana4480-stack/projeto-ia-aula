@@ -1437,6 +1437,7 @@ class MissionTracker:
 
     # ── persistence ───────────────────────────────────────────────────────
     def persist(self) -> Path | None:
+        require_disk_headroom(MISSIONS_DIR.parent)
         try:
             MISSIONS_DIR.mkdir(parents=True, exist_ok=True)
             path = MISSIONS_DIR / f"{self.mission.id}.json"

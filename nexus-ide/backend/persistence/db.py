@@ -317,6 +317,31 @@ def _ensure_current_schema() -> None:
         raise RuntimeError("Database schema readiness failed") from exc
 
 
+_SESSION_COMPAT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("project_id", "TEXT"),
+    ("title", "TEXT"),
+    ("mode", "TEXT"),
+    ("started_at", "TEXT"),
+    ("last_active_at", "TEXT"),
+    ("context_json", "TEXT"),
+)
+
+
+def _ensure_session_compatibility_schema() -> None:
+    """Repair legacy sessions before schemas.sql creates dependent indexes."""
+    try:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")}
+            if columns:
+                for name, column_type in _SESSION_COMPAT_COLUMNS:
+                    if name not in columns:
+                        conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {column_type}")
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Failed to ensure sessions compatibility schema")
+        raise RuntimeError("Sessions schema readiness failed") from exc
+
+
 _EXECUTION_ENVELOPE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("mission_id", "TEXT"),
     ("correlation_id", "TEXT"),
@@ -379,7 +404,12 @@ def init_db(run_migrations: bool = True) -> None:
         _seed_default_rbac()
         _stamp_alembic()
     else:
-        # Compatibility repair must precede migrations and all seed work.
+        # Compatibility repairs must precede schema/index execution, migrations,
+        # and all seed work. Older session_runs tables lack envelope columns
+        # referenced by the current schemas.sql indexes.
+        _ensure_execution_envelope_schema()
+        _ensure_session_compatibility_schema()
+        _ensure_message_cost_column()
         _ensure_current_schema()
         _ensure_execution_envelope_schema()
         _ensure_git_commits_table()
@@ -388,7 +418,6 @@ def init_db(run_migrations: bool = True) -> None:
             _ensure_execution_envelope_schema()
         _seed_default_user()
         _seed_default_rbac()
-    _ensure_message_cost_column()
 
 
     # Stale-run recovery is performed by the startup lifespan immediately
@@ -403,10 +432,6 @@ def _seed_default_user() -> None:
     ``NEXUS_DEFAULT_PASSWORD`` environment variables, falling back to
     ``admin@nexus-ide.com`` / ``admin123`` in development.
     """
-    import os
-
-    import bcrypt
-
     try:
         with sqlite3.connect(str(DB_PATH)) as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()

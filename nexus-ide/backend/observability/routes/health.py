@@ -5,12 +5,20 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Any
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from backend.orchestrator.routes.auth import get_current_user
 
+from backend.core.disk_guard import disk_pressure_status
+
+_RUNTIME_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _disk_pressure_payload() -> dict[str, Any]:
+    return disk_pressure_status(_RUNTIME_ROOT)
 router = APIRouter()
 
 
@@ -29,7 +37,7 @@ class SystemHealth(BaseModel):
     timestamp: float
     components: dict[str, ComponentHealth]
     summary: dict[str, int]
-
+    disk_pressure: dict[str, Any] | None = None
 
 # Dependency checkers
 dependencies: dict[str, Any] = {}
@@ -46,6 +54,7 @@ async def health_check() -> dict[str, Any]:
     return {
         "status": "healthy",
         "service": "nexus-omega",
+        "disk_pressure": _disk_pressure_payload(),
     }
 
 
@@ -168,6 +177,7 @@ async def deep_health_check() -> dict[str, Any]:
             "degraded": degraded_count,
             "unhealthy": unhealthy_count,
         },
+        "disk_pressure": _disk_pressure_payload(),
     }
 
 
@@ -189,11 +199,12 @@ async def readiness_check() -> dict[str, Any]:
         except Exception as exc:
             results[name] = f"error: {exc}"
             all_ready = False
-
     status = "ready" if all_ready else "not_ready"
+
     return {
         "status": status,
         "dependencies": results,
+        "disk_pressure": _disk_pressure_payload(),
     }
 
 

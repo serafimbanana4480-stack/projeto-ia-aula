@@ -36,9 +36,10 @@ class DiskPressureError(RuntimeError):
     def __init__(self, snapshot: DiskSnapshot, threshold_percent: float) -> None:
         self.snapshot = snapshot
         self.threshold_percent = threshold_percent
+        self.candidate_cleanup_categories = _CLEANUP_CATEGORIES
         self.remediation = (
             "Free space without deleting automatically. Candidate cleanup categories: "
-            + "; ".join(_CLEANUP_CATEGORIES)
+            + "; ".join(self.candidate_cleanup_categories)
         )
         super().__init__(self._format_message())
 
@@ -57,6 +58,7 @@ class DiskPressureError(RuntimeError):
             "free_bytes": self.snapshot.free_bytes,
             "free_percent": self.snapshot.free_percent,
             "threshold_percent": self.threshold_percent,
+            "candidate_cleanup_categories": list(self.candidate_cleanup_categories),
             "remediation": self.remediation,
         }
 

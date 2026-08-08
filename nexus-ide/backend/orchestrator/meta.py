@@ -28,7 +28,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.agents.base import AgentBase
-from backend.core.disk_guard import require_disk_headroom
+from backend.core.disk_guard import DiskPressureError, require_disk_headroom
 from backend.config.settings import get_model_config
 from backend.core.agent_state import AgentStateStore
 from backend.orchestrator.dependency_graph import (
@@ -223,9 +223,21 @@ class MetaOrchestrator:
         mission = self._get_mission(mission_id)
         if mission is None:
             raise ValueError(f"Mission {mission_id} not found")
-        require_disk_headroom(mission.metadata.get("project_path", "."))
-
-
+        try:
+            require_disk_headroom(mission.metadata.get("project_path", "."))
+        except DiskPressureError as exc:
+            mission.status = MissionStatus.FAILED
+            mission.completed_at = _now()
+            mission.metadata["error"] = str(exc)
+            mission.metadata["error_category"] = "disk_pressure"
+            mission.metadata["disk_pressure"] = exc.to_dict()
+            await self._persist_mission(mission)
+            await self._emit(
+                EventType.ORCHESTRATOR_FINISHED,
+                mission_id=mission_id,
+                data={"status": mission.status.value, "error_category": "disk_pressure", **exc.to_dict()},
+            )
+            return mission
         mission.status = MissionStatus.RUNNING
         await self._persist_mission(mission)
         await self._emit(

@@ -12,9 +12,11 @@ Provides endpoints for:
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from pathlib import Path
 
-from fastapi import APIRouter, Query, Response, Request
+from fastapi import APIRouter, HTTPException, Query, Response, Request
 from pydantic import BaseModel
+from backend.core.disk_guard import DiskPressureError, require_disk_headroom
 
 
 router = APIRouter()
@@ -288,12 +290,15 @@ async def get_available_reports() -> list[dict[str, Any]]:
     ]
 
 
-@router.post("/analytics/reports/generate")
 async def generate_report(payload: dict, request: Request) -> dict[str, Any]:
     """Generate a PDF or Excel report asynchronously. Returns report_id for download."""
     report_id = f"report-{int(NOW)}"
     fmt = payload.get("format", "pdf")
     report_type = payload.get("report_id", "perf-weekly")
+    try:
+        require_disk_headroom(Path("nexus-ide/reports").parent)
+    except DiskPressureError as exc:
+        raise HTTPException(status_code=507, detail={"error": "disk_pressure", **exc.to_dict()}) from exc
 
     import asyncio
     asyncio.create_task(_build_report(report_id, report_type, fmt))
@@ -310,9 +315,9 @@ async def generate_report(payload: dict, request: Request) -> dict[str, Any]:
 async def _build_report(report_id: str, report_type: str, fmt: str) -> None:
     """Build report in background and store to disk."""
     import os, json
-    from pathlib import Path
 
     out_dir = Path("nexus-ide/reports")
+    require_disk_headroom(out_dir.parent)
     out_dir.mkdir(parents=True, exist_ok=True)
     data = await _collect_report_data(report_type)
 

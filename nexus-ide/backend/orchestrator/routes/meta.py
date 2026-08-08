@@ -22,10 +22,11 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.core.disk_guard import DiskPressureError, require_disk_headroom
 from backend.middleware.auth import require_auth
 from backend.orchestrator.meta import MetaOrchestrator, Mission
 from backend.orchestrator.registry import get_registry
@@ -156,6 +157,10 @@ async def create_mission(
     req: CreateMissionRequest, request: Request, _auth: None = Depends(require_auth)
 ) -> CreateMissionResponse:
     """Create a new dynamic mission."""
+    try:
+        require_disk_headroom(req.project_path)
+    except DiskPressureError as exc:
+        raise HTTPException(status_code=507, detail={"error": "disk_pressure", **exc.to_dict()}) from exc
     meta = _get_meta(request)
     mission = await meta.create_mission(
         objective=req.objective,

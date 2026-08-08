@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
+from backend.core.disk_guard import DiskPressureError
 from fastapi.responses import StreamingResponse
 
 from backend.agents.base import AgentRequest
@@ -1313,6 +1314,17 @@ async def _stream_autonomous_execution(
                     },
                 )
             )
+        except DiskPressureError as exc:
+            detail = exc.to_dict()
+            summary_lines.append(f"\nDisk pressure blocked mission artifact persistence: {exc}")
+            yield _sse(
+                StreamEvent(
+                    type="error",
+                    agent="ORCHESTRATOR",
+                    content=str(exc),
+                    data={"error_category": "disk_pressure", **detail},
+                )
+            )
         except Exception:
             logger.warning("Mission Control report generation failed", exc_info=True)
 
@@ -1978,6 +1990,42 @@ async def _run_pipeline(
                     ),
                     finished=True,
                 )
+                return
+            except DiskPressureError as exc:
+                detail = exc.to_dict()
+                autonomous_outcome.update(
+                    {
+                        "status": "blocked",
+                        "state": "blocked",
+                        "failed_tasks": [],
+                        "errors": [str(exc)],
+                        "disk_pressure": detail,
+                    }
+                )
+                _checkpoint(
+                    status="blocked",
+                    phase="disk_pressure",
+                    agent="ORCHESTRATOR",
+                    checkpoint={"mode": "autonomous", "error_category": "disk_pressure", **detail},
+                    error=str(exc),
+                    finished=True,
+                )
+                now = datetime.now(UTC).isoformat()
+                blocked_message = f"Autonomous run blocked by disk pressure: {exc}"
+                await context.append_message(
+                    req.session_id,
+                    ChatMessage(role="assistant", content=blocked_message, timestamp=now),
+                )
+                add_message(req.session_id, "assistant", blocked_message, tier_used="ORCHESTRATOR")
+                yield _sse(
+                    StreamEvent(
+                        type="error",
+                        agent="ORCHESTRATOR",
+                        content=blocked_message,
+                        data={"error_category": "disk_pressure", **detail},
+                    )
+                )
+                yield _sse(StreamEvent(type="done"))
                 return
             except Exception as exc:
                 logger.warning(
