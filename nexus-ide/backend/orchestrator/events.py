@@ -121,6 +121,7 @@ class OrchestratorEvent:
             "timestamp": self.timestamp,
             "event_id": self.event_id,
             "task_id": self.task_id,
+            "correlation_id": self.correlation_id,
         }
 
 

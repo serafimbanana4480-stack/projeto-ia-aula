@@ -39,9 +39,10 @@ from backend.config.settings import (
 from backend.llm.multi_llm_manager import MultiLLMManager
 from backend.middleware.auth import require_auth
 from backend.models.api import AgentName, ChatRequest, RoutingDecision, StreamEvent
+from backend.orchestrator.execution_contracts import ErrorCategory, ExecutionMode, RunContext
 from backend.observability.advanced_logging import get_structured_logger
 from backend.orchestrator.cancellation import get_cancellation_registry
-from backend.orchestrator.fallback import invoke_with_fallback
+from backend.orchestrator.fallback import FallbackOutcome, invoke_with_fallback
 from backend.orchestrator.llm_client_lifecycle import acquire_llm_client, release_llm_client
 from backend.orchestrator.registry import get_registry, resolve
 from backend.orchestrator.router import fast_route, route_with_model
@@ -625,7 +626,7 @@ _COMPLEX_TASK_INTENT_RES: tuple["re.Pattern[str]", ...] = tuple(
 _COMPLEX_TASK_QUESTION_STARTERS: tuple[str, ...] = (
     "como ", "o que", "que é", "porque", "porquê", "por que",
     "qual ", "quais ", "quando ", "onde ", "explica", "explain",
-    "what ", "what's", "why ", "how ", "which ",
+    "what ", "what's", "why ", "how ", "which ", "quanto ",
 )
 
 
@@ -637,6 +638,57 @@ def _is_informational_question(query: str) -> bool:
     if stripped.endswith("?"):
         return True
     return any(stripped.startswith(starter) for starter in _COMPLEX_TASK_QUESTION_STARTERS)
+
+
+def classify_execution_mode(
+    message: str, requested_mode: str, project_path: str
+) -> ExecutionMode:
+    """Classify a turn into the explicit CHAT, ASSISTED, or MISSION lane.
+
+    The automatic lane uses observable intent phases only.  Topic words such
+    as ``backend`` or ``autenticação`` never imply a mission, and questions
+    stay in CHAT even when they mention a project concept.
+    """
+    text = (message or "").strip()
+    lowered = text.lower()
+    requested = (requested_mode or "auto").strip().lower()
+
+    if re.match(r"^/mission(?:\s|$)", lowered):
+        return ExecutionMode.MISSION
+    if _is_informational_question(text):
+        return ExecutionMode.CHAT
+
+    explicit = {
+        "chat": ExecutionMode.CHAT,
+        "assisted": ExecutionMode.ASSISTED,
+        "mission": ExecutionMode.MISSION,
+        "ask": ExecutionMode.CHAT,
+        "fast": ExecutionMode.CHAT,
+        "plan": ExecutionMode.MISSION,
+        "swarm": ExecutionMode.MISSION,
+        "auto_swarm": ExecutionMode.MISSION,
+        "debug": ExecutionMode.ASSISTED,
+        "coder": ExecutionMode.ASSISTED,
+        "reviewer": ExecutionMode.ASSISTED,
+        "analyst": ExecutionMode.ASSISTED,
+        "deep": ExecutionMode.ASSISTED,
+    }
+    if requested in explicit and requested not in {"auto", "agent"}:
+        return explicit[requested]
+
+    phase_count = sum(1 for marker_re in _COMPLEX_TASK_INTENT_RES if marker_re.search(lowered))
+    if (
+        _COMPLEX_TASK_INTENT_RES[0].search(lowered)
+        and _COMPLEX_TASK_INTENT_RES[1].search(lowered)
+        and _COMPLEX_TASK_INTENT_RES[2].search(lowered)
+    ):
+        return ExecutionMode.MISSION
+    if phase_count >= 1 and (
+        _RUNTIME_EVIDENCE_ACTION_RE.search(lowered)
+        or _FAST_CHAT_ACTION_RE.search(lowered)
+    ):
+        return ExecutionMode.ASSISTED
+    return ExecutionMode.CHAT
 
 
 def _is_complex_task(query: str) -> bool:
@@ -1473,6 +1525,19 @@ async def _run_pipeline(
     """The core chat pipeline, extracted for testability (keeps the route tiny)."""
     started_at = time.time()
     run_id = f"run-{uuid.uuid4().hex}"
+    correlation_id = uuid.uuid4().hex[:16]
+    requested_mode = getattr(req, "mode", "auto") or "auto"
+    execution_mode = classify_execution_mode(
+        req.message, requested_mode, getattr(req, "project_path", "") or ""
+    )
+    run_context = RunContext(
+        session_id=req.session_id,
+        run_id=run_id,
+        correlation_id=correlation_id,
+        mission_id=None,
+        project_path=getattr(req, "project_path", "") or None,
+        mode=execution_mode,
+    )
     run_started = False
 
     def _start_durable_run() -> None:
@@ -1492,7 +1557,12 @@ async def _run_pipeline(
                 req.session_id,
                 prompt=req.message,
                 phase="routing",
-                checkpoint={"mode": req.mode, "project_path": bool(req.project_path)},
+                checkpoint={"mode": execution_mode.value, "project_path": bool(req.project_path)},
+                correlation_id=run_context.correlation_id,
+                mode=execution_mode.value,
+                execution_state="routing",
+                provider=getattr(req, "provider", "") or None,
+                model=getattr(req, "model", "") or None,
             )
             run_started = True
         except Exception:
@@ -1510,6 +1580,7 @@ async def _run_pipeline(
         checkpoint: dict[str, Any] | None = None,
         usage: dict[str, Any] | None = None,
         error: str | None = None,
+        error_category: str | None = None,
         finished: bool = False,
     ) -> None:
         if not run_started:
@@ -1527,6 +1598,14 @@ async def _run_pipeline(
                 usage=usage,
                 error=error,
                 finished=finished,
+                correlation_id=run_context.correlation_id,
+                mode=execution_mode.value,
+                execution_state=(
+                    "completed" if finished and status == "completed" else status
+                ),
+                provider=getattr(req, "provider", "") or None,
+                model=getattr(req, "model", "") or None,
+                error_category=error_category,
             )
         except Exception:
             logger.debug("Checkpoint write failed for %s", run_id, exc_info=True)
@@ -1634,9 +1713,15 @@ async def _run_pipeline(
             StreamEvent(
                 type="error",
                 content=f"Provider desconhecido '{req_provider}'. Permitidos: {', '.join(sorted(ALLOWED_PROVIDERS))}",
+                data={
+                    "error_category": ErrorCategory.VALIDATION.value,
+                    "run_id": run_context.run_id,
+                    "correlation_id": run_context.correlation_id,
+                    "provider": req_provider,
+                },
             )
         )
-        yield _sse(StreamEvent(type="done"))
+        yield _sse(StreamEvent(type="done", data=run_context.to_dict()))
         return
 
     # Slash-command help is product metadata, not an LLM question. Answer it
@@ -1645,6 +1730,21 @@ async def _run_pipeline(
     if _is_command_help_request(req.message):
         help_text = _command_help_text()
         _start_durable_run()
+        help_decision = RoutingDecision(
+            primary_agent="ROUTER",
+            mode=execution_mode,
+            run_id=run_context.run_id,
+            correlation_id=run_context.correlation_id,
+            provider=getattr(req, "provider", "") or "",
+            model=getattr(req, "model", "") or "",
+            reason="command-catalog",
+            routing_reason="command-catalog",
+            routing_confidence=1.0,
+            task_type="command_help",
+        )
+        yield _sse(
+            StreamEvent(type="routing", routing=help_decision, data=run_context.to_dict())
+        )
         now = datetime.now(UTC).isoformat()
         await context.append_message(
             req.session_id, ChatMessage(role="user", content=req.message, timestamp=now)
@@ -1667,34 +1767,9 @@ async def _run_pipeline(
         yield _sse(StreamEvent(type="done"))
         return
 
-    # ── Demo fallback: no real LLM provider configured ──────────────────
-    # When no API keys are set, MultiLLMManager registers zero providers and
-    # every real attempt would fail with "Upstream unavailable". Instead of
-    # failing, emit a clearly-labelled simulated response so the chat stays
-    # usable for local/demo runs. This branch ONLY triggers when no real
-    # provider is available and never affects the normal path.
-    if _is_llm_unavailable(llm_client):
-        logger.info("No LLM provider configured — emitting DEMO fallback response")
-        _start_durable_run()
-        async for chunk in _demo_response(req, _demo_agent(req)):
-            yield chunk
-        try:
-            add_message(req.session_id, "assistant", _DEMO_FALLBACK_MESSAGE, tier_used=_demo_agent(req))
-            _checkpoint(
-                status="completed",
-                phase="demo_completed",
-                agent=str(_demo_agent(req)),
-                partial_output=_DEMO_FALLBACK_MESSAGE,
-                checkpoint={"mode": "demo"},
-                finished=True,
-            )
-        except Exception:
-            logger.debug("Could not persist demo response", exc_info=True)
-        return
 
-    # Decide the cheap-path shape before project bootstrap and semantic memory
-    # are touched. Informational turns do not need either to answer correctly.
-    fast_candidate = mode in {"ask", "fast"} or (
+    # CHAT never bootstraps a project or autonomous execution context.
+    fast_candidate = execution_mode is ExecutionMode.CHAT or mode in {"ask", "fast"} or (
         mode in {"auto", "agent"} and _is_fast_chat_turn(req.message)
     )
 
@@ -1842,14 +1917,44 @@ async def _run_pipeline(
         mode_enable_thinking = True
 
     # Load history early so it's available for plan mode and agent invocation.
+    run_context = RunContext(
+        session_id=req.session_id,
+        run_id=run_id,
+        correlation_id=correlation_id,
+        mission_id=None,
+        project_path=project_path or None,
+        mode=execution_mode,
+    )
     history = await context.get_history(req.session_id)
     # Persist the current user turn only after taking the pre-turn snapshot;
     # otherwise the same prompt would be fed back as part of its own history.
     _start_durable_run()
 
-    # Routing decision placeholder; filled by every branch that reaches the
-    # single-agent invocation path.
-    decision: RoutingDecision | None = None
+    # Publish exactly one routing frame before any plan, mission, or provider
+    # token.  Later heuristics refine the agent choice but retain this run
+    # envelope so the client can correlate every event.
+    initial_agent: AgentName = (
+        "ARCHITECT"
+        if execution_mode is ExecutionMode.MISSION
+        else "CODER"
+        if execution_mode is ExecutionMode.ASSISTED
+        else "MICRO"
+    )
+    decision: RoutingDecision = RoutingDecision(
+        primary_agent=initial_agent,
+        mode=execution_mode,
+        run_id=run_context.run_id,
+        correlation_id=run_context.correlation_id,
+        provider=getattr(req, "provider", "") or "",
+        model=model_override or user_model,
+        reason=f"classified:{execution_mode.value}",
+        routing_reason=f"classified:{execution_mode.value}",
+        routing_confidence=1.0,
+        thinking_mode="deep" if execution_mode is ExecutionMode.MISSION else "fast",
+        context_needed="high" if execution_mode is not ExecutionMode.CHAT else "low",
+        task_type=execution_mode.value,
+    )
+    yield _sse(StreamEvent(type="routing", routing=decision, data=run_context.to_dict()))
 
     # When the user explicitly picks a chat mode (anything other than the
     # default "agent" mode), the mode always wins over the selected model tier.
@@ -1920,7 +2025,7 @@ async def _run_pipeline(
                 context_needed="high",
                 task_type="planning",
             )
-    elif mode in ("auto", "agent") or _advanced_force_autonomous:
+    elif execution_mode is ExecutionMode.MISSION or mode in ("auto", "agent") or _advanced_force_autonomous:
         # Auto mode: for COMPLEX tasks, use the full Plan→Execute→Verify pipeline
         # via OrchestrationEngine.execute_autonomous(). For simple tasks, fall
         # through to the normal smart-routed single-agent ReAct loop.
@@ -1928,7 +2033,7 @@ async def _run_pipeline(
         # Plan->Execute->Verify path is reserved for an explicitly activated
         # advanced autonomous mode; otherwise a complex request is handled by
         # the principal, which may use ``spawn_task`` for independent work.
-        if _is_complex_task(req.message) and event_bus is not None and _advanced_force_autonomous:
+        if execution_mode is ExecutionMode.MISSION and event_bus is not None:
             logger.info(
                 "Auto mode: complex task detected, routing to execute_autonomous | session=%s | query=%.80s",
                 req.session_id,
@@ -2035,7 +2140,7 @@ async def _run_pipeline(
                 )
                 # Fall through to single-agent path below
 
-        elif _is_complex_task(req.message) and event_bus is None:
+        elif execution_mode is ExecutionMode.MISSION and event_bus is None:
             logger.warning(
                 "Auto mode: complex task detected but event_bus is unavailable — "
                 "falling back to single-agent ReAct (OrchestrationEngine disabled). | query=%.80s",
@@ -2278,9 +2383,16 @@ async def _run_pipeline(
                 context_needed="high",
                 task_type="implementation",
             )
-    else:
-        decision = await _decide_route(req.message, llm_client)
-    yield _sse(StreamEvent(type="routing", routing=decision))
+    decision = decision.model_copy(
+        update={
+            "mode": execution_mode,
+            "run_id": run_context.run_id,
+            "correlation_id": run_context.correlation_id,
+            "provider": getattr(req, "provider", "") or "",
+            "model": model_override or user_model,
+            "reason": decision.reason or decision.routing_reason,
+        }
+    )
 
     # Tell the UI which agent is taking the request before model setup,
     # semantic memory, or fallback resolution. This prevents a silent gap
@@ -2423,7 +2535,7 @@ async def _run_pipeline(
             "and surface only a concise user-facing approach summary, never private chain-of-thought."
         ),
     }
-    fast_chat_turn = mode in {"ask", "fast"} or (
+    fast_chat_turn = execution_mode is ExecutionMode.CHAT or mode in {"ask", "fast"} or (
         mode in {"auto", "agent"}
         and not _advanced_command_mode
         and _is_fast_chat_turn(effective_message)
@@ -2453,19 +2565,27 @@ async def _run_pipeline(
         async def invoke() -> AsyncIterator[str]:
             nonlocal resolved_model_id
             agent = resolve(registry, agent_name)  # type: ignore[arg-type]
-            agent_context: dict[str, Any] = {}
+            agent_context: dict[str, Any] = {"run_context": run_context}
             if project_path:
                 agent_context["project_path"] = project_path
-            if project_memory:
+            if project_memory and execution_mode is not ExecutionMode.CHAT:
                 agent_context["_project_memory"] = project_memory
             if enriched_addon:
                 agent_context["_system_addon"] = enriched_addon
             if fast_chat_turn:
-                # The principal chat lane must not inherit the autonomous
-                # retry/backoff policy.  A provider quota outage should be
-                # reported in seconds, while complex work may remain patient.
+                # CHAT is a direct, schema-free lane: no tools, memory,
+                # planning, subagents, or A2A consultations.
                 agent_context["_fast_chat_lane"] = True
-            if _advanced_profile:
+                agent_context["_allowed_tools"] = ()
+            elif execution_mode is ExecutionMode.ASSISTED:
+                agent_context["_assisted_tool_budget"] = 3
+                agent_context["_allowed_tools"] = (
+                    "read_file", "search_in_files", "run_tests", "type_check"
+                )
+                agent_context["_tool_evidence_requirement"] = (
+                    _direct_runtime_evidence_requirement(effective_message) or "substantive"
+                )
+            if _advanced_profile and execution_mode is not ExecutionMode.CHAT:
                 agent_context["_advanced_profile"] = {
                     key: value
                     for key, value in _advanced_profile.items()
@@ -2473,13 +2593,8 @@ async def _run_pipeline(
                 }
             if model_override:
                 # Agents are shared singletons, so the pinned model travels with
-                # the request rather than being set on the instance. AgentBase
-                # reads this in stream_llm/resolve_model_id.
+                # the request rather than being set on the instance.
                 agent_context["_model_override"] = model_override
-            if req.autonomous:
-                evidence_requirement = _direct_runtime_evidence_requirement(effective_message)
-                if evidence_requirement:
-                    agent_context["_tool_evidence_requirement"] = evidence_requirement
 
             agent_req = AgentRequest(
                 session_id=req.session_id,
@@ -2488,12 +2603,20 @@ async def _run_pipeline(
                 history=history,
                 project_path=project_path,
                 context=agent_context,
-                max_iterations=2 if fast_chat_turn else mode_max_iterations,
-                enable_thinking=mode_enable_thinking and not fast_chat_turn,
+                max_iterations=(
+                    2
+                    if execution_mode is ExecutionMode.CHAT
+                    else 3
+                    if execution_mode is ExecutionMode.ASSISTED
+                    else mode_max_iterations
+                ),
+                enable_thinking=(
+                    mode_enable_thinking
+                    and execution_mode is not ExecutionMode.CHAT
+                ),
                 autonomous=bool(
                     req.autonomous
-                    and mode not in {"ask", "fast"}
-                    and not fast_chat_turn
+                    and execution_mode in {ExecutionMode.ASSISTED, ExecutionMode.MISSION}
                 ),
             )
             resolved_model_id = agent.resolve_model_id(agent_req)
@@ -2501,20 +2624,23 @@ async def _run_pipeline(
 
         return invoke
 
-    # 4. Invoke with fallback.
+    # CHAT and ASSISTED deliberately invoke one registry agent only.  Mission
+    # is the sole lane allowed to use the autonomous fallback chain.
     try:
-        outcome, token_stream = await invoke_with_fallback(
-            decision.primary_agent,
-            lambda name: make_invocation(name)(),
-            # A stalled provider must not hold a normal question for the
-            # global 180s stream-start budget. Complex/explicit work keeps the
-            # more patient default for local model loading.
-            stream_start_timeout=(
-                6.0
-                if fast_chat_turn
-                else None
-            ),
-        )
+        if execution_mode in {ExecutionMode.CHAT, ExecutionMode.ASSISTED}:
+            token_stream = await make_invocation(decision.primary_agent)()
+            outcome = FallbackOutcome(
+                used_agent=decision.primary_agent,
+                attempts=1,
+                notified_dashboard=False,
+                reason="single-agent-lane",
+            )
+        else:
+            outcome, token_stream = await invoke_with_fallback(
+                decision.primary_agent,
+                lambda name: make_invocation(name)(),
+                stream_start_timeout=None,
+            )
     except Exception as exc:
         logger.exception("All fallbacks exhausted: %s", exc)
         detail = str(exc).strip().replace("\n", " ")[:500]
@@ -2523,10 +2649,20 @@ async def _run_pipeline(
             f"Causa técnica: {detail or 'erro upstream desconhecido'}. "
             "Para respostas reais, usa uma chave/provider com quota disponível ou liga um Ollama local."
         )
-        yield _sse(StreamEvent(type="error", content=err_text))
-        yield _sse(StreamEvent(type="done"))
-        # Persist the user message + an explicit error assistant message so
-        # the error stays visible after a refresh.
+        yield _sse(
+            StreamEvent(
+                type="error",
+                content=err_text,
+                data={
+                    "error_category": ErrorCategory.PROVIDER.value,
+                    "run_id": run_context.run_id,
+                    "correlation_id": run_context.correlation_id,
+                    "provider": getattr(req, "provider", "") or None,
+                    "model": model_override or user_model or None,
+                    "message": detail or "provider unavailable",
+                },
+            )
+        )
         try:
             err_now = datetime.now(UTC).isoformat()
             await context.append_message(
@@ -2541,6 +2677,7 @@ async def _run_pipeline(
                 status="failed",
                 phase="provider_error",
                 error=err_text,
+                error_category=ErrorCategory.PROVIDER.value,
                 checkpoint={"reason": "provider_unavailable"},
                 finished=True,
             )

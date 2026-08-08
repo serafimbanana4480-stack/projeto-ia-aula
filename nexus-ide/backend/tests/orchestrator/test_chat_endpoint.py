@@ -93,15 +93,15 @@ class TestChatEndpoint:
         )
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
-
         events = _iter_sse_events(response.content)
         types = [e["type"] for e in events]
-
         assert "routing" in types, f"missing routing event: {types}"
+        assert types.count("routing") == 1
         assert types.count("agent_started") == 1
         assert types.count("done") == 1
+        first_token_index = types.index("token")
+        assert types.index("routing") < first_token_index
         tokens = [e["content"] for e in events if e["type"] == "token"]
-        # Autonomous tool-capable turns buffer provider text until it is known
         # not to be raw tool transport, then publish one clean answer chunk.
         assert tokens == ["Hello NEXUS"]
 

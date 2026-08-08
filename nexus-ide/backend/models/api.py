@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from backend.orchestrator.execution_contracts import ExecutionMode
+
 
 AgentName = Literal[
     "ROUTER",
@@ -232,8 +234,8 @@ class TerminalExecuteResponse(BaseModel):
 
 class RoutingDecision(BaseModel):
     """Output of the ROUTER model. Validated with Pydantic on parse."""
-
     model_config = ConfigDict(extra="ignore")
+
 
     primary_agent: AgentName
     secondary_agents: list[AgentName] = Field(default_factory=list)
@@ -244,6 +246,14 @@ class RoutingDecision(BaseModel):
     context_needed: ContextNeed = "low"
     routing_confidence: float = Field(ge=0.0, le=1.0, default=0.5)
     routing_reason: str = ""
+    # Execution-envelope metadata is included in the first routing SSE frame
+    # and persisted with the durable session run.
+    mode: ExecutionMode = ExecutionMode.CHAT
+    run_id: str = ""
+    correlation_id: str = ""
+    provider: str = ""
+    model: str = ""
+    reason: str = ""
 
 
 class StreamEvent(BaseModel):
