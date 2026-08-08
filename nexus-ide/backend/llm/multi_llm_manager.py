@@ -723,8 +723,10 @@ class MultiLLMManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                await breaker.record_failure()
-                last_error = self._typed_provider_error(exc, name, model)
+                typed = self._typed_provider_error(exc, name, model)
+                if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
+                    await breaker.record_failure()
+                last_error = typed
                 self._update_health(name, False, (time.time() - started) * 1000)
         raise last_error or ProviderUnavailableError(
             "No registered provider supports embeddings",
@@ -968,13 +970,24 @@ class MultiLLMManager:
             health = self.health_status.get(name, {})
             cb = breaker_snapshots.get(name, {})
             provider = self.providers[name]
+            quota = getattr(provider, "quota_available", None)
+            validated_at = getattr(provider, "validated_at", None)
+            reason = getattr(provider, "eligibility_reason", "")
+            eligible = not self.free_only or (
+                quota is True and validated_at is not None and reason not in {"", "not checked"}
+            )
             status[name] = {
                 **health,
+                "healthy": bool(
+                    health.get("healthy") is True
+                    and eligible
+                    and str(cb.get("state", "")).lower() not in {"open", "half_open"}
+                ),
                 "free_only": self.free_only,
                 "simulation": bool(getattr(provider, "simulation", False)),
-                "eligibility_reason": getattr(provider, "eligibility_reason", None),
-                "quota_available": getattr(provider, "quota_available", None),
-                "validation_timestamp": getattr(provider, "validated_at", None),
+                "eligibility_reason": reason,
+                "quota_available": quota,
+                "validation_timestamp": validated_at,
                 "circuit_breaker": cb,
                 "retry_after": cb.get("retry_after"),
             }
