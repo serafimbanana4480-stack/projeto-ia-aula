@@ -640,6 +640,13 @@ def _is_informational_question(query: str) -> bool:
     return any(stripped.startswith(starter) for starter in _COMPLEX_TASK_QUESTION_STARTERS)
 
 
+_ASSISTED_ACTION_RE = _compile_marker_pattern(
+    (
+        "create", "build", "write", "change", "update", "remove", "modify",
+        "criar", "construir", "escrever", "alterar", "atualizar", "remover",
+    )
+)
+
 def classify_execution_mode(
     message: str, requested_mode: str, project_path: str
 ) -> ExecutionMode:
@@ -676,6 +683,8 @@ def classify_execution_mode(
     if requested in explicit and requested not in {"auto", "agent"}:
         return explicit[requested]
 
+    if _ASSISTED_ACTION_RE.search(lowered):
+        return ExecutionMode.ASSISTED
     phase_count = sum(1 for marker_re in _COMPLEX_TASK_INTENT_RES if marker_re.search(lowered))
     if (
         _COMPLEX_TASK_INTENT_RES[0].search(lowered)
@@ -2477,6 +2486,18 @@ async def _run_pipeline(
                 "model": model_override or "",
             },
         )
+        _checkpoint(
+            status="failed",
+            phase="provider_error",
+            error=f"Provider '{req.provider}' is not configured",
+            error_category=ErrorCategory.PROVIDER.value,
+            checkpoint={
+                "reason": "provider_unavailable",
+                "provider": req.provider,
+                "model": model_override or user_model or None,
+            },
+            finished=True,
+        )
         yield _sse(
             StreamEvent(
                 type="error",
@@ -2484,9 +2505,16 @@ async def _run_pipeline(
                     f"Provider '{req.provider}' não está configurado/ativo; "
                     "o pedido foi interrompido para não trocar silenciosamente de provider."
                 ),
+                data={
+                    "error_category": ErrorCategory.PROVIDER.value,
+                    "run_id": run_context.run_id,
+                    "correlation_id": run_context.correlation_id,
+                    "provider": req.provider,
+                    "model": model_override or user_model or None,
+                },
             )
         )
-        yield _sse(StreamEvent(type="done"))
+        yield _sse(StreamEvent(type="done", data=run_context.to_dict()))
         return
 
     # Audit-only routing evidence. Keep provider/model identifiers, never

@@ -24,6 +24,11 @@ def test_action_with_bounded_assistance_is_assisted() -> None:
     )
 
 
+def test_action_only_requests_are_assisted() -> None:
+    for message in ("create a file", "build the backend", "update this module"):
+        assert classify_execution_mode(message, "auto", "") is ExecutionMode.ASSISTED
+
+
 def test_multi_phase_or_explicit_mission_is_mission() -> None:
     assert (
         classify_execution_mode(
