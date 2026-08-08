@@ -28,7 +28,7 @@ async def enhanced_chat(req: ChatRequest, request: Request) -> StreamingResponse
     
     # Get event bus and chat system
     event_bus = await get_event_bus()
-    chat_system = await get_chat_system(event_bus)
+    chat_system = await get_chat_system(event_bus, context=getattr(request.app.state, "context", None))
     
     async def event_stream() -> AsyncIterator[str]:
         async for chunk in chat_system.process_chat_request(req, ollama, registry):

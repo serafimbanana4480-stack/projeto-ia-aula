@@ -97,3 +97,21 @@ def test_retriever_stats_track_chunks() -> None:
     s = r.stats()
     assert s["chunks"] >= 1
     assert s["embeddings"] == 0  # we disabled them
+
+
+def test_retriever_scopes_hits_to_project() -> None:
+    r = SwarmRetriever(enable_embeddings=False)
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        first = root / "first"
+        second = root / "second"
+        first.mkdir()
+        second.mkdir()
+        r.add_chunks(chunk_text("alpha only", source_path=str(first / "a.py")))
+        r.add_chunks(chunk_text("beta only", source_path=str(second / "b.py")))
+
+        hits = r.retrieve("alpha", project_path=str(second))
+        assert hits == []

@@ -271,6 +271,7 @@ class RagSearchBody(BaseModel):
     query: str = Field(min_length=1, max_length=2_000)
     top_k: int = Field(default=8, ge=1, le=50)
     language: str | None = None
+    project_path: str = Field(default="", max_length=2000)
 
 
 class SkillRunBody(BaseModel):
@@ -327,7 +328,7 @@ async def _ensure_indexed(project_path: str, enabled: bool) -> int:
     if not enabled or not project_path:
         return 0
     retriever = get_retriever()
-    if retriever.stats().get("chunks", 0) > 0:
+    if retriever.has_project(project_path):
         return 0
     try:
         return await asyncio.to_thread(index_directory, retriever, project_path)
@@ -418,7 +419,13 @@ async def rag_search(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     retriever = get_retriever()
-    hits = retriever.retrieve(body.query, top_k=body.top_k, language=body.language)
+    project_path, _ = resolve_project_path(body.project_path or "")
+    hits = retriever.retrieve(
+        body.query,
+        top_k=body.top_k,
+        language=body.language,
+        project_path=project_path or None,
+    )
     return {
         "query": body.query,
         "hits": [h.to_dict() for h in hits],

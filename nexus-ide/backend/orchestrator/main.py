@@ -252,7 +252,113 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 data.get("agent_type", "UNKNOWN"), event, {**data, "instance_id": iid}
             )
         )
+
+    async def _on_background_agent_state(
+        instance_id: str, event_type: str, data: dict[str, Any]
+    ) -> None:
+        """Bridge detached specialist work back into the chat session.
+
+        ``spawn_task`` is intentionally non-blocking for the principal agent,
+        so its result must have two durable destinations: the event bus for a
+        live UI and the session history for refresh/recovery.
+        """
+        instance = lifecycle.get_status(instance_id)
+        if instance is None:
+            return
+
+        from backend.orchestrator.events import EventType, OrchestratorEvent
+
+        event_map = {
+            "agent_started": EventType.AGENT_STARTED,
+            "agent_finished": EventType.AGENT_FINISHED,
+            "agent_failed": EventType.AGENT_FAILED,
+        }
+        mapped = event_map.get(event_type)
+        event_data = {
+            **data,
+            "background": True,
+            "instance_id": instance_id,
+            "agent_type": instance.agent_type,
+            "mission_id": instance.mission_id,
+            "parent_task_id": instance.parent_task_id,
+            "status": instance.status,
+        }
+        if mapped is not None:
+            await app.state.event_bus.publish(
+                OrchestratorEvent(
+                    event_type=mapped,
+                    source=instance.agent_type,
+                    session_id=instance.mission_id,
+                    task_id=instance_id,
+                    content=(
+                        f"{instance.agent_type} continua em background"
+                        if event_type == "agent_started"
+                        else f"{instance.agent_type} terminou em background"
+                        if event_type == "agent_finished"
+                        else f"{instance.agent_type} falhou em background"
+                    ),
+                    data=event_data,
+                )
+            )
+
+        if event_type not in {"agent_finished", "agent_failed"} or not instance.mission_id:
+            return
+
+        # A lifecycle callback is the single completion boundary. Keep a
+        # process-local guard because persistence is also attempted in the
+        # normal success path and should never duplicate a specialist result.
+        persisted = getattr(app.state, "background_results_persisted", None)
+        if persisted is None:
+            persisted = set()
+            app.state.background_results_persisted = persisted
+        if instance_id in persisted:
+            return
+
+        from backend.history_sanitizer import sanitize_history_content
+        from backend.orchestrator.context_manager import ContextStore
+        from backend.persistence.db import add_message, create_session, get_session
+        from backend.tools.ollama_client import ChatMessage
+
+        output = str(instance.context.get("output") or "").strip()
+        if event_type == "agent_finished":
+            output = sanitize_history_content("assistant", output)[:20_000]
+            content = (
+                f"[Subagente {instance.agent_type} concluído — {instance_id}]\n\n"
+                f"{output or 'O subagente terminou sem texto de resposta.'}"
+            )
+        else:
+            error = str(instance.error_message or data.get("error") or "erro desconhecido")
+            content = f"[Subagente {instance.agent_type} falhou — {instance_id}]\n\n{error[:2_000]}"
+
+        try:
+            if get_session(instance.mission_id) is None:
+                create_session(
+                    title=instance.objective[:60] or "Sessão Nexus",
+                    mode="auto",
+                    session_id=instance.mission_id,
+                )
+            now = datetime.now(UTC).isoformat()
+            context_store: ContextStore = app.state.context
+            await context_store.append_message(
+                instance.mission_id,
+                ChatMessage(role="assistant", content=content, timestamp=now),
+            )
+            add_message(
+                instance.mission_id,
+                "assistant",
+                content,
+                tier_used=instance.agent_type,
+                latency_ms=int(
+                    max(0.0, instance.completed_at - instance.start_time) * 1000
+                ),
+            )
+            persisted.add(instance_id)
+        except Exception:
+            logger.exception("Could not persist background result %s", instance_id)
+
+    lifecycle.set_state_callback(_on_background_agent_state)
     app.state.agent_lifecycle = lifecycle
+    app.state.background_results_persisted = set()
     app.state.registry = registry
     logger.info("Agent lifecycle manager ready")
 

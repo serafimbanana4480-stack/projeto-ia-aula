@@ -763,6 +763,11 @@ class AgentBase(ABC):
                     messages=messages,
                     options=options,
                     on_final_chunk=_capture_final_chunk,
+                    **(
+                        {"_nexus_dispatch_timeout": 12.0}
+                        if request.context.get("_fast_chat_lane")
+                        else {}
+                    ),
                 ):
                     if token:
                         emitted_output = True
@@ -812,7 +817,7 @@ class AgentBase(ABC):
                 if self._is_rate_limited(exc):
                     failed_models.add(model_id)
                     request.context[failed_models_key] = sorted(failed_models)
-                if not is_last_model:
+                if not is_last_model and not request.context.get("_fast_chat_lane"):
                     await self._wait_before_fallback(exc, attempt_idx)
                 continue
 
@@ -1943,7 +1948,11 @@ class AgentBase(ABC):
                     full_response = ""
                     token_count = 0
                     continue
-                elif self._is_rate_limited(stream_failure) and not rate_limit_retry_used:
+                elif (
+                    self._is_rate_limited(stream_failure)
+                    and not rate_limit_retry_used
+                    and not request.context.get("_fast_chat_lane")
+                ):
                     rate_limit_retry_used = True
                     logger.warning(
                         "[%s] rate limited on iteration %d — backing off and retrying once",

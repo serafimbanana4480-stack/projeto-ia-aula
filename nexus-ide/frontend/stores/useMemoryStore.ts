@@ -94,7 +94,7 @@ export const useMemoryStore = create<MemoryStore>((set) => ({
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       set({
-        vectorDbSize: data.vector_db_size ?? 0,
+        vectorDbSize: data.vector_db_size ?? data.vector?.count ?? 0,
         totalRetrievals: data.total_retrievals ?? 0,
         avgRelevance: data.avg_relevance ?? 0,
         isLoading: false,

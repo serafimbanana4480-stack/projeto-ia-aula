@@ -6,7 +6,7 @@ Provides endpoints for knowledge graph and memory systems.
 
 import logging
 import time
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -24,6 +24,9 @@ class MemoryStats(BaseModel):
     vector: dict[str, int]
     graph: dict[str, int]
     procedural: dict[str, int]
+    vector_db_size: int = 0
+    total_retrievals: int = 0
+    avg_relevance: float = 0.0
 
 
 class KnowledgeStats(BaseModel):
@@ -110,87 +113,35 @@ async def get_memory_stats() -> dict:
     **Returns:**
         Dictionary with memory statistics for each memory type
     """
-    stats = {
-        "semantic": {
-            "count": 0,
-            "size": 0,
-        },
-        "episodic": {
-            "count": 0,
-            "size": 0,
-        },
+    # The SQLite-backed store is the canonical source for the chat path.
+    # Redis/Qdrant are optional adapters and must not produce invented counts
+    # when they are offline.
+    from backend.knowledge.memory import get_memory_store
+
+    memories = get_memory_store().all_memories()
+    by_kind: dict[str, list[Any]] = {"semantic": [], "episodic": [], "procedural": []}
+    for memory in memories:
+        by_kind.setdefault(memory.kind, []).append(memory)
+
+    def size_of(items: list[Any]) -> int:
+        return sum(len(memory.content.encode("utf-8")) for memory in items)
+
+    vector_memories = [memory for memory in memories if memory.embedding]
+    total_retrievals = sum(memory.access_count for memory in memories)
+    related_edges = sum(len(memory.related_memory_ids) for memory in memories)
+    return {
+        "semantic": {"count": len(by_kind["semantic"]), "size": size_of(by_kind["semantic"])},
+        "episodic": {"count": len(by_kind["episodic"]), "size": size_of(by_kind["episodic"])},
         "vector": {
-            "count": 0,
-            "size": 0,
+            "count": len(vector_memories),
+            "size": sum(len(memory.embedding) * 4 for memory in vector_memories),
         },
-        "graph": {
-            "nodes": 0,
-            "edges": 0,
-        },
-        "procedural": {
-            "count": 0,
-            "size": 0,
-        },
+        "graph": {"nodes": len(memories), "edges": related_edges // 2},
+        "procedural": {"count": len(by_kind["procedural"]), "size": size_of(by_kind["procedural"])},
+        "vector_db_size": len(vector_memories),
+        "total_retrievals": total_retrievals,
+        "avg_relevance": 0.0,
     }
-    
-    # Try to get real stats from Redis
-    try:
-        from backend.knowledge.redis_backend import RedisBackend, REDIS_AVAILABLE
-        
-        if REDIS_AVAILABLE:
-            redis = RedisBackend()
-            if redis.is_connected:
-                # Count memory keys
-                pattern = f"{redis._prefix}:*"
-                keys = list(redis._client.scan_iter(match=pattern, count=1000))
-                memory_keys = [k for k in keys if ":session:" not in k]
-                
-                # Estimate memory usage
-                total_memory = 0
-                for key in memory_keys[:100]:  # Sample first 100 for performance
-                    try:
-                        info = redis._client.memory_usage(key)
-                        if info:
-                            total_memory += info
-                    except:
-                        pass
-                
-                # Extrapolate from sample
-                if memory_keys:
-                    avg_size = total_memory / min(len(memory_keys), 100)
-                    total_size = avg_size * len(memory_keys)
-                else:
-                    total_size = 0
-                
-                stats["semantic"]["count"] = len(memory_keys)
-                stats["semantic"]["size"] = total_size
-                stats["episodic"]["count"] = len(memory_keys) // 2
-                stats["episodic"]["size"] = total_size // 2
-                stats["vector"]["count"] = len(memory_keys)
-                stats["vector"]["size"] = total_size
-                stats["graph"]["nodes"] = len(memory_keys)
-                stats["graph"]["edges"] = len(memory_keys) // 2
-                stats["procedural"]["count"] = len(memory_keys) // 3
-                stats["procedural"]["size"] = total_size // 3
-                
-    except Exception as e:
-        logger.warning(f"Failed to get Redis stats: {e}")
-    
-    # Try to get vector count from Qdrant
-    try:
-        from backend.knowledge.qdrant_backend import QdrantBackend, QDRANT_AVAILABLE
-        
-        if QDRANT_AVAILABLE:
-            qdrant = QdrantBackend()
-            vector_count = qdrant.count()
-            
-            stats["vector"]["count"] = vector_count
-            stats["vector"]["size"] = vector_count * 768 * 4  # Estimate: 768 dims * 4 bytes
-            
-    except Exception as e:
-        logger.warning(f"Failed to get Qdrant stats: {e}")
-    
-    return stats
 
 
 @router.get("/memory/stream", tags=["memory"])

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 MAX_CONCURRENT_AGENTS_GLOBAL = 20
 MAX_CONCURRENT_AGENTS_PER_TYPE = 5
 DEFAULT_TOKEN_BUDGET = 100_000
-DEFAULT_TIME_BUDGET_SECONDS = 600  # 10 minutes
+DEFAULT_TIME_BUDGET_SECONDS = 600  # 10 minutes for explicitly managed agents
 GC_MAX_AGE_SECONDS = 3_600  # 1 hour
 
 # ---------------------------------------------------------------------------
@@ -100,6 +100,7 @@ class AgentLifecycleManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
         self._overseer_callback: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None = None
+        self._state_callback: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None = None
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._registry = registry
         self._llm_client = llm_client
@@ -117,6 +118,18 @@ class AgentLifecycleManager:
         """
         self._overseer_callback = callback
 
+    def set_state_callback(
+        self,
+        callback: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None,
+    ) -> None:
+        """Register the application callback for durable/event-bus updates.
+
+        This is deliberately separate from the Overseer hook so the chat
+        session can receive completed background work without coupling
+        persistence to the monitoring agent.
+        """
+        self._state_callback = callback
+
     async def _notify_overseer(
         self, instance_id: str, event_type: str, data: dict[str, Any] | None = None
     ) -> None:
@@ -125,6 +138,11 @@ class AgentLifecycleManager:
                 await self._overseer_callback(instance_id, event_type, data or {})
             except Exception:
                 logger.exception("Overseer notification failed for %s", instance_id)
+        if self._state_callback:
+            try:
+                await self._state_callback(instance_id, event_type, data or {})
+            except Exception:
+                logger.exception("Lifecycle state callback failed for %s", instance_id)
 
     # -- CRUD ---------------------------------------------------------------
 
@@ -276,6 +294,8 @@ class AgentLifecycleManager:
         instance.status = AgentInstanceStatus.COMPLETED.value
         instance.completed_at = time.time()
         instance.tokens_used = tokens_used
+        if output:
+            instance.context["output"] = output
         await self._notify_overseer(
             instance_id,
             "agent_finished",
@@ -317,6 +337,10 @@ class AgentLifecycleManager:
     def list_active(self) -> list[AgentInstance]:
         """Return all non-terminal agent instances."""
         return [i for i in self._instances.values() if not i.is_terminal()]
+
+    def list_all(self) -> list[AgentInstance]:
+        """Return active and recently terminal instances for UI recovery."""
+        return list(self._instances.values())
 
     def list_by_mission(self, mission_id: str) -> list[AgentInstance]:
         """Return all agent instances associated with a mission."""

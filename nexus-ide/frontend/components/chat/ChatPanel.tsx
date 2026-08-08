@@ -14,6 +14,7 @@ import { useProjectStore } from "../../stores/projectStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import MessageBubble from "./MessageBubble";
+import BackgroundAgentsPanel from "./BackgroundAgentsPanel";
 import ModelSelector from "./ModelSelector";
 import VirtualMessageList from "./VirtualMessageList";
 import SessionList from "./SessionList";
@@ -1533,6 +1534,7 @@ export default function ChatPanel({
 
       {/* Input area — fixed at bottom */}
       <div className="shrink-0 border-t border-nexus-border bg-nexus-panel px-5 pt-3 pb-2">
+        <BackgroundAgentsPanel sessionId={sessionId} onCompleted={loadHistory} />
         {/* Live streaming-status pill */}
         {streamStatus && (
           <div className="mb-2 flex justify-start">

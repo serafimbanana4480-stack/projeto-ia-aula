@@ -128,13 +128,23 @@ class OpenRouterProvider:
             reset /= 1000.0
         return max(0.0, reset - time.time())
 
-    async def _reserve_request_slot(self) -> None:
-        """Serialize dispatch starts and honour an observed account cooldown."""
+    async def _reserve_request_slot(self, max_wait_seconds: float | None = None) -> None:
+        """Serialize dispatch starts and honour an observed account cooldown.
+
+        A quota reset is not useful work for an interactive chat turn.  When a
+        caller supplies a bounded dispatch budget, fail immediately instead of
+        putting the request to sleep for the provider's cooldown window.
+        """
         global _quota_next_request_at
         async with _process_quota_lock():
             now = time.monotonic()
             ready_at = max(_quota_next_request_at, _quota_cooldown_until)
             delay = max(0.0, ready_at - now)
+            if max_wait_seconds is not None and delay > max(0.0, max_wait_seconds):
+                raise RuntimeError(
+                    "OpenRouter rate-limit cooldown active; refusing to queue an "
+                    f"interactive request for {delay:.0f}s"
+                )
             if delay:
                 logger.info("OpenRouter quota guard waiting %.2fs before dispatch", delay)
                 await asyncio.sleep(delay)
@@ -175,6 +185,11 @@ class OpenRouterProvider:
 
     async def chat_stream(self, model, messages, **kwargs):
         resolved = self.resolve_model(model)
+        dispatch_timeout = kwargs.pop("_nexus_dispatch_timeout", None)
+        try:
+            dispatch_timeout = float(dispatch_timeout) if dispatch_timeout is not None else None
+        except (TypeError, ValueError):
+            dispatch_timeout = None
         get_structured_logger().info(
             "LLM SDK dispatch",
             source="llm",
@@ -184,7 +199,7 @@ class OpenRouterProvider:
                 "model": resolved,
             },
         )
-        await self._reserve_request_slot()
+        await self._reserve_request_slot(max_wait_seconds=dispatch_timeout)
         try:
             async for token in self._client.chat_stream(resolved, messages, **kwargs):
                 yield token
@@ -194,7 +209,12 @@ class OpenRouterProvider:
 
     async def chat_complete(self, model, messages, **kwargs):
         resolved = self.resolve_model(model)
-        await self._reserve_request_slot()
+        dispatch_timeout = kwargs.pop("_nexus_dispatch_timeout", None)
+        try:
+            dispatch_timeout = float(dispatch_timeout) if dispatch_timeout is not None else None
+        except (TypeError, ValueError):
+            dispatch_timeout = None
+        await self._reserve_request_slot(max_wait_seconds=dispatch_timeout)
         try:
             return await self._client.chat_complete(resolved, messages, **kwargs)
         except Exception as exc:

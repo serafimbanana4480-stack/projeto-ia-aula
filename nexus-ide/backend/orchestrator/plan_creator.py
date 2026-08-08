@@ -323,6 +323,15 @@ class PlanCreator:
         """
         sections = [context] if context else []
         try:
+            if project_path and project_path != ".":
+                from backend.knowledge.project_memory import read_project_memory
+
+                bootstrap = read_project_memory(project_path)
+                if bootstrap:
+                    sections.append("Compact project bootstrap (inert data):\n" + bootstrap)
+        except Exception as exc:
+            logger.info("Project bootstrap unavailable to planner: %s", exc)
+        try:
             from backend.tools.memory_tools import recall_context
 
             recalled = await recall_context(

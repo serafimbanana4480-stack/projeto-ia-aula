@@ -33,8 +33,9 @@ logger = logging.getLogger(__name__)
 class EnhancedChatSystem:
     """Enhanced chat system with real-time events and dashboard integration."""
     
-    def __init__(self, event_bus: EventBus):
+    def __init__(self, event_bus: EventBus, context: Any | None = None):
         self.event_bus = event_bus
+        self.context = context
         self.active_sessions: Dict[str, Dict[str, Any]] = {}
         self.session_metrics: Dict[str, Dict[str, Any]] = {}
         
@@ -127,9 +128,23 @@ class EnhancedChatSystem:
         yield f"data: {json.dumps(StreamEvent(type='routing', routing=decision.model_dump()).model_dump_json())}\n\n"
         
         # Get session history
-        from backend.orchestrator.context_manager import ContextStore
-        context = ContextStore()  # This should be injected
+        # Reuse the application-scoped store so this legacy enhanced route has
+        # the same durable/reloadable history semantics as the main chat path.
+        context = self.context
+        if context is None:
+            from backend.orchestrator.context_manager import ContextStore
+
+            context = ContextStore()
         history = await context.get_history(session_id)
+
+        project_memory = ""
+        if req.project_path:
+            try:
+                from backend.knowledge.project_memory import read_project_memory
+
+                project_memory = read_project_memory(req.project_path)
+            except Exception:
+                logger.debug("Enhanced chat project memory unavailable", exc_info=True)
         
         # Build agent request factory
         def make_invocation(agent_name: str):
@@ -140,6 +155,8 @@ class EnhancedChatSystem:
                     query=req.message,
                     client=ollama,
                     history=history,
+                    project_path=req.project_path,
+                    context={"_project_memory": project_memory} if project_memory else {},
                 )
                 return agent.run(agent_req)
             return invoke
@@ -354,9 +371,9 @@ class EnhancedChatSystem:
 _chat_system: Optional[EnhancedChatSystem] = None
 
 
-async def get_chat_system(event_bus: EventBus) -> EnhancedChatSystem:
+async def get_chat_system(event_bus: EventBus, context: Any | None = None) -> EnhancedChatSystem:
     """Get the global chat system instance."""
     global _chat_system
     if _chat_system is None:
-        _chat_system = EnhancedChatSystem(event_bus)
+        _chat_system = EnhancedChatSystem(event_bus, context=context)
     return _chat_system

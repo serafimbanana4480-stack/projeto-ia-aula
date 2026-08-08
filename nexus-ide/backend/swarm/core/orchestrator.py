@@ -240,7 +240,11 @@ class SwarmOrchestrator:
             # 2. Pull RAG evidence (if the mode needs it)
             evidence: list[RetrievalHit] = []
             if spec.uses_rag and self.retriever.stats()["chunks"] > 0:
-                evidence = self.retriever.retrieve(req.objective, top_k=6)
+                evidence = self.retriever.retrieve(
+                    req.objective,
+                    top_k=6,
+                    project_path=req.project_path or None,
+                )
                 result.evidence_used = [h.to_dict() for h in evidence]
                 await self._publish_status(
                     f"📚 RAG retrieved {len(evidence)} evidence chunks",

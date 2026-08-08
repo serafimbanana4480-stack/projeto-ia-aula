@@ -197,6 +197,7 @@ class SwarmRetriever:
         semantic_weight: float = 0.6,
         keyword_weight: float = 0.4,
         language: str | None = None,
+        project_path: str | None = None,
     ) -> list[RetrievalHit]:
         """Return top-k chunks by hybrid score.
 
@@ -207,9 +208,28 @@ class SwarmRetriever:
         if not query or not self._index.chunks:
             return []
 
+        project_root = None
+        if project_path:
+            from pathlib import Path
+
+            project_root = Path(project_path).expanduser().resolve()
+
+        def matches_project(chunk: TextChunk) -> bool:
+            if project_root is None:
+                return True
+            try:
+                from pathlib import Path
+
+                Path(chunk.source_path).expanduser().resolve().relative_to(project_root)
+                return True
+            except (OSError, ValueError):
+                return False
+
         # ---- Keyword leg (BM25) ----
         keyword_scores: dict[str, float] = {}
         for chunk in self._index.chunks:
+            if not matches_project(chunk):
+                continue
             if language and chunk.language and chunk.language != language:
                 continue
             keyword_scores[chunk.chunk_id] = self._index.bm25_score(query, chunk.chunk_id)
@@ -225,6 +245,8 @@ class SwarmRetriever:
         # ---- Combine ----
         hits: list[RetrievalHit] = []
         for chunk in self._index.chunks:
+            if not matches_project(chunk):
+                continue
             kw = keyword_scores.get(chunk.chunk_id, 0.0)
             sem = semantic_scores.get(chunk.chunk_id, 0.0)
             if language and chunk.language and chunk.language != language:
@@ -311,6 +333,19 @@ class SwarmRetriever:
             "faiss_enabled": self._faiss is not None,
             "languages": dict(Counter(c.language for c in self._index.chunks if c.language)),
         }
+
+    def has_project(self, project_path: str) -> bool:
+        """Return whether this in-memory index contains chunks for a project."""
+        from pathlib import Path
+
+        root = Path(project_path).expanduser().resolve()
+        for chunk in self._index.chunks:
+            try:
+                Path(chunk.source_path).expanduser().resolve().relative_to(root)
+                return True
+            except (OSError, ValueError):
+                continue
+        return False
 
     def clear(self) -> None:
         self._index = InMemoryIndex()

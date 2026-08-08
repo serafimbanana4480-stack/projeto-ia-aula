@@ -14,6 +14,7 @@ import re
 import tempfile
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 
 from backend.core.project_adapter import ProjectAdapter
@@ -32,9 +33,19 @@ def project_memory_path(project_path: str | os.PathLike[str]) -> Path:
 
 def _top_level_map(root: Path) -> str:
     entries: list[str] = []
+    ignored = {
+        "__pycache__",
+        ".venv",
+        "venv",
+        "node_modules",
+        ".next",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+    }
     try:
         for entry in sorted(root.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
-            if entry.name.startswith(".") and entry.name not in {".env.example"}:
+            if entry.name in ignored or entry.name.startswith(".") and entry.name not in {".env.example"}:
                 continue
             if entry.is_dir():
                 entries.append(f"- `{entry.name}/` — diretório")
@@ -146,10 +157,8 @@ def _atomic_write(path: Path, content: str) -> None:
             os.fsync(handle.fileno())
         os.replace(temp_name, path)
     finally:
-        try:
+        with suppress(FileNotFoundError):
             os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
 
 
 def _clean_fact(value: str, limit: int = 180) -> str:
@@ -178,7 +187,12 @@ def record_verified_session(
         before, separator, after = content.partition(marker)
         if not separator:
             before, after = content, ""
-        lines = [line for line in after.splitlines() if line.strip().startswith("-")]
+        lines = [
+            line
+            for line in after.splitlines()
+            if line.strip().startswith("-")
+            and line.strip() != "- Ainda não existem registos."
+        ]
         timestamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
         note = f"- {timestamp} · sessão `{_clean_fact(session_id, 128)}` · estado `{_clean_fact(status, 32)}`"
         if topic:

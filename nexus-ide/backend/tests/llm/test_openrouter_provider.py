@@ -41,3 +41,18 @@ async def test_provider_wide_slot_guard_spaces_requests(
     assert sleeps == [pytest.approx(3.1)]
     await provider.aclose()
     await second_provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_interactive_slot_does_not_sleep_through_quota_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenRouterProvider(api_key="test")
+    provider._min_request_interval = 0.0
+    monkeypatch.setattr(openrouter_module.time, "monotonic", lambda: 100.0)
+    openrouter_module._quota_cooldown_until = 160.0
+
+    with pytest.raises(RuntimeError, match="refusing to queue"):
+        await provider._reserve_request_slot(max_wait_seconds=12.0)
+
+    await provider.aclose()

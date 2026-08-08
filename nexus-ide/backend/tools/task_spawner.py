@@ -8,6 +8,7 @@ it can spawn new tasks that the orchestrator will then schedule.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, get_args
 
 from backend.tools.registry import ToolSpec, register_tool
@@ -76,6 +77,20 @@ async def spawn_task(
 
         lifecycle = getattr(app.state, "agent_lifecycle", None)
         if lifecycle is not None:
+            try:
+                background_budget = max(
+                    60,
+                    int(os.environ.get("NEXUS_BACKGROUND_AGENT_TIME_BUDGET_SECONDS", "7200")),
+                )
+            except ValueError:
+                background_budget = 7200
+            try:
+                background_tokens = max(
+                    1000,
+                    int(os.environ.get("NEXUS_BACKGROUND_AGENT_TOKEN_BUDGET", "200000")),
+                )
+            except ValueError:
+                background_tokens = 200000
             instance_id = await lifecycle.spawn(
                 agent_type=agent,
                 objective=description,
@@ -87,6 +102,8 @@ async def spawn_task(
                 },
                 mission_id=session_id,
                 parent_task_id=parent_id or "",
+                token_budget=background_tokens,
+                time_budget_seconds=background_budget,
             )
             result.update(
                 {

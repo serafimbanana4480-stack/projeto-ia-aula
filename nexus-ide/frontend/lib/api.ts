@@ -721,13 +721,20 @@ export interface Mission {
 export interface AgentInstance {
   id: string;
   name: string;
+  instance_id?: string;
+  agent_type?: string;
   status: "idle" | "running" | "paused" | "failed" | "completed";
+  objective?: string;
+  error_message?: string;
+  parent_task_id?: string;
   current_task?: string;
   cpu_percent?: number;
   memory_mb?: number;
   tokens_used: number;
   mission_id?: string;
   started_at?: string;
+  start_time?: number;
+  completed_at?: number;
   last_heartbeat?: string;
 }
 
@@ -792,9 +799,16 @@ export interface SelfImprovementProposal {
   created_at: string;
 }
 
-export async function getAgentInstances(): Promise<AgentInstance[]> {
+export async function getAgentInstances(options?: {
+  sessionId?: string;
+  includeTerminal?: boolean;
+}): Promise<AgentInstance[]> {
+  const query = new URLSearchParams();
+  if (options?.sessionId) query.set("session_id", options.sessionId);
+  if (options?.includeTerminal) query.set("include_terminal", "true");
+  const suffix = query.toString() ? `?${query.toString()}` : "";
   const data = await readJson<{ agents?: AgentInstance[] }>(
-    await fetch(apiUrl("/api/agents/instances"), { headers: authHeaders() }),
+    await fetch(apiUrl(`/api/agents/instances${suffix}`), { headers: authHeaders() }),
   );
   return data.agents ?? [];
 }

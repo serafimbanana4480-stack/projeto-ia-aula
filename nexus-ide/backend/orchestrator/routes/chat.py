@@ -2400,6 +2400,11 @@ async def _run_pipeline(
                 agent_context["_project_memory"] = project_memory
             if enriched_addon:
                 agent_context["_system_addon"] = enriched_addon
+            if fast_chat_turn:
+                # The principal chat lane must not inherit the autonomous
+                # retry/backoff policy.  A provider quota outage should be
+                # reported in seconds, while complex work may remain patient.
+                agent_context["_fast_chat_lane"] = True
             if _advanced_profile:
                 agent_context["_advanced_profile"] = {
                     key: value

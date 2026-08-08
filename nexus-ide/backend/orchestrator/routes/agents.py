@@ -27,12 +27,19 @@ def _get_lifecycle(request: Request) -> AgentLifecycleManager | None:
 
 
 @router.get("/agents/instances")
-async def list_instances(request: Request, _user: dict = Depends(require_auth)) -> dict[str, Any]:
-    """Return all active (non-terminal) agent instances."""
+async def list_instances(
+    request: Request,
+    session_id: str | None = None,
+    include_terminal: bool = False,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Return background agents, optionally scoped to one chat session."""
     lifecycle = _get_lifecycle(request)
     if not lifecycle:
         raise HTTPException(status_code=503, detail="Agent lifecycle manager not available")
-    active = lifecycle.list_active()
+    active = lifecycle.list_active() if not include_terminal else lifecycle.list_all()
+    if session_id:
+        active = [instance for instance in active if instance.mission_id == session_id]
     return {
         "agents": [i.model_dump(mode="json") for i in active],
         "count": len(active),
