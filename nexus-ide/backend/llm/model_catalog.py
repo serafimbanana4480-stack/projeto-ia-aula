@@ -825,3 +825,24 @@ def list_provider_specs() -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def load_validated_models(provider: str) -> list[ModelInfo]:
+    """Load only fresh validated cache entries for synchronous factory wiring."""
+    entry = _load_cache().get(provider)
+    if not isinstance(entry, dict):
+        return []
+    ttl = max(1, int(getattr(get_settings(), "provider_validation_ttl_seconds", CACHE_TTL_SECONDS)))
+    now = time.time()
+    models: list[ModelInfo] = []
+    for raw in entry.get("models", []):
+        try:
+            model = ModelInfo(**raw)
+        except (TypeError, ValueError):
+            continue
+        if model.validated_at is None or now - model.validated_at > ttl:
+            continue
+        if model.quota_available is not True:
+            continue
+        models.append(model)
+    return models

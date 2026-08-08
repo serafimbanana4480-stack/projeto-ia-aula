@@ -73,7 +73,7 @@ def _free_only_enabled(settings: Any, overrides: dict[str, Any]) -> bool:
 
     configured = getattr(settings, "free_only", None)
     if not isinstance(configured, (bool, str, int, float)):
-        configured = os.environ.get("NEXUS_FREE_ONLY", "false")
+        configured = os.environ.get("NEXUS_FREE_ONLY", "true")
     value = _setting_value(settings, overrides, "free_only", configured)
     return _as_bool(value, True)
 
@@ -554,8 +554,10 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
         return 0 if name == preferred_provider else default
 
     free_only = _free_only_enabled(settings, values)
-    policy_candidates = values.get("policy_candidates", [])
-    local_models = values.get("local_models")
+    policy_candidates = values.get("policy_candidates")
+    if not isinstance(policy_candidates, list):
+        from backend.llm.model_catalog import load_validated_models
+        policy_candidates = load_validated_models("openrouter")
     validation_ttl = _setting_value(
         settings, values, "provider_validation_ttl_seconds", 600
     )
@@ -736,8 +738,10 @@ def create_llm_client(**overrides: Any) -> Any:
     _runtime = _load_runtime_overrides()
     if _runtime:
         logger.info("Loaded %d runtime settings overrides", len(_runtime))
-
     effective_overrides: dict[str, Any] = {**_runtime, **overrides}
+    if "policy_candidates" not in effective_overrides:
+        from backend.llm.model_catalog import load_validated_models
+        effective_overrides["policy_candidates"] = load_validated_models("openrouter")
     free_only = _free_only_enabled(settings, effective_overrides)
     multi_llm_enabled = _as_bool(
         _setting_value(settings, effective_overrides, "multi_llm_enabled", settings.multi_llm_enabled),
@@ -760,6 +764,12 @@ def create_llm_client(**overrides: Any) -> Any:
             provider=provider,
         )
     if provider in ("local", "ollama"):
+        if not _as_bool(_setting_value(settings, effective_overrides, "nexus_enable_ollama", False)):
+            raise ProviderUnavailableError(
+                "Ollama is disabled; enable NEXUS_ENABLE_OLLAMA explicitly",
+                category="eligibility",
+                provider="ollama",
+            )
         base_url = _setting_value(settings, effective_overrides, "ollama_host", settings.ollama_host)
         logger.info("Using Ollama provider at %s with fallback chain", base_url)
         primary = OllamaProvider(base_url=base_url)

@@ -11,7 +11,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
@@ -435,8 +435,9 @@ class MultiLLMManager:
             seen.add(identity)
             names.append(name)
         return names
-
-    def _select_policy_model(self, model: str) -> str:
+    def _select_policy_model(
+        self, model: str, requirement: FreeModelRequirement | None = None
+    ) -> str:
         if not self.free_only:
             return model
         candidates = list(self.policy_candidates)
@@ -452,7 +453,7 @@ class MultiLLMManager:
             if ollama is not None:
                 local_models = getattr(ollama, "local_models", None)
         selection = self.policy.select(
-            self.requirement,
+            requirement or self.requirement,
             candidates,
             {name: get_breaker(name) for name in self.providers},
             local_models,
@@ -474,8 +475,22 @@ class MultiLLMManager:
         provider: str | None = None,
         **kwargs: Any,
     ) -> str:
-        """Send a completion through validated, health-aware providers."""
-        model = self._select_policy_model(model)
+        request_options = options or {}
+        request_requirement = replace(
+            self.requirement,
+            tool_calling=bool(kwargs.get("tools") or request_options.get("tools")),
+            structured_output=bool(
+                kwargs.get("response_format") or request_options.get("response_format")
+            ),
+        )
+        model = self._select_policy_model(model, request_requirement)
+        if self.free_only and provider and provider != self._selected_provider:
+            raise ProviderUnavailableError(
+                "Explicit provider is not the policy-selected free provider",
+                category="eligibility",
+                provider=provider,
+                model=model,
+            )
         target = provider or self._selected_provider or self.get_best_provider()
         if target not in self.providers:
             raise ProviderUnavailableError(
@@ -815,9 +830,9 @@ class MultiLLMManager:
         results: dict[str, str] = {}
 
         async def _call(name: str) -> None:
+            breaker = get_breaker(name)
             try:
                 self._ensure_dispatch_allowed(name, model)
-                breaker = get_breaker(name)
                 if not await breaker.is_call_permitted():
                     raise ProviderUnavailableError(
                         f"Circuit breaker open for '{name}'",

@@ -114,6 +114,7 @@ class OpenRouterProvider:
         self.validated_at = None
         self._validation_ttl_seconds = max(1, int(validation_ttl_seconds))
         self._max_latency_ms = float(max_latency_ms)
+        self._catalog = catalog
         try:
             self._min_request_interval = min(
                 5.0,
