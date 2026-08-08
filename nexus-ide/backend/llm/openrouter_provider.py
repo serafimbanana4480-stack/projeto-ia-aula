@@ -94,6 +94,7 @@ class OpenRouterProvider:
         catalog: Any = None,
         validation_ttl_seconds: int = 600,
         max_latency_ms: int = 30_000,
+        local_embed_host: str | None = None,
     ) -> None:
         # OpenRouter's canonical ``/api`` URL and legacy config values ending
         # in ``/api/v1`` without ever producing ``/v1/v1``.
@@ -115,6 +116,7 @@ class OpenRouterProvider:
         self._validation_ttl_seconds = max(1, int(validation_ttl_seconds))
         self._max_latency_ms = float(max_latency_ms)
         self._catalog = catalog
+        self._local_embed_host = (local_embed_host or "").rstrip("/")
         try:
             self._min_request_interval = min(
                 5.0,
@@ -196,6 +198,11 @@ class OpenRouterProvider:
             entry_provider = getattr(entry, "provider", None) or (
                 entry.get("provider") if isinstance(entry, dict) else None
             )
+            if model == "openrouter/free":
+                if str(entry_id) != "openrouter/free":
+                    continue
+            elif str(entry_id) != str(resolved):
+                continue
             if entry_provider != "openrouter":
                 continue
             def field(name: str, default: Any = None) -> Any:
@@ -309,28 +316,29 @@ class OpenRouterProvider:
             raise
 
     async def embed(self, texts, model, **kwargs):
-        # OpenRouter does not support /v1/embeddings — use local Ollama instead.
+        """Use an explicitly configured, bounded local embedding service."""
         from backend.tools.ollama_client import OllamaClient
 
-        ollama = OllamaClient(base_url="http://localhost:11434")
+        if not self._local_embed_host:
+            raise ProviderUnavailableError(
+                "Local embedding host is not configured",
+                category="eligibility",
+                provider="ollama",
+                model=model,
+            )
+        ollama = OllamaClient(base_url=self._local_embed_host)
         try:
-            # Avoid Ollama's long retry/backoff cycle when the local service is
-            # not installed. This keeps cloud OpenRouter chat completion fast.
             if not await ollama.health_check(timeout=0.75):
                 raise ConnectionError("Ollama embedding service is unavailable")
-
-            # ``OllamaClient.embed`` expects a list of texts and returns
-            # ``list[list[float]]`` (one embedding per input). Calling it
-            # with a single string in a loop would have appended a 1-D
-            # vector per item, which the FAISS indexer misinterprets as a
-            # 3-D array of shape (1, n, dim). Use the batch API instead.
-            return await ollama.embed(texts, model="nomic-embed-text")
+            return await ollama.embed(texts, model=model or "nomic-embed-text")
         except Exception as exc:
+            if isinstance(exc, ProviderUnavailableError):
+                raise
             raise ProviderUnavailableError(
                 "Ollama embedding service is unavailable; no synthetic embedding was produced",
                 category="provider_unavailable",
                 provider="ollama",
-                model="nomic-embed-text",
+                model=model,
             ) from exc
         finally:
             await ollama.aclose()

@@ -398,6 +398,7 @@ async def get_providers_status(
     # Otherwise inspect the resilient provider's internals
     from backend.llm.factory import ResilientLLMProvider
     if isinstance(llm_client, ResilientLLMProvider):
+        providers: dict[str, dict[str, Any]] = {}
         for idx, prov in enumerate([llm_client.primary] + llm_client.fallbacks):
             name = prov.__class__.__name__.replace("Provider", "").lower() or f"provider_{idx}"
             breaker = all_breakers().get(name, {})

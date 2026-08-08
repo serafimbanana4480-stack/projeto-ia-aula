@@ -709,6 +709,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
                 catalog=policy_candidates if isinstance(policy_candidates, list) else None,
                 validation_ttl_seconds=int(validation_ttl),
                 max_latency_ms=int(max_latency),
+                local_embed_host=_setting_value(settings, values, "ollama_host", ""),
             ),
             priority=priority_for("openrouter", 3),
         )
@@ -913,7 +914,6 @@ def create_llm_client(**overrides: Any) -> Any:
                 settings, effective_overrides, "openrouter_base_url", "https://openrouter.ai/api"
             ),
             api_key=api_key,
-            free_only=free_only,
             catalog=effective_overrides.get("policy_candidates"),
             validation_ttl_seconds=int(
                 _setting_value(settings, effective_overrides, "provider_validation_ttl_seconds", 600)
@@ -921,6 +921,7 @@ def create_llm_client(**overrides: Any) -> Any:
             max_latency_ms=int(
                 _setting_value(settings, effective_overrides, "max_provider_latency_ms", 30_000)
             ),
+            local_embed_host=_setting_value(settings, effective_overrides, "ollama_host", ""),
         )
         fallbacks = _build_fallback_chain(
             settings, effective_overrides, primary_provider="openrouter"
