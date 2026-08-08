@@ -140,9 +140,17 @@ class OpenRouterProvider:
             now = time.monotonic()
             ready_at = max(_quota_next_request_at, _quota_cooldown_until)
             delay = max(0.0, ready_at - now)
-            if max_wait_seconds is not None and delay > max(0.0, max_wait_seconds):
+            # Once the account has reported a daily/quota reset, sleeping here
+            # only serializes every later chat turn behind a known outage. A
+            # circuit-open error lets the fallback layer decide immediately.
+            if _quota_cooldown_until > now:
                 raise RuntimeError(
                     "OpenRouter rate-limit cooldown active; refusing to queue an "
+                    f"interactive request for {delay:.0f}s"
+                )
+            if max_wait_seconds is not None and delay > max(0.0, max_wait_seconds):
+                raise RuntimeError(
+                    "OpenRouter dispatch budget exceeded; refusing to queue an "
                     f"interactive request for {delay:.0f}s"
                 )
             if delay:
