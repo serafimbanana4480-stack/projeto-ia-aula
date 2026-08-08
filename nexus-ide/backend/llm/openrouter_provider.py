@@ -13,7 +13,7 @@ import logging
 import os
 import re
 import time
-from backend.llm.free_policy import ProviderUnavailableError
+from backend.llm.free_policy import FreeModelRequirement, ProviderUnavailableError
 from backend.llm.openai_provider import OpenAIProvider
 from backend.observability.advanced_logging import get_structured_logger
 logger = logging.getLogger(__name__)
@@ -179,8 +179,9 @@ class OpenRouterProvider:
         self.quota_available = False
         logger.warning("OpenRouter account quota exhausted; cooldown %.2fs", delay)
 
-    def validate_model(self, model: str) -> str:
-        """Fail closed before dispatch when free-only execution is enabled."""
+    def validate_model(
+        self, model: str, requirement: FreeModelRequirement | None = None
+    ) -> str:
         resolved = self.resolve_model(model)
         if not self.free_only:
             return resolved
@@ -204,14 +205,35 @@ class OpenRouterProvider:
             output_price = field("output_price_per_1m")
             quota = field("quota_available")
             validated_at = field("validated_at")
+            capabilities = field("capabilities", ()) or ()
+            context_window = int(field("context_window", 0) or 0)
+            caps = {str(cap).lower().replace("-", "_") for cap in capabilities}
+            if isinstance(capabilities, str):
+                caps = {capabilities.lower().replace("-", "_")}
+            requirement_ok = (
+                requirement is None
+                or (
+                    context_window >= requirement.min_context
+                    and (
+                        not requirement.tool_calling
+                        or bool(caps & {"tools", "tool_calling", "function_calling"})
+                    )
+                    and (
+                        not requirement.structured_output
+                        or bool(caps & {"json", "json_schema", "structured_output", "structured"})
+                    )
+                )
+            )
             latency = field("latency_ms")
             if (
                 input_price == 0
                 and output_price == 0
+                and requirement_ok
+                and latency is not None
                 and quota is True
                 and validated_at is not None
                 and now - float(validated_at) <= self._validation_ttl_seconds
-                and (latency is None or float(latency) <= self._max_latency_ms)
+                and float(latency) <= self._max_latency_ms
             ):
                 self.quota_available = True
                 self.validated_at = float(validated_at)
