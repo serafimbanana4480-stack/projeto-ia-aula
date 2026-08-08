@@ -283,7 +283,7 @@ class MultiLLMManager:
                         resp = await client.get("/models", timeout=5.0)
                         healthy = resp.status_code == 200
                     else:
-                        healthy = True
+                        healthy = False
                 latency = (time.time() - started) * 1000
             except Exception as exc:
                 logger.warning("Health check failed for provider '%s': %s", name, exc)
@@ -568,9 +568,15 @@ class MultiLLMManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                await breaker.record_failure()
-                last_error = self._typed_provider_error(exc, name, model)
-                self._update_health(name, False, (time.time() - started) * 1000)
+                typed = self._typed_provider_error(exc, name, model)
+                if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
+                    await breaker.record_failure()
+                last_error = typed
+                self._update_health(
+                    name,
+                    False,
+                    (time.time() - started) * 1000,
+                )
                 logger.warning("Provider '%s' failed for chat_complete: %s", name, exc)
         raise last_error or ProviderUnavailableError(
             "All providers failed for chat_complete",
@@ -586,7 +592,15 @@ class MultiLLMManager:
         provider: str | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
-        model = self._select_policy_model(model)
+        request_options = options or {}
+        request_requirement = replace(
+            self.requirement,
+            tool_calling=bool(kwargs.get("tools") or request_options.get("tools")),
+            structured_output=bool(
+                kwargs.get("response_format") or request_options.get("response_format")
+            ),
+        )
+        model = self._select_policy_model(model, request_requirement)
         target = provider or self._selected_provider or self.get_best_provider()
         if self.free_only and provider and provider != self._selected_provider:
             raise ProviderUnavailableError(
@@ -642,8 +656,10 @@ class MultiLLMManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                await breaker.record_failure()
-                last_error = self._typed_provider_error(exc, name, model)
+                typed = self._typed_provider_error(exc, name, model)
+                if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
+                    await breaker.record_failure()
+                last_error = typed
                 self._update_health(name, False, (time.time() - started) * 1000)
                 if emitted_output:
                     raise
@@ -722,7 +738,15 @@ class MultiLLMManager:
             return []
         if not model:
             raise ValueError("MultiLLMManager.batch_complete requires an explicit model")
-        model = self._select_policy_model(model)
+        request_options = options or {}
+        request_requirement = replace(
+            self.requirement,
+            tool_calling=bool(kwargs.get("tools") or request_options.get("tools")),
+            structured_output=bool(
+                kwargs.get("response_format") or request_options.get("response_format")
+            ),
+        )
+        model = self._select_policy_model(model, request_requirement)
         target = provider or self._selected_provider or self.get_best_provider()
         if self.free_only and provider and provider != self._selected_provider:
             raise ProviderUnavailableError(
@@ -776,8 +800,10 @@ class MultiLLMManager:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await breaker.record_failure()
-            raise self._typed_provider_error(exc, target, model) from exc
+            typed = self._typed_provider_error(exc, target, model)
+            if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
+                await breaker.record_failure()
+            raise typed from exc
 
     async def parallel_completion(
         self,
@@ -787,7 +813,15 @@ class MultiLLMManager:
         options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
-        model = self._select_policy_model(model)
+        request_options = options or {}
+        request_requirement = replace(
+            self.requirement,
+            tool_calling=bool(kwargs.get("tools") or request_options.get("tools")),
+            structured_output=bool(
+                kwargs.get("response_format") or request_options.get("response_format")
+            ),
+        )
+        model = self._select_policy_model(model, request_requirement)
         if self.free_only and self._selected_provider:
             providers = [self._selected_provider]
         valid_providers = self._attempt_names(providers[0]) if providers else []
@@ -825,8 +859,10 @@ class MultiLLMManager:
                 self._update_health(name, True, 0.0)
                 return name, result
             except Exception as exc:
-                await breaker.record_failure()
-                raise self._typed_provider_error(exc, name, model) from exc
+                typed = self._typed_provider_error(exc, name, model)
+                if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
+                    await breaker.record_failure()
+                raise typed from exc
 
         tasks = {asyncio.create_task(_call(name)): name for name in valid_providers}
         pending: set[asyncio.Task] = set(tasks)
@@ -855,7 +891,15 @@ class MultiLLMManager:
         options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
-        model = self._select_policy_model(model)
+        request_options = options or {}
+        request_requirement = replace(
+            self.requirement,
+            tool_calling=bool(kwargs.get("tools") or request_options.get("tools")),
+            structured_output=bool(
+                kwargs.get("response_format") or request_options.get("response_format")
+            ),
+        )
+        model = self._select_policy_model(model, request_requirement)
         if self.free_only and self._selected_provider:
             providers = [self._selected_provider]
         valid_providers: list[str] = []
@@ -899,9 +943,11 @@ class MultiLLMManager:
                 self._update_health(name, True, 0.0)
                 results[name] = result
             except Exception as exc:
-                await breaker.record_failure()
+                typed = self._typed_provider_error(exc, name, model)
+                if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
+                    await breaker.record_failure()
                 self._update_health(name, False, 0.0)
-                logger.warning("Consensus provider '%s' failed: %s", name, exc)
+                logger.warning("Consensus provider '%s' failed: %s", name, typed)
         await asyncio.gather(*(_call(name) for name in valid_providers))
         if not results:
             raise ProviderUnavailableError(

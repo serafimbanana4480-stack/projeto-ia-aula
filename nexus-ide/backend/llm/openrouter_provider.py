@@ -248,6 +248,18 @@ class OpenRouterProvider:
             model=model,
         )
 
+    async def health_check(self, timeout: float = 5.0) -> bool:
+        """Bounded live health probe; free-only also requires validated catalog."""
+        if self.free_only:
+            if not self._catalog:
+                self.eligibility_reason = "no validated catalog"
+                return False
+            try:
+                self.validate_model("openrouter/free")
+            except ProviderUnavailableError:
+                return False
+        return await self._client.health_check(timeout=min(float(timeout), 5.0))
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
