@@ -24,6 +24,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import {
   AlertTriangle,
@@ -34,7 +35,6 @@ import {
   FileText,
   GitBranch,
   ListChecks,
-  Pause,
   Play,
   Radar,
   RotateCcw,
@@ -45,7 +45,13 @@ import {
   XCircle,
 } from "lucide-react";
 
-import { apiUrl, authHeaders, cancelMission as apiCancelMission, replanMission as apiReplanMission, resumeMission as apiResumeMission } from "../../lib/api";
+import {
+  apiUrl,
+  authHeaders,
+  cancelMission as apiCancelMission,
+  replanMission as apiReplanMission,
+  resumeMission as apiResumeMission,
+} from "../../lib/api";
 import {
   EXECUTION_ERROR_LABEL_PT,
   EXECUTION_MODE_LABEL_PT,
@@ -55,7 +61,6 @@ import {
   type ExecutionErrorCategory,
   type ExecutionState,
   type MissionPayload,
-  type ProviderHealth,
   deriveDisplayState,
   isTerminalExecutionState,
 } from "../../lib/executionTypes";
@@ -91,17 +96,42 @@ async function fetchMission(): Promise<MissionResponse | null> {
  * Visual tokens — single source of truth for state tones
  * ──────────────────────────────────────────────────────────────────────── */
 
-const STATE_TONE: Record<ExecutionState, { dot: string; pill: string; text: string; label: string }> = {
-  queued:      { dot: "bg-nexus-muted",  pill: "bg-[rgba(148,163,184,0.16)] text-nexus-muted",          text: "text-nexus-muted",   label: "Em fila" },
-  routing:     { dot: "bg-sky-300",      pill: "bg-[rgba(56,189,248,0.16)] text-sky-300",              text: "text-sky-300",       label: "A decidir rota" },
-  planning:    { dot: "bg-sky-300",      pill: "bg-[rgba(56,189,248,0.16)] text-sky-300",              text: "text-sky-300",       label: "A planear" },
+interface StateTone {
+  dot: string;
+  pill: string;
+  text: string;
+  label: string;
+}
+
+const STATE_TONE: Record<ExecutionState, StateTone> = {
+  queued:      { dot: "bg-nexus-muted",  pill: "bg-[rgba(148,163,184,0.16)] text-nexus-muted",       text: "text-nexus-muted",   label: "Em fila" },
+  routing:     { dot: "bg-sky-300",      pill: "bg-[rgba(56,189,248,0.16)] text-sky-300",           text: "text-sky-300",       label: "A decidir rota" },
+  planning:    { dot: "bg-sky-300",      pill: "bg-[rgba(56,189,248,0.16)] text-sky-300",           text: "text-sky-300",       label: "A planear" },
   executing:   { dot: "bg-emerald-400 animate-pulse-subtle", pill: "bg-[rgba(52,211,153,0.16)] text-emerald-300", text: "text-emerald-300", label: "A executar" },
   verifying:   { dot: "bg-amber-300 animate-pulse-subtle",   pill: "bg-[rgba(251,191,36,0.16)] text-amber-300",   text: "text-amber-300",   label: "A verificar" },
-  completed:   { dot: "bg-emerald-400",  pill: "bg-[rgba(52,211,153,0.18)] text-emerald-300",          text: "text-emerald-300",   label: "Concluída" },
-  failed:      { dot: "bg-rose-400",     pill: "bg-[rgba(251,113,133,0.18)] text-rose-300",            text: "text-rose-300",      label: "Falhou" },
-  blocked:     { dot: "bg-amber-400",    pill: "bg-[rgba(251,191,36,0.18)] text-amber-300",            text: "text-amber-300",     label: "Bloqueada" },
-  cancelled:   { dot: "bg-nexus-faint",  pill: "bg-[rgba(100,116,139,0.18)] text-nexus-faint",         text: "text-nexus-faint",   label: "Cancelada" },
-  interrupted: { dot: "bg-orange-300",   pill: "bg-[rgba(251,146,60,0.18)] text-orange-300",           text: "text-orange-300",    label: "Interrompida" },
+  completed:   { dot: "bg-emerald-400",  pill: "bg-[rgba(52,211,153,0.18)] text-emerald-300",       text: "text-emerald-300",   label: "Concluída" },
+  failed:      { dot: "bg-rose-400",     pill: "bg-[rgba(251,113,133,0.18)] text-rose-300",         text: "text-rose-300",      label: "Falhou" },
+  blocked:     { dot: "bg-amber-400",    pill: "bg-[rgba(251,191,36,0.18)] text-amber-300",         text: "text-amber-300",     label: "Bloqueada" },
+  cancelled:   { dot: "bg-nexus-faint",  pill: "bg-[rgba(100,116,139,0.18)] text-nexus-faint",      text: "text-nexus-faint",   label: "Cancelada" },
+  interrupted: { dot: "bg-orange-300",   pill: "bg-[rgba(251,146,60,0.18)] text-orange-300",        text: "text-orange-300",    label: "Interrompida" },
+};
+
+const CONTRACT_STATE_STYLE: Record<string, string> = {
+  proposed: "bg-[rgba(148,163,184,0.12)] text-nexus-muted",
+  ready: "bg-[rgba(56,189,248,0.14)] text-sky-300",
+  running: "bg-[rgba(52,211,153,0.14)] text-emerald-300",
+  blocked: "bg-[rgba(251,191,36,0.14)] text-amber-300",
+  completed: "bg-[rgba(124,106,251,0.14)] text-nexus-accent-bright",
+  failed: "bg-[rgba(251,113,133,0.16)] text-rose-300",
+  skipped: "bg-[rgba(100,116,139,0.12)] text-nexus-faint",
+};
+
+const SEVERITY_TEXT: Record<string, string> = {
+  critical: "text-rose-300",
+  high: "text-rose-300",
+  medium: "text-amber-300",
+  low: "text-sky-300",
+  info: "text-nexus-faint",
 };
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -120,15 +150,44 @@ function uniq<T>(items: T[]): T[] {
   return Array.from(new Set(items));
 }
 
-/** True when the user-typed query is a substring of any item's haystack. */
 function matches(query: string, haystack: string): boolean {
   if (!query.trim()) return true;
   return haystack.toLowerCase().includes(query.trim().toLowerCase());
 }
 
+function shortMessage(message: string): string {
+  return message.length > 40 ? `${message.slice(0, 37)}…` : message;
+}
+
+const ERROR_TONE: Record<ExecutionErrorCategory, string> = {
+  provider: "bg-rose-500/15 text-rose-300",
+  model: "bg-rose-500/15 text-rose-300",
+  tool: "bg-rose-500/15 text-rose-300",
+  validation: "bg-amber-400/15 text-amber-300",
+  verification: "bg-amber-400/15 text-amber-300",
+  project_context: "bg-amber-400/15 text-amber-300",
+  planning: "bg-amber-400/15 text-amber-300",
+  disk_pressure: "bg-rose-500/15 text-rose-300",
+  timeout: "bg-rose-500/15 text-rose-300",
+  cancellation: "bg-nexus-muted/15 text-nexus-muted",
+  internal: "bg-rose-500/15 text-rose-300",
+  unknown: "bg-rose-500/15 text-rose-300",
+};
+
 /* ────────────────────────────────────────────────────────────────────────
  * Main component
  * ──────────────────────────────────────────────────────────────────────── */
+
+const TABS = [
+  { id: "brief", label: "Brief", icon: Radar },
+  { id: "plan", label: "Plano", icon: ClipboardList },
+  { id: "agents", label: "Agentes", icon: GitBranch },
+  { id: "evidence", label: "Evidência", icon: Sparkles },
+  { id: "decisions", label: "Decisões", icon: ScrollText },
+  { id: "timeline", label: "Timeline", icon: Clock },
+] as const;
+
+type TabId = (typeof TABS)[number]["id"];
 
 export default function MissionPanel() {
   const [mission, setMission] = useState<MissionPayload | null>(null);
@@ -159,12 +218,9 @@ export default function MissionPanel() {
     return () => clearInterval(timer);
   }, [load]);
 
-  // The envelope is the source of truth for execution state. The REST poll
-  // fills the rich mission payload. Both must agree before we show anything.
   const displayState = useMemo(() => deriveDisplayState(envelope), [envelope]);
   const effectiveState: ExecutionState =
-    envelope?.state ??
-    (mission ? (mission.state as ExecutionState) : "queued");
+    envelope?.state ?? ((mission ? (mission.state as ExecutionState) : "queued"));
   const tone = STATE_TONE[effectiveState] ?? STATE_TONE.queued;
 
   const handleCancel = useCallback(async () => {
@@ -209,7 +265,6 @@ export default function MissionPanel() {
     }
   }, [mission, load]);
 
-  // ── Empty / error states ──────────────────────────────────────────────
   if (error && !mission && !envelope) {
     return (
       <Surface elevation={1} padding="lg">
@@ -219,9 +274,7 @@ export default function MissionPanel() {
           subtitle="Planeamento, execução supervisionada, verificação e relatório"
         />
         <div className="mt-4">
-          <CardEmpty icon={<AlertTriangle className="h-3.5 w-3.5" />}>
-            {error}
-         </CardEmpty>
+          <CardEmpty icon={<AlertTriangle className="h-3.5 w-3.5" />}>{error</CardEmpty>
        </div>
      </Surface>
     );
@@ -239,6 +292,7 @@ export default function MissionPanel() {
           <CardEmpty icon={<Radar className="h-3.5 w-3.5" />}>
             Nenhuma missão em curso. Lança um objetivo — o brief e o plano aparecem aqui
             <em> antes</em>
+            {" "}
             de qualquer agente ser criado.
          </CardEmpty>
        </div>
@@ -246,9 +300,6 @@ export default function MissionPanel() {
     );
   }
 
-  // Once we know something is live, prefer the envelope's mission payload —
-  // it's the same shape the REST endpoint returns but carries the latest
-  // checkpoint data.
   const view: MissionPayload | null = envelope?.mission ?? mission;
   const pct = Math.round(((view?.progress ?? 0) * 100) || 0);
 
@@ -284,7 +335,8 @@ export default function MissionPanel() {
               title="Cancelar"
               className="flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-rose-200 transition-colors hover:bg-rose-500/20 focus:outline-none focus:ring-2 focus:ring-rose-400/40 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              <Ban className="h-3 w-3" aria-hidden /> Cancelar
+              <Ban className="h-3 w-3" aria-hidden />
+              Cancelar
            </button>
             <button
               type="button"
@@ -294,7 +346,8 @@ export default function MissionPanel() {
               title="Retomar"
               className="flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-200 transition-colors hover:bg-emerald-500/20 focus:outline-none focus:ring-2 focus:ring-emerald-400/40 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              <Play className="h-3 w-3" aria-hidden /> Retomar
+              <Play className="h-3 w-3" aria-hidden />
+              Retomar
            </button>
             <button
               type="button"
@@ -304,13 +357,13 @@ export default function MissionPanel() {
               title="Replanear"
               className="flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-sky-200 transition-colors hover:bg-sky-500/20 focus:outline-none focus:ring-2 focus:ring-sky-400/40 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              <RotateCcw className="h-3 w-3" aria-hidden /> Replanear
+              <RotateCcw className="h-3 w-3" aria-hidden />
+              Replanear
            </button>
          </div>
         }
       />
 
-      {/* ── Live status region — announced to assistive tech ──────────── */}
       <div
         role="status"
         aria-live="polite"
@@ -352,7 +405,6 @@ export default function MissionPanel() {
        </div>
       ) : null}
 
-      {/* ── Search ──────────────────────────────────────────────────── */}
       <div className="mt-3 flex items-center gap-2 rounded-lg nx-inset px-2.5 py-1.5">
         <Search className="h-3 w-3 text-nexus-faint" aria-hidden />
         <label htmlFor="mission-search" className="sr-only">
@@ -378,7 +430,6 @@ export default function MissionPanel() {
         ) : null}
      </div>
 
-      {/* ── The eight numbers ─────────────────────────────────────────── */}
       <dl
         aria-label="Métricas da missão"
         className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-7"
@@ -434,10 +485,8 @@ export default function MissionPanel() {
         />
      </div>
 
-      {/* ── Execution state strip — truthful, never inferred ─────────── */}
       <ExecutionStrip envelope={envelope} />
 
-      {/* ── Tabs ─────────────────────────────────────────────────────── */}
       <div
         className="mt-5 flex flex-wrap gap-1.5 border-b border-nexus-border/60 pb-2"
         role="tablist"
@@ -511,17 +560,6 @@ export default function MissionPanel() {
  * Tabs
  * ──────────────────────────────────────────────────────────────────────── */
 
-const TABS = [
-  { id: "brief", label: "Brief", icon: Radar },
-  { id: "plan", label: "Plano", icon: ClipboardList },
-  { id: "agents", label: "Agentes", icon: GitBranch },
-  { id: "evidence", label: "Evidência", icon: Sparkles },
-  { id: "decisions", label: "Decisões", icon: ScrollText },
-  { id: "timeline", label: "Timeline", icon: Clock },
-] as const;
-
-type TabId = (typeof TABS)[number]["id"];
-
 function BriefTab({ mission, query }: { mission: MissionPayload | null; query: string }) {
   const b = mission?.brief ?? null;
   if (!b) return <CardEmpty>Sem brief registado</CardEmpty>;
@@ -579,11 +617,7 @@ function BriefTab({ mission, query }: { mission: MissionPayload | null; query: s
             <ul className="space-y-1.5">
               {filteredFindings.map((f) => (
                 <li key={f.id} className="text-[11px] leading-relaxed">
-                  <span
-                    className={`font-mono text-[10px] font-semibold uppercase ${
-                      SEVERITY_TEXT[f.severity]
-                    }`}
-                  >
+                  <span className={`font-mono text-[10px] font-semibold uppercase ${SEVERITY_TEXT[f.severity] ?? "text-nexus-faint"}`}>
                     [{f.severity}]
                  </span>{" "}
                   <span className="text-nexus-text">{f.title}
@@ -670,13 +704,11 @@ function PlanTab({ mission, query }: { mission: MissionPayload | null; query: st
           ) : (
             <>
               <ul className="space-y-1">
-                {ph.steps
-                  .filter((s) => matches(query, s))
-                  .map((s) => (
-                    <li key={s} className="text-[11px] leading-relaxed text-nexus-muted">
-                      · {s}
-                   </li>
-                  ))}
+                {ph.steps.filter((s) => matches(query, s)).map((s) => (
+                  <li key={s} className="text-[11px] leading-relaxed text-nexus-muted">
+                    · {s}
+                 </li>
+                ))}
              </ul>
               {ph.rationale ? (
                 <p className="mt-2 border-t border-nexus-border/50 pt-2 text-[10px] italic leading-relaxed text-nexus-faint">
@@ -755,9 +787,7 @@ function ContractCard({
       title={c.name}
       defaultOpen={false}
       badge={
-        <span
-          className={`rounded-md px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${STATE_STYLE[c.state]}`}
-        >
+        <span className={`rounded-md px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${CONTRACT_STATE_STYLE[c.state] ?? "bg-[rgba(148,163,184,0.12)] text-nexus-muted"}`}>
           {c.state}
        </span>
       }
@@ -857,7 +887,10 @@ function EvidenceTab({
   mission: MissionPayload | null;
 }) {
   const files = uniq([...(envelope?.files_changed ?? []), ...(mission?.files_changed ?? [])]);
-  const commands = uniq([...(envelope?.commands_run ?? []), ...(mission?.verifications?.map((v) => v.command) ?? [])]);
+  const commands = uniq([
+    ...(envelope?.commands_run ?? []),
+    ...(mission?.verifications?.map((v) => v.command) ?? []),
+  ]);
   const failedTasks = uniq([
     ...(envelope?.failed_tasks ?? []),
     ...(mission?.waves?.flatMap((w) => w.contracts).filter((c) => c.state === "failed").map((c) => c.id) ?? []),
@@ -992,7 +1025,7 @@ function ProviderStrip({ envelope }: { envelope: ExecutionEnvelope | null }) {
   const quota = health?.quota_available ?? null;
   const isSimulation = envelope?.simulation ?? health?.simulation ?? false;
 
-  if (!provider && !model && !cost && !error && !health) {
+  if (!provider && !model && cost == null && !error && !health) {
     return (
       <p className="text-[11px] italic text-nexus-faint">
         Sem telemetria de provider ainda — fica disponível assim que o envelope chegar.
@@ -1005,23 +1038,11 @@ function ProviderStrip({ envelope }: { envelope: ExecutionEnvelope | null }) {
       <Stat label="Provider" value={provider ?? "—"} mono />
       <Stat label="Modelo" value={model ?? "—"} mono />
       <Stat label="Custo" value={cost == null ? "—" : `$${cost.toFixed(4)}`} mono />
-      <Stat
-        label="Quota"
-        value={quota == null ? "—" : quota.toLocaleString("pt-PT")}
-        mono
-      />
-      <Stat
-        label="Retry após"
-        value={retryAfter == null ? "—" : `${retryAfter}s`}
-        mono
-      />
+      <Stat label="Quota" value={quota == null ? "—" : quota.toLocaleString("pt-PT")} mono />
+      <Stat label="Retry após" value={retryAfter == null ? "—" : `${retryAfter}s`} mono />
       <Stat
         label="Modo"
-        value={
-          isSimulation
-            ? "simulação"
-            : (health?.free_only ? "free only" : "real")
-        }
+        value={isSimulation ? "simulação" : (health?.free_only ? "free only" : "real")}
         mono
         tone={isSimulation ? "warning" : "neutral"}
       />
@@ -1232,10 +1253,7 @@ function TimelineTab({
       ) : (
         <Accordion title="Eventos" icon={<Clock className="h-3 w-3" />} defaultOpen>
           <ol className="relative space-y-2 pl-4">
-            <span
-              className="absolute bottom-1 left-[5px] top-1 w-px bg-nexus-border/60"
-              aria-hidden
-            />
+            <span className="absolute bottom-1 left-[5px] top-1 w-px bg-nexus-border/60" aria-hidden />
             {filteredTimeline.map((t, i) => (
               <li key={`${t.at}-${i}`} className="relative">
                 <span
@@ -1267,10 +1285,7 @@ function TimelineTab({
 function ExecutionStrip({ envelope }: { envelope: ExecutionEnvelope | null }) {
   if (!envelope) {
     return (
-      <div
-        className="mt-3 rounded-lg nx-inset px-3 py-2 text-[11px] text-nexus-faint"
-        role="note"
-      >
+      <div className="mt-3 rounded-lg nx-inset px-3 py-2 text-[11px] text-nexus-faint" role="note">
         Sem envelope de execução recebido. O estado atual reflete apenas a última snapshot REST.
      </div>
     );
@@ -1288,8 +1303,8 @@ function ExecutionStrip({ envelope }: { envelope: ExecutionEnvelope | null }) {
         <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
           Execução
        </span>
-        <span className={`rounded-md px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${STATE_TONE[state].pill}`}>
-          {STATE_TONE[state].label}
+        <span className={`rounded-md px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${STATE_TONE[state]?.pill ?? STATE_TONE.queued.pill}`}>
+          {STATE_TONE[state]?.label ?? EXECUTION_STATE_LABEL_PT[state]}
        </span>
         {isComplete ? (
           <span className="rounded-md bg-emerald-400/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-emerald-300">
@@ -1320,32 +1335,14 @@ function ExecutionStrip({ envelope }: { envelope: ExecutionEnvelope | null }) {
 }
 
 function ErrorChip({ error }: { error: ExecutionError }) {
-  const tone: Record<ExecutionErrorCategory, string> = {
-    provider: "bg-rose-500/15 text-rose-300",
-    model: "bg-rose-500/15 text-rose-300",
-    tool: "bg-rose-500/15 text-rose-300",
-    validation: "bg-amber-400/15 text-amber-300",
-    verification: "bg-amber-400/15 text-amber-300",
-    project_context: "bg-amber-400/15 text-amber-300",
-    planning: "bg-amber-400/15 text-amber-300",
-    disk_pressure: "bg-rose-500/15 text-rose-300",
-    timeout: "bg-rose-500/15 text-rose-300",
-    cancellation: "bg-nexus-muted/15 text-nexus-muted",
-    internal: "bg-rose-500/15 text-rose-300",
-    unknown: "bg-rose-500/15 text-rose-300",
-  };
   return (
     <span
-      className={`rounded-md px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${tone[error.category]}`}
+      className={`rounded-md px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${ERROR_TONE[error.category]}`}
       title={error.message}
     >
       {EXECUTION_ERROR_LABEL_PT[error.category]} · {shortMessage(error.message)}
    </span>
   );
-}
-
-function shortMessage(message: string): string {
-  return message.length > 40 ? `${message.slice(0, 37)}…` : message;
 }
 
 function EnvelopeBadge({
@@ -1370,24 +1367,6 @@ function EnvelopeBadge({
 /* ────────────────────────────────────────────────────────────────────────
  * Shared visual primitives
  * ──────────────────────────────────────────────────────────────────────── */
-
-const STATE_STYLE: Record<string, string> = {
-  proposed: "bg-[rgba(148,163,184,0.12)] text-nexus-muted",
-  ready: "bg-[rgba(56,189,248,0.14)] text-sky-300",
-  running: "bg-[rgba(52,211,153,0.14)] text-emerald-300",
-  blocked: "bg-[rgba(251,191,36,0.14)] text-amber-300",
-  completed: "bg-[rgba(124,106,251,0.14)] text-nexus-accent-bright",
-  failed: "bg-[rgba(251,113,133,0.16)] text-rose-300",
-  skipped: "bg-[rgba(100,116,139,0.12)] text-nexus-faint",
-};
-
-const SEVERITY_TEXT: Record<string, string> = {
-  critical: "text-rose-300",
-  high: "text-rose-300",
-  medium: "text-amber-300",
-  low: "text-sky-300",
-  info: "text-nexus-faint",
-};
 
 function Stat({
   label,
@@ -1434,11 +1413,11 @@ function Accordion({
   children,
 }: {
   title: string;
-  icon?: React.ReactNode;
-  badge?: React.ReactNode;
+  icon?: ReactNode;
+  badge?: ReactNode;
   tone?: "neutral" | "warning" | "success" | "danger";
   defaultOpen?: boolean;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -1448,6 +1427,7 @@ function Accordion({
     success: "border-emerald-400/30",
     danger: "border-rose-400/30",
   }[tone];
+  const slug = title.replace(/\s+/g, "-");
 
   return (
     <section className={`nx-inset rounded-xl border ${toneRing}`}>
@@ -1456,7 +1436,7 @@ function Accordion({
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          aria-controls={`accordion-${title.replace(/\s+/g, "-")}`}
+          aria-controls={`accordion-${slug}`}
           className="flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2 text-left transition-colors hover:bg-white/[0.04] focus:outline-none focus:ring-2 focus:ring-nexus-accent/40"
         >
           <span className="flex min-w-0 items-center gap-1.5">
@@ -1480,7 +1460,7 @@ function Accordion({
       {open ? (
         <div
           ref={contentRef}
-          id={`accordion-${title.replace(/\s+/g, "-")}`}
+          id={`accordion-${slug}`}
           className="border-t border-nexus-border/40 px-3 pb-3 pt-2"
         >
           {children}
