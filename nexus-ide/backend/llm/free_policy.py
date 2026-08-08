@@ -250,9 +250,10 @@ class FreeModelPolicy:
                     )
                 )
                 continue
+            item = _eligibility(value)
             installed = _bool_value(_value(value, "installed", True), False)
             healthy = _bool_value(_value(value, "healthy", True), False)
-            if item.provider != "ollama":
+            if item.provider != "ollama" or (installed and healthy and not item.free):
                 item = ModelEligibility(
                     model_id=item.model_id,
                     provider="ollama",

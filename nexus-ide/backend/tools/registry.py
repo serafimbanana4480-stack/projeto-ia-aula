@@ -654,8 +654,22 @@ def get_tool_stats() -> dict[str, Any]:
         by_risk[t.risk_level] = by_risk.get(t.risk_level, 0) + 1
         if t.requires_confirmation:
             confirmation_count += 1
+    return {
+        "total": len(tools),
+        "by_category": by_cat,
+        "by_risk": by_risk,
+        "requires_confirmation": confirmation_count,
+    }
+
+
+def set_tool_enabled(name: str, enabled: bool) -> None:
+    """Enable or disable a registered tool without changing availability."""
+    if name in _registry:
+        _registry[name].enabled = bool(enabled)
+
+
 def _handler_result_failed(result: Any) -> str | None:
-    """Return an error message when a handler result dict indicates failure."""
+    """Return an error when a handler did not produce a successful result."""
     if not isinstance(result, dict):
         return None
     if result.get("error"):
@@ -664,6 +678,8 @@ def _handler_result_failed(result: Any) -> str | None:
         return str(result.get("error") or "Tool process timed out")
     if result.get("exit_code") not in (None, 0):
         return str(result.get("stderr") or f"Command exited with code {result['exit_code']}")
+    if result.get("ok") is False or result.get("success") is False:
+        return str(result.get("error") or "Tool reported failure")
     if result.get("written") is False:
         return str(result.get("error") or "Write operation failed")
     if result.get("deleted") is False:
@@ -674,93 +690,95 @@ def _handler_result_failed(result: Any) -> str | None:
 
 
 def _drop_unsupported_args(spec: "ToolSpec", args: dict) -> tuple[dict, dict]:
-    """Split *args* into those the handler accepts and those it does not.
-
-    Returns ``(accepted, dropped)``. A handler that declares ``**kwargs`` is
-    treated as accepting everything. Required parameters are never dropped —
-    if one is missing the handler should still raise, so the model sees a
-
-    genuine signature error rather than a silent no-op.
-    """
+    """Split args into handler-supported and ignored arguments."""
     handler = getattr(spec, "handler", None)
     if handler is None or not isinstance(args, dict):
         return args, {}
     try:
-        signature = inspect.signature(handler)
-    except (TypeError, ValueError):  # builtins / C handlers
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
         return args, {}
-    params = signature.parameters
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return args, {}
-    accepted: dict = {}
-    dropped: dict = {}
-    for key, value in args.items():
-        if key in params:
-            accepted[key] = value
-        else:
-            dropped[key] = value
-    if dropped:
-        logger.warning(
-            "[TOOL ARGS] %s called with unsupported argument(s) %s — dropped; "
-            "valid arguments are %s",
-            spec.name,
-            sorted(dropped),
-            sorted(params),
-        )
-        return accepted, {
-            "dropped": sorted(dropped),
-            "valid_arguments": sorted(params),
-            "note": (
-                "These arguments are not part of this tool's signature and were "
-                "ignored. Do not pass them again."
-            ),
-        }
-    return accepted, {}
+    accepted = {key: value for key, value in args.items() if key in params}
+    dropped = {key: value for key, value in args.items() if key not in params}
+    if not dropped:
+        return accepted, {}
+    return accepted, {
+        "dropped": sorted(dropped),
+        "valid_arguments": sorted(params),
+        "note": "Unsupported arguments were ignored.",
+    }
+
+
 def validate_tool_args(spec: ToolSpec, args: dict[str, Any]) -> list[str]:
-    """Validate arguments against a JSON-schema subset used by tool specs."""
+    """Validate tool arguments against the supported JSON-schema subset."""
     schema = spec.schema or {}
     if not isinstance(args, dict):
         return ["arguments must be an object"]
-    if not schema:
-        return []
     errors: list[str] = []
 
     def check(value: Any, rule: dict[str, Any], path: str) -> None:
+        alternatives = rule.get("anyOf") or rule.get("oneOf")
+        if alternatives:
+            for alternative in alternatives:
+                candidate: list[str] = []
+                before = len(errors)
+                check(value, alternative, path)
+                candidate = errors[before:]
+                del errors[before:]
+                if not candidate:
+                    break
+            else:
+                errors.append(f"{path} does not match any allowed schema")
+            return
         expected = rule.get("type")
-        if expected == "object":
-            if not isinstance(value, dict):
-                errors.append(f"{path} must be an object")
-                return
+        expected_types = expected if isinstance(expected, list) else [expected]
+        valid_type = not expected or any(
+            (kind == "object" and isinstance(value, dict))
+            or (kind == "array" and isinstance(value, list))
+            or (kind == "string" and isinstance(value, str))
+            or (kind == "integer" and isinstance(value, int) and not isinstance(value, bool))
+            or (kind == "number" and isinstance(value, (int, float)) and not isinstance(value, bool))
+            or (kind == "boolean" and isinstance(value, bool))
+            or (kind == "null" and value is None)
+            for kind in expected_types
+        )
+        if not valid_type:
+            errors.append(f"{path} has invalid type")
+            return
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if "minimum" in rule and value < rule["minimum"]:
+                errors.append(f"{path} is below minimum")
+            if "maximum" in rule and value > rule["maximum"]:
+                errors.append(f"{path} is above maximum")
+        if isinstance(value, str):
+            if "minLength" in rule and len(value) < int(rule["minLength"]):
+                errors.append(f"{path} is shorter than minLength")
+            if "maxLength" in rule and len(value) > int(rule["maxLength"]):
+                errors.append(f"{path} is longer than maxLength")
+        if isinstance(value, list):
+            if "minItems" in rule and len(value) < int(rule["minItems"]):
+                errors.append(f"{path} has fewer than minItems")
+            if "maxItems" in rule and len(value) > int(rule["maxItems"]):
+                errors.append(f"{path} has more than maxItems")
+            if isinstance(rule.get("items"), dict):
+                for index, item in enumerate(value):
+                    check(item, rule["items"], f"{path}[{index}]")
+        if isinstance(value, dict):
+            properties = rule.get("properties", {})
             for required in rule.get("required", []):
                 if required not in value:
                     errors.append(f"{path}.{required} is required")
-            properties = rule.get("properties", {})
             additional = rule.get("additionalProperties", True)
             for key, item in value.items():
                 child = f"{path}.{key}"
-                if key not in properties and additional is False:
-                    errors.append(f"{child} is not allowed")
-                elif key in properties and isinstance(properties[key], dict):
+                if key in properties and isinstance(properties[key], dict):
                     check(item, properties[key], child)
-        elif expected == "array":
-            if not isinstance(value, list):
-                errors.append(f"{path} must be an array")
-            elif isinstance(rule.get("items"), dict):
-                for index, item in enumerate(value):
-                    check(item, rule["items"], f"{path}[{index}]")
-        elif expected == "string":
-            if not isinstance(value, str):
-                errors.append(f"{path} must be a string")
-            elif "minLength" in rule and len(value) < int(rule["minLength"]):
-                errors.append(f"{path} is shorter than minLength")
-        elif expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
-            errors.append(f"{path} must be an integer")
-        elif expected == "number" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
-            errors.append(f"{path} must be a number")
-        elif expected == "boolean" and not isinstance(value, bool):
-            errors.append(f"{path} must be a boolean")
-        elif expected == "null" and value is not None:
-            errors.append(f"{path} must be null")
+                elif additional is False:
+                    errors.append(f"{child} is not allowed")
+                elif isinstance(additional, dict):
+                    check(item, additional, child)
         if "enum" in rule and value not in rule["enum"]:
             errors.append(f"{path} must be one of {rule['enum']!r}")
 
@@ -931,16 +949,6 @@ async def execute_tool(
     # "_list_dir_absolute_handler() got an unexpected keyword argument
     # 'include_hidden'" (session bf1e9435b9ec47c9, DEBUGGER iteration 6) —
     # unactionable, counted as a hard failure, and one iteration closer to the
-    # circuit breaker. Dropping the extras lets the call succeed and tells the
-    # model precisely which names are valid.
-    args, dropped_args = _drop_unsupported_args(spec, args)
-    timeout_seconds = (
-        float(spec.timeout_seconds)
-        if spec.timeout_seconds is not None
-        else TOOL_TIMEOUT_SECONDS
-    )
-    start = time.time()
-    try:
         result = await asyncio.wait_for(spec.handler(**args), timeout=timeout_seconds)
         if dropped_args and isinstance(result, dict):
             result = {**result, "ignored_arguments": dropped_args}
@@ -953,8 +961,10 @@ async def execute_tool(
                 ok=False,
                 result=result,
                 error=handler_error,
-                error_category="tool",
+                error_category="timeout" if result.get("timed_out") else "tool",
                 duration_ms=duration_ms,
+                timed_out=bool(result.get("timed_out")),
+                exit_code=result.get("exit_code"),
                 consecutive_failures=failure_count,
             )
             log_tool_execution(

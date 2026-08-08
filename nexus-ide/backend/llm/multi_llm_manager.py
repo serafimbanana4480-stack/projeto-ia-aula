@@ -407,10 +407,13 @@ class MultiLLMManager:
                 validated = float(validated)
             except (TypeError, ValueError):
                 validated = None
+            input_price = getattr(item, "input_price_per_1m", None) if not isinstance(item, dict) else item.get("input_price_per_1m")
+            output_price = getattr(item, "output_price_per_1m", None) if not isinstance(item, dict) else item.get("output_price_per_1m")
             if (
                 candidate_provider == name
                 and candidate_id == str(model)
                 and free
+                and (candidate_provider == "ollama" or (input_price == 0 and output_price == 0))
                 and quota is True
                 and validated is not None
                 and 0 <= now - validated <= self.policy.validation_ttl_seconds

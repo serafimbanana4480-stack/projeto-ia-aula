@@ -128,14 +128,25 @@ def _task_metadata(
         "rollback": rollback,
         "lock_scope": lock_scope,
     }
-def _registered_planning_tools(preferred: list[str]) -> list[str]:
+def _registered_planning_tools(preferred: list[str], agent: str | None = None) -> list[str]:
+    """Select tools from the live registry and, when available, agent contract."""
+    allowed: set[str] | None = None
+    try:
+        from backend.orchestrator.agent_capabilities import get_agent_capability
+
+        allowed = set(get_agent_capability(agent).allowed_tools) if agent else None
+    except Exception:
+        allowed = None
     try:
         from backend.tools.registry import list_tools
+
         available = {str(spec.name) for spec in list_tools(enabled_only=True)}
-        selected = [tool for tool in preferred if tool in available]
-        return selected
+        return [
+            tool for tool in preferred
+            if tool in available and (allowed is None or tool in allowed)
+        ]
     except Exception:
-        return preferred
+        return [tool for tool in preferred if allowed is None or tool in allowed]
 
 
 
@@ -167,10 +178,15 @@ def build_deterministic_plan(
         agent="ANALYZER",
         model_key="reasoning",
         priority=TaskPriority.HIGH,
-        allowed_tools=_registered_planning_tools(["read_file", "list_dir", "search_in_files"]),
+        allowed_tools=_registered_planning_tools(
+            ["read_file", "list_dir", "search_in_files"], "ANALYZER"
+        ),
         **_task_metadata(
             file_scope=files,
-            criteria=["Scope names concrete files or measured project paths", "Risks and out-of-scope work are recorded"],
+            criteria=[
+                "Scope names concrete files or measured project paths",
+                "Risks and out-of-scope work are recorded",
+            ],
             commands=[],
             risk=risk,
             rollback="No writes; discard the analysis artifact.",
@@ -184,10 +200,15 @@ def build_deterministic_plan(
         model_key="coder",
         priority=TaskPriority.HIGH,
         depends_on=[analyze.task_id],
-        allowed_tools=_registered_planning_tools(["read_file", "write_file", "execute_code"]),
+        allowed_tools=_registered_planning_tools(
+            ["read_file", "write_file", "execute_code"], "CODER"
+        ),
         **_task_metadata(
             file_scope=files,
-            criteria=["Requested behavior is implemented", "Changes stay within the measured file scope"],
+            criteria=[
+                "Requested behavior is implemented",
+                "Changes stay within the measured file scope",
+            ],
             commands=[],
             risk=risk,
             rollback="Revert the implementation diff using the repository's version-control history.",
@@ -196,15 +217,25 @@ def build_deterministic_plan(
     )
     analyze.required_by.append(implement.task_id)
     verify = TaskNode(
-        description=f"Run the discovered verification command and report its exit status and relevant output for: {objective}",
+        name=f"Verify scoped change: {title}",
+        description=(
+            f"Run the discovered verification command and report its exit status "
+            f"and relevant output for: {objective}"
+        ),
         agent="DEBUGGER",
-        model_key="fast",
+        model_key="coder",
         priority=TaskPriority.HIGH,
         depends_on=[implement.task_id],
-        allowed_tools=_registered_planning_tools(["execute_code", "read_file"]),
+        allowed_tools=_registered_planning_tools(
+            ["execute_code", "read_file"], "DEBUGGER"
+        ),
         **_task_metadata(
             file_scope=files,
-            criteria=["Verification command completes", "Exit status and evidence are recorded", "All completion criteria pass"],
+            criteria=[
+                "Verification command completes",
+                "Exit status and evidence are recorded",
+                "All completion criteria pass",
+            ],
             commands=commands,
             risk=risk,
             rollback="Do not change files; report failing evidence for explicit remediation.",
@@ -249,20 +280,42 @@ def validate_execution_plan(
     if len(plan.steps) > max_steps:
         errors.append(f"plan has {len(plan.steps)} steps; maximum is {max_steps}")
 
-    known_agents = {"PLANNER", "ARCHITECT", "CODER", "ANALYZER", "DEBUGGER", "RESEARCHER", "DOCUMENTER", "OPTIMIZER", "DASHBOARD"}
+    known_agents = {
+        "PLANNER", "ARCHITECT", "CODER", "ANALYZER", "DEBUGGER",
+        "RESEARCHER", "DOCUMENTER", "OPTIMIZER", "DASHBOARD",
+    }
+    capability_matrix: dict[str, Any] = {}
+    contract_validator: Any = None
+    try:
+        from backend.orchestrator.agent_capabilities import (
+            capability_matrix as get_capability_matrix,
+            validate_agent_contract,
+        )
+
+        capability_matrix = get_capability_matrix()
+        contract_validator = validate_agent_contract
+        if capability_matrix:
+            known_agents = set(capability_matrix)
+    except Exception as exc:
+        warnings.append(f"agent capability matrix unavailable: {exc}")
     registered_tools: set[str] = set()
     try:
         from backend.tools.registry import list_tools
+
         registered_tools = {str(spec.name) for spec in list_tools(enabled_only=False)}
     except Exception:
         warnings.append("tool registry unavailable while validating plan")
-
-    graph = plan.dependency_graph
-    graph_valid, graph_error = graph.validate()
-    if not graph_valid:
-        errors.append(graph_error)
-    task_ids = {task.task_id for task in plan.steps}
-    known_model_keys = {"micro", "fast", "coder", "reasoning", "deep", "analyzer", "debugger", "researcher", "documenter", "optimizer", "dashboard"}
+    known_model_keys = {
+        "micro", "fast", "coder", "reasoning", "deep",
+        "analyzer", "debugger", "researcher", "documenter",
+        "optimizer", "dashboard",
+    }
+    known_models = {
+        model
+        for capability in capability_matrix.values()
+        for model in capability.allowed_models
+    }
+    known_model_keys.update(known_models)
     for task in plan.steps:
         if task.agent.upper() not in known_agents:
             errors.append(f"task {task.task_id} uses unknown agent {task.agent!r}")
@@ -272,6 +325,13 @@ def validate_execution_plan(
             errors.append(f"task {task.task_id} is missing model")
         if "execute objective" in task.name.strip().lower() or "execute objective" in task.description.strip().lower():
             errors.append(f"task {task.task_id} is the generic Execute Objective fallback")
+        if contract_validator is not None and task.agent.upper() in known_agents:
+            errors.extend(
+                f"task {task.task_id}: {error}"
+                for error in contract_validator(
+                    task.agent, task.model_key, task.allowed_tools
+                )
+            )
         for dep_id in task.depends_on:
             if dep_id not in task_ids:
                 errors.append(f"task {task.task_id} depends on unknown task {dep_id}")

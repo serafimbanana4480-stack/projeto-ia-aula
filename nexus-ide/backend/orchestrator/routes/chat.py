@@ -215,7 +215,6 @@ _INLINE_EVENT_RE = re.compile(r"<event>([^|>]+)(?:\|(.*?))?</event>", re.DOTALL)
 _THINK_OPEN_RE = re.compile(r"<(?:think|thinking)>", re.IGNORECASE)
 _THINK_CLOSE_RE = re.compile(r"</(?:think|thinking)>", re.IGNORECASE)
 
-
 class _IncrementalResponseParser:
     """Turn provider chunks into UI events without waiting for a full reply.
 
@@ -683,8 +682,6 @@ def classify_execution_mode(
     if requested in explicit and requested not in {"auto", "agent"}:
         return explicit[requested]
 
-    if _ASSISTED_ACTION_RE.search(lowered):
-        return ExecutionMode.ASSISTED
     phase_count = sum(1 for marker_re in _COMPLEX_TASK_INTENT_RES if marker_re.search(lowered))
     if (
         _COMPLEX_TASK_INTENT_RES[0].search(lowered)
@@ -692,12 +689,19 @@ def classify_execution_mode(
         and _COMPLEX_TASK_INTENT_RES[2].search(lowered)
     ):
         return ExecutionMode.MISSION
+    if _ASSISTED_ACTION_RE.search(lowered):
+        return ExecutionMode.ASSISTED
     if phase_count >= 1 and (
         _RUNTIME_EVIDENCE_ACTION_RE.search(lowered)
         or _FAST_CHAT_ACTION_RE.search(lowered)
     ):
         return ExecutionMode.ASSISTED
     return ExecutionMode.CHAT
+
+
+def _should_persist_project_memory(mode: ExecutionMode, project_path: str) -> bool:
+    """Only project-bound non-CHAT lanes may mutate project memory."""
+    return mode is not ExecutionMode.CHAT and bool(project_path)
 
 
 def _is_complex_task(query: str) -> bool:
@@ -2159,8 +2163,23 @@ async def _run_pipeline(
         # Simple tasks or autonomous fallback: smart routing → single agent → ReAct loop
         try:
             decision = await _decide_route(req.message, llm_client)
+            if execution_mode is ExecutionMode.CHAT:
+                # Informational turns stay on the schema-free MICRO lane even
+                # when the generic router sees a specialist keyword.
+                decision = decision.model_copy(
+                    update={
+                        "primary_agent": "MICRO",
+                        "secondary_agents": [],
+                        "requires_web_search": False,
+                        "routing_reason": "chat:validated-micro",
+                    }
+                )
             # Auto mode needs an agent with tool support. Upgrade lightweight picks.
-            if decision.primary_agent in ("MICRO", "DOCUMENTER") and not _is_fast_chat_turn(req.message):
+            if (
+                execution_mode is not ExecutionMode.CHAT
+                and decision.primary_agent in ("MICRO", "DOCUMENTER")
+                and not _is_fast_chat_turn(req.message)
+            ):
                 logger.info(
                     "Auto mode upgraded agent %s -> CODER for tool autonomy",
                     decision.primary_agent,
@@ -2770,6 +2789,32 @@ async def _run_pipeline(
             # Parse provider chunks incrementally. Thinking events are emitted
             # while the provider is still generating, not after </think>.
             for evt in response_parser.feed(token):
+                if evt.type in {"error", "execution_error"}:
+                    error_event = evt.model_copy(
+                        update={
+                            "data": {
+                                **evt.data,
+                                "error_category": ErrorCategory.PROVIDER.value,
+                                "run_id": run_context.run_id,
+                                "correlation_id": run_context.correlation_id,
+                                "provider": getattr(req, "provider", "") or None,
+                                "model": model_override or user_model or None,
+                            }
+                        }
+                    )
+                    yield _sse(error_event)
+                    _checkpoint(
+                        status="failed",
+                        phase="provider_error",
+                        agent=str(outcome.used_agent),
+                        partial_output="".join(parts),
+                        error=evt.content or "Provider stream error",
+                        error_category=ErrorCategory.PROVIDER.value,
+                        checkpoint={"last_event": evt.type, "tools": tool_names[-20:]},
+                        finished=True,
+                    )
+                    yield _sse(StreamEvent(type="done", data=run_context.to_dict()))
+                    return
                 if evt.type == "token":
                     parts.append(evt.content or "")
                 elif evt.type == "thinking" and evt.content:
@@ -2973,19 +3018,20 @@ async def _run_pipeline(
     # Keep the per-project bootstrap useful over time without turning it into
     # a transcript.  The topic is reduced to inert keywords by AgentBase and
     # only a bounded, verified completion marker is persisted.
-    try:
-        from backend.agents.base import AgentBase
-        from backend.knowledge.project_memory import record_verified_session
+    if execution_mode is not ExecutionMode.CHAT and project_path:
+        try:
+            from backend.agents.base import AgentBase
+            from backend.knowledge.project_memory import record_verified_session
 
-        record_verified_session(
-            project_path,
-            session_id=req.session_id,
-            status="completed" if not stream_aborted else "interrupted",
-            topic=AgentBase._memory_topic(req.message),
-            evidence=(f"agent={outcome.used_agent}; tools={','.join(tool_names[-8:])}"),
-        )
-    except Exception as exc:
-        logger.debug("Project memory update failed (non-critical): %s", exc)
+            record_verified_session(
+                project_path,
+                session_id=req.session_id,
+                status="completed" if not stream_aborted else "interrupted",
+                topic=AgentBase._memory_topic(req.message),
+                evidence=(f"agent={outcome.used_agent}; tools={','.join(tool_names[-8:])}"),
+            )
+        except Exception as exc:
+            logger.debug("Project memory update failed (non-critical): %s", exc)
 
     yield _sse(StreamEvent(type="agent_finished", agent=outcome.used_agent))  # type: ignore[arg-type]
     yield _sse(StreamEvent(type="done"))

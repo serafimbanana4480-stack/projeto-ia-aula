@@ -1874,13 +1874,45 @@ export async function abortMission(id: string): Promise<{ status: string; missio
       headers: authHeaders(),
     }),
   );
-}
+ }
 
-export async function getMissionAgents(id: string): Promise<AgentInstance[]> {
+ export async function getMissionAgents(id: string): Promise<AgentInstance[]> {
   const data = await readJson<{ agents?: AgentInstance[] }>(
     await fetch(apiUrl(`/api/missions/${id}/agents`), { headers: authHeaders() }),
   );
   return data.agents ?? [];
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Execution envelope — Task 10 alignment
+// ──────────────────────────────────────────────────────────────────────────
+//
+// These endpoints let the frontend act on the orchestrator's *current* state
+// rather than the legacy pause/resume/abort verbs. ``cancelMission`` maps to
+// ``POST /api/missions/{id}/cancel``, ``resumeMission`` re-queues an
+// interrupted run, and ``replanMission`` asks the planner to rebuild the
+// wave layout for the current mission.
+
+export async function cancelMission(
+  id: string,
+): Promise<{ status: string; mission_id: string }> {
+  return readJson<{ status: string; mission_id: string }>(
+    await fetch(apiUrl(`/api/missions/${id}/cancel`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function replanMission(
+  id: string,
+): Promise<{ status: string; mission_id: string }> {
+  return readJson<{ status: string; mission_id: string }>(
+    await fetch(apiUrl(`/api/missions/${id}/replan`), {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

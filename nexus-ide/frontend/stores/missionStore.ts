@@ -2,9 +2,19 @@
  * Mission Control Store — Central state for the autonomous system dashboard.
  *
  * Holds missions, agent instances, bus messages, decisions, quality gates,
- * and system health.  Updated by the REST API and the WebSocket hook.
+ * and the execution envelope.  Updated by the REST API and the WebSocket
+ * hook.  Task 10 adds envelope-derived state plus the
+ * cancel / resume / replan / apply / mergeCheckpoint actions; the existing
+ * public surface is preserved verbatim so dashboard consumers continue to
+ * compile unchanged.
  */
 import { create } from "zustand";
+
+import {
+  type ExecutionEnvelope,
+  mergeEnvelopeMonotonic,
+  normalizeExecutionEnvelope,
+} from "../lib/executionTypes";
 
 // Debounce helpers for high-frequency store updates
 let _busMsgTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -101,6 +111,12 @@ interface MissionState {
   error: string | null;
   backendOnline: boolean;
 
+  // Task 10 — execution envelope.
+  envelope: ExecutionEnvelope | null;
+  envelopeVersion: number;
+  envelopePending: boolean;
+  envelopeError: string | null;
+
   // Actions
   setMissions: (missions: Mission[]) => void;
   updateMission: (mission: Mission) => void;
@@ -116,9 +132,52 @@ interface MissionState {
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   setBackendOnline: (online: boolean) => void;
+
+  /**
+   * Replace the current envelope unconditionally — used when the orchestrator
+   * confirms a brand-new run (e.g. resumeMission just succeeded). The caller
+   * is responsible for passing a fully-normalized envelope.
+   */
+  applyExecution: (envelope: ExecutionEnvelope | unknown) => void;
+  /**
+   * Monotonic checkpoint merge. Older envelopes are dropped without
+   * touching the store. Use this for any SSE / WebSocket update where the
+   * ordering cannot be guaranteed.
+   */
+  mergeCheckpoint: (envelope: ExecutionEnvelope | unknown) => void;
+  clearEnvelope: () => void;
+  setEnvelopePending: (pending: boolean) => void;
+  setEnvelopeError: (message: string | null) => void;
+
+  /** Action stubs — wired up by useMissionWebSocket so the store stays
+   * transport-agnostic. They emit a friendly error when called without a
+   * binding so callers can surface the issue. */
+  cancelMission: (id: string) => Promise<{ status: string; mission_id: string }>;
+  resumeMission: (id: string) => Promise<{ status: string; mission_id: string }>;
+  replanMission: (id: string) => Promise<{ status: string; mission_id: string }>;
 }
 
-export const useMissionStore = create<MissionState>((set) => ({
+const initialEnvelopeState = {
+  envelope: null as ExecutionEnvelope | null,
+  envelopeVersion: 0,
+  envelopePending: false,
+  envelopeError: null as string | null,
+};
+
+/**
+ * Default stub implementations for the action verbs. They throw so the
+ * caller can decide whether the dashboard is missing a transport binding;
+ * the WebSocket hook overrides them at runtime with real implementations.
+ */
+async function _notImplemented(action: string, id: string): Promise<{ status: string; mission_id: string }> {
+  void action;
+  void id;
+  throw new Error(
+    `missionStore.${action}() called without a transport binding`,
+  );
+}
+
+export const useMissionStore = create<MissionState>((set, get) => ({
   missions: [],
   agents: [],
   busMessages: [],
@@ -129,6 +188,7 @@ export const useMissionStore = create<MissionState>((set) => ({
   loading: false,
   error: null,
   backendOnline: true,
+  ...initialEnvelopeState,
 
   setMissions: (missions) => set({ missions }),
   updateMission: (mission) =>
@@ -166,4 +226,37 @@ export const useMissionStore = create<MissionState>((set) => ({
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   setBackendOnline: (online) => set({ backendOnline: online }),
+
+  applyExecution: (envelope) => {
+    const normalized = normalizeExecutionEnvelope(envelope);
+    set({
+      envelope: normalized,
+      envelopeVersion: normalized.version,
+      envelopeError: null,
+      selectedMission:
+        normalized.context.mission_id ?? get().selectedMission,
+    });
+  },
+
+  mergeCheckpoint: (envelope) => {
+    const incoming = normalizeExecutionEnvelope(envelope);
+    set((state) => {
+      const merged = mergeEnvelopeMonotonic(state.envelope, incoming);
+      return {
+        envelope: merged,
+        envelopeVersion: merged.version,
+        envelopeError: null,
+        selectedMission:
+          merged.context.mission_id ?? state.selectedMission,
+      };
+    });
+  },
+
+  clearEnvelope: () => set({ ...initialEnvelopeState }),
+  setEnvelopePending: (envelopePending) => set({ envelopePending }),
+  setEnvelopeError: (envelopeError) => set({ envelopeError }),
+
+  cancelMission: (id) => _notImplemented("cancelMission", id),
+  resumeMission: (id) => _notImplemented("resumeMission", id),
+  replanMission: (id) => _notImplemented("replanMission", id),
 }));

@@ -166,11 +166,10 @@ class FileLockRegistry:
         if not scope or not run_id:
             return False
         with self._lock:
-            owner = self._owners.get(scope)
-            if owner is None or owner == run_id:
-                self._owners[scope] = run_id
-                return True
-            return False
+            if scope in self._owners:
+                return False
+            self._owners[scope] = run_id
+            return True
 
     def release(self, scope: str, run_id: str) -> None:
         scope = str(scope or "").strip()
