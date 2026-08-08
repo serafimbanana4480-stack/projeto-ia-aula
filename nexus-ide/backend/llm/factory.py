@@ -558,6 +558,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
     if not isinstance(policy_candidates, list):
         from backend.llm.model_catalog import load_validated_models
         policy_candidates = load_validated_models("openrouter")
+    local_models = values.get("local_models")
     validation_ttl = _setting_value(
         settings, values, "provider_validation_ttl_seconds", 600
     )
@@ -904,7 +905,7 @@ def create_llm_client(**overrides: Any) -> Any:
         if not api_key:
             logger.warning("OPENROUTER_API_KEY not set — requests will fail")
         logger.info("Using OpenRouter provider")
-        return OpenRouterProvider(
+        primary = OpenRouterProvider(
             base_url=_setting_value(
                 settings, effective_overrides, "openrouter_base_url", "https://openrouter.ai/api"
             ),
@@ -918,6 +919,10 @@ def create_llm_client(**overrides: Any) -> Any:
                 _setting_value(settings, effective_overrides, "max_provider_latency_ms", 30_000)
             ),
         )
+        fallbacks = _build_fallback_chain(
+            settings, effective_overrides, primary_provider="openrouter"
+        )
+        return ResilientLLMProvider(primary, fallbacks, free_only=free_only)
 
     if provider == "opencode_go":
         from backend.llm.opencode_go_provider import OpenCodeGoProvider

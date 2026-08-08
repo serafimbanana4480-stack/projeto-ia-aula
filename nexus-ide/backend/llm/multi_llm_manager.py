@@ -408,6 +408,12 @@ class MultiLLMManager:
         exc: BaseException, provider: str, model: str
     ) -> ProviderUnavailableError:
         if isinstance(exc, ProviderUnavailableError):
+            if exc.provider is None:
+                exc.provider = provider
+            if exc.model is None:
+                exc.model = model
+            if not exc.category:
+                exc.category = "provider_unavailable"
             return exc
         text = str(exc).lower()
         category = "provider_unavailable"
@@ -452,16 +458,39 @@ class MultiLLMManager:
             ollama = self.providers.get("ollama") or self.providers.get("local")
             if ollama is not None:
                 local_models = getattr(ollama, "local_models", None)
+        eligible_candidates = []
+        for item in candidates:
+            provider_name = str(getattr(item, "provider", None) or (
+                item.get("provider") if isinstance(item, dict) else ""
+            ))
+            health = self.health_status.get(provider_name)
+            if health is not None and health.get("healthy") is False:
+                continue
+            eligible_candidates.append(item)
         selection = self.policy.select(
             requirement or self.requirement,
-            candidates,
+            eligible_candidates,
             {name: get_breaker(name) for name in self.providers},
             local_models,
         )
         if selection is None:
+            for item in eligible_candidates:
+                provider_name = str(getattr(item, "provider", None) or (
+                    item.get("provider") if isinstance(item, dict) else ""
+                ))
+                breaker = get_breaker(provider_name) if provider_name else None
+                snapshot = breaker.snapshot() if breaker else {}
+                if str(snapshot.get("state", "")).lower() == "open":
+                    raise ProviderUnavailableError(
+                        "Free provider circuit breaker is open",
+                        category="breaker_open",
+                        provider=provider_name,
+                        model=model,
+                        retry_after=breaker.retry_after,
+                    )
             raise ProviderUnavailableError(
-                "No validated free provider satisfies the request",
-                category="eligibility",
+                "No validated healthy free provider satisfies the request",
+                category="provider_unavailable",
                 model=model,
             )
         self._selected_provider = selection.provider

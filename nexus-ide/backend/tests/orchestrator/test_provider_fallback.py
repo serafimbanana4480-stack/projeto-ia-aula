@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import pytest
+import asyncio
 
-from backend.llm.circuit_breaker import get_breaker, reset_all_breakers
+from backend.llm.circuit_breaker import CircuitBreaker, get_breaker, reset_all_breakers
 from backend.llm.free_policy import ProviderUnavailableError
 from backend.llm.multi_llm_manager import MultiLLMManager
 
@@ -59,3 +59,18 @@ async def test_simulation_cannot_complete_a_real_run() -> None:
         await manager.chat_complete("dev", [{"role": "user", "content": "hi"}], provider="dev")
     assert error.value.category == "simulation"
     reset_all_breakers()
+
+def test_existing_typed_error_is_enriched_with_lane_identity() -> None:
+    error = ProviderUnavailableError("blocked", category="quota")
+    enriched = MultiLLMManager._typed_provider_error(error, "openrouter", "openrouter/free")
+    assert enriched is error
+    assert enriched.provider == "openrouter"
+    assert enriched.model == "openrouter/free"
+    assert enriched.category == "quota"
+
+
+def test_half_open_transition_reserves_single_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    breaker = CircuitBreaker("probe", failure_threshold=1, cooldown_seconds=0, half_open_max_calls=1)
+    asyncio.run(breaker.record_failure())
+    assert asyncio.run(breaker.is_call_permitted()) is True
+    assert asyncio.run(breaker.is_call_permitted()) is False

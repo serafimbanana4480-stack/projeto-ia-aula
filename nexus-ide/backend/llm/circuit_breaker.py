@@ -65,7 +65,7 @@ class CircuitBreaker:
                 if time.monotonic() - self._last_failure_time >= self.cooldown_seconds:
                     logger.info("Circuit breaker [%s]: OPEN → HALF_OPEN (cooldown elapsed)", self.name)
                     self._state = CircuitState.HALF_OPEN
-                    self._half_open_calls = 0
+                    self._half_open_calls = 1
                     return True
                 return False
             if self._state == CircuitState.HALF_OPEN:
