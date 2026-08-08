@@ -131,6 +131,14 @@ async def update_settings(
             continue
         current[key.strip()] = value
 
+    from backend.llm.model_catalog import invalidate_cache
+    changed_providers = {
+        "ollama" if key == "ollama_host" else key.removesuffix("_api_key").removesuffix("_base_url")
+        for key in update.settings
+        if key.endswith(("_api_key", "_base_url", "_host"))
+    }
+    for changed_provider in changed_providers:
+        invalidate_cache(changed_provider)
     # Build the replacement before persisting it.  A malformed provider
     # configuration must not leave the saved settings pointing at a client
     # that could not be initialized.
@@ -147,14 +155,6 @@ async def update_settings(
 
     try:
         _save_runtime_settings(current)
-        from backend.llm.model_catalog import invalidate_cache
-        changed_providers = {
-            key.removesuffix("_api_key").removesuffix("_base_url")
-            for key in update.settings
-            if key.endswith(("_api_key", "_base_url"))
-        }
-        for changed_provider in changed_providers:
-            invalidate_cache(changed_provider)
     except OSError as exc:
         close = getattr(replacement_client, "aclose", None)
         if callable(close):

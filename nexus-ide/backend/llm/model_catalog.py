@@ -36,7 +36,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -614,17 +614,28 @@ def _load_cache() -> dict[str, Any]:
         return {}
 
 
+def _cache_timestamp(value: Any) -> float:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return timestamp if timestamp > 0 else 0.0
+
 def _stale_models(raw_models: list[dict[str, Any]]) -> list[ModelInfo]:
     """Keep stale entries visible, but make them ineligible for selection."""
     models: list[ModelInfo] = []
     for raw in raw_models:
         try:
-            model = ModelInfo(**raw)
-        except TypeError:
+            if not isinstance(raw, dict):
+                continue
+            allowed = {field.name for field in fields(ModelInfo)}
+            model = ModelInfo(**{key: value for key, value in raw.items() if key in allowed})
+        except (TypeError, ValueError):
             continue
         model.free = False
         model.pricing = "unknown"
-        model.reason = "stale catalog validation"
+        model.validated_at = None
+        model.quota_available = False
         models.append(model)
     return models
 
@@ -699,7 +710,8 @@ async def discover_models(provider: str, *, refresh: bool = False) -> DiscoveryR
     cache = _load_cache()
     entry = cache.get(provider)
     if not refresh and isinstance(entry, dict):
-        age = time.time() - float(entry.get("fetched_at") or 0)
+        fetched_at = _cache_timestamp(entry.get("fetched_at"))
+        age = time.time() - fetched_at if fetched_at else float("inf")
         ttl = max(
             1,
             int(getattr(get_settings(), "provider_validation_ttl_seconds", CACHE_TTL_SECONDS)),
@@ -718,14 +730,14 @@ async def discover_models(provider: str, *, refresh: bool = False) -> DiscoveryR
             m.validated_at is not None and current - m.validated_at <= ttl for m in models
         ):
             return DiscoveryResult(
-                provider, models, cached=True, fetched_at=float(entry.get("fetched_at") or 0)
+                provider, models, cached=True, fetched_at=fetched_at
             )
         if models:
             return DiscoveryResult(
                 provider,
-                _stale_models(raw_models),
+                _stale_models(raw_models if isinstance(raw_models, list) else []),
                 cached=True,
-                fetched_at=float(entry.get("fetched_at") or 0),
+                fetched_at=fetched_at,
                 error="catalog validation expired",
             )
 
