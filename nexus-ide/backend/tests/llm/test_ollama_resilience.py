@@ -23,6 +23,11 @@ OllamaProvider = AirLLMProvider  # backwards-compat alias for existing tests
 from backend.tests.conftest import make_stream_response  # noqa: E402
 from backend.tools.ollama_client import ChatMessage, OllamaClient, OllamaError  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _legacy_fallback_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These chain-shape tests exercise legacy paid/simulation fallback semantics."""
+    monkeypatch.setenv("NEXUS_FREE_ONLY", "false")
+
 # ---------------------------------------------------------------------------
 # Retry logic tests
 # ---------------------------------------------------------------------------

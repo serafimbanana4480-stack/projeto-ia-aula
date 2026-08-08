@@ -9,6 +9,11 @@ import pytest
 from backend.llm import factory
 from backend.llm.multi_llm_manager import MultiLLMManager
 
+@pytest.fixture(autouse=True)
+def _legacy_factory_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests cover paid provider construction, not the free-only policy."""
+    monkeypatch.setenv("NEXUS_FREE_ONLY", "false")
+
 
 def _settings() -> SimpleNamespace:
     """Minimal settings object used to prove persisted values take effect."""
