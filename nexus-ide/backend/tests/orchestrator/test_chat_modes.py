@@ -1,7 +1,10 @@
 """Execution-mode classification and routing metadata contracts."""
 
 from backend.orchestrator.execution_contracts import ExecutionMode
-from backend.orchestrator.routes.chat import classify_execution_mode
+from backend.orchestrator.routes.chat import (
+    _should_persist_project_memory,
+    classify_execution_mode,
+)
 
 
 def test_informational_questions_are_chat() -> None:
@@ -23,6 +26,13 @@ def test_action_with_bounded_assistance_is_assisted() -> None:
         is ExecutionMode.ASSISTED
     )
 
+
+
+
+def test_chat_never_persists_project_memory_without_project() -> None:
+    assert not _should_persist_project_memory(ExecutionMode.CHAT, "")
+    assert not _should_persist_project_memory(ExecutionMode.CHAT, "C:/repo")
+    assert _should_persist_project_memory(ExecutionMode.ASSISTED, "C:/repo")
 
 def test_action_only_requests_are_assisted() -> None:
     for message in ("create a file", "build the backend", "update this module"):

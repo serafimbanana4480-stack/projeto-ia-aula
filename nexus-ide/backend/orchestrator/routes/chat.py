@@ -1025,6 +1025,22 @@ async def _stream_autonomous_execution(
                 # raise in ``_sse`` and silently kill the entire bridge.
                 raw_data = _json_safe(evt.data) if evt.data else {}
                 data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
+                event_metadata = {
+                    key: value
+                    for key, value in (
+                        ("correlation_id", getattr(evt, "correlation_id", "")),
+                        ("run_id", data.get("run_id")),
+                        ("mission_id", data.get("mission_id")),
+                    )
+                    if value
+                }
+
+                def _event_sse(event: StreamEvent) -> str:
+                    return _sse(
+                        event.model_copy(
+                            update={"data": {**event.data, **event_metadata}}
+                        )
+                    )
 
                 try:
                     et = EventType(et_value)
@@ -1036,9 +1052,9 @@ async def _stream_autonomous_execution(
                         str(agent), _IncrementalResponseParser(str(agent))
                     )
                     for parsed in parser.feed(content):
-                        yield _sse(parsed)
+                        yield _event_sse(parsed)
                 elif et == EventType.THINKING and content:
-                    yield _sse(StreamEvent(type="thinking", agent=agent, content=content))
+                    yield _event_sse(StreamEvent(type="thinking", agent=agent, content=content))
                     # Also publish to the dashboard thinking feed (non-blocking)
                     try:
                         from backend.orchestrator.routes.thinking import publish_thought
@@ -1049,12 +1065,13 @@ async def _stream_autonomous_execution(
                     except Exception:
                         pass
                 elif et in (EventType.AGENT_STARTED, EventType.AGENT_FINISHED):
-                    yield _sse(
+                    yield _event_sse(
                         StreamEvent(
                             type="agent_started" if et == EventType.AGENT_STARTED else "agent_finished",
                             agent=agent,
                             data={
                                 **data,
+                                **event_metadata,
                                 "task_id": evt.task_id,
                                 "delegated": agent not in ("ARCHITECT", "ORCHESTRATOR"),
                             },
@@ -1097,13 +1114,14 @@ async def _stream_autonomous_execution(
                         or data.get("objective")
                         or ""
                     )
-                    yield _sse(
+                    yield _event_sse(
                         StreamEvent(
                             type="progress",
                             agent=agent,
                             content=str(task_name),
                             data={
                                 **data,
+                                **event_metadata,
                                 "kind": kind,
                                 "status": status,
                                 "event": et_value,
@@ -1116,7 +1134,7 @@ async def _stream_autonomous_execution(
                     args = data.get("tool_args") or data.get("arguments") or data.get("args") or {}
                     result = data.get("tool_result", data.get("result", content or None))
                     error = str(data.get("error") or content or "")
-                    yield _sse(
+                    yield _event_sse(
                         StreamEvent(
                             type=et_value,  # type: ignore[arg-type]
                             agent=agent,
@@ -1124,17 +1142,18 @@ async def _stream_autonomous_execution(
                             tool_args=args if isinstance(args, dict) else {"raw": args},
                             tool_result=result if et == EventType.TOOL_RESULT else None,
                             tool_error=error if et == EventType.TOOL_ERROR else None,
-                            data=data,
+                            data={**data, **event_metadata},
                         )
                     )
                 elif et in (EventType.ERROR, EventType.WARNING):
-                    yield _sse(
+                    yield _event_sse(
                         StreamEvent(
                             type="progress",
                             agent=agent,
                             content=content or str(data)[:200],
                             data={
                                 **data,
+                                **event_metadata,
                                 "kind": "status",
                                 "status": "error" if et == EventType.ERROR else "running",
                                 "event": et_value,
@@ -1143,7 +1162,7 @@ async def _stream_autonomous_execution(
                     )
             for parser in response_parsers.values():
                 for parsed in parser.flush():
-                    yield _sse(parsed)
+                    yield _event_sse(parsed)
         except Exception as exc:
             # WARNING, not DEBUG: a dead bridge is exactly the "modelo não
             # responde" symptom and must be visible in production logs.
@@ -3018,7 +3037,7 @@ async def _run_pipeline(
     # Keep the per-project bootstrap useful over time without turning it into
     # a transcript.  The topic is reduced to inert keywords by AgentBase and
     # only a bounded, verified completion marker is persisted.
-    if execution_mode is not ExecutionMode.CHAT and project_path:
+    if _should_persist_project_memory(execution_mode, project_path):
         try:
             from backend.agents.base import AgentBase
             from backend.knowledge.project_memory import record_verified_session
