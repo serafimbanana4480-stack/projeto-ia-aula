@@ -398,33 +398,50 @@ async def get_providers_status(
     # Otherwise inspect the resilient provider's internals
     from backend.llm.factory import ResilientLLMProvider
     if isinstance(llm_client, ResilientLLMProvider):
-        providers: dict[str, dict] = {}
         for idx, prov in enumerate([llm_client.primary] + llm_client.fallbacks):
             name = prov.__class__.__name__.replace("Provider", "").lower() or f"provider_{idx}"
+            breaker = all_breakers().get(name, {})
+            quota = getattr(prov, "quota_available", None)
+            reason = getattr(prov, "eligibility_reason", "")
+            free_only = bool(getattr(llm_client, "free_only", False))
+            eligible = not free_only or (
+                quota is True and bool(getattr(prov, "validated_at", None))
+                and reason not in {"", "not checked"}
+            )
             providers[name] = {
-                "healthy": True,
+                "healthy": eligible and not bool(getattr(prov, "simulation", False)),
                 "latency": 0.0,
                 "last_check": 0.0,
-                "circuit_breaker": {},
+                "eligibility_reason": reason,
+                "quota_available": quota,
+                "validated_at": getattr(prov, "validated_at", None),
+                "circuit_breaker": breaker,
             }
         return {
             "providers": providers,
             "breakers": all_breakers(),
         }
 
-    # A single configured provider (OpenRouterProvider, OpenAIProvider, etc.)
-    # is also a healthy runtime. Treating it as "unsupported" made the
-    # dashboard claim that no provider was registered while chat was actively
-    # using that same client.
     name = llm_client.__class__.__name__.replace("Provider", "").lower()
     if name:
+        breaker = all_breakers().get(name, {})
+        quota = getattr(llm_client, "quota_available", None)
+        reason = getattr(llm_client, "eligibility_reason", "")
+        free_only = bool(getattr(llm_client, "free_only", False))
+        eligible = not free_only or (
+            quota is True and bool(getattr(llm_client, "validated_at", None))
+            and reason not in {"", "not checked"}
+        )
         return {
             "providers": {
                 name: {
-                    "healthy": True,
+                    "healthy": eligible and not bool(getattr(llm_client, "simulation", False)),
                     "latency": 0.0,
                     "last_check": 0.0,
-                    "circuit_breaker": all_breakers().get(name, {}),
+                    "eligibility_reason": reason,
+                    "quota_available": quota,
+                    "validated_at": getattr(llm_client, "validated_at", None),
+                    "circuit_breaker": breaker,
                 }
             },
             "breakers": all_breakers(),
