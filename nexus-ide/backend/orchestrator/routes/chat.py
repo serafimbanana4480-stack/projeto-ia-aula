@@ -1678,17 +1678,23 @@ async def _run_pipeline(
             logger.debug("Could not persist demo response", exc_info=True)
         return
 
+    # Decide the cheap-path shape before project bootstrap and semantic memory
+    # are touched. Informational turns do not need either to answer correctly.
+    fast_candidate = mode in {"ask", "fast"} or (
+        mode in {"auto", "agent"} and _is_fast_chat_turn(req.message)
+    )
+
     # The explicit request wins. If the UI has no active project, recover a
     # real absolute directory named in the user's message. The old order read
     # an arbitrary ``SELECT ... LIMIT 1`` project first and silently executed
     # against the wrong workspace.
-    project_path = _requested_project_path(
+    project_path = "" if fast_candidate else _requested_project_path(
         getattr(req, "project_path", "") or "",
         req.message,
     )
     project_path_defaulted = False
 
-    if not project_path:
+    if not project_path and not fast_candidate:
         try:
             from backend.persistence.db import get_connection_pool
 
@@ -1709,7 +1715,7 @@ async def _run_pipeline(
         except Exception as exc:
             logger.warning("Could not read project from database: %s", exc)
 
-    if not project_path:
+    if not project_path and not fast_candidate:
         project_path_defaulted = True
         project_path = str(REPO_ROOT)
         logger.warning(
@@ -1726,7 +1732,7 @@ async def _run_pipeline(
     try:
         from backend.knowledge.project_memory import read_project_memory
 
-        project_memory = read_project_memory(project_path)
+        project_memory = read_project_memory(project_path) if project_path else ""
     except Exception as exc:
         logger.warning("Could not load project memory for %s: %s", project_path, exc)
 
@@ -2450,7 +2456,7 @@ async def _run_pipeline(
             # global 180s stream-start budget. Complex/explicit work keeps the
             # more patient default for local model loading.
             stream_start_timeout=(
-                8.0
+                6.0
                 if not _advanced_force_autonomous and _is_fast_chat_turn(effective_message)
                 else None
             ),
@@ -2719,7 +2725,7 @@ async def _run_pipeline(
         from backend.knowledge.memory import get_memory_store
 
         mem_store = get_memory_store()
-        if full.strip():
+        if full.strip() and not fast_chat_turn:
             await mem_store.remember_conversation(
                 user_message=req.message,
                 assistant_message=full,

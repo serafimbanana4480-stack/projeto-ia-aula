@@ -293,7 +293,7 @@ class AgentBase(ABC):
             )
 
         # Inject relevant semantic memories asynchronously (non-blocking)
-        if self.enable_memory:
+        if self.enable_memory and not request.context.get("_fast_chat_lane"):
             try:
                 memory_cache_key = f"_memory_context:{self.name}"
                 memory_context = request.context.get(memory_cache_key)
