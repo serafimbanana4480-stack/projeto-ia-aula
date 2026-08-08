@@ -592,7 +592,11 @@ def resolve_mission_project(project_path: str, session_project: str | None = Non
     is accepted as the only fallback for clients whose active project lives in
     session state; an empty request with no session target is blocked.
     """
-    requested = (project_path or "").strip()
+    if not isinstance(project_path, str):
+        raise ProjectContextError("project_path must be a string")
+    if session_project is not None and not isinstance(session_project, str):
+        raise ProjectContextError("session_project must be a string")
+    requested = project_path.strip()
     session_target = (session_project or "").strip()
     candidate = requested if requested not in {"", ".", "./", ".\\"} else session_target
     if not candidate or candidate in {".", "./", ".\\"}:

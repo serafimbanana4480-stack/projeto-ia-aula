@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from backend.config.settings import ProjectContextError, resolve_mission_project
 from backend.orchestrator.mission_control import ProjectIntelligence
 
 
@@ -57,3 +58,13 @@ def test_missing_project_preserves_unknown_provenance(tmp_path: Path) -> None:
     assert "filesystem scan" in snapshot.unknowns
     assert any(f.classification == "unknown" for f in snapshot.facts)
     assert snapshot.findings and snapshot.findings[0].id == "scan-root-missing"
+
+
+def test_mission_project_resolver_rejects_non_strings(tmp_path: Path) -> None:
+    for project_path, session_project in ((None, str(tmp_path)), (str(tmp_path), 42)):
+        try:
+            resolve_mission_project(project_path, session_project)  # type: ignore[arg-type]
+        except ProjectContextError as exc:
+            assert exc.code == "BLOCKED_PROJECT_CONTEXT"
+        else:
+            raise AssertionError("non-string mission context was accepted")
