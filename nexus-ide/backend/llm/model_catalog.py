@@ -319,7 +319,7 @@ def _price_to_per_1m(raw: Any) -> float | None:
         return None
     if value < 0:
         return None
-    return round(value * 1_000_000, 4)
+    return value * 1_000_000
 
 
 def _color_for(provider: str, model_id: str) -> str:
@@ -350,10 +350,8 @@ def _finalise(info: ModelInfo) -> ModelInfo:
         info.context_window = _guess_context(info.id)
     if not info.capabilities:
         info.capabilities = _guess_capabilities(info.id, info.description)
-    if info.quota_available is None:
-        info.quota_available = True
-    # Missing prices are unknown.  An ID suffix alone is never evidence of a
-    # free cloud model; only an exact zero/zero catalog entry qualifies.
+    # Unknown quota remains unknown; policy selection requires explicit True.
+    # Missing prices remain unknown rather than being labelled paid.
     info.free = bool(
         info.provider == "ollama"
         or (info.input_price_per_1m == 0 and info.output_price_per_1m == 0)
@@ -362,9 +360,15 @@ def _finalise(info: ModelInfo) -> ModelInfo:
         info.reason = "verified installed Ollama model"
     elif info.free and not info.reason:
         info.reason = "catalog confirmed zero input/output prices"
-    elif not info.free and not info.reason:
+    elif not info.reason:
         info.reason = "prices missing or non-zero"
-    info.pricing = "free" if info.free else "unknown" if info.reason.startswith("stale") else "paid"
+    info.pricing = (
+        "free"
+        if info.free
+        else "unknown"
+        if info.input_price_per_1m is None or info.output_price_per_1m is None or info.reason.startswith("stale")
+        else "paid"
+    )
     info.tier = _infer_tier(info.id, info.context_window, info.capabilities)
     info.color = _color_for(info.provider, info.id)
     if not info.name:
@@ -696,10 +700,26 @@ async def discover_models(provider: str, *, refresh: bool = False) -> DiscoveryR
     entry = cache.get(provider)
     if not refresh and isinstance(entry, dict):
         age = time.time() - float(entry.get("fetched_at") or 0)
-        if age < CACHE_TTL_SECONDS:
-            models = [ModelInfo(**m) for m in entry.get("models", [])]
+        ttl = max(
+            1,
+            int(getattr(get_settings(), "provider_validation_ttl_seconds", CACHE_TTL_SECONDS)),
+        )
+        raw_models = entry.get("models", [])
+        models = [ModelInfo(**m) for m in raw_models]
+        current = time.time()
+        if age < CACHE_TTL_SECONDS and all(
+            m.validated_at is not None and current - m.validated_at <= ttl for m in models
+        ):
             return DiscoveryResult(
                 provider, models, cached=True, fetched_at=float(entry.get("fetched_at") or 0)
+            )
+        if models:
+            return DiscoveryResult(
+                provider,
+                _stale_models(raw_models),
+                cached=True,
+                fetched_at=float(entry.get("fetched_at") or 0),
+                error="catalog validation expired",
             )
 
     try:
@@ -707,8 +727,6 @@ async def discover_models(provider: str, *, refresh: bool = False) -> DiscoveryR
     except Exception as exc:  # noqa: BLE001 - surfaced to the UI, never raised
         message = _explain_error(provider, exc)
         logger.warning("Model discovery failed for %s: %s", provider, message)
-        # Serve stale data rather than an empty list: a rate limit should not
-        # wipe the user's model selector.
         if isinstance(entry, dict) and entry.get("models"):
             stale = _stale_models(entry["models"])
             return DiscoveryResult(

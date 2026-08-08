@@ -18,8 +18,10 @@ from backend.llm.airllm_provider import ChatMessage
 
 
 class DevProvider:
-    """Zero-cost provider for development and testing."""
+    """Deterministic simulation provider; never a real completion."""
 
+    simulation = True
+    eligibility_reason = "deterministic simulation only"
     # Internal — estimated usage (tokens are counted from text length)
     _last_usage: dict[str, int] = {}
 

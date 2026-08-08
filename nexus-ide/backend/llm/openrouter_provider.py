@@ -108,13 +108,14 @@ class OpenRouterProvider:
         # provider-wide slot every ~3.1s (19.3/min), including fallbacks.
         self.free_only = free_only
         self.eligibility_reason = "not checked"
-        self.quota_available = True
+        self.quota_available = None
         self.validated_at = None
         self._catalog = catalog
+        self._max_latency_ms = 30_000.0
         try:
-            self._min_request_interval = max(
-                0.0,
-                float(os.environ.get("NEXUS_OPENROUTER_MIN_INTERVAL_SECONDS", "3.1")),
+            self._min_request_interval = min(
+                5.0,
+                max(0.0, float(os.environ.get("NEXUS_OPENROUTER_MIN_INTERVAL_SECONDS", "3.1"))),
             )
         except ValueError:
             self._min_request_interval = 3.1
@@ -146,17 +147,11 @@ class OpenRouterProvider:
             now = time.monotonic()
             ready_at = max(_quota_next_request_at, _quota_cooldown_until)
             delay = max(0.0, ready_at - now)
-            # Once the account has reported a daily/quota reset, sleeping here
-            # only serializes every later chat turn behind a known outage. A
-            # circuit-open error lets the fallback layer decide immediately.
-            if _quota_cooldown_until > now:
-                raise ProviderUnavailableError(
-                    "OpenRouter rate-limit cooldown active; refusing to queue an interactive request",
-                    category="quota",
-                    provider=self.provider_name,
-                    retry_after=delay,
-                )
-            if max_wait_seconds is not None and delay > max(0.0, max_wait_seconds):
+            budget = min(
+                5.0,
+                max(0.0, max_wait_seconds if max_wait_seconds is not None else 5.0),
+            )
+            if delay > budget:
                 raise ProviderUnavailableError(
                     "OpenRouter dispatch budget exceeded; refusing to queue an interactive request",
                     category="quota",
@@ -165,7 +160,7 @@ class OpenRouterProvider:
                 )
             if delay:
                 logger.info("OpenRouter quota guard waiting %.2fs before dispatch", delay)
-                await asyncio.sleep(delay)
+                await asyncio.sleep(min(delay, budget))
                 now = time.monotonic()
             _quota_next_request_at = now + self._min_request_interval
 
@@ -186,32 +181,40 @@ class OpenRouterProvider:
         resolved = self.resolve_model(model)
         if not self.free_only:
             return resolved
-        if resolved == "openrouter/free":
-            self.eligibility_reason = "OpenRouter free router alias"
-            return resolved
         entries = self._catalog
         if isinstance(entries, dict):
             entries = entries.get("models", entries.get("data", []))
+        now = time.time()
         for entry in entries or []:
             entry_id = getattr(entry, "id", None) or (
                 entry.get("id") if isinstance(entry, dict) else None
             )
             if entry_id != resolved:
                 continue
-            input_price = getattr(entry, "input_price_per_1m", None)
-            output_price = getattr(entry, "output_price_per_1m", None)
-            if isinstance(entry, dict):
-                input_price = entry.get("input_price_per_1m", input_price)
-                output_price = entry.get("output_price_per_1m", output_price)
-            if input_price == 0 and output_price == 0:
-                self.validated_at = getattr(entry, "validated_at", None) or (
-                    entry.get("validated_at") if isinstance(entry, dict) else None
-                )
-                self.eligibility_reason = "catalog confirmed zero input/output prices"
+            def field(name: str, default: Any = None) -> Any:
+                value = getattr(entry, name, default)
+                return entry.get(name, value) if isinstance(entry, dict) else value
+            input_price = field("input_price_per_1m")
+            output_price = field("output_price_per_1m")
+            quota = field("quota_available")
+            validated_at = field("validated_at")
+            latency = field("latency_ms")
+            if (
+                input_price == 0
+                and output_price == 0
+                and quota is True
+                and validated_at is not None
+                and now - float(validated_at) <= 600
+                and (latency is None or float(latency) <= self._max_latency_ms)
+            ):
+                self.quota_available = True
+                self.validated_at = float(validated_at)
+                self.eligibility_reason = "catalog confirmed zero prices, quota and freshness"
                 return resolved
-        self.eligibility_reason = "model is not confirmed free by live catalog"
+        self.quota_available = False
+        self.eligibility_reason = "model lacks current zero-price/quota validation"
         raise ProviderUnavailableError(
-            f"OpenRouter model '{model}' is not confirmed free",
+            f"OpenRouter model '{model}' is not confirmed free and available",
             category="eligibility",
             provider=self.provider_name,
             model=model,
@@ -219,17 +222,9 @@ class OpenRouterProvider:
 
     async def aclose(self) -> None:
         await self._client.aclose()
-    def resolve_model(self, model: str) -> str:
-        """Resolve a model alias to the OpenRouter model identifier.
 
-        A single ``NEXUS_OPENROUTER_TOOL_MODEL`` override, when set, pins every
-        tier to one model id. The default NEXUS tiers map to small free models
-        that are unreliable at function calling; this lets an operator point all
-        agents at a tool-capable model (e.g. ``openai/gpt-4o-mini`` or a current
-        free model that supports the ``tools`` parameter) without editing the
-        alias table. ``auto`` is left untouched so provider-side routing still
-        works when explicitly requested.
-        """
+    def resolve_model(self, model: str) -> str:
+        """Resolve an alias to its OpenRouter model identifier."""
         override = os.environ.get("NEXUS_OPENROUTER_TOOL_MODEL", "").strip()
         if override and model != "auto":
             return override

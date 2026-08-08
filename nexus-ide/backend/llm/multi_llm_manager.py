@@ -17,8 +17,11 @@ from typing import Any
 import httpx
 
 from backend.llm.circuit_breaker import get_breaker
-from backend.llm.free_policy import ProviderUnavailableError
-
+from backend.llm.free_policy import (
+    FreeModelPolicy,
+    FreeModelRequirement,
+    ProviderUnavailableError,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -223,14 +226,20 @@ class MultiLLMManager:
         free_only: bool = False,
         policy_candidates: list[Any] | None = None,
         local_models: Any = None,
+        validation_ttl_seconds: int = 600,
+        max_latency_ms: int | None = 30_000,
+        requirement: FreeModelRequirement | None = None,
     ) -> None:
-        self.providers: dict[str, Any] = {}  # name -> provider instance
-        self.health_status: dict[str, dict[str, Any]] = {}  # name -> health info
-        self._priority: dict[str, int] = {}  # name -> priority (lower = higher)
+        self.providers: dict[str, Any] = {}
+        self.health_status: dict[str, dict[str, Any]] = {}
+        self._priority: dict[str, int] = {}
         self._tracker = get_token_tracker()
         self.free_only = free_only
         self.policy_candidates = policy_candidates or []
         self.local_models = local_models
+        self.policy = FreeModelPolicy(validation_ttl_seconds=validation_ttl_seconds)
+        self.requirement = requirement or FreeModelRequirement(max_latency_ms=max_latency_ms)
+        self._selected_provider: str | None = None
 
     def register_provider(self, name: str, provider: Any, priority: int = 1) -> None:
         """Register a provider with priority (lower = higher priority)."""
@@ -353,8 +362,10 @@ class MultiLLMManager:
         if not candidates:
             if self.providers:
                 return next(iter(self.providers))
-            raise RuntimeError("No providers registered")
-
+            raise ProviderUnavailableError(
+                "No providers registered",
+                category="provider_unavailable",
+            )
         def score(item: tuple[str, dict[str, Any]]) -> float:
             name, info = item
             p = self._priority.get(name, 1)
@@ -379,6 +390,8 @@ class MultiLLMManager:
         validator = getattr(provider, "validate_model", None)
         if callable(validator):
             validator(model)
+            return
+        if name == self._selected_provider:
             return
         if name.lower() in {"ollama", "local"} or getattr(provider, "free", False) is True:
             return
@@ -409,6 +422,39 @@ class MultiLLMManager:
             retry_after=getattr(exc, "retry_after", None),
         )
 
+    def _attempt_names(self, target: str) -> list[str]:
+        seen: set[int] = set()
+        names: list[str] = []
+        for name in [target, *self.providers]:
+            if name not in self.providers:
+                continue
+            identity = id(self.providers[name])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            names.append(name)
+        return names
+
+    def _select_policy_model(self, model: str) -> str:
+        if not self.free_only:
+            return model
+        if self.policy_candidates or self.local_models is not None:
+            selection = self.policy.select(
+                self.requirement,
+                self.policy_candidates,
+                {name: get_breaker(name) for name in self.providers},
+                self.local_models,
+            )
+            if selection is None:
+                raise ProviderUnavailableError(
+                    "No validated free provider satisfies the request",
+                    category="eligibility",
+                    model=model,
+                )
+            self._selected_provider = selection.provider
+            return selection.model
+        return model
+
     async def chat_complete(
         self,
         model: str,
@@ -418,7 +464,8 @@ class MultiLLMManager:
         **kwargs: Any,
     ) -> str:
         """Send a completion through validated, health-aware providers."""
-        target = provider or self.get_best_provider()
+        model = self._select_policy_model(model)
+        target = provider or self._selected_provider or self.get_best_provider()
         if target not in self.providers:
             raise ProviderUnavailableError(
                 f"Provider '{target}' not registered",
@@ -427,7 +474,7 @@ class MultiLLMManager:
                 model=model,
             )
         last_error: ProviderUnavailableError | None = None
-        names_to_try = [target] + [n for n in self.providers if n != target]
+        names_to_try = self._attempt_names(target)
         for name in names_to_try:
             breaker = get_breaker(name)
             if not await breaker.is_call_permitted():
@@ -484,13 +531,6 @@ class MultiLLMManager:
         provider: str | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
-        """Stream a completion, failing over only before visible output.
-
-        A streaming provider can fail after it has already emitted tokens.
-        Restarting that request on another provider corrupts the answer and can
-        repeat downstream ReAct tool calls, so only pre-output failures are
-        eligible for failover.
-        """
         target = provider or self.get_best_provider()
         if target not in self.providers:
             raise ProviderUnavailableError(
@@ -499,15 +539,11 @@ class MultiLLMManager:
                 provider=target,
                 model=model,
             )
-
+        model = self._select_policy_model(model)
         last_error: ProviderUnavailableError | None = None
-        names_to_try = [target] + [n for n in self.providers if n != target]
-        for name in names_to_try:
+        for name in self._attempt_names(target):
             breaker = get_breaker(name)
             if not await breaker.is_call_permitted():
-                logger.info(
-                    "Circuit breaker: skipping provider '%s' (state=%s)", name, breaker.state
-                )
                 last_error = ProviderUnavailableError(
                     f"Circuit breaker open for '{name}'",
                     category="breaker_open",
@@ -516,15 +552,14 @@ class MultiLLMManager:
                     retry_after=breaker.retry_after,
                 )
                 continue
-
             try:
                 self._ensure_dispatch_allowed(name, model)
             except ProviderUnavailableError as exc:
                 last_error = exc
                 continue
             started = time.time()
-            chunks: list[str] = []
             emitted_output = False
+            chunks: list[str] = []
             try:
                 async for token in self.providers[name].chat_stream(
                     model=model, messages=messages, options=options, **kwargs
@@ -537,10 +572,12 @@ class MultiLLMManager:
                     raise RuntimeError(f"Provider '{name}' returned an empty stream")
                 await breaker.record_success()
                 self._update_health(name, True, (time.time() - started) * 1000)
-                # Record token usage after stream completes
-                full_output = "".join(chunks)
-                self._record_usage(provider_name=name, model=model, messages=messages, output_text=full_output)
-                logger.info("Provider '%s' succeeded for chat_stream", name)
+                self._record_usage(
+                    provider_name=name,
+                    model=model,
+                    messages=messages,
+                    output_text="".join(chunks),
+                )
                 return
             except asyncio.CancelledError:
                 raise
@@ -548,12 +585,8 @@ class MultiLLMManager:
                 await breaker.record_failure()
                 last_error = self._typed_provider_error(exc, name, model)
                 self._update_health(name, False, (time.time() - started) * 1000)
-                logger.warning("Provider '%s' failed for chat_stream: %s", name, exc)
                 if emitted_output:
-                    # The response has already reached the user. Never append
-                    # a second provider's response to it.
                     raise
-
         raise last_error or ProviderUnavailableError(
             "All providers failed for chat_stream",
             category="provider_unavailable",
@@ -567,37 +600,36 @@ class MultiLLMManager:
         provider: str | None = None,
         **kwargs: Any,
     ) -> list[list[float]]:
-        """Embed text through the same health-aware provider failover path.
-
-        ``create_llm_client()`` can return this manager when multi-provider
-        mode is enabled.  Without this method, semantic memory and code search
-        fail with ``AttributeError`` even when a registered provider supports
-        embeddings.
-        """
         target = provider or self.get_best_provider()
+        model = self._select_policy_model(model)
         if target not in self.providers:
-            raise RuntimeError(f"Provider '{target}' not registered")
-
-        last_error: Exception | None = None
-        names_to_try = [target] + [name for name in self.providers if name != target]
-        for name in names_to_try:
+            raise ProviderUnavailableError(
+                f"Provider '{target}' not registered",
+                category="provider_unavailable",
+                provider=target,
+                model=model,
+            )
+        last_error: ProviderUnavailableError | None = None
+        for name in self._attempt_names(target):
             candidate = self.providers[name]
             if not hasattr(candidate, "embed"):
                 continue
-
             breaker = get_breaker(name)
             if not await breaker.is_call_permitted():
-                last_error = RuntimeError(f"Circuit breaker open for '{name}'")
+                last_error = ProviderUnavailableError(
+                    f"Circuit breaker open for '{name}'",
+                    category="breaker_open",
+                    provider=name,
+                    model=model,
+                    retry_after=breaker.retry_after,
+                )
                 continue
-
             started = time.time()
             try:
+                self._ensure_dispatch_allowed(name, model)
                 vectors = await candidate.embed(texts, model=model, **kwargs)
                 if not isinstance(vectors, list) or len(vectors) != len(texts):
-                    raise RuntimeError(
-                        f"Provider '{name}' returned {len(vectors) if isinstance(vectors, list) else 'invalid'} "
-                        f"embeddings for {len(texts)} inputs"
-                    )
+                    raise RuntimeError("Provider returned invalid embeddings")
                 await breaker.record_success()
                 self._update_health(name, True, (time.time() - started) * 1000)
                 return vectors
@@ -605,12 +637,13 @@ class MultiLLMManager:
                 raise
             except Exception as exc:
                 await breaker.record_failure()
-                last_error = exc
+                last_error = self._typed_provider_error(exc, name, model)
                 self._update_health(name, False, (time.time() - started) * 1000)
-                logger.warning("Provider '%s' failed for embed: %s", name, exc)
-
-        raise last_error or RuntimeError("No registered provider supports embeddings")
-
+        raise last_error or ProviderUnavailableError(
+            "No registered provider supports embeddings",
+            category="provider_unavailable",
+            model=model,
+        )
     async def batch_complete(
         self,
         messages_list: list[list[dict[str, str]]],
@@ -620,41 +653,58 @@ class MultiLLMManager:
         provider: str | None = None,
         **kwargs: Any,
     ) -> list[str]:
-        """Run a batch while preserving the manager's provider resilience."""
         if not messages_list:
             return []
         if not model:
             raise ValueError("MultiLLMManager.batch_complete requires an explicit model")
-
         target = provider or self.get_best_provider()
+        model = self._select_policy_model(model)
         if target not in self.providers:
-            raise RuntimeError(f"Provider '{target}' not registered")
-
+            raise ProviderUnavailableError(
+                f"Provider '{target}' not registered",
+                category="provider_unavailable",
+                provider=target,
+                model=model,
+            )
+        self._ensure_dispatch_allowed(target, model)
         candidate = self.providers[target]
-        if hasattr(candidate, "batch_complete"):
-            try:
-                return await candidate.batch_complete(
+        breaker = get_breaker(target)
+        if not await breaker.is_call_permitted():
+            raise ProviderUnavailableError(
+                f"Circuit breaker open for '{target}'",
+                category="breaker_open",
+                provider=target,
+                model=model,
+                retry_after=breaker.retry_after,
+            )
+        try:
+            if hasattr(candidate, "batch_complete"):
+                result = await candidate.batch_complete(
                     messages_list, model=model, options=options, **kwargs
                 )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("Provider '%s' failed for batch_complete: %s", target, exc)
-
-        return list(
-            await asyncio.gather(
-                *(
-                    self.chat_complete(
+                if getattr(candidate, "simulation", False):
+                    raise ProviderUnavailableError(
+                        "Simulation output cannot complete a real run",
+                        category="simulation",
+                        provider=target,
                         model=model,
-                        messages=messages,
-                        options=options,
-                        provider=provider,
-                        **kwargs,
                     )
-                    for messages in messages_list
+                return result
+            return list(
+                await asyncio.gather(
+                    *(
+                        self.chat_complete(
+                            model=model, messages=messages, options=options, provider=target, **kwargs
+                        )
+                        for messages in messages_list
+                    )
                 )
             )
-        )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await breaker.record_failure()
+            raise self._typed_provider_error(exc, target, model) from exc
 
     async def parallel_completion(
         self,
@@ -664,45 +714,62 @@ class MultiLLMManager:
         options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
-        """Send same request to multiple providers in parallel, return fastest successful response."""
-        valid_providers = [p for p in providers if p in self.providers]
+        model = self._select_policy_model(model)
+        valid_providers = self._attempt_names(providers[0]) if providers else []
+        valid_providers = [name for name in valid_providers if name in providers]
         if not valid_providers:
-            raise RuntimeError("No valid providers for parallel completion")
+            raise ProviderUnavailableError(
+                "No valid providers for parallel completion",
+                category="provider_unavailable",
+                model=model,
+            )
 
         async def _call(name: str) -> tuple[str, str]:
+            self._ensure_dispatch_allowed(name, model)
             breaker = get_breaker(name)
             if not await breaker.is_call_permitted():
-                raise RuntimeError(f"Circuit breaker open for '{name}'")
-            started = time.time()
+                raise ProviderUnavailableError(
+                    f"Circuit breaker open for '{name}'",
+                    category="breaker_open",
+                    provider=name,
+                    model=model,
+                    retry_after=breaker.retry_after,
+                )
             try:
                 result = await self.providers[name].chat_complete(
                     model=model, messages=messages, options=options, **kwargs
                 )
+                if getattr(self.providers[name], "simulation", False):
+                    raise ProviderUnavailableError(
+                        "Simulation output cannot complete a real run",
+                        category="simulation",
+                        provider=name,
+                        model=model,
+                    )
                 await breaker.record_success()
-                latency = (time.time() - started) * 1000
-                self._update_health(name, True, latency)
                 return name, result
-            except Exception:
+            except Exception as exc:
                 await breaker.record_failure()
-                raise
+                raise self._typed_provider_error(exc, name, model) from exc
 
         tasks = {asyncio.create_task(_call(name)): name for name in valid_providers}
-        pending: set[asyncio.Task] = set(tasks.keys())
-        last_error: Exception | None = None
+        pending: set[asyncio.Task] = set(tasks)
+        last_error: ProviderUnavailableError | None = None
         while pending:
             done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 try:
                     _, result = task.result()
-                    for t in pending:
-                        t.cancel()
+                    for other in pending:
+                        other.cancel()
                     return result
                 except Exception as exc:
-                    last_error = exc
-                    self._update_health(tasks[task], False, 0.0)
-                    logger.warning("Parallel provider '%s' failed: %s", tasks[task], exc)
-
-        raise last_error or RuntimeError("All parallel providers failed")
+                    last_error = self._typed_provider_error(exc, tasks[task], model)
+        raise last_error or ProviderUnavailableError(
+            "All parallel providers failed",
+            category="provider_unavailable",
+            model=model,
+        )
 
     async def consensus_completion(
         self,
@@ -712,21 +779,44 @@ class MultiLLMManager:
         options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
-        """Send to multiple providers and return the consensus (most common) response."""
-        valid_providers = [p for p in providers if p in self.providers]
+        model = self._select_policy_model(model)
+        valid_providers: list[str] = []
+        seen: set[int] = set()
+        for name in providers:
+            if name not in self.providers or id(self.providers[name]) in seen:
+                continue
+            seen.add(id(self.providers[name]))
+            valid_providers.append(name)
         if not valid_providers:
-            raise RuntimeError("No valid providers for consensus completion")
-
+            raise ProviderUnavailableError(
+                "No valid providers for consensus completion",
+                category="provider_unavailable",
+                model=model,
+            )
         results: dict[str, str] = {}
 
         async def _call(name: str) -> None:
             try:
+                self._ensure_dispatch_allowed(name, model)
                 breaker = get_breaker(name)
                 if not await breaker.is_call_permitted():
-                    raise RuntimeError(f"Circuit breaker open for '{name}'")
+                    raise ProviderUnavailableError(
+                        f"Circuit breaker open for '{name}'",
+                        category="breaker_open",
+                        provider=name,
+                        model=model,
+                        retry_after=breaker.retry_after,
+                    )
                 result = await self.providers[name].chat_complete(
                     model=model, messages=messages, options=options, **kwargs
                 )
+                if getattr(self.providers[name], "simulation", False):
+                    raise ProviderUnavailableError(
+                        "Simulation output cannot complete a real run",
+                        category="simulation",
+                        provider=name,
+                        model=model,
+                    )
                 await breaker.record_success()
                 results[name] = result
             except Exception as exc:
@@ -734,12 +824,12 @@ class MultiLLMManager:
 
         await asyncio.gather(*(_call(name) for name in valid_providers))
         if not results:
-            raise RuntimeError("All consensus providers failed")
-
-        counter = Counter(results.values())
-        most_common, _ = counter.most_common(1)[0]
-        return most_common
-
+            raise ProviderUnavailableError(
+                "All consensus providers failed",
+                category="provider_unavailable",
+                model=model,
+            )
+        return Counter(results.values()).most_common(1)[0][0]
     def provider_status(self) -> dict[str, dict[str, Any]]:
         """Return health, eligibility, quota and breaker state."""
         from backend.llm.circuit_breaker import all_breakers

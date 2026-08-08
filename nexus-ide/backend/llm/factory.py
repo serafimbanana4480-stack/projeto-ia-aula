@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+import os
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +78,12 @@ def _free_only_enabled(settings: Any, overrides: dict[str, Any]) -> bool:
     return _as_bool(value, True)
 
 
+
+def _local_models_ready(value: Any) -> bool:
+    if not isinstance(value, dict) or not value.get("enabled", False):
+        return False
+    models = value.get("models", value.get("installed", []))
+    return bool(models) and bool(value.get("healthy", True))
 def _usable_api_key(value: Any) -> str:
     """Return a real-looking API key, ignoring template placeholder values.
 
@@ -215,9 +221,10 @@ class ResilientLLMProvider:
     message instead of a raw traceback.
     """
 
-    def __init__(self, primary: Any, fallbacks: list[Any]) -> None:
+    def __init__(self, primary: Any, fallbacks: list[Any], *, free_only: bool = False) -> None:
         self.primary = primary
         self.fallbacks = fallbacks
+        self.free_only = free_only
 
     async def aclose(self) -> None:
         await self.primary.aclose()
@@ -226,29 +233,30 @@ class ResilientLLMProvider:
                 await fb.aclose()
 
     async def _try_providers(self, method: str, *args: Any, **kwargs: Any) -> Any:
-        """Try synchronous-style methods (chat_complete, embed, health_check)."""
+        """Try providers without allowing simulation to claim real success."""
         for provider in [self.primary, *self.fallbacks]:
+            if self.free_only and (
+                getattr(provider, "simulation", False)
+                or (
+                    provider.__class__.__name__.lower().startswith("ollama")
+                    and not getattr(provider, "_free_validated", False)
+                )
+            ):
+                continue
             try:
                 return await getattr(provider, method)(*args, **kwargs)
             except Exception as exc:
-                # Embeddings fall back silently to deterministic hashes; don't
-                # pollute logs with provider warnings for optional features.
-                if method == "embed":
-                    logger.debug(
-                        "Provider %s failed for %s: %s",
-                        provider.__class__.__name__,
-                        method,
-                        exc,
-                    )
-                else:
-                    logger.warning(
-                        "Provider %s failed for %s: %s",
-                        provider.__class__.__name__,
-                        method,
-                        exc,
-                    )
+                logger.warning(
+                    "Provider %s failed for %s: %s",
+                    provider.__class__.__name__,
+                    method,
+                    exc,
+                )
                 continue
-        raise RuntimeError(f"All providers failed for {method}")
+        raise ProviderUnavailableError(
+            f"All providers failed for {method}",
+            category="provider_unavailable",
+        )
 
     async def chat_stream(
         self,
@@ -257,6 +265,14 @@ class ResilientLLMProvider:
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         for provider in [self.primary, *self.fallbacks]:
+            if self.free_only and (
+                getattr(provider, "simulation", False)
+                or (
+                    provider.__class__.__name__.lower().startswith("ollama")
+                    and not getattr(provider, "_free_validated", False)
+                )
+            ):
+                continue
             emitted_output = False
             try:
                 async for token in provider.chat_stream(model, messages, **kwargs):
@@ -284,7 +300,10 @@ class ResilientLLMProvider:
                 continue
             finally:
                 kwargs.pop("_stream_retry_attempt", None)
-        raise RuntimeError("All providers failed for chat_stream")
+        raise ProviderUnavailableError(
+            "All providers failed for chat_stream",
+            category="provider_unavailable",
+        )
 
     async def chat_complete(
         self,
@@ -311,6 +330,14 @@ class ResilientLLMProvider:
         set through the resilient fallback chain.
         """
         for provider in [self.primary, *self.fallbacks]:
+            if self.free_only and (
+                getattr(provider, "simulation", False)
+                or (
+                    provider.__class__.__name__.lower().startswith("ollama")
+                    and not getattr(provider, "_free_validated", False)
+                )
+            ):
+                continue
             try:
                 if hasattr(provider, "batch_complete"):
                     return await provider.batch_complete(
@@ -333,8 +360,10 @@ class ResilientLLMProvider:
                     provider.__class__.__name__,
                     exc,
                 )
-                continue
-        raise RuntimeError("All providers failed for batch_complete")
+        raise ProviderUnavailableError(
+            "All providers failed for batch_complete",
+            category="provider_unavailable",
+        )
 
     async def embed(
         self,
@@ -361,16 +390,24 @@ def _build_fallback_chain(
     if free_only:
         ollama_host = _setting_value(settings, overrides, "ollama_host", "")
         ollama_enabled = _as_bool(
-            _setting_value(settings, overrides, "nexus_enable_ollama", False)
+            _setting_value(
+                settings,
+                overrides,
+                "nexus_enable_ollama",
+                getattr(settings, "nexus_enable_ollama", False),
+            )
         )
-        if primary_provider == "ollama" and ollama_host:
-            ollama_enabled = True
+        local_ready = _local_models_ready(overrides.get("local_models"))
+        if local_ready and primary_provider == "ollama" and ollama_host:
             fallback_host = _setting_value(settings, overrides, "ollama_dashboard_host", "")
             if fallback_host and fallback_host != ollama_host:
-                fallbacks.append(OllamaProvider(base_url=fallback_host))
-        elif ollama_enabled and ollama_host:
-            fallbacks.append(OllamaProvider(base_url=ollama_host))
-        fallbacks.extend((DevProvider(), MockProvider()))
+                fallback = OllamaProvider(base_url=fallback_host)
+                fallback._free_validated = True
+                fallbacks.append(fallback)
+        elif local_ready and ollama_enabled and ollama_host:
+            fallback = OllamaProvider(base_url=ollama_host)
+            fallback._free_validated = True
+            fallbacks.append(fallback)
         return fallbacks
 
     if primary_provider is None and primary_is_local is not None:
@@ -512,8 +549,24 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             _setting_value(settings, values, "default_provider", ""),
         )
     ).strip().lower()
+
+    def priority_for(name: str, default: int) -> int:
+        return 0 if name == preferred_provider else default
+
     free_only = _free_only_enabled(settings, values)
-    manager = MultiLLMManager(free_only=free_only)
+    policy_candidates = values.get("policy_candidates", [])
+    local_models = values.get("local_models")
+    validation_ttl = _setting_value(
+        settings, values, "provider_validation_ttl_seconds", 600
+    )
+    max_latency = _setting_value(settings, values, "max_provider_latency_ms", 30_000)
+    manager = MultiLLMManager(
+        free_only=free_only,
+        policy_candidates=policy_candidates if isinstance(policy_candidates, list) else [],
+        local_models=local_models,
+        validation_ttl_seconds=int(validation_ttl),
+        max_latency_ms=int(max_latency),
+    )
 
     # ------------------------------------------------------------------
     # PRIMARY: OpenCode Go (only registered when its API key is set)
@@ -538,10 +591,13 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
     # ------------------------------------------------------------------
     # OPTIONAL: Local Ollama (only if NEXUS_ENABLE_OLLAMA=true)
     # ------------------------------------------------------------------
-    import os
-
     ollama_enabled = _as_bool(
-        values.get("nexus_enable_ollama", os.environ.get("NEXUS_ENABLE_OLLAMA", ""))
+        _setting_value(
+            settings,
+            values,
+            "nexus_enable_ollama",
+            getattr(settings, "nexus_enable_ollama", os.environ.get("NEXUS_ENABLE_OLLAMA", "")),
+        )
     ) or preferred_provider in {"ollama", "local"}
     if ollama_enabled:
         ollama_provider = OllamaProvider(base_url=_setting_value(settings, values, "ollama_host", ""))
@@ -552,7 +608,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
     # ------------------------------------------------------------------
     # OPTIONAL: AirLLM experimental (only if explicitly enabled)
     # ------------------------------------------------------------------
-    if _as_bool(
+    if not free_only and _as_bool(
         _setting_value(settings, values, "airllm_experimental_enabled", False),
         bool(getattr(settings, "airllm_experimental_enabled", False)),
     ):
@@ -568,7 +624,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
     # ------------------------------------------------------------------
     # OPTIONAL: Other cloud providers (only if API key is set)
     # ------------------------------------------------------------------
-    if not free_only and (_setting_value(settings, values, "openai_api_key", "")):
+    if not free_only and (openai_api_key := _usable_api_key(_setting_value(settings, values, "openai_api_key", ""))):
         manager.register_provider(
             "openai",
             OpenAIProvider(
@@ -578,7 +634,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("openai", 3),
         )
 
-    if not free_only and (_setting_value(settings, values, "kimi_api_key", "")):
+    if not free_only and (kimi_api_key := _usable_api_key(_setting_value(settings, values, "kimi_api_key", ""))):
         manager.register_provider(
             "kimi",
             KimiProvider(
@@ -588,7 +644,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("kimi", 3),
         )
 
-    if not free_only and (_setting_value(settings, values, "deepseek_api_key", "")):
+    if not free_only and (deepseek_api_key := _usable_api_key(_setting_value(settings, values, "deepseek_api_key", ""))):
         manager.register_provider(
             "deepseek",
             OpenAIProvider(
@@ -598,7 +654,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("deepseek", 3),
         )
 
-    if not free_only and (_setting_value(settings, values, "groq_api_key", "")):
+    if not free_only and (groq_api_key := _usable_api_key(_setting_value(settings, values, "groq_api_key", ""))):
         manager.register_provider(
             "groq",
             OpenAIProvider(
@@ -608,7 +664,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("groq", 3),
         )
 
-    if not free_only and (_setting_value(settings, values, "anthropic_api_key", "")):
+    if not free_only and (anthropic_api_key := _usable_api_key(_setting_value(settings, values, "anthropic_api_key", ""))):
         from backend.llm.anthropic_provider import AnthropicProvider
 
         manager.register_provider(
@@ -620,24 +676,20 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("anthropic", 3),
         )
 
-    if not free_only and (_setting_value(settings, values, "gemini_api_key", "")):
+    if not free_only and (gemini_api_key := _usable_api_key(_setting_value(settings, values, "gemini_api_key", ""))):
         from backend.llm.gemini_provider import GeminiProvider
 
         manager.register_provider(
             "gemini",
             GeminiProvider(
                 base_url=_setting_value(
-                    settings,
-                    values,
-                    "gemini_base_url",
-                    "https://generativelanguage.googleapis.com/v1beta",
+                    settings, values, "gemini_base_url", "https://generativelanguage.googleapis.com/v1beta"
                 ),
                 api_key=gemini_api_key,
             ),
             priority=priority_for("gemini", 3),
         )
-
-    if openrouter_api_key := _setting_value(settings, values, "openrouter_api_key", ""):
+    if openrouter_api_key := _usable_api_key(_setting_value(settings, values, "openrouter_api_key", "")):
         from backend.llm.openrouter_provider import OpenRouterProvider
 
         manager.register_provider(
@@ -648,6 +700,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
                 ),
                 api_key=openrouter_api_key,
                 free_only=free_only,
+                catalog=policy_candidates if isinstance(policy_candidates, list) else None,
             ),
             priority=priority_for("openrouter", 3),
         )
@@ -708,12 +761,13 @@ def create_llm_client(**overrides: Any) -> Any:
         base_url = _setting_value(settings, effective_overrides, "ollama_host", settings.ollama_host)
         logger.info("Using Ollama provider at %s with fallback chain", base_url)
         primary = OllamaProvider(base_url=base_url)
+        primary._free_validated = _local_models_ready(effective_overrides.get("local_models"))
         fallbacks = _build_fallback_chain(
             settings,
             effective_overrides,
             primary_provider="ollama",
         )
-        return ResilientLLMProvider(primary, fallbacks)
+        return ResilientLLMProvider(primary, fallbacks, free_only=free_only)
 
     if provider == "airllm":
         device = _setting_value(settings, effective_overrides, "local_llm_device", settings.local_llm_device)
@@ -731,7 +785,7 @@ def create_llm_client(**overrides: Any) -> Any:
             effective_overrides,
             primary_provider="airllm",
         )
-        return ResilientLLMProvider(primary, fallbacks)
+        return ResilientLLMProvider(primary, fallbacks, free_only=free_only)
 
     if provider == "dev":
         logger.info("Using DevProvider (zero-cost development mode)")
@@ -869,4 +923,4 @@ def create_llm_client(**overrides: Any) -> Any:
         effective_overrides,
         primary_provider="ollama",
     )
-    return ResilientLLMProvider(primary, fallbacks)
+    return ResilientLLMProvider(primary, fallbacks, free_only=free_only)

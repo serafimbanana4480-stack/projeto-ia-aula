@@ -107,7 +107,7 @@ def _eligibility(candidate: Any) -> ModelEligibility:
         free=free,
         capabilities=caps,
         context_window=int(_value(candidate, "context_window", 0) or 0),
-        quota_available=_value(candidate, "quota_available", True),
+        quota_available=_value(candidate, "quota_available", None),
         latency_ms=_value(candidate, "latency_ms", None),
         validated_at=_value(candidate, "validated_at", None),
         reason=reason,
@@ -136,6 +136,8 @@ def _has_capability(caps: Iterable[str], names: set[str]) -> bool:
 class FreeModelPolicy:
     """Select the first validated free model satisfying a requirement."""
 
+    def __init__(self, *, validation_ttl_seconds: int = 600) -> None:
+        self.validation_ttl_seconds = max(1, int(validation_ttl_seconds))
     def select(
         self,
         requirement: FreeModelRequirement,
@@ -145,12 +147,16 @@ class FreeModelPolicy:
     ) -> ProviderSelection | None:
         breakers = breakers or {}
         normalized = [_eligibility(item) for item in candidates]
-        # Local entries are deliberately a separate input: an Ollama model is
-        # verified by installation/health, not by cloud pricing metadata.
         local = self._local_eligibilities(local_models)
         ordered = [item for item in normalized if item.provider != "ollama"] + local
+        now = time.time()
         for item in ordered:
             if not item.model_id or not item.free:
+                continue
+            if item.provider != "ollama" and (
+                item.validated_at is None
+                or now - item.validated_at > self.validation_ttl_seconds
+            ):
                 continue
             open_, _ = _breaker_open(breakers.get(item.provider))
             if open_:

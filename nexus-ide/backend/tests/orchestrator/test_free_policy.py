@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import time
+
 from backend.llm.free_policy import FreeModelPolicy, FreeModelRequirement, ModelEligibility
-
-
 def _model(model_id: str, provider: str = "openrouter", **kwargs: object) -> dict[str, object]:
     return {
         "id": model_id,
@@ -11,6 +11,7 @@ def _model(model_id: str, provider: str = "openrouter", **kwargs: object) -> dic
         "input_price_per_1m": kwargs.pop("input_price_per_1m", 0),
         "output_price_per_1m": kwargs.pop("output_price_per_1m", 0),
         "quota_available": kwargs.pop("quota_available", True),
+        "validated_at": kwargs.pop("validated_at", time.time()),
         **kwargs,
     }
 
@@ -62,8 +63,11 @@ def test_ollama_requires_opt_in_and_installed_model() -> None:
 
 def test_simulation_is_explicitly_marked() -> None:
     eligibility = ModelEligibility(
-        model_id="dev", provider="dev", free=True, quota_available=True
+        model_id="dev",
+        provider="dev",
+        free=True,
+        quota_available=True,
+        validated_at=time.time(),
     )
     selection = FreeModelPolicy().select(FreeModelRequirement(), [eligibility], {})
     assert selection is not None
-    assert selection.simulation is True

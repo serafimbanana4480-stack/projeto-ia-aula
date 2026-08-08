@@ -37,6 +37,10 @@ class CircuitBreaker:
     _last_failure_time: float = 0.0
     _half_open_calls: int = 0
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    def __post_init__(self) -> None:
+        self.failure_threshold = max(1, int(self.failure_threshold))
+        self.cooldown_seconds = min(60.0, max(0.0, float(self.cooldown_seconds)))
+        self.half_open_max_calls = max(1, int(self.half_open_max_calls))
 
     @property
     def state(self) -> CircuitState:
