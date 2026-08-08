@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.middleware.auth import require_auth
+from backend.config.settings import ProjectContextError, resolve_mission_project
 from backend.core.disk_guard import DiskPressureError
 from backend.orchestrator.mission_control import (
     MISSIONS_DIR,
@@ -40,6 +41,18 @@ router = APIRouter()
 _MAX_LIVE_MISSIONS = 32
 _MISSIONS: OrderedDict[str, MissionTracker] = OrderedDict()
 
+def _resolve_mission_body(body: dict[str, Any]):
+    """Resolve the same strict project context for both mission endpoints."""
+    try:
+        return resolve_mission_project(
+            body.get("project_path", ""),
+            body.get("session_project") or body.get("session_project_path"),
+        )
+    except ProjectContextError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": exc.code, "reason": exc.reason},
+        ) from exc
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Registry
@@ -233,11 +246,11 @@ async def analyze_project(body: dict, _user: dict = Depends(require_auth)) -> di
     objective = (body.get("objective") or "").strip()
     if not objective:
         raise HTTPException(status_code=400, detail="Missing 'objective'")
-
+    project_path = _resolve_mission_body(body)
     tracker = start_mission(
         objective,
         session_id=body.get("session_id", ""),
-        project_path=body.get("project_path", "."),
+        project_path=str(project_path),
         deep_scan=bool(body.get("deep_scan", True)),
     )
     try:
@@ -247,9 +260,12 @@ async def analyze_project(body: dict, _user: dict = Depends(require_auth)) -> di
             status_code=507,
             detail={"error": "disk_pressure", **exc.to_dict()},
         ) from exc
+    mission_data = tracker.mission.to_dict()
+    snapshot = tracker.mission.brief.snapshot.to_dict() if tracker.mission.brief else None
     return {
         "mission_id": tracker.mission.id,
-        "mission": tracker.mission.to_dict(),
+        "mission": mission_data,
+        "snapshot": snapshot,
         "agents_started": 0,
     }
 
@@ -257,7 +273,8 @@ async def analyze_project(body: dict, _user: dict = Depends(require_auth)) -> di
 @router.post("/mission/scan")
 async def scan_project(body: dict, _user: dict = Depends(require_auth)) -> dict:
     """Project intelligence only — the measured snapshot, no plan, no agents."""
-    snapshot = ProjectIntelligence(body.get("project_path", ".")).scan(
+    project_path = _resolve_mission_body(body)
+    snapshot = ProjectIntelligence(project_path).scan(
         deep=bool(body.get("deep", True))
     )
     return {"snapshot": snapshot.to_dict(), "summary": snapshot.summary_lines()}

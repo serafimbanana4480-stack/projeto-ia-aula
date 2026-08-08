@@ -46,14 +46,15 @@ import os
 import re
 import subprocess
 import time
+import tomllib
 import uuid
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
-from backend.core.disk_guard import require_disk_headroom
+from typing import Any, Literal
+from backend.core.disk_guard import measure_disk, require_disk_headroom
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,19 @@ class Finding:
 
 
 @dataclass
+class SnapshotFact:
+    """A snapshot claim with an explicit provenance and validation state."""
+
+    value: Any
+    classification: Literal["measured", "inferred", "unknown", "not_validated"]
+    source: str
+    evidence: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class ProjectSnapshot:
     """What the project actually looked like when the mission started.
 
@@ -168,6 +182,16 @@ class ProjectSnapshot:
     """
 
     root: str = ""
+    absolute_path: str = ""
+    commands: dict[str, list[str]] = field(default_factory=dict)
+    disk: dict[str, Any] | None = None
+    services: list[dict[str, Any]] = field(default_factory=list)
+    recent_errors: list[str] = field(default_factory=list)
+    facts: list[SnapshotFact] = field(default_factory=list)
+    unknowns: list[str] = field(default_factory=list)
+    request_constraints: list[str] = field(default_factory=list)
+    modified_files: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
     scanned_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     file_count: int = 0
     truncated: bool = False
@@ -191,11 +215,14 @@ class ProjectSnapshot:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["findings"] = [f.to_dict() for f in self.findings]
+        d["facts"] = [fact.to_dict() for fact in self.facts]
         return d
 
     def summary_lines(self) -> list[str]:
         """Human-readable initial state — the body of the Mission Brief."""
         out: list[str] = []
+        if self.absolute_path:
+            out.append(f"Projeto: {self.absolute_path}")
         if self.languages:
             top = sorted(self.languages.items(), key=lambda kv: -kv[1])[:4]
             out.append("Linguagens: " + ", ".join(f"{k} ({v})" for k, v in top))
@@ -241,7 +268,6 @@ class ProjectIntelligence:
         ".sql": "SQL", ".css": "CSS", ".scss": "SCSS", ".md": "Markdown",
         ".yaml": "YAML", ".yml": "YAML", ".json": "JSON",
     }
-
     FRAMEWORK_MARKERS = {
         "next.config.mjs": "Next.js", "next.config.js": "Next.js",
         "next.config.ts": "Next.js", "vite.config.ts": "Vite",
@@ -261,17 +287,24 @@ class ProjectIntelligence:
     })
 
     TODO_RE = re.compile(r"\b(TODO|FIXME|HACK|XXX|BUG)\b[: ]", re.IGNORECASE)
-
     def __init__(self, root: str | Path = ".") -> None:
         self.root = Path(root).resolve()
 
-    # ── public ────────────────────────────────────────────────────────────
     def scan(self, *, deep: bool = True) -> ProjectSnapshot:
         started = time.monotonic()
-        snap = ProjectSnapshot(root=str(self.root))
+        snap = ProjectSnapshot(root=str(self.root), absolute_path=str(self.root))
 
         if not self.root.is_dir():
-            snap.notes.append(f"Caminho inexistente ou não é diretório: {self.root}")
+            reason = f"Caminho inexistente ou não é diretório: {self.root}"
+            snap.notes.append(reason)
+            snap.unknowns.extend([
+                "filesystem scan",
+                "git state",
+                "available commands",
+                "disk measurement",
+                "services",
+                "recent errors",
+            ])
             snap.findings.append(
                 Finding(
                     id="scan-root-missing",
@@ -282,13 +315,192 @@ class ProjectIntelligence:
                     evidence=str(self.root),
                 )
             )
+            self._classify_facts(snap)
             return snap
 
         self._walk(snap, deep=deep, started=started)
         self._read_git(snap)
+        self._read_commands(snap)
+        self._measure_disk(snap)
+        self._measure_services(snap)
+        self._read_recent_errors(snap)
         self._derive_findings(snap)
+        self._classify_facts(snap)
         snap.scan_seconds = round(time.monotonic() - started, 3)
         return snap
+
+    def _measure_disk(self, snap: ProjectSnapshot) -> None:
+        try:
+            snap.disk = asdict(measure_disk(self.root))
+        except (OSError, ValueError, RuntimeError) as exc:
+            snap.disk = None
+            snap.unknowns.append("disk measurement")
+            snap.notes.append(f"Medida de disco indisponível: {exc}")
+
+    def _read_commands(self, snap: ProjectSnapshot) -> None:
+        """Discover declared commands without executing any command."""
+        commands: dict[str, list[str]] = {}
+
+        def add(kind: str, value: str) -> None:
+            if value and value not in commands.setdefault(kind, []):
+                commands[kind].append(value)
+
+        for manifest in (self.root / "package.json", self.root / "frontend" / "package.json"):
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError) as exc:
+                snap.unknowns.append(f"commands from {manifest.relative_to(self.root)}")
+                snap.notes.append(f"Manifesto de comandos ilegível: {manifest}: {exc}")
+                continue
+            scripts = data.get("scripts", {})
+            if isinstance(scripts, dict):
+                prefix = "" if manifest.parent == self.root else "cd frontend && "
+                for name in sorted(scripts):
+                    if name.lower() in {"test", "lint", "build", "typecheck", "check", "format"}:
+                        add(name.lower(), f"{prefix}npm run {name}")
+
+        pyproject = self.root / "pyproject.toml"
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            data = {}
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            snap.unknowns.append("Python commands from pyproject.toml")
+            snap.notes.append(f"pyproject.toml ilegível: {exc}")
+            data = {}
+        if snap.test_files and (
+            "pytest" in snap.test_frameworks
+            or pyproject.is_file()
+            or (self.root / "pytest.ini").is_file()
+        ):
+            add("test", "python -m pytest")
+        if data:
+            deps = str(data.get("project", {}).get("optional-dependencies", {})).lower()
+            if "pytest" in deps or (self.root / "pytest.ini").exists():
+                add("test", "python -m pytest")
+            if "ruff" in deps:
+                add("lint", "ruff check .")
+        if (self.root / "pytest.ini").exists() and "python -m pytest" not in commands.get("test", []):
+            add("test", "python -m pytest")
+        for name, command in (("test", "make test"), ("lint", "make lint"), ("build", "make build")):
+            if (self.root / "Makefile").exists():
+                try:
+                    text = (self.root / "Makefile").read_text(encoding="utf-8", errors="ignore")
+                    if re.search(rf"(?m)^{name}\s*:", text):
+                        add(name, command)
+                except OSError:
+                    snap.unknowns.append("commands from Makefile")
+                    break
+        snap.commands = {kind: sorted(values) for kind, values in sorted(commands.items())}
+
+    def _measure_services(self, snap: ProjectSnapshot) -> None:
+        services: list[dict[str, Any]] = []
+        compose = next(
+            (self.root / name for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
+             if (self.root / name).is_file()),
+            None,
+        )
+        if compose is not None:
+            try:
+                text = compose.read_text(encoding="utf-8", errors="ignore")
+                names = re.findall(
+                    r"(?m)^\s{2}([A-Za-z0-9_.-]+):\s*$",
+                    text.split("services:", 1)[-1],
+                )
+                services.extend(
+                    {"name": name, "source": str(compose.relative_to(self.root))}
+                    for name in sorted(set(names))
+                )
+            except OSError as exc:
+                snap.unknowns.append("services from compose")
+                snap.notes.append(f"Compose ilegível: {exc}")
+        for rel in ("backend", "frontend", "src"):
+            folder = self.root / rel
+            has_python = folder.is_dir() and any(folder.glob("*.py"))
+            has_package = (folder / "package.json").is_file()
+            if has_python or has_package:
+                if not any(service["name"] == rel for service in services):
+                    services.append({"name": rel, "source": rel, "kind": "directory"})
+        snap.services = sorted(services, key=lambda service: str(service["name"]))
+
+    def _read_recent_errors(self, snap: ProjectSnapshot) -> None:
+        candidates: list[Path] = []
+        for path in sorted(self.root.glob("**/*.log"))[:20]:
+            if any(part in SKIP_DIRS for part in path.relative_to(self.root).parts):
+                continue
+            candidates.append(path)
+        errors: list[str] = []
+        for path in candidates[:8]:
+            try:
+                with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                    try:
+                        handle.seek(max(0, path.stat().st_size - 64_000))
+                    except OSError:
+                        pass
+                    lines = handle.read(64_000).splitlines()
+            except OSError:
+                snap.unknowns.append(f"recent errors from {path.relative_to(self.root)}")
+                continue
+            for line_number, line in list(enumerate(lines, 1))[-200:]:
+                if re.search(r"\b(error|exception|traceback|fatal|critical)\b", line, re.IGNORECASE):
+                    errors.append(f"{path.relative_to(self.root)}:{line_number}: {line[:300]}")
+        snap.recent_errors = errors[-40:]
+
+    def _classify_facts(self, snap: ProjectSnapshot) -> None:
+        snap.facts = [
+            SnapshotFact(snap.absolute_path, "measured", "Path.resolve", "resolved project directory"),
+            SnapshotFact(snap.languages, "measured", "filesystem walk", f"files={snap.file_count}"),
+            SnapshotFact(
+                snap.commands,
+                "unknown" if any(item.startswith("commands") for item in snap.unknowns)
+                else ("measured" if snap.commands else "unknown"),
+                "manifest parsing",
+                "declared commands only",
+            ),
+            SnapshotFact(
+                snap.disk,
+                "measured" if snap.disk is not None else "unknown",
+                "shutil.disk_usage",
+                "volume containing project",
+            ),
+            SnapshotFact(
+                snap.services,
+                "unknown" if "services" in snap.unknowns else "inferred",
+                "compose/package directory markers",
+                "static service markers; no processes started",
+            ),
+            SnapshotFact(
+                snap.recent_errors,
+                "unknown" if any(item.startswith("recent errors") for item in snap.unknowns)
+                else "measured",
+                "bounded *.log scan",
+                f"matches={len(snap.recent_errors)}",
+            ),
+            SnapshotFact(
+                snap.modified_files,
+                "measured" if snap.git_dirty_files is not None else "unknown",
+                "git status --porcelain",
+                "working tree state",
+            ),
+            SnapshotFact(
+                list(snap.commands),
+                "not_validated",
+                "command catalog",
+                "available commands were discovered but not executed",
+            ),
+        ]
+        if snap.unknowns:
+            snap.facts.append(
+                SnapshotFact(
+                    snap.unknowns,
+                    "unknown",
+                    "probe failures or unavailable context",
+                    "; ".join(snap.unknowns),
+                )
+            )
+
 
     # ── internals ─────────────────────────────────────────────────────────
     def _walk(self, snap: ProjectSnapshot, *, deep: bool, started: float) -> None:
@@ -296,10 +508,11 @@ class ProjectIntelligence:
 
         for dirpath, dirnames, filenames in os.walk(self.root):
             # Prune in place — os.walk honours mutation of ``dirnames``.
-            dirnames[:] = [
+            dirnames[:] = sorted(
                 d for d in dirnames
                 if d not in SKIP_DIRS and not d.startswith(".pytest")
-            ]
+            )
+            filenames = sorted(filenames)
 
             if snap.file_count >= MAX_SCAN_FILES or (time.monotonic() - started) > MAX_SCAN_SECONDS:
                 snap.truncated = True
@@ -420,16 +633,24 @@ class ProjectIntelligence:
                 return out.stdout.strip() if out.returncode == 0 else None
             except (OSError, subprocess.SubprocessError):
                 return None
-
         if not (self.root / ".git").exists():
             snap.notes.append("Sem repositório git — histórico e diff indisponíveis.")
+            snap.unknowns.append("git state")
             return
 
         snap.git_branch = run(["rev-parse", "--abbrev-ref", "HEAD"])
         snap.git_last_commit = run(["log", "-1", "--pretty=%h %s"])
         status = run(["status", "--porcelain"])
-        if status is not None:
-            snap.git_dirty_files = len([ln for ln in status.splitlines() if ln.strip()])
+        if snap.git_branch is None:
+            snap.unknowns.append("git branch")
+        if snap.git_last_commit is None:
+            snap.unknowns.append("git last commit")
+        if status is None:
+            snap.unknowns.append("git modified files")
+        else:
+            rows = [ln for ln in status.splitlines() if ln.strip()]
+            snap.git_dirty_files = len(rows)
+            snap.modified_files = [ln[3:].strip() for ln in rows[:500]]
 
     def _derive_findings(self, snap: ProjectSnapshot) -> None:
         """Turn measurements into ranked findings. Each carries its evidence."""
@@ -495,6 +716,11 @@ class ProjectIntelligence:
                 ),
                 evidence=f"file_count={snap.file_count}, truncated=True",
             ))
+        snap.risks = [
+            finding.title
+            for finding in snap.findings
+            if finding.severity in (Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM)
+        ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1794,6 +2020,6 @@ __all__ = [
     "AgentContract", "ContractState", "Decision", "Finding", "Mission",
     "MissionBrief", "MissionPhase", "MissionPlan", "MissionPlanner",
     "MissionReport", "MissionState", "MissionTracker", "PhasePlan",
-    "ProjectIntelligence", "ProjectSnapshot", "Severity", "TimelineEntry",
-    "VerificationResult", "Wave", "start_mission",
+    "ProjectIntelligence", "ProjectSnapshot", "Severity", "SnapshotFact",
+    "TimelineEntry", "VerificationResult", "Wave", "start_mission",
 ]

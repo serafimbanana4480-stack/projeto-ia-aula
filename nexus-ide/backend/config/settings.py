@@ -575,6 +575,38 @@ def validate_configuration() -> list[str]:
     return errors
 
 
+class ProjectContextError(ValueError):
+    """Raised when a mission has no explicit, usable project context."""
+
+    code = "BLOCKED_PROJECT_CONTEXT"
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"{self.code}: {reason}")
+
+
+def resolve_mission_project(project_path: str, session_project: str | None = None) -> Path:
+    """Resolve a mission target without ever defaulting to :data:`REPO_ROOT`.
+
+    Mission work must be tied to a caller-provided directory.  ``session_project``
+    is accepted as the only fallback for clients whose active project lives in
+    session state; an empty request with no session target is blocked.
+    """
+    requested = (project_path or "").strip()
+    session_target = (session_project or "").strip()
+    candidate = requested if requested not in {"", ".", "./", ".\\"} else session_target
+    if not candidate or candidate in {".", "./", ".\\"}:
+        raise ProjectContextError("an explicit project_path or session_project is required")
+
+    try:
+        resolved = Path(candidate).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ProjectContextError(f"project path cannot be resolved: {candidate}") from exc
+    if not resolved.is_dir():
+        raise ProjectContextError(f"project path is not an existing directory: {resolved}")
+    return resolved
+
+
 def resolve_project_path(project_path: str) -> tuple[str, bool]:
     """Return an effective project path and whether a default was applied.
 
