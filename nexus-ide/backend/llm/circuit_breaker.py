@@ -42,6 +42,17 @@ class CircuitBreaker:
     def state(self) -> CircuitState:
         return self._state
 
+    @property
+    def retry_after(self) -> float | None:
+        """Bounded seconds until an open breaker may probe recovery."""
+        with self._lock:
+            if self._state != CircuitState.OPEN:
+                return None
+            return max(
+                0.0,
+                self.cooldown_seconds - (time.monotonic() - self._last_failure_time),
+            )
+
     async def is_call_permitted(self) -> bool:
         with self._lock:
             if self._state == CircuitState.CLOSED:
@@ -90,7 +101,7 @@ class CircuitBreaker:
                 "name": self.name,
                 "state": self._state.value,
                 "failures": self._failures,
-                "last_failure_time": self._last_failure_time,
+                "retry_after": self.retry_after,
             }
 
 

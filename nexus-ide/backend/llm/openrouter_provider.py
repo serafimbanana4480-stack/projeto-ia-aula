@@ -13,10 +13,9 @@ import logging
 import os
 import re
 import time
-
+from backend.llm.free_policy import ProviderUnavailableError
 from backend.llm.openai_provider import OpenAIProvider
 from backend.observability.advanced_logging import get_structured_logger
-
 logger = logging.getLogger(__name__)
 
 # All agents in one backend process share the same OpenRouter account quota,
@@ -90,8 +89,10 @@ class OpenRouterProvider:
         self,
         base_url: str = DEFAULT_BASE_URL,
         api_key: str | None = None,
+        *,
+        free_only: bool = False,
+        catalog: Any = None,
     ) -> None:
-        # OpenAIProvider appends ``/v1/chat/completions`` itself. Accept both
         # OpenRouter's canonical ``/api`` URL and legacy config values ending
         # in ``/api/v1`` without ever producing ``/v1/v1``.
         normalized_base_url = base_url.rstrip("/")
@@ -105,6 +106,11 @@ class OpenRouterProvider:
         # not protect that shared quota: five different agents could each be
         # "within limit" while collectively causing a 429 storm. Reserve one
         # provider-wide slot every ~3.1s (19.3/min), including fallbacks.
+        self.free_only = free_only
+        self.eligibility_reason = "not checked"
+        self.quota_available = True
+        self.validated_at = None
+        self._catalog = catalog
         try:
             self._min_request_interval = max(
                 0.0,
@@ -144,14 +150,18 @@ class OpenRouterProvider:
             # only serializes every later chat turn behind a known outage. A
             # circuit-open error lets the fallback layer decide immediately.
             if _quota_cooldown_until > now:
-                raise RuntimeError(
-                    "OpenRouter rate-limit cooldown active; refusing to queue an "
-                    f"interactive request for {delay:.0f}s"
+                raise ProviderUnavailableError(
+                    "OpenRouter rate-limit cooldown active; refusing to queue an interactive request",
+                    category="quota",
+                    provider=self.provider_name,
+                    retry_after=delay,
                 )
             if max_wait_seconds is not None and delay > max(0.0, max_wait_seconds):
-                raise RuntimeError(
-                    "OpenRouter dispatch budget exceeded; refusing to queue an "
-                    f"interactive request for {delay:.0f}s"
+                raise ProviderUnavailableError(
+                    "OpenRouter dispatch budget exceeded; refusing to queue an interactive request",
+                    category="quota",
+                    provider=self.provider_name,
+                    retry_after=delay,
                 )
             if delay:
                 logger.info("OpenRouter quota guard waiting %.2fs before dispatch", delay)
@@ -164,17 +174,51 @@ class OpenRouterProvider:
         delay = self._rate_limit_reset_delay(error)
         if delay is None:
             return
-        # A small margin prevents every queued agent from waking on the exact
-        # reset boundary and being rejected by clock skew.
         _quota_cooldown_until = max(
             _quota_cooldown_until,
             time.monotonic() + min(delay + 0.5, 65.0),
         )
+        self.quota_available = False
         logger.warning("OpenRouter account quota exhausted; cooldown %.2fs", delay)
+
+    def validate_model(self, model: str) -> str:
+        """Fail closed before dispatch when free-only execution is enabled."""
+        resolved = self.resolve_model(model)
+        if not self.free_only:
+            return resolved
+        if resolved == "openrouter/free":
+            self.eligibility_reason = "OpenRouter free router alias"
+            return resolved
+        entries = self._catalog
+        if isinstance(entries, dict):
+            entries = entries.get("models", entries.get("data", []))
+        for entry in entries or []:
+            entry_id = getattr(entry, "id", None) or (
+                entry.get("id") if isinstance(entry, dict) else None
+            )
+            if entry_id != resolved:
+                continue
+            input_price = getattr(entry, "input_price_per_1m", None)
+            output_price = getattr(entry, "output_price_per_1m", None)
+            if isinstance(entry, dict):
+                input_price = entry.get("input_price_per_1m", input_price)
+                output_price = entry.get("output_price_per_1m", output_price)
+            if input_price == 0 and output_price == 0:
+                self.validated_at = getattr(entry, "validated_at", None) or (
+                    entry.get("validated_at") if isinstance(entry, dict) else None
+                )
+                self.eligibility_reason = "catalog confirmed zero input/output prices"
+                return resolved
+        self.eligibility_reason = "model is not confirmed free by live catalog"
+        raise ProviderUnavailableError(
+            f"OpenRouter model '{model}' is not confirmed free",
+            category="eligibility",
+            provider=self.provider_name,
+            model=model,
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
-
     def resolve_model(self, model: str) -> str:
         """Resolve a model alias to the OpenRouter model identifier.
 
@@ -192,7 +236,7 @@ class OpenRouterProvider:
         return self.MODEL_ALIASES.get(model, model)
 
     async def chat_stream(self, model, messages, **kwargs):
-        resolved = self.resolve_model(model)
+        resolved = self.validate_model(model)
         dispatch_timeout = kwargs.pop("_nexus_dispatch_timeout", None)
         try:
             dispatch_timeout = float(dispatch_timeout) if dispatch_timeout is not None else None
@@ -216,7 +260,7 @@ class OpenRouterProvider:
             raise
 
     async def chat_complete(self, model, messages, **kwargs):
-        resolved = self.resolve_model(model)
+        resolved = self.validate_model(model)
         dispatch_timeout = kwargs.pop("_nexus_dispatch_timeout", None)
         try:
             dispatch_timeout = float(dispatch_timeout) if dispatch_timeout is not None else None

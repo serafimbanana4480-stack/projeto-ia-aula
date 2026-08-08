@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from backend.llm.circuit_breaker import get_breaker
+from backend.llm.free_policy import ProviderUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -216,12 +217,20 @@ def _compute_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 
 class MultiLLMManager:
     """Manages multiple LLM providers with load balancing, failover, and parallel execution."""
-
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        free_only: bool = False,
+        policy_candidates: list[Any] | None = None,
+        local_models: Any = None,
+    ) -> None:
         self.providers: dict[str, Any] = {}  # name -> provider instance
         self.health_status: dict[str, dict[str, Any]] = {}  # name -> health info
         self._priority: dict[str, int] = {}  # name -> priority (lower = higher)
         self._tracker = get_token_tracker()
+        self.free_only = free_only
+        self.policy_candidates = policy_candidates or []
+        self.local_models = local_models
 
     def register_provider(self, name: str, provider: Any, priority: int = 1) -> None:
         """Register a provider with priority (lower = higher priority)."""
@@ -356,6 +365,50 @@ class MultiLLMManager:
         best, _ = min(candidates, key=score)
         return best
 
+    def _ensure_dispatch_allowed(self, name: str, model: str) -> None:
+        provider = self.providers[name]
+        if getattr(provider, "simulation", False):
+            raise ProviderUnavailableError(
+                f"Provider '{name}' is simulation-only; no real completion was produced",
+                category="simulation",
+                provider=name,
+                model=model,
+            )
+        if not self.free_only:
+            return
+        validator = getattr(provider, "validate_model", None)
+        if callable(validator):
+            validator(model)
+            return
+        if name.lower() in {"ollama", "local"} or getattr(provider, "free", False) is True:
+            return
+        raise ProviderUnavailableError(
+            f"Provider '{name}' has no validated free model for '{model}'",
+            category="eligibility",
+            provider=name,
+            model=model,
+        )
+
+    @staticmethod
+    def _typed_provider_error(
+        exc: BaseException, provider: str, model: str
+    ) -> ProviderUnavailableError:
+        if isinstance(exc, ProviderUnavailableError):
+            return exc
+        text = str(exc).lower()
+        category = "provider_unavailable"
+        if "quota" in text or "rate limit" in text or "429" in text:
+            category = "quota"
+        elif "timeout" in text:
+            category = "timeout"
+        return ProviderUnavailableError(
+            str(exc) or exc.__class__.__name__,
+            category=category,
+            provider=provider,
+            model=model,
+            retry_after=getattr(exc, "retry_after", None),
+        )
+
     async def chat_complete(
         self,
         model: str,
@@ -364,40 +417,64 @@ class MultiLLMManager:
         provider: str | None = None,
         **kwargs: Any,
     ) -> str:
-        """Send chat completion. If provider specified, use it. Otherwise use best available."""
+        """Send a completion through validated, health-aware providers."""
         target = provider or self.get_best_provider()
         if target not in self.providers:
-            raise RuntimeError(f"Provider '{target}' not registered")
-
-        last_error: Exception | None = None
+            raise ProviderUnavailableError(
+                f"Provider '{target}' not registered",
+                category="provider_unavailable",
+                provider=target,
+                model=model,
+            )
+        last_error: ProviderUnavailableError | None = None
         names_to_try = [target] + [n for n in self.providers if n != target]
         for name in names_to_try:
             breaker = get_breaker(name)
             if not await breaker.is_call_permitted():
-                logger.info(
-                    "Circuit breaker: skipping provider '%s' (state=%s)", name, breaker.state
+                last_error = ProviderUnavailableError(
+                    f"Circuit breaker open for '{name}'",
+                    category="breaker_open",
+                    provider=name,
+                    model=model,
+                    retry_after=breaker.retry_after,
                 )
-                last_error = RuntimeError(f"Circuit breaker open for '{name}'")
                 continue
-
+            try:
+                self._ensure_dispatch_allowed(name, model)
+            except ProviderUnavailableError as exc:
+                last_error = exc
+                continue
             started = time.time()
             try:
                 result = await self.providers[name].chat_complete(
                     model=model, messages=messages, options=options, **kwargs
                 )
+                if getattr(self.providers[name], "simulation", False):
+                    raise ProviderUnavailableError(
+                        "Simulation output cannot complete a real run",
+                        category="simulation",
+                        provider=name,
+                        model=model,
+                    )
                 await breaker.record_success()
                 self._update_health(name, True, (time.time() - started) * 1000)
-                # Record token usage
-                self._record_usage(provider_name=name, model=model, messages=messages, output_text=result)
+                self._record_usage(
+                    provider_name=name, model=model, messages=messages, output_text=result
+                )
                 logger.info("Provider '%s' succeeded for chat_complete", name)
                 return result
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 await breaker.record_failure()
-                last_error = exc
+                last_error = self._typed_provider_error(exc, name, model)
                 self._update_health(name, False, (time.time() - started) * 1000)
                 logger.warning("Provider '%s' failed for chat_complete: %s", name, exc)
-
-        raise last_error or RuntimeError("All providers failed for chat_complete")
+        raise last_error or ProviderUnavailableError(
+            "All providers failed for chat_complete",
+            category="provider_unavailable",
+            model=model,
+        )
 
     async def chat_stream(
         self,
@@ -416,9 +493,14 @@ class MultiLLMManager:
         """
         target = provider or self.get_best_provider()
         if target not in self.providers:
-            raise RuntimeError(f"Provider '{target}' not registered")
+            raise ProviderUnavailableError(
+                f"Provider '{target}' not registered",
+                category="provider_unavailable",
+                provider=target,
+                model=model,
+            )
 
-        last_error: Exception | None = None
+        last_error: ProviderUnavailableError | None = None
         names_to_try = [target] + [n for n in self.providers if n != target]
         for name in names_to_try:
             breaker = get_breaker(name)
@@ -426,9 +508,20 @@ class MultiLLMManager:
                 logger.info(
                     "Circuit breaker: skipping provider '%s' (state=%s)", name, breaker.state
                 )
-                last_error = RuntimeError(f"Circuit breaker open for '{name}'")
+                last_error = ProviderUnavailableError(
+                    f"Circuit breaker open for '{name}'",
+                    category="breaker_open",
+                    provider=name,
+                    model=model,
+                    retry_after=breaker.retry_after,
+                )
                 continue
 
+            try:
+                self._ensure_dispatch_allowed(name, model)
+            except ProviderUnavailableError as exc:
+                last_error = exc
+                continue
             started = time.time()
             chunks: list[str] = []
             emitted_output = False
@@ -453,7 +546,7 @@ class MultiLLMManager:
                 raise
             except Exception as exc:
                 await breaker.record_failure()
-                last_error = exc
+                last_error = self._typed_provider_error(exc, name, model)
                 self._update_health(name, False, (time.time() - started) * 1000)
                 logger.warning("Provider '%s' failed for chat_stream: %s", name, exc)
                 if emitted_output:
@@ -461,7 +554,11 @@ class MultiLLMManager:
                     # a second provider's response to it.
                     raise
 
-        raise last_error or RuntimeError("All providers failed for chat_stream")
+        raise last_error or ProviderUnavailableError(
+            "All providers failed for chat_stream",
+            category="provider_unavailable",
+            model=model,
+        )
 
     async def embed(
         self,
@@ -644,7 +741,7 @@ class MultiLLMManager:
         return most_common
 
     def provider_status(self) -> dict[str, dict[str, Any]]:
-        """Return status for all providers, including health info and circuit breaker state."""
+        """Return health, eligibility, quota and breaker state."""
         from backend.llm.circuit_breaker import all_breakers
 
         status: dict[str, dict[str, Any]] = {}
@@ -652,7 +749,17 @@ class MultiLLMManager:
         for name in self.providers:
             health = self.health_status.get(name, {})
             cb = breaker_snapshots.get(name, {})
-            status[name] = {**health, "circuit_breaker": cb}
+            provider = self.providers[name]
+            status[name] = {
+                **health,
+                "free_only": self.free_only,
+                "simulation": bool(getattr(provider, "simulation", False)),
+                "eligibility_reason": getattr(provider, "eligibility_reason", None),
+                "quota_available": getattr(provider, "quota_available", None),
+                "validation_timestamp": getattr(provider, "validated_at", None),
+                "circuit_breaker": cb,
+                "retry_after": cb.get("retry_after"),
+            }
         return status
 
     # ── Usage tracking convenience ─────────────────────────────────

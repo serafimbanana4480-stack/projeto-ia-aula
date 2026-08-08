@@ -184,6 +184,10 @@ class ModelInfo:
     capabilities: list[str] = field(default_factory=list)
     description: str = ""
     deprecated: bool = False
+    quota_available: bool | None = None
+    latency_ms: float | None = None
+    validated_at: float | None = None
+    reason: str = ""
     # Legacy fields the existing UI still reads.
     tier: str = "medium"
     pricing: str = "paid"
@@ -340,19 +344,27 @@ def _color_for(provider: str, model_id: str) -> str:
         return "#5eead4"
     return "#818cf8"
 
-
 def _finalise(info: ModelInfo) -> ModelInfo:
-    """Fill derived fields that depend on the parsed values."""
+    """Fill derived fields while keeping free eligibility fail-closed."""
     if not info.context_window:
         info.context_window = _guess_context(info.id)
     if not info.capabilities:
         info.capabilities = _guess_capabilities(info.id, info.description)
+    if info.quota_available is None:
+        info.quota_available = True
+    # Missing prices are unknown.  An ID suffix alone is never evidence of a
+    # free cloud model; only an exact zero/zero catalog entry qualifies.
     info.free = bool(
-        info.id.endswith(":free")
+        info.provider == "ollama"
         or (info.input_price_per_1m == 0 and info.output_price_per_1m == 0)
-        or info.provider == "ollama"
     )
-    info.pricing = "free" if info.free else "paid"
+    if info.provider == "ollama" and not info.reason:
+        info.reason = "verified installed Ollama model"
+    elif info.free and not info.reason:
+        info.reason = "catalog confirmed zero input/output prices"
+    elif not info.free and not info.reason:
+        info.reason = "prices missing or non-zero"
+    info.pricing = "free" if info.free else "unknown" if info.reason.startswith("stale") else "paid"
     info.tier = _infer_tier(info.id, info.context_window, info.capabilities)
     info.color = _color_for(info.provider, info.id)
     if not info.name:
@@ -362,9 +374,9 @@ def _finalise(info: ModelInfo) -> ModelInfo:
 
 # ─────────────────────── per-provider parsers ───────────────────────
 
-
 def _parse_openrouter(payload: dict[str, Any]) -> list[ModelInfo]:
     out: list[ModelInfo] = []
+    validated_at = time.time()
     for entry in payload.get("data", []):
         if not isinstance(entry, dict) or not entry.get("id"):
             continue
@@ -385,6 +397,9 @@ def _parse_openrouter(payload: dict[str, Any]) -> list[ModelInfo]:
                     output_price_per_1m=_price_to_per_1m(pricing.get("completion")),
                     capabilities=caps,
                     description=str(entry.get("description") or "")[:280],
+                    quota_available=entry.get("quota_available", True),
+                    latency_ms=entry.get("latency_ms"),
+                    validated_at=validated_at,
                 )
             )
         )
@@ -461,6 +476,7 @@ def _parse_gemini(payload: dict[str, Any]) -> list[ModelInfo]:
 
 def _parse_ollama(payload: dict[str, Any]) -> list[ModelInfo]:
     out: list[ModelInfo] = []
+    validated_at = time.time()
     for entry in payload.get("models", []) or []:
         if not isinstance(entry, dict) or not entry.get("name"):
             continue
@@ -468,7 +484,9 @@ def _parse_ollama(payload: dict[str, Any]) -> list[ModelInfo]:
         size_bytes = int(entry.get("size") or 0)
         size_gb = round(size_bytes / 1_073_741_824, 1) if size_bytes else 0
         param_size = details.get("parameter_size") or ""
-        desc = " · ".join(str(p) for p in (param_size, f"{size_gb} GB" if size_gb else "") if p)
+        desc = " · ".join(
+            str(p) for p in (param_size, f"{size_gb} GB" if size_gb else "") if p
+        )
         out.append(
             _finalise(
                 ModelInfo(
@@ -478,6 +496,8 @@ def _parse_ollama(payload: dict[str, Any]) -> list[ModelInfo]:
                     input_price_per_1m=0.0,
                     output_price_per_1m=0.0,
                     description=desc,
+                    validated_at=validated_at,
+                    quota_available=True,
                 )
             )
         )
@@ -590,6 +610,21 @@ def _load_cache() -> dict[str, Any]:
         return {}
 
 
+def _stale_models(raw_models: list[dict[str, Any]]) -> list[ModelInfo]:
+    """Keep stale entries visible, but make them ineligible for selection."""
+    models: list[ModelInfo] = []
+    for raw in raw_models:
+        try:
+            model = ModelInfo(**raw)
+        except TypeError:
+            continue
+        model.free = False
+        model.pricing = "unknown"
+        model.reason = "stale catalog validation"
+        models.append(model)
+    return models
+
+
 def _write_cache(cache: dict[str, Any]) -> None:
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -675,7 +710,7 @@ async def discover_models(provider: str, *, refresh: bool = False) -> DiscoveryR
         # Serve stale data rather than an empty list: a rate limit should not
         # wipe the user's model selector.
         if isinstance(entry, dict) and entry.get("models"):
-            stale = [ModelInfo(**m) for m in entry["models"]]
+            stale = _stale_models(entry["models"])
             return DiscoveryResult(
                 provider,
                 stale,

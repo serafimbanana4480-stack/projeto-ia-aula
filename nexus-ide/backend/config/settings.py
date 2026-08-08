@@ -112,8 +112,16 @@ class Settings(BaseSettings):
     environment: str = Field(default="development")
 
     # LLM Provider selection
-    # Default: OpenRouter (cloud). Ollama is opt-in via NEXUS_ENABLE_OLLAMA=true.
+    # Runtime execution is fail-closed: only validated zero-cost models are
+    # eligible unless an operator explicitly disables this guard.
     llm_provider: str = Field(default="openrouter")
+    free_only: bool = Field(default=True, validation_alias="NEXUS_FREE_ONLY")
+    provider_validation_ttl_seconds: int = Field(
+        default=600, validation_alias="NEXUS_PROVIDER_VALIDATION_TTL_SECONDS", ge=1
+    )
+    max_provider_latency_ms: int = Field(
+        default=30_000, validation_alias="NEXUS_MAX_PROVIDER_LATENCY_MS", ge=0
+    )
 
     # Local LLM (AirLLM experimental)
     local_llm_device: str = Field(default="auto")
@@ -121,9 +129,10 @@ class Settings(BaseSettings):
     local_llm_dashboard_device: str = Field(default="cpu")
     airllm_experimental_enabled: bool = Field(default=False)
 
-    # Ollama
+    # Ollama is opt-in, including for free-only policy selection.
     ollama_host: str = Field(default="http://localhost:11434")
     ollama_dashboard_host: str = Field(default="http://localhost:11434")
+    nexus_enable_ollama: bool = Field(default=False, validation_alias="NEXUS_ENABLE_OLLAMA")
 
     # Cloud API keys (used when llm_provider != "local")
     openai_api_key: str = Field(default="")

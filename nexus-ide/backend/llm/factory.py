@@ -16,6 +16,7 @@ from typing import Any
 from backend.config.settings import get_settings
 from backend.llm.airllm_provider import AirLLMProvider
 from backend.llm.dev_provider import DevProvider
+from backend.llm.free_policy import ProviderUnavailableError
 from backend.llm.multi_llm_manager import MultiLLMManager
 from backend.llm.ollama_provider import OllamaProvider
 
@@ -66,6 +67,15 @@ def _as_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "off", ""}:
             return False
     return default
+def _free_only_enabled(settings: Any, overrides: dict[str, Any]) -> bool:
+    """Resolve the fail-closed runtime policy from settings/UI overrides."""
+    import os
+
+    configured = getattr(settings, "free_only", None)
+    if not isinstance(configured, (bool, str, int, float)):
+        configured = os.environ.get("NEXUS_FREE_ONLY", "false")
+    value = _setting_value(settings, overrides, "free_only", configured)
+    return _as_bool(value, True)
 
 
 def _usable_api_key(value: Any) -> str:
@@ -89,11 +99,11 @@ def _usable_api_key(value: Any) -> str:
         return ""
     return candidate
 
-
 class MockProvider:
-    """Graceful degradation provider that returns helpful messages when all
-    real providers are down.
-    """
+    """Simulation provider; its text is never a real completed run."""
+
+    simulation = True
+    eligibility_reason = "deterministic simulation only"
 
     _last_usage: dict[str, int] = {}
 
@@ -345,8 +355,23 @@ def _build_fallback_chain(
     primary_provider: str | None = None,
     primary_is_local: bool | None = None,
 ) -> list[Any]:
-    """Build a list of fallback providers based on configured API keys."""
+    """Build a policy-filtered list of fallback providers."""
     fallbacks: list[Any] = []
+    free_only = _free_only_enabled(settings, overrides)
+    if free_only:
+        ollama_host = _setting_value(settings, overrides, "ollama_host", "")
+        ollama_enabled = _as_bool(
+            _setting_value(settings, overrides, "nexus_enable_ollama", False)
+        )
+        if primary_provider == "ollama" and ollama_host:
+            ollama_enabled = True
+            fallback_host = _setting_value(settings, overrides, "ollama_dashboard_host", "")
+            if fallback_host and fallback_host != ollama_host:
+                fallbacks.append(OllamaProvider(base_url=fallback_host))
+        elif ollama_enabled and ollama_host:
+            fallbacks.append(OllamaProvider(base_url=ollama_host))
+        fallbacks.extend((DevProvider(), MockProvider()))
+        return fallbacks
 
     if primary_provider is None and primary_is_local is not None:
         primary_provider = "ollama" if primary_is_local else None
@@ -487,11 +512,8 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             _setting_value(settings, values, "default_provider", ""),
         )
     ).strip().lower()
-
-    def priority_for(name: str, default: int) -> int:
-        return 0 if name == preferred_provider else default
-
-    manager = MultiLLMManager()
+    free_only = _free_only_enabled(settings, values)
+    manager = MultiLLMManager(free_only=free_only)
 
     # ------------------------------------------------------------------
     # PRIMARY: OpenCode Go (only registered when its API key is set)
@@ -501,7 +523,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
     opencode_go_api_key = _usable_api_key(
         _setting_value(settings, values, "opencode_go_api_key", "")
     )
-    if opencode_go_api_key:
+    if not free_only and opencode_go_api_key:
         manager.register_provider(
             "opencode_go",
             OpenCodeGoProvider(
@@ -546,7 +568,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
     # ------------------------------------------------------------------
     # OPTIONAL: Other cloud providers (only if API key is set)
     # ------------------------------------------------------------------
-    if openai_api_key := _setting_value(settings, values, "openai_api_key", ""):
+    if not free_only and (_setting_value(settings, values, "openai_api_key", "")):
         manager.register_provider(
             "openai",
             OpenAIProvider(
@@ -556,7 +578,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("openai", 3),
         )
 
-    if kimi_api_key := _setting_value(settings, values, "kimi_api_key", ""):
+    if not free_only and (_setting_value(settings, values, "kimi_api_key", "")):
         manager.register_provider(
             "kimi",
             KimiProvider(
@@ -566,7 +588,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("kimi", 3),
         )
 
-    if deepseek_api_key := _setting_value(settings, values, "deepseek_api_key", ""):
+    if not free_only and (_setting_value(settings, values, "deepseek_api_key", "")):
         manager.register_provider(
             "deepseek",
             OpenAIProvider(
@@ -576,7 +598,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("deepseek", 3),
         )
 
-    if groq_api_key := _setting_value(settings, values, "groq_api_key", ""):
+    if not free_only and (_setting_value(settings, values, "groq_api_key", "")):
         manager.register_provider(
             "groq",
             OpenAIProvider(
@@ -586,7 +608,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("groq", 3),
         )
 
-    if anthropic_api_key := _setting_value(settings, values, "anthropic_api_key", ""):
+    if not free_only and (_setting_value(settings, values, "anthropic_api_key", "")):
         from backend.llm.anthropic_provider import AnthropicProvider
 
         manager.register_provider(
@@ -598,7 +620,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("anthropic", 3),
         )
 
-    if gemini_api_key := _setting_value(settings, values, "gemini_api_key", ""):
+    if not free_only and (_setting_value(settings, values, "gemini_api_key", "")):
         from backend.llm.gemini_provider import GeminiProvider
 
         manager.register_provider(
@@ -621,8 +643,11 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
         manager.register_provider(
             "openrouter",
             OpenRouterProvider(
-                base_url=_setting_value(settings, values, "openrouter_base_url", "https://openrouter.ai/api"),
+                base_url=_setting_value(
+                    settings, values, "openrouter_base_url", "https://openrouter.ai/api"
+                ),
                 api_key=openrouter_api_key,
+                free_only=free_only,
             ),
             priority=priority_for("openrouter", 3),
         )
@@ -652,13 +677,13 @@ def create_llm_client(**overrides: Any) -> Any:
         A provider instance with ``chat_stream()``, ``chat_complete()``, and ``embed()`` methods.
     """
     settings = get_settings()
-
     # Runtime overrides from data/settings.json (set via Settings UI)
     _runtime = _load_runtime_overrides()
     if _runtime:
         logger.info("Loaded %d runtime settings overrides", len(_runtime))
 
     effective_overrides: dict[str, Any] = {**_runtime, **overrides}
+    free_only = _free_only_enabled(settings, effective_overrides)
     multi_llm_enabled = _as_bool(
         _setting_value(settings, effective_overrides, "multi_llm_enabled", settings.multi_llm_enabled),
         bool(settings.multi_llm_enabled),
@@ -673,6 +698,12 @@ def create_llm_client(**overrides: Any) -> Any:
         .strip()
     )
 
+    if free_only and provider not in {"local", "ollama", "openrouter", "dev"}:
+        raise ProviderUnavailableError(
+            f"Configured provider '{provider}' is not validated free",
+            category="eligibility",
+            provider=provider,
+        )
     if provider in ("local", "ollama"):
         base_url = _setting_value(settings, effective_overrides, "ollama_host", settings.ollama_host)
         logger.info("Using Ollama provider at %s with fallback chain", base_url)
@@ -809,6 +840,7 @@ def create_llm_client(**overrides: Any) -> Any:
                 settings, effective_overrides, "openrouter_base_url", "https://openrouter.ai/api"
             ),
             api_key=api_key,
+            free_only=free_only,
         )
 
     if provider == "opencode_go":

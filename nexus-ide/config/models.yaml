@@ -6,8 +6,8 @@ models:
   # MICRO — perguntas triviais (1+1, classificação rápida, routing)
   # Usa um modelo cloud pequeno e barato (MiMo-V2.5) para latência mínima
   micro:
-    id: "mimo-v2.5"
-    fallback_id: "minimax-m3"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 512
     context_window: 131072
@@ -18,8 +18,8 @@ models:
   # FAST — respostas rápidas, formatação leve, sumários
   # Usa o flash tier do DeepSeek (cheap + fast)
   fast:
-    id: "deepseek-v4-flash"
-    fallback_id: "minimax-m3"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 2048
     context_window: 131072
@@ -30,8 +30,8 @@ models:
   # CODER — geração e análise de código
   # Usa o Kimi-K2.7-Code (modelo especializado em código)
   coder:
-    id: "kimi-k2.7-code"
-    fallback_id: "deepseek-v4-flash"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 8192
     context_window: 131072
@@ -42,8 +42,8 @@ models:
   # REASONING — raciocínio multi-step com thinking
   # Usa o GLM-5.2 com thinking_mode (excelente para raciocínio)
   reasoning:
-    id: "glm-5.2"
-    fallback_id: "deepseek-v4-pro"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: true
     max_tokens: 8192
     context_window: 131072
@@ -54,8 +54,8 @@ models:
   # DEEP — análises complexas, arquitetura
   # Usa o DeepSeek-V4-Pro (premium) para respostas da mais alta qualidade
   deep:
-    id: "deepseek-v4-pro"
-    fallback_id: "glm-5.2"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: true
     max_tokens: 16384
     context_window: 131072
@@ -65,80 +65,80 @@ models:
 
   # Aliases retro-compatibilidade (legacy registry)
   q3b-4bit:
-    id: "mimo-v2.5"
-    fallback_id: "minimax-m3"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 4096
     context_window: 131072
     temperature: 0.5
     use_cases: [simple_qa, formatting, summarization]
   coder3b-4bit:
-    id: "kimi-k2.7-code"
-    fallback_id: "deepseek-v4-flash"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 4096
     context_window: 131072
     temperature: 0.2
     use_cases: [code_generation, refactor, debug]
   nano:
-    id: "mimo-v2.5"
-    fallback_id: "minimax-m3"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 512
     context_window: 131072
     temperature: 0.1
     use_cases: [trivial_qa, routing, classification]
   small:
-    id: "deepseek-v4-flash"
-    fallback_id: "minimax-m3"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 4096
     context_window: 131072
     temperature: 0.7
     use_cases: [simple_qa, formatting, summarization]
   medium:
-    id: "kimi-k2.7-code"
-    fallback_id: "deepseek-v4-flash"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 8192
     context_window: 131072
     temperature: 0.3
     use_cases: [code_generation, planning, multi_step_reasoning]
   large:
-    id: "glm-5.2"
-    fallback_id: "deepseek-v4-pro"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: true
     max_tokens: 8192
     context_window: 131072
     temperature: 0.7
     use_cases: [architecture, complex_analysis, large_codebases]
   expert:
-    id: "deepseek-v4-pro"
-    fallback_id: "glm-5.2"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: true
     max_tokens: 16384
     context_window: 131072
     temperature: 0.3
     use_cases: [architecture, complex_analysis, large_codebases]
   vision:
-    id: "minimax-m3"
-    fallback_id: "glm-5.2"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 2048
     context_window: 131072
     temperature: 0.7
     use_cases: [image_analysis, vision_tasks]
   embed:
-    id: "minimax-m3"
-    fallback_id: "deepseek-v4-flash"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 512
     context_window: 131072
     temperature: 0.0
     use_cases: [embedding, retrieval]
   dashboard:
-    id: "minimax-m3"
-    fallback_id: "glm-5.2"
+    id: "openrouter/free"
+    fallback_id: "openrouter/free"
     thinking_mode: false
     max_tokens: 2048
     context_window: 131072
@@ -210,14 +210,7 @@ providers:
     requires_api_key: true
     primary: true
     default_models:
-      - "minimax-m3"
-      - "deepseek-v4-flash"
-      - "deepseek-v4-pro"
-      - "glm-5.2"
-      - "kimi-k2.7-code"
-      - "qwen3.7-max"
-      - "qwen3.7-plus"
-      - "mimo-v2.5"
+      - "openrouter/free"
   # Optional: Ollama (local). Only enabled if NEXUS_ENABLE_OLLAMA=true.
   ollama:
     name: "Ollama (local)"
