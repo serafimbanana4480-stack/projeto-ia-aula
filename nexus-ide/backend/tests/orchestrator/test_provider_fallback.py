@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import pytest
 
 from backend.llm.circuit_breaker import CircuitBreaker, get_breaker, reset_all_breakers
 from backend.llm.free_policy import ProviderUnavailableError
