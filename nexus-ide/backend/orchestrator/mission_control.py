@@ -81,6 +81,7 @@ MAX_SCAN_SECONDS = 12.0
 MIN_CONCURRENT_AGENTS = 3
 MAX_RECENT_LOG_FILES = 8
 MAX_RECENT_LOG_BYTES = 64_000
+MAX_RECENT_LOG_SCAN_FILES = 2_048
 MAX_GIT_PROBE_SECONDS = 2
 MAX_GIT_OUTPUT_BYTES = 128_000
 MAX_CONCURRENT_AGENTS = 6
@@ -449,13 +450,23 @@ class ProjectIntelligence:
 
     def _read_recent_errors(self, snap: ProjectSnapshot) -> None:
         candidates: list[Path] = []
-        for path in self.root.rglob("*.log"):
-            if any(part in SKIP_DIRS for part in path.relative_to(self.root).parts):
-                continue
-            candidates.append(path)
-            if len(candidates) >= MAX_RECENT_LOG_FILES:
+        inspected = 0
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            dirnames[:] = sorted(
+                d for d in dirnames
+                if d not in SKIP_DIRS and not d.startswith(".pytest")
+            )
+            for name in sorted(filenames):
+                inspected += 1
+                if inspected > MAX_RECENT_LOG_SCAN_FILES:
+                    break
+                if not name.endswith(".log"):
+                    continue
+                candidates.append(Path(dirpath) / name)
+                if len(candidates) >= MAX_RECENT_LOG_FILES:
+                    break
+            if inspected > MAX_RECENT_LOG_SCAN_FILES or len(candidates) >= MAX_RECENT_LOG_FILES:
                 break
-        candidates.sort()
         errors: list[str] = []
         for path in candidates:
             try:
