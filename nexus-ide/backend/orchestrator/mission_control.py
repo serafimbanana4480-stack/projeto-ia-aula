@@ -292,7 +292,16 @@ class ProjectIntelligence:
 
     def scan(self, *, deep: bool = True) -> ProjectSnapshot:
         started = time.monotonic()
-        snap = ProjectSnapshot(root=str(self.root), absolute_path=str(self.root))
+        snap = ProjectSnapshot(
+            root=str(self.root),
+            absolute_path=str(self.root),
+            request_constraints=[
+                f"max_scan_files={MAX_SCAN_FILES}",
+                f"max_scan_seconds={MAX_SCAN_SECONDS}",
+                "commands are catalogued but never executed",
+            ],
+            unknowns=["runtime service health", "command outcomes"],
+        )
 
         if not self.root.is_dir():
             reason = f"Caminho inexistente ou não é diretório: {self.root}"

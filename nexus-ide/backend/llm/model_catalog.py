@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -697,6 +698,13 @@ class DiscoveryResult:
 
 async def discover_models(provider: str, *, refresh: bool = False) -> DiscoveryResult:
     """List the models *provider* exposes, using the disk cache when fresh."""
+    if provider == "ollama":
+        enabled = os.environ.get("NEXUS_ENABLE_OLLAMA", "").strip().lower() in {"1", "true", "yes", "on"}
+        if not enabled:
+            configured = getattr(get_settings(), "nexus_enable_ollama", False)
+            enabled = str(configured).strip().lower() in {"1", "true", "yes", "on"} or configured is True
+        if not enabled:
+            return DiscoveryResult(provider, [], error="Ollama discovery is disabled", configured=False)
     if provider not in PROVIDER_SPECS:
         return DiscoveryResult(provider, [], error=f"Provider desconhecido: {provider}", configured=False)
 

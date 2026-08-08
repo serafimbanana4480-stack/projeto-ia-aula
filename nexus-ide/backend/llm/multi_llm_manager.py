@@ -392,9 +392,15 @@ class MultiLLMManager:
         if callable(validator):
             validator(model)
             return
-        if name == self._selected_provider:
-            return
-        if name.lower() in {"ollama", "local"} or getattr(provider, "free", False) is True:
+        policy_names = {
+            str(getattr(item, "provider", None) or (
+                item.get("provider") if isinstance(item, dict) else ""
+            ))
+            for item in self.policy_candidates
+            if bool(getattr(item, "free", False) if not isinstance(item, dict) else item.get("free"))
+            and (getattr(item, "quota_available", True) if not isinstance(item, dict) else item.get("quota_available", True)) is not False
+        }
+        if name in policy_names:
             return
         raise ProviderUnavailableError(
             f"Provider '{name}' has no validated free model for '{model}'",
@@ -822,8 +828,6 @@ class MultiLLMManager:
             ),
         )
         model = self._select_policy_model(model, request_requirement)
-        if self.free_only and self._selected_provider:
-            providers = [self._selected_provider]
         valid_providers = self._attempt_names(providers[0]) if providers else []
         valid_providers = [name for name in valid_providers if name in providers]
         if not valid_providers:
@@ -900,8 +904,6 @@ class MultiLLMManager:
             ),
         )
         model = self._select_policy_model(model, request_requirement)
-        if self.free_only and self._selected_provider:
-            providers = [self._selected_provider]
         valid_providers: list[str] = []
         seen: set[int] = set()
         for name in providers:
