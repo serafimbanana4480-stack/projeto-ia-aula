@@ -217,6 +217,33 @@ class TestChatStream:
         finally:
             await client.aclose()
 
+    async def test_direct_answer_structured_request_drops_stale_partial_history(self) -> None:
+        captured: dict = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["messages"] = json.loads(req.content.decode())["messages"]
+            return make_stream_response(["ok"])
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        client.direct_answer = True
+        try:
+            async for _ in client.chat_stream(
+                "qwen2.5:0.5b",
+                [
+                    ChatMessage(role="user", content="old structured request"),
+                    ChatMessage(role="assistant", content="1. partial old answer"),
+                    ChatMessage(
+                        role="user",
+                        content="Responde em exatamente 4 pontos numerados: current request",
+                    ),
+                ],
+            ):
+                pass
+            assert [message["role"] for message in captured["messages"]] == ["system", "user"]
+            assert captured["messages"][1]["content"].endswith("current request")
+        finally:
+            await client.aclose()
+
     async def test_skips_malformed_lines(self) -> None:
         body = (
             "not json\n"

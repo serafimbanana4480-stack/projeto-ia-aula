@@ -162,6 +162,28 @@ class OllamaClient:
             for message in messages
             if message.get("role") in {"user", "assistant"}
         ]
+        latest_user = next(
+            (message for message in reversed(text_turns) if message.get("role") == "user"),
+            None,
+        )
+        latest_user_content = str((latest_user or {}).get("content", ""))
+        # A structured request must be answered from the current instruction.
+        # Feeding a small local model an earlier, already-truncated assistant
+        # answer made it copy that partial list and stop again. Keep history
+        # for normal follow-ups, but make explicit list/number constraints a
+        # single-turn prompt so the local model can finish the requested shape.
+        if latest_user is not None and re.search(
+            r"(?:(?:exatamente|exactamente)|em\s+(?:exatamente|exactamente))\s+\d+\s+"
+            r"(?:pontos?|passos?|itens?)|"
+            r"\b(?:lista|enumerad[ao]|numerad[ao])\b",
+            latest_user_content,
+            flags=re.IGNORECASE,
+        ):
+            text_turns = [latest_user]
+        else:
+            # Bound noisy chat history in the CPU fallback while retaining
+            # enough recent context for ordinary follow-up questions.
+            text_turns = text_turns[-6:]
         return [direct_system, *text_turns]
 
     @staticmethod
@@ -282,7 +304,8 @@ class OllamaClient:
             )
             structured_request = bool(
                 re.search(
-                    r"(?:exactamente|em)\s+\d+\s+(?:pontos?|passos?|itens?)|"
+                    r"(?:(?:exatamente|exactamente)|em\s+(?:exatamente|exactamente))\s+\d+\s+"
+                    r"(?:pontos?|passos?|itens?)|"
                     r"\b(?:lista|enumerad[ao]|numerad[ao])\b",
                     latest_user,
                     flags=re.IGNORECASE,
