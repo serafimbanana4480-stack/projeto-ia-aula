@@ -245,6 +245,7 @@ class ResilientLLMProvider:
 
     async def _try_providers(self, method: str, *args: Any, **kwargs: Any) -> Any:
         """Try providers without allowing simulation to claim real success."""
+        failures: list[str] = []
         for provider in [self.primary, *self.fallbacks]:
             if self.free_only and (
                 getattr(provider, "simulation", False)
@@ -261,6 +262,8 @@ class ResilientLLMProvider:
                     validator(validation_model)
                 return await getattr(provider, method)(*args, **kwargs)
             except Exception as exc:
+                detail = " ".join(str(exc).split())[:360] or type(exc).__name__
+                failures.append(f"{provider.__class__.__name__}: {detail}")
                 logger.warning(
                     "Provider %s failed for %s: %s",
                     provider.__class__.__name__,
@@ -269,7 +272,7 @@ class ResilientLLMProvider:
                 )
                 continue
         raise ProviderUnavailableError(
-            f"All providers failed for {method}",
+            f"All providers failed for {method}: {' | '.join(failures)}",
             category="provider_unavailable",
         )
 
@@ -279,6 +282,7 @@ class ResilientLLMProvider:
         messages: list[dict[str, str]],
         **kwargs: Any,
     ) -> AsyncIterator[str]:
+        failures: list[str] = []
         for provider in [self.primary, *self.fallbacks]:
             if self.free_only and (
                 getattr(provider, "simulation", False)
@@ -305,6 +309,8 @@ class ResilientLLMProvider:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                detail = " ".join(str(exc).split())[:360] or type(exc).__name__
+                failures.append(f"{provider.__class__.__name__}: {detail}")
                 logger.warning(
                     "Provider %s failed for chat_stream: %s",
                     provider.__class__.__name__,
@@ -319,7 +325,7 @@ class ResilientLLMProvider:
             finally:
                 kwargs.pop("_stream_retry_attempt", None)
         raise ProviderUnavailableError(
-            "All providers failed for chat_stream",
+            f"All providers failed for chat_stream: {' | '.join(failures)}",
             category="provider_unavailable",
         )
 

@@ -18,7 +18,12 @@ DEFAULT_LIMITS = httpx.Limits(
     max_connections=100,
     keepalive_expiry=30.0,
 )
-DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)
+# Local CPU inference can spend tens of seconds before the first useful chunk,
+# especially after a larger model/context is loaded.  A 60s read timeout made
+# a healthy Ollama server look unavailable for complex prompts.  Keep this
+# bounded, but leave enough time for one honest generation; deployments with
+# stricter limits can override it explicitly through the constructor.
+DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=180.0, write=5.0, pool=5.0)
 
 _RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 _RETRYABLE_EXCEPTIONS = (
