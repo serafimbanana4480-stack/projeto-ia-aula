@@ -3236,6 +3236,40 @@ async def _run_pipeline(
     full = "".join(parts)
     if MAX_RESPONSE_LENGTH > 0:
         full = full[:MAX_RESPONSE_LENGTH]
+    if not full.strip():
+        empty_response_error = (
+            "O provider terminou a execução sem conteúdo visível. "
+            "A resposta não foi marcada como concluída; verifica o provider, "
+            "a quota e os eventos de thinking antes de tentar novamente."
+        )
+        await _persist_terminal_error(
+            empty_response_error,
+            agent=str(outcome.used_agent),
+            phase="empty_provider_response",
+            partial_output="".join(thinking_parts),
+            checkpoint={
+                "reason": "empty_visible_response",
+                "thinking_tokens": count_tokens(
+                    "".join(thinking_parts), model_for_counting
+                ),
+                "tools": tool_names[-20:],
+            },
+        )
+        yield _sse(
+            StreamEvent(
+                type="error",
+                agent=outcome.used_agent,
+                content=empty_response_error,
+                data={
+                    "error_category": ErrorCategory.PROVIDER.value,
+                    "run_id": run_context.run_id,
+                    "correlation_id": run_context.correlation_id,
+                    "reason": "empty_visible_response",
+                },
+            )
+        )
+        yield _sse(StreamEvent(type="done", data=run_context.to_dict()))
+        return
     def _message_content(message: Any) -> str:
         if isinstance(message, dict):
             return str(message.get("content") or "")

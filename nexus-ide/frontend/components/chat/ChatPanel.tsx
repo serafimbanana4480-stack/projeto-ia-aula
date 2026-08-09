@@ -372,6 +372,10 @@ export default function ChatPanel({
   const errorLoggedRef = useRef(false);
   const planPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastUserMessageRef = useRef<string>("");
+  // Do not let the startup recovery poll resume the run that this tab has
+  // just submitted. The initial poll can overlap the POST /chat request and
+  // abort the legitimate stream as if it were a stale run.
+  const submittedTurnRef = useRef(false);
 
   // The dashboard can hand off a prompt through the URL. Pre-fill it without
   // replacing anything the user has already started typing.
@@ -383,6 +387,7 @@ export default function ChatPanel({
   // Sync the session list's currentId with local sessionId state
   useEffect(() => {
     if (sessions.currentId && sessions.currentId !== sessionId) {
+      submittedTurnRef.current = false;
       setSessionId(sessions.currentId);
     }
   }, [sessions.currentId]);
@@ -505,6 +510,7 @@ export default function ChatPanel({
   // second run or leaving the user with a stale history-only view.
   useEffect(() => {
     if (!historyLoaded || streaming) return;
+    if (submittedTurnRef.current) return;
     let cancelled = false;
     void getSessionRuns(sessionId)
       .then((runs) => {
@@ -559,6 +565,7 @@ export default function ChatPanel({
       ? `${trimmed}\n\n[${attachedFiles.length} ficheiro(s) anexado(s): ${attachedFiles.map(f => f.name).join(", ")}]`
       : trimmed;
     lastUserMessageRef.current = trimmed;
+    submittedTurnRef.current = true;
     const pendingUserMessage: ChatMessage = {
       id: `u-${pendingUser.length}-${Date.now()}`,
       role: "user",
