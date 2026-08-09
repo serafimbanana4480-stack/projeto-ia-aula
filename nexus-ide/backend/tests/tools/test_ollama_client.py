@@ -142,6 +142,7 @@ class TestChatStream:
             async for _ in client.chat_stream(
                 "qwen2.5:0.5b",
                 [
+                    ChatMessage(role="system", content="base instructions"),
                     ChatMessage(role="user", content="question"),
                     ChatMessage(role="system", content="recovery directive"),
                     ChatMessage(role="tool", content="evidence"),
@@ -149,7 +150,9 @@ class TestChatStream:
             ):
                 pass
             assert [m["role"] for m in captured["messages"]] == ["system", "user", "tool"]
-            assert captured["messages"][0]["content"] == "recovery directive"
+            assert captured["messages"][0]["content"] == (
+                "base instructions\n\nrecovery directive"
+            )
         finally:
             await client.aclose()
 

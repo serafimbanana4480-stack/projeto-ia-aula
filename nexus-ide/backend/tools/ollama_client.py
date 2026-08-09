@@ -120,7 +120,18 @@ class OllamaClient:
         # messages together at the front for local model compatibility.
         system_messages = [m for m in normalized if m.get("role") == "system"]
         other_messages = [m for m in normalized if m.get("role") != "system"]
-        return [*system_messages, *other_messages]
+        if not system_messages:
+            return other_messages
+        # Some Ollama templates accept only one system turn.  Merge recovery
+        # directives and the base prompt instead of sending a second system
+        # role that the template rejects as "not at the beginning".
+        merged_system = dict(system_messages[0])
+        merged_system["content"] = "\n\n".join(
+            str(message.get("content", ""))
+            for message in system_messages
+            if str(message.get("content", ""))
+        )
+        return [merged_system, *other_messages]
 
     @staticmethod
     def _format_attempt_failure(
