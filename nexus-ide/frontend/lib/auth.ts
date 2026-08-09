@@ -235,12 +235,14 @@ export async function refreshAuth(): Promise<boolean> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Dev-only auto-login (disabled in production unless explicitly enabled)
+// Auto-login stays development-only by default. Local test mode can opt in
+// explicitly with NEXT_PUBLIC_AUTO_LOGIN=true, including a production build
+// served on localhost; normal deployments remain protected by default.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const AUTO_LOGIN_ENABLED =
-  process.env.NODE_ENV === "development" &&
-  process.env.NEXT_PUBLIC_AUTO_LOGIN !== "false";
+  process.env.NEXT_PUBLIC_AUTO_LOGIN === "true" ||
+  (process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_AUTO_LOGIN !== "false");
 
 export function isAutoLoginEnabled(): boolean {
   return AUTO_LOGIN_ENABLED;
@@ -248,7 +250,8 @@ export function isAutoLoginEnabled(): boolean {
 
 /**
  * Attempt automatic login with development credentials.
- * Only runs in development mode and when AUTO_LOGIN is not disabled.
+ * Runs only when the explicit local-test opt-in is enabled (or in development
+ * mode with the default enabled), never from arbitrary production settings.
  * Returns true if login succeeded, false otherwise.
  */
 export async function autoLoginDev(): Promise<boolean> {

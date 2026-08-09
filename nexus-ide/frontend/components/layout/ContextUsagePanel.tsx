@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Bot, FolderGit2, Gauge, Network, Wrench } from "lucide-react";
 import { useChatTelemetryStore } from "../../stores/chatTelemetryStore";
+import { useMetricsStore } from "../../stores/metricsStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useToolsStore } from "../../stores/toolsStore";
 import { Sparkline } from "../ui/Sparkline";
@@ -31,9 +32,17 @@ function eventTokenCount(value: unknown): number {
   }
 }
 
+function positiveOrFallback(value: unknown, fallback: unknown): number {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  const fallbackParsed = Number(fallback);
+  return Number.isFinite(fallbackParsed) && fallbackParsed > 0 ? fallbackParsed : 0;
+}
+
 /** A compact, live view of what is consuming the selected model context. */
 export default function ContextUsagePanel({ contextWindow = 0 }: { contextWindow?: number }) {
   const usage = useChatTelemetryStore((state) => state.usage);
+  const metrics = useMetricsStore((state) => state.metrics);
   const events = useChatTelemetryStore((state) => state.events);
   const streaming = useChatTelemetryStore((state) => state.streaming);
   const project = useProjectStore((state) => state.currentProject);
@@ -44,6 +53,11 @@ export default function ContextUsagePanel({ contextWindow = 0 }: { contextWindow
 
   const derived = useMemo(() => {
     const context = usage?.context ?? {};
+    const messageStats = metrics?.message_stats;
+    const fallbackInput = usage?.input_tokens ?? messageStats?.tokens_in_total ?? 0;
+    const fallbackOutput = usage?.output_tokens ?? messageStats?.tokens_out_total ?? 0;
+    const fallbackTotal =
+      usage?.total_tokens ?? Number(messageStats?.tokens_in_total ?? 0) + Number(messageStats?.tokens_out_total ?? 0);
     const capturedTools = events.filter((event) =>
       event.type === "tool_call" || event.type === "tool_result" || event.type === "tool_error",
     );
@@ -56,20 +70,20 @@ export default function ContextUsagePanel({ contextWindow = 0 }: { contextWindow
       .reduce((total, event) => total + eventTokenCount(event.tool_args) + eventTokenCount(event.tool_result), 0);
 
     const segments: Segment[] = [
-      { label: "Prompt", value: Number(context.prompt ?? usage?.input_tokens ?? 0), color: SEGMENT_COLORS[0], icon: Gauge },
+      { label: "Prompt", value: positiveOrFallback(context.prompt, fallbackInput), color: SEGMENT_COLORS[0], icon: Gauge },
       { label: "Histórico", value: Number(context.history ?? 0), color: SEGMENT_COLORS[1], icon: Bot },
       { label: "Raciocínio", value: Number(context.reasoning ?? usage?.reasoning_tokens ?? 0), color: SEGMENT_COLORS[2], icon: Gauge },
-      { label: "Resposta", value: Number(context.response ?? usage?.output_tokens ?? 0), color: SEGMENT_COLORS[3], icon: Bot },
-      { label: "Projeto", value: Number(context.project ?? (project?.path ? Math.ceil(project.path.length / 4) : 0)), color: SEGMENT_COLORS[4], icon: FolderGit2 },
-      { label: "Tools", value: Number(context.tools ?? eventToolTokens), color: SEGMENT_COLORS[5], icon: Wrench },
-      { label: "MCP", value: Number(context.mcp ?? eventMcpTokens), color: SEGMENT_COLORS[6], icon: Network },
+      { label: "Resposta", value: positiveOrFallback(context.response, fallbackOutput), color: SEGMENT_COLORS[3], icon: Bot },
+      { label: "Projeto", value: positiveOrFallback(context.project, project?.path ? Math.ceil(project.path.length / 4) : 0), color: SEGMENT_COLORS[4], icon: FolderGit2 },
+      { label: "Tools", value: positiveOrFallback(context.tools, eventToolTokens), color: SEGMENT_COLORS[5], icon: Wrench },
+      { label: "MCP", value: positiveOrFallback(context.mcp, eventMcpTokens), color: SEGMENT_COLORS[6], icon: Network },
     ];
     const known = segments.reduce((total, item) => total + Math.max(0, item.value), 0);
-    const used = Math.max(Number(context.total ?? usage?.total_tokens ?? known), known);
+    const used = Math.max(positiveOrFallback(context.total, fallbackTotal), known);
     const system = Math.max(0, used - known);
     if (system > 0) segments.push({ label: "Sistema", value: system, color: SEGMENT_COLORS[7], icon: Gauge });
     return { segments, used };
-  }, [events, project?.path, usage]);
+  }, [events, metrics?.message_stats, project?.path, usage]);
 
   // The model selector owns the authoritative window; the compact panel still
   // shows a useful percentage using the provider-reported window when present.

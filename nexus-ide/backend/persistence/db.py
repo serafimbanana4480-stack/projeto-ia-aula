@@ -1431,7 +1431,16 @@ def get_agent_activity(minutes: int = 30) -> list[dict[str, Any]]:
                    COUNT(*) AS tasks_completed,
                    SUM(CASE WHEN COALESCE(te.failed, 0) > 0 THEN 1 ELSE 0 END) AS tasks_failed,
                    AVG(COALESCE(m.latency_ms, 0)) AS avg_latency_ms,
-                   MAX(m.created_at) AS last_activity
+                   MAX(m.created_at) AS last_activity,
+                   MAX(
+                       CASE WHEN EXISTS (
+                           SELECT 1
+                           FROM session_runs sr
+                           WHERE sr.session_id = m.session_id
+                             AND sr.status = 'running'
+                             AND (sr.agent IS NULL OR UPPER(sr.agent) = UPPER(m.tier_used))
+                       ) THEN 1 ELSE 0 END
+                   ) AS has_active_run
             FROM messages m
             LEFT JOIN (
                 SELECT session_id, COUNT(*) AS failed
@@ -1454,13 +1463,14 @@ def get_agent_activity(minutes: int = 30) -> list[dict[str, Any]]:
     activity: list[dict[str, Any]] = []
     for row in rows:
         last = row["last_activity"] or ""
-        status = "idle"
+        # A recent assistant message is recent activity, not proof that work
+        # is still running. Use the durable execution envelope as the source
+        # of truth for the live status shown by the dashboard.
+        status = "active" if int(row["has_active_run"] or 0) else "idle"
         try:
             last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
             if last_dt.tzinfo is None:
                 last_dt = last_dt.replace(tzinfo=UTC)
-            if (now - last_dt).total_seconds() < 120:
-                status = "active"
         except Exception:
             pass
         tasks_failed = int(row["tasks_failed"] or 0)

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { isTokenValid, clearAuth, autoLoginDev, refreshAuth, getRefreshToken } from "../../lib/auth";
+import { isTokenValid, clearAuth, autoLoginDev, isAutoLoginEnabled, refreshAuth, getRefreshToken } from "../../lib/auth";
 
 const PUBLIC_PATHS = ["/login"];
 
@@ -57,7 +57,7 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
       // The login page owns its dev auto-login attempt. Running it here too
       // creates two concurrent authentication requests and can overload the
       // backend while the database pool is still warming up.
-      if (!isPublic && !autoLoginAttempted.current && process.env.NODE_ENV === "development") {
+      if (!isPublic && !autoLoginAttempted.current && isAutoLoginEnabled()) {
         autoLoginAttempted.current = true;
         try {
           await autoLoginDev();
