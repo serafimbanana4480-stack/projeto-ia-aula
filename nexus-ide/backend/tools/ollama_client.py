@@ -245,6 +245,16 @@ class OllamaClient:
             for key, value in (options or {}).items()
             if key not in excluded_options
         }
+        if getattr(self, "direct_answer", False):
+            # The Coder tier can request an 8k output budget.  That is useful
+            # for a tool-capable cloud model but makes a CPU local fallback
+            # spend minutes generating unnecessary text.  Keep this lane
+            # bounded while leaving the normal Ollama client untouched.
+            try:
+                requested_predict = int(ollama_options.get("num_predict", 512))
+            except (TypeError, ValueError):
+                requested_predict = 512
+            ollama_options["num_predict"] = min(max(requested_predict, 128), 512)
         resolved_model = self._resolve_model(model)
         normalized_messages = self._normalize_messages(messages)
         if getattr(self, "direct_answer", False):
