@@ -130,6 +130,29 @@ class TestChatStream:
         finally:
             await client.aclose()
 
+    async def test_moves_late_system_messages_before_other_turns(self) -> None:
+        captured: dict = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["messages"] = json.loads(req.content.decode())["messages"]
+            return make_stream_response(["ok"])
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            async for _ in client.chat_stream(
+                "qwen2.5:0.5b",
+                [
+                    ChatMessage(role="user", content="question"),
+                    ChatMessage(role="system", content="recovery directive"),
+                    ChatMessage(role="tool", content="evidence"),
+                ],
+            ):
+                pass
+            assert [m["role"] for m in captured["messages"]] == ["system", "user", "tool"]
+            assert captured["messages"][0]["content"] == "recovery directive"
+        finally:
+            await client.aclose()
+
     async def test_disables_qwen_thinking_by_default_but_allows_explicit_override(self) -> None:
         captured: list[dict] = []
 

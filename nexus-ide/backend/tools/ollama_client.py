@@ -113,7 +113,14 @@ class OllamaClient:
     def _normalize_messages(
         messages: list[dict[str, str]] | list[ChatMessage],
     ) -> list[dict[str, str]]:
-        return [m.to_dict() if isinstance(m, ChatMessage) else dict(m) for m in messages]
+        normalized = [m.to_dict() if isinstance(m, ChatMessage) else dict(m) for m in messages]
+        # Ollama's chat templates require system instructions before every
+        # user/tool turn.  The agent pipeline may append a later system
+        # directive while recovering a ReAct iteration; keep all system
+        # messages together at the front for local model compatibility.
+        system_messages = [m for m in normalized if m.get("role") == "system"]
+        other_messages = [m for m in normalized if m.get("role") != "system"]
+        return [*system_messages, *other_messages]
 
     @staticmethod
     def _format_attempt_failure(
@@ -237,6 +244,11 @@ class OllamaClient:
                         )
                         if response.status_code == 404:
                             raise OllamaModelError(error_message)
+                        if "System message must be at the beginning" in error_message:
+                            # This is a deterministic payload/template error,
+                            # not a transient server failure. Retrying the same
+                            # invalid message only delays the real diagnosis.
+                            raise OllamaError(error_message)
                         if response.status_code not in _RETRYABLE_STATUS_CODES:
                             raise OllamaError(error_message)
                         retryable_failure = error_message
