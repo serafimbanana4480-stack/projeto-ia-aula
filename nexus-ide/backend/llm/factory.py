@@ -286,7 +286,7 @@ class ResilientLLMProvider:
             try:
                 validator = getattr(provider, "validate_model", None)
                 if self.free_only and callable(validator):
-                    validator(model)
+                    validator(str(getattr(provider, "fallback_model", "") or model))
                 async for token in provider.chat_stream(model, messages, **kwargs):
                     if token:
                         emitted_output = True
