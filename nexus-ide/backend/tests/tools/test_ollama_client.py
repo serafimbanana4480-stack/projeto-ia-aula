@@ -182,6 +182,40 @@ class TestChatStream:
         finally:
             await client.aclose()
 
+    async def test_direct_answer_fallback_removes_tool_instructions(self) -> None:
+        captured: dict = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["messages"] = json.loads(req.content.decode())["messages"]
+            return make_stream_response(["ok"])
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        client.direct_answer = True
+        try:
+            async for _ in client.chat_stream(
+                "qwen2.5:0.5b",
+                [
+                    ChatMessage(
+                        role="system",
+                        content=(
+                            "Base\n\n" + "=" * 60 + "\n"
+                            "TOOL USAGE - You MUST use tools to act.\n"
+                            "list_dir\n\n" + "=" * 60 + "\n"
+                            "MODE-SPECIFIC INSTRUCTIONS\nAnswer briefly"
+                        ),
+                    ),
+                    ChatMessage(role="user", content="question"),
+                ],
+            ):
+                pass
+            system = captured["messages"][0]["content"]
+            assert "TOOL USAGE" not in system
+            assert "list_dir" not in system
+            assert "LOCAL FALLBACK DIRECT ANSWER" in system
+            assert captured["messages"][1]["role"] == "user"
+        finally:
+            await client.aclose()
+
     async def test_skips_malformed_lines(self) -> None:
         body = (
             "not json\n"

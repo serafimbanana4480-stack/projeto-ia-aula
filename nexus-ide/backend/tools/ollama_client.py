@@ -134,6 +134,32 @@ class OllamaClient:
         return [merged_system, *other_messages]
 
     @staticmethod
+    def _prepare_direct_answer_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Turn the local fallback into a visible, tool-free answer lane."""
+        tool_marker = "TOOL USAGE - You MUST use tools to act."
+        mode_marker = "MODE-SPECIFIC INSTRUCTIONS"
+        instruction = (
+            "LOCAL FALLBACK DIRECT ANSWER: respond with the final answer in visible plain text. "
+            "Do not call tools and do not emit JSON, XML tool tags, or private thinking."
+        )
+        prepared: list[dict[str, str]] = []
+        for message in messages:
+            item = dict(message)
+            if item.get("role") == "system":
+                content = str(item.get("content", ""))
+                if tool_marker in content:
+                    before_tools, after_tools = content.split(tool_marker, 1)
+                    mode_start = after_tools.find(mode_marker)
+                    content = before_tools + (
+                        "\n\n" + after_tools[mode_start:]
+                        if mode_start >= 0
+                        else ""
+                    )
+                item["content"] = f"{content}\n\n{instruction}"
+            prepared.append(item)
+        return prepared
+
+    @staticmethod
     def _format_attempt_failure(
         method: str,
         path: str,
@@ -224,9 +250,12 @@ class OllamaClient:
             if key not in excluded_options
         }
         resolved_model = self._resolve_model(model)
+        normalized_messages = self._normalize_messages(messages)
+        if getattr(self, "direct_answer", False):
+            normalized_messages = self._prepare_direct_answer_messages(normalized_messages)
         payload = {
             "model": resolved_model,
-            "messages": self._normalize_messages(messages),
+            "messages": normalized_messages,
             "stream": True,
             "options": ollama_options,
         }

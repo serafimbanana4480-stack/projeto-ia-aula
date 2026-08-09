@@ -472,6 +472,7 @@ def _build_fallback_chain(
             # exact model selected by the user.
             fallback.fallback_model = local_model_id
             fallback.disable_tools = True
+            fallback.direct_answer = True
             fallbacks.append(fallback)
         return fallbacks
 
