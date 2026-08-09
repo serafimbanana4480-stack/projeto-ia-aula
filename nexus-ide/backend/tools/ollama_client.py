@@ -192,10 +192,13 @@ class OllamaClient:
         # providers.  Ollama expects ``num_predict``; forwarding the other
         # names inside its options object is unnecessary and can break strict
         # server versions.
+        excluded_options = {"max_tokens", "max_output_tokens"}
+        if getattr(self, "disable_tools", False):
+            excluded_options.update({"tools", "tool_choice"})
         ollama_options = {
             key: value
             for key, value in (options or {}).items()
-            if key not in {"max_tokens", "max_output_tokens"}
+            if key not in excluded_options
         }
         resolved_model = self._resolve_model(model)
         payload = {

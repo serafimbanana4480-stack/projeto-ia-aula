@@ -465,6 +465,7 @@ def _build_fallback_chain(
             # local fallback object; the primary provider still receives the
             # exact model selected by the user.
             fallback.fallback_model = local_model_id
+            fallback.disable_tools = True
             fallbacks.append(fallback)
         return fallbacks
 
