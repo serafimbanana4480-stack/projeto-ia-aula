@@ -231,11 +231,17 @@ class ResilientLLMProvider:
         self.primary = primary
         self.fallbacks = fallbacks
         self.free_only = free_only
+        self.last_provider: Any | None = None
 
     @property
     def provider_name(self) -> str:
         """Expose the active provider identity through the fallback wrapper."""
         return str(getattr(self.primary, "provider_name", "") or "")
+
+    @property
+    def direct_answer_fallback(self) -> bool:
+        """Whether the last successful call used the tool-free local lane."""
+        return bool(getattr(self.last_provider, "direct_answer", False))
 
     async def aclose(self) -> None:
         await self.primary.aclose()
@@ -305,6 +311,7 @@ class ResilientLLMProvider:
                     raise RuntimeError(
                         f"Provider {provider.__class__.__name__} returned an empty stream"
                     )
+                self.last_provider = provider
                 return
             except asyncio.CancelledError:
                 raise

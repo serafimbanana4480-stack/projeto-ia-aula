@@ -787,6 +787,12 @@ class AgentBase(ABC):
                 await collector.record_request(success=True, latency_ms=latency_ms)
                 if tokens_out > 0:
                     await collector.record_token(model_id, tokens_out)
+                if getattr(request.client, "direct_answer_fallback", False):
+                    # A local fallback deliberately has no tools.  Remember
+                    # this so an analytical answer is not rejected by the
+                    # assisted-mode evidence gate; file mutations still keep
+                    # their separate file-task safeguards below.
+                    request.context["_local_direct_answer"] = True
                 # Record cost tracking
                 if _HAVE_COST_TRACKER:
                     try:
@@ -2167,7 +2173,11 @@ class AgentBase(ABC):
                 evidence_satisfied = self._has_required_tool_evidence(
                     request, successful_tools
                 )
-                if not evidence_satisfied:
+                direct_answer_allowed = bool(
+                    request.context.get("_local_direct_answer")
+                    and not self._is_file_task(request.query)
+                )
+                if not evidence_satisfied and not direct_answer_allowed:
                     logger.warning(
                         "[%s] Autonomous task lacks %s tool evidence | iteration=%d "
                         "| successful_tools=%s | corrections_used=%d/%d",
