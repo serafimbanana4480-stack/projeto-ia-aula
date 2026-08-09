@@ -51,6 +51,7 @@ function providerLabel(provider: string | undefined): string {
     groq: "Groq",
     kimi: "Kimi",
     opencode_go: "OpenCode Go",
+    kilo: "Kilo AI Gateway",
     ollama: "Ollama (local)",
   };
   return labels[provider] ?? provider;
@@ -206,9 +207,15 @@ export default function ModelSelector() {
 
   return (
     <div className="relative" ref={containerRef}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
+        <button
+          type="button"
+          onClick={() => {
+            const nextOpen = !open;
+            setOpen(nextOpen);
+            // A backend restart must not leave the selector stuck on the
+            // first transient connection error until the whole page reloads.
+            if (nextOpen && modelsError) void loadModels(true);
+          }}
         className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-2.5 py-1.5 text-[11px] font-medium text-nexus-muted transition-colors hover:border-nexus-accent/30 hover:text-nexus-text"
         title={activeModel || "Automático — o router escolhe o modelo"}
       >

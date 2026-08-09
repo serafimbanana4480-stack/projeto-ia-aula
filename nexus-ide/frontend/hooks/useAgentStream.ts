@@ -1,7 +1,8 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { StreamEvent } from "../lib/types";
-import { postChat, cancelChatRequest, ApiError } from "../lib/api";
+import { postChat, cancelChatRequest, ApiError, apiUrl } from "../lib/api";
+import { authHeaders } from "../lib/auth";
 import { clearAuth, refreshAuth } from "../lib/auth";
 import { log } from "../lib/log";
 import { useChatTelemetryStore } from "../stores/chatTelemetryStore";
@@ -347,6 +348,52 @@ export function useAgentStream(sessionId: string) {
     [sessionId, consumeStream, cancelServerRequest, resetInactivityWatchdog, clearInactivityWatchdog],
   );
 
+  const resume = useCallback(
+    async (runId: string) => {
+      cancelServerRequest();
+      abortRef.current?.abort();
+      clearInactivityWatchdog();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const requestId = ++activeRequestId.current;
+      setStreaming(true);
+      setError(null);
+      streamTimeoutMsRef.current = 1_800_000;
+      resetInactivityWatchdog();
+
+      try {
+        const response = await fetch(
+          `${apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/events`)}?run_id=${encodeURIComponent(runId)}`,
+          {
+            headers: {
+              ...authHeaders(),
+              Accept: "text/event-stream",
+            },
+            signal: controller.signal,
+          },
+        );
+        if (!response.ok || !response.body) {
+          throw new ApiError(`HTTP ${response.status}: não foi possível recuperar a missão`, response.status);
+        }
+        const reader = response.body.getReader();
+        readerRef.current = reader;
+        await consumeStream(reader, requestId, "", controller.signal);
+      } catch (reason) {
+        if (controller.signal.aborted || requestId !== activeRequestId.current) return;
+        clearInactivityWatchdog();
+        setStreaming(false);
+        setError(reason instanceof Error ? reason.message : "Não foi possível recuperar a missão.");
+      }
+    },
+    [
+      sessionId,
+      cancelServerRequest,
+      clearInactivityWatchdog,
+      resetInactivityWatchdog,
+      consumeStream,
+    ],
+  );
+
   const cancel = useCallback(() => {
     cancelServerRequest();
     abortRef.current?.abort();
@@ -376,5 +423,5 @@ export function useAgentStream(sessionId: string) {
     };
   }, [cancelServerRequest]);
 
-  return { events, streaming, error, send, cancel, reset };
+  return { events, streaming, error, send, resume, cancel, reset };
 }

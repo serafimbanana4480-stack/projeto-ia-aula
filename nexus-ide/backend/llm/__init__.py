@@ -23,6 +23,7 @@ from backend.llm.factory import (
 )
 from backend.llm.gemini_provider import GeminiProvider
 from backend.llm.kimi_provider import KimiProvider
+from backend.llm.kilo_provider import KiloProvider
 from backend.llm.multi_llm_manager import MultiLLMManager
 from backend.llm.ollama_provider import OllamaProvider
 from backend.llm.openai_provider import OpenAIProvider
@@ -43,6 +44,7 @@ __all__ = [
     "GeminiProvider",
     "OpenRouterProvider",
     "KimiProvider",
+    "KiloProvider",
     "ResilientLLMProvider",
     "ChatMessage",
     "CircuitBreaker",

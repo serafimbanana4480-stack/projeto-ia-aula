@@ -152,6 +152,10 @@ class Settings(BaseSettings):
     opencode_go_api_key: str = Field(default="")
     opencode_go_base_url: str = Field(default="https://opencode.ai/zen/go/v1")
 
+    # Kilo AI Gateway (OpenAI-compatible, without /v1 in the path)
+    kilo_api_key: str = Field(default="")
+    kilo_base_url: str = Field(default="https://api.kilo.ai/api/gateway")
+
     # Multi-LLM Manager
     multi_llm_enabled: bool = Field(default=True)
     default_provider: str = Field(default="openrouter")
@@ -557,6 +561,7 @@ def validate_configuration() -> list[str]:
             "anthropic",
             "gemini",
             "openrouter",
+            "kilo",
         }
         if provider in cloud_providers:
             key_attr = f"{provider}_api_key"

@@ -22,7 +22,7 @@ import os
 import re
 import time
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -871,6 +871,72 @@ def _user_facing_preamble(query: str) -> str:
     return "Vou compreender o contexto, executar os passos necessários e confirmar o resultado."
 
 
+def _mission_ui_payload(mission: Any) -> dict[str, Any]:
+    """Return the small, public mission snapshot used by the chat.
+
+    Mission Control deliberately keeps a rich diagnostic model.  That model is
+    useful for the technical drawer and persistence, but sending ``to_dict``
+    as chat text exposed prompts, file lists and internal planning details.
+    The main chat receives only measured counters and short labels; the full
+    object remains available through the persisted run/events endpoints.
+    """
+    snapshot = getattr(getattr(mission, "brief", None), "snapshot", None)
+    plan = getattr(mission, "plan", None)
+    phases: list[dict[str, Any]] = []
+    for phase in getattr(plan, "phases", []) or []:
+        phases.append(
+            {
+                "phase": getattr(getattr(phase, "phase", None), "value", str(getattr(phase, "phase", ""))),
+                "label": getattr(phase, "phase", None).label
+                if getattr(getattr(phase, "phase", None), "label", None)
+                else str(getattr(phase, "phase", "")),
+                "steps": [str(step)[:180] for step in (getattr(phase, "steps", []) or [])[:4]],
+                "skipped": bool(getattr(phase, "skipped", False)),
+            }
+        )
+    findings = getattr(snapshot, "findings", []) if snapshot is not None else []
+    contracts = getattr(mission, "contracts", []) or []
+    tasks_done = sum(
+        1
+        for contract in contracts
+        if getattr(getattr(contract, "state", None), "value", getattr(contract, "state", ""))
+        in {"completed", "skipped"}
+    )
+    return {
+        "mission_id": getattr(mission, "id", ""),
+        "session_id": getattr(mission, "session_id", ""),
+        "objective": str(getattr(mission, "title", "") or "")[:240],
+        "state": getattr(getattr(mission, "state", None), "value", str(getattr(mission, "state", "analysing"))),
+        "phase": getattr(getattr(mission, "phase", None), "value", str(getattr(mission, "phase", "diagnosis"))),
+        "progress": float(getattr(mission, "progress", 0.0) or 0.0),
+        "tasks_total": int(len(contracts)),
+        "tasks_done": tasks_done,
+        "active_agents": int(getattr(mission, "active_agents", 0) or 0),
+        "files_analyzed": int(getattr(snapshot, "file_count", 0) or 0) if snapshot else 0,
+        "tests_total": int(getattr(snapshot, "test_files", 0) or 0) if snapshot else 0,
+        "findings_count": len(findings),
+        "priorities": [str(item)[:180] for item in (getattr(getattr(mission, "brief", None), "priorities", []) or [])[:4]],
+        "phases": phases,
+    }
+
+
+def _mission_heartbeat_payload(mission: Any | None, started_at: float) -> tuple[str, dict[str, Any]]:
+    """Build a truthful user-facing heartbeat from the current mission state."""
+    payload = _mission_ui_payload(mission) if mission is not None else {}
+    elapsed = max(0, int(time.monotonic() - started_at))
+    payload.update({"elapsed_seconds": elapsed, "heartbeat": True})
+    active = int(payload.get("active_agents", 0) or 0)
+    total = int(payload.get("tasks_total", 0) or 0)
+    done = int(payload.get("tasks_done", 0) or 0)
+    if total:
+        message = f"Continuo a executar a missão. {done}/{total} tarefas já terminaram; {active} continuam ativas."
+    elif active:
+        message = f"Continuo a executar a missão. {active} agente(s) continuam ativos."
+    else:
+        message = "Continuo a executar a missão; ainda não há uma nova etapa concluída para reportar."
+    return message, payload
+
+
 async def _stream_autonomous_execution(
     objective: str,
     session_id: str,
@@ -884,6 +950,8 @@ async def _stream_autonomous_execution(
     execution_context: str = "",
     cancellation_event: asyncio.Event | None = None,
     cancellation_request_id: str = "",
+    checkpoint_callback: Callable[..., None] | None = None,
+    run_id: str = "",
 ) -> AsyncIterator[str]:
     """Run execute_autonomous() and convert Engine EventBus events to SSE tokens.
 
@@ -895,6 +963,7 @@ async def _stream_autonomous_execution(
     """
     from backend.orchestrator.engine import OrchestrationEngine
     from backend.orchestrator.events import EventType
+    execution_started_at = time.monotonic()
 
     try:
         autonomous_step_timeout = max(
@@ -964,22 +1033,70 @@ async def _stream_autonomous_execution(
             )
         )
         mission = mission_tracker.mission
-        for block in (
-            mission.brief.render() if mission.brief else "",
-            mission.plan.render() if mission.plan else "",
-        ):
-            if not block:
-                continue
-            yield _sse(
-                StreamEvent(type="token", agent="ARCHITECT", content=f"\n```\n{block}\n```\n")
+        mission_payload = _mission_ui_payload(mission)
+        event_task_id = run_id or mission.id
+        if event_bus is not None:
+            from backend.orchestrator.events import OrchestratorEvent
+
+            await event_bus.publish(
+                OrchestratorEvent(
+                    event_type=EventType.TOKEN,
+                    source="ORCHESTRATOR",
+                    session_id=session_id,
+                    task_id=event_task_id,
+                    content=_user_facing_preamble(objective) + "\n",
+                    data={"public_message": True, "mission_id": mission.id},
+                )
             )
+            await event_bus.publish(
+                OrchestratorEvent(
+                    event_type=EventType.MISSION_BRIEF,
+                    source="ORCHESTRATOR",
+                    session_id=session_id,
+                    task_id=event_task_id,
+                    data=mission_payload,
+                )
+            )
+            if mission.plan:
+                await event_bus.publish(
+                    OrchestratorEvent(
+                        event_type=EventType.MISSION_PLAN,
+                        source="ORCHESTRATOR",
+                        session_id=session_id,
+                        task_id=event_task_id,
+                        data=mission_payload,
+                    )
+                )
+        # The main agent speaks naturally.  The complete brief/plan remains
+        # in structured event data for the technical drawer and recovery API.
+        yield _sse(
+            StreamEvent(
+                type="token",
+                agent="ORCHESTRATOR",
+                content=_user_facing_preamble(objective) + "\n",
+            )
+        )
         yield _sse(
             StreamEvent(
                 type="mission_brief",
                 agent="ORCHESTRATOR",
-                data={"mission_id": mission.id, **mission.to_dict()},
+                data=mission_payload,
             )
         )
+        if mission.plan:
+            yield _sse(
+                StreamEvent(
+                    type="mission_plan",
+                    agent="ORCHESTRATOR",
+                    data={**mission_payload, "phases": mission_payload.get("phases", [])},
+                )
+            )
+        if checkpoint_callback:
+            checkpoint_callback(
+                phase="mission_planned",
+                agent="ORCHESTRATOR",
+                checkpoint=mission_payload,
+            )
     except Exception:
         logger.warning("Mission Control pre-flight failed; continuing", exc_info=True)
 
@@ -1091,10 +1208,11 @@ async def _stream_autonomous_execution(
                     EventType.ORCHESTRATOR_FINISHED,
                     EventType.PLAN_CREATED,
                     EventType.STEP_COMPLETED,
+                    EventType.HEARTBEAT,
                 ):
                     status = (
                         "running"
-                        if et in (EventType.TASK_STARTED, EventType.AGENT_RETRY, EventType.ORCHESTRATOR_STARTED)
+                        if et in (EventType.TASK_STARTED, EventType.AGENT_RETRY, EventType.ORCHESTRATOR_STARTED, EventType.HEARTBEAT)
                         else "error"
                         if et in (EventType.TASK_FAILED, EventType.TASK_CANCELLED, EventType.AGENT_FAILED)
                         else "success"
@@ -1105,7 +1223,7 @@ async def _stream_autonomous_execution(
                         else "agent"
                         if et in (EventType.AGENT_FAILED, EventType.AGENT_RETRY)
                         else "status"
-                        if et in (EventType.ORCHESTRATOR_STARTED, EventType.ORCHESTRATOR_FINISHED)
+                        if et in (EventType.ORCHESTRATOR_STARTED, EventType.ORCHESTRATOR_FINISHED, EventType.HEARTBEAT)
                         else "verification"
                         if et == EventType.STEP_COMPLETED
                         else "task"
@@ -1172,6 +1290,9 @@ async def _stream_autonomous_execution(
             logger.warning("Event bridge ended: %s", exc, exc_info=True)
 
     _cancelled: bool = False
+    last_output_at = time.monotonic()
+    last_output_wall = datetime.now(UTC)
+    next_heartbeat_at = last_output_at + 15.0
     try:
         # Start the subscription before the engine.  A task for ``anext`` is
         # deliberately kept alive across idle periods: using
@@ -1225,11 +1346,67 @@ async def _stream_autonomous_execution(
 
             if next_event_task is not None and next_event_task in done:
                 try:
-                    yield next_event_task.result()
+                    frame = next_event_task.result()
+                    last_output_at = time.monotonic()
+                    last_output_wall = datetime.now(UTC)
+                    next_heartbeat_at = last_output_at + 15.0
+                    yield frame
+                    if checkpoint_callback:
+                        checkpoint_callback(
+                            phase="event",
+                            agent="ORCHESTRATOR",
+                            checkpoint={"last_event_at": datetime.now(UTC).isoformat()},
+                        )
                 except StopAsyncIteration:
                     next_event_task = None
                 else:
                     next_event_task = asyncio.create_task(anext(event_stream))
+
+            if (
+                next_event_task is not None
+                and time.monotonic() >= next_heartbeat_at
+                and not engine_result_future.done()
+            ):
+                heartbeat_text, heartbeat_data = _mission_heartbeat_payload(
+                    mission_tracker.mission if mission_tracker is not None else None,
+                    started_at=execution_started_at,
+                )
+                heartbeat_data["last_event_at"] = last_output_wall.isoformat()
+                heartbeat_event_data = {
+                    **heartbeat_data,
+                    "event": "heartbeat",
+                    "kind": "status",
+                    "status": "running",
+                }
+                if event_bus is not None:
+                    from backend.orchestrator.events import OrchestratorEvent
+
+                    await event_bus.publish(
+                        OrchestratorEvent(
+                            event_type=EventType.HEARTBEAT,
+                            source="ORCHESTRATOR",
+                            session_id=session_id,
+                            task_id=run_id,
+                            content=heartbeat_text,
+                            data=heartbeat_event_data,
+                        )
+                    )
+                else:
+                    yield _sse(
+                        StreamEvent(
+                            type="progress",
+                            agent="ORCHESTRATOR",
+                            content=heartbeat_text,
+                            data=heartbeat_event_data,
+                        )
+                    )
+                if checkpoint_callback:
+                    checkpoint_callback(
+                        phase="heartbeat",
+                        agent="ORCHESTRATOR",
+                        checkpoint=heartbeat_data,
+                    )
+                next_heartbeat_at = time.monotonic() + 15.0
 
             if engine_result_future in done:
                 result = engine_result_future.result()
@@ -1505,6 +1682,7 @@ async def chat(
         """
         pipeline = _run_pipeline(req, llm_client, registry, context, event_bus, request)
         next_chunk: asyncio.Task[str] | None = asyncio.create_task(anext(pipeline))
+        terminal_done_seen = False
         try:
             while next_chunk is not None:
                 ready, _ = await asyncio.wait({next_chunk}, timeout=15.0)
@@ -1514,8 +1692,31 @@ async def chat(
                     yield ": nexus-heartbeat\n\n"
                     continue
                 try:
-                    yield next_chunk.result()
+                    frame = next_chunk.result()
+                    if frame.startswith("data:"):
+                        try:
+                            payload = json.loads(frame.split("data:", 1)[1].strip())
+                            terminal_done_seen = payload.get("type") == "done"
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            pass
+                    yield frame
                 except StopAsyncIteration:
+                    if not terminal_done_seen:
+                        logger.error(
+                            "Chat pipeline ended without terminal done event | session=%s",
+                            req.session_id,
+                        )
+                        yield _sse(
+                            StreamEvent(
+                                type="error",
+                                content=(
+                                    "A execução terminou sem uma resposta final. "
+                                    "O estado foi marcado como incompleto; tenta novamente."
+                                ),
+                                data={"error_category": ErrorCategory.INTERNAL.value},
+                            )
+                        )
+                        yield _sse(StreamEvent(type="done"))
                     break
                 next_chunk = asyncio.create_task(anext(pipeline))
         except asyncio.CancelledError:
@@ -1645,6 +1846,62 @@ async def _run_pipeline(
         except Exception:
             logger.debug("Checkpoint write failed for %s", run_id, exc_info=True)
 
+    terminal_error_persisted = False
+
+    async def _persist_terminal_error(
+        message: str,
+        *,
+        agent: str | None = None,
+        error_category: str = ErrorCategory.PROVIDER.value,
+        phase: str = "provider_error",
+        partial_output: str = "",
+        checkpoint: dict[str, Any] | None = None,
+    ) -> None:
+        """Keep terminal failures visible after the SSE stream is reloaded.
+
+        The stream can legitimately emit an ``error`` followed by ``done``.
+        Persisting only the run checkpoint in that path meant that
+        ``ChatPanel.loadHistory`` erased the in-memory error and left the user
+        with a missing assistant message.
+        """
+        nonlocal terminal_error_persisted
+        if terminal_error_persisted:
+            return
+        terminal_error_persisted = True
+        error_text = message.strip() or "O pedido falhou sem uma mensagem técnica."
+        now = datetime.now(UTC).isoformat()
+        try:
+            await context.append_message(
+                req.session_id,
+                ChatMessage(role="user", content=req.message, timestamp=now),
+            )
+            await context.append_message(
+                req.session_id,
+                ChatMessage(
+                    role="assistant",
+                    content=f"⚠️ {error_text}",
+                    timestamp=now,
+                ),
+            )
+            add_message(
+                req.session_id,
+                "assistant",
+                f"⚠️ {error_text}",
+                tier_used=agent,
+            )
+        except Exception:
+            logger.debug("Failed to persist terminal chat error", exc_info=True)
+        _checkpoint(
+            status="failed",
+            phase=phase,
+            agent=agent,
+            partial_output=partial_output,
+            error=error_text,
+            error_category=error_category,
+            checkpoint=checkpoint,
+            finished=True,
+        )
+
     if not re.match(r"^[a-zA-Z0-9_-]{1,128}$", req.session_id):
         yield _sse(
             StreamEvent(
@@ -1734,6 +1991,7 @@ async def _run_pipeline(
             "gemini",
             "openrouter",
             "opencode_go",
+            "kilo",
         }
     )
     req_provider = getattr(req, "provider", "") or ""
@@ -2137,6 +2395,12 @@ async def _run_pipeline(
                     execution_context=mode_addon,
                     cancellation_event=inner_cancellation_event,
                     cancellation_request_id=inner_cancellation_request_id,
+                    checkpoint_callback=lambda *, phase, agent, checkpoint: _checkpoint(
+                        phase=phase,
+                        agent=agent,
+                        checkpoint=checkpoint,
+                    ),
+                    run_id=run_id,
                 ):
                     yield chunk
                 outcome_status = str(autonomous_outcome["status"])
@@ -2771,26 +3035,11 @@ async def _run_pipeline(
                 },
             )
         )
-        try:
-            err_now = datetime.now(UTC).isoformat()
-            await context.append_message(
-                req.session_id, ChatMessage(role="user", content=req.message, timestamp=err_now)
-            )
-            await context.append_message(
-                req.session_id,
-                ChatMessage(role="assistant", content=f"⚠ {err_text}", timestamp=err_now),
-            )
-            add_message(req.session_id, "assistant", f"⚠ {err_text}")
-            _checkpoint(
-                status="failed",
-                phase="provider_error",
-                error=err_text,
-                error_category=ErrorCategory.PROVIDER.value,
-                checkpoint={"reason": "provider_unavailable"},
-                finished=True,
-            )
-        except Exception as persist_exc:  # pragma: no cover
-            logger.debug("Failed to persist error to DB: %s", persist_exc)
+        await _persist_terminal_error(
+            err_text,
+            agent=str(outcome.used_agent),
+            checkpoint={"reason": "provider_unavailable"},
+        )
         return
 
     if outcome.used_agent != decision.primary_agent:
@@ -2864,15 +3113,11 @@ async def _run_pipeline(
                         }
                     )
                     yield _sse(error_event)
-                    _checkpoint(
-                        status="failed",
-                        phase="provider_error",
+                    await _persist_terminal_error(
+                        evt.content or "Provider stream error",
                         agent=str(outcome.used_agent),
                         partial_output="".join(parts),
-                        error=evt.content or "Provider stream error",
-                        error_category=ErrorCategory.PROVIDER.value,
                         checkpoint={"last_event": evt.type, "tools": tool_names[-20:]},
-                        finished=True,
                     )
                     yield _sse(StreamEvent(type="done", data=run_context.to_dict()))
                     return

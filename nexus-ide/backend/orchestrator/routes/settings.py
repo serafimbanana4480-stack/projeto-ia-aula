@@ -129,6 +129,11 @@ async def update_settings(
             raise HTTPException(status_code=400, detail=f"Invalid type for key '{key}'")
         if not key.strip():
             continue
+        # Settings UI forms intentionally submit empty password fields for
+        # providers that were not edited. Do not erase an existing secret just
+        # because another provider was saved.
+        if key.endswith("_api_key") and not value.strip() and current.get(key):
+            continue
         current[key.strip()] = value
 
     from backend.llm.model_catalog import invalidate_cache

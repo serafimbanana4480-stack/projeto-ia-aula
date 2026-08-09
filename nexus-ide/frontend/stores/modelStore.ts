@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { getModelCatalog, type ProviderCatalogStatus } from "../lib/api";
+import { ApiError, getModelCatalog, type ProviderCatalogStatus } from "../lib/api";
 
 export interface Model {
   id: string;
@@ -45,6 +45,16 @@ interface ModelStore {
 
 /** Empty string = let the smart router pick. */
 const AUTO_MODEL = "";
+const CATALOG_RETRY_DELAYS_MS = [400, 1000];
+
+function isRetryableCatalogError(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return true;
+  return error.status === 0 || error.status === 408 || error.status === 429 || error.status >= 500;
+}
+
+function waitForCatalogRetry(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
 
 export const useModelStore = create<ModelStore>((set, get) => ({
   // Default to auto-routing instead of pinning a hardcoded id that may not
@@ -67,7 +77,22 @@ export const useModelStore = create<ModelStore>((set, get) => ({
     if (get().modelsLoading || (!refresh && get().modelsLoaded)) return;
     set({ modelsLoading: true, modelsError: null });
     try {
-      const catalog = await getModelCatalog(refresh);
+      let catalog: Awaited<ReturnType<typeof getModelCatalog>> | undefined;
+      let lastError: unknown;
+
+      for (let attempt = 0; attempt <= CATALOG_RETRY_DELAYS_MS.length; attempt += 1) {
+        try {
+          catalog = await getModelCatalog(refresh);
+          break;
+        } catch (error) {
+          lastError = error;
+          const delay = CATALOG_RETRY_DELAYS_MS[attempt];
+          if (delay === undefined || !isRetryableCatalogError(error)) throw error;
+          await waitForCatalogRetry(delay);
+        }
+      }
+
+      if (!catalog) throw lastError ?? new Error("Catálogo de modelos indisponível");
       const mapped: Model[] = (catalog.models ?? []).map((m) => ({
         id: m.id,
         name: m.name || m.id,

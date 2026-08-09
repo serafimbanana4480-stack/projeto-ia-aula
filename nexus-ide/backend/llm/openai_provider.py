@@ -43,12 +43,23 @@ def _normalize_api_root(base_url: str) -> str:
 class OpenAIProvider:
     """Provider for OpenAI-compatible APIs (DeepSeek, Groq, OpenAI, etc.)."""
 
-    def __init__(self, base_url: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None = None,
+        *,
+        api_prefix: str = "/v1",
+    ) -> None:
         self._base_url = _normalize_api_root(base_url)
         self._api_key = api_key
+        self._api_prefix = "/" + api_prefix.strip("/") if api_prefix.strip("/") else ""
         self._client = self._new_client()
         # Internal — set after each successful chat_complete / chat_stream
         self._last_usage: dict[str, int] = {}
+
+    def _api_path(self, path: str) -> str:
+        suffix = path.lstrip("/")
+        return f"{self._api_prefix}/{suffix}" if self._api_prefix else f"/{suffix}"
 
     def _new_client(self) -> httpx.AsyncClient:
         """Create the HTTP transport used by this provider."""
@@ -100,7 +111,7 @@ class OpenAIProvider:
         """Check the OpenAI-compatible models endpoint without raising."""
         try:
             self._ensure_open()
-            response = await self._client.get("/v1/models", timeout=timeout)
+            response = await self._client.get(self._api_path("models"), timeout=timeout)
             return response.status_code == 200
         except Exception:
             return False
@@ -145,7 +156,7 @@ class OpenAIProvider:
         # OpenAI streams ``function.name`` once and ``function.arguments`` in
         # arbitrary-sized chunks, so both are concatenated as they arrive.
         tool_calls_acc: dict[int, dict[str, str]] = {}
-        async with self._client.stream("POST", "/v1/chat/completions", json=payload) as resp:
+        async with self._client.stream("POST", self._api_path("chat/completions"), json=payload) as resp:
             if resp.status_code != 200:
                 text = await resp.aread()
                 raise RuntimeError(f"OpenAI API error {resp.status_code}: {text.decode()}")
@@ -242,7 +253,7 @@ class OpenAIProvider:
                 if options.get(key):
                     payload[key] = options[key]
 
-        resp = await self._client.post("/v1/chat/completions", json=payload)
+        resp = await self._client.post(self._api_path("chat/completions"), json=payload)
         if resp.status_code != 200:
             raise RuntimeError(f"OpenAI API error {resp.status_code}: {resp.text}")
 
@@ -282,7 +293,7 @@ class OpenAIProvider:
         """Get embeddings for texts."""
         self._ensure_open()
         resp = await self._client.post(
-            "/v1/embeddings",
+            self._api_path("embeddings"),
             json={"model": model, "input": texts},
         )
         if resp.status_code != 200:

@@ -104,6 +104,7 @@ from backend.orchestrator.routes.workers import router as workers_router
 from backend.orchestrator.routes.workspace import router as workspace_router
 from backend.swarm.api.routes import router as swarm_router
 from backend.core.disk_guard import (
+    DiskPressureError,
     WorkerOwnershipGuard,
     disk_pressure_status,
     require_disk_headroom,
@@ -118,6 +119,22 @@ def _runtime_root() -> str:
 
 def _disk_pressure_payload() -> dict[str, Any]:
     return disk_pressure_status(_runtime_root())
+
+
+def _allow_degraded_startup() -> bool:
+    """Allow an explicit local-dev startup while retaining operation guards.
+
+    Disk pressure must remain visible and autonomous/file-writing operations
+    still enforce their own ``require_disk_headroom`` checks.  This narrow
+    opt-in only keeps health, authentication, and read-only UI available so a
+    developer can recover the workspace and free space without a dead login.
+    """
+    return os.environ.get("NEXUS_ALLOW_DEGRADED_STARTUP", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _claim_worker(name: str, owned: set[str]) -> bool:
@@ -274,8 +291,19 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
         extra={"recovered_count": len(recovered_runs)},
     )
     # Check the reserve before provider construction or any background start.
-    disk_snapshot = require_disk_headroom(_runtime_root())
-    app.state.disk_pressure = disk_snapshot.to_dict()
+    try:
+        disk_snapshot = require_disk_headroom(_runtime_root())
+        app.state.disk_pressure = disk_snapshot.to_dict()
+    except DiskPressureError as exc:
+        if not _allow_degraded_startup():
+            raise
+        app.state.disk_pressure = exc.to_dict()
+        logger.warning(
+            "Starting in explicit degraded mode under disk pressure; "
+            "write/autonomous guards remain active. free_percent=%.2f threshold=%.2f",
+            exc.snapshot.free_percent,
+            exc.threshold_percent,
+        )
 
 
     # Background services are individually opt-out via NEXUS_ENABLE_<SERVICE>=false.
@@ -334,6 +362,11 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     registry = get_registry(app)
     app.state.context = ContextStore()
     app.state.event_bus = OrchestrationEventBus()
+    # Mission events must survive an SSE disconnect/refresh.  The in-memory
+    # bus remains the live transport; EventStore is the durable replay layer.
+    from backend.orchestrator.events import get_event_store
+
+    app.state.event_bus.attach_store(get_event_store())
     app.state.workflow_tracker = init_workflow_tracker()
 
     from backend.core.agent_lifecycle import AgentLifecycleManager

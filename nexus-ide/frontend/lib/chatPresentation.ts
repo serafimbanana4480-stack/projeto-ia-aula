@@ -71,6 +71,10 @@ function stripBareToolPayloads(value: string): string {
 export function sanitizeAssistantContent(value: string): string {
   const withoutDelimitedTransport = value
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    // Legacy missions could persist a complete Mission Brief as a fenced
+    // assistant token.  Keep old conversations readable after the backend
+    // switches to structured mission events.
+    .replace(/```(?:markdown|text)?\s*MISSION BRIEF[\s\S]*?```/gi, "")
     .replace(/```tool\b[\s\S]*?(?:```|$)/gi, "")
     .replace(/<tool_call\b[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi, "")
     .replace(/<tool\b[^>]*>[\s\S]*?(?:<\/tool>|$)/gi, "")
@@ -83,6 +87,60 @@ export function sanitizeAssistantContent(value: string): string {
     .replace(/^\s*tool\s*$/gim, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+export function activityFromMissionEvent(
+  event: StreamEvent,
+  index: number,
+): ActivityItem {
+  const data = event.data ?? {};
+  const type = event.type;
+  const phaseCount = Array.isArray(data.phases) ? data.phases.length : 0;
+  const files = Number(data.files_analyzed ?? 0);
+  const tests = Number(data.tests_total ?? 0);
+  const findings = Number(data.findings_count ?? 0);
+  let title = "Atualização da missão";
+  let kind: ActivityItem["kind"] = "status";
+  let status: ActivityItem["status"] = "running";
+
+  if (type === "mission_brief") {
+    title = "Análise inicial concluída";
+    kind = "plan";
+  } else if (type === "mission_plan") {
+    title = "Plano de execução preparado";
+    kind = "plan";
+  } else if (type === "mission_completed") {
+    title = "Missão concluída";
+    status = "success";
+  } else if (type === "mission_verification") {
+    title = "Validação em curso";
+    kind = "verification";
+  } else if (type === "mission_agent") {
+    title = "Agente especializado atualizado";
+    kind = "agent";
+  } else if (type === "progress" && data.event === "heartbeat") {
+    title = "Ainda a trabalhar";
+  }
+
+  const detailParts: string[] = [];
+  if (files > 0) detailParts.push(`${files} ficheiros analisados`);
+  if (tests > 0) detailParts.push(`${tests} testes identificados`);
+  if (findings > 0) detailParts.push(`${findings} achados registados`);
+  if (phaseCount > 0) detailParts.push(`${phaseCount} fases`);
+  if (typeof data.progress === "number") {
+    detailParts.push(`${Math.round(data.progress * 100)}% concluído`);
+  }
+
+  return {
+    id: String(data.event_id ?? data.mission_id ?? `mission-${index}-${event.timestamp}`),
+    kind,
+    title,
+    detail: event.content?.trim() || detailParts.join(" · ") || undefined,
+    agent: event.agent as AgentName | undefined,
+    status,
+    timestamp: event.timestamp,
+    data,
+  };
 }
 
 export function summarizeApproachContent(value: string): string {

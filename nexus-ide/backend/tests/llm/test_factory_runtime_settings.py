@@ -111,3 +111,20 @@ async def test_single_provider_ollama_selection_is_an_explicit_opt_in(
     assert client.primary.__class__.__name__ == "OllamaProvider"
     assert client.provider_name == "ollama"
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_kilo_selection_builds_kilo_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    settings.multi_llm_enabled = False
+    settings.llm_provider = "kilo"
+    settings.free_only = True
+    monkeypatch.setattr(factory, "get_settings", lambda: settings)
+    monkeypatch.setattr(factory, "_load_runtime_overrides", lambda: {})
+
+    client = factory.create_llm_client(kilo_api_key="test-kilo-key")
+    assert client.provider_name == "kilo"
+    assert client.primary.__class__.__name__ == "KiloProvider"
+    await client.aclose()

@@ -46,15 +46,15 @@ def _task_from_row(row) -> dict:
 @router.get("/tasks/pipeline")
 async def get_task_pipeline() -> dict:
     """Return current task pipeline status from real database."""
+    status_counts: dict[str, int] = {}
     try:
         with get_db() as conn:
             rows = conn.execute(
                 "SELECT status, COUNT(*) as count FROM workflows GROUP BY status"
             ).fetchall()
+        status_counts = {r["status"]: r["count"] for r in rows}
     except sqlite3.OperationalError as exc:
         logger.warning("Task pipeline table is unavailable: %s", exc)
-        rows = []
-        status_counts = {r["status"]: r["count"] for r in rows}
 
     return {
         "phases": [

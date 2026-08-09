@@ -183,6 +183,23 @@ export async function getSessionHistory(id: string): Promise<ChatMessage[]> {
   return Array.isArray(data) ? data : (data.messages ?? []);
 }
 
+export interface SessionRun {
+  id: string;
+  session_id: string;
+  status: string;
+  phase?: string;
+  updated_at?: string;
+  started_at?: string;
+  finished_at?: string | null;
+}
+
+export async function getSessionRuns(id: string): Promise<SessionRun[]> {
+  const data = await readJson<{ runs?: SessionRun[] }>(
+    await authenticatedFetch(apiUrl(`/api/sessions/${encodeURIComponent(id)}/runs`)),
+  );
+  return data.runs ?? [];
+}
+
 export interface AvailableModel {
   id: string;
   name: string;

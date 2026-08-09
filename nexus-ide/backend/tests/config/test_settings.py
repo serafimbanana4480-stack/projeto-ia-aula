@@ -36,6 +36,7 @@ class TestSettingsDefaults:
             "kimi",
             "gemini",
             "opencode_go",
+            "kilo",
         }
         assert isinstance(s.local_llm_device, str)
         assert s.local_llm_device

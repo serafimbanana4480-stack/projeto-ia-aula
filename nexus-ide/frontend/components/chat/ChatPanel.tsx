@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useAgentStream } from "../../hooks/useAgentStream";
 import { useChatSessions } from "../../hooks/useChatSessions";
 import { useToast } from "./Toast";
-import { ApiError, getSessionHistory, createPlan, approvePlan, executePlan, getPlanStatus, cancelPlan, getProvidersStatus } from "../../lib/api";
+import { ApiError, getSessionHistory, getSessionRuns, createPlan, approvePlan, executePlan, getPlanStatus, cancelPlan, getProvidersStatus } from "../../lib/api";
 import type { PlanCreateResult, PlanStatus as PlanStatusType } from "../../lib/api";
 import { useModeStore, type Mode } from "../../stores/modeStore";
 import { useModelStore } from "../../stores/modelStore";
@@ -58,6 +58,7 @@ import { log } from "../../lib/log";
 import { stripAnsiCodes } from "../../lib/utils";
 import {
   activityFromProgress,
+  activityFromMissionEvent,
   agentActivity,
   sanitizeAssistantContent,
 } from "../../lib/chatPresentation";
@@ -197,6 +198,16 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
           upsertActivity(activityFromProgress(e, out.length));
           break;
         }
+        case "mission_brief":
+        case "mission_plan":
+        case "mission_wave":
+        case "mission_agent":
+        case "mission_decision":
+        case "mission_verification":
+        case "mission_completed": {
+          upsertActivity(activityFromMissionEvent(e, out.length));
+          break;
+        }
         case "tool_result": {
           const idx = findRunningTool(e.tool_name);
           if (idx >= 0 && current) {
@@ -312,7 +323,7 @@ export default function ChatPanel({
   // *different* model than the one shown in the UI. `/api/chat` now accepts
   // concrete provider model ids; "" still means auto-route.
 
-  const { events, streaming, error: streamError, send, cancel, reset } = useAgentStream(sessionId);
+  const { events, streaming, error: streamError, send, resume, cancel, reset } = useAgentStream(sessionId);
   const [input, setInput] = useState("");
   const [historyMessages, setHistoryMessages] = useState<ChatMessage[]>([]);
   const [pendingUser, setPendingUser] = useState<ChatMessage[]>([]);
@@ -490,6 +501,27 @@ export default function ChatPanel({
     modelsLoaded,
   ]);
 
+  // A refresh must reconnect to an existing mission instead of creating a
+  // second run or leaving the user with a stale history-only view.
+  useEffect(() => {
+    if (!historyLoaded || streaming) return;
+    let cancelled = false;
+    void getSessionRuns(sessionId)
+      .then((runs) => {
+        if (cancelled) return;
+        const active = runs.find((run) =>
+          ["running", "queued", "planning", "waiting_agent", "waiting_tool"].includes(run.status),
+        );
+        if (active) void resume(active.id);
+      })
+      .catch(() => {
+        // History remains usable when the optional recovery endpoint is down.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [historyLoaded, sessionId, resume, streaming]);
+
   const { toggleTheme } = useThemeStore();
 
   async function composeMessageWithAttachments(
@@ -553,10 +585,11 @@ export default function ChatPanel({
       toast.error("Falha ao enviar", err instanceof Error ? err.message : String(err));
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    if (!streamError && !backendOffline) {
-      await loadHistory();
-    }
+    // The SSE fold is the source of truth for the just-finished turn. Reloading
+    // history here used to erase a terminal provider error before it could be
+    // rendered when the backend had only persisted the run checkpoint. Full
+    // history is still loaded on mount/session changes and remains available
+    // after a refresh.
   };
 
   // -----------------------------------------------------------------------

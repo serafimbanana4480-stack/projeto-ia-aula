@@ -53,7 +53,7 @@ HTTP_TIMEOUT = 15.0
 
 # Providers whose ``/models`` endpoint follows the OpenAI schema:
 # ``{"data": [{"id": ..., "created": ...}, ...]}`` with a bearer token.
-_OPENAI_COMPATIBLE = frozenset({"openai", "deepseek", "groq", "kimi", "opencode_go"})
+_OPENAI_COMPATIBLE = frozenset({"openai", "deepseek", "groq", "kimi", "opencode_go", "kilo"})
 
 # Per-provider metadata: which settings attribute holds the key, the default
 # API root, and a human label. ``requires_key`` drives the Settings UI.
@@ -121,6 +121,14 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
         "default_base": "https://opencode.ai/zen/go/v1",
         "requires_key": True,
         "docs": "https://opencode.ai",
+    },
+    "kilo": {
+        "label": "Kilo AI Gateway",
+        "key_setting": "kilo_api_key",
+        "base_setting": "kilo_base_url",
+        "default_base": "https://api.kilo.ai/api/gateway",
+        "requires_key": True,
+        "docs": "https://kilo.ai/docs/gateway",
     },
     "ollama": {
         "label": "Ollama (local)",
@@ -535,6 +543,9 @@ def _build_request(provider: str, api_key: str, base_url: str) -> tuple[str, dic
 
     if provider == "ollama":
         return f"{root}/api/tags", {}, {}
+
+    if provider == "kilo":
+        return f"{root}/models", {"Authorization": f"Bearer {api_key}"}, {}
 
     # OpenAI-compatible: base URL already ends in /v1 for every spec default.
     url = root if root.endswith("/v1") else f"{root}/v1"

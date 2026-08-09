@@ -549,6 +549,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
     # Lazy imports to avoid loading unused provider classes at startup
     from backend.llm.kimi_provider import KimiProvider
     from backend.llm.openai_provider import OpenAIProvider
+    from backend.llm.kilo_provider import KiloProvider
 
     settings = get_settings()
     # Settings written from the UI are strings and intentionally do not alter
@@ -604,6 +605,21 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
                 api_key=opencode_go_api_key,
             ),
             priority=priority_for("opencode_go", 1),
+        )
+
+    kilo_api_key = _usable_api_key(
+        _setting_value(settings, values, "kilo_api_key", "")
+    )
+    if kilo_api_key:
+        manager.register_provider(
+            "kilo",
+            KiloProvider(
+                base_url=_setting_value(
+                    settings, values, "kilo_base_url", KiloProvider.DEFAULT_BASE_URL
+                ),
+                api_key=kilo_api_key,
+            ),
+            priority=priority_for("kilo", 2),
         )
 
     # ------------------------------------------------------------------
@@ -738,7 +754,7 @@ def create_llm_client(**overrides: Any) -> Any:
     """Create an LLM provider instance based on configuration.
 
     Reads ``llm_provider`` from settings (env var ``LLM_PROVIDER``).
-    Supported providers: ``ollama``/``local``, ``airllm``, ``openai``, ``deepseek``, ``kimi``, ``groq``, ``anthropic``, ``gemini``, ``openrouter``, ``opencode_go``, ``dev``.
+    Supported providers: ``ollama``/``local``, ``airllm``, ``openai``, ``deepseek``, ``kimi``, ``groq``, ``anthropic``, ``gemini``, ``openrouter``, ``opencode_go``, ``kilo``, ``dev``.
 
     If ``MULTI_LLM_ENABLED`` is true, returns a :class:`MultiLLMManager`
     configured with all available providers.
@@ -777,7 +793,7 @@ def create_llm_client(**overrides: Any) -> Any:
         .strip()
     )
 
-    if free_only and provider not in {"local", "ollama", "openrouter", "dev"}:
+    if free_only and provider not in {"local", "ollama", "openrouter", "kilo", "dev"}:
         raise ProviderUnavailableError(
             f"Configured provider '{provider}' is not validated free",
             category="eligibility",
@@ -970,6 +986,24 @@ def create_llm_client(**overrides: Any) -> Any:
         primary._local_embed_host = _setting_value(settings, effective_overrides, "ollama_host", "")
         fallbacks = _build_fallback_chain(
             settings, effective_overrides, primary_provider="openrouter"
+        )
+        return ResilientLLMProvider(primary, fallbacks, free_only=free_only)
+
+    if provider == "kilo":
+        from backend.llm.kilo_provider import KiloProvider
+
+        api_key = _setting_value(settings, effective_overrides, "kilo_api_key", "")
+        if not api_key:
+            logger.warning("KILO_API_KEY not set — requests will fail")
+        logger.info("Using Kilo AI Gateway provider")
+        primary = KiloProvider(
+            base_url=_setting_value(
+                settings, effective_overrides, "kilo_base_url", KiloProvider.DEFAULT_BASE_URL
+            ),
+            api_key=api_key,
+        )
+        fallbacks = _build_fallback_chain(
+            settings, effective_overrides, primary_provider="kilo"
         )
         return ResilientLLMProvider(primary, fallbacks, free_only=free_only)
 

@@ -28,6 +28,7 @@ interface AppSettings {
   anthropic_api_key: string;
   gemini_api_key: string;
   openrouter_api_key: string;
+  kilo_api_key: string;
 }
 
 const PROVIDER_OPTIONS = [
@@ -39,6 +40,7 @@ const PROVIDER_OPTIONS = [
   { value: "anthropic", label: "🧠 Claude (Anthropic)" },
   { value: "gemini", label: "💎 Gemini (Google)" },
   { value: "openrouter", label: "🔀 OpenRouter" },
+  { value: "kilo", label: "🚀 Kilo AI Gateway" },
 ];
 
 export default function SettingsPage() {
@@ -56,6 +58,7 @@ export default function SettingsPage() {
     anthropic_api_key: "",
     gemini_api_key: "",
     openrouter_api_key: "",
+    kilo_api_key: "",
   });
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -77,6 +80,7 @@ export default function SettingsPage() {
           anthropic_api_key: _anthropicApiKey,
           gemini_api_key: _geminiApiKey,
           openrouter_api_key: _openrouterApiKey,
+          kilo_api_key: _kiloApiKey,
           ...publicSettings
         } = data as Partial<AppSettings>;
         const telemetryValue = (publicSettings as Record<string, unknown>).enable_telemetry;
@@ -96,6 +100,7 @@ export default function SettingsPage() {
           anthropic_api_key: "",
           gemini_api_key: "",
           openrouter_api_key: "",
+          kilo_api_key: "",
         }));
       } catch {
         if (process.env.NODE_ENV !== "development") {
@@ -109,6 +114,7 @@ export default function SettingsPage() {
             anthropic_api_key: "",
             gemini_api_key: "",
             openrouter_api_key: "",
+            kilo_api_key: "",
           }));
         } else {
           const stored = localStorage.getItem("nexus_settings");
@@ -131,6 +137,7 @@ export default function SettingsPage() {
                 anthropic_api_key: "",
                 gemini_api_key: "",
                 openrouter_api_key: "",
+                kilo_api_key: "",
               }));
             } catch { /* ignore */ }
           }
@@ -290,6 +297,7 @@ export default function SettingsPage() {
                   { key: "anthropic", label: "Claude (Anthropic) API Key", placeholder: "sk-ant-..." },
                   { key: "gemini", label: "Gemini (Google) API Key", placeholder: "AIza..." },
                   { key: "openrouter", label: "OpenRouter API Key", placeholder: "sk-or-v1-..." },
+                  { key: "kilo", label: "Kilo AI Gateway API Key", placeholder: "eyJ..." },
                 ] as const).map(({ key, label, placeholder }) => (
                   <div key={key}>
                     <label className="mb-1 block text-xs text-gray-400">{label}</label>

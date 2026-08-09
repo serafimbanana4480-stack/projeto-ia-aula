@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  activityFromMissionEvent,
   activityFromProgress,
   sanitizeAssistantContent,
   summarizeApproachContent,
@@ -22,6 +23,11 @@ describe("chat presentation", () => {
   it("keeps normal markdown code fences", () => {
     const content = "Exemplo:\n```ts\nconst ok = true;\n```";
     expect(sanitizeAssistantContent(content)).toBe(content);
+  });
+
+  it("removes legacy mission briefs but keeps the principal message", () => {
+    const content = "Já comecei a análise.\n\n```\nMISSION BRIEF\nficheiros internos\n```\n\nContinuo.";
+    expect(sanitizeAssistantContent(content)).toBe("Já comecei a análise.\n\nContinuo.");
   });
 
   it("removes repeated malformed and bare tool payloads from saved history", () => {
@@ -79,6 +85,30 @@ describe("chat presentation", () => {
       detail: "Atualizar a experiência do chat",
       status: "running",
     });
+  });
+
+  it("turns structured mission events into compact activity cards", () => {
+    const item = activityFromMissionEvent(
+      {
+        type: "mission_plan",
+        agent: "ORCHESTRATOR",
+        data: {
+          mission_id: "m1",
+          files_analyzed: 214,
+          tests_total: 3,
+          phases: [{ phase: "diagnosis" }],
+          progress: 0.5,
+        },
+        timestamp: "2026-08-09T10:00:00Z",
+      },
+      0,
+    );
+    expect(item).toMatchObject({
+      title: "Plano de execução preparado",
+      kind: "plan",
+      status: "running",
+    });
+    expect(item.detail).toContain("214 ficheiros analisados");
   });
 
   it("limits approach summaries to readable progress lines", () => {
