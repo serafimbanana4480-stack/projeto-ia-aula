@@ -75,6 +75,8 @@ export default function ContextUsagePanel({ contextWindow = 0 }: { contextWindow
   // shows a useful percentage using the provider-reported window when present.
   const reportedWindow = Number(usage?.context?.context_window ?? contextWindow);
   const percent = reportedWindow > 0 ? Math.min(100, (derived.used / reportedWindow) * 100) : 0;
+  const percentLabel =
+    reportedWindow <= 0 ? "—" : percent > 0 && percent < 1 ? "<1%" : `${percent.toFixed(0)}%`;
   currentPercentRef.current = percent;
 
   useEffect(() => {
@@ -115,7 +117,7 @@ export default function ContextUsagePanel({ contextWindow = 0 }: { contextWindow
           role="img"
         >
           <span className="flex h-9 w-9 items-center justify-center rounded-full bg-nexus-panel text-[10px] font-bold text-nexus-text">
-            {reportedWindow > 0 ? `${percent.toFixed(0)}%` : "—"}
+            {percentLabel}
           </span>
         </div>
       </div>

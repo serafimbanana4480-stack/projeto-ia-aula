@@ -148,7 +148,9 @@ class OllamaClient:
                 "plain text. Do not call tools, emit JSON/XML tool tags, or reveal private thinking. "
                 "Use only facts present in the conversation. Never invent environment variable names, "
                 "ports, endpoints, files, tests, or configuration. If a fact is not verified, say "
-                "NÃO VALIDADO. SSE is HTTP server-sent events, not WebSocket; do not conflate them."
+                "NÃO VALIDADO. SSE is HTTP server-sent events, not WebSocket; do not conflate them. "
+                "If the user asks you to repeat an exact literal marker, output that marker exactly; "
+                "repeating user-provided text is not an unverified factual claim."
             ),
         }
         text_turns = [
