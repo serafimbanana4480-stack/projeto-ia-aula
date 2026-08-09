@@ -412,16 +412,53 @@ def _build_fallback_chain(
                 getattr(settings, "nexus_enable_ollama", False),
             )
         )
-        local_ready = _local_models_ready(overrides.get("local_models"))
+        local_models = overrides.get("local_models")
+        local_candidates: list[Any] = []
+        if isinstance(local_models, dict):
+            local_candidates = list(local_models.get("models", local_models.get("installed", [])) or [])
+        elif isinstance(local_models, (list, tuple)):
+            local_candidates = list(local_models)
+
+        # The model catalog already verifies installed Ollama models. Reuse it
+        # here so a temporarily unavailable cloud provider can fail over to a
+        # real local model without inventing a model id or bypassing the free
+        # policy.
+        if not local_candidates:
+            try:
+                from backend.llm.model_catalog import load_validated_models
+
+                local_candidates = list(load_validated_models("ollama"))
+            except Exception:  # pragma: no cover - catalog is best effort
+                logger.debug("Could not load validated Ollama fallback models", exc_info=True)
+
+        local_model_id = ""
+        for candidate in local_candidates:
+            candidate_id = (
+                candidate
+                if isinstance(candidate, str)
+                else getattr(candidate, "id", None)
+                or (candidate.get("id") if isinstance(candidate, dict) else None)
+            )
+            if candidate_id:
+                local_model_id = str(candidate_id)
+                break
+
+        local_ready = bool(local_model_id)
         if local_ready and primary_provider == "ollama" and ollama_host:
             fallback_host = _setting_value(settings, overrides, "ollama_dashboard_host", "")
             if fallback_host and fallback_host != ollama_host:
                 fallback = OllamaProvider(base_url=fallback_host)
                 fallback._free_validated = True
+                fallback._free_candidates = local_candidates
                 fallbacks.append(fallback)
         elif local_ready and ollama_enabled and ollama_host:
             fallback = OllamaProvider(base_url=ollama_host)
             fallback._free_validated = True
+            fallback._free_candidates = local_candidates
+            # Cloud model ids are intentionally mapped only on this explicit
+            # local fallback object; the primary provider still receives the
+            # exact model selected by the user.
+            fallback.fallback_model = local_model_id
             fallbacks.append(fallback)
         return fallbacks
 

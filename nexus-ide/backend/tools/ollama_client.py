@@ -95,7 +95,14 @@ class OllamaClient:
         await self._client.aclose()
 
     def _resolve_model(self, model: str) -> str:
-        return _MODEL_ALIASES.get(model, model)
+        resolved = _MODEL_ALIASES.get(model, model)
+        # A resilient cloud -> local fallback keeps the user's selected cloud
+        # model for the primary provider. Only the explicitly attached
+        # fallback object may remap it to an installed local model.
+        fallback_model = str(getattr(self, "fallback_model", "") or "").strip()
+        if fallback_model and (resolved == "openrouter/free" or ":free" in resolved):
+            return fallback_model
+        return resolved
 
     @staticmethod
     def _normalize_messages(
