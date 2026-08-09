@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -149,6 +150,9 @@ class OllamaClient:
                 "Use only facts present in the conversation. Never invent environment variable names, "
                 "ports, endpoints, files, tests, or configuration. If a fact is not verified, say "
                 "NÃO VALIDADO. SSE is HTTP server-sent events, not WebSocket; do not conflate them. "
+                "Follow every explicit output constraint completely. If the user requests a number "
+                "of points, steps, or items, write all of them with clear numbering before stopping. "
+                "If a word limit is requested, stay within it while still completing the requested list. "
                 "If the user asks you to repeat an exact literal marker, output that marker exactly; "
                 "repeating user-provided text is not an unverified factual claim."
             ),
@@ -254,12 +258,38 @@ class OllamaClient:
             # The Coder tier can request an 8k output budget.  That is useful
             # for a tool-capable cloud model but makes a CPU local fallback
             # spend minutes generating unnecessary text.  Keep this lane
-            # bounded while leaving the normal Ollama client untouched.
+            # bounded while leaving the normal Ollama client untouched. Give
+            # structured/numbered requests enough room to finish their list;
+            # short literal replies still use the faster small budget.
             try:
                 requested_predict = int(ollama_options.get("num_predict", 512))
             except (TypeError, ValueError):
                 requested_predict = 512
-            ollama_options["num_predict"] = min(max(requested_predict, 128), 256)
+            latest_user = next(
+                (
+                    str(
+                        message.get("content", "")
+                        if isinstance(message, dict)
+                        else getattr(message, "content", "")
+                    )
+                    for message in reversed(messages)
+                    if (
+                        message.get("role") if isinstance(message, dict)
+                        else getattr(message, "role", None)
+                    ) == "user"
+                ),
+                "",
+            )
+            structured_request = bool(
+                re.search(
+                    r"(?:exactamente|em)\s+\d+\s+(?:pontos?|passos?|itens?)|"
+                    r"\b(?:lista|enumerad[ao]|numerad[ao])\b",
+                    latest_user,
+                    flags=re.IGNORECASE,
+                )
+            )
+            cap = 512 if structured_request else 256
+            ollama_options["num_predict"] = min(max(requested_predict, 128), cap)
         resolved_model = self._resolve_model(model)
         normalized_messages = self._normalize_messages(messages)
         if getattr(self, "direct_answer", False):

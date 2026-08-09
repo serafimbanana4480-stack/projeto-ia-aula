@@ -90,7 +90,13 @@ export default function ContextUsagePanel({ contextWindow = 0 }: { contextWindow
   const reportedWindow = Number(usage?.context?.context_window ?? contextWindow);
   const percent = reportedWindow > 0 ? Math.min(100, (derived.used / reportedWindow) * 100) : 0;
   const percentLabel =
-    reportedWindow <= 0 ? "—" : percent > 0 && percent < 1 ? "<1%" : `${percent.toFixed(0)}%`;
+    reportedWindow <= 0
+      ? "—"
+      : percent > 0 && percent < 0.1
+        ? "<0.1%"
+        : percent < 1
+          ? `${percent.toFixed(1)}%`
+          : `${percent.toFixed(0)}%`;
   currentPercentRef.current = percent;
 
   useEffect(() => {
@@ -167,7 +173,7 @@ export default function ContextUsagePanel({ contextWindow = 0 }: { contextWindow
           <div className="mt-0.5 flex items-center gap-2 text-[9px] text-nexus-faint">
             <span>{activeAgents} agentes observados</span>
             <span>·</span>
-            <span>{enabledTools} tools ativas</span>
+            <span>{enabledTools} tools habilitadas</span>
           </div>
         </div>
         <div className="text-right">
