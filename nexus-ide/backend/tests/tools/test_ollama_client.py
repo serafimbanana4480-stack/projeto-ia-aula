@@ -211,7 +211,8 @@ class TestChatStream:
             system = captured["messages"][0]["content"]
             assert "TOOL USAGE" not in system
             assert "list_dir" not in system
-            assert "LOCAL FALLBACK DIRECT ANSWER" in system
+            assert "directly in visible plain text" in system
+            assert [m["role"] for m in captured["messages"]] == ["system", "user"]
             assert captured["messages"][1]["role"] == "user"
         finally:
             await client.aclose()

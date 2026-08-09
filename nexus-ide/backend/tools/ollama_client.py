@@ -136,28 +136,24 @@ class OllamaClient:
     @staticmethod
     def _prepare_direct_answer_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
         """Turn the local fallback into a visible, tool-free answer lane."""
-        tool_marker = "TOOL USAGE - You MUST use tools to act."
-        mode_marker = "MODE-SPECIFIC INSTRUCTIONS"
-        instruction = (
-            "LOCAL FALLBACK DIRECT ANSWER: respond with the final answer in visible plain text. "
-            "Do not call tools and do not emit JSON, XML tool tags, or private thinking."
-        )
-        prepared: list[dict[str, str]] = []
-        for message in messages:
-            item = dict(message)
-            if item.get("role") == "system":
-                content = str(item.get("content", ""))
-                if tool_marker in content:
-                    before_tools, after_tools = content.split(tool_marker, 1)
-                    mode_start = after_tools.find(mode_marker)
-                    content = before_tools + (
-                        "\n\n" + after_tools[mode_start:]
-                        if mode_start >= 0
-                        else ""
-                    )
-                item["content"] = f"{content}\n\n{instruction}"
-            prepared.append(item)
-        return prepared
+        # The ReAct system prompt intentionally teaches cloud models how to
+        # call tools. A small local fallback may follow those examples even
+        # after native tool schemas are removed, producing no visible answer.
+        # Keep only textual conversation turns and replace the full system
+        # prompt with an unambiguous direct-answer contract.
+        direct_system = {
+            "role": "system",
+            "content": (
+                "You are the Nexus IDE assistant. Answer the user's request directly in visible "
+                "plain text. Do not call tools, emit JSON/XML tool tags, or reveal private thinking."
+            ),
+        }
+        text_turns = [
+            dict(message)
+            for message in messages
+            if message.get("role") in {"user", "assistant"}
+        ]
+        return [direct_system, *text_turns]
 
     @staticmethod
     def _format_attempt_failure(
