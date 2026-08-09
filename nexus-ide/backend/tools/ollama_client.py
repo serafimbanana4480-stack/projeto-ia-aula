@@ -254,7 +254,7 @@ class OllamaClient:
                 requested_predict = int(ollama_options.get("num_predict", 512))
             except (TypeError, ValueError):
                 requested_predict = 512
-            ollama_options["num_predict"] = min(max(requested_predict, 128), 512)
+            ollama_options["num_predict"] = min(max(requested_predict, 128), 256)
         resolved_model = self._resolve_model(model)
         normalized_messages = self._normalize_messages(messages)
         if getattr(self, "direct_answer", False):
