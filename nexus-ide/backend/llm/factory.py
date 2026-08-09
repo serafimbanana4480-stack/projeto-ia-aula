@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 RUNTIME_SETTINGS_PATH = Path(__file__).resolve().parents[2] / "data" / "settings.json"
 
 
-def _load_runtime_overrides() -> dict[str, str]:
+def _load_runtime_overrides() -> dict[str, Any]:
     """Load user-configured settings written by the Settings REST endpoint.
 
     The backend reads ``.env`` at startup via Pydantic.  To allow hot-updating
@@ -37,7 +37,13 @@ def _load_runtime_overrides() -> dict[str, str]:
     try:
         with RUNTIME_SETTINGS_PATH.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
-        return {k: v for k, v in data.items() if isinstance(v, str) and v}
+        # Keep structured local-model metadata as well as scalar settings;
+        # the fallback policy needs the verified installed model ids.
+        return {
+            k: v
+            for k, v in data.items()
+            if isinstance(v, (str, int, float, bool, dict, list)) and v not in ("", None)
+        }
     except (OSError, json.JSONDecodeError):
         return {}
 
