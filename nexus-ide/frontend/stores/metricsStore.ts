@@ -6,7 +6,7 @@
  */
 import { create } from "zustand";
 import { apiUrl, authHeaders, getMetricsHistory } from "../lib/api";
-import { getAccessToken, isAuthenticated } from "../lib/auth";
+import { authenticatedFetch, getAccessToken, isAuthenticated } from "../lib/auth";
 
 export interface SystemMetrics {
   tokens_per_second: number;
@@ -291,7 +291,7 @@ async function fetchMetrics() {
   }
 
   try {
-    const response = await fetch(apiUrl("/api/metrics/current"), {
+    const response = await authenticatedFetch(apiUrl("/api/metrics/current"), {
       headers: authHeaders(),
       signal: AbortSignal.timeout(5000),
     });
@@ -300,6 +300,10 @@ async function fetchMetrics() {
       useMetricsStore.getState()._setBackendOnline(false);
       useMetricsStore.getState()._setConnectionStatus("offline");
       useMetricsStore.getState()._setConnectionMode("none");
+      // The next authenticated request may refresh the access token. Do not
+      // leave the singleton latched after this transient authentication miss.
+      isInitialized = false;
+      isStopped = false;
       stopAuthHeartbeat();
       stopAll();
       return false;

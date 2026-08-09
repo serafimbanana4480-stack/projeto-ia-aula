@@ -256,7 +256,20 @@ export function isAutoLoginEnabled(): boolean {
  */
 export async function autoLoginDev(): Promise<boolean> {
   if (!AUTO_LOGIN_ENABLED) return false;
-  if (isTokenValid()) return true;
+  if (isTokenValid()) {
+    // A locally decoded `exp` is not enough after a backend restart: the JWT
+    // may still be temporally valid but signed with an old runtime secret.
+    // Confirm it server-side before allowing dependent stores to initialize.
+    try {
+      const response = await fetchAuth(apiUrl("/api/auth/me"), {
+        headers: { Authorization: `Bearer ${getAccessToken()}` },
+      });
+      if (response.ok) return true;
+    } catch {
+      // Fall through to a fresh local test login below.
+    }
+    clearAuth();
+  }
 
   const email = process.env.NEXT_PUBLIC_DEV_EMAIL;
   const password = process.env.NEXT_PUBLIC_DEV_PASSWORD;

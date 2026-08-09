@@ -12,6 +12,7 @@ import { useModeStore, type Mode } from "../../stores/modeStore";
 import { useModelStore } from "../../stores/modelStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useThemeStore } from "../../stores/themeStore";
+import { initMetricsStream } from "../../stores/metricsStore";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import MessageBubble from "./MessageBubble";
 import BackgroundAgentsPanel from "./BackgroundAgentsPanel";
@@ -464,6 +465,10 @@ export default function ChatPanel({
       reset();
       setHistoryLoaded(true);
       setBackendOffline(false);
+      // authenticatedFetch may have refreshed the token while loading the
+      // history. This successful boundary is the reliable point to start
+      // dashboard metrics after a cold production reload.
+      initMetricsStream();
       errorLoggedRef.current = false;
     } catch (error) {
       const isNetworkFailure =
