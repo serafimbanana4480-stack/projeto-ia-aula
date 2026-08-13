@@ -16,7 +16,16 @@ class TestHealthEndpoint:
     def test_health_returns_ok(self, client: TestClient) -> None:
         response = client.get("/health")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
+        payload = response.json()
+        assert payload["status"] == "ok"
+        assert set(payload["disk_pressure"]) >= {
+            "status",
+            "snapshot",
+            "warning_threshold_percent",
+            "critical_threshold_percent",
+            "write_blocked",
+        }
+        assert payload["disk_pressure"]["snapshot"]["free_percent"] >= 0
 
     def test_app_metadata(self) -> None:
         assert app.title == "NEXUS IDE Orchestrator"

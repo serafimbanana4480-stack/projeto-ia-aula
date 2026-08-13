@@ -544,9 +544,13 @@ class PlanExecutor:
                 )
             )
             return {"error": task.error_message}
+        configured_model = getattr(agent, "model_key", "")
+        effective_model = task.model_key or (
+            configured_model if isinstance(configured_model, str) else ""
+        )
         contract_errors = validate_agent_contract(
             task.agent,
-            task.model_key or getattr(agent, "model_key", ""),
+            effective_model,
             task.allowed_tools,
         )
         if contract_errors:
@@ -596,7 +600,7 @@ class PlanExecutor:
                         "project_path": ctx.project_path,
                         "_enforce_agent_contract": True,
                         "_allowed_tools": list(task.allowed_tools),
-                        "model": task.model_key or getattr(agent, "model_key", ""),
+                        "model": effective_model,
                         "_tool_evidence_requirement": (
                             "verification"
                             if task.agent == "DEBUGGER"
