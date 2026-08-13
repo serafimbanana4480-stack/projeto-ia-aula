@@ -9,15 +9,9 @@ Covers:
 from __future__ import annotations
 
 import os
-import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-
-PROJECT_ROOT = Path(
-    r"C:\Users\rodri\Desktop\PROJETO IA AULA GIT CLONE\projeto-ia-aula\nexus-ide"
-)
-sys.path.insert(0, str(PROJECT_ROOT))
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -228,7 +222,8 @@ def test_session_lifecycle_manager_init() -> None:
     assert manager.running is False
 
 
-def test_session_lifecycle_manager_start_stop() -> None:
+@pytest.mark.asyncio
+async def test_session_lifecycle_manager_start_stop() -> None:
     """Verify background loop can be started and stopped."""
     from backend.orchestrator.session_lifecycle import SessionLifecycleManager
 
@@ -236,9 +231,7 @@ def test_session_lifecycle_manager_start_stop() -> None:
     assert manager.running is False
     manager.start()
     assert manager.running is True
-    import asyncio
-
-    asyncio.get_event_loop().run_until_complete(manager.stop())
+    await manager.stop()
     assert manager.running is False
 
 
@@ -268,7 +261,7 @@ async def test_session_lifecycle_run_gc(client) -> None:
     await event_bus.subscribe(EventType.SESSION_CLEANUP_COMPLETED.value, collect)
 
     manager = SessionLifecycleManager(event_bus=event_bus, ttl_hours=1, gc_interval_minutes=999)
-    report = await manager.run_gc()
+    report = await manager.run_gc(allow_destructive=True)
 
     assert sid in report["expired_sessions"]
     assert "expired_data_counts" in report
@@ -278,6 +271,27 @@ async def test_session_lifecycle_run_gc(client) -> None:
     assert len(collected_events) == 1
     assert collected_events[0].event_type == EventType.SESSION_CLEANUP_COMPLETED
     assert sid in collected_events[0].data.get("expired_sessions", [])
+
+
+@pytest.mark.asyncio
+async def test_background_gc_inventory_does_not_delete_stale_sessions(client) -> None:
+    """Default/background GC must never delete user conversation data."""
+    from backend.orchestrator.session_lifecycle import SessionLifecycleManager
+    from backend.persistence import db as db_mod
+
+    session = db_mod.create_session(title="Preserve me")
+    sid = session["id"]
+    with db_mod.get_db() as conn:
+        conn.execute(
+            "UPDATE sessions SET last_active_at = ? WHERE id = ?",
+            (db_mod._now_iso_minus_hours(48), sid),
+        )
+
+    report = await SessionLifecycleManager(event_bus=None, ttl_hours=1).run_gc()
+
+    assert report["cleanup_skipped"] is True
+    assert sid in report["expired_session_candidates"]
+    assert db_mod.get_session(sid) is not None
 
 
 def test_cleanup_temporary_files(client) -> None:
@@ -353,8 +367,16 @@ def test_admin_gc_run_endpoint(client) -> None:
 
 def test_admin_gc_without_auth_returns_401(client) -> None:
     """Verify unauthenticated requests are rejected."""
-    r = client.get("/api/admin/gc/stats")
-    assert r.status_code == 401
+    auth_override = app.dependency_overrides.pop(auth_module.require_auth, None)
+    admin_override = app.dependency_overrides.pop(auth_module.require_admin, None)
+    try:
+        r = client.get("/api/admin/gc/stats")
+        assert r.status_code == 401
+    finally:
+        if auth_override is not None:
+            app.dependency_overrides[auth_module.require_auth] = auth_override
+        if admin_override is not None:
+            app.dependency_overrides[auth_module.require_admin] = admin_override
 
 
 def test_admin_gc_endpoint_no_manager(client) -> None:

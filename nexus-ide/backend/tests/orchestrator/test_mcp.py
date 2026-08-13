@@ -221,11 +221,11 @@ def test_overview_marks_real_tool_activity(client: TestClient, auth_headers):
     assert item["tool"] == "probe"
 
 
-def test_dashboard_status_includes_mcp_summary(client: TestClient):
+def test_dashboard_status_includes_mcp_summary(client: TestClient, auth_headers):
     """The main dashboard status endpoint should surface an MCP connector
     summary (see backend/orchestrator/routes/dashboard.py) so the UI can show
     connector health without a second round trip."""
-    response = client.get("/api/dashboard/status")
+    response = client.get("/api/dashboard/status", headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert "mcp_connectors" in data

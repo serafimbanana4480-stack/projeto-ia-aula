@@ -429,7 +429,7 @@ class SupremeOrchestrator:
         if self._ollama_client is None:
             from backend.config.settings import get_settings
             settings = get_settings()
-            self._ollama_client = OllamaClient(host=settings.ollama_host)
+            self._ollama_client = OllamaClient(base_url=settings.ollama_host)
 
         # Build the query for the agent
         query = f"""Task: {story.title}

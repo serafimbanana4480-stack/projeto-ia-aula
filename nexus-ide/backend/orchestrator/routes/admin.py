@@ -38,7 +38,7 @@ async def run_gc(
     """
     manager = _get_manager(request)
     try:
-        report = await manager.run_gc()
+        report = await manager.run_gc(allow_destructive=True)
     except Exception as exc:
         logger.exception("Manual GC run failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc

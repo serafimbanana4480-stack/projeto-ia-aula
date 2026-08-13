@@ -118,7 +118,7 @@ class TestAutoMode:
         assert "routing" in types
         routing = next(e for e in events if e["type"] == "routing")["routing"]
         assert routing["primary_agent"] == "CODER"
-        assert "auto:" in routing["routing_reason"]
+        assert routing["routing_reason"] == "classified:assisted"
 
         assert "agent_started" in types
         assert types[-1] == "done"
@@ -126,8 +126,7 @@ class TestAutoMode:
     def test_auto_mode_upgrades_lightweight_agent(
         self, client_with_fake_agents: TestClient
     ) -> None:
-        # A short, non-code question would normally route to MICRO/DOCUMENTER.
-        # In auto mode it must be upgraded to CODER so it can use tools.
+        # A short informational question must stay on the direct CHAT lane.
         response = client_with_fake_agents.post(
             "/api/chat",
             json={
@@ -139,8 +138,8 @@ class TestAutoMode:
         assert response.status_code == 200
         events = _iter_sse_events(response.content)
         routing = next(e for e in events if e["type"] == "routing")["routing"]
-        assert routing["primary_agent"] == "CODER"
-        assert "auto:upgraded" in routing["routing_reason"]
+        assert routing["primary_agent"] == "MICRO"
+        assert routing["routing_reason"] == "classified:chat"
 
     def test_auto_mode_persists_history(self, client_with_fake_agents: TestClient) -> None:
         sid = "t-auto-history"

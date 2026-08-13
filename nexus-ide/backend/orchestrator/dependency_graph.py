@@ -54,7 +54,11 @@ class TaskNode:
     name: str = ""
     description: str = ""
     agent: str = "CODER"  # agent type to execute this task
-    model_key: str = "coder"  # model tier to use
+    # Empty means "use the assigned agent's configured model".  A hard-coded
+    # ``coder`` default made hand-built ANALYZER/ARCHITECT tasks fail their own
+    # capability contract before execution.  Parsed model plans still have to
+    # provide an explicit, validated model key.
+    model_key: str = ""
     priority: TaskPriority = TaskPriority.MEDIUM
     status: TaskStatus = TaskStatus.PENDING
 

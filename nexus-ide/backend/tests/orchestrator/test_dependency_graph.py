@@ -203,7 +203,7 @@ class TestTaskNode:
         task = TaskNode(name="test", description="Test", agent="CODER")
         assert task.status == TaskStatus.PENDING
         assert task.priority == TaskPriority.MEDIUM
-        assert task.model_key == "coder"
+        assert task.model_key == ""
         assert task.depends_on == []
         assert task.required_by == []
         assert task.subtasks == []

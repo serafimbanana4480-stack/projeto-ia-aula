@@ -2456,7 +2456,7 @@ async def _run_pipeline(
         execution_mode is ExecutionMode.MISSION
         or mode in ("auto", "agent")
         or (_advanced_force_autonomous and not fast_candidate)
-    ) and not _advanced_force_swarm:
+    ) and mode not in ("swarm", "auto_swarm") and not _advanced_force_swarm:
         # Auto mode: for COMPLEX tasks, use the full Plan→Execute→Verify pipeline
         # via OrchestrationEngine.execute_autonomous(). For simple tasks, fall
         # through to the normal smart-routed single-agent ReAct loop.

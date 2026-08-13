@@ -84,7 +84,7 @@ class SessionLifecycleManager:
 
         manager = SessionLifecycleManager(event_bus=app.state.event_bus)
         manager.start()                    # begin background loop
-        await manager.run_gc()             # one-off manual cycle
+        await manager.run_gc(allow_destructive=True)  # explicit manual cycle
         manager.stop()                     # tear down
     """
 
@@ -126,8 +126,10 @@ class SessionLifecycleManager:
         if self._task is not None and not self._task.done():
             logger.warning("SessionLifecycleManager background loop is already running")
             return
+        loop = asyncio.get_running_loop()
         self._stop_event.clear()
-        self._task = asyncio.create_task(self._run_loop())
+        self._running = True
+        self._task = loop.create_task(self._run_loop())
         logger.info(
             "Session GC background loop started (interval=%d min, ttl=%d h)",
             self._gc_interval,
@@ -152,7 +154,10 @@ class SessionLifecycleManager:
         try:
             while not self._stop_event.is_set():
                 try:
-                    await self.run_gc()
+                    # Background maintenance is deliberately non-destructive.
+                    # It inventories stale data and emits an audit event, but
+                    # deletion requires the explicit authenticated admin call.
+                    await self.run_gc(allow_destructive=False)
                 except Exception:
                     logger.exception("Session GC cycle failed")
                 # Wait for the configured interval (or until a stop signal)
@@ -169,10 +174,15 @@ class SessionLifecycleManager:
 
     # ── Core GC logic ───────────────────────────────────────────────────
 
-    async def run_gc(self) -> dict[str, Any]:
-        """Execute a full GC cycle and return a summary report.
+    async def run_gc(self, *, allow_destructive: bool = False) -> dict[str, Any]:
+        """Inventory or explicitly execute a GC cycle.
 
-        Steps:
+        Destructive work is fail-closed: the periodic background cycle uses
+        the default dry-run mode.  Callers must pass ``allow_destructive=True``
+        (the authenticated admin endpoint does so) before session content,
+        orphan rows, or generated temporary files can be removed.
+
+        Destructive steps:
         1. Soft-delete expired sessions.
         2. Delete orphan data for the newly expired sessions.
         3. Hard-delete session rows that were soft-deleted >7 days ago.
@@ -183,6 +193,9 @@ class SessionLifecycleManager:
         report: dict[str, Any] = {
             "timestamp": datetime.now(UTC).isoformat(),
             "ttl_hours": self._ttl_hours,
+            "destructive_cleanup": allow_destructive,
+            "cleanup_skipped": not allow_destructive,
+            "expired_session_candidates": [],
             "expired_sessions": [],
             "expired_data_counts": {},
             "hard_deleted_ids": [],
@@ -193,6 +206,20 @@ class SessionLifecycleManager:
 
         # 1. Find and soft-delete expired sessions
         expired = db.list_expired_sessions(ttl_hours=self._ttl_hours)
+        report["expired_session_candidates"] = [session["id"] for session in expired]
+        if not allow_destructive:
+            try:
+                report["stats"] = db.get_session_stats()
+            except Exception:
+                report["stats"] = {"active": 0, "expired": 0, "total": 0}
+            _write_audit_entry({"action": "gc_inventory", **report})
+            await self._publish_event(report)
+            logger.info(
+                "GC inventory complete: %d stale session candidate(s); no data deleted",
+                len(report["expired_session_candidates"]),
+            )
+            return report
+
         for session in expired:
             sid = session["id"]
             db.mark_session_expired(sid)
@@ -220,7 +247,7 @@ class SessionLifecycleManager:
             report["stats"] = {"active": 0, "expired": 0, "total": 0}
 
         # Audit log
-        _write_audit_entry({"action": "run_gc", **report})
+        _write_audit_entry({"action": "run_gc_destructive", **report})
 
         # Publish event
         await self._publish_event(report)

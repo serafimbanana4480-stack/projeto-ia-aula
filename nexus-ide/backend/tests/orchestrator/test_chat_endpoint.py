@@ -65,6 +65,7 @@ def client_with_mocked_ollama(
             multi_llm_enabled=False,
             llm_provider="ollama",
             ollama_host="http://ollama.test",
+            free_only=False,
         ),
     )
 
