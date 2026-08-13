@@ -18,10 +18,25 @@ from backend.tests.conftest import make_stream_response
 from backend.tools.ollama_client import OllamaClient
 
 
-def _install_mock_ollama(tokens: list[str]) -> httpx.MockTransport:
+def _install_mock_ollama(tokens: list[str], *, done_reason: str = "stop") -> httpx.MockTransport:
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/api/chat":
-            return make_stream_response(tokens)
+            if done_reason == "stop":
+                return make_stream_response(tokens)
+            frames = [
+                json.dumps({"message": {"content": token}, "done": False}) for token in tokens
+            ]
+            frames.append(
+                json.dumps(
+                    {
+                        "done": True,
+                        "done_reason": done_reason,
+                        "prompt_eval_count": 12,
+                        "eval_count": len(tokens),
+                    }
+                )
+            )
+            return httpx.Response(200, content=("\n".join(frames) + "\n").encode())
         return httpx.Response(404)
 
     return httpx.MockTransport(handler)
@@ -29,10 +44,12 @@ def _install_mock_ollama(tokens: list[str]) -> httpx.MockTransport:
 
 @pytest.fixture
 def client_with_mocked_ollama(
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[TestClient]:
     """FastAPI TestClient with the app-level OllamaClient replaced by a mock."""
-    mock_transport = _install_mock_ollama(["Hello", " ", "NEXUS"])
+    done_reason = str(getattr(request, "param", "stop"))
+    mock_transport = _install_mock_ollama(["Hello", " ", "NEXUS"], done_reason=done_reason)
 
     # Monkey-patch the OllamaClient constructor used in the lifespan so that
     # every app.state.ollama created uses our in-process mock transport.
@@ -105,6 +122,38 @@ class TestChatEndpoint:
         tokens = [e["content"] for e in events if e["type"] == "token"]
         # Chunks must compose to the provider answer without raw tool transport.
         assert "".join(tokens) == "Hello NEXUS"
+
+    @pytest.mark.parametrize("client_with_mocked_ollama", ["length"], indirect=True)
+    def test_provider_token_limit_is_persisted_as_interrupted(
+        self, client_with_mocked_ollama: TestClient
+    ) -> None:
+        session_id = "t-provider-token-limit"
+        response = client_with_mocked_ollama.post(
+            "/api/chat",
+            json={"message": "what is HTTP?", "session_id": session_id},
+        )
+        assert response.status_code == 200
+        events = _iter_sse_events(response.content)
+        assert not [event for event in events if event["type"] == "error"]
+
+        warning = next(
+            event
+            for event in events
+            if event["type"] == "progress"
+            and event.get("data", {}).get("reason") == "provider_token_limit"
+        )
+        assert warning["data"]["finish_reason"] == "length"
+
+        usage = next(event["data"]["usage"] for event in events if event["type"] == "metric")
+        assert usage["provider"]["finish_reason"] == "length"
+        assert usage["provider"]["complete"] is False
+
+        runs = client_with_mocked_ollama.get(f"/api/sessions/{session_id}/runs").json()["runs"]
+        run = runs[0]
+        assert run["status"] == "interrupted"
+        assert run["execution_state"] == "interrupted"
+        assert run["phase"] == "provider_output_truncated"
+        assert "interrompida pelo limite de tokens" in run["partial_output"]
 
     def test_injection_is_blocked(self, client_with_mocked_ollama: TestClient) -> None:
         response = client_with_mocked_ollama.post(

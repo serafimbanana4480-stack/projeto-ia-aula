@@ -3705,10 +3705,11 @@ async def _run_pipeline(
         )
         yield _sse(
             StreamEvent(
-                type="warning",
+                type="progress",
                 agent=outcome.used_agent,
                 content=truncation_notice,
                 data={
+                    "level": "warning",
                     "reason": "provider_token_limit",
                     "finish_reason": finish_reason,
                     "run_id": run_context.run_id,
