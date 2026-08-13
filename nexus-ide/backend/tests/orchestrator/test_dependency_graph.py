@@ -132,6 +132,20 @@ class TestDependencyGraph:
         graph.update_status(task.task_id, TaskStatus.COMPLETED)
         assert task.status == TaskStatus.COMPLETED
 
+    def test_retrying_task_reenters_running_before_completion(self) -> None:
+        """A recovered retry must re-enter RUNNING before it can complete."""
+        graph = DependencyGraph()
+        task = TaskNode(name="retryable", description="Retry once", agent="CODER")
+        graph.add_task(task)
+
+        graph.transition_status(task.task_id, TaskStatus.READY)
+        graph.transition_status(task.task_id, TaskStatus.RUNNING)
+        graph.transition_status(task.task_id, TaskStatus.RETRYING)
+        graph.transition_status(task.task_id, TaskStatus.RUNNING)
+        graph.transition_status(task.task_id, TaskStatus.COMPLETED)
+
+        assert task.status is TaskStatus.COMPLETED
+
     def test_is_complete(self) -> None:
         """Test checking if graph is complete."""
         graph = DependencyGraph()
