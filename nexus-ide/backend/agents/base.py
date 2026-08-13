@@ -98,6 +98,9 @@ class AgentAction(StrEnum):
     FORMAT_CODE = "format_code"
     TYPE_CHECK = "type_check"
     SPAWN_TASK = "spawn_task"
+    MCP_PROJECT_CONTEXT = "mcp_project_context"
+    MCP_IMPACT_ANALYSIS = "mcp_impact_analysis"
+    MCP_SEQUENTIAL_THINKING = "mcp_sequential_thinking"
 
 
 @dataclass

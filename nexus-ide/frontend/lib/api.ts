@@ -1390,6 +1390,7 @@ export interface MCPActivityItem {
   connector_id: string;
   connector: string;
   tool: string;
+  kind?: "tool_call" | "health_check";
   status: "untested" | "ok" | "warning" | "error";
   latency_ms: number | null;
   detail: string;

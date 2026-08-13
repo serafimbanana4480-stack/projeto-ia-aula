@@ -53,6 +53,17 @@ export interface CommandAlias {
   mode: string;
 }
 
+export interface AdvancedExecutionProfile {
+  active_mode_ids: string[];
+  applied_mode_ids: string[];
+  policy_mode_ids: string[];
+  primary_mode: string | null;
+  preferred_agent: string | null;
+  force_autonomous: boolean;
+  summary: string;
+  addon?: string;
+}
+
 interface AdvancedModeHealth {
   healthy: boolean;
   active_modes: number;
@@ -73,6 +84,7 @@ interface AdvancedModeHealth {
     handler?: string | null;
   }>;
   groups: Record<string, AdvancedModeGroup>;
+  execution_profile?: AdvancedExecutionProfile;
 }
 
 interface AdvancedModeStore {
@@ -85,6 +97,7 @@ interface AdvancedModeStore {
   loading: boolean;
   error: string | null;
   health: AdvancedModeHealth | null;
+  executionProfile: AdvancedExecutionProfile | null;
 
   loadModes: () => Promise<void>;
   loadCommands: () => Promise<void>;
@@ -107,6 +120,7 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
   loading: false,
   error: null,
   health: null,
+  executionProfile: null,
 
   loadModes: async () => {
     if (get().loading) return;
@@ -122,6 +136,7 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
           .map(([id]) => id);
         set({
           health: data,
+          executionProfile: data.execution_profile ?? null,
           modes: Object.fromEntries(
             Object.entries(data.modes).map(([id, m]) => [
               id,
@@ -218,7 +233,10 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
             : [...state.activeModeIds, modeId],
           modes: {
             ...state.modes,
-            [modeId]: { ...state.modes[modeId], active: true, session_count: (state.modes[modeId]?.session_count || 0) + 1 },
+            // Activation is idempotent on the backend and reuses an existing
+            // session. Do not invent a new session count before the next
+            // server refresh confirms one exists.
+            [modeId]: { ...state.modes[modeId], active: true },
           },
         }));
       }
@@ -268,7 +286,7 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
       });
       if (res.ok) {
         const data: AdvancedModeHealth = await res.json();
-        set({ health: data });
+        set({ health: data, executionProfile: data.execution_profile ?? null });
       }
     } catch {
       // ignore

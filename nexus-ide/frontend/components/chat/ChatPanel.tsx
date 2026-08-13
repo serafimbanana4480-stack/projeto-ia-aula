@@ -393,6 +393,21 @@ export default function ChatPanel({
     }
   }, [sessions.currentId]);
 
+  // The Infinity panel lives outside ChatPanel. Let its "Usar /comando"
+  // action place a real command in this input, so every mode is reachable
+  // without relying on remembering aliases or copying text manually.
+  useEffect(() => {
+    const handleInsertCommand = (event: Event) => {
+      const customEvent = event as CustomEvent<{ command?: string }>;
+      const command = customEvent.detail?.command?.trim();
+      if (!command) return;
+      setInput(`${command} `);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    };
+    window.addEventListener("nexus:insert-command", handleInsertCommand);
+    return () => window.removeEventListener("nexus:insert-command", handleInsertCommand);
+  }, []);
+
   // Push stream / history errors to the global toast so they don't disappear
   useEffect(() => {
     if (streamError) {

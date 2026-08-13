@@ -63,10 +63,12 @@ function GroupSection({
   group,
   modes,
   onToggle,
+  onUseCommand,
 }: {
   group: AdvancedModeGroup;
   modes: AdvancedMode[];
   onToggle: (modeId: string, shouldBeActive: boolean) => void;
+  onUseCommand: (command: string) => void;
 }) {
   const [expanded, setExpanded] = useState(true);
 
@@ -92,7 +94,13 @@ function GroupSection({
             className="overflow-hidden"
           >
             {modes.map((mode) => (
-              <ModeCard key={mode.mode_id} mode={mode} onToggle={onToggle} />
+              <ModeCard
+                key={mode.mode_id}
+                mode={mode}
+                command={`/${mode.mode_id}`}
+                onToggle={onToggle}
+                onUseCommand={onUseCommand}
+              />
             ))}
           </motion.div>
         )}
@@ -104,9 +112,13 @@ function GroupSection({
 function ModeCard({
   mode,
   onToggle,
+  command,
+  onUseCommand,
 }: {
   mode: AdvancedMode;
   onToggle: (modeId: string, shouldBeActive: boolean) => void;
+  command: string;
+  onUseCommand: (command: string) => void;
 }) {
   const [toggling, setToggling] = useState(false);
   const emoji = MODE_EMOJIS[mode.mode_id] || "\u25C6";
@@ -172,6 +184,22 @@ function ModeCard({
               {totalSessions > activeSessions && <span>· {totalSessions} total</span>}
             </div>
           )}
+          <div className="mt-1.5 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onUseCommand(command);
+              }}
+              className="rounded border border-purple-500/20 px-1.5 py-0.5 font-mono text-[9px] text-purple-300 hover:bg-purple-500/10"
+              title="Inserir este comando no chat"
+            >
+              Usar {command}
+            </button>
+            <span className="truncate text-[9px] text-gray-600" title={mode.runtime_summary || undefined}>
+              {mode.runtime_summary || "Contrato de execução não disponível"}
+            </span>
+          </div>
         </div>
         <div className="shrink-0 self-center">
           {toggling ? (
@@ -198,6 +226,7 @@ export default function AdvancedModePanel() {
     modes,
     groups,
     activeModeIds,
+    executionProfile,
     loading,
     error,
     loadModes,
@@ -224,6 +253,11 @@ export default function AdvancedModePanel() {
       await deactivateMode(modeId);
     }
     await loadModes();
+  };
+
+  const handleUseCommand = (command: string) => {
+    window.dispatchEvent(new CustomEvent("nexus:insert-command", { detail: { command: `${command} ` } }));
+    setIsOpen(false);
   };
 
   const modesByGroup = Object.entries(groups)
@@ -343,6 +377,21 @@ export default function AdvancedModePanel() {
                       Os modos armados entram nos próximos pedidos como um perfil composto.
                       Um badge não significa que um agente esteja a correr neste instante.
                     </p>
+                    {executionProfile?.primary_mode && (
+                      <div className="mt-2 rounded border border-purple-500/15 bg-black/10 px-2 py-1.5 text-[10px] text-gray-400">
+                        <div>
+                          Estratégia principal: <span className="font-mono text-purple-300">/{executionProfile.primary_mode}</span>
+                        </div>
+                        <div className="mt-0.5">
+                          Aplicada: {executionProfile.applied_mode_ids.map((id) => `/${id}`).join(", ")}
+                        </div>
+                        {executionProfile.policy_mode_ids.length > 0 && (
+                          <div className="mt-0.5 text-gray-500">
+                            Políticas: {executionProfile.policy_mode_ids.map((id) => `/${id}`).join(", ")}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -357,6 +406,7 @@ export default function AdvancedModePanel() {
                         key={groupId}
                         group={group}
                         modes={groupModes}
+                        onUseCommand={handleUseCommand}
                         onToggle={handleToggle}
                       />
                     ))}
@@ -370,6 +420,7 @@ export default function AdvancedModePanel() {
                           order: 99,
                         }}
                         modes={ungroupedModes}
+                        onUseCommand={handleUseCommand}
                         onToggle={handleToggle}
                       />
                     )}

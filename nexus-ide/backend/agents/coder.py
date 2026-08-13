@@ -49,4 +49,6 @@ class CoderAgent(AgentBase):
         AgentAction.RECALL_CONTEXT,
         AgentAction.STORE_MEMORY,
         AgentAction.FETCH_URL,
+        AgentAction.MCP_PROJECT_CONTEXT,
+        AgentAction.MCP_IMPACT_ANALYSIS,
     }

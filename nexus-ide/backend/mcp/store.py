@@ -259,7 +259,7 @@ class MCPConnectorStore:
 
         # stdio transport
         if connector.template_id == "projectmind":
-            result = self._probe_projectmind(connector)
+            result = await self._probe_with_runtime(connector)
             self._record_test_result(connector, result)
             return result
         if not connector.command:
@@ -271,10 +271,26 @@ class MCPConnectorStore:
                 "Vai ser instalado/resolvido no primeiro arranque (normal para npx/uvx).",
             }
         else:
-            result = {"status": "ok", "detail": f"Executável '{connector.command}' resolvido com sucesso."}
+            result = await self._probe_with_runtime(connector)
 
         self._record_test_result(connector, result)
         return result
+
+    async def _probe_with_runtime(self, connector: MCPConnector) -> dict[str, Any]:
+        """Run the same real MCP handshake used by agent calls."""
+        try:
+            from backend.mcp.runtime import list_connector_tools
+
+            started = time.perf_counter()
+            tools = await list_connector_tools(connector, timeout=35)
+            return {
+                "status": "ok",
+                "detail": f"MCP handshake OK · {len(tools)} tools descobertas",
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                "tools": tools,
+            }
+        except Exception as exc:
+            return {"status": "error", "detail": f"Handshake falhou: {str(exc)[:240]}"}
 
     @staticmethod
     def _probe_projectmind(connector: MCPConnector) -> dict[str, Any]:
@@ -358,7 +374,47 @@ class MCPConnectorStore:
         connector.last_tested_at = time.time()
         if result.get("latency_ms") is not None:
             connector.latency_ms = float(result["latency_ms"])
+        discovered = result.get("tools")
+        if isinstance(discovered, list):
+            previous = {str(item.get("name")): item for item in connector.tools}
+            connector.tools = [
+                {
+                    "name": item.get("name", ""),
+                    "title": item.get("title", ""),
+                    "description": item.get("description", ""),
+                    "inputSchema": item.get("inputSchema", {}),
+                    "calls": int(previous.get(str(item.get("name")), {}).get("calls") or 0),
+                    "successes": int(previous.get(str(item.get("name")), {}).get("successes") or 0),
+                    "success_rate": previous.get(str(item.get("name")), {}).get("success_rate"),
+                }
+                for item in discovered
+                if isinstance(item, dict) and item.get("name")
+            ]
         connector.tools = self._discover_tools(connector) or connector.tools
+        self._save()
+
+    def record_tool_call(
+        self, connector_id: str, tool_name: str, latency_ms: float, *, success: bool
+    ) -> None:
+        """Persist evidence from a real MCP tool invocation."""
+        connector = self._connectors.get(connector_id)
+        if connector is None:
+            return
+        connector.calls_today += 1
+        connector.last_activity_tool = tool_name
+        connector.last_activity_at = time.time()
+        connector.latency_ms = round(float(latency_ms), 1)
+        for tool in connector.tools:
+            if tool.get("name") != tool_name:
+                continue
+            calls = int(tool.get("calls") or 0) + 1
+            successes = int(tool.get("successes") or 0) + (1 if success else 0)
+            tool["calls"] = calls
+            tool["successes"] = successes
+            tool["success_rate"] = round(successes / calls * 100, 1)
+            break
+        connector.last_test_status = "ok" if success else "warning"
+        connector.last_test_detail = f"Tool MCP {'executada' if success else 'falhou'}: {tool_name}"
         self._save()
 
     # ── Export ───────────────────────────────────────────────────────

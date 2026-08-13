@@ -45,6 +45,7 @@ dependencies = [
     "python-dateutil>=2.9",
     "psutil>=6.0",
     "beautifulsoup4>=4.12",
+    "mcp>=1.27,<2",
 ]
 
 [dependency-groups]

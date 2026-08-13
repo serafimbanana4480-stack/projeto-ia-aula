@@ -166,7 +166,9 @@ export async function login(credentials: LoginCredentials): Promise<LoginResult>
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("O backend não respondeu a tempo. Confirma que está ativo em localhost:8000.");
+      throw new Error(
+        `O backend não respondeu a tempo. Confirma que está ativo em ${apiUrl("/")}.`,
+      );
     }
     throw error;
   }

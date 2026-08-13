@@ -171,6 +171,26 @@ actions:
     risk_level: "low"
     tags: ["memory", "store", "context"]
 
+  # --- Validated MCP context ---
+  MCP_PROJECT_CONTEXT:
+    tool: mcp_project_context
+    example_args: '{"task": "Find the symbols and dependencies relevant to this change", "token_budget": 1200}'
+    when_to_use: "When a bounded semantic map can replace reading large source files before a code change."
+    risk_level: "low"
+    tags: ["mcp", "projectmind", "semantic", "read"]
+  MCP_IMPACT_ANALYSIS:
+    tool: mcp_impact_analysis
+    example_args: '{"node_id_or_diff": "MCPConnectorStore.test_connector"}'
+    when_to_use: "Before changing a shared symbol or applying a broad diff, to estimate affected dependants."
+    risk_level: "low"
+    tags: ["mcp", "projectmind", "impact", "read"]
+  MCP_SEQUENTIAL_THINKING:
+    tool: mcp_sequential_thinking
+    example_args: '{"thought": "Compare the architecture options", "thought_number": 1, "total_thoughts": 3, "complexity": 8, "architecture": true}'
+    when_to_use: "Only for complexity >= 7, architecture work, two failed debugging attempts, or confidence < 0.7."
+    risk_level: "low"
+    tags: ["mcp", "sequential-thinking", "reasoning"]
+
   # --- Data / reports ---
   ANALYZE_DATA:
     tool: data_analysis

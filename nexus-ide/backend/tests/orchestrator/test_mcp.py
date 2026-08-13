@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.middleware.auth import create_access_token
 from backend.mcp.store import MCPConnectorStore
+from backend.middleware.auth import create_access_token
 from backend.orchestrator.main import app
 
 
@@ -173,6 +173,52 @@ def test_create_connector_unknown_template_returns_400(client: TestClient, auth_
 def test_requires_auth(client: TestClient):
     response = client.get("/api/mcp/connectors")
     assert response.status_code in (401, 403)
+
+
+def test_executable_resolution_is_not_reported_as_connected(client: TestClient, auth_headers, monkeypatch):
+    create = client.post(
+        "/api/mcp/connectors",
+        headers=auth_headers,
+        json={"name": "Filesystem probe", "template_id": "filesystem", "params": {"root_path": "/tmp"}, "env": {}},
+    )
+    connector_id = create.json()["id"]
+
+    async def failed_handshake(_connector):
+        return {"status": "error", "detail": "Handshake falhou: servidor inválido"}
+
+    monkeypatch.setattr("backend.mcp.store.shutil.which", lambda _command: "npx.exe")
+    monkeypatch.setattr("backend.mcp.store.mcp_store._probe_with_runtime", failed_handshake)
+    result = client.post(f"/api/mcp/connectors/{connector_id}/test", headers=auth_headers)
+    assert result.status_code == 200
+    assert result.json()["status"] == "error"
+
+
+def test_curated_mcp_tools_are_advertised_to_coder():
+    from backend.agents.coder import CoderAgent
+
+    names = {item["function"]["name"] for item in CoderAgent()._openai_tool_schemas() or []}
+    assert {"mcp_project_context", "mcp_impact_analysis"} <= names
+
+
+def test_overview_marks_real_tool_activity(client: TestClient, auth_headers):
+    from backend.mcp import store as store_module
+    from backend.mcp.store import MCPConnector
+
+    connector = MCPConnector(
+        id="mcp_test_activity",
+        name="Activity",
+        template_id="custom",
+        command="echo",
+        tools=[{"name": "probe", "title": "Probe", "calls": 0, "success_rate": None}],
+    )
+    store_module.mcp_store._connectors[connector.id] = connector
+    store_module.mcp_store.record_tool_call(connector.id, "probe", 12.5, success=True)
+
+    response = client.get("/api/mcp/overview", headers=auth_headers)
+    assert response.status_code == 200
+    item = next(entry for entry in response.json()["activity"] if entry["connector_id"] == connector.id)
+    assert item["kind"] == "tool_call"
+    assert item["tool"] == "probe"
 
 
 def test_dashboard_status_includes_mcp_summary(client: TestClient):

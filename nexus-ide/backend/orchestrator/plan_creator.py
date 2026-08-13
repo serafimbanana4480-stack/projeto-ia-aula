@@ -493,26 +493,23 @@ Use phase prefixes in step names: "Phase N: Name - Description"."""
         objective: str,
         session_id: str,
     ) -> ExecutionPlan | None:
-        """Parse model JSON without repairing or completing it."""
-        cleaned = re.sub(r"<thinking>.*?</thinking>", "", plan_content, flags=re.DOTALL)
-        cleaned = re.sub(r"```json\s*", "", cleaned)
-        cleaned = re.sub(r"```\s*", "", cleaned)
-        json_match = re.search(r"\[.*\]", cleaned, re.DOTALL)
-        if not json_match:
+        """Parse equivalent structured JSON envelopes without inventing steps."""
+        cleaned = str(plan_content or "").lstrip("\ufeff")
+        cleaned = re.sub(
+            r"<(?:thinking|think)>.*?</(?:thinking|think)>\s*",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        cleaned = re.sub(r"```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = cleaned.replace("```", "")
+
+        raw_steps = self._extract_structured_steps(cleaned)
+        if raw_steps is None:
             text_plan = self._parse_text_plan(cleaned, objective)
             if text_plan is not None and len(text_plan.steps) > 1:
                 text_plan.session_id = session_id
                 return text_plan
-            return None
-        raw_text = json_match.group(0)
-        try:
-            raw_steps = json.loads(raw_text)
-        except json.JSONDecodeError:
-            try:
-                raw_steps = json.loads(re.sub(r",\s*([}\]])", r"\1", raw_text))
-            except json.JSONDecodeError:
-                return None
-        if not isinstance(raw_steps, list) or not raw_steps:
             return None
         valid_raw_steps = [raw for raw in raw_steps if isinstance(raw, dict)]
         if not valid_raw_steps or len(valid_raw_steps) > self.MAX_PLAN_STEPS:
@@ -568,6 +565,42 @@ Use phase prefixes in step names: "Phase N: Name - Description"."""
             steps=steps,
             session_id=session_id,
         )
+
+    @staticmethod
+    def _extract_structured_steps(content: str) -> list[Any] | None:
+        """Extract a JSON array or a documented ``steps``/``plan`` envelope.
+
+        Providers commonly wrap otherwise valid JSON in a short preamble or an
+        object envelope.  This method only unwraps known structural forms; it
+        never repairs missing fields or converts prose into executable tasks.
+        """
+        decoder = json.JSONDecoder()
+        candidates: list[str] = []
+        for marker in ("[", "{"):
+            start = content.find(marker)
+            if start >= 0:
+                candidates.append(content[start:])
+
+        for candidate in candidates:
+            try:
+                value, _end = decoder.raw_decode(candidate)
+            except json.JSONDecodeError:
+                # Keep the existing narrow tolerance for trailing commas in
+                # otherwise JSON-shaped provider output.
+                try:
+                    repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+                    value, _end = decoder.raw_decode(repaired)
+                except json.JSONDecodeError:
+                    continue
+
+            if isinstance(value, list) and value:
+                return value
+            if isinstance(value, dict):
+                for key in ("steps", "plan", "tasks"):
+                    nested = value.get(key)
+                    if isinstance(nested, list) and nested:
+                        return nested
+        return None
 
     @staticmethod
     def _resolve_dep_ref(

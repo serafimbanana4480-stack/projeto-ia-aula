@@ -32,4 +32,7 @@ class ArchitectAgent(AgentBase):
         AgentAction.WRITE_FILE_ABSOLUTE,
         AgentAction.LIST_DIR,
         AgentAction.LIST_DIR_ABSOLUTE,
+        AgentAction.MCP_PROJECT_CONTEXT,
+        AgentAction.MCP_IMPACT_ANALYSIS,
+        AgentAction.MCP_SEQUENTIAL_THINKING,
     }

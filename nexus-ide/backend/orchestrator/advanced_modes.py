@@ -740,6 +740,10 @@ class AdvancedModeOrchestrator:
             "groups": groups,
             "active_count": len(self.state_manager.list_active_modes()),
             "total_count": len(modes),
+            # This is deliberately non-persistent: it is a read-only preview
+            # of what the next request will receive from the armed profile.
+            # A preview must never create a goal, checkpoint, or session.
+            "execution_profile": self.build_active_execution_profile(),
         }
 
     def prepare_mode_context(self, mode_id: str, user_request: str) -> Dict[str, Any]:
@@ -919,6 +923,22 @@ SESSION CONTEXT:
     def get_preferred_agent(self, mode_id: str) -> Optional[str]:
         """Return the safe existing agent selected by an explicit command."""
         return MODE_PREFERRED_AGENTS.get(mode_id)
+
+    def get_execution_target(self, mode_id: str) -> Dict[str, Optional[str]]:
+        """Return the concrete executor selected by an explicit mode command.
+
+        The catalog contains policy contracts as well as executable
+        strategies.  Keeping this distinction in one backend method prevents
+        the chat route and the UI from silently treating every card as a
+        standalone worker.
+        """
+        if mode_id not in get_advanced_modes():
+            return {"kind": "unknown", "agent": None}
+        if mode_id in COMPOSITE_MODES:
+            return {"kind": "autonomous", "agent": None}
+        if mode_id == "swarm-foundry":
+            return {"kind": "swarm", "agent": "SWARM"}
+        return {"kind": "agent", "agent": MODE_PREFERRED_AGENTS.get(mode_id, "CODER")}
 
     def _analyze_claim(
         self,

@@ -103,6 +103,7 @@ def _ensure_tools_registered() -> None:
         "git_auto_commit",
         "git_tools",
         "memory_tools",
+        "mcp_tools",
         "notifications",
         "profile_tools",
         "project_analyzer",

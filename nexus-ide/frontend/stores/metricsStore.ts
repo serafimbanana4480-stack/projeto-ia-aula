@@ -6,7 +6,13 @@
  */
 import { create } from "zustand";
 import { apiUrl, authHeaders, getMetricsHistory } from "../lib/api";
-import { authenticatedFetch, getAccessToken, isAuthenticated } from "../lib/auth";
+import {
+  authenticatedFetch,
+  autoLoginDev,
+  getAccessToken,
+  isAuthenticated,
+  isAutoLoginEnabled,
+} from "../lib/auth";
 
 export interface SystemMetrics {
   tokens_per_second: number;
@@ -239,6 +245,7 @@ let isInitialized = false;
 let isStopped = false;
 let backoffTimer: ReturnType<typeof setTimeout> | null = null;
 let authHeartbeat: ReturnType<typeof setInterval> | null = null;
+let authRecovery: Promise<boolean> | null = null;
 
 // SSE throttle: prevent re-render storms by limiting updates to one per 300ms
 let lastSseUpdate = 0;
@@ -265,6 +272,16 @@ function stopAuthHeartbeat() {
     clearInterval(authHeartbeat);
     authHeartbeat = null;
   }
+}
+
+async function recoverMetricsAuth(): Promise<boolean> {
+  if (!isAutoLoginEnabled()) return false;
+  if (!authRecovery) {
+    authRecovery = autoLoginDev().finally(() => {
+      authRecovery = null;
+    });
+  }
+  return authRecovery;
 }
 
 function stopAll() {
@@ -304,8 +321,11 @@ async function fetchMetrics() {
       // leave the singleton latched after this transient authentication miss.
       isInitialized = false;
       isStopped = false;
-      stopAuthHeartbeat();
       stopAll();
+      startAuthHeartbeat();
+      void recoverMetricsAuth().then((recovered) => {
+        if (recovered) initMetricsStream();
+      });
       return false;
     }
 
@@ -318,11 +338,15 @@ async function fetchMetrics() {
       return true;
     }
   } catch {
-    stopAuthHeartbeat();
+    // Keep the heartbeat alive so a temporary backend restart can recover
+    // without requiring a route change or a full browser reload.
+    isInitialized = false;
+    isStopped = false;
     stopAll();
     useMetricsStore.getState()._setBackendOnline(false);
     useMetricsStore.getState()._setConnectionStatus("offline");
     useMetricsStore.getState()._setConnectionMode("none");
+    startAuthHeartbeat();
   }
   return false;
 }

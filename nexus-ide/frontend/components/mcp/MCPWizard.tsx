@@ -161,7 +161,11 @@ export default function MCPWizard() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async (showSpinner = false) => { if (showSpinner) setRefreshing(true); try { const [nextTemplates, nextOverview] = await Promise.all([getMCPTemplates(), getMCPOverview()]); setTemplates(nextTemplates); setOverview(nextOverview); setError(null); } catch (err) { setError(err instanceof Error ? err.message : "Falha ao carregar o Control Center"); } finally { setLoading(false); setRefreshing(false); } }, []);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => void load(), 30000);
+    return () => window.clearInterval(timer);
+  }, [load]);
 
   const connectors = useMemo(() => overview?.connectors ?? [], [overview]);
   const filteredConnectors = useMemo(() => { const query = search.trim().toLowerCase(); const result = connectors.filter((connector) => { const matchesQuery = !query || `${connector.name} ${connector.description} ${connector.template_id} ${connector.last_test_status}`.toLowerCase().includes(query); const matchesCategory = category === "all" || connector.template_id === category; return matchesQuery && matchesCategory; }); return [...result].sort((a, b) => sort === "name" ? a.name.localeCompare(b.name) : sort === "tools" ? (b.tool_count ?? b.tools?.length ?? 0) - (a.tool_count ?? a.tools?.length ?? 0) : sort === "latency" ? (a.latency_ms ?? Number.MAX_SAFE_INTEGER) - (b.latency_ms ?? Number.MAX_SAFE_INTEGER) : (b.last_tested_at ?? 0) - (a.last_tested_at ?? 0)); }, [category, connectors, search, sort]);

@@ -589,7 +589,8 @@ _COMPLEX_TASK_MIN_WORDS = 8  # Short queries are always simple
 _COMPLEX_TASK_INTENT_MARKERS: tuple[tuple[str, ...], ...] = (
     (
         "analyze", "analyse", "audit", "inspect", "review", "assess",
-        "analisa", "analisar", "audita", "auditar", "inspeciona", "rever",
+        "evaluate", "evaluation", "self-evaluation", "analisa", "analisar",
+        "audita", "auditar", "inspeciona", "rever", "avaliar", "avaliação",
     ),
     (
         "fix", "correct", "implement", "improve", "refactor", "change",
@@ -598,8 +599,8 @@ _COMPLEX_TASK_INTENT_MARKERS: tuple[tuple[str, ...], ...] = (
     ),
     (
         "run tests", "test", "tests", "regression", "verify", "validation",
-        "executa os testes", "teste", "testa", "testar", "testes",
-        "regress", "verifica", "verificar", "validar",
+        "execute", "retest", "executa os testes", "executar", "teste", "testa",
+        "testar", "testes", "retestar", "regress", "verifica", "verificar", "validar",
     ),
     (
         "document", "report", "results", "summarize", "summary",
@@ -619,6 +620,22 @@ _COMPLEX_TASK_INTENT_RES: tuple["re.Pattern[str]", ...] = tuple(
     _compile_marker_pattern(markers) for markers in _COMPLEX_TASK_INTENT_MARKERS
 )
 
+# A long operational prompt may contain a final question as its success
+# criterion.  That question must not downgrade the request to the lightweight
+# Q&A lane when the message also contains explicit execution verbs.
+_ACTIONABLE_QUESTION_INTENT_RE = _compile_marker_pattern(
+    (
+        "analyze", "audit", "inspect", "review", "assess", "investigate",
+        "fix", "correct", "implement", "improve", "refactor", "change",
+        "update", "create", "build", "write", "run", "execute", "perform",
+        "identify", "retest", "verify", "validate", "use",
+        "analisar", "auditar", "inspecionar", "rever", "avaliar", "investigar",
+        "corrigir", "implementar", "melhorar", "refatorar", "alterar", "atualizar",
+        "criar", "construir", "escrever", "executar", "testar", "identificar",
+        "retestar", "verificar", "validar", "usar",
+    )
+)
+
 # Informational questions must never trigger multi-agent orchestration, even
 # when they contain strong keywords ("como funciona a autenticação?" mentions
 # "autenticação" but asks for an explanation, not a change).
@@ -634,9 +651,16 @@ def _is_informational_question(query: str) -> bool:
     stripped = query.strip().lower()
     if not stripped:
         return False
-    if stripped.endswith("?"):
-        return True
-    return any(stripped.startswith(starter) for starter in _COMPLEX_TASK_QUESTION_STARTERS)
+    has_action_intent = bool(_ACTIONABLE_QUESTION_INTENT_RE.search(stripped))
+    starts_as_question = any(
+        stripped.startswith(starter) for starter in _COMPLEX_TASK_QUESTION_STARTERS
+    )
+    if starts_as_question:
+        return not has_action_intent
+    # A trailing question mark is only a reliable Q&A signal when the message
+    # contains no operational command.  This preserves prompts such as
+    # "run the tests and report what prevents the project improving?".
+    return stripped.endswith("?") and not has_action_intent
 
 
 _ASSISTED_ACTION_RE = _compile_marker_pattern(
@@ -661,9 +685,6 @@ def classify_execution_mode(
 
     if re.match(r"^/mission(?:\s|$)", lowered):
         return ExecutionMode.MISSION
-    if _is_informational_question(text):
-        return ExecutionMode.CHAT
-
     explicit = {
         "chat": ExecutionMode.CHAT,
         "assisted": ExecutionMode.ASSISTED,
@@ -681,6 +702,9 @@ def classify_execution_mode(
     }
     if requested in explicit and requested not in {"auto", "agent"}:
         return explicit[requested]
+
+    if _is_informational_question(text):
+        return ExecutionMode.CHAT
 
     phase_count = sum(1 for marker_re in _COMPLEX_TASK_INTENT_RES if marker_re.search(lowered))
     if (
@@ -935,6 +959,16 @@ def _mission_heartbeat_payload(mission: Any | None, started_at: float) -> tuple[
     else:
         message = "Continuo a executar a missão; ainda não há uma nova etapa concluída para reportar."
     return message, payload
+
+
+def _normalise_autonomous_status(state: str, failed_tasks: int = 0) -> str:
+    """Map orchestration states to the only terminal UI outcomes."""
+    normalized = str(state or "").strip().lower()
+    if normalized == "cancelled":
+        return "cancelled"
+    if normalized in {"failed", "planning_blocked", "blocked"} or failed_tasks > 0:
+        return "failed"
+    return "completed"
 
 
 async def _stream_autonomous_execution(
@@ -1473,13 +1507,7 @@ async def _stream_autonomous_execution(
     state_value = str(
         result.state.value if hasattr(result.state, "value") else result.state or "completed"
     )
-    normalized_status = (
-        "cancelled"
-        if state_value == "cancelled"
-        else "failed"
-        if state_value == "failed" or result.failed_tasks > 0
-        else "completed"
-    )
+    normalized_status = _normalise_autonomous_status(state_value, result.failed_tasks)
     if outcome_state is not None:
         outcome_state.update(
             {
@@ -1570,16 +1598,37 @@ async def _stream_autonomous_execution(
             report_path = MissionReport(mission_tracker.mission).write()
             if report_path is not None:
                 summary_lines.append(f"\n📄 Relatório: `reports/{report_path.name}`")
-            yield _sse(
-                StreamEvent(
-                    type="mission_completed",
-                    agent="ORCHESTRATOR",
-                    data={
-                        "mission_id": mission_tracker.mission.id,
-                        "report": report_path.name if report_path else None,
-                    },
+            if normalized_status == "completed":
+                yield _sse(
+                    StreamEvent(
+                        type="mission_completed",
+                        agent="ORCHESTRATOR",
+                        data={
+                            "mission_id": mission_tracker.mission.id,
+                            "report": report_path.name if report_path else None,
+                            "status": normalized_status,
+                        },
+                    )
                 )
-            )
+            else:
+                yield _sse(
+                    StreamEvent(
+                        type="error",
+                        agent="ORCHESTRATOR",
+                        content=(
+                            "; ".join(result.errors[:3])
+                            or "A missão não concluiu todas as fases com evidência verificável."
+                        ),
+                        data={
+                            "error_category": "planning"
+                            if state_value == "planning_blocked"
+                            else "execution",
+                            "mission_id": mission_tracker.mission.id,
+                            "report": report_path.name if report_path else None,
+                            "state": state_value,
+                        },
+                    )
+                )
         except DiskPressureError as exc:
             detail = exc.to_dict()
             summary_lines.append(f"\nDisk pressure blocked mission artifact persistence: {exc}")
@@ -1810,6 +1859,7 @@ async def _run_pipeline(
     def _checkpoint(
         *,
         status: str = "running",
+        execution_state: str | None = None,
         phase: str,
         agent: str | None = None,
         partial_output: str = "",
@@ -1837,7 +1887,8 @@ async def _run_pipeline(
                 correlation_id=run_context.correlation_id,
                 mode=execution_mode.value,
                 execution_state=(
-                    "completed" if finished and status == "completed" else status
+                    execution_state
+                    or ("completed" if finished and status == "completed" else status)
                 ),
                 provider=getattr(req, "provider", "") or None,
                 model=getattr(req, "model", "") or None,
@@ -2152,6 +2203,7 @@ async def _run_pipeline(
     _advanced_profile: dict[str, Any] = {}
     _advanced_command_mode: str | None = None
     _advanced_force_autonomous = False
+    _advanced_force_swarm = False
     _advanced_preferred_agent: str | None = None
     _trimmed = effective_message.lstrip()
     if _trimmed.startswith("/"):
@@ -2168,9 +2220,11 @@ async def _run_pipeline(
             if resolved:
                 mode_id = resolved["mode"]
                 orch = get_orchestrator()
+                execution_target = orch.get_execution_target(mode_id)
                 _advanced_command_mode = mode_id
-                _advanced_force_autonomous = mode_id in {"vibe-infinity", "autonomous"}
-                _advanced_preferred_agent = orch.get_preferred_agent(mode_id)
+                _advanced_force_autonomous = execution_target.get("kind") == "autonomous"
+                _advanced_force_swarm = execution_target.get("kind") == "swarm"
+                _advanced_preferred_agent = execution_target.get("agent")
                 # Activate the advanced mode
                 orch.activate_mode(mode_id)
                 # Prepare mode context with the actual request (without the command)
@@ -2348,7 +2402,11 @@ async def _run_pipeline(
                 context_needed="high",
                 task_type="planning",
             )
-    elif execution_mode is ExecutionMode.MISSION or mode in ("auto", "agent") or _advanced_force_autonomous:
+    elif (
+        execution_mode is ExecutionMode.MISSION
+        or mode in ("auto", "agent")
+        or (_advanced_force_autonomous and not fast_candidate)
+    ) and not _advanced_force_swarm:
         # Auto mode: for COMPLEX tasks, use the full Plan→Execute→Verify pipeline
         # via OrchestrationEngine.execute_autonomous(). For simple tasks, fall
         # through to the normal smart-routed single-agent ReAct loop.
@@ -2356,7 +2414,10 @@ async def _run_pipeline(
         # Plan->Execute->Verify path is reserved for an explicitly activated
         # advanced autonomous mode; otherwise a complex request is handled by
         # the principal, which may use ``spawn_task`` for independent work.
-        if execution_mode is ExecutionMode.MISSION and event_bus is not None:
+        if (
+            execution_mode is ExecutionMode.MISSION
+            or (_advanced_force_autonomous and not fast_candidate)
+        ) and event_bus is not None:
             logger.info(
                 "Auto mode: complex task detected, routing to execute_autonomous | session=%s | query=%.80s",
                 req.session_id,
@@ -2383,7 +2444,7 @@ async def _run_pipeline(
                         if cancellation_entry is not None:
                             inner_cancellation_event = cancellation_entry.event
                 async for chunk in _stream_autonomous_execution(
-                    objective=req.message,
+                    objective=effective_message,
                     session_id=req.session_id,
                     llm_client=llm_client,
                     registry=registry,
@@ -2424,6 +2485,11 @@ async def _run_pipeline(
                         if outcome_status != "completed"
                         else None
                     ),
+                    error_category=(
+                        "planning"
+                        if autonomous_outcome.get("state") == "planning_blocked"
+                        else None
+                    ),
                     finished=True,
                 )
                 return
@@ -2439,11 +2505,18 @@ async def _run_pipeline(
                     }
                 )
                 _checkpoint(
-                    status="blocked",
+                    # ``session_runs.status`` is constrained to the terminal
+                    # values used by the UI. Keep the more precise blocked
+                    # reason in the execution envelope instead of attempting
+                    # to persist an invalid status that would leave the run
+                    # stuck as ``running``.
+                    status="failed",
+                    execution_state="blocked",
                     phase="disk_pressure",
                     agent="ORCHESTRATOR",
                     checkpoint={"mode": "autonomous", "error_category": "disk_pressure", **detail},
                     error=str(exc),
+                    error_category="disk_pressure",
                     finished=True,
                 )
                 now = datetime.now(UTC).isoformat()
@@ -2469,7 +2542,10 @@ async def _run_pipeline(
                 )
                 # Fall through to single-agent path below
 
-        elif execution_mode is ExecutionMode.MISSION and event_bus is None:
+        elif (
+            execution_mode is ExecutionMode.MISSION
+            or (_advanced_force_autonomous and not fast_candidate)
+        ) and event_bus is None:
             logger.warning(
                 "Auto mode: complex task detected but event_bus is unavailable — "
                 "falling back to single-agent ReAct (OrchestrationEngine disabled). | query=%.80s",
@@ -2588,13 +2664,13 @@ async def _run_pipeline(
             context_needed="high",
             task_type="analysis",
         )
-    elif mode in ("swarm", "auto_swarm"):
+    elif mode in ("swarm", "auto_swarm") or _advanced_force_swarm:
         try:
             swarm_agents = getattr(req, "swarm_agents", []) or []
             swarm_strategy = getattr(req, "swarm_strategy", "adaptive") or "adaptive"
 
             if not swarm_agents:
-                if mode == "auto_swarm":
+                if mode == "auto_swarm" or _advanced_force_swarm:
                     # Auto swarm: let the orchestrator pick the team and the
                     # strategy adaptively from the objective itself.
                     swarm_agents = ["ARCHITECT", "CODER", "ANALYZER", "DEBUGGER", "DOCUMENTER"]
@@ -2617,7 +2693,7 @@ async def _run_pipeline(
 
             swarm_task = asyncio.create_task(
                 swarm.execute_swarm(
-                    objective=req.message,
+                    objective=effective_message,
                     session_id=req.session_id,
                     agents=swarm_agents,
                     strategy=swarm_strategy,
@@ -2727,7 +2803,7 @@ async def _run_pipeline(
                 context_needed="high",
                 task_type="implementation",
             )
-    if execution_mode is ExecutionMode.CHAT:
+    if execution_mode is ExecutionMode.CHAT and not _advanced_command_mode:
         decision = decision.model_copy(
             update={
                 "primary_agent": "MICRO",

@@ -131,14 +131,16 @@ async def test_cancel_route_marks_a_registered_request() -> None:
 
 
 def test_cancellation_routes_are_mounted_on_the_main_app() -> None:
-    mounted_routers = [getattr(route, "original_router", None) for route in app.routes]
     paths = {route.path for route in cancellation_router.routes}
 
-    # FastAPI 0.138 keeps included routers lazily instead of flattening every
-    # route into ``app.routes``.  Assert the actual router identity and paths.
-    assert any(router is cancellation_router for router in mounted_routers)
-    assert "/api/chat/cancel/{request_id}" in paths
-    assert "/api/chat/cancel/stats" in paths
+    # FastAPI versions differ in whether ``include_router`` keeps an
+    # ``original_router`` marker or flattens routes into concrete APIRoute
+    # objects.  The observable contract is that every cancellation endpoint
+    # is actually reachable from the main application.
+    mounted_paths = {route.path for route in app.routes}
+    assert paths <= mounted_paths
+    assert "/api/chat/cancel/{request_id}" in mounted_paths
+    assert "/api/chat/cancel/stats" in mounted_paths
 
 
 @pytest.mark.asyncio

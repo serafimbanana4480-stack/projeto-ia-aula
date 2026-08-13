@@ -82,9 +82,10 @@ async def advanced_modes_health(
 
     active_count = all_statuses.get("active_count", 0)
     total_count = all_statuses.get("total_count", 0)
+    mode_statuses = all_statuses.get("modes", {})
 
     mode_summaries = {}
-    for mid, status in all_statuses.get("modes", {}).items():
+    for mid, status in mode_statuses.items():
         mode_summaries[mid] = {
             "active": status.get("active", False),
             "session_count": status.get("session_count", 0),
@@ -102,11 +103,17 @@ async def advanced_modes_health(
         }
 
     return {
-        "healthy": True,
+        # A healthy catalog means every configured mode loaded and exposed a
+        # runtime contract.  HTTP 200 alone is not proof that the suite is
+        # usable, so keep this explicit and machine-readable for the UI.
+        "healthy": bool(total_count > 0 and len(mode_statuses) == total_count and all(
+            status.get("available", True) for status in mode_statuses.values()
+        )),
         "active_modes": active_count,
         "total_modes": total_count,
         "modes": mode_summaries,
         "groups": all_statuses.get("groups", {}),
+        "execution_profile": all_statuses.get("execution_profile", {}),
     }
 
 
@@ -146,6 +153,8 @@ async def deactivate_advanced_mode(
     _user: dict = Depends(require_auth),
 ) -> dict:
     """Deactivate an advanced mode."""
+    if not get_advanced_mode(mode_id):
+        raise HTTPException(status_code=404, detail=f"Advanced mode '{mode_id}' not found")
     orch = _get_orch()
     result = orch.deactivate_mode(mode_id)
     return result

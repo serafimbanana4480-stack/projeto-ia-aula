@@ -34,4 +34,6 @@ class DebuggerAgent(AgentBase):
         AgentAction.CONSULT_AGENT,
         AgentAction.RECALL_CONTEXT,
         AgentAction.STORE_MEMORY,
+        AgentAction.MCP_PROJECT_CONTEXT,
+        AgentAction.MCP_IMPACT_ANALYSIS,
     }

@@ -87,6 +87,29 @@ def test_parse_plan_normalizes_invalid_steps_and_dependencies() -> None:
     assert plan.dependency_graph.validate() == (False, f"Task {plan.steps[1].task_id} depends on non-existent True")
 
 
+@pytest.mark.parametrize("wrapper_key", ["steps", "plan", "tasks"])
+def test_parse_plan_accepts_structured_provider_envelopes(wrapper_key: str) -> None:
+    creator = _creator()
+    payload = json.dumps(
+        {
+            wrapper_key: [
+                {"name": "Inspect", "description": "Read the measured scope", "agent": "ANALYZER"},
+                {"name": "Verify", "description": "Run the checks", "agent": "DEBUGGER", "depends_on": [0]},
+            ]
+        }
+    )
+
+    plan = creator._parse_plan(
+        f"<think>planning privately</think>\n```json\n{payload}\n```\n",
+        "Audit the project",
+        "session_envelope",
+    )
+
+    assert plan is not None
+    assert [step.name for step in plan.steps] == ["Inspect", "Verify"]
+    assert plan.steps[1].depends_on == [plan.steps[0].task_id]
+
+
 def test_planning_prompt_uses_bounded_economical_step_count() -> None:
     prompt = _creator()._build_planning_prompt("Audit Nexus", "")
 

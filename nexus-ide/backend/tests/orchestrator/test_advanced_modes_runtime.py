@@ -102,3 +102,35 @@ def test_mode_prompt_renders_catalog_values_without_formatting_literal_json() ->
 
     assert "{max_debate_rounds}" not in rendered
     assert "6" in rendered
+
+
+def test_explicit_commands_have_a_concrete_execution_target() -> None:
+    orchestrator = modes.AdvancedModeOrchestrator()
+
+    assert orchestrator.get_execution_target("autonomous") == {
+        "kind": "autonomous",
+        "agent": None,
+    }
+    assert orchestrator.get_execution_target("vibe-infinity")["kind"] == "autonomous"
+    assert orchestrator.get_execution_target("swarm-foundry") == {
+        "kind": "swarm",
+        "agent": "SWARM",
+    }
+
+    expected_agents = {
+        "advisor-infinity": "ADVISOR",
+        "forge": "CODER",
+        "multiverse": "ARCHITECT",
+        "proof": "ADVISOR",
+        "reality-lab": "TEST_RUNNER_E2E",
+        "archaeologist": "ANALYZER",
+        "evolve": "ANALYZER",
+        "sentinel": "GUARDIAN",
+    }
+    for mode_id, agent in expected_agents.items():
+        assert orchestrator.get_execution_target(mode_id) == {
+            "kind": "agent",
+            "agent": agent,
+        }
+
+    assert orchestrator.get_execution_target("does-not-exist")["kind"] == "unknown"

@@ -69,13 +69,15 @@ async def get_overview(_user: dict = Depends(require_auth)) -> dict[str, Any]:
     activity = []
     for connector in connectors:
         tested_at = connector.get("last_tested_at")
-        if tested_at:
+        activity_at = connector.get("last_activity_at") or tested_at
+        if activity_at:
             activity.append(
                 {
-                    "at": tested_at,
+                    "at": activity_at,
                     "connector_id": connector["id"],
                     "connector": connector["name"],
                     "tool": connector.get("last_activity_tool") or "health_check",
+                    "kind": "tool_call" if connector.get("last_activity_tool") else "health_check",
                     "status": connector.get("last_test_status", "untested"),
                     "latency_ms": connector.get("latency_ms"),
                     "detail": connector.get("last_test_detail", ""),
