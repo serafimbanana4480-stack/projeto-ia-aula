@@ -137,7 +137,22 @@ def test_cancellation_routes_are_mounted_on_the_main_app() -> None:
     # ``original_router`` marker or flattens routes into concrete APIRoute
     # objects.  The observable contract is that every cancellation endpoint
     # is actually reachable from the main application.
-    mounted_paths = {route.path for route in app.routes}
+    def mounted_route_paths(routes) -> set[str]:
+        mounted: set[str] = set()
+        for route in routes:
+            path = getattr(route, "path", None)
+            if isinstance(path, str):
+                mounted.add(path)
+            nested = getattr(route, "routes", None)
+            if nested:
+                mounted.update(mounted_route_paths(nested))
+            original_router = getattr(route, "original_router", None)
+            original_routes = getattr(original_router, "routes", None)
+            if original_routes:
+                mounted.update(mounted_route_paths(original_routes))
+        return mounted
+
+    mounted_paths = mounted_route_paths(app.routes)
     assert paths <= mounted_paths
     assert "/api/chat/cancel/{request_id}" in mounted_paths
     assert "/api/chat/cancel/stats" in mounted_paths

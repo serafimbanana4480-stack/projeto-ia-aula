@@ -227,6 +227,29 @@ class TestMissionTracker:
         t.finish_agent("Project Intelligence Agent")
         assert c.state is ContractState.COMPLETED
 
+    def test_execution_plan_replaces_proposal_denominator(self, py_project: Path) -> None:
+        """Mission progress follows real executor task ids, not broad proposals."""
+        t = start_mission("x", project_path=str(py_project), deep_scan=False)
+        t.sync_execution_plan(
+            {
+                "steps": [
+                    {"task_id": "task-a", "name": "Inspect", "agent": "ANALYZER"},
+                    {
+                        "task_id": "task-b",
+                        "name": "Verify",
+                        "agent": "DEBUGGER",
+                        "depends_on": ["task-a"],
+                    },
+                ]
+            }
+        )
+
+        assert t.mission.to_dict()["tasks_total"] == 2
+        t.update_execution_task("task-a", "completed")
+        t.update_execution_task("task-b", "blocked", error="dependency did not complete")
+        assert t.mission.to_dict()["tasks_done"] == 1
+        assert t.find_contract("task-b").state is ContractState.BLOCKED
+
     def test_confidence_is_clamped(self, py_project: Path) -> None:
         t = start_mission("x", project_path=str(py_project), deep_scan=False)
         t.start_wave(1)

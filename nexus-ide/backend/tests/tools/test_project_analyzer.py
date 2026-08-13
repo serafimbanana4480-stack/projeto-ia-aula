@@ -37,6 +37,23 @@ async def test_analyze_project_missing_tests(tmp_path):
     # by checking only actual test artifacts within the directory
     result = await analyze_project(project_path=str(tmp_path))
     assert result["test_coverage"]["test_files_found"] is False
+
+
+@pytest.mark.asyncio
+async def test_analyze_project_prunes_generated_and_historical_directories(tmp_path):
+    (tmp_path / "main.py").write_text("print('signal')\n", encoding="utf-8")
+    for directory in ("node_modules", ".next-dev", "logs", "reports", "tmp"):
+        generated = tmp_path / directory
+        generated.mkdir()
+        (generated / "noise.py").write_text("print('noise')\n", encoding="utf-8")
+
+    result = await analyze_project(project_path=str(tmp_path))
+
+    # The global test fixture may create SQLite files in the temporary root;
+    # only the single source file should contribute to Python inventory.
+    assert result["files_by_extension"][".py"] == 1
+    assert result["scan_truncated"] is False
+    assert result["scan_errors"] == []
     # The project analyzer may flag the tmp_path name itself as a test dir,
     # so we verify the issue exists OR no test files were actually found.
     assert result["test_coverage"]["test_files_found"] is False

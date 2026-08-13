@@ -39,6 +39,8 @@ from backend.orchestrator.events import (
     OrchestratorEvent,
 )
 from backend.orchestrator.plan_executor import extract_spawn_requests
+from backend.orchestrator.plan_validation import PlanningResult
+from backend.orchestrator.types import OrchestrationState as SharedOrchestrationState
 
 # ---------------------------------------------------------------------------
 # Dependency Graph Tests
@@ -384,6 +386,36 @@ class TestOrchestrationEngine:
 
     def test_initial_state(self, engine: OrchestrationEngine) -> None:
         assert engine.get_state("any") == OrchestrationState.IDLE
+        assert OrchestrationState is SharedOrchestrationState
+
+    @pytest.mark.asyncio
+    async def test_blocked_planning_can_continue_only_into_approval(
+        self, engine: OrchestrationEngine
+    ) -> None:
+        proposal = ExecutionPlan.from_steps(
+            "Safe fallback",
+            "Validated deterministic proposal",
+            [TaskNode(name="Inspect", agent="ANALYZER")],
+            session_id="blocked-session",
+        )
+        engine._planning_results["blocked-session"] = PlanningResult(
+            status="blocked",
+            source="deterministic_fallback",
+            error="provider returned malformed output",
+            deterministic_proposal=proposal,
+        )
+        engine._state["blocked-session"] = OrchestrationState.PLANNING_BLOCKED
+
+        continued = await engine.continue_planning("blocked-session")
+
+        assert continued is not None
+        assert continued.status == "ready"
+        assert continued.plan is proposal
+        assert proposal.approved is False
+        assert engine.get_state("blocked-session") == OrchestrationState.AWAITING_APPROVAL
+        approval = engine.request_approval(proposal.plan_id)
+        assert approval is not None
+        assert approval.session_id == "blocked-session"
 
     @pytest.mark.asyncio
     async def test_cancel(self, engine: OrchestrationEngine) -> None:
@@ -500,6 +532,35 @@ class TestOrchestrationEngine:
         assert result.completed_tasks == 2
 
     @pytest.mark.asyncio
+    async def test_failed_predecessor_blocks_dependent_task(
+        self, engine: OrchestrationEngine, event_bus: EventBus
+    ) -> None:
+        """A failed hand-off must never start its dependent agent."""
+        predecessor = MagicMock()
+        predecessor.name = "CODER"
+        predecessor.run = AsyncMock(side_effect=RuntimeError("predecessor failed"))
+        dependent = MagicMock()
+        dependent.name = "ANALYZER"
+        dependent.run = AsyncMock(return_value=iter(["should not run"]))
+        engine._registry.update({"CODER": predecessor, "ANALYZER": dependent})
+
+        first = TaskNode(name="First", agent="CODER", max_retries=0)
+        second = TaskNode(
+            name="Second", agent="ANALYZER", depends_on=[first.task_id], max_retries=0
+        )
+        plan = ExecutionPlan.from_steps("Failure hand-off", "desc", [first, second])
+
+        result = await engine.execute_plan(plan, "s1", auto_approve=True)
+
+        assert result.state == OrchestrationState.FAILED
+        assert result.failed_tasks == 1
+        assert result.blocked_tasks == 1
+        assert dependent.run.await_count == 0
+        assert second.status == TaskStatus.BLOCKED
+        events = await event_bus.get_recent_events(limit=100)
+        assert any(event.event_type == EventType.TASK_BLOCKED for event in events)
+
+    @pytest.mark.asyncio
     async def test_task_failure_handling(self, engine: OrchestrationEngine) -> None:
         # Create a failing agent
         failing_agent = MagicMock()
@@ -515,6 +576,35 @@ class TestOrchestrationEngine:
         assert result.state == OrchestrationState.FAILED
         assert result.failed_tasks == 1
         assert len(result.errors) > 0
+
+    @pytest.mark.asyncio
+    async def test_task_can_recover_after_entering_retrying(
+        self, engine: OrchestrationEngine
+    ) -> None:
+        attempts = 0
+
+        async def flaky_run(_request):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("temporary provider failure")
+            yield "Recovered with verified output"
+
+        agent = MagicMock()
+        agent.name = "CODER"
+        agent.run = flaky_run
+        engine._registry["CODER"] = agent
+
+        task = TaskNode(name="Retry once", agent="CODER", max_retries=1)
+        plan = ExecutionPlan.from_steps("Retry", "Recover", [task], session_id="s1")
+
+        result = await engine.execute_plan(plan, "s1", auto_approve=True)
+
+        assert attempts == 2
+        assert task.retry_count == 1
+        assert task.status == TaskStatus.COMPLETED
+        assert result.state == OrchestrationState.COMPLETED
+        assert result.completed_tasks == 1
 
     @pytest.mark.asyncio
     async def test_task_fails_when_agent_output_contains_tool_error(

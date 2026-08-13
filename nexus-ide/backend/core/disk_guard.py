@@ -6,6 +6,7 @@ import shutil
 import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,90 @@ class DiskSnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+class DiskPressure(StrEnum):
+    """Operational disk states used by health, scheduling, and persistence."""
+
+    NORMAL = "normal"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
+class DiskPressureManager:
+    """Classify disk pressure and inventory safe candidates without deleting.
+
+    A warning is observable but permits normal work. Critical pressure blocks
+    provider/model allocation and new durable artefacts. Candidate inventory is
+    deliberately advisory: cleanup always remains an explicit user action.
+    """
+
+    def __init__(
+        self,
+        *,
+        warning_percent: float = 10.0,
+        critical_percent: float = 5.0,
+    ) -> None:
+        if critical_percent < 0 or warning_percent < critical_percent:
+            raise ValueError("disk thresholds must satisfy 0 <= critical <= warning")
+        self.warning_percent = float(warning_percent)
+        self.critical_percent = float(critical_percent)
+
+    def classify(self, snapshot: DiskSnapshot) -> DiskPressure:
+        if snapshot.free_percent < self.critical_percent:
+            return DiskPressure.CRITICAL
+        if snapshot.free_percent < self.warning_percent:
+            return DiskPressure.WARNING
+        return DiskPressure.NORMAL
+
+    def inspect(self, path: str | Path) -> dict[str, Any]:
+        snapshot = measure_disk(path)
+        state = self.classify(snapshot)
+        return {
+            "status": state.value,
+            "pressure": state is not DiskPressure.NORMAL,
+            "write_blocked": state is DiskPressure.CRITICAL,
+            "warning_threshold_percent": self.warning_percent,
+            "critical_threshold_percent": self.critical_percent,
+            "snapshot": snapshot.to_dict(),
+            "candidate_cleanup_categories": list(_CLEANUP_CATEGORIES),
+        }
+
+    def candidate_inventory(
+        self, root: str | Path, *, max_candidates: int = 32
+    ) -> list[dict[str, Any]]:
+        """Return existing cleanup candidates and measured shallow sizes."""
+        root_path = Path(root)
+        names = (
+            ".next",
+            ".next-dev",
+            "frontend/.next",
+            "frontend/.next-dev",
+            "logs",
+            "reports",
+            ".pytest_cache",
+            "coverage",
+        )
+        candidates: list[dict[str, Any]] = []
+        for relative in names[:max_candidates]:
+            candidate = root_path / relative
+            if not candidate.exists():
+                continue
+            size = 0
+            try:
+                if candidate.is_file():
+                    size = candidate.stat().st_size
+                else:
+                    for item in candidate.rglob("*"):
+                        if item.is_file():
+                            try:
+                                size += item.stat().st_size
+                            except OSError:
+                                continue
+            except OSError:
+                continue
+            candidates.append({"path": str(candidate), "size_bytes": size})
+        return candidates
 
 
 class DiskPressureError(RuntimeError):
@@ -106,12 +191,11 @@ def disk_pressure_status(
             "error": str(exc),
             "threshold_percent": threshold_percent,
         }
-    return {
-        "status": "pressure" if snapshot.free_percent < threshold_percent else "ok",
-        "pressure": snapshot.free_percent < threshold_percent,
-        "threshold_percent": threshold_percent,
-        "snapshot": snapshot.to_dict(),
-    }
+    manager = DiskPressureManager(critical_percent=threshold_percent)
+    payload = manager.inspect(path)
+    payload["threshold_percent"] = threshold_percent
+    payload["legacy_status"] = "pressure" if payload["pressure"] else "ok"
+    return payload
 
 
 class WorkerOwnershipGuard:

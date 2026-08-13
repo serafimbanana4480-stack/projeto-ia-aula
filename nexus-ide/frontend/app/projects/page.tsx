@@ -1,11 +1,21 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useCallback, useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { apiUrl, authHeaders, createProject, getProjects } from "../../lib/api";
 import AppShell from "../../components/layout/AppShell";
 import { FolderKanban, Plus, Settings, Trash2, Clock, FolderOpen, AlertTriangle } from "lucide-react";
 import type { Project } from "../../lib/types";
 import { useProjectStore } from "../../stores/projectStore";
+
+function detectDuplicates(list: Project[]): boolean {
+  const seen = new Map<string, number>();
+  for (const project of list) {
+    const count = (seen.get(project.path) ?? 0) + 1;
+    seen.set(project.path, count);
+    if (count > 1) return true;
+  }
+  return false;
+}
 
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -33,17 +43,7 @@ export default function ProjectsPage() {
   const pathInputRef = useRef<HTMLInputElement>(null);
   const { setCurrentProject } = useProjectStore();
 
-  function detectDuplicates(list: Project[]): boolean {
-    const seen = new Map<string, number>();
-    for (const p of list) {
-      const count = (seen.get(p.path) ?? 0) + 1;
-      seen.set(p.path, count);
-      if (count > 1) return true;
-    }
-    return false;
-  }
-
-  async function loadProjects() {
+  const loadProjects = useCallback(async () => {
     try {
       setLoading(true);
       const data = await getProjects();
@@ -57,11 +57,11 @@ export default function ProjectsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
-    loadProjects();
-  }, []);
+    void loadProjects();
+  }, [loadProjects]);
 
   async function handleCreateProject() {
     try {

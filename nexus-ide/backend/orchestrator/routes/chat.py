@@ -961,12 +961,18 @@ def _mission_heartbeat_payload(mission: Any | None, started_at: float) -> tuple[
     return message, payload
 
 
-def _normalise_autonomous_status(state: str, failed_tasks: int = 0) -> str:
+def _normalise_autonomous_status(
+    state: str, failed_tasks: int = 0, blocked_tasks: int = 0
+) -> str:
     """Map orchestration states to the only terminal UI outcomes."""
     normalized = str(state or "").strip().lower()
     if normalized == "cancelled":
         return "cancelled"
-    if normalized in {"failed", "planning_blocked", "blocked"} or failed_tasks > 0:
+    if (
+        normalized in {"failed", "planning_blocked", "blocked"}
+        or failed_tasks > 0
+        or blocked_tasks > 0
+    ):
         return "failed"
     return "completed"
 
@@ -1233,8 +1239,10 @@ async def _stream_autonomous_execution(
                     )
                 elif et in (
                     EventType.TASK_STARTED,
+                    EventType.TASK_WAITING_DEPENDENCY,
                     EventType.TASK_COMPLETED,
                     EventType.TASK_FAILED,
+                    EventType.TASK_BLOCKED,
                     EventType.TASK_CANCELLED,
                     EventType.AGENT_FAILED,
                     EventType.AGENT_RETRY,
@@ -1244,11 +1252,52 @@ async def _stream_autonomous_execution(
                     EventType.STEP_COMPLETED,
                     EventType.HEARTBEAT,
                 ):
+                    if mission_tracker is not None:
+                        execution_status = {
+                            EventType.TASK_STARTED: "running",
+                            EventType.TASK_WAITING_DEPENDENCY: "waiting_dependency",
+                            EventType.TASK_COMPLETED: "completed",
+                            EventType.TASK_FAILED: "failed",
+                            EventType.TASK_BLOCKED: "blocked",
+                            EventType.TASK_CANCELLED: "cancelled",
+                            EventType.AGENT_RETRY: "running",
+                        }.get(et)
+                        if execution_status:
+                            mission_tracker.update_execution_task(
+                                evt.task_id,
+                                execution_status,
+                                error=str(data.get("error") or "") or None,
+                                activity=(
+                                    "A aguardar dependências"
+                                    if execution_status == "waiting_dependency"
+                                    else None
+                                ),
+                            )
+                        if et == EventType.PLAN_CREATED:
+                            mission_tracker.sync_execution_plan(data)
+                            yield _event_sse(
+                                StreamEvent(
+                                    type="mission_plan",
+                                    agent="ORCHESTRATOR",
+                                    data=_mission_ui_payload(mission_tracker.mission),
+                                )
+                            )
                     status = (
                         "running"
-                        if et in (EventType.TASK_STARTED, EventType.AGENT_RETRY, EventType.ORCHESTRATOR_STARTED, EventType.HEARTBEAT)
+                        if et in (
+                            EventType.TASK_STARTED,
+                            EventType.TASK_WAITING_DEPENDENCY,
+                            EventType.AGENT_RETRY,
+                            EventType.ORCHESTRATOR_STARTED,
+                            EventType.HEARTBEAT,
+                        )
                         else "error"
-                        if et in (EventType.TASK_FAILED, EventType.TASK_CANCELLED, EventType.AGENT_FAILED)
+                        if et in (
+                            EventType.TASK_FAILED,
+                            EventType.TASK_BLOCKED,
+                            EventType.TASK_CANCELLED,
+                            EventType.AGENT_FAILED,
+                        )
                         else "success"
                     )
                     kind = (
@@ -1507,7 +1556,9 @@ async def _stream_autonomous_execution(
     state_value = str(
         result.state.value if hasattr(result.state, "value") else result.state or "completed"
     )
-    normalized_status = _normalise_autonomous_status(state_value, result.failed_tasks)
+    normalized_status = _normalise_autonomous_status(
+        state_value, result.failed_tasks, result.blocked_tasks
+    )
     if outcome_state is not None:
         outcome_state.update(
             {
@@ -1572,18 +1623,12 @@ async def _stream_autonomous_execution(
         try:
             from backend.orchestrator.mission_control import MissionReport, MissionState
 
-            for artifact in result.task_results.values():
+            for task_id, artifact in result.task_results.items():
                 if not isinstance(artifact, dict):
                     continue
-                agent_name = str(artifact.get("agent", "")) or "Backend Agent"
-                mission_tracker.update_agent(
-                    agent_name,
-                    activity="",
-                    discovery=str(artifact.get("name", "")) or None,
-                )
-                mission_tracker.finish_agent(
-                    agent_name,
-                    success=str(artifact.get("status", "")) not in ("failed", "error"),
+                mission_tracker.update_execution_task(
+                    str(task_id),
+                    str(artifact.get("status", "")),
                     error=str(artifact.get("error", "")) or None,
                 )
 
@@ -1810,6 +1855,7 @@ async def _run_pipeline(
     """The core chat pipeline, extracted for testability (keeps the route tiny)."""
     started_at = time.time()
     run_id = f"run-{uuid.uuid4().hex}"
+    goal_id = f"goal-{uuid.uuid4().hex[:12]}"
     correlation_id = uuid.uuid4().hex[:16]
     requested_mode = getattr(req, "mode", "auto") or "auto"
     execution_mode = classify_execution_mode(
@@ -1822,6 +1868,7 @@ async def _run_pipeline(
         mission_id=None,
         project_path=getattr(req, "project_path", "") or None,
         mode=execution_mode,
+        goal_id=goal_id,
     )
     run_started = False
 
@@ -1843,6 +1890,7 @@ async def _run_pipeline(
                 prompt=req.message,
                 phase="routing",
                 checkpoint={"mode": execution_mode.value, "project_path": bool(req.project_path)},
+                goal_id=run_context.goal_id,
                 correlation_id=run_context.correlation_id,
                 mode=execution_mode.value,
                 execution_state="routing",
@@ -1885,6 +1933,7 @@ async def _run_pipeline(
                 error=error,
                 finished=finished,
                 correlation_id=run_context.correlation_id,
+                goal_id=run_context.goal_id,
                 mode=execution_mode.value,
                 execution_state=(
                     execution_state
@@ -2271,6 +2320,7 @@ async def _run_pipeline(
         mission_id=None,
         project_path=project_path or None,
         mode=execution_mode,
+        goal_id=goal_id,
     )
     history = await context.get_history(req.session_id)
     # Persist the current user turn only after taking the pre-turn snapshot;

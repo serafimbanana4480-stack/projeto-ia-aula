@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 
 from backend.core import disk_guard
-from backend.core.disk_guard import DiskPressureError, measure_disk, require_disk_headroom
+from backend.core.disk_guard import (
+    DiskPressure,
+    DiskPressureError,
+    DiskPressureManager,
+    measure_disk,
+    require_disk_headroom,
+)
 
 
 class _Usage:
@@ -50,3 +56,29 @@ def test_headroom_gate_allows_above_threshold(monkeypatch: pytest.MonkeyPatch, t
     snapshot = require_disk_headroom(tmp_path)
 
     assert snapshot.free_percent == pytest.approx(5.1)
+
+
+def test_disk_pressure_manager_has_normal_warning_critical_states(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = DiskPressureManager(warning_percent=10, critical_percent=5)
+
+    monkeypatch.setattr(disk_guard.shutil, "disk_usage", lambda path: _Usage(1_000, 120))
+    assert manager.inspect(tmp_path)["status"] == DiskPressure.NORMAL.value
+    monkeypatch.setattr(disk_guard.shutil, "disk_usage", lambda path: _Usage(1_000, 80))
+    assert manager.inspect(tmp_path)["status"] == DiskPressure.WARNING.value
+    monkeypatch.setattr(disk_guard.shutil, "disk_usage", lambda path: _Usage(1_000, 40))
+    critical = manager.inspect(tmp_path)
+    assert critical["status"] == DiskPressure.CRITICAL.value
+    assert critical["write_blocked"] is True
+
+
+def test_candidate_inventory_is_advisory_and_does_not_delete(tmp_path: Path) -> None:
+    cache = tmp_path / ".next"
+    cache.mkdir()
+    (cache / "bundle.js").write_text("x", encoding="utf-8")
+
+    candidates = DiskPressureManager().candidate_inventory(tmp_path)
+
+    assert candidates == [{"path": str(cache), "size_bytes": 1}]
+    assert (cache / "bundle.js").exists()

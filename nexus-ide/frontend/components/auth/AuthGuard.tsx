@@ -14,6 +14,7 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [checked, setChecked] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const checkedRef = useRef(false);
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blockedLoginRedirectRef = useRef(false);
@@ -35,6 +36,7 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
       if (err) {
         setError(err instanceof Error ? err.message : "Authentication check failed.");
       }
+      checkedRef.current = true;
       setChecked(true);
     };
 
@@ -42,7 +44,7 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
       // Start the guard timeout before any network-backed auto-login attempt.
       // A stalled backend must never keep the entire UI on an infinite spinner.
       timeoutRef.current = setTimeout(() => {
-        if (mounted && !checked) {
+        if (mounted && !checkedRef.current) {
           const isPublic = PUBLIC_PATHS.includes(pathname);
           if (!isPublic) {
             clearAuth();

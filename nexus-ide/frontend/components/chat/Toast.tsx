@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AlertTriangle, X, Copy, Check } from "lucide-react";
 
@@ -193,7 +193,7 @@ export default function ToastHost() {
 
 // Convenience hooks
 export function useToast() {
-  return {
+  return useMemo(() => ({
     push: pushToast,
     dismiss: dismissToast,
     clear: clearToasts,
@@ -202,5 +202,5 @@ export function useToast() {
     warning: (title: string, message?: string) => pushToast({ kind: "warning", title, message }),
     info: (title: string, message?: string) => pushToast({ kind: "info", title, message }),
     success: (title: string, message?: string) => pushToast({ kind: "success", title, message }),
-  };
+  }), []);
 }

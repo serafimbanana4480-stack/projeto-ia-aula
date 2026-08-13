@@ -30,8 +30,7 @@ import asyncio
 import logging
 import os
 import uuid
-from dataclasses import dataclass, field
-from enum import StrEnum
+from dataclasses import dataclass
 from typing import Any
 
 from backend.agents.base import AgentBase
@@ -50,6 +49,7 @@ from backend.orchestrator.plan_executor import (
 )
 from backend.orchestrator.plan_validation import PlanningResult, validate_execution_plan
 from backend.orchestrator.retry_manager import RetryManager
+from backend.orchestrator.types import ExecutionContext, OrchestrationResult, OrchestrationState
 from backend.orchestrator.verification import (
     VerificationOutcome,
     _create_final_review_task,
@@ -67,44 +67,6 @@ except ImportError:
     TTLCache = None
 
 logger = logging.getLogger(__name__)
-
-class OrchestrationState(StrEnum):
-    IDLE = "idle"
-    PLANNING = "planning"
-    PLANNING_BLOCKED = "planning_blocked"
-    AWAITING_APPROVAL = "awaiting_approval"
-    EXECUTING = "executing"
-    PAUSED = "paused"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-@dataclass
-class ExecutionContext:
-    """Shared state accessible to all agents during orchestration."""
-
-    session_id: str
-    project_path: str = "."
-    shared_memory: dict[str, Any] = field(default_factory=dict)
-    artifacts: dict[str, Any] = field(default_factory=dict)  # task outputs keyed by task_id
-    _global_context_parts: list[str] = field(
-        default_factory=list
-    )  # accumulated context from completed tasks
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-    @property
-    def global_context(self) -> str:
-        return "".join(self._global_context_parts)
-
-    @global_context.setter
-    def global_context(self, value: str) -> None:
-        # Support legacy assignment, but internally append
-        if not self._global_context_parts:
-            self._global_context_parts.append(value)
-        else:
-            self._global_context_parts.append(value)
-
 
 @dataclass
 class PlanApprovalRequest:
@@ -132,22 +94,6 @@ class PlanApprovalRequest:
             "approval_timeout_s": self.approval_timeout_s,
             "created_at": self.created_at,
         }
-
-
-@dataclass
-class OrchestrationResult:
-    """Aggregated result of an orchestration run."""
-
-    run_id: str
-    state: OrchestrationState
-    plan: ExecutionPlan | None = None
-    completed_tasks: int = 0
-    failed_tasks: int = 0
-    total_duration_ms: int = 0
-    tokens_used: int = 0
-    errors: list[str] = field(default_factory=list)
-    task_results: dict[str, Any] = field(default_factory=dict)
-
 
 class OrchestrationEngine:
     """Coordinates multi-agent execution of structured plans.
@@ -278,6 +224,13 @@ class OrchestrationEngine:
             self._state[session_id] = OrchestrationState.IDLE
             return result
 
+        self._begin_approval(plan, session_id)
+        return result
+
+    def _begin_approval(
+        self, plan: ExecutionPlan, session_id: str
+    ) -> PlanApprovalRequest:
+        """Register one complete approval state for model or fallback plans."""
         self._state[session_id] = OrchestrationState.AWAITING_APPROVAL
         approval_request = PlanApprovalRequest(
             plan_id=plan.plan_id,
@@ -307,7 +260,7 @@ class OrchestrationEngine:
             self._approval_timeouts[plan.plan_id] = asyncio.create_task(
                 self._approval_timeout_worker(plan.plan_id, session_id, timeout)
             )
-        return result
+        return approval_request
 
     async def continue_planning(self, session_id: str) -> PlanningResult | None:
         """Expose the deterministic proposal only after explicit continuation."""
@@ -325,7 +278,7 @@ class OrchestrationEngine:
         self._planning_results[session_id] = continued
         self._plans[proposal.plan_id] = proposal
         self._session_plans[session_id] = proposal.plan_id
-        self._state[session_id] = OrchestrationState.AWAITING_APPROVAL
+        self._begin_approval(proposal, session_id)
         return continued
 
     async def continue_plan(self, session_id: str) -> PlanningResult | None:
@@ -652,6 +605,7 @@ class OrchestrationEngine:
             raise ValueError("Plan requires approval before execution")
 
         run_id = uuid.uuid4().hex[:12]
+        plan.run_id = run_id
         self._state[session_id] = OrchestrationState.EXECUTING
         cancellation_event = self._cancellation.create(session_id)
         active_tasks: list[asyncio.Task[Any]] = []

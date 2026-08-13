@@ -54,6 +54,7 @@ def get_logger(name: str) -> StructuredLogger:
 class OrchestrationState(StrEnum):
     IDLE = "idle"
     PLANNING = "planning"
+    PLANNING_BLOCKED = "planning_blocked"
     AWAITING_APPROVAL = "awaiting_approval"
     EXECUTING = "executing"
     PAUSED = "paused"
@@ -94,6 +95,7 @@ class OrchestrationResult:
     plan: Any | None = None
     completed_tasks: int = 0
     failed_tasks: int = 0
+    blocked_tasks: int = 0
     total_duration_ms: int = 0
     tokens_used: int = 0
     errors: list[str] = field(default_factory=list)

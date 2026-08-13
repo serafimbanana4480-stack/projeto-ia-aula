@@ -40,17 +40,25 @@ const CB_STATE_LABEL: Record<CircuitBreakerState["state"], string> = {
   half_open: "semiaberto",
 };
 
-function getStatusInfo(info: ProviderInfo): { tone: StatusTone; label: string } {
+export function getStatusInfo(info: ProviderInfo): { tone: StatusTone; label: string } {
   const cb = info.circuit_breaker;
 
   if (cb?.state === "open") return { tone: "danger", label: "Indisponível (circuito aberto)" };
   if (cb?.state === "half_open") return { tone: "warning", label: "Degradado (a recuperar)" };
   if (info.healthy === false) return { tone: "danger", label: "Indisponível" };
 
-  const sr = info.success_rate ?? 1.0;
-  if (sr < 0.5) return { tone: "warning", label: "Degradado" };
+  const sr = info.success_rate;
+  if (info.healthy !== true && sr == null) {
+    return { tone: "warning", label: "Não verificado" };
+  }
+  if (sr != null && sr < 0.5) return { tone: "warning", label: "Degradado" };
 
   return { tone: "success", label: "Saudável" };
+}
+
+export function successRatePercent(info: ProviderInfo): number | null {
+  if (info.success_rate == null) return null;
+  return info.success_rate >= 0.999 ? 100 : info.success_rate * 100;
 }
 
 function formatLatency(ms: number | undefined): string {
@@ -211,8 +219,7 @@ export default function ProviderStatusWidget() {
           {providerEntries.map(([name, info]) => {
             const status = getStatusInfo(info);
             const cb = info.circuit_breaker;
-            const sr = info.success_rate ?? 1.0;
-            const srPct = sr >= 0.999 ? 100 : sr * 100;
+            const srPct = successRatePercent(info);
             return (
               <motion.div key={name} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}>
                 <Surface elevation={0} padding="sm" tone={status.tone}>
@@ -237,7 +244,11 @@ export default function ProviderStatusWidget() {
                     <div className="flex min-w-0 items-center gap-1" title="Taxa de sucesso">
                       <Zap className="h-3 w-3 shrink-0" />
                       <span className="truncate tabular-nums">
-                        <AnimatedNumber value={srPct} decimals={1} />% sucesso
+                        {srPct == null ? (
+                          <span>— sucesso</span>
+                        ) : (
+                          <><AnimatedNumber value={srPct} decimals={1} />% sucesso</>
+                        )}
                       </span>
                     </div>
                     <div className="flex min-w-0 items-center justify-end gap-1 text-right" title="Última verificação">
@@ -245,7 +256,9 @@ export default function ProviderStatusWidget() {
                       <span className="truncate">{formatTime(info.last_check)}</span>
                     </div>
                   </div>
-                  <Meter value={srPct} tone={status.tone} showThresholds={false} height={3} className="mt-2" />
+                  {srPct != null && (
+                    <Meter value={srPct} tone={status.tone} showThresholds={false} height={3} className="mt-2" />
+                  )}
 
                   {/* Circuit breaker state */}
                   {cb && (

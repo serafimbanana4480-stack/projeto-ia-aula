@@ -115,6 +115,30 @@ describe("lib/api.ts Client Suite", () => {
       );
       expect(messages).toHaveLength(1);
     });
+
+    it("preserves the planning envelope and continues a blocked fallback explicitly", async () => {
+      const blocked = {
+        status: "blocked",
+        source: "deterministic_fallback",
+        error: "malformed provider output",
+        plan: null,
+        deterministic_proposal: { plan_id: "fallback-1", steps: [] },
+      };
+      mockResponse(200, blocked);
+
+      expect(await api.createPlan("Audit", "session-plan")).toEqual(blocked);
+
+      const ready = { ...blocked, status: "ready", plan: blocked.deterministic_proposal };
+      mockResponse(200, ready);
+      expect(await api.continuePlan("session-plan")).toEqual(ready);
+      expect(global.fetch).toHaveBeenLastCalledWith(
+        "http://localhost:8000/api/plan/continue",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ session_id: "session-plan" }),
+        }),
+      );
+    });
   });
 
   describe("File operations API", () => {

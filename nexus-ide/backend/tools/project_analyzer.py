@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 from backend.tools.registry import ToolSpec, register_tool
 
@@ -50,24 +53,63 @@ _EXCLUDED_DIRS = {
     "dist",
     "build",
     ".next",
+    ".next-dev",
+    ".nexus",
+    ".kilo",
+    ".agents",
+    ".ruff_cache",
+    ".tox",
+    ".turbo",
     "out",
     "target",
     ".idea",
     ".vscode",
     "coverage",
+    "logs",
+    "reports",
+    "tmp",
+    "temp",
+    "artifacts",
+    "playwright-report",
+    "test-results",
+    "site-packages",
     ".gitignore",  # not a dir but safe to include
 }
 
+_MAX_PROJECT_FILES = 20_000
+_MAX_SCAN_SECONDS = 8.0
 
-def _walk_project(project: Path):
-    """Yield files under project, skipping excluded directories."""
-    for entry in project.iterdir():
-        if entry.name in _EXCLUDED_DIRS:
-            continue
-        if entry.is_dir():
-            yield from _walk_project(entry)
-        elif entry.is_file():
-            yield entry
+
+def _walk_project(project: Path, *, state: dict[str, Any] | None = None):
+    """Yield a bounded project file inventory, pruning generated data."""
+    scan_state = state if state is not None else {}
+    scan_state.setdefault("truncated", False)
+    scan_state.setdefault("errors", [])
+    started = time.monotonic()
+    yielded = 0
+
+    def onerror(exc: OSError) -> None:
+        scan_state["errors"].append(str(exc))
+
+    for root, dirnames, filenames in os.walk(project, onerror=onerror):
+        dirnames[:] = sorted(
+            name
+            for name in dirnames
+            if name not in _EXCLUDED_DIRS and not name.startswith(".pytest-")
+        )
+        for name in sorted(filenames):
+            if yielded >= _MAX_PROJECT_FILES or time.monotonic() - started > _MAX_SCAN_SECONDS:
+                scan_state["truncated"] = True
+                return
+            path = Path(root) / name
+            try:
+                if not path.is_file():
+                    continue
+            except OSError as exc:
+                scan_state["errors"].append(str(exc))
+                continue
+            yielded += 1
+            yield path
 
 
 def _detect_framework(project: Path, files: list[Path]) -> dict:
@@ -344,7 +386,8 @@ async def analyze_project(project_path: str = ".") -> dict:
         if not project.exists():
             return {"error": f"Project path not found: {project_path}"}
 
-        files = list(_walk_project(project))
+        scan_state: dict[str, Any] = {}
+        files = list(_walk_project(project, state=scan_state))
 
         ext_counter: Counter = Counter()
         for f in files:
@@ -360,6 +403,8 @@ async def analyze_project(project_path: str = ".") -> dict:
         report = {
             "project_path": str(project),
             "total_files": len(files),
+            "scan_truncated": bool(scan_state.get("truncated")),
+            "scan_errors": list(scan_state.get("errors", []))[:20],
             "files_by_extension": dict(ext_counter.most_common()),
             "framework": framework_info,
             "dependencies": dependencies,

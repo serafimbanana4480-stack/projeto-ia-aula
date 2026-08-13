@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, is_dataclass
 from datetime import date, datetime
@@ -113,9 +114,10 @@ class RunContext:
     mission_id: str | None
     project_path: str | None
     mode: ExecutionMode
+    goal_id: str = field(default_factory=lambda: f"goal-{uuid.uuid4().hex[:12]}")
 
     def __post_init__(self) -> None:
-        for name in ("session_id", "run_id", "correlation_id"):
+        for name in ("session_id", "run_id", "correlation_id", "goal_id"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must not be empty")
@@ -128,6 +130,7 @@ class RunContext:
             "mission_id": self.mission_id,
             "project_path": self.project_path,
             "mode": self.mode.value,
+            "goal_id": self.goal_id,
         }
 
     @classmethod
@@ -139,6 +142,7 @@ class RunContext:
             mission_id=value.get("mission_id"),
             project_path=value.get("project_path"),
             mode=ExecutionMode(value["mode"]),
+            goal_id=str(value.get("goal_id") or f"goal-{str(value['run_id'])}"),
         )
 
 

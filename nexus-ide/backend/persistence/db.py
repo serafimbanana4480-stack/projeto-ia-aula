@@ -343,6 +343,7 @@ def _ensure_session_compatibility_schema() -> None:
 
 
 _EXECUTION_ENVELOPE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("goal_id", "TEXT"),
     ("mission_id", "TEXT"),
     ("correlation_id", "TEXT"),
     ("mode", "TEXT"),
@@ -380,6 +381,10 @@ def _ensure_execution_envelope_schema() -> None:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_session_runs_mission_updated "
                     "ON session_runs(mission_id, updated_at)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_session_runs_goal_updated "
+                    "ON session_runs(goal_id, updated_at)"
                 )
             conn.commit()
     except Exception as exc:
@@ -969,6 +974,7 @@ def upsert_session_run(
     usage: dict[str, Any] | None = None,
     error: str | None = None,
     finished: bool = False,
+    goal_id: str | None = None,
     mission_id: str | None = None,
     correlation_id: str | None = None,
     mode: str | None = None,
@@ -993,9 +999,10 @@ def upsert_session_run(
             INSERT INTO session_runs
                 (id, session_id, status, agent, phase, prompt, partial_output,
                  checkpoint_json, usage_json, error, mission_id, correlation_id,
+                 goal_id,
                  mode, execution_state, provider, model, error_category,
                  retry_after, evidence_json, started_at, updated_at, finished_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 status = excluded.status,
                 agent = COALESCE(excluded.agent, session_runs.agent),
@@ -1005,6 +1012,7 @@ def upsert_session_run(
                 checkpoint_json = excluded.checkpoint_json,
                 usage_json = excluded.usage_json,
                 error = excluded.error,
+                goal_id = COALESCE(excluded.goal_id, session_runs.goal_id),
                 mission_id = COALESCE(excluded.mission_id, session_runs.mission_id),
                 correlation_id = COALESCE(excluded.correlation_id, session_runs.correlation_id),
                 mode = COALESCE(excluded.mode, session_runs.mode),
@@ -1030,6 +1038,7 @@ def upsert_session_run(
                 error,
                 mission_id,
                 correlation_id,
+                goal_id,
                 mode,
                 execution_state,
                 provider,

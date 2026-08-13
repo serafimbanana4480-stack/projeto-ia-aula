@@ -204,6 +204,7 @@ class PlanExecutor:
         errors: list[str] = []
 
         graph = plan.dependency_graph
+        plan.run_id = run_id
         # Dynamic ``spawn_task`` requests may extend the graph while it is
         # running. Recompute layers after each batch so spawned work is not
         # merely reported as an artifact and is actually executed.
@@ -439,6 +440,7 @@ class PlanExecutor:
                     "plan": result.plan.to_dict() if hasattr(result.plan, "to_dict") else str(result.plan),
                     "completed_tasks": result.completed_tasks,
                     "failed_tasks": result.failed_tasks,
+                    "blocked_tasks": result.blocked_tasks,
                     "total_duration_ms": result.total_duration_ms,
                     "tokens_used": result.tokens_used,
                     "errors": [str(e) for e in (result.errors or [])],
@@ -483,11 +485,11 @@ class PlanExecutor:
         try:
             for scope in scopes:
                 if not file_locks.acquire(scope, task_owner):
-                    task.status = TaskStatus.FAILED
                     task.error_message = (
                         f"Scope lock conflict for {scope!r} "
                         f"(owner={file_locks.owner(scope)!r})"
                     )
+                    graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
                     task.completed_at = time.time()
                     return {"error": task.error_message, "error_category": "scope_conflict"}
                 acquired.append(scope)
@@ -508,8 +510,11 @@ class PlanExecutor:
         cancellation_event: asyncio.Event | None = None,
     ) -> dict[str, Any]:
         """Execute a single task with retry logic and event emission."""
-        task.status = TaskStatus.RUNNING
+        graph.transition_status(task.task_id, TaskStatus.RUNNING)
         task.started_at = time.time()
+        task.agent_execution_id = f"{run_id}:agent:{task.task_id}"
+        if task.agent == "DEBUGGER" or task.name.strip().lower().startswith("verify"):
+            task.test_run_id = f"{run_id}:test:{task.task_id}"
 
         await self._events.publish(
             OrchestratorEvent(
@@ -517,14 +522,18 @@ class PlanExecutor:
                 source=task.agent,
                 session_id=session_id,
                 task_id=task.task_id,
-                data={"task_name": task.name},
+                data={
+                    "task_name": task.name,
+                    "agent_execution_id": task.agent_execution_id,
+                    "test_run_id": task.test_run_id,
+                },
             )
         )
 
         agent = self._registry.get(task.agent)
         if not agent:
-            task.status = TaskStatus.FAILED
             task.error_message = f"Agent {task.agent} not found"
+            graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
             await self._events.publish(
                 OrchestratorEvent(
                     event_type=EventType.TASK_FAILED,
@@ -541,8 +550,8 @@ class PlanExecutor:
             task.allowed_tools,
         )
         if contract_errors:
-            task.status = TaskStatus.FAILED
             task.error_message = "Agent contract rejected: " + "; ".join(contract_errors)
+            graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
             task.completed_at = time.time()
             return {"error": task.error_message, "error_category": "agent_contract"}
 
@@ -552,9 +561,16 @@ class PlanExecutor:
         conv_log = get_conversation_logger(session_id)
 
         for attempt in range(task.max_retries + 1):
+            # A retry is a new execution attempt. Keep the guarded state
+            # machine honest by moving RETRYING back to RUNNING before the
+            # attempt can complete or fail. Without this transition a
+            # recovered second attempt tried RETRYING -> COMPLETED and raised
+            # a state-machine error instead of returning the real result.
+            if attempt > 0 and task.status == TaskStatus.RETRYING:
+                graph.transition_status(task.task_id, TaskStatus.RUNNING)
             try:
                 if cancellation_event is not None and cancellation_event.is_set():
-                    task.status = TaskStatus.CANCELLED
+                    graph.transition_status(task.task_id, TaskStatus.CANCELLED)
                     return {"cancelled": True}
 
                 conv_log.log_task_started(task.task_id, task.name, task.agent, attempt + 1)
@@ -616,10 +632,10 @@ class PlanExecutor:
                 agent_run_success = getattr(agent, "_last_run_success", None)
                 if agent_run_success is False:
                     task.output_data["content"] = output
-                    task.status = TaskStatus.FAILED
                     task.error_message = (
                         "Agent execution failed its runtime/tool evidence gate"
                     )
+                    graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
                     task.completed_at = time.time()
                     conv_log.log_task_failed(
                         task.task_id,
@@ -667,8 +683,8 @@ class PlanExecutor:
 
                 if unrecovered_errors:
                     task.output_data["content"] = output
-                    task.status = TaskStatus.FAILED
                     task.error_message = unrecovered_errors[0]
+                    graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
                     task.completed_at = time.time()
 
                     conv_log.log_task_failed(
@@ -718,10 +734,10 @@ class PlanExecutor:
                 incompletion = output_reports_incompletion(output)
                 if incompletion:
                     task.output_data["content"] = output
-                    task.status = TaskStatus.FAILED
                     task.error_message = (
                         f"Agent reported the task as not completed ({incompletion})"
                     )
+                    graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
                     task.completed_at = time.time()
 
                     conv_log.log_task_failed(
@@ -763,7 +779,7 @@ class PlanExecutor:
                     }
 
                 task.output_data["content"] = output
-                task.status = TaskStatus.COMPLETED
+                graph.transition_status(task.task_id, TaskStatus.COMPLETED)
                 task.completed_at = time.time()
 
                 # Store artifact
@@ -808,6 +824,7 @@ class PlanExecutor:
                     task.max_retries + 1,
                 )
                 if attempt < task.max_retries:
+                    graph.transition_status(task.task_id, TaskStatus.RETRYING)
                     await self._events.publish(
                         OrchestratorEvent(
                             event_type=EventType.AGENT_RETRY,
@@ -824,8 +841,8 @@ class PlanExecutor:
                     jitter = random.uniform(0, 1)
                     await asyncio.sleep((2**attempt) + jitter)
                 else:
-                    task.status = TaskStatus.FAILED
                     task.error_message = f"Task timed out after {self._default_timeout}s"
+                    graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
                     task.completed_at = time.time()
                     conv_log.log_task_failed(
                         task.task_id,
@@ -856,6 +873,7 @@ class PlanExecutor:
                 )
 
                 if attempt < task.max_retries:
+                    graph.transition_status(task.task_id, TaskStatus.RETRYING)
                     await self._events.publish(
                         OrchestratorEvent(
                             event_type=EventType.AGENT_RETRY,
@@ -868,8 +886,8 @@ class PlanExecutor:
                     jitter = random.uniform(0, 1)
                     await asyncio.sleep((2**attempt) + jitter)
                 else:
-                    task.status = TaskStatus.FAILED
                     task.error_message = str(exc)
+                    graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
                     task.completed_at = time.time()
 
                     conv_log.log_task_failed(

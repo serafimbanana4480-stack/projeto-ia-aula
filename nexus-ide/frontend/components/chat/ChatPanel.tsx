@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useAgentStream } from "../../hooks/useAgentStream";
 import { useChatSessions } from "../../hooks/useChatSessions";
 import { useToast } from "./Toast";
-import { ApiError, getSessionHistory, getSessionRuns, createPlan, approvePlan, executePlan, getPlanStatus, cancelPlan, getProvidersStatus } from "../../lib/api";
+import { ApiError, getSessionHistory, getSessionRuns, createPlan, continuePlan, approvePlan, executePlan, getPlanStatus, cancelPlan, getProvidersStatus } from "../../lib/api";
 import type { PlanCreateResult, PlanStatus as PlanStatusType } from "../../lib/api";
 import { useModeStore, type Mode } from "../../stores/modeStore";
 import { useModelStore } from "../../stores/modelStore";
@@ -391,7 +391,7 @@ export default function ChatPanel({
       submittedTurnRef.current = false;
       setSessionId(sessions.currentId);
     }
-  }, [sessions.currentId]);
+  }, [sessionId, sessions.currentId]);
 
   // The Infinity panel lives outside ChatPanel. Let its "Usar /comando"
   // action place a real command in this input, so every mode is reachable
@@ -413,12 +413,12 @@ export default function ChatPanel({
     if (streamError) {
       toast.error("Falha no chat", streamError, undefined);
     }
-  }, [streamError]);
+  }, [streamError, toast]);
   useEffect(() => {
     if (historyError) {
       toast.error("Não foi possível carregar o histórico", historyError, undefined);
     }
-  }, [historyError]);
+  }, [historyError, toast]);
 
   // Proactively detect demo mode: no LLM provider/API key configured.
   useEffect(() => {
@@ -1076,7 +1076,27 @@ export default function ChatPanel({
   const handlePlanCreate = useCallback(async (objective: string) => {
     setPlanError(null);
     try {
-      const plan = await createPlan(objective, sessionId);
+      const planning = await createPlan(objective, sessionId);
+      const plan = planning.plan;
+      if (!plan) {
+        const proposal = planning.deterministic_proposal;
+        setActivePlan(proposal);
+        if (proposal) {
+          setPlanStatus({
+            plan_id: proposal.plan_id,
+            status: "planning_blocked",
+            title: proposal.title,
+            total_steps: proposal.total_steps,
+            steps: proposal.steps,
+            requires_approval: true,
+            approved: false,
+          });
+        }
+        setPlanError(
+          planning.error || "O planeamento foi bloqueado; existe uma proposta segura para revisão.",
+        );
+        return;
+      }
       setActivePlan(plan);
       const status = await getPlanStatus(plan.plan_id);
       setPlanStatus(status);
@@ -1092,6 +1112,18 @@ export default function ChatPanel({
       log.error("Failed to create plan:", err);
     }
   }, [sessionId, startPlanExecution]);
+
+  const handlePlanContinue = useCallback(async () => {
+    setPlanError(null);
+    try {
+      const planning = await continuePlan(sessionId);
+      if (!planning.plan) throw new Error("A proposta segura já não está disponível");
+      setActivePlan(planning.plan);
+      setPlanStatus(await getPlanStatus(planning.plan.plan_id));
+    } catch (err) {
+      setPlanError(err instanceof Error ? err.message : "Falha ao continuar o plano");
+    }
+  }, [sessionId]);
 
   const handlePlanApprove = useCallback(async () => {
     if (!activePlan) return;
@@ -1470,6 +1502,15 @@ export default function ChatPanel({
                 </div>
               )}
               <div className="flex items-center gap-2">
+                {planStatus?.status === "planning_blocked" && (
+                  <button
+                    onClick={handlePlanContinue}
+                    className="flex items-center gap-1 rounded-lg bg-amber-500/20 px-3 py-1.5 text-xs font-medium text-amber-300 transition-colors hover:bg-amber-500/30"
+                  >
+                    <ListChecks className="h-3.5 w-3.5" />
+                    Continuar com plano seguro
+                  </button>
+                )}
                 {planStatus?.status === "awaiting_approval" && (
                   <button
                     onClick={handlePlanApprove}
@@ -1722,7 +1763,7 @@ export default function ChatPanel({
               placeholder="Pergunte qualquer coisa... (use @ para agents, / para comandos, Ctrl+K para procurar)"
               aria-autocomplete="list"
               aria-controls={showCommands ? "slash-command-menu" : undefined}
-              aria-expanded={showCommands}
+              aria-haspopup={showCommands ? "listbox" : undefined}
               disabled={streaming}
               rows={1}
               style={{ fieldSizing: "content" }}

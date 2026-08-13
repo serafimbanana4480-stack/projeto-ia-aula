@@ -198,7 +198,6 @@ export default function ModelComparison() {
                     <th
                       scope="col"
                       aria-sort={ariaSortValue("status")}
-                      role="button"
                       tabIndex={0}
                       aria-label={`${STR.sortPrefix} ${COLUMN_LABELS.status}`}
                       className="cursor-pointer pb-2 text-left hover:text-nexus-text"
@@ -210,7 +209,6 @@ export default function ModelComparison() {
                     <th
                       scope="col"
                       aria-sort={ariaSortValue("id")}
-                      role="button"
                       tabIndex={0}
                       aria-label={`${STR.sortPrefix} ${COLUMN_LABELS.id}`}
                       className="cursor-pointer pb-2 text-left hover:text-nexus-text"
@@ -222,7 +220,6 @@ export default function ModelComparison() {
                     <th
                       scope="col"
                       aria-sort={ariaSortValue("size_bytes")}
-                      role="button"
                       tabIndex={0}
                       aria-label={`${STR.sortPrefix} ${COLUMN_LABELS.size_bytes}`}
                       className="cursor-pointer pb-2 text-right hover:text-nexus-text"

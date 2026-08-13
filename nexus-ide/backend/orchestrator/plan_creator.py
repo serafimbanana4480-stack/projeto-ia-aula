@@ -213,10 +213,10 @@ class PlanCreator:
                 candidate_plan = self._parse_plan(repaired, objective, session_id)
 
         # A provider can return a body that is non-empty but not executable.
-        # That is a planner defect, not a reason to kill an otherwise safe run:
-        # use the measured deterministic proposal after bounded repair.  The
-        # proposal remains explicit in the result so the UI and audit trail can
-        # distinguish model planning from fallback planning.
+        # Preserve a validated deterministic proposal so the user can continue
+        # explicitly, but never mark it ready here: ``execute_autonomous``
+        # auto-approves ready plans, which would turn malformed model output
+        # into an unreviewed multi-agent run.
         if candidate_plan is None:
             await self._events.publish(
                 OrchestratorEvent(
@@ -226,26 +226,14 @@ class PlanCreator:
                     content=(
                         "Planner output was not executable after "
                         f"{repair_attempts} structured repair attempt(s); "
-                        "using the validated deterministic fallback."
+                        "a validated deterministic fallback is available for "
+                        "explicit continuation."
                     ),
                 )
             )
             deterministic.source = "deterministic_fallback"  # type: ignore[attr-defined]
-            await self._events.publish(
-                OrchestratorEvent(
-                    event_type=EventType.PLAN_CREATED,
-                    source="PLANNER",
-                    session_id=session_id,
-                    data={
-                        **deterministic.to_dict(),
-                        "source": "deterministic_fallback",
-                        "repair_attempts": repair_attempts,
-                    },
-                )
-            )
             return PlanningResult(
-                status="ready",
-                plan=deterministic,
+                status="blocked",
                 source="deterministic_fallback",
                 error="planner output was not a parseable structured plan",
                 deterministic_proposal=deterministic,
@@ -261,28 +249,16 @@ class PlanCreator:
                     source="PLANNER",
                     session_id=session_id,
                     content=(
-                        "Planner schema validation failed; using the validated "
-                        "deterministic fallback: "
+                        "Planner schema validation failed; a validated "
+                        "deterministic fallback is available for explicit "
+                        "continuation: "
                         + "; ".join(candidate_validation.errors[:4])
                     ),
                 )
             )
             deterministic.source = "deterministic_fallback"  # type: ignore[attr-defined]
-            await self._events.publish(
-                OrchestratorEvent(
-                    event_type=EventType.PLAN_CREATED,
-                    source="PLANNER",
-                    session_id=session_id,
-                    data={
-                        **deterministic.to_dict(),
-                        "source": "deterministic_fallback",
-                        "validation_errors": candidate_validation.errors[:8],
-                    },
-                )
-            )
             return PlanningResult(
-                status="ready",
-                plan=deterministic,
+                status="blocked",
                 source="deterministic_fallback",
                 error="; ".join(candidate_validation.errors),
                 deterministic_proposal=deterministic,

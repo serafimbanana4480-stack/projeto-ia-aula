@@ -40,11 +40,13 @@ Design constraints
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
 import subprocess
+import sys
 import time
 import tomllib
 import uuid
@@ -54,6 +56,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
+
 from backend.core.disk_guard import measure_disk, require_disk_headroom
 
 logger = logging.getLogger(__name__)
@@ -68,6 +71,7 @@ SKIP_DIRS = frozenset({
     ".mypy_cache", ".ruff_cache", ".pytest_cache", "dist", "build", ".turbo",
     "coverage", ".idea", ".vscode", "playwright-report", "test-results",
     ".nexus", ".kilo", ".agents", "site-packages", ".egg-info",
+    "logs", "reports", "tmp", "temp", "artifacts",
 })
 
 # A scan walking a monorepo unbounded is a hang, not a scan. These caps make the
@@ -86,6 +90,10 @@ MAX_GIT_PROBE_SECONDS = 2
 MAX_GIT_OUTPUT_BYTES = 128_000
 GIT_OUTPUT_TRUNCATED = "\n__NEXUS_GIT_OUTPUT_TRUNCATED__"
 MAX_CONCURRENT_AGENTS = 6
+
+# Process-local incremental cache. It stores only file signatures and measured
+# TODO counts; it never persists user content or silently changes the project.
+_INCREMENTAL_TODO_CACHE: dict[str, dict[str, tuple[int, int, int]]] = {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -202,6 +210,8 @@ class ProjectSnapshot:
     file_count: int = 0
     truncated: bool = False
     scan_seconds: float = 0.0
+    incremental_cache_hits: int = 0
+    incremental_cache_misses: int = 0
     languages: dict[str, int] = field(default_factory=dict)
     frameworks: list[str] = field(default_factory=list)
     entrypoints: list[str] = field(default_factory=list)
@@ -470,9 +480,10 @@ class ProjectIntelligence:
             folder = self.root / rel
             has_python = folder.is_dir() and any(folder.glob("*.py"))
             has_package = (folder / "package.json").is_file()
-            if has_python or has_package:
-                if not any(service["name"] == rel for service in services):
-                    services.append({"name": rel, "source": rel, "kind": "directory"})
+            if (has_python or has_package) and not any(
+                service["name"] == rel for service in services
+            ):
+                services.append({"name": rel, "source": rel, "kind": "directory"})
         snap.services = sorted(services, key=lambda service: str(service["name"]))
 
     def _read_recent_errors(self, snap: ProjectSnapshot, started: float | None = None) -> None:
@@ -506,10 +517,8 @@ class ProjectIntelligence:
         for path in candidates:
             try:
                 with path.open("r", encoding="utf-8", errors="ignore") as handle:
-                    try:
+                    with contextlib.suppress(OSError):
                         handle.seek(max(0, path.stat().st_size - MAX_RECENT_LOG_BYTES))
-                    except OSError:
-                        pass
                     lines = handle.read(MAX_RECENT_LOG_BYTES).splitlines()
             except OSError:
                 snap.unknowns.append(f"recent errors from {path.relative_to(self.root)}")
@@ -583,6 +592,9 @@ class ProjectIntelligence:
     # ── internals ─────────────────────────────────────────────────────────
     def _walk(self, snap: ProjectSnapshot, *, deep: bool, started: float) -> None:
         todo_samples: list[str] = []
+        cache_key = str(self.root)
+        previous_cache = _INCREMENTAL_TODO_CACHE.get(cache_key, {})
+        next_cache: dict[str, tuple[int, int, int]] = {}
 
         def onerror(exc: OSError) -> None:
             snap.unknowns.append(f"filesystem scan: {exc}")
@@ -608,7 +620,7 @@ class ProjectIntelligence:
                     break
                 if (time.monotonic() - started) > MAX_SCAN_SECONDS:
                     snap.truncated = True
-                    return
+                    break
                 ext = Path(name).suffix.lower()
                 lang = self.LANG_BY_EXT.get(ext)
                 if lang:
@@ -636,16 +648,30 @@ class ProjectIntelligence:
                         snap.entrypoints.append(rel)
 
                 if deep and ext in (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs"):
-                    hits = self._scan_todos(Path(dirpath) / name)
+                    file_path = Path(dirpath) / name
+                    rel = str(rel_dir / name) if str(rel_dir) != "." else name
+                    try:
+                        stat = file_path.stat()
+                        signature = (int(stat.st_mtime_ns), int(stat.st_size))
+                    except OSError:
+                        signature = None
+                    cached = previous_cache.get(rel)
+                    if signature is not None and cached and cached[:2] == signature:
+                        hits = cached[2]
+                        snap.incremental_cache_hits += 1
+                    else:
+                        hits = self._scan_todos(file_path)
+                        snap.incremental_cache_misses += 1
+                    if signature is not None and hits is not None:
+                        next_cache[rel] = (signature[0], signature[1], int(hits))
                     if hits is None:
-                        rel = str(rel_dir / name) if str(rel_dir) != "." else name
                         snap.unknowns.append(f"TODO scan: {rel}")
                     else:
                         snap.todo_count += hits
                         if hits and len(todo_samples) < 10:
-                            rel = str(rel_dir / name) if str(rel_dir) != "." else name
                             todo_samples.append(f"{rel} ({hits})")
         snap.todo_samples = todo_samples
+        _INCREMENTAL_TODO_CACHE[cache_key] = next_cache
         self._detect_test_frameworks(snap)
 
     #: Extensions a test file can actually have. Without this, the name-only
@@ -1602,6 +1628,91 @@ class MissionTracker:
                 return w
         return None
 
+    def sync_execution_plan(self, plan_data: dict[str, Any]) -> None:
+        """Make Mission Control track the executor's actual task graph.
+
+        The pre-flight planner intentionally proposes broad waves before the
+        engine has produced its executable plan. Once that plan exists, those
+        broad proposals must not remain the progress denominator: doing so
+        made a three-task run report ``0/13`` forever. The executable task ids
+        become the single source of truth for the live mission card.
+        """
+        raw_steps = plan_data.get("steps") if isinstance(plan_data, dict) else None
+        if not isinstance(raw_steps, list) or not raw_steps:
+            return
+        contracts: list[AgentContract] = []
+        for index, raw in enumerate(raw_steps, start=1):
+            if not isinstance(raw, dict):
+                continue
+            task_id = str(raw.get("task_id") or raw.get("id") or f"task-{index}")
+            name = str(raw.get("name") or raw.get("title") or task_id)
+            objective = str(raw.get("description") or raw.get("objective") or name)
+            dependencies = [str(dep) for dep in (raw.get("depends_on") or [])]
+            contracts.append(
+                AgentContract(
+                    id=task_id,
+                    name=name,
+                    objective=objective,
+                    justification=(
+                        f"Tarefa executável do plano; agente {str(raw.get('agent') or 'unknown')}"
+                    ),
+                    phase=MissionPhase.IMPROVEMENT,
+                    dependencies=dependencies,
+                    tools=[str(tool) for tool in (raw.get("allowed_tools") or [])],
+                    completion_criteria=[
+                        str(item) for item in (raw.get("completion_criteria") or [])
+                    ],
+                    state=ContractState.READY,
+                )
+            )
+        if not contracts:
+            return
+        self.mission.waves = [
+            Wave(
+                index=0,
+                name="Plano executável",
+                phase=MissionPhase.IMPROVEMENT,
+                contracts=contracts,
+            )
+        ]
+        self.mission.state = MissionState.PLANNED
+        self._mark("Plano executável sincronizado", f"{len(contracts)} tarefas")
+        self._emit("mission_waves", {"waves": [w.to_dict() for w in self.mission.waves]})
+
+    def update_execution_task(
+        self,
+        task_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        activity: str | None = None,
+    ) -> AgentContract | None:
+        """Project one executor task state into the durable mission model."""
+        contract = self.find_contract(task_id)
+        if contract is None:
+            return None
+        normalized = str(status).lower()
+        if normalized in {"running", "started"}:
+            self.start_agent(task_id)
+        elif normalized in {"waiting_dependency", "pending", "ready"}:
+            contract.state = ContractState.READY
+            contract.activity = activity or "A aguardar dependências"
+            self._emit("mission_agent", contract.to_dict())
+        elif normalized in {"blocked", "cancelled"}:
+            contract.state = ContractState.BLOCKED
+            contract.error = error or normalized
+            contract.finished_at = datetime.now(UTC).isoformat()
+            self._mark(f"{contract.name} bloqueada", contract.error)
+            self._emit("mission_agent", contract.to_dict())
+        elif normalized in {"completed", "success", "succeeded"}:
+            self.finish_agent(task_id, success=True)
+        elif normalized in {"failed", "error"}:
+            self.finish_agent(task_id, success=False, error=error)
+        if activity and contract.state == ContractState.RUNNING:
+            contract.activity = activity
+            self._emit("mission_agent", contract.to_dict())
+        return contract
+
     def find_contract(self, agent_id_or_name: str) -> AgentContract | None:
         for c in self.mission.contracts:
             if c.id == agent_id_or_name or c.name == agent_id_or_name:
@@ -1700,11 +1811,18 @@ class MissionTracker:
 
         Nothing here can report success without a process having exited 0.
         """
+        actual_command = list(command)
+        # ``python3`` is a conventional POSIX spelling, but Windows machines
+        # commonly expose only the interpreter running Nexus. Resolve this
+        # harmless alias so a verification records the real process result
+        # instead of a shell-level 9009 failure.
+        if sys.platform == "win32" and actual_command and actual_command[0].lower() == "python3":
+            actual_command[0] = sys.executable
         joined = " ".join(command)
         started = time.monotonic()
         try:
             proc = subprocess.run(
-                list(command),
+                actual_command,
                 cwd=cwd or self.mission.brief.snapshot.root if self.mission.brief else None,
                 capture_output=True,
                 text=True,

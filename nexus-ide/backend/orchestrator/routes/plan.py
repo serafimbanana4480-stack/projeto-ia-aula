@@ -50,6 +50,10 @@ class PlanApproveRequest(BaseModel):
     session_id: str = Field(default="default", min_length=1, max_length=128)
 
 
+class PlanContinueRequest(BaseModel):
+    session_id: str = Field(default="default", min_length=1, max_length=128)
+
+
 class PlanExecuteRequest(BaseModel):
     plan_id: str = Field(min_length=1, max_length=128)
     session_id: str = Field(default="default", min_length=1, max_length=128)
@@ -150,6 +154,31 @@ async def create_plan(
         if approval_req:
             result["approval"] = approval_req.to_dict()
 
+    return result
+
+
+@router.post("/plan/continue")
+async def continue_plan(
+    req: PlanContinueRequest,
+    request: Request,
+    _user: dict = Depends(require_auth),
+) -> dict:
+    """Expose a validated fallback only after an explicit user decision.
+
+    Malformed provider formatting therefore does not strand the workflow, but
+    it also cannot silently become an auto-approved multi-agent execution.
+    """
+    engine = _get_engine(request)
+    planning = await engine.continue_planning(req.session_id)
+    if planning is None or planning.plan is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No blocked deterministic proposal is available for this session",
+        )
+    result = planning.to_dict()
+    approval = engine.request_approval(planning.plan.plan_id)
+    if approval is not None:
+        result["approval"] = approval.to_dict()
     return result
 
 

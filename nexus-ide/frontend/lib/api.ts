@@ -628,6 +628,19 @@ export interface PlanCreateResult {
   steps: PlanStep[];
 }
 
+export interface PlanningResult {
+  status: "ready" | "blocked";
+  source: string;
+  error: string | null;
+  plan: PlanCreateResult | null;
+  deterministic_proposal: PlanCreateResult | null;
+  approval?: {
+    plan_id: string;
+    session_id: string;
+    approval_timeout_s: number;
+  };
+}
+
 export interface PlanExecuteResult {
   run_id: string;
   state: string;
@@ -643,8 +656,8 @@ export async function createPlan(
   sessionId: string = "default",
   context: string = "",
   autoApprove: boolean = true,
-): Promise<PlanCreateResult> {
-  return readJson<PlanCreateResult>(
+): Promise<PlanningResult> {
+  return readJson<PlanningResult>(
     await fetch(apiUrl("/api/plan/create"), {
       method: "POST",
       headers: authHeaders(),
@@ -654,6 +667,18 @@ export async function createPlan(
         context,
         auto_approve: autoApprove,
       }),
+    }),
+  );
+}
+
+export async function continuePlan(
+  sessionId: string = "default",
+): Promise<PlanningResult> {
+  return readJson<PlanningResult>(
+    await fetch(apiUrl("/api/plan/continue"), {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ session_id: sessionId }),
     }),
   );
 }

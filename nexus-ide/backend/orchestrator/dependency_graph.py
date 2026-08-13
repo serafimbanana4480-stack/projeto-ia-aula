@@ -374,6 +374,8 @@ class ExecutionPlan:
     title: str = ""
     description: str = ""
     session_id: str = ""
+    goal_id: str = field(default_factory=lambda: f"goal-{uuid.uuid4().hex[:12]}")
+    run_id: str = ""
 
     # Steps
     steps: list[TaskNode] = field(default_factory=list)
@@ -395,6 +397,8 @@ class ExecutionPlan:
             "title": self.title,
             "description": self.description,
             "session_id": self.session_id,
+            "goal_id": self.goal_id,
+            "run_id": self.run_id,
             "steps": [s.to_dict() for s in self.steps],
             "graph": self.dependency_graph.to_dict(),
             "estimated_duration_seconds": self.estimated_duration_seconds,
