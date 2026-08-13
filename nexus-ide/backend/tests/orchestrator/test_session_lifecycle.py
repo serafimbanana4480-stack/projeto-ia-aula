@@ -25,10 +25,6 @@ async def _fake_user() -> dict:
     return {"user_id": "test", "email": "admin@nexus-ide.com"}
 
 
-app.dependency_overrides[auth_module.require_auth] = _fake_user
-app.dependency_overrides[auth_module.require_admin] = _fake_user
-
-
 @pytest.fixture
 def client(tmp_path):
     """Function-scoped client with a fresh, isolated SQLite database."""
@@ -44,8 +40,14 @@ def client(tmp_path):
     import backend.persistence.db as _db_reload
 
     _db_reload._connection_pool = None
-    with TestClient(app) as c:
-        yield c
+    app.dependency_overrides[auth_module.require_auth] = _fake_user
+    app.dependency_overrides[auth_module.require_admin] = _fake_user
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(auth_module.require_auth, None)
+        app.dependency_overrides.pop(auth_module.require_admin, None)
 
 
 AUTH = {"Authorization": "Bearer test-bypass"}
@@ -294,14 +296,12 @@ async def test_background_gc_inventory_does_not_delete_stale_sessions(client) ->
     assert db_mod.get_session(sid) is not None
 
 
-def test_cleanup_temporary_files(client) -> None:
+def test_cleanup_temporary_files(client, tmp_path) -> None:
     """Verify temporary files older than 24h are cleaned up."""
     from backend.orchestrator.session_lifecycle import SessionLifecycleManager
 
-    manager = SessionLifecycleManager(event_bus=None)
-
-    data_dir = Path(__file__).resolve().parents[2] / "data"
-    temp_dir = data_dir / "temp"
+    temp_dir = tmp_path / "temp"
+    manager = SessionLifecycleManager(event_bus=None, temp_dir=temp_dir)
     temp_dir.mkdir(parents=True, exist_ok=True)
 
     # Create a fresh file (should NOT be cleaned)

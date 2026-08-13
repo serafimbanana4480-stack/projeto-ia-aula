@@ -94,6 +94,7 @@ class SessionLifecycleManager:
         *,
         ttl_hours: int | None = None,
         gc_interval_minutes: int | None = None,
+        temp_dir: Path | None = None,
     ) -> None:
         settings = get_settings()
         self._ttl_hours = ttl_hours if ttl_hours is not None else settings.nexus_session_ttl_hours
@@ -101,6 +102,7 @@ class SessionLifecycleManager:
             gc_interval_minutes if gc_interval_minutes is not None else settings.nexus_gc_interval_minutes
         )
         self._event_bus = event_bus
+        self._temp_dir = temp_dir
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._running = False
@@ -304,8 +306,7 @@ class SessionLifecycleManager:
 
         Returns ``(files_removed, bytes_freed)``.
         """
-        data_dir = Path(__file__).resolve().parents[2] / "data"
-        temp_dir = data_dir / "temp"
+        temp_dir = self._temp_dir or (Path(__file__).resolve().parents[2] / "data" / "temp")
         if not temp_dir.exists():
             return 0, 0
 

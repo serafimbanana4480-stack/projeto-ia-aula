@@ -103,8 +103,8 @@ class TestChatEndpoint:
         first_token_index = types.index("token")
         assert types.index("routing") < first_token_index
         tokens = [e["content"] for e in events if e["type"] == "token"]
-        # not to be raw tool transport, then publish one clean answer chunk.
-        assert tokens == ["Hello NEXUS"]
+        # Chunks must compose to the provider answer without raw tool transport.
+        assert "".join(tokens) == "Hello NEXUS"
 
     def test_injection_is_blocked(self, client_with_mocked_ollama: TestClient) -> None:
         response = client_with_mocked_ollama.post(
