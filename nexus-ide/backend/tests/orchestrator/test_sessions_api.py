@@ -10,12 +10,6 @@ Verifies:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-PROJECT_ROOT = Path(r"C:\Users\rodri\Desktop\PROJETO IA AULA GIT CLONE\projeto-ia-aula\nexus-ide")
-sys.path.insert(0, str(PROJECT_ROOT))
-
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -26,9 +20,6 @@ from backend.orchestrator.main import app  # noqa: E402
 # Override require_auth so tests don't depend on JWT signature secrets
 async def _fake_user() -> dict:
     return {"user_id": "test", "email": "t@t"}
-
-
-app.dependency_overrides[auth_module.require_auth] = _fake_user
 
 
 @pytest.fixture
@@ -49,9 +40,13 @@ def client(tmp_path):
     importlib.reload(db_mod)
     # Re-point DB_PATH and the connection pool
     db_mod.DB_PATH = tmp_path / "test_nexus.db"
-    db_mod._pool = None  # reset the global pool
-    with TestClient(app) as c:
-        yield c
+    db_mod._connection_pool = None  # reset the global pool
+    app.dependency_overrides[auth_module.require_auth] = _fake_user
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(auth_module.require_auth, None)
 
 
 AUTH = {"Authorization": "Bearer test-bypass"}
