@@ -59,6 +59,12 @@ class TestEmbeddingService:
         e2 = svc._fallback_embed("world")
         assert e1 != e2
 
+    def test_fallback_embed_preserves_shared_terms(self) -> None:
+        svc = EmbeddingService()
+        stored = svc._fallback_embed("PostgreSQL is the primary database")
+        query = svc._fallback_embed("PostgreSQL primary database")
+        assert svc.cosine_similarity(stored, query) >= 0.45
+
     def test_fallback_embed_dimension(self) -> None:
         svc = EmbeddingService()
         emb = svc._fallback_embed("test")

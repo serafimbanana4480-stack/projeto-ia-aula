@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import time
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

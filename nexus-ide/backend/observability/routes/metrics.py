@@ -388,6 +388,7 @@ async def get_providers_status(
 
     # If it's a MultiLLMManager, use its provider_status
     from backend.llm.multi_llm_manager import MultiLLMManager
+
     if isinstance(llm_client, MultiLLMManager):
         status = llm_client.provider_status()
         return {
@@ -397,6 +398,7 @@ async def get_providers_status(
 
     # Otherwise inspect the resilient provider's internals
     from backend.llm.factory import ResilientLLMProvider
+
     if isinstance(llm_client, ResilientLLMProvider):
         providers: dict[str, dict[str, Any]] = {}
         for idx, prov in enumerate([llm_client.primary] + llm_client.fallbacks):
@@ -406,17 +408,28 @@ async def get_providers_status(
             reason = getattr(prov, "eligibility_reason", "")
             free_only = bool(getattr(llm_client, "free_only", False))
             eligible = not free_only or (
-                quota is True and bool(getattr(prov, "validated_at", None))
+                quota is True
+                and bool(getattr(prov, "validated_at", None))
                 and reason not in {"", "not checked"}
             )
+            observed_at = (
+                float(getattr(llm_client, "last_provider_at", 0.0) or 0.0)
+                if prov is getattr(llm_client, "last_provider", None)
+                else 0.0
+            )
+            observed_real_success = observed_at > 0 and not bool(getattr(prov, "simulation", False))
             providers[name] = {
-                "healthy": eligible and not bool(getattr(prov, "simulation", False)),
-                "latency": 0.0,
-                "last_check": 0.0,
+                "healthy": observed_real_success
+                or (eligible and not bool(getattr(prov, "simulation", False))),
+                "latency": (
+                    getattr(llm_client, "last_provider_latency_ms", None) if observed_at else None
+                ),
+                "last_check": observed_at or None,
                 "eligibility_reason": reason,
                 "quota_available": quota,
                 "validated_at": getattr(prov, "validated_at", None),
                 "circuit_breaker": breaker,
+                "runtime_observed": observed_real_success,
             }
         return {
             "providers": providers,
@@ -430,7 +443,8 @@ async def get_providers_status(
         reason = getattr(llm_client, "eligibility_reason", "")
         free_only = bool(getattr(llm_client, "free_only", False))
         eligible = not free_only or (
-            quota is True and bool(getattr(llm_client, "validated_at", None))
+            quota is True
+            and bool(getattr(llm_client, "validated_at", None))
             and reason not in {"", "not checked"}
         )
         return {

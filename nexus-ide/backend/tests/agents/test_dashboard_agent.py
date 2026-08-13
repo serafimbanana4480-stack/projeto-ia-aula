@@ -7,6 +7,11 @@ from backend.agents.dashboard_agent import DashboardAgent
 
 
 class TestDashboardAgent:
+    def test_health_score_unmeasured_is_none(self) -> None:
+        agent = DashboardAgent()
+
+        assert agent.get_health_score() is None
+
     def test_metadata(self) -> None:
         agent = DashboardAgent()
         assert agent.name == "DASHBOARD"

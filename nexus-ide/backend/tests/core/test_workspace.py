@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -42,11 +43,14 @@ class TestGitDetection:
         # _is_git_repo should return True for the subdirectory
         assert await workspace_mod._is_git_repo(sub) is True
 
-    async def test_is_git_repo_false_outside_repo(self, tmp_path: Path) -> None:
+    async def test_is_git_repo_false_outside_repo(self) -> None:
         """A plain directory with no git ancestry is not a repo."""
-        plain = tmp_path / "plain"
-        plain.mkdir()
-        assert await workspace_mod._is_git_repo(plain) is False
+        # ``tmp_path`` lives under the Nexus checkout and therefore has git
+        # ancestry; use the operating-system temp root for this negative case.
+        with tempfile.TemporaryDirectory() as temp_root:
+            plain = Path(temp_root) / "plain"
+            plain.mkdir()
+            assert await workspace_mod._is_git_repo(plain) is False
 
     async def test_backup_dir_uses_git_subprocess_not_dotgit(self, tmp_path: Path) -> None:
         """Backup functions exist and git repo detection works."""
@@ -310,11 +314,12 @@ class TestGetProjectInfoGit:
         result = await get_project_info(str(sub))
         assert result["git"]["is_repo"] is True
 
-    async def test_no_git_info_outside_repo(self, tmp_path: Path) -> None:
+    async def test_no_git_info_outside_repo(self) -> None:
         """A plain directory returns is_repo=False."""
-        plain = tmp_path / "plain"
-        plain.mkdir()
-        (plain / "main.py").write_text("print(1)")
+        with tempfile.TemporaryDirectory() as temp_root:
+            plain = Path(temp_root) / "plain"
+            plain.mkdir()
+            (plain / "main.py").write_text("print(1)")
 
-        result = await get_project_info(str(plain))
-        assert result["git"]["is_repo"] is False
+            result = await get_project_info(str(plain))
+            assert result["git"]["is_repo"] is False

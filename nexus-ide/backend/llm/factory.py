@@ -10,6 +10,8 @@ import asyncio
 import json
 import logging
 import os
+import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +77,8 @@ def _as_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "off", ""}:
             return False
     return default
+
+
 def _free_only_enabled(settings: Any, overrides: dict[str, Any]) -> bool:
     """Resolve the fail-closed runtime policy from settings/UI overrides."""
     import os
@@ -85,11 +89,14 @@ def _free_only_enabled(settings: Any, overrides: dict[str, Any]) -> bool:
     value = _setting_value(settings, overrides, "free_only", configured)
     return _as_bool(value, True)
 
+
 def _local_models_ready(value: Any) -> bool:
     if not isinstance(value, dict) or not _as_bool(value.get("enabled"), False):
         return False
     models = value.get("models", value.get("installed", []))
     return bool(models) and _as_bool(value.get("healthy", True), False)
+
+
 def _usable_api_key(value: Any) -> str:
     """Return a real-looking API key, ignoring template placeholder values.
 
@@ -102,14 +109,20 @@ def _usable_api_key(value: Any) -> str:
         return ""
     candidate = value.strip()
     lowered = candidate.lower()
-    if not candidate or lowered.startswith("your-") or lowered in {
-        "changeme",
-        "replace-me",
-        "replace_with_your_key",
-        "xxx",
-    }:
+    if (
+        not candidate
+        or lowered.startswith("your-")
+        or lowered
+        in {
+            "changeme",
+            "replace-me",
+            "replace_with_your_key",
+            "xxx",
+        }
+    ):
         return ""
     return candidate
+
 
 class MockProvider:
     """Simulation provider; its text is never a real completed run."""
@@ -232,6 +245,8 @@ class ResilientLLMProvider:
         self.fallbacks = fallbacks
         self.free_only = free_only
         self.last_provider: Any | None = None
+        self.last_provider_at = 0.0
+        self.last_provider_latency_ms: float | None = None
 
     @property
     def provider_name(self) -> str:
@@ -299,6 +314,7 @@ class ResilientLLMProvider:
             ):
                 continue
             emitted_output = False
+            attempt_started = time.monotonic()
             try:
                 validator = getattr(provider, "validate_model", None)
                 if self.free_only and callable(validator):
@@ -312,6 +328,10 @@ class ResilientLLMProvider:
                         f"Provider {provider.__class__.__name__} returned an empty stream"
                     )
                 self.last_provider = provider
+                self.last_provider_at = time.time()
+                self.last_provider_latency_ms = round(
+                    (time.monotonic() - attempt_started) * 1000.0, 2
+                )
                 return
             except asyncio.CancelledError:
                 raise
@@ -408,7 +428,38 @@ class ResilientLLMProvider:
         return await self._try_providers("embed", texts, model, **kwargs)
 
     async def health_check(self) -> bool:
-        return await self._try_providers("health_check")
+        """Return true when any eligible real provider is reachable.
+
+        Health probes run concurrently: a slow or unconfigured cloud primary
+        must not consume the entire endpoint budget before a healthy local
+        fallback can be checked.  Simulation providers are never evidence of
+        provider health.
+        """
+        providers = []
+        for provider in [self.primary, *self.fallbacks]:
+            if getattr(provider, "simulation", False):
+                continue
+            if self.free_only and (
+                provider.__class__.__name__.lower().startswith("ollama")
+                and not getattr(provider, "_free_validated", False)
+            ):
+                continue
+            if callable(getattr(provider, "health_check", None)):
+                providers.append(provider)
+        if not providers:
+            return False
+
+        async def probe(provider: Any) -> bool:
+            try:
+                try:
+                    result = provider.health_check(timeout=1.0)
+                except TypeError:
+                    result = provider.health_check()
+                return bool(await asyncio.wait_for(result, timeout=1.1))
+            except (TimeoutError, Exception):
+                return False
+
+        return any(await asyncio.gather(*(probe(provider) for provider in providers)))
 
 
 def _build_fallback_chain(
@@ -434,7 +485,9 @@ def _build_fallback_chain(
         local_models = overrides.get("local_models")
         local_candidates: list[Any] = []
         if isinstance(local_models, dict):
-            local_candidates = list(local_models.get("models", local_models.get("installed", [])) or [])
+            local_candidates = list(
+                local_models.get("models", local_models.get("installed", [])) or []
+            )
         elif isinstance(local_models, (list, tuple)):
             local_candidates = list(local_models)
 
@@ -503,7 +556,9 @@ def _build_fallback_chain(
 
         fallbacks.append(
             OpenAIProvider(
-                base_url=_setting_value(settings, overrides, "openai_base_url", "https://api.openai.com/v1"),
+                base_url=_setting_value(
+                    settings, overrides, "openai_base_url", "https://api.openai.com/v1"
+                ),
                 api_key=openai_api_key,
             )
         )
@@ -513,7 +568,9 @@ def _build_fallback_chain(
 
         fallbacks.append(
             KimiProvider(
-                base_url=_setting_value(settings, overrides, "kimi_base_url", "https://api.moonshot.cn/v1"),
+                base_url=_setting_value(
+                    settings, overrides, "kimi_base_url", "https://api.moonshot.cn/v1"
+                ),
                 api_key=kimi_api_key,
             )
         )
@@ -523,7 +580,9 @@ def _build_fallback_chain(
 
         fallbacks.append(
             OpenAIProvider(
-                base_url=_setting_value(settings, overrides, "deepseek_base_url", "https://api.deepseek.com/v1"),
+                base_url=_setting_value(
+                    settings, overrides, "deepseek_base_url", "https://api.deepseek.com/v1"
+                ),
                 api_key=deepseek_api_key,
             )
         )
@@ -533,7 +592,9 @@ def _build_fallback_chain(
 
         fallbacks.append(
             OpenAIProvider(
-                base_url=_setting_value(settings, overrides, "groq_base_url", "https://api.groq.com/openai/v1"),
+                base_url=_setting_value(
+                    settings, overrides, "groq_base_url", "https://api.groq.com/openai/v1"
+                ),
                 api_key=groq_api_key,
             )
         )
@@ -543,7 +604,9 @@ def _build_fallback_chain(
 
         fallbacks.append(
             AnthropicProvider(
-                base_url=_setting_value(settings, overrides, "anthropic_base_url", "https://api.anthropic.com"),
+                base_url=_setting_value(
+                    settings, overrides, "anthropic_base_url", "https://api.anthropic.com"
+                ),
                 api_key=anthropic_api_key,
             )
         )
@@ -568,7 +631,9 @@ def _build_fallback_chain(
 
         fallbacks.append(
             OpenRouterProvider(
-                base_url=_setting_value(settings, overrides, "openrouter_base_url", "https://openrouter.ai/api"),
+                base_url=_setting_value(
+                    settings, overrides, "openrouter_base_url", "https://openrouter.ai/api"
+                ),
                 api_key=openrouter_api_key,
             )
         )
@@ -605,9 +670,9 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
     local development).
     """
     # Lazy imports to avoid loading unused provider classes at startup
+    from backend.llm.kilo_provider import KiloProvider
     from backend.llm.kimi_provider import KimiProvider
     from backend.llm.openai_provider import OpenAIProvider
-    from backend.llm.kilo_provider import KiloProvider
 
     settings = get_settings()
     # Settings written from the UI are strings and intentionally do not alter
@@ -615,14 +680,18 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
     # mode, otherwise the default multi-provider path silently ignores a key
     # the user just saved.
     values: dict[str, Any] = {**_load_runtime_overrides(), **(overrides or {})}
-    preferred_provider = str(
-        _setting_value(
-            settings,
-            values,
-            "llm_provider",
-            _setting_value(settings, values, "default_provider", ""),
+    preferred_provider = (
+        str(
+            _setting_value(
+                settings,
+                values,
+                "llm_provider",
+                _setting_value(settings, values, "default_provider", ""),
+            )
         )
-    ).strip().lower()
+        .strip()
+        .lower()
+    )
 
     def priority_for(name: str, default: int) -> int:
         return 0 if name == preferred_provider else default
@@ -631,11 +700,10 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
     policy_candidates = values.get("policy_candidates")
     if not isinstance(policy_candidates, list):
         from backend.llm.model_catalog import load_validated_models
+
         policy_candidates = load_validated_models("openrouter")
     local_models = values.get("local_models")
-    validation_ttl = _setting_value(
-        settings, values, "provider_validation_ttl_seconds", 600
-    )
+    validation_ttl = _setting_value(settings, values, "provider_validation_ttl_seconds", 600)
     max_latency = _setting_value(settings, values, "max_provider_latency_ms", 30_000)
     manager = MultiLLMManager(
         free_only=free_only,
@@ -665,9 +733,7 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("opencode_go", 1),
         )
 
-    kilo_api_key = _usable_api_key(
-        _setting_value(settings, values, "kilo_api_key", "")
-    )
+    kilo_api_key = _usable_api_key(_setting_value(settings, values, "kilo_api_key", ""))
     if kilo_api_key:
         manager.register_provider(
             "kilo",
@@ -692,10 +758,11 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
         )
     ) or preferred_provider in {"ollama", "local"}
     if ollama_enabled and (
-        _local_models_ready(values.get("local_models"))
-        or preferred_provider in {"ollama", "local"}
+        _local_models_ready(values.get("local_models")) or preferred_provider in {"ollama", "local"}
     ):
-        ollama_provider = OllamaProvider(base_url=_setting_value(settings, values, "ollama_host", ""))
+        ollama_provider = OllamaProvider(
+            base_url=_setting_value(settings, values, "ollama_host", "")
+        )
         manager.register_provider("ollama", ollama_provider, priority=priority_for("ollama", 4))
         manager.register_provider("local", ollama_provider, priority=priority_for("local", 4))
         logger.info("Ollama provider registered")
@@ -719,72 +786,103 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
     # ------------------------------------------------------------------
     # OPTIONAL: Other cloud providers (only if API key is set)
     # ------------------------------------------------------------------
-    if not free_only and (openai_api_key := _usable_api_key(_setting_value(settings, values, "openai_api_key", ""))):
+    if not free_only and (
+        openai_api_key := _usable_api_key(_setting_value(settings, values, "openai_api_key", ""))
+    ):
         manager.register_provider(
             "openai",
             OpenAIProvider(
-                base_url=_setting_value(settings, values, "openai_base_url", "https://api.openai.com/v1"),
+                base_url=_setting_value(
+                    settings, values, "openai_base_url", "https://api.openai.com/v1"
+                ),
                 api_key=openai_api_key,
             ),
             priority=priority_for("openai", 3),
         )
 
-    if not free_only and (kimi_api_key := _usable_api_key(_setting_value(settings, values, "kimi_api_key", ""))):
+    if not free_only and (
+        kimi_api_key := _usable_api_key(_setting_value(settings, values, "kimi_api_key", ""))
+    ):
         manager.register_provider(
             "kimi",
             KimiProvider(
-                base_url=_setting_value(settings, values, "kimi_base_url", "https://api.moonshot.cn/v1"),
+                base_url=_setting_value(
+                    settings, values, "kimi_base_url", "https://api.moonshot.cn/v1"
+                ),
                 api_key=kimi_api_key,
             ),
             priority=priority_for("kimi", 3),
         )
 
-    if not free_only and (deepseek_api_key := _usable_api_key(_setting_value(settings, values, "deepseek_api_key", ""))):
+    if not free_only and (
+        deepseek_api_key := _usable_api_key(
+            _setting_value(settings, values, "deepseek_api_key", "")
+        )
+    ):
         manager.register_provider(
             "deepseek",
             OpenAIProvider(
-                base_url=_setting_value(settings, values, "deepseek_base_url", "https://api.deepseek.com/v1"),
+                base_url=_setting_value(
+                    settings, values, "deepseek_base_url", "https://api.deepseek.com/v1"
+                ),
                 api_key=deepseek_api_key,
             ),
             priority=priority_for("deepseek", 3),
         )
 
-    if not free_only and (groq_api_key := _usable_api_key(_setting_value(settings, values, "groq_api_key", ""))):
+    if not free_only and (
+        groq_api_key := _usable_api_key(_setting_value(settings, values, "groq_api_key", ""))
+    ):
         manager.register_provider(
             "groq",
             OpenAIProvider(
-                base_url=_setting_value(settings, values, "groq_base_url", "https://api.groq.com/openai/v1"),
+                base_url=_setting_value(
+                    settings, values, "groq_base_url", "https://api.groq.com/openai/v1"
+                ),
                 api_key=groq_api_key,
             ),
             priority=priority_for("groq", 3),
         )
 
-    if not free_only and (anthropic_api_key := _usable_api_key(_setting_value(settings, values, "anthropic_api_key", ""))):
+    if not free_only and (
+        anthropic_api_key := _usable_api_key(
+            _setting_value(settings, values, "anthropic_api_key", "")
+        )
+    ):
         from backend.llm.anthropic_provider import AnthropicProvider
 
         manager.register_provider(
             "anthropic",
             AnthropicProvider(
-                base_url=_setting_value(settings, values, "anthropic_base_url", "https://api.anthropic.com"),
+                base_url=_setting_value(
+                    settings, values, "anthropic_base_url", "https://api.anthropic.com"
+                ),
                 api_key=anthropic_api_key,
             ),
             priority=priority_for("anthropic", 3),
         )
 
-    if not free_only and (gemini_api_key := _usable_api_key(_setting_value(settings, values, "gemini_api_key", ""))):
+    if not free_only and (
+        gemini_api_key := _usable_api_key(_setting_value(settings, values, "gemini_api_key", ""))
+    ):
         from backend.llm.gemini_provider import GeminiProvider
 
         manager.register_provider(
             "gemini",
             GeminiProvider(
                 base_url=_setting_value(
-                    settings, values, "gemini_base_url", "https://generativelanguage.googleapis.com/v1beta"
+                    settings,
+                    values,
+                    "gemini_base_url",
+                    "https://generativelanguage.googleapis.com/v1beta",
                 ),
                 api_key=gemini_api_key,
             ),
             priority=priority_for("gemini", 3),
         )
-    if openrouter_api_key := _usable_api_key(_setting_value(settings, values, "openrouter_api_key", "")):
+    if openrouter_api_key := _usable_api_key(
+        _setting_value(settings, values, "openrouter_api_key", "")
+    ):
         from backend.llm.openrouter_provider import OpenRouterProvider
 
         manager.register_provider(
@@ -803,7 +901,11 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("openrouter", 3),
         )
 
-    if not manager.list_providers() if hasattr(manager, "list_providers") else not manager.providers:
+    if (
+        not manager.list_providers()
+        if hasattr(manager, "list_providers")
+        else not manager.providers
+    ):
         logger.error("No providers configured; add an API key or enable a local provider.")
     return manager
 
@@ -835,10 +937,13 @@ def create_llm_client(**overrides: Any) -> Any:
     effective_overrides: dict[str, Any] = {**_runtime, **overrides}
     if "policy_candidates" not in effective_overrides:
         from backend.llm.model_catalog import load_validated_models
+
         effective_overrides["policy_candidates"] = load_validated_models("openrouter")
     free_only = _free_only_enabled(settings, effective_overrides)
     multi_llm_enabled = _as_bool(
-        _setting_value(settings, effective_overrides, "multi_llm_enabled", settings.multi_llm_enabled),
+        _setting_value(
+            settings, effective_overrides, "multi_llm_enabled", settings.multi_llm_enabled
+        ),
         bool(settings.multi_llm_enabled),
     )
     if multi_llm_enabled:
@@ -870,7 +975,9 @@ def create_llm_client(**overrides: Any) -> Any:
                 category="eligibility",
                 provider="ollama",
             )
-        base_url = _setting_value(settings, effective_overrides, "ollama_host", settings.ollama_host)
+        base_url = _setting_value(
+            settings, effective_overrides, "ollama_host", settings.ollama_host
+        )
         logger.info("Using Ollama provider at %s with fallback chain", base_url)
         primary = OllamaProvider(base_url=base_url)
         local_models = effective_overrides.get("local_models")
@@ -904,7 +1011,9 @@ def create_llm_client(**overrides: Any) -> Any:
         return ResilientLLMProvider(primary, fallbacks, free_only=free_only)
 
     if provider == "airllm":
-        device = _setting_value(settings, effective_overrides, "local_llm_device", settings.local_llm_device)
+        device = _setting_value(
+            settings, effective_overrides, "local_llm_device", settings.local_llm_device
+        )
         compression = _setting_value(
             settings, effective_overrides, "local_llm_compression", settings.local_llm_compression
         )
@@ -933,79 +1042,77 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "openai":
         from backend.llm.openai_provider import OpenAIProvider
 
-        api_key = (
-            _setting_value(settings, effective_overrides, "openai_api_key", "")
-        )
+        api_key = _setting_value(settings, effective_overrides, "openai_api_key", "")
         if not api_key:
             logger.warning("OPENAI_API_KEY not set — requests will fail")
         logger.info("Using OpenAI provider")
         return OpenAIProvider(
-            base_url=_setting_value(settings, effective_overrides, "openai_base_url", "https://api.openai.com/v1"),
+            base_url=_setting_value(
+                settings, effective_overrides, "openai_base_url", "https://api.openai.com/v1"
+            ),
             api_key=api_key,
         )
 
     if provider == "deepseek":
         from backend.llm.openai_provider import OpenAIProvider
 
-        api_key = (
-            _setting_value(settings, effective_overrides, "deepseek_api_key", "")
-        )
+        api_key = _setting_value(settings, effective_overrides, "deepseek_api_key", "")
         if not api_key:
             logger.warning("DEEPSEEK_API_KEY not set — requests will fail")
         logger.info("Using DeepSeek provider")
         return OpenAIProvider(
-            base_url=_setting_value(settings, effective_overrides, "deepseek_base_url", "https://api.deepseek.com/v1"),
+            base_url=_setting_value(
+                settings, effective_overrides, "deepseek_base_url", "https://api.deepseek.com/v1"
+            ),
             api_key=api_key,
         )
 
     if provider == "kimi":
         from backend.llm.kimi_provider import KimiProvider
 
-        api_key = (
-            _setting_value(settings, effective_overrides, "kimi_api_key", "")
-        )
+        api_key = _setting_value(settings, effective_overrides, "kimi_api_key", "")
         if not api_key:
             logger.warning("KIMI_API_KEY not set — requests will fail")
         logger.info("Using Kimi provider")
         return KimiProvider(
-            base_url=_setting_value(settings, effective_overrides, "kimi_base_url", "https://api.moonshot.cn/v1"),
+            base_url=_setting_value(
+                settings, effective_overrides, "kimi_base_url", "https://api.moonshot.cn/v1"
+            ),
             api_key=api_key,
         )
 
     if provider == "groq":
         from backend.llm.openai_provider import OpenAIProvider
 
-        api_key = (
-            _setting_value(settings, effective_overrides, "groq_api_key", "")
-        )
+        api_key = _setting_value(settings, effective_overrides, "groq_api_key", "")
         if not api_key:
             logger.warning("GROQ_API_KEY not set — requests will fail")
         logger.info("Using Groq provider")
         return OpenAIProvider(
-            base_url=_setting_value(settings, effective_overrides, "groq_base_url", "https://api.groq.com/openai/v1"),
+            base_url=_setting_value(
+                settings, effective_overrides, "groq_base_url", "https://api.groq.com/openai/v1"
+            ),
             api_key=api_key,
         )
 
     if provider == "anthropic":
         from backend.llm.anthropic_provider import AnthropicProvider
 
-        api_key = (
-            _setting_value(settings, effective_overrides, "anthropic_api_key", "")
-        )
+        api_key = _setting_value(settings, effective_overrides, "anthropic_api_key", "")
         if not api_key:
             logger.warning("ANTHROPIC_API_KEY not set — requests will fail")
         logger.info("Using Anthropic provider")
         return AnthropicProvider(
-            base_url=_setting_value(settings, effective_overrides, "anthropic_base_url", "https://api.anthropic.com"),
+            base_url=_setting_value(
+                settings, effective_overrides, "anthropic_base_url", "https://api.anthropic.com"
+            ),
             api_key=api_key,
         )
 
     if provider == "gemini":
         from backend.llm.gemini_provider import GeminiProvider
 
-        api_key = (
-            _setting_value(settings, effective_overrides, "gemini_api_key", "")
-        )
+        api_key = _setting_value(settings, effective_overrides, "gemini_api_key", "")
         if not api_key:
             logger.warning("GEMINI_API_KEY not set — requests will fail")
         logger.info("Using Gemini provider")
@@ -1034,7 +1141,9 @@ def create_llm_client(**overrides: Any) -> Any:
             free_only=free_only,
             catalog=effective_overrides.get("policy_candidates"),
             validation_ttl_seconds=int(
-                _setting_value(settings, effective_overrides, "provider_validation_ttl_seconds", 600)
+                _setting_value(
+                    settings, effective_overrides, "provider_validation_ttl_seconds", 600
+                )
             ),
             max_latency_ms=int(
                 _setting_value(settings, effective_overrides, "max_provider_latency_ms", 30_000)
@@ -1060,23 +1169,22 @@ def create_llm_client(**overrides: Any) -> Any:
             ),
             api_key=api_key,
         )
-        fallbacks = _build_fallback_chain(
-            settings, effective_overrides, primary_provider="kilo"
-        )
+        fallbacks = _build_fallback_chain(settings, effective_overrides, primary_provider="kilo")
         return ResilientLLMProvider(primary, fallbacks, free_only=free_only)
 
     if provider == "opencode_go":
         from backend.llm.opencode_go_provider import OpenCodeGoProvider
 
-        api_key = (
-            _setting_value(settings, effective_overrides, "opencode_go_api_key", "")
-        )
+        api_key = _setting_value(settings, effective_overrides, "opencode_go_api_key", "")
         if not api_key:
             logger.warning("OPENCODE_GO_API_KEY not set — requests will fail")
         logger.info("Using OpenCode Go provider at https://opencode.ai/zen/go/v1")
         return OpenCodeGoProvider(
             base_url=_setting_value(
-                settings, effective_overrides, "opencode_go_base_url", "https://opencode.ai/zen/go/v1"
+                settings,
+                effective_overrides,
+                "opencode_go_base_url",
+                "https://opencode.ai/zen/go/v1",
             ),
             api_key=api_key,
         )

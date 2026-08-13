@@ -30,3 +30,14 @@ class TestHealthEndpoint:
     def test_app_metadata(self) -> None:
         assert app.title == "NEXUS IDE Orchestrator"
         assert app.version == "0.1.0"
+
+    def test_provider_status_and_runtime_routes_are_distinct(self) -> None:
+        paths = [
+            route.path
+            for wrapper in app.routes
+            for route in getattr(getattr(wrapper, "original_router", None), "routes", [])
+            if hasattr(route, "path")
+        ]
+
+        assert paths.count("/providers/status") == 1
+        assert paths.count("/providers/runtime") == 1

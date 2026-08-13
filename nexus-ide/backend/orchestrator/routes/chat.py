@@ -76,11 +76,11 @@ def _json_safe(value: Any, _depth: int = 0) -> Any:
     """
     if _depth > 8:
         return str(value)
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, str | int | float | bool):
         return value
     if isinstance(value, dict):
         return {str(k): _json_safe(v, _depth + 1) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, list | tuple | set | frozenset):
         return [_json_safe(v, _depth + 1) for v in value]
     to_dict = getattr(value, "to_dict", None)
     if callable(to_dict):
@@ -168,15 +168,11 @@ async def _demo_response(req: "ChatRequest", agent_name: AgentName) -> AsyncIter
     special-casing. Only triggered when no real provider is available.
     """
     yield _sse(StreamEvent(type="agent_started", agent=agent_name))
-    yield _sse(
-        StreamEvent(type="token", agent=agent_name, content=f"> {req.message}\n\n")
-    )
+    yield _sse(StreamEvent(type="token", agent=agent_name, content=f"> {req.message}\n\n"))
     # Stream the demo notice in small chunks to mimic token streaming.
     for i in range(0, len(_DEMO_FALLBACK_MESSAGE), 24):
         yield _sse(
-            StreamEvent(
-                type="token", agent=agent_name, content=_DEMO_FALLBACK_MESSAGE[i : i + 24]
-            )
+            StreamEvent(type="token", agent=agent_name, content=_DEMO_FALLBACK_MESSAGE[i : i + 24])
         )
     prompt_tokens = count_tokens(req.message, agent_name)
     output_tokens = count_tokens(_DEMO_FALLBACK_MESSAGE, agent_name)
@@ -214,6 +210,7 @@ _INLINE_EVENT_RE = re.compile(r"<event>([^|>]+)(?:\|(.*?))?</event>", re.DOTALL)
 
 _THINK_OPEN_RE = re.compile(r"<(?:think|thinking)>", re.IGNORECASE)
 _THINK_CLOSE_RE = re.compile(r"</(?:think|thinking)>", re.IGNORECASE)
+
 
 class _IncrementalResponseParser:
     """Turn provider chunks into UI events without waiting for a full reply.
@@ -304,9 +301,7 @@ class _IncrementalResponseParser:
             ]
             tool_candidates = [candidate for candidate in tool_candidates if candidate[0] >= 0]
             next_tool = min(tool_candidates, default=None, key=lambda item: item[0])
-            if next_tool is not None and (
-                opening is None or next_tool[0] < opening.start()
-            ):
+            if next_tool is not None and (opening is None or next_tool[0] < opening.start()):
                 events.extend(self._text_events(self.buffer[: next_tool[0]]))
                 self.buffer = self.buffer[next_tool[0] + next_tool[2] :]
                 self.tool_delimiter = next_tool[1]
@@ -317,7 +312,9 @@ class _IncrementalResponseParser:
                 if close:
                     content = self.buffer[: close.start()]
                     if content.strip():
-                        events.append(StreamEvent(type="thinking", agent=self.agent, content=content))
+                        events.append(
+                            StreamEvent(type="thinking", agent=self.agent, content=content)
+                        )
                     self.buffer = self.buffer[close.end() :]
                     self.in_thinking = False
                     continue
@@ -328,7 +325,9 @@ class _IncrementalResponseParser:
                 if safe_length:
                     content = self.buffer[:safe_length]
                     if content.strip():
-                        events.append(StreamEvent(type="thinking", agent=self.agent, content=content))
+                        events.append(
+                            StreamEvent(type="thinking", agent=self.agent, content=content)
+                        )
                     self.buffer = self.buffer[safe_length:]
                 break
 
@@ -362,8 +361,13 @@ class _IncrementalResponseParser:
             return []
         if self.in_thinking:
             self.in_thinking = False
-            return [StreamEvent(type="thinking", agent=self.agent, content=text)] if text.strip() else []
+            return (
+                [StreamEvent(type="thinking", agent=self.agent, content=text)]
+                if text.strip()
+                else []
+            )
         return self._text_events(text)
+
 
 # Per-token streaming timeout is intentionally disabled by default. A model can
 # spend several minutes loading or reasoning locally and the chat must not turn
@@ -373,8 +377,10 @@ class _IncrementalResponseParser:
 _token_timeout_raw = os.environ.get("NEXUS_STREAM_TOKEN_TIMEOUT", "").strip()
 try:
     TOKEN_TIMEOUT_SECONDS: float | None = (
-        float(_token_timeout_raw) if float(_token_timeout_raw) > 0 else None
-    ) if _token_timeout_raw else None
+        (float(_token_timeout_raw) if float(_token_timeout_raw) > 0 else None)
+        if _token_timeout_raw
+        else None
+    )
 except ValueError:
     TOKEN_TIMEOUT_SECONDS = None
 
@@ -478,7 +484,7 @@ def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
                     tool_args=confirmation.get("tool_args"),
                     data=confirmation,
                 )
-                )
+            )
         elif event_type == "thinking":
             # The ReAct loop emits an iteration marker before asking the model
             # for its next response.  It is progress metadata, not private
@@ -588,25 +594,73 @@ _COMPLEX_TASK_MIN_WORDS = 8  # Short queries are always simple
 # resultados" which previously went through the single-turn ReAct path.
 _COMPLEX_TASK_INTENT_MARKERS: tuple[tuple[str, ...], ...] = (
     (
-        "analyze", "analyse", "audit", "inspect", "review", "assess",
-        "evaluate", "evaluation", "self-evaluation", "analisa", "analisar",
-        "audita", "auditar", "inspeciona", "rever", "avaliar", "avaliação",
+        "analyze",
+        "analyse",
+        "audit",
+        "inspect",
+        "review",
+        "assess",
+        "evaluate",
+        "evaluation",
+        "self-evaluation",
+        "analisa",
+        "analisar",
+        "audita",
+        "auditar",
+        "inspeciona",
+        "rever",
+        "avaliar",
+        "avaliação",
     ),
     (
-        "fix", "correct", "implement", "improve", "refactor", "change",
-        "corrige", "corrigir", "implementa", "melhora", "melhorar",
-        "refatora", "alterar",
+        "fix",
+        "correct",
+        "implement",
+        "improve",
+        "refactor",
+        "change",
+        "corrige",
+        "corrigir",
+        "implementa",
+        "melhora",
+        "melhorar",
+        "refatora",
+        "alterar",
     ),
     (
-        "run tests", "test", "tests", "regression", "verify", "validation",
-        "execute", "retest", "executa os testes", "executar", "teste", "testa",
-        "testar", "testes", "retestar", "regress", "verifica", "verificar", "validar",
+        "run tests",
+        "test",
+        "tests",
+        "regression",
+        "verify",
+        "validation",
+        "execute",
+        "retest",
+        "executa os testes",
+        "executar",
+        "teste",
+        "testa",
+        "testar",
+        "testes",
+        "retestar",
+        "regress",
+        "verifica",
+        "verificar",
+        "validar",
     ),
     (
-        "document", "report", "results", "summarize", "summary",
-        "documenta", "relatório", "resultados", "apresenta",
+        "document",
+        "report",
+        "results",
+        "summarize",
+        "summary",
+        "documenta",
+        "relatório",
+        "resultados",
+        "apresenta",
     ),
 )
+
 
 # Pre-compiled word-boundary patterns. Plain substring matching produced
 # false positives — "escrever" contains "rever", "testa" contains "test" —
@@ -625,14 +679,52 @@ _COMPLEX_TASK_INTENT_RES: tuple["re.Pattern[str]", ...] = tuple(
 # Q&A lane when the message also contains explicit execution verbs.
 _ACTIONABLE_QUESTION_INTENT_RE = _compile_marker_pattern(
     (
-        "analyze", "audit", "inspect", "review", "assess", "investigate",
-        "fix", "correct", "implement", "improve", "refactor", "change",
-        "update", "create", "build", "write", "run", "execute", "perform",
-        "identify", "retest", "verify", "validate", "use",
-        "analisar", "auditar", "inspecionar", "rever", "avaliar", "investigar",
-        "corrigir", "implementar", "melhorar", "refatorar", "alterar", "atualizar",
-        "criar", "construir", "escrever", "executar", "testar", "identificar",
-        "retestar", "verificar", "validar", "usar",
+        "analyze",
+        "audit",
+        "inspect",
+        "review",
+        "assess",
+        "investigate",
+        "fix",
+        "correct",
+        "implement",
+        "improve",
+        "refactor",
+        "change",
+        "update",
+        "create",
+        "build",
+        "write",
+        "run",
+        "execute",
+        "perform",
+        "identify",
+        "retest",
+        "verify",
+        "validate",
+        "use",
+        "analisar",
+        "auditar",
+        "inspecionar",
+        "rever",
+        "avaliar",
+        "investigar",
+        "corrigir",
+        "implementar",
+        "melhorar",
+        "refatorar",
+        "alterar",
+        "atualizar",
+        "criar",
+        "construir",
+        "escrever",
+        "executar",
+        "testar",
+        "identificar",
+        "retestar",
+        "verificar",
+        "validar",
+        "usar",
     )
 )
 
@@ -640,9 +732,24 @@ _ACTIONABLE_QUESTION_INTENT_RE = _compile_marker_pattern(
 # when they contain strong keywords ("como funciona a autenticação?" mentions
 # "autenticação" but asks for an explanation, not a change).
 _COMPLEX_TASK_QUESTION_STARTERS: tuple[str, ...] = (
-    "como ", "o que", "que é", "porque", "porquê", "por que",
-    "qual ", "quais ", "quando ", "onde ", "explica", "explain",
-    "what ", "what's", "why ", "how ", "which ", "quanto ",
+    "como ",
+    "o que",
+    "que é",
+    "porque",
+    "porquê",
+    "por que",
+    "qual ",
+    "quais ",
+    "quando ",
+    "onde ",
+    "explica",
+    "explain",
+    "what ",
+    "what's",
+    "why ",
+    "how ",
+    "which ",
+    "quanto ",
 )
 
 
@@ -665,14 +772,46 @@ def _is_informational_question(query: str) -> bool:
 
 _ASSISTED_ACTION_RE = _compile_marker_pattern(
     (
-        "create", "build", "write", "change", "update", "remove", "modify",
-        "criar", "construir", "escrever", "alterar", "atualizar", "remover",
+        "create",
+        "build",
+        "write",
+        "change",
+        "update",
+        "remove",
+        "modify",
+        "criar",
+        "construir",
+        "escrever",
+        "alterar",
+        "atualizar",
+        "remover",
     )
 )
 
-def classify_execution_mode(
-    message: str, requested_mode: str, project_path: str
-) -> ExecutionMode:
+_PROJECT_CONTEXT_RE = _compile_marker_pattern(
+    (
+        "this project",
+        "this repository",
+        "this repo",
+        "current project",
+        "current repository",
+        "este projeto",
+        "este repositorio",
+        "este repositório",
+        "projeto atual",
+        "repositorio atual",
+        "repositório atual",
+        "esta codebase",
+    )
+)
+
+
+def _needs_project_context(message: str) -> bool:
+    """Return whether a read-only CHAT question refers to the selected project."""
+    return _PROJECT_CONTEXT_RE.search((message or "").casefold()) is not None
+
+
+def classify_execution_mode(message: str, requested_mode: str, project_path: str) -> ExecutionMode:
     """Classify a turn into the explicit CHAT, ASSISTED, or MISSION lane.
 
     The automatic lane uses observable intent phases only.  Topic words such
@@ -716,8 +855,7 @@ def classify_execution_mode(
     if _ASSISTED_ACTION_RE.search(lowered):
         return ExecutionMode.ASSISTED
     if phase_count >= 1 and (
-        _RUNTIME_EVIDENCE_ACTION_RE.search(lowered)
-        or _FAST_CHAT_ACTION_RE.search(lowered)
+        _RUNTIME_EVIDENCE_ACTION_RE.search(lowered) or _FAST_CHAT_ACTION_RE.search(lowered)
     ):
         return ExecutionMode.ASSISTED
     return ExecutionMode.CHAT
@@ -747,19 +885,46 @@ def _is_complex_task(query: str) -> bool:
     # avoids sending a simple "analisa este ficheiro" request to the heavier
     # plan/execution engine, while correctly escalating an audit → fix →
     # test workflow.
-    intent_count = sum(
-        1 for marker_re in _COMPLEX_TASK_INTENT_RES if marker_re.search(lowered)
-    )
+    intent_count = sum(1 for marker_re in _COMPLEX_TASK_INTENT_RES if marker_re.search(lowered))
     return intent_count >= 2
 
 
 _FAST_CHAT_ACTION_RE = _compile_marker_pattern(
     (
-        "create", "build", "implement", "write", "develop", "design", "refactor",
-        "optimize", "fix", "debug", "analyze", "review", "add", "remove", "update",
-        "modify", "generate", "install", "deploy", "test", "criar", "construir",
-        "implementar", "escrever", "desenvolver", "projetar", "otimizar", "corrigir",
-        "depurar", "analisar", "auditar", "verificar", "testar", "melhorar",
+        "create",
+        "build",
+        "implement",
+        "write",
+        "develop",
+        "design",
+        "refactor",
+        "optimize",
+        "fix",
+        "debug",
+        "analyze",
+        "review",
+        "add",
+        "remove",
+        "update",
+        "modify",
+        "generate",
+        "install",
+        "deploy",
+        "test",
+        "criar",
+        "construir",
+        "implementar",
+        "escrever",
+        "desenvolver",
+        "projetar",
+        "otimizar",
+        "corrigir",
+        "depurar",
+        "analisar",
+        "auditar",
+        "verificar",
+        "testar",
+        "melhorar",
     )
 )
 
@@ -778,18 +943,56 @@ def _is_fast_chat_turn(query: str) -> bool:
 
 _RUNTIME_EVIDENCE_ACTION_RE = _compile_marker_pattern(
     (
-        "analisa", "analisar", "audita", "auditar", "auditoria", "investiga",
-        "investigar", "verifica", "verificar", "testa", "testar", "corrige",
-        "corrigir", "implementa", "implementar", "inspeciona", "inspecionar",
-        "ler", "analyze", "audit", "investigate", "verify", "test", "fix",
-        "implement", "inspect", "read",
+        "analisa",
+        "analisar",
+        "audita",
+        "auditar",
+        "auditoria",
+        "investiga",
+        "investigar",
+        "verifica",
+        "verificar",
+        "testa",
+        "testar",
+        "corrige",
+        "corrigir",
+        "implementa",
+        "implementar",
+        "inspeciona",
+        "inspecionar",
+        "ler",
+        "analyze",
+        "audit",
+        "investigate",
+        "verify",
+        "test",
+        "fix",
+        "implement",
+        "inspect",
+        "read",
     )
 )
 _RUNTIME_EVIDENCE_TARGET_RE = _compile_marker_pattern(
     (
-        "projeto", "project", "codigo", "code", "ficheiro", "ficheiros",
-        "arquivo", "file", "files", "pasta", "diretoria", "directory", "backend",
-        "frontend", "repositorio", "repository", "modulo", "module", "ambiente",
+        "projeto",
+        "project",
+        "codigo",
+        "code",
+        "ficheiro",
+        "ficheiros",
+        "arquivo",
+        "file",
+        "files",
+        "pasta",
+        "diretoria",
+        "directory",
+        "backend",
+        "frontend",
+        "repositorio",
+        "repository",
+        "modulo",
+        "module",
+        "ambiente",
         "environment",
     )
 )
@@ -830,7 +1033,10 @@ def _existing_directory_from_message(message: str) -> str:
     tail = _WINDOWS_PATH_TAIL_RE.search(message or "")
     if tail:
         raw = tail.group("path").strip()
-        boundaries = [len(raw), *(match.start() for match in reversed(list(re.finditer(r"\s+", raw))))]
+        boundaries = [
+            len(raw),
+            *(match.start() for match in reversed(list(re.finditer(r"\s+", raw)))),
+        ]
         candidates.extend(raw[:end] for end in boundaries)
 
     for candidate in candidates:
@@ -877,7 +1083,9 @@ def _command_help_text() -> str:
         if description:
             line += f" — {description}"
         lines.append(line)
-    lines.append("\nEscreve um comando seguido do objetivo, por exemplo: `/proof verifica este projeto`.")
+    lines.append(
+        "\nEscreve um comando seguido do objetivo, por exemplo: `/proof verifica este projeto`."
+    )
     return "\n".join(lines)
 
 
@@ -888,7 +1096,9 @@ def _user_facing_preamble(query: str) -> str:
         return "Vou reproduzir o problema, localizar a causa e validar a correção."
     if any(word in lowered for word in ("pesquisa", "research", "compar", "investig")):
         return "Vou reunir o contexto relevante, comparar a evidência e resumir o essencial."
-    if any(word in lowered for word in ("cria", "criar", "implement", "build", "adicion", "melhor")):
+    if any(
+        word in lowered for word in ("cria", "criar", "implement", "build", "adicion", "melhor")
+    ):
         return "Vou mapear a implementação atual, fazer a alteração e verificar o resultado."
     if any(word in lowered for word in ("analisa", "analis", "review", "revis")):
         return "Vou inspecionar o contexto, identificar os pontos importantes e apresentar uma conclusão clara."
@@ -910,7 +1120,9 @@ def _mission_ui_payload(mission: Any) -> dict[str, Any]:
     for phase in getattr(plan, "phases", []) or []:
         phases.append(
             {
-                "phase": getattr(getattr(phase, "phase", None), "value", str(getattr(phase, "phase", ""))),
+                "phase": getattr(
+                    getattr(phase, "phase", None), "value", str(getattr(phase, "phase", ""))
+                ),
                 "label": getattr(phase, "phase", None).label
                 if getattr(getattr(phase, "phase", None), "label", None)
                 else str(getattr(phase, "phase", "")),
@@ -930,8 +1142,12 @@ def _mission_ui_payload(mission: Any) -> dict[str, Any]:
         "mission_id": getattr(mission, "id", ""),
         "session_id": getattr(mission, "session_id", ""),
         "objective": str(getattr(mission, "title", "") or "")[:240],
-        "state": getattr(getattr(mission, "state", None), "value", str(getattr(mission, "state", "analysing"))),
-        "phase": getattr(getattr(mission, "phase", None), "value", str(getattr(mission, "phase", "diagnosis"))),
+        "state": getattr(
+            getattr(mission, "state", None), "value", str(getattr(mission, "state", "analysing"))
+        ),
+        "phase": getattr(
+            getattr(mission, "phase", None), "value", str(getattr(mission, "phase", "diagnosis"))
+        ),
         "progress": float(getattr(mission, "progress", 0.0) or 0.0),
         "tasks_total": int(len(contracts)),
         "tasks_done": tasks_done,
@@ -939,12 +1155,17 @@ def _mission_ui_payload(mission: Any) -> dict[str, Any]:
         "files_analyzed": int(getattr(snapshot, "file_count", 0) or 0) if snapshot else 0,
         "tests_total": int(getattr(snapshot, "test_files", 0) or 0) if snapshot else 0,
         "findings_count": len(findings),
-        "priorities": [str(item)[:180] for item in (getattr(getattr(mission, "brief", None), "priorities", []) or [])[:4]],
+        "priorities": [
+            str(item)[:180]
+            for item in (getattr(getattr(mission, "brief", None), "priorities", []) or [])[:4]
+        ],
         "phases": phases,
     }
 
 
-def _mission_heartbeat_payload(mission: Any | None, started_at: float) -> tuple[str, dict[str, Any]]:
+def _mission_heartbeat_payload(
+    mission: Any | None, started_at: float
+) -> tuple[str, dict[str, Any]]:
     """Build a truthful user-facing heartbeat from the current mission state."""
     payload = _mission_ui_payload(mission) if mission is not None else {}
     elapsed = max(0, int(time.monotonic() - started_at))
@@ -957,13 +1178,13 @@ def _mission_heartbeat_payload(mission: Any | None, started_at: float) -> tuple[
     elif active:
         message = f"Continuo a executar a missão. {active} agente(s) continuam ativos."
     else:
-        message = "Continuo a executar a missão; ainda não há uma nova etapa concluída para reportar."
+        message = (
+            "Continuo a executar a missão; ainda não há uma nova etapa concluída para reportar."
+        )
     return message, payload
 
 
-def _normalise_autonomous_status(
-    state: str, failed_tasks: int = 0, blocked_tasks: int = 0
-) -> str:
+def _normalise_autonomous_status(state: str, failed_tasks: int = 0, blocked_tasks: int = 0) -> str:
     """Map orchestration states to the only terminal UI outcomes."""
     normalized = str(state or "").strip().lower()
     if normalized == "cancelled":
@@ -1003,6 +1224,7 @@ async def _stream_autonomous_execution(
     """
     from backend.orchestrator.engine import OrchestrationEngine
     from backend.orchestrator.events import EventType
+
     execution_started_at = time.monotonic()
 
     try:
@@ -1029,9 +1251,7 @@ async def _stream_autonomous_execution(
     # work keeps running.  The registry watcher cancels this exact generator
     # task, including while it is awaiting the pre-flight.
     async def _cancel_stream_on_request() -> bool:
-        cancelled = await get_cancellation_registry().wait_cancelled(
-            cancellation_request_id
-        )
+        cancelled = await get_cancellation_registry().wait_cancelled(cancellation_request_id)
         # An async generator can resume under a different task for each
         # ``anext`` call, so cancelling the task captured before the first
         # yield is unreliable.  Cancel the long-lived engine task directly.
@@ -1043,9 +1263,7 @@ async def _stream_autonomous_execution(
 
     cancellation_watch_task: asyncio.Task[bool] | None = None
     if cancellation_request_id:
-        cancellation_watch_task = asyncio.create_task(
-            _cancel_stream_on_request()
-        )
+        cancellation_watch_task = asyncio.create_task(_cancel_stream_on_request())
 
     yield _sse(StreamEvent(type="agent_started", agent="ARCHITECT"))
 
@@ -1157,13 +1375,33 @@ async def _stream_autonomous_execution(
         def ui_agent(source: str) -> AgentName:
             """Keep infrastructure component names out of the public agent field."""
             known_agents = {
-                "ROUTER", "PLANNER", "ARCHITECT", "ARCHITECT_DESIGN",
-                "ARCHITECT_COMPLEXITY", "RESEARCHER", "RESEARCHER_WEB",
-                "CODER", "REVIEWER", "ANALYZER", "DEBUGGER", "DOCUMENTER",
-                "OPTIMIZER", "REFACTOR_PERFORMANCE", "REFACTOR_CLEAN",
-                "DASHBOARD", "MICRO", "ORCHESTRATOR", "SWARM", "SUPERVISOR",
-                "GUARDIAN", "TEST_RUNNER_UNIT", "TEST_RUNNER_E2E", "OVERSEER",
-                "BUG_HUNTER_STATIC", "BUG_HUNTER_RUNTIME", "META_ANALYZER",
+                "ROUTER",
+                "PLANNER",
+                "ARCHITECT",
+                "ARCHITECT_DESIGN",
+                "ARCHITECT_COMPLEXITY",
+                "RESEARCHER",
+                "RESEARCHER_WEB",
+                "CODER",
+                "REVIEWER",
+                "ANALYZER",
+                "DEBUGGER",
+                "DOCUMENTER",
+                "OPTIMIZER",
+                "REFACTOR_PERFORMANCE",
+                "REFACTOR_CLEAN",
+                "DASHBOARD",
+                "MICRO",
+                "ORCHESTRATOR",
+                "SWARM",
+                "SUPERVISOR",
+                "GUARDIAN",
+                "TEST_RUNNER_UNIT",
+                "TEST_RUNNER_E2E",
+                "OVERSEER",
+                "BUG_HUNTER_STATIC",
+                "BUG_HUNTER_RUNTIME",
+                "META_ANALYZER",
             }
             normalized = source.upper()
             return normalized if normalized in known_agents else "ORCHESTRATOR"  # type: ignore[return-value]
@@ -1196,11 +1434,7 @@ async def _stream_autonomous_execution(
                     event: StreamEvent,
                     metadata: dict[str, Any] = event_metadata,
                 ) -> str:
-                    return _sse(
-                        event.model_copy(
-                            update={"data": {**event.data, **metadata}}
-                        )
-                    )
+                    return _sse(event.model_copy(update={"data": {**event.data, **metadata}}))
 
                 try:
                     et = EventType(et_value)
@@ -1227,7 +1461,9 @@ async def _stream_autonomous_execution(
                 elif et in (EventType.AGENT_STARTED, EventType.AGENT_FINISHED):
                     yield _event_sse(
                         StreamEvent(
-                            type="agent_started" if et == EventType.AGENT_STARTED else "agent_finished",
+                            type="agent_started"
+                            if et == EventType.AGENT_STARTED
+                            else "agent_finished",
                             agent=agent,
                             data={
                                 **data,
@@ -1284,7 +1520,8 @@ async def _stream_autonomous_execution(
                             )
                     status = (
                         "running"
-                        if et in (
+                        if et
+                        in (
                             EventType.TASK_STARTED,
                             EventType.TASK_WAITING_DEPENDENCY,
                             EventType.AGENT_RETRY,
@@ -1292,7 +1529,8 @@ async def _stream_autonomous_execution(
                             EventType.HEARTBEAT,
                         )
                         else "error"
-                        if et in (
+                        if et
+                        in (
                             EventType.TASK_FAILED,
                             EventType.TASK_BLOCKED,
                             EventType.TASK_CANCELLED,
@@ -1306,7 +1544,12 @@ async def _stream_autonomous_execution(
                         else "agent"
                         if et in (EventType.AGENT_FAILED, EventType.AGENT_RETRY)
                         else "status"
-                        if et in (EventType.ORCHESTRATOR_STARTED, EventType.ORCHESTRATOR_FINISHED, EventType.HEARTBEAT)
+                        if et
+                        in (
+                            EventType.ORCHESTRATOR_STARTED,
+                            EventType.ORCHESTRATOR_FINISHED,
+                            EventType.HEARTBEAT,
+                        )
                         else "verification"
                         if et == EventType.STEP_COMPLETED
                         else "task"
@@ -1385,13 +1628,10 @@ async def _stream_autonomous_execution(
         next_event_task = asyncio.create_task(anext(event_stream))
         await asyncio.sleep(0)
 
-        if (
-            (cancellation_event is not None and cancellation_event.is_set())
-            or (
-                cancellation_watch_task is not None
-                and cancellation_watch_task.done()
-                and cancellation_watch_task.result()
-            )
+        if (cancellation_event is not None and cancellation_event.is_set()) or (
+            cancellation_watch_task is not None
+            and cancellation_watch_task.done()
+            and cancellation_watch_task.result()
         ):
             raise asyncio.CancelledError
 
@@ -1574,7 +1814,13 @@ async def _stream_autonomous_execution(
         session_id, ChatMessage(role="user", content=objective, timestamp=now)
     )
 
-    icon = "✅" if normalized_status == "completed" else "⏹" if normalized_status == "cancelled" else "❌"
+    icon = (
+        "✅"
+        if normalized_status == "completed"
+        else "⏹"
+        if normalized_status == "cancelled"
+        else "❌"
+    )
     title = (
         "Execução Autónoma Concluída"
         if normalized_status == "completed"
@@ -1915,6 +2161,8 @@ async def _run_pipeline(
         usage: dict[str, Any] | None = None,
         error: str | None = None,
         error_category: str | None = None,
+        provider_name: str | None = None,
+        model_name: str | None = None,
         finished: bool = False,
     ) -> None:
         if not run_started:
@@ -1939,8 +2187,8 @@ async def _run_pipeline(
                     execution_state
                     or ("completed" if finished and status == "completed" else status)
                 ),
-                provider=getattr(req, "provider", "") or None,
-                model=getattr(req, "model", "") or None,
+                provider=provider_name or getattr(req, "provider", "") or None,
+                model=model_name or getattr(req, "model", "") or None,
                 error_category=error_category,
             )
         except Exception:
@@ -2135,9 +2383,7 @@ async def _run_pipeline(
             routing_confidence=1.0,
             task_type="command_help",
         )
-        yield _sse(
-            StreamEvent(type="routing", routing=help_decision, data=run_context.to_dict())
-        )
+        yield _sse(StreamEvent(type="routing", routing=help_decision, data=run_context.to_dict()))
         now = datetime.now(UTC).isoformat()
         await context.append_message(
             req.session_id, ChatMessage(role="user", content=req.message, timestamp=now)
@@ -2160,19 +2406,32 @@ async def _run_pipeline(
         yield _sse(StreamEvent(type="done"))
         return
 
-
-    # CHAT never bootstraps a project or autonomous execution context.
-    fast_candidate = execution_mode is ExecutionMode.CHAT or mode in {"ask", "fast"} or (
-        mode in {"auto", "agent"} and _is_fast_chat_turn(req.message)
+    # CHAT never bootstraps an arbitrary project or autonomous execution
+    # context.  A read-only question that explicitly refers to the project may
+    # use an already-existing compact bootstrap for the project selected by the
+    # UI; it still receives no tools and cannot create/update project memory.
+    fast_candidate = (
+        execution_mode is ExecutionMode.CHAT
+        or mode in {"ask", "fast"}
+        or (mode in {"auto", "agent"} and _is_fast_chat_turn(req.message))
+    )
+    project_context_requested = (
+        execution_mode is ExecutionMode.CHAT
+        and bool((getattr(req, "project_path", "") or "").strip())
+        and _needs_project_context(req.message)
     )
 
     # The explicit request wins. If the UI has no active project, recover a
     # real absolute directory named in the user's message. The old order read
     # an arbitrary ``SELECT ... LIMIT 1`` project first and silently executed
     # against the wrong workspace.
-    project_path = "" if fast_candidate else _requested_project_path(
-        getattr(req, "project_path", "") or "",
-        req.message,
+    project_path = (
+        _requested_project_path(
+            getattr(req, "project_path", "") or "",
+            "" if project_context_requested else req.message,
+        )
+        if not fast_candidate or project_context_requested
+        else ""
     )
     project_path_defaulted = False
 
@@ -2212,9 +2471,14 @@ async def _run_pipeline(
     # embeddings.
     project_memory = ""
     try:
-        from backend.knowledge.project_memory import read_project_memory
+        from backend.knowledge.project_memory import project_memory_path, read_project_memory
 
-        project_memory = read_project_memory(project_path) if project_path else ""
+        memory_exists = bool(project_path and project_memory_path(project_path).is_file())
+        project_memory = (
+            read_project_memory(project_path)
+            if project_path and (execution_mode is not ExecutionMode.CHAT or memory_exists)
+            else ""
+        )
     except Exception as exc:
         logger.warning("Could not load project memory for %s: %s", project_path, exc)
 
@@ -2265,6 +2529,7 @@ async def _run_pipeline(
                 get_orchestrator,
                 resolve_command,
             )
+
             resolved = resolve_command(cmd_text)
             if resolved:
                 mode_id = resolved["mode"]
@@ -2285,7 +2550,9 @@ async def _run_pipeline(
                 effective_message = rest or f"Activate {mode_id} mode"
                 logger.info(
                     "Advanced mode /command resolved: %s -> %s | msg=%s",
-                    cmd_text, mode_id, effective_message[:80],
+                    cmd_text,
+                    mode_id,
+                    effective_message[:80],
                 )
         except ImportError as _exc:
             logger.debug("Advanced modes not available: %s", _exc)
@@ -2299,7 +2566,9 @@ async def _run_pipeline(
         try:
             from backend.orchestrator.advanced_modes import get_orchestrator
 
-            _advanced_profile = get_orchestrator().prepare_active_execution_profile(effective_message)
+            _advanced_profile = get_orchestrator().prepare_active_execution_profile(
+                effective_message
+            )
             if _advanced_profile.get("active_mode_ids"):
                 _advanced_mode_addon = _advanced_profile.get("addon", "")
                 _advanced_force_autonomous = bool(_advanced_profile.get("force_autonomous"))
@@ -2453,10 +2722,14 @@ async def _run_pipeline(
                 task_type="planning",
             )
     elif (
-        execution_mode is ExecutionMode.MISSION
-        or mode in ("auto", "agent")
-        or (_advanced_force_autonomous and not fast_candidate)
-    ) and mode not in ("swarm", "auto_swarm") and not _advanced_force_swarm:
+        (
+            execution_mode is ExecutionMode.MISSION
+            or mode in ("auto", "agent")
+            or (_advanced_force_autonomous and not fast_candidate)
+        )
+        and mode not in ("swarm", "auto_swarm")
+        and not _advanced_force_swarm
+    ):
         # Auto mode: for COMPLEX tasks, use the full Plan→Execute→Verify pipeline
         # via OrchestrationEngine.execute_autonomous(). For simple tasks, fall
         # through to the normal smart-routed single-agent ReAct loop.
@@ -3033,10 +3306,14 @@ async def _run_pipeline(
             "and surface only a concise user-facing approach summary, never private chain-of-thought."
         ),
     }
-    fast_chat_turn = execution_mode is ExecutionMode.CHAT or mode in {"ask", "fast"} or (
-        mode in {"auto", "agent"}
-        and not _advanced_command_mode
-        and _is_fast_chat_turn(effective_message)
+    fast_chat_turn = (
+        execution_mode is ExecutionMode.CHAT
+        or mode in {"ask", "fast"}
+        or (
+            mode in {"auto", "agent"}
+            and not _advanced_command_mode
+            and _is_fast_chat_turn(effective_message)
+        )
     )
     if req.thinking_strength in strength_guidance and not fast_chat_turn:
         enriched_addon += f"\n\n[REASONING DEPTH]\n{strength_guidance[req.thinking_strength]}"
@@ -3066,7 +3343,9 @@ async def _run_pipeline(
             agent_context: dict[str, Any] = {"run_context": run_context}
             if project_path:
                 agent_context["project_path"] = project_path
-            if project_memory and execution_mode is not ExecutionMode.CHAT:
+            if project_memory and (
+                execution_mode is not ExecutionMode.CHAT or project_context_requested
+            ):
                 agent_context["_project_memory"] = project_memory
             if enriched_addon:
                 agent_context["_system_addon"] = enriched_addon
@@ -3078,16 +3357,17 @@ async def _run_pipeline(
             elif execution_mode is ExecutionMode.ASSISTED:
                 agent_context["_assisted_tool_budget"] = 3
                 agent_context["_allowed_tools"] = (
-                    "read_file", "search_in_files", "run_tests", "type_check"
+                    "read_file",
+                    "search_in_files",
+                    "run_tests",
+                    "type_check",
                 )
                 agent_context["_tool_evidence_requirement"] = (
                     _direct_runtime_evidence_requirement(effective_message) or "substantive"
                 )
             if _advanced_profile and execution_mode is not ExecutionMode.CHAT:
                 agent_context["_advanced_profile"] = {
-                    key: value
-                    for key, value in _advanced_profile.items()
-                    if key != "addon"
+                    key: value for key, value in _advanced_profile.items() if key != "addon"
                 }
             if model_override:
                 # Agents are shared singletons, so the pinned model travels with
@@ -3108,10 +3388,7 @@ async def _run_pipeline(
                     if execution_mode is ExecutionMode.ASSISTED
                     else mode_max_iterations
                 ),
-                enable_thinking=(
-                    mode_enable_thinking
-                    and execution_mode is not ExecutionMode.CHAT
-                ),
+                enable_thinking=(mode_enable_thinking and execution_mode is not ExecutionMode.CHAT),
                 autonomous=bool(
                     req.autonomous
                     and execution_mode in {ExecutionMode.ASSISTED, ExecutionMode.MISSION}
@@ -3201,9 +3478,7 @@ async def _run_pipeline(
                 break
             except TimeoutError:
                 stream_aborted = True
-                logger.warning(
-                    "Token streaming timeout after %ds", TOKEN_TIMEOUT_SECONDS
-                )
+                logger.warning("Token streaming timeout after %ds", TOKEN_TIMEOUT_SECONDS)
                 # Close the agent stream so a wedged tool call inside the
                 # ReAct generator is cancelled instead of running orphaned in
                 # the background after the client already saw the error.
@@ -3375,9 +3650,7 @@ async def _run_pipeline(
             partial_output="".join(thinking_parts),
             checkpoint={
                 "reason": "empty_visible_response",
-                "thinking_tokens": count_tokens(
-                    "".join(thinking_parts), model_for_counting
-                ),
+                "thinking_tokens": count_tokens("".join(thinking_parts), model_for_counting),
                 "tools": tool_names[-20:],
             },
         )
@@ -3396,13 +3669,59 @@ async def _run_pipeline(
         )
         yield _sse(StreamEvent(type="done", data=run_context.to_dict()))
         return
+
     def _message_content(message: Any) -> str:
         if isinstance(message, dict):
             return str(message.get("content") or "")
         return str(getattr(message, "content", "") or "")
 
+    runtime_provider = getattr(effective_client, "last_provider", None) or effective_client
+    actual_provider_name = str(
+        getattr(runtime_provider, "provider_name", "")
+        or runtime_provider.__class__.__name__.removesuffix("Provider").lower()
+    )
+    actual_model_name = str(
+        getattr(runtime_provider, "fallback_model", "") or resolved_model_id or req.model or ""
+    )
+    simulation_used = bool(getattr(runtime_provider, "simulation", False))
+    reported_usage = getattr(runtime_provider, "last_usage", {})
+    if not isinstance(reported_usage, dict):
+        reported_usage = {}
+    finish_reason = str(
+        getattr(runtime_provider, "last_finish_reason", "")
+        or getattr(effective_client, "last_finish_reason", "")
+        or ""
+    ).lower()
+    output_truncated = finish_reason in {
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+        "token_limit",
+    }
+    if output_truncated:
+        truncation_notice = (
+            "A resposta foi interrompida pelo limite de tokens do provider; "
+            "o estado ficou incompleto e pode ser continuado numa nova mensagem."
+        )
+        yield _sse(
+            StreamEvent(
+                type="warning",
+                agent=outcome.used_agent,
+                content=truncation_notice,
+                data={
+                    "reason": "provider_token_limit",
+                    "finish_reason": finish_reason,
+                    "run_id": run_context.run_id,
+                },
+            )
+        )
+        full = full.rstrip() + f"\n\n⚠️ {truncation_notice}"
+        stream_aborted = True
+
     prompt_tokens = count_tokens(req.message, model_for_counting)
-    history_tokens = sum(count_tokens(_message_content(message), model_for_counting) for message in history)
+    history_tokens = sum(
+        count_tokens(_message_content(message), model_for_counting) for message in history
+    )
     reasoning_tokens = sum(count_tokens(text, model_for_counting) for text in thinking_parts)
     output_tokens = count_tokens(full, model_for_counting) + reasoning_tokens
     total_tokens = prompt_tokens + history_tokens + output_tokens
@@ -3414,15 +3733,31 @@ async def _run_pipeline(
         + (count_tokens(project_path, model_for_counting) if project_path else 0)
         + tool_context_tokens
     )
+    provider_input_tokens = int(reported_usage.get("input_tokens") or 0)
+    provider_output_tokens = int(reported_usage.get("output_tokens") or 0)
+    provider_total_tokens = int(reported_usage.get("total_tokens") or 0)
+    provider_usage_measured = provider_total_tokens > 0 or (
+        provider_input_tokens > 0 or provider_output_tokens > 0
+    )
     usage_data = {
-        "input_tokens": prompt_tokens + history_tokens,
-        "output_tokens": output_tokens,
+        "input_tokens": (
+            provider_input_tokens if provider_usage_measured else prompt_tokens + history_tokens
+        ),
+        "output_tokens": provider_output_tokens if provider_usage_measured else output_tokens,
         "reasoning_tokens": reasoning_tokens,
-        "total_tokens": total_tokens,
-        "source": "estimated",
+        "total_tokens": provider_total_tokens if provider_usage_measured else total_tokens,
+        "source": "provider" if provider_usage_measured else "estimated",
         "cache_read_tokens": None,
         "cache_write_tokens": None,
         "cache_status": "not_reported",
+        "provider": {
+            "name": actual_provider_name,
+            "model": actual_model_name or None,
+            "simulation": simulation_used,
+            "source": "runtime_dispatch",
+            "finish_reason": finish_reason or None,
+            "complete": not output_truncated and not simulation_used,
+        },
         "context": {
             "prompt": prompt_tokens,
             "history": history_tokens,
@@ -3432,6 +3767,7 @@ async def _run_pipeline(
             "tools": tool_context_tokens,
             "mcp": mcp_context_tokens,
             "total": context_total_tokens,
+            "source": "estimated",
         },
     }
     yield _sse(StreamEvent(type="metric", agent=outcome.used_agent, data={"usage": usage_data}))
@@ -3446,11 +3782,23 @@ async def _run_pipeline(
 
     _checkpoint(
         status="interrupted" if stream_aborted else "completed",
-        phase="stream_timeout" if stream_aborted else "completed",
+        phase=(
+            "provider_output_truncated"
+            if output_truncated
+            else "stream_timeout"
+            if stream_aborted
+            else "completed"
+        ),
         agent=str(outcome.used_agent),
         partial_output=full,
-        checkpoint={"tools": tool_names[-20:]},
+        checkpoint={
+            "tools": tool_names[-20:],
+            "finish_reason": finish_reason or None,
+            "output_truncated": output_truncated,
+        },
         usage=usage_data,
+        provider_name=actual_provider_name,
+        model_name=actual_model_name or None,
         finished=True,
     )
     add_message(
@@ -3458,7 +3806,7 @@ async def _run_pipeline(
         "assistant",
         full,
         tier_used=decision.primary_agent,
-        model_used=resolved_model_id or req.model or str(outcome.used_agent),
+        model_used=actual_model_name or str(outcome.used_agent),
         tokens_in=history_tokens,
         tokens_out=output_tokens,
         latency_ms=latency_ms,

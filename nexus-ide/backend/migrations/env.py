@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 # Import the database path from the persistence module
@@ -22,15 +23,19 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+if config.config_file_name is not None and not logging.getLogger().handlers:
+    # The embedded startup configures Nexus/uvicorn logging before running
+    # migrations.  Alembic's ``fileConfig`` replaces the root handlers, which
+    # used to remove every application/access log after the first migration.
+    # Standalone Alembic commands still receive the ini configuration when no
+    # host logging exists.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
 target_metadata = None
-
 
 
 def get_sqlite_connection(url: str) -> sqlite3.Connection:

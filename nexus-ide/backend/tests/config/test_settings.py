@@ -107,6 +107,7 @@ class TestLoadModelsConfig:
             or "minimax" in nano["id"].lower()
             or "gemma" in nano["id"].lower()
             or "nemotron" in nano["id"].lower()
+            or nano["id"] == "openrouter/free"
         )
         assert nano["temperature"] == 0.1
         assert "routing" in nano["use_cases"]

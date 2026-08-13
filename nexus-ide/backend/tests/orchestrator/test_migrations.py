@@ -1,6 +1,7 @@
 """Focused migration tests for old durable-run fixtures."""
 
 import importlib
+import logging
 import sqlite3
 
 from alembic.migration import MigrationContext
@@ -38,9 +39,7 @@ def test_pre_migration_session_runs_rows_survive_schema_readiness(tmp_path) -> N
             """
         )
 
-    migration = importlib.import_module(
-        "backend.migrations.versions.006_execution_envelope"
-    )
+    migration = importlib.import_module("backend.migrations.versions.006_execution_envelope")
     engine = create_engine(f"sqlite:///{db_path}")
     with engine.begin() as conn:
         context = MigrationContext.configure(conn)
@@ -49,15 +48,12 @@ def test_pre_migration_session_runs_rows_survive_schema_readiness(tmp_path) -> N
 
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(session_runs)")}
-        legacy = conn.execute(
-            "SELECT status FROM session_runs WHERE id = 'legacy-run'"
-        ).fetchone()
+        legacy = conn.execute("SELECT status FROM session_runs WHERE id = 'legacy-run'").fetchone()
 
     assert "execution_state" in columns
     assert "correlation_id" in columns
     assert "evidence_json" in columns
     assert legacy == ("completed",)
-
 
 
 def test_init_db_repairs_pre_envelope_session_runs_before_current_schema(
@@ -94,12 +90,12 @@ def test_init_db_repairs_pre_envelope_session_runs_before_current_schema(
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(session_runs)")}
         index_names = {
-            row[1] for row in conn.execute(
-                "SELECT type, name FROM sqlite_master WHERE type = 'index'"
-            )
+            row[1]
+            for row in conn.execute("SELECT type, name FROM sqlite_master WHERE type = 'index'")
         }
     assert "correlation_id" in columns
     assert "idx_session_runs_correlation_updated" in index_names
+
 
 def test_stamped_head_repairs_missing_message_cost_column(tmp_path, monkeypatch) -> None:
     import backend.persistence.db as db
@@ -127,14 +123,19 @@ def test_stamped_head_repairs_missing_message_cost_column(tmp_path, monkeypatch)
             """
         )
         conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
-        conn.execute(
-            "INSERT INTO alembic_version (version_num) VALUES ('006_execution_envelope')"
-        )
+        conn.execute("INSERT INTO alembic_version (version_num) VALUES ('006_execution_envelope')")
         conn.commit()
 
     monkeypatch.setattr(db, "DB_PATH", db_path)
     db.close_pool()
-    db.init_db()
+    sentinel = logging.NullHandler()
+    root = logging.getLogger()
+    root.addHandler(sentinel)
+    try:
+        db.init_db()
+        assert sentinel in root.handlers
+    finally:
+        root.removeHandler(sentinel)
 
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}

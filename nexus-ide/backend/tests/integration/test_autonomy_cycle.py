@@ -24,9 +24,16 @@ class TestAutonomyCycle:
         from backend.orchestrator.events import EventBus
 
         async def _mock_stream(*args, **kwargs):
-            yield """[
-                {"name": "step1", "description": "First step", "agent": "CODER"}
-            ]"""
+            yield """{"goal":"Create a simple calculator","tasks":[
+                {"id":"step1","description":"Implement the calculator","agent":"CODER",
+                 "dependencies":[],"acceptance_criteria":["Calculator behavior is implemented"],
+                 "validation":[],"file_scope":["."],"model_key":"coder","risk":"low",
+                 "rollback":"Revert the implementation diff","lock_scope":"write:.","allowed_tools":[]},
+                {"id":"verify","description":"Run focused calculator tests","agent":"DEBUGGER",
+                 "dependencies":["step1"],"acceptance_criteria":["Focused tests pass"],
+                 "validation":["python -m pytest"],"file_scope":["."],"model_key":"coder","risk":"low",
+                 "rollback":"No writes; retain the failure report","lock_scope":"read:.","allowed_tools":[]}
+            ]}"""
 
         mock_ollama = MagicMock()
         mock_ollama.chat_stream = _mock_stream
@@ -42,9 +49,10 @@ class TestAutonomyCycle:
             session_id="test-session",
         )
 
-        assert plan is not None
+        assert plan.status == "ready"
+        assert plan.source == "model"
         assert plan.title == "Create a simple calculator"
-        assert len(plan.steps) > 0
+        assert [step.name for step in plan.steps] == ["step1", "verify"]
         assert plan.dependency_graph.validate()[0] is True
 
     def test_execute_plan_runs_independent_tasks_parallel(self) -> None:
@@ -128,11 +136,20 @@ class TestAutonomyCycle:
         from backend.orchestrator.events import EventBus
 
         async def _mock_stream(*args, **kwargs):
-            yield """[
-                {"name": "implement_calculator", "description": "Write the calculator function", "agent": "CODER"},
-                {"name": "write_tests", "description": "Write unit tests", "agent": "CODER", "depends_on": ["implement_calculator"]},
-                {"name": "verify", "description": "Verify implementation", "agent": "DEBUGGER", "depends_on": ["write_tests"]}
-            ]"""
+            yield """{"goal":"Create a calculator in Python with tests","tasks":[
+                {"id":"implement_calculator","description":"Write the calculator function","agent":"CODER",
+                 "dependencies":[],"acceptance_criteria":["Calculator function is implemented"],
+                 "validation":[],"file_scope":["."],"model_key":"coder","risk":"low",
+                 "rollback":"Revert the calculator diff","lock_scope":"write:.","allowed_tools":[]},
+                {"id":"write_tests","description":"Write unit tests","agent":"CODER",
+                 "dependencies":["implement_calculator"],"acceptance_criteria":["Unit tests cover calculator behavior"],
+                 "validation":[],"file_scope":["."],"model_key":"coder","risk":"low",
+                 "rollback":"Revert the test diff","lock_scope":"write:.","allowed_tools":[]},
+                {"id":"verify","description":"Verify implementation","agent":"DEBUGGER",
+                 "dependencies":["write_tests"],"acceptance_criteria":["Focused tests pass"],
+                 "validation":["python -m pytest"],"file_scope":["."],"model_key":"coder","risk":"low",
+                 "rollback":"No writes; retain the failure report","lock_scope":"read:.","allowed_tools":[]}
+            ]}"""
 
         mock_ollama = MagicMock()
         mock_ollama.chat_stream = _mock_stream
@@ -150,7 +167,8 @@ class TestAutonomyCycle:
         )
 
         # Verify plan structure
-        assert plan is not None
+        assert plan.status == "ready"
+        assert plan.source == "model"
         assert len(plan.steps) == 3
 
         # Build dependency graph

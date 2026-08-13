@@ -138,19 +138,38 @@ class EmbeddingService:
         return self._fallback_embed(text)
 
     def _fallback_embed(self, text: str) -> list[float]:
-        """Deterministic fallback embedding when local model is unavailable."""
-        import hashlib
+        """Deterministic lexical embedding when a model is unavailable.
 
-        hash_bytes = hashlib.sha256(text.encode()).digest()
-        # Generate a pseudo-embedding from hash
-        embedding = []
-        for i in range(0, min(len(hash_bytes), self._dimension // 4)):
-            val = int.from_bytes(hash_bytes[i : i + 4], "big") / (2**32)
-            embedding.append(val * 2 - 1)  # normalize to [-1, 1]
-        # Pad to dimension
-        while len(embedding) < self._dimension:
-            embedding.append(0.0)
-        return embedding[: self._dimension]
+        Hashing the complete string made similar sentences statistically
+        unrelated, so degraded-mode memory recall only worked for byte-for-byte
+        repeats.  Feature hashing preserves shared terms without a network or
+        model dependency.  It is intentionally labelled a fallback: this gives
+        useful lexical similarity, not a claim of provider-grade semantics.
+        """
+        import hashlib
+        import re
+
+        stopwords = {
+            "a", "an", "and", "as", "at", "de", "do", "da", "e", "em",
+            "for", "is", "o", "of", "os", "the", "to", "um", "uma",
+        }
+        tokens = [
+            token
+            for token in re.findall(r"[^\W_]+", text.casefold(), flags=re.UNICODE)
+            if len(token) > 1 and token not in stopwords
+        ]
+        if not tokens:
+            tokens = [text.casefold() or "empty"]
+
+        embedding = [0.0] * self._dimension
+        for token in tokens:
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            index = int.from_bytes(digest[:4], "big") % self._dimension
+            sign = 1.0 if digest[4] & 1 else -1.0
+            embedding[index] += sign
+
+        norm = math.sqrt(sum(value * value for value in embedding))
+        return [value / norm for value in embedding] if norm else embedding
 
     def cosine_similarity(self, a: list[float], b: list[float]) -> float:
         """Compute cosine similarity between two vectors."""

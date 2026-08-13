@@ -2,16 +2,25 @@
 
 from backend.orchestrator.execution_contracts import ExecutionMode
 from backend.orchestrator.routes.chat import (
+    _needs_project_context,
     _normalise_autonomous_status,
     _should_persist_project_memory,
     classify_execution_mode,
 )
 
 
+def test_project_referential_questions_request_read_only_context() -> None:
+    assert _needs_project_context("Para que serve este projeto?")
+    assert _needs_project_context("Summarize this repository")
+    assert not _needs_project_context("Olá")
+
+
 def test_informational_questions_are_chat() -> None:
     assert classify_execution_mode("quanto é 2+2?", "auto", "") is ExecutionMode.CHAT
     assert classify_execution_mode("explica Python", "auto", "") is ExecutionMode.CHAT
-    assert classify_execution_mode("como funciona a autenticação?", "auto", "") is ExecutionMode.CHAT
+    assert (
+        classify_execution_mode("como funciona a autenticação?", "auto", "") is ExecutionMode.CHAT
+    )
 
 
 def test_single_word_topics_remain_chat() -> None:
@@ -21,19 +30,16 @@ def test_single_word_topics_remain_chat() -> None:
 
 def test_action_with_bounded_assistance_is_assisted() -> None:
     assert (
-        classify_execution_mode(
-            "corrige este erro neste ficheiro e executa o teste X", "auto", ""
-        )
+        classify_execution_mode("corrige este erro neste ficheiro e executa o teste X", "auto", "")
         is ExecutionMode.ASSISTED
     )
-
-
 
 
 def test_chat_never_persists_project_memory_without_project() -> None:
     assert not _should_persist_project_memory(ExecutionMode.CHAT, "")
     assert not _should_persist_project_memory(ExecutionMode.CHAT, "C:/repo")
     assert _should_persist_project_memory(ExecutionMode.ASSISTED, "C:/repo")
+
 
 def test_action_only_requests_are_assisted() -> None:
     for message in ("create a file", "build the backend", "update this module"):
@@ -47,7 +53,10 @@ def test_multi_phase_or_explicit_mission_is_mission() -> None:
         )
         is ExecutionMode.MISSION
     )
-    assert classify_execution_mode("/mission analyze this project", "auto", "") is ExecutionMode.MISSION
+    assert (
+        classify_execution_mode("/mission analyze this project", "auto", "")
+        is ExecutionMode.MISSION
+    )
 
 
 def test_long_audit_prompt_with_final_question_is_mission() -> None:

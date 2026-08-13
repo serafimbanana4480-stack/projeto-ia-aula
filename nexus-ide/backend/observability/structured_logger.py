@@ -11,7 +11,6 @@ import json
 import logging
 import sys
 import time
-import uuid
 from typing import Any
 
 # Thread-local storage for correlation context
@@ -120,8 +119,13 @@ def clear_correlation_context() -> None:
 def configure_structured_logging(level: int = logging.INFO) -> None:
     """Configure root logger for structured JSON output."""
     handler = logging.StreamHandler(sys.stdout)
+    handler._nexus_owned = True  # type: ignore[attr-defined]
     handler.setFormatter(StructuredLogFormatter())
 
     root = logging.getLogger()
-    root.handlers = [handler]
+    for existing in list(root.handlers):
+        if getattr(existing, "_nexus_owned", False):
+            root.removeHandler(existing)
+            existing.close()
+    root.addHandler(handler)
     root.setLevel(level)

@@ -663,10 +663,10 @@ class DashboardAgent(AgentBase):
         """Return the most recent metrics snapshot."""
         return dict(self._history[-1]) if self._history else None
 
-    def get_health_score(self) -> float:
-        """Compute an overall health score 0-1."""
+    def get_health_score(self) -> float | None:
+        """Compute an overall health score 0-1 when metrics have been measured."""
         if not self._history:
-            return 1.0
+            return None
         snapshot = self._history[-1]
         score = 1.0
         cpu = snapshot.get("cpu_percent", 0) or 0

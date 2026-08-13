@@ -78,18 +78,20 @@ class TestFileLocksDirect:
         test_file = str((tmp_path / "shared.txt").resolve())
         results: list[str] = []
         lock = asyncio.Lock()
+        a_acquired = asyncio.Event()
 
         async def agent_a():
             await manager.acquire_write_lock(test_file, "agent-A", timeout=5.0)
             async with lock:
                 results.append("A-acquired")
+            a_acquired.set()
             await asyncio.sleep(0.3)  # hold the lock
             manager.release_lock(test_file, "agent-A")
             async with lock:
                 results.append("A-released")
 
         async def agent_b():
-            await asyncio.sleep(0.05)  # ensure A acquires first
+            await a_acquired.wait()
             async with lock:
                 results.append("B-before-acquire")
             await manager.acquire_write_lock(test_file, "agent-B", timeout=5.0)

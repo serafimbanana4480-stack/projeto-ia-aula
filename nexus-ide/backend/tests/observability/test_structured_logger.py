@@ -5,9 +5,8 @@ import logging
 from backend.observability.structured_logger import (
     StructuredLogFormatter,
     StructuredLogger,
-    configure_structured_logging,
-    set_correlation_context,
     clear_correlation_context,
+    set_correlation_context,
 )
 
 
@@ -49,11 +48,17 @@ class TestStructuredLogger:
         assert caplog.records[0].message == "debug msg"
 
     def test_correlation_context(self, caplog) -> None:
-        logger = StructuredLogger("test")
+        logger = StructuredLogger("test.correlation")
         set_correlation_context(trace_id="trace-1", span_id="span-1")
 
-        with caplog.at_level(logging.INFO):
-            logger.info("with context")
+        # Capture directly on the named logger so the unit test is isolated
+        # from application lifespan logging configuration and test order.
+        logger._logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.INFO, logger="test.correlation"):
+                logger.info("with context")
+        finally:
+            logger._logger.removeHandler(caplog.handler)
 
         record = caplog.records[0]
         assert record.trace_id == "trace-1"

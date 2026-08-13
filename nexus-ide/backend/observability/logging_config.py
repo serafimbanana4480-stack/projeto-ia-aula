@@ -74,11 +74,17 @@ def setup_logging(
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-    # Remove existing handlers
-    root.handlers.clear()
+    # Replace only handlers installed by a previous Nexus configuration.
+    # Clearing the root logger also removed uvicorn/host handlers and pytest's
+    # capture handler, making diagnostics disappear after an app lifespan.
+    for handler in list(root.handlers):
+        if getattr(handler, "_nexus_owned", False):
+            root.removeHandler(handler)
+            handler.close()
 
     # Console handler
     console = logging.StreamHandler(sys.stdout)
+    console._nexus_owned = True  # type: ignore[attr-defined]
     if json_format:
         console.setFormatter(JsonFormatter())
     else:
@@ -88,6 +94,7 @@ def setup_logging(
     # File handler (optional)
     if log_file:
         file_handler = logging.FileHandler(log_file)
+        file_handler._nexus_owned = True  # type: ignore[attr-defined]
         file_handler.setFormatter(
             JsonFormatter()
             if json_format

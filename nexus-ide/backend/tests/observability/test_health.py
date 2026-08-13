@@ -184,7 +184,10 @@ class TestHealthEndpoint:
     def test_health_fast_liveness(self, client: TestClient) -> None:
         response = client.get("/health")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
+        payload = response.json()
+        assert payload["status"] == "ok"
+        assert payload["disk_pressure"]["status"] in {"normal", "warning", "critical"}
+        assert payload["disk_pressure"]["snapshot"]["free_percent"] >= 0
 
     def test_health_deep_returns_full_report(self, client: TestClient) -> None:
         response = client.get("/health?deep=true")

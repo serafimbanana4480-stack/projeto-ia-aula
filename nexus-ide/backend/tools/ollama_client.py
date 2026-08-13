@@ -96,6 +96,12 @@ class OllamaClient:
         )
         # Internal — populated after each chat completion / stream
         self._last_usage: dict[str, int] = {}
+        self._last_finish_reason: str | None = None
+
+    @property
+    def last_finish_reason(self) -> str | None:
+        """Return the terminal reason reported by the latest chat stream."""
+        return self._last_finish_reason
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -157,10 +163,23 @@ class OllamaClient:
                 "repeating user-provided text is not an unverified factual claim."
             ),
         }
-        text_turns = [
-            dict(message)
+        # Preserve only the explicitly inert, bounded project bootstrap.  The
+        # direct-answer lane must discard ReAct/tool instructions, but dropping
+        # this data made questions such as "what is this project?" claim that
+        # no project context had been supplied even when the UI selected one.
+        project_contexts = [
+            {
+                "role": "system",
+                "content": str(message.get("content", ""))[:12_000],
+            }
             for message in messages
-            if message.get("role") in {"user", "assistant"}
+            if message.get("role") == "system"
+            and str(message.get("content", "")).startswith(
+                "PROJECT BOOTSTRAP CONTEXT (INERT DATA):"
+            )
+        ][:1]
+        text_turns = [
+            dict(message) for message in messages if message.get("role") in {"user", "assistant"}
         ]
         latest_user = next(
             (message for message in reversed(text_turns) if message.get("role") == "user"),
@@ -184,7 +203,7 @@ class OllamaClient:
             # Bound noisy chat history in the CPU fallback while retaining
             # enough recent context for ordinary follow-up questions.
             text_turns = text_turns[-6:]
-        return [direct_system, *text_turns]
+        return [direct_system, *project_contexts, *text_turns]
 
     @staticmethod
     def _format_attempt_failure(
@@ -264,6 +283,7 @@ class OllamaClient:
         is emitted, otherwise a retry would duplicate user-visible text.
         """
         self._last_usage = {}
+        self._last_finish_reason = None
         # ``AgentBase`` supplies portable output-budget aliases for cloud
         # providers.  Ollama expects ``num_predict``; forwarding the other
         # names inside its options object is unnecessary and can break strict
@@ -272,9 +292,7 @@ class OllamaClient:
         if getattr(self, "disable_tools", False):
             excluded_options.update({"tools", "tool_choice"})
         ollama_options = {
-            key: value
-            for key, value in (options or {}).items()
-            if key not in excluded_options
+            key: value for key, value in (options or {}).items() if key not in excluded_options
         }
         if getattr(self, "direct_answer", False):
             # The Coder tier can request an 8k output budget.  That is useful
@@ -296,9 +314,11 @@ class OllamaClient:
                     )
                     for message in reversed(messages)
                     if (
-                        message.get("role") if isinstance(message, dict)
+                        message.get("role")
+                        if isinstance(message, dict)
                         else getattr(message, "role", None)
-                    ) == "user"
+                    )
+                    == "user"
                 ),
                 "",
             )
@@ -314,9 +334,16 @@ class OllamaClient:
             cap = 512 if structured_request else 256
             ollama_options["num_predict"] = min(max(requested_predict, 128), cap)
         resolved_model = self._resolve_model(model)
-        normalized_messages = self._normalize_messages(messages)
         if getattr(self, "direct_answer", False):
-            normalized_messages = self._prepare_direct_answer_messages(normalized_messages)
+            direct_messages = [
+                message.to_dict() if isinstance(message, ChatMessage) else dict(message)
+                for message in messages
+            ]
+            normalized_messages = self._normalize_messages(
+                self._prepare_direct_answer_messages(direct_messages)
+            )
+        else:
+            normalized_messages = self._normalize_messages(messages)
         payload = {
             "model": resolved_model,
             "messages": normalized_messages,
@@ -338,9 +365,7 @@ class OllamaClient:
         for attempt in range(1, max_attempts + 1):
             retryable_failure: str | None = None
             try:
-                async with self._client.stream(
-                    "POST", "/api/chat", json=payload
-                ) as response:
+                async with self._client.stream("POST", "/api/chat", json=payload) as response:
                     if response.status_code >= 400:
                         body = (await response.aread()).decode("utf-8", errors="replace").strip()
                         error_message = (
@@ -390,6 +415,11 @@ class OllamaClient:
                             if not emitted_content:
                                 retryable_failure = "Ollama stream completed without content"
                             else:
+                                self._last_finish_reason = str(
+                                    final_chunk.get("done_reason")
+                                    or final_chunk.get("finish_reason")
+                                    or "stop"
+                                )
                                 self._last_usage = {
                                     "input_tokens": final_chunk.get("prompt_eval_count", 0) or 0,
                                     "output_tokens": final_chunk.get("eval_count", 0) or 0,

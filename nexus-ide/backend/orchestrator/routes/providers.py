@@ -1,6 +1,7 @@
 """LLM provider discovery, live model catalogs and API-key validation.
 
 - ``GET  /api/providers``                    configured providers + health
+- ``GET  /api/providers/runtime``            runtime policy/eligibility summary
 - ``GET  /api/providers/catalog``            provider metadata for Settings
 - ``GET  /api/providers/{id}/models``        live model list (cached, TTL 10m)
 - ``POST /api/providers/{id}/validate-key``  test a key before saving it
@@ -100,9 +101,14 @@ async def list_providers(_user: dict = Depends(require_auth)) -> dict:
     }
 
 
-@router.get("/providers/status")
+@router.get("/providers/runtime")
 async def providers_status(_user: dict = Depends(require_auth)) -> dict[str, Any]:
-    """Runtime LLM availability and typed provider eligibility state."""
+    """Runtime LLM availability and typed provider eligibility state.
+
+    ``/providers/status`` belongs to the live metrics widget.  Keeping this
+    policy/catalog view on a distinct path avoids an order-dependent FastAPI
+    route collision where one of the two responses was unreachable.
+    """
     is_demo = True
     client = None
     runtime: dict[str, Any] = {}

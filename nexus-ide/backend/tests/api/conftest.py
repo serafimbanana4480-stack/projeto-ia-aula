@@ -4,10 +4,11 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.orchestrator.main import app
-from backend.observability.routes.workflows import init_workflow_tracker
+from backend.middleware.auth import create_access_token
 from backend.observability.dashboard_state import DashboardState
 from backend.observability.event_bus import EventBus
+from backend.observability.routes.workflows import init_workflow_tracker
+from backend.orchestrator.main import app
 
 
 @pytest.fixture
@@ -21,9 +22,10 @@ def client():
     dashboard_state = DashboardState(event_bus=EventBus())
     dashboard_routes._dashboard_state = dashboard_state
 
-    # Disable auth for tests so TestClient requests don't need Bearer tokens
-    app.state.auth_disabled = True
-    return TestClient(app)
+    # Exercise the real authentication dependency with a signed local token;
+    # toggling arbitrary app state no longer bypasses auth (and should not).
+    token = create_access_token({"sub": "api-test", "email": "api@test.local"})
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})
 
 
 @pytest.fixture

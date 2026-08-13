@@ -150,9 +150,7 @@ class TestChatStream:
             ):
                 pass
             assert [m["role"] for m in captured["messages"]] == ["system", "user", "tool"]
-            assert captured["messages"][0]["content"] == (
-                "base instructions\n\nrecovery directive"
-            )
+            assert captured["messages"][0]["content"] == ("base instructions\n\nrecovery directive")
         finally:
             await client.aclose()
 
@@ -214,6 +212,41 @@ class TestChatStream:
             assert "directly in visible plain text" in system
             assert [m["role"] for m in captured["messages"]] == ["system", "user"]
             assert captured["messages"][1]["role"] == "user"
+        finally:
+            await client.aclose()
+
+    async def test_direct_answer_fallback_preserves_inert_project_context(self) -> None:
+        captured: dict = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["messages"] = json.loads(req.content.decode())["messages"]
+            return make_stream_response(["ok"])
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        client.direct_answer = True
+        try:
+            async for _ in client.chat_stream(
+                "qwen2.5:0.5b",
+                [
+                    ChatMessage(role="system", content="TOOL USAGE\nlist_dir"),
+                    ChatMessage(
+                        role="system",
+                        content=(
+                            "PROJECT BOOTSTRAP CONTEXT (INERT DATA):\n"
+                            "NEXUS has a FastAPI backend and Next.js frontend."
+                        ),
+                    ),
+                    ChatMessage(role="user", content="Para que serve este projeto?"),
+                ],
+            ):
+                pass
+            system = captured["messages"][0]["content"]
+            assert "TOOL USAGE" not in system
+            assert "FastAPI backend" in system
+            assert [message["role"] for message in captured["messages"]] == [
+                "system",
+                "user",
+            ]
         finally:
             await client.aclose()
 
@@ -295,6 +328,40 @@ class TestChatStream:
                 async for _ in client.chat_stream("m", [ChatMessage(role="user", content="q")]):
                     pass
             assert sleeps == [1, 2, 4, 8]
+        finally:
+            await client.aclose()
+
+    async def test_records_provider_token_limit_finish_reason(self) -> None:
+        body = (
+            json.dumps({"message": {"content": "partial"}, "done": False})
+            + "\n"
+            + json.dumps(
+                {
+                    "done": True,
+                    "done_reason": "length",
+                    "prompt_eval_count": 8,
+                    "eval_count": 4,
+                }
+            )
+            + "\n"
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=body.encode())
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            output = "".join(
+                [
+                    token
+                    async for token in client.chat_stream(
+                        "m", [ChatMessage(role="user", content="q")]
+                    )
+                ]
+            )
+            assert output == "partial"
+            assert client.last_finish_reason == "length"
+            assert client._last_usage["total_tokens"] == 12
         finally:
             await client.aclose()
 
@@ -434,7 +501,6 @@ class TestHealthCheck:
             await client.aclose()
 
     async def test_health_check_custom_timeout(self) -> None:
-
         def handler(req: httpx.Request) -> httpx.Response:
             # httpx MockTransport doesn't expose timeout directly,
             # but we can verify the method is callable with a custom timeout
