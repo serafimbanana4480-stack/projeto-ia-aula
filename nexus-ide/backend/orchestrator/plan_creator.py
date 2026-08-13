@@ -71,6 +71,8 @@ class PlanCreator:
     """Generate and parse structured execution plans from natural-language objectives."""
 
     PLAN_STREAM_TIMEOUT_SECONDS = 180.0
+    PLAN_REPAIR_TIMEOUT_SECONDS = 45.0
+    MAX_PLAN_REPAIR_ATTEMPTS = 1
     MAX_PLAN_STEPS = 50
 
     #: Seconds to wait before re-dispatching planning to the next model. A free
@@ -196,11 +198,55 @@ class PlanCreator:
                 deterministic_proposal=deterministic,
             )
 
+        planner_model = planner_models[0] if planner_models else "coder"
         candidate_plan = self._parse_plan(plan_content, objective, session_id)
+        repair_attempts = 0
+        if candidate_plan is None and self.MAX_PLAN_REPAIR_ATTEMPTS:
+            repaired = await self._repair_plan_content(
+                plan_content,
+                objective,
+                planner_model,
+                planner_cfg,
+            )
+            repair_attempts += 1
+            if repaired:
+                candidate_plan = self._parse_plan(repaired, objective, session_id)
+
+        # A provider can return a body that is non-empty but not executable.
+        # That is a planner defect, not a reason to kill an otherwise safe run:
+        # use the measured deterministic proposal after bounded repair.  The
+        # proposal remains explicit in the result so the UI and audit trail can
+        # distinguish model planning from fallback planning.
         if candidate_plan is None:
+            await self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.WARNING,
+                    source="PLANNER",
+                    session_id=session_id,
+                    content=(
+                        "Planner output was not executable after "
+                        f"{repair_attempts} structured repair attempt(s); "
+                        "using the validated deterministic fallback."
+                    ),
+                )
+            )
+            deterministic.source = "deterministic_fallback"  # type: ignore[attr-defined]
+            await self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.PLAN_CREATED,
+                    source="PLANNER",
+                    session_id=session_id,
+                    data={
+                        **deterministic.to_dict(),
+                        "source": "deterministic_fallback",
+                        "repair_attempts": repair_attempts,
+                    },
+                )
+            )
             return PlanningResult(
-                status="blocked",
-                source="model",
+                status="ready",
+                plan=deterministic,
+                source="deterministic_fallback",
                 error="planner output was not a parseable structured plan",
                 deterministic_proposal=deterministic,
             )
@@ -209,9 +255,35 @@ class PlanCreator:
             candidate_plan, facts, self.MAX_PLAN_STEPS
         )
         if not candidate_validation.valid:
+            await self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.WARNING,
+                    source="PLANNER",
+                    session_id=session_id,
+                    content=(
+                        "Planner schema validation failed; using the validated "
+                        "deterministic fallback: "
+                        + "; ".join(candidate_validation.errors[:4])
+                    ),
+                )
+            )
+            deterministic.source = "deterministic_fallback"  # type: ignore[attr-defined]
+            await self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.PLAN_CREATED,
+                    source="PLANNER",
+                    session_id=session_id,
+                    data={
+                        **deterministic.to_dict(),
+                        "source": "deterministic_fallback",
+                        "validation_errors": candidate_validation.errors[:8],
+                    },
+                )
+            )
             return PlanningResult(
-                status="blocked",
-                source="model",
+                status="ready",
+                plan=deterministic,
+                source="deterministic_fallback",
                 error="; ".join(candidate_validation.errors),
                 deterministic_proposal=deterministic,
             )
@@ -229,6 +301,56 @@ class PlanCreator:
             source="model",
             deterministic_proposal=deterministic,
         )
+
+    async def _repair_plan_content(
+        self,
+        invalid_content: str,
+        objective: str,
+        planner_model: str,
+        planner_cfg: Mapping[str, Any],
+    ) -> str:
+        """Ask the same planner for one bounded, JSON-only repair attempt."""
+        prompt = f"""Repair the following planner response into a valid JSON object.
+
+The required shape is {{"goal": "...", "tasks": [{{
+  "id": "stable-name", "description": "...", "dependencies": [],
+  "agent": "CODER", "acceptance_criteria": [], "validation": [],
+  "file_scope": [], "model_key": "coder", "risk": "low",
+  "rollback": "...", "lock_scope": "read:...", "allowed_tools": []
+}}]}}.
+
+OBJECTIVE: {objective}
+
+INVALID RESPONSE:
+{invalid_content[:20000]}
+
+Return ONLY valid JSON. Do not invent files, commands, tools, or dependencies.
+If required facts are unavailable, leave the corresponding array empty so the
+validator can reject the plan and the deterministic fallback can take over."""
+        parts: list[str] = []
+        try:
+            async with asyncio.timeout(self.PLAN_REPAIR_TIMEOUT_SECONDS):
+                async for token in self._llm_client.chat_stream(
+                    model=planner_model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You repair structured plans. Output JSON only.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    options={
+                        "temperature": min(float(planner_cfg.get("temperature", 0.2)), 0.1),
+                        "num_predict": 8192,
+                    },
+                ):
+                    if isinstance(token, str):
+                        parts.append(token)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Structured planner repair failed: %s", exc)
+        return "".join(parts).strip()
 
     @staticmethod
     def _format_provider_error(exc: BaseException | None) -> str:
@@ -523,31 +645,43 @@ Use phase prefixes in step names: "Phase N: Name - Description"."""
                 if priority_upper in TaskPriority.__members__
                 else TaskPriority.MEDIUM
             )
-            name = raw.get("name") if isinstance(raw.get("name"), str) else ""
+            name_value = raw.get("name", raw.get("id", raw.get("task_id", "")))
+            name = name_value if isinstance(name_value, str) else ""
             description = raw.get("description") if isinstance(raw.get("description"), str) else ""
-            agent = raw.get("agent") if isinstance(raw.get("agent"), str) else ""
+            agent_value = raw.get("agent", raw.get("agent_type", ""))
+            agent = agent_value if isinstance(agent_value, str) else ""
+            file_scope = self._normalize_string_list(raw.get("file_scope", raw.get("files", [])))
+            criteria = self._normalize_string_list(
+                raw.get("completion_criteria", raw.get("acceptance_criteria", []))
+            )
+            verification = self._normalize_string_list(
+                raw.get("verification_commands", raw.get("validation", []))
+            )
+            allowed_tools = self._normalize_string_list(
+                raw.get("allowed_tools", raw.get("tools", []))
+            )
             steps.append(
                 TaskNode(
                     name=name.strip(),
                     description=description.strip(),
                     agent=agent.strip().upper(),
-                    model_key=str(raw.get("model_key", "")).strip(),
+                    model_key=str(raw.get("model_key", raw.get("model", ""))).strip(),
                     priority=priority,
                     sandboxed=raw.get("sandboxed", False) is True,
-                    file_scope=raw.get("file_scope", []),
-                    completion_criteria=raw.get("completion_criteria", []),
-                    verification_commands=raw.get("verification_commands", []),
+                    file_scope=file_scope,
+                    completion_criteria=criteria,
+                    verification_commands=verification,
                     risk=str(raw.get("risk", "")),
                     rollback=str(raw.get("rollback", "")),
-                    lock_scope=str(raw.get("lock_scope", "")),
-                    allowed_tools=raw.get("allowed_tools", []),
+                    lock_scope=str(raw.get("lock_scope", raw.get("scope", ""))),
+                    allowed_tools=allowed_tools,
                 )
             )
         name_to_idx: dict[str, int] = {
             step.name.lower(): idx for idx, step in enumerate(steps) if step.name
         }
         for i, raw in enumerate(valid_raw_steps):
-            raw_deps = raw.get("depends_on", [])
+            raw_deps = raw.get("depends_on", raw.get("dependencies", []))
             refs = raw_deps if isinstance(raw_deps, list) else [raw_deps]
             for dep_ref in refs:
                 dep_idx = self._resolve_dep_ref(dep_ref, len(steps), name_to_idx)
@@ -567,6 +701,23 @@ Use phase prefixes in step names: "Phase N: Name - Description"."""
         )
 
     @staticmethod
+    def _normalize_string_list(value: Any) -> list[str]:
+        """Normalize provider aliases without turning arbitrary objects into tools."""
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if not isinstance(value, list):
+            return []
+        normalized: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                normalized.append(item.strip())
+            elif isinstance(item, dict):
+                command = item.get("command") or item.get("name")
+                if isinstance(command, str) and command.strip():
+                    normalized.append(command.strip())
+        return normalized
+
+    @staticmethod
     def _extract_structured_steps(content: str) -> list[Any] | None:
         """Extract a JSON array or a documented ``steps``/``plan`` envelope.
 
@@ -576,10 +727,16 @@ Use phase prefixes in step names: "Phase N: Name - Description"."""
         """
         decoder = json.JSONDecoder()
         candidates: list[str] = []
-        for marker in ("[", "{"):
-            start = content.find(marker)
-            if start >= 0:
-                candidates.append(content[start:])
+        # Providers often put bullets, a title, or a second fenced block before
+        # the JSON. Try every plausible opening marker in a bounded window so a
+        # harmless preamble cannot make an otherwise valid plan disappear.
+        starts = [
+            index
+            for index, char in enumerate(content[:32_000])
+            if char in "[{"
+        ][:64]
+        for start in starts:
+            candidates.append(content[start:])
 
         for candidate in candidates:
             try:

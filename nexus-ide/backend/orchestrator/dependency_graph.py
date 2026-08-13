@@ -24,10 +24,13 @@ logger = logging.getLogger(__name__)
 
 class TaskStatus(StrEnum):
     PENDING = "pending"
+    WAITING_DEPENDENCY = "waiting_dependency"
     READY = "ready"
     RUNNING = "running"
+    RETRYING = "retrying"
     COMPLETED = "completed"
     FAILED = "failed"
+    BLOCKED = "blocked"
     CANCELLED = "cancelled"
     SKIPPED = "skipped"
 
@@ -65,6 +68,8 @@ class TaskNode:
     required_by: list[str] = field(default_factory=list)  # task_ids that depend on this
 
     # Execution metadata
+    agent_execution_id: str = ""
+    test_run_id: str = ""
     max_retries: int = 2
     retry_count: int = 0
     timeout_seconds: int = 300
@@ -98,6 +103,8 @@ class TaskNode:
             "status": self.status.value,
             "depends_on": self.depends_on,
             "required_by": self.required_by,
+            "agent_execution_id": self.agent_execution_id,
+            "test_run_id": self.test_run_id,
             "max_retries": self.max_retries,
             "retry_count": self.retry_count,
             "timeout_seconds": self.timeout_seconds,
@@ -208,7 +215,7 @@ class DependencyGraph:
         """Return tasks whose dependencies are all satisfied."""
         ready: list[TaskNode] = []
         for task in self._nodes.values():
-            if task.status != TaskStatus.PENDING:
+            if task.status not in (TaskStatus.PENDING, TaskStatus.WAITING_DEPENDENCY):
                 continue
             deps_satisfied = all(
                 self._nodes[dep_id].status == TaskStatus.COMPLETED for dep_id in task.depends_on
@@ -216,6 +223,54 @@ class DependencyGraph:
             if deps_satisfied:
                 ready.append(task)
         return ready
+
+    def reconcile_dependencies(self) -> tuple[list[TaskNode], list[TaskNode]]:
+        """Advance dependency state without ever starting dependent work.
+
+        Returns ``(ready, blocked)``.  A failed/cancelled/blocked predecessor
+        blocks its descendants; an unfinished predecessor leaves the task in
+        ``WAITING_DEPENDENCY``.  This is intentionally separate from
+        ``get_ready_tasks`` so the executor can emit a truthful state event.
+        """
+        terminal_failure = {
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+            TaskStatus.SKIPPED,
+        }
+        ready: list[TaskNode] = []
+        blocked: list[TaskNode] = []
+        for task in self._nodes.values():
+            if task.status not in (TaskStatus.PENDING, TaskStatus.WAITING_DEPENDENCY):
+                continue
+            dependencies = [self._nodes.get(dep_id) for dep_id in task.depends_on]
+            if any(dep is None for dep in dependencies):
+                self.transition_status(
+                    task.task_id,
+                    TaskStatus.BLOCKED,
+                    "dependency task is missing",
+                )
+                blocked.append(task)
+                continue
+            if any(dep is not None and dep.status in terminal_failure for dep in dependencies):
+                failed_ids = [
+                    dep.task_id
+                    for dep in dependencies
+                    if dep is not None and dep.status in terminal_failure
+                ]
+                self.transition_status(
+                    task.task_id,
+                    TaskStatus.BLOCKED,
+                    f"dependency did not complete: {', '.join(failed_ids)}",
+                )
+                blocked.append(task)
+                continue
+            if all(dep is not None and dep.status == TaskStatus.COMPLETED for dep in dependencies):
+                self.transition_status(task.task_id, TaskStatus.READY)
+                ready.append(task)
+            else:
+                self.transition_status(task.task_id, TaskStatus.WAITING_DEPENDENCY)
+        return ready, blocked
 
     def get_task(self, task_id: str) -> TaskNode | None:
         return self._nodes.get(task_id)
@@ -230,11 +285,67 @@ class DependencyGraph:
             if error:
                 self._nodes[task_id].error_message = error
 
+    def transition_status(self, task_id: str, status: TaskStatus, error: str = "") -> None:
+        """Apply a runtime transition with a guarded state machine.
+
+        ``update_status`` remains as a compatibility escape hatch for legacy
+        administrative/tests code. Runtime execution must use this method.
+        """
+        task = self._nodes.get(task_id)
+        if task is None:
+            raise KeyError(f"Task not found: {task_id}")
+        current = task.status
+        if current == status:
+            if error:
+                task.error_message = error
+            return
+        allowed: dict[TaskStatus, set[TaskStatus]] = {
+            TaskStatus.PENDING: {
+                TaskStatus.WAITING_DEPENDENCY,
+                TaskStatus.READY,
+                TaskStatus.BLOCKED,
+                TaskStatus.CANCELLED,
+            },
+            TaskStatus.WAITING_DEPENDENCY: {
+                TaskStatus.WAITING_DEPENDENCY,
+                TaskStatus.READY,
+                TaskStatus.BLOCKED,
+                TaskStatus.CANCELLED,
+            },
+            TaskStatus.READY: {
+                TaskStatus.RUNNING,
+                TaskStatus.FAILED,
+                TaskStatus.BLOCKED,
+                TaskStatus.CANCELLED,
+            },
+            TaskStatus.RUNNING: {
+                TaskStatus.RETRYING,
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.BLOCKED,
+                TaskStatus.CANCELLED,
+            },
+            TaskStatus.RETRYING: {
+                TaskStatus.RUNNING,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            },
+        }
+        if status not in allowed.get(current, set()):
+            raise ValueError(
+                f"Invalid task state transition {current.value} -> {status.value} "
+                f"for {task_id}"
+            )
+        task.status = status
+        if error:
+            task.error_message = error
+
     def is_complete(self) -> bool:
         """Check if all tasks have reached a terminal state."""
         terminal = {
             TaskStatus.COMPLETED,
             TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
             TaskStatus.CANCELLED,
             TaskStatus.SKIPPED,
         }

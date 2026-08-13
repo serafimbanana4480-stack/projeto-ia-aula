@@ -42,8 +42,10 @@ class EventType(StrEnum):
     # Execution
     TASK_SCHEDULED = "task_scheduled"
     TASK_STARTED = "task_started"
+    TASK_WAITING_DEPENDENCY = "task_waiting_dependency"
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
+    TASK_BLOCKED = "task_blocked"
     TASK_CANCELLED = "task_cancelled"
     ROUTING = "routing"
     EXECUTION_STATE = "execution_state"

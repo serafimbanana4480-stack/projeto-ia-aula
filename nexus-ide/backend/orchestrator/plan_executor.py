@@ -233,27 +233,58 @@ class PlanExecutor:
                 if cancellation_event is not None and cancellation_event.is_set():
                     break
 
-                layers = graph.topological_layers()
-                pending_layer = next(
-                    (
-                        current_layer
-                        for current_layer in layers
-                        if any(
-                            (graph.get_task(task_id) is not None)
-                            and graph.get_task(task_id).status == TaskStatus.PENDING
-                            for task_id in current_layer
+                # Readiness is derived from predecessor state, not merely
+                # from topological position.  A topological layer still
+                # contains a task whose predecessor failed; scheduling that
+                # task was the source of dependent agents starting on an
+                # unvalidated hand-off.
+                ready_tasks, blocked_tasks = graph.reconcile_dependencies()
+                for blocked_task in blocked_tasks:
+                    await self._events.publish(
+                        OrchestratorEvent(
+                            event_type=EventType.TASK_BLOCKED,
+                            source=blocked_task.agent,
+                            session_id=session_id,
+                            task_id=blocked_task.task_id,
+                            data={
+                                "task_name": blocked_task.name,
+                                "error": blocked_task.error_message,
+                                "depends_on": list(blocked_task.depends_on),
+                            },
                         )
-                    ),
-                    None,
-                )
-                if pending_layer is None:
+                    )
+                if not ready_tasks:
+                    unresolved = [
+                        task
+                        for task in graph.get_all_tasks()
+                        if task.status
+                        in (TaskStatus.PENDING, TaskStatus.WAITING_DEPENDENCY)
+                    ]
+                    if unresolved:
+                        # No runnable task remains and no task is running in
+                        # this loop. This is a malformed/corrupted graph, not
+                        # a reason to spin forever in planning.
+                        for task in unresolved:
+                            graph.transition_status(
+                                task.task_id,
+                                TaskStatus.BLOCKED,
+                                "no runnable dependency state remained",
+                            )
+                            await self._events.publish(
+                                OrchestratorEvent(
+                                    event_type=EventType.TASK_BLOCKED,
+                                    source=task.agent,
+                                    session_id=session_id,
+                                    task_id=task.task_id,
+                                    data={
+                                        "task_name": task.name,
+                                        "error": task.error_message,
+                                    },
+                                )
+                            )
+                        errors.append("no runnable task remained after dependency reconciliation")
                     break
-                layer = [
-                    task_id
-                    for task_id in pending_layer
-                    if (graph.get_task(task_id) is not None)
-                    and graph.get_task(task_id).status == TaskStatus.PENDING
-                ]
+                layer = [task.task_id for task in ready_tasks]
 
                 # Execute tasks in this layer concurrently, bounded by the
                 # configured budget so provider failures do not fan out into a
@@ -264,7 +295,13 @@ class PlanExecutor:
                     task = graph.get_task(task_id)
                     if task is None:
                         continue
-                    task.status = TaskStatus.READY
+                    # ``reconcile_dependencies`` has already performed the
+                    # guarded PENDING/WAITING -> READY transition.
+                    if task.status != TaskStatus.READY:
+                        raise RuntimeError(
+                            f"scheduler attempted to start task {task.task_id} "
+                            f"from {task.status.value}"
+                        )
                     async def run_limited(
                         current_task: TaskNode = task,
                         semaphore: asyncio.Semaphore = limiter,
@@ -358,10 +395,15 @@ class PlanExecutor:
         duration_ms = int((time.time() - start_time) * 1000)
         completed = sum(1 for t in graph.get_all_tasks() if t.status == TaskStatus.COMPLETED)
         failed = sum(1 for t in graph.get_all_tasks() if t.status == TaskStatus.FAILED)
+        blocked = sum(1 for t in graph.get_all_tasks() if t.status == TaskStatus.BLOCKED)
 
         from backend.orchestrator.engine import OrchestrationState
 
-        final_state = OrchestrationState.COMPLETED if failed == 0 else OrchestrationState.FAILED
+        final_state = (
+            OrchestrationState.COMPLETED
+            if failed == 0 and blocked == 0
+            else OrchestrationState.FAILED
+        )
 
         result = OrchestrationResult(
             run_id=run_id,
@@ -369,6 +411,7 @@ class PlanExecutor:
             plan=plan,
             completed_tasks=completed,
             failed_tasks=failed,
+            blocked_tasks=blocked,
             total_duration_ms=duration_ms,
             tokens_used=total_tokens,
             errors=errors,
