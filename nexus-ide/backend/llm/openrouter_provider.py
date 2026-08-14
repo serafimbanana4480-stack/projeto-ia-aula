@@ -238,20 +238,25 @@ class OpenRouterProvider:
             latency = field("latency_ms")
             try:
                 validated_value = float(validated_at)
-                latency_value = float(latency)
+            except (TypeError, ValueError):
+                continue
+            try:
+                latency_value = float(latency) if latency is not None else None
             except (TypeError, ValueError):
                 continue
             if (
                 input_price == 0
                 and output_price == 0
                 and requirement_ok
-                and quota is True
+                and quota is not False
                 and 0 <= now - validated_value <= self._validation_ttl_seconds
-                and 0 <= latency_value <= self._max_latency_ms
+                and (latency_value is None or 0 <= latency_value <= self._max_latency_ms)
             ):
-                self.quota_available = True
+                self.quota_available = quota is True
                 self.validated_at = validated_value
-                self.eligibility_reason = "catalog confirmed zero prices, quota and freshness"
+                self.eligibility_reason = (
+                    "live catalog confirmed zero prices; request quota observed at dispatch"
+                )
                 return resolved
         self.quota_available = False
         self.eligibility_reason = "model lacks current zero-price/quota validation"

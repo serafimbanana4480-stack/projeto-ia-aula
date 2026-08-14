@@ -38,6 +38,23 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "PROMETHEUS_PORT": "9099",
         "JWT_SECRET": "test-jwt-secret-for-testing",
         "JWT_ALGORITHM": "HS256",
+        # A TestClient lifespan must never start autonomous loops against the
+        # developer worktree. Some of those loops create git checkpoints with
+        # ``git add -A``, which made an ordinary test run commit unrelated
+        # in-progress changes. Keep every background service fail-closed in
+        # pytest; individual service tests instantiate their target directly.
+        "NEXUS_BACKGROUND_SERVICES": "off",
+        "NEXUS_ENABLE_BACKGROUND_WORKERS": "false",
+        "NEXUS_ENABLE_DASHBOARD_AGENT": "false",
+        "NEXUS_ENABLE_GUARDIAN_AGENT": "false",
+        "NEXUS_ENABLE_AUTO_CORRECTION": "false",
+        "NEXUS_ENABLE_EXEC_ENGINE": "false",
+        "NEXUS_ENABLE_CONTINUOUS_IMPROVEMENT": "false",
+        "NEXUS_ENABLE_SELF_IMPROVEMENT": "false",
+        "NEXUS_ENABLE_SELF_HEALING": "false",
+        "NEXUS_ENABLE_AI_ORCHESTRATOR": "false",
+        "NEXUS_ENABLE_AUTO_TRIGGER": "false",
+        "NEXUS_ENABLE_SESSION_GC": "false",
         # Skip the expensive torch import (~3 s) during test Settings creation.
         "LOCAL_LLM_DEVICE": "cpu",
     }

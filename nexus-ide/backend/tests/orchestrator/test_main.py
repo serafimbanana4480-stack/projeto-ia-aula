@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -32,12 +34,13 @@ class TestHealthEndpoint:
         assert app.version == "0.1.0"
 
     def test_provider_status_and_runtime_routes_are_distinct(self) -> None:
-        paths = [
-            route.path
-            for wrapper in app.routes
-            for route in getattr(getattr(wrapper, "original_router", None), "routes", [])
-            if hasattr(route, "path")
-        ]
+        # Other legacy routers still expose duplicate operation IDs.  They are
+        # outside this collision regression, so do not let their OpenAPI
+        # warnings obscure the two provider contracts being checked here.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            paths = app.openapi()["paths"]
 
-        assert paths.count("/providers/status") == 1
-        assert paths.count("/providers/runtime") == 1
+        status_operation = paths["/api/providers/status"]["get"]
+        runtime_operation = paths["/api/providers/runtime"]["get"]
+        assert status_operation["operationId"] != runtime_operation["operationId"]

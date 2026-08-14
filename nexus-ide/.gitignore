@@ -141,6 +141,8 @@ rollback/
 !README.md
 !CONTRIBUTING.md
 !CHANGELOG.md
+!NEXUS_FULL_AUDIT.md
+!NEXUS_TEST_MATRIX.md
 !LICENSE
 # IDEs
 .windsurf/

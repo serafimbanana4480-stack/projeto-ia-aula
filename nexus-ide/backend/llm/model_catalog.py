@@ -395,24 +395,45 @@ def _parse_openrouter(payload: dict[str, Any]) -> list[ModelInfo]:
             continue
         pricing = entry.get("pricing") or {}
         arch = entry.get("architecture") or {}
+        top_provider = entry.get("top_provider") or {}
+        supported = {str(value).lower() for value in entry.get("supported_parameters") or []}
         modalities = arch.get("input_modalities") or []
         caps = _guess_capabilities(str(entry["id"]), str(entry.get("description", "")))
         if "image" in modalities and "vision" not in caps:
             caps.append("vision")
+        if "tools" in supported and "tools" not in caps:
+            caps.append("tools")
+        if {"response_format", "structured_outputs"} & supported and "structured_output" not in caps:
+            caps.append("structured_output")
+        quota = entry.get("quota_available")
+        # The authenticated live Models API confirms that the route is listed,
+        # but it does not expose account quota telemetry. Keep the model
+        # selectable and let the bounded completion call observe real quota.
+        if quota is None:
+            quota = True
+        input_price = _price_to_per_1m(pricing.get("prompt"))
+        output_price = _price_to_per_1m(pricing.get("completion"))
         out.append(
             _finalise(
                 ModelInfo(
                     id=str(entry["id"]),
                     provider="openrouter",
                     name=str(entry.get("name") or entry["id"]),
-                    context_window=int(entry.get("context_length") or 0),
-                    input_price_per_1m=_price_to_per_1m(pricing.get("prompt")),
-                    output_price_per_1m=_price_to_per_1m(pricing.get("completion")),
+                    context_window=int(
+                        entry.get("context_length") or top_provider.get("context_length") or 0
+                    ),
+                    input_price_per_1m=input_price,
+                    output_price_per_1m=output_price,
                     capabilities=caps,
                     description=str(entry.get("description") or "")[:280],
-                    quota_available=entry.get("quota_available"),
+                    quota_available=quota,
                     latency_ms=entry.get("latency_ms"),
                     validated_at=validated_at,
+                    reason=(
+                        "live catalog entry; zero pricing confirmed; quota observed at request time"
+                        if input_price == 0 and output_price == 0
+                        else "live catalog entry; pricing or quota not confirmed as free"
+                    ),
                 )
             )
         )
@@ -421,6 +442,7 @@ def _parse_openrouter(payload: dict[str, Any]) -> list[ModelInfo]:
 
 def _parse_openai_compatible(payload: dict[str, Any], provider: str) -> list[ModelInfo]:
     out: list[ModelInfo] = []
+    validated_at = time.time()
     for entry in payload.get("data", []) or []:
         if isinstance(entry, str):
             model_id = entry
@@ -430,15 +452,49 @@ def _parse_openai_compatible(payload: dict[str, Any], provider: str) -> list[Mod
             meta = entry
         else:
             continue
+        pricing = meta.get("pricing") or {}
+        top_provider = meta.get("top_provider") or {}
+        architecture = meta.get("architecture") or {}
+        supported = {str(value).lower() for value in meta.get("supported_parameters") or []}
+        modalities = architecture.get("input_modalities") or []
+        caps = _guess_capabilities(model_id, str(meta.get("description") or ""))
+        if "image" in modalities and "vision" not in caps:
+            caps.append("vision")
+        if "tools" in supported and "tools" not in caps:
+            caps.append("tools")
+        if {"response_format", "structured_outputs"} & supported and "structured_output" not in caps:
+            caps.append("structured_output")
+        input_price = _price_to_per_1m(pricing.get("prompt"))
+        output_price = _price_to_per_1m(pricing.get("completion"))
+        if meta.get("isFree") is True and input_price is None and output_price is None:
+            input_price = output_price = 0.0
+        quota = meta.get("quota_available")
+        if quota is None:
+            quota = True
         out.append(
             _finalise(
                 ModelInfo(
                     id=model_id,
                     provider=provider,
                     name=str(meta.get("name") or model_id),
-                    # Groq is the only OpenAI-compatible API that reports this.
-                    context_window=int(meta.get("context_window") or 0),
+                    context_window=int(
+                        meta.get("context_window")
+                        or meta.get("context_length")
+                        or top_provider.get("context_length")
+                        or 0
+                    ),
+                    input_price_per_1m=input_price,
+                    output_price_per_1m=output_price,
+                    capabilities=caps,
                     description=str(meta.get("description") or "")[:280],
+                    quota_available=quota,
+                    latency_ms=meta.get("latency_ms"),
+                    validated_at=validated_at,
+                    reason=(
+                        "live catalog entry; zero pricing confirmed; quota observed at request time"
+                        if input_price == 0 and output_price == 0
+                        else "live catalog entry; pricing or quota not confirmed as free"
+                    ),
                 )
             )
         )

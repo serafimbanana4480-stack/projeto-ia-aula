@@ -88,15 +88,28 @@ class OllamaClient:
             base_url = get_settings().ollama_host
 
         self.base_url = (base_url or "http://localhost:11434").rstrip("/")
-        self._client = httpx.AsyncClient(
-            base_url=self.base_url,
-            timeout=timeout or DEFAULT_TIMEOUT,
-            limits=limits or DEFAULT_LIMITS,
-            transport=transport,
-        )
+        self._timeout = timeout or DEFAULT_TIMEOUT
+        self._limits = limits or DEFAULT_LIMITS
+        self._transport = transport
+        self._client = self._new_client()
         # Internal — populated after each chat completion / stream
         self._last_usage: dict[str, int] = {}
         self._last_finish_reason: str | None = None
+
+    def _new_client(self) -> httpx.AsyncClient:
+        """Create the transport, including after a settings hot-swap."""
+        return httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=self._timeout,
+            limits=self._limits,
+            transport=self._transport,
+        )
+
+    def _ensure_open(self) -> None:
+        """Recreate the HTTP client if a lifecycle hand-over closed it."""
+        if self._client.is_closed:
+            logger.warning("Re-opening closed Ollama HTTP client for %s", self.base_url)
+            self._client = self._new_client()
 
     @property
     def last_finish_reason(self) -> str | None:
@@ -223,6 +236,7 @@ class OllamaClient:
         json_payload: dict[str, Any] | None = None,
         timeout: httpx.Timeout | float | None = None,
     ) -> httpx.Response:
+        self._ensure_open()
         failures: list[str] = []
         max_attempts = len(_BACKOFF_DELAYS) + 1
 
@@ -282,6 +296,7 @@ class OllamaClient:
         yielding lines and retry only failures that happen before any content
         is emitted, otherwise a retry would duplicate user-visible text.
         """
+        self._ensure_open()
         self._last_usage = {}
         self._last_finish_reason = None
         # ``AgentBase`` supplies portable output-budget aliases for cloud
@@ -487,6 +502,7 @@ class OllamaClient:
 
     async def health_check(self, timeout: float = 5.0) -> bool:
         try:
+            self._ensure_open()
             response = await self._client.get("/api/tags", timeout=timeout)
             return response.status_code == 200
         except Exception:

@@ -192,8 +192,13 @@ class FreeModelPolicy:
                 continue
             if item.context_window < requirement.min_context:
                 continue
-            if requirement.max_latency_ms is not None and (
-                item.latency_ms is None or item.latency_ms > requirement.max_latency_ms
+            # OpenRouter and Kilo publish live model catalogs without a
+            # per-account latency sample. Unknown latency is not a failure;
+            # only an observed sample above the requested ceiling is rejected.
+            if (
+                requirement.max_latency_ms is not None
+                and item.latency_ms is not None
+                and item.latency_ms > requirement.max_latency_ms
             ):
                 continue
             caps = item.capabilities
