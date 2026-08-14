@@ -49,3 +49,37 @@ __all__ = [
     "SubagentProposal",
     "dedupe_and_order",
 ]
+
+from backend.runtime.primary import (  # noqa: E402  (re-export after base modules)
+    AgentSignal,
+    AgentSignalKind,
+    Observation,
+    PrimaryLoop,
+    PrimaryOutcome,
+    PrimaryPhase,
+    PrimaryTurn,
+    SteeringChannel,
+    VerificationRequest,
+    VerificationResult,
+)
+from backend.runtime.triage import (  # noqa: E402
+    RequestClass,
+    TriageDecision,
+    triage_request,
+)
+
+__all__ += [
+    "AgentSignal",
+    "AgentSignalKind",
+    "Observation",
+    "PrimaryLoop",
+    "PrimaryOutcome",
+    "PrimaryPhase",
+    "PrimaryTurn",
+    "RequestClass",
+    "SteeringChannel",
+    "TriageDecision",
+    "VerificationRequest",
+    "VerificationResult",
+    "triage_request",
+]

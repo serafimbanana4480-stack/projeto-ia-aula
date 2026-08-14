@@ -14,6 +14,9 @@ from backend.orchestrator.execution_contracts import ExecutionMode
 
 
 AgentName = Literal[
+    # The primary agent. One agent owns the turn and talks to the user;
+    # every other name below is a specialist it may delegate to.
+    "NEXUS",
     "ROUTER",
     "PLANNER",
     "ARCHITECT",

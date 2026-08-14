@@ -50,6 +50,7 @@ def _get_agent_classes() -> dict[AgentName, Any]:
     from backend.agents.guardian import NexusGuardianAgent
     from backend.agents.meta_analyzer import MetaAnalyzerAgent
     from backend.agents.micro import MicroAgent
+    from backend.agents.nexus_primary import NexusPrimaryAgent
     from backend.agents.optimizer import OptimizerAgent
     from backend.agents.overseer import OverseerAgent
     from backend.agents.planner import PlannerAgent
@@ -64,6 +65,7 @@ def _get_agent_classes() -> dict[AgentName, Any]:
     from backend.agents.test_runner_unit import TestRunnerUnitAgent
 
     _AGENT_CLASSES = {
+        "NEXUS": NexusPrimaryAgent,
         "PLANNER": PlannerAgent,
         "ARCHITECT": ArchitectAgent,
         "ARCHITECT_DESIGN": ArchitectDesignAgent,

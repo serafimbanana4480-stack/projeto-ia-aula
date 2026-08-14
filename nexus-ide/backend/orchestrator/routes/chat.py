@@ -2020,7 +2020,7 @@ async def chat(
         generic ``NetworkError``. Convert late pipeline failures into the
         same structured error/done events used by the normal error paths.
         """
-        pipeline = _run_pipeline(req, llm_client, registry, context, event_bus, request)
+        pipeline = _select_pipeline(req, llm_client, registry, context, event_bus, request)
         next_chunk: asyncio.Task[str] | None = asyncio.create_task(anext(pipeline))
         terminal_done_seen = False
         try:
@@ -2093,6 +2093,105 @@ async def chat(
             "Connection": "keep-alive",
         },
     )
+
+
+async def _select_pipeline(
+    req: ChatRequest,
+    llm_client,
+    registry,
+    context,
+    event_bus=None,
+    request: Request | None = None,
+) -> AsyncIterator[str]:
+    """Decide who owns this turn — and keep a fallback that actually works.
+
+    ``_run_pipeline`` is neither deleted nor blindly bypassed. It remains the
+    path for planned multi-phase work, for a disabled feature flag, and for
+    any primary-runtime failure that happens *before the first frame reaches
+    the client*. Once a frame has been written the browser is already
+    rendering this run, so silently restarting it would duplicate output;
+    late failures surface as ordinary ``error`` + ``done`` frames instead.
+    """
+
+    def legacy() -> AsyncIterator[str]:
+        return _run_pipeline(req, llm_client, registry, context, event_bus, request)
+
+    try:
+        from backend.orchestrator.routes import chat_primary
+    except Exception:
+        logger.exception("NEXUS primary runtime unavailable; using the legacy pipeline")
+        async for frame in legacy():
+            yield frame
+        return
+
+    if not chat_primary.is_primary_enabled():
+        async for frame in legacy():
+            yield frame
+        return
+
+    decision = None
+    try:
+        decision = chat_primary.plan_turn(
+            req.message,
+            getattr(req, "mode", "auto") or "auto",
+            getattr(req, "project_path", "") or "",
+        )
+        use_primary = chat_primary.should_use_primary(decision)
+    except Exception:
+        logger.exception("Triage failed; using the legacy pipeline")
+        use_primary = False
+
+    if not use_primary or decision is None:
+        if decision is not None:
+            logger.info(
+                "[NEXUS] session=%s routed to the legacy pipeline (%s)",
+                req.session_id,
+                decision.request_class.value,
+            )
+        async for frame in legacy():
+            yield frame
+        return
+
+    logger.info(
+        "[NEXUS] session=%s routed to the primary agent (%s: %s)",
+        req.session_id,
+        decision.request_class.value,
+        decision.reason,
+    )
+    primary = chat_primary.run_primary_chat(
+        req, llm_client, registry, context, decision=decision, event_bus=event_bus
+    )
+    frames = 0
+    try:
+        async for frame in primary:
+            frames += 1
+            yield frame
+        return
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("NEXUS primary path failed after %d frame(s)", frames)
+        if frames:
+            yield _sse(
+                StreamEvent(
+                    type="error",
+                    content=(
+                        "A execução falhou a meio. O que já foi feito está "
+                        "guardado; volta a pedir para continuar."
+                    ),
+                )
+            )
+            yield _sse(StreamEvent(type="done"))
+            return
+    finally:
+        with contextlib.suppress(Exception):
+            await primary.aclose()
+
+    # Nothing reached the client, so restarting on the legacy pipeline is
+    # still invisible to the user. This is the only automatic fallback.
+    logger.warning("NEXUS primary path produced no frames; falling back")
+    async for frame in legacy():
+        yield frame
 
 
 async def _run_pipeline(
@@ -3890,3 +3989,35 @@ async def _run_pipeline(
 # Small helper so JSON marshaling can be tested without spinning up FastAPI.
 def decision_to_json(d: RoutingDecision) -> str:  # pragma: no cover - trivial
     return json.dumps(d.model_dump(), separators=(",", ":"))
+
+
+@router.post("/chat/{run_id}/stop")
+async def stop_chat_run(run_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Cooperative STOP: the run pauses at its next checkpoint.
+
+    A pause, not a kill. The agent keeps everything it has already observed,
+    so CONTINUE resumes the same run instead of paying for a cold restart.
+    """
+    from backend.runtime import steering_registry
+
+    channel = steering_registry.get_channel(run_id)
+    if channel is None:
+        return {"ok": False, "run_id": run_id, "reason": "run não encontrado ou já terminado"}
+    channel.stop()
+    return {"ok": True, "run_id": run_id, "state": "stopped"}
+
+
+@router.post("/chat/{run_id}/continue")
+async def continue_chat_run(
+    run_id: str,
+    payload: dict[str, Any] | None = None,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Resume a paused run, optionally with new instructions from the user."""
+    from backend.runtime import steering_registry
+
+    channel = steering_registry.get_channel(run_id)
+    if channel is None:
+        return {"ok": False, "run_id": run_id, "reason": "run não encontrado ou já terminado"}
+    channel.cont(str((payload or {}).get("guidance") or ""))
+    return {"ok": True, "run_id": run_id, "state": "running"}
