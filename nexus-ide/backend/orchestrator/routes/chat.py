@@ -2655,39 +2655,74 @@ async def _run_pipeline(
                 session_id=req.session_id,
                 history=history,
             )
-            if planning.status == "blocked" or planning.plan is None:
+            plan = planning.plan
+            planner_degraded = ""
+            if planning.status == "blocked" or plan is None:
+                # A planner that could not emit valid structured JSON must not
+                # end the turn. The deterministic proposal is derived from the
+                # measured project snapshot (never from model output), so when
+                # it exists we show that instead of failing the request.
                 error = planning.error or "planning blocked"
-                _checkpoint(
-                    status="failed",
-                    phase="planning_blocked",
-                    agent="ARCHITECT",
-                    error=error,
-                    checkpoint={"status": "planning_blocked", "source": planning.source},
-                    finished=True,
+                fallback = engine._validated_fallback_plan(planning, project_path or ".")
+                if fallback is None:
+                    _checkpoint(
+                        status="failed",
+                        phase="planning_blocked",
+                        agent="NEXUS",
+                        error=error,
+                        checkpoint={"status": "planning_blocked", "source": planning.source},
+                        finished=True,
+                    )
+                    yield _sse(
+                        StreamEvent(
+                            type="error",
+                            agent="NEXUS",
+                            content=f"Planning blocked: {error}",
+                            data={
+                                "status": "planning_blocked",
+                                "source": planning.source,
+                                "error": error,
+                                "deterministic_proposal": (
+                                    planning.deterministic_proposal.to_dict()
+                                    if planning.deterministic_proposal is not None
+                                    else None
+                                ),
+                            },
+                        )
+                    )
+                    yield _sse(StreamEvent(type="done"))
+                    return
+                plan = fallback
+                planner_degraded = error
+                logger.warning(
+                    "Planner blocked (%s); continuing with the validated "
+                    "deterministic plan | session=%s",
+                    error,
+                    req.session_id,
                 )
                 yield _sse(
                     StreamEvent(
-                        type="error",
-                        agent="ARCHITECT",
-                        content=f"Planning blocked: {error}",
+                        type="status",
+                        agent="NEXUS",
+                        content=(
+                            "O planeamento estruturado falhou; continuo com o "
+                            "plano determinístico validado."
+                        ),
                         data={
-                            "status": "planning_blocked",
-                            "source": planning.source,
-                            "error": error,
-                            "deterministic_proposal": (
-                                planning.deterministic_proposal.to_dict()
-                                if planning.deterministic_proposal is not None
-                                else None
-                            ),
+                            "status": "planner_degraded",
+                            "planner_error": error,
+                            "source": "deterministic_recovered",
                         },
                     )
                 )
-                yield _sse(StreamEvent(type="done"))
-                return
-            plan = planning.plan
             # Stream the plan as structured output
             yield _sse(StreamEvent(type="agent_started", agent="ARCHITECT"))
             plan_text = "# Execution Plan\n\n"
+            if planner_degraded:
+                plan_text += (
+                    "> Plano determinístico (o planeamento estruturado falhou: "
+                    f"{planner_degraded[:200]}).\n\n"
+                )
             plan_text += f"**Objective:** {plan.title or req.message}\n\n"
             for i, step in enumerate(plan.steps, 1):
                 plan_text += f"## Step {i}: {step.name}\n"

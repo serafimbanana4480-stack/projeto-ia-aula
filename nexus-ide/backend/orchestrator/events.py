@@ -101,12 +101,24 @@ class EventType(StrEnum):
 
 @dataclass
 class OrchestratorEvent:
-    """A typed event with metadata flowing through the event bus."""
+    """A typed event with metadata flowing through the event bus.
+
+    ``run_id`` and ``seq`` exist because ``timestamp`` is not a total order:
+    ``time.time()`` has ~15.6 ms granularity on Windows, so a burst of
+    events emitted inside one scheduling slice shares a single value and any
+    consumer sorting by time renders an arbitrary permutation. Consumers
+    must order by ``(run_id, seq)`` and deduplicate by ``event_id``.
+
+    ``seq`` is assigned by :meth:`EventBus.publish` when it is still 0, so
+    callers never have to thread a counter through the call graph.
+    """
 
     event_type: EventType
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     source: str = ""  # agent name or component
     session_id: str = ""
+    run_id: str = ""  # scopes the event to one execution
+    seq: int = 0  # strictly increasing within a run; 0 means "unassigned"
     task_id: str = ""
     data: dict[str, Any] = field(default_factory=dict)
     content: str = ""
@@ -122,6 +134,8 @@ class OrchestratorEvent:
             "data": self.data,
             "timestamp": self.timestamp,
             "event_id": self.event_id,
+            "run_id": self.run_id,
+            "seq": self.seq,
             "task_id": self.task_id,
             "correlation_id": self.correlation_id,
         }
@@ -153,6 +167,23 @@ class EventBus:
         self._event_log: deque[OrchestratorEvent] = deque(maxlen=10_000)
         self._max_queue_size = max_queue_size
         self._store: EventStore | None = None
+        # Per-run sequence counters. Events without a run_id share the ""
+        # bucket, which still yields a total order for that stream.
+        self._seq: dict[str, int] = {}
+        # Durable writes are drained off the critical path: persisting used
+        # to happen *before* subscriber notification via ``asyncio.to_thread``,
+        # which let two concurrent publishers be resumed in the wrong order.
+        self._persist_queue: asyncio.Queue[OrchestratorEvent | None] | None = None
+        self._persist_task: asyncio.Task[None] | None = None
+
+    def _assign_seq(self, event: OrchestratorEvent) -> None:
+        """Stamp a strictly increasing per-run sequence number."""
+        if event.seq:
+            self._seq[event.run_id] = max(self._seq.get(event.run_id, 0), event.seq)
+            return
+        nxt = self._seq.get(event.run_id, 0) + 1
+        self._seq[event.run_id] = nxt
+        event.seq = nxt
 
     async def subscribe(self, event_type: str, callback: Subscriber) -> None:
         """Register a subscriber for a specific event type or '*' for all."""
@@ -168,25 +199,84 @@ class EventBus:
                 subs.remove(callback)
 
     async def publish(self, event: OrchestratorEvent) -> None:
-        """Publish an event to all matching subscribers."""
-        # Get matching subscribers and log event under the same lock
+        """Publish an event to all matching subscribers, in publish order.
+
+        Ordering rules enforced here:
+
+        * ``seq`` is assigned, the event is logged, and every *synchronous*
+          subscriber is notified without a single ``await`` in between, so
+          concurrent publishers cannot be interleaved;
+        * persistence is queued for a background writer instead of being
+          awaited inline, which is what used to invert delivery order;
+        * asynchronous subscribers still run afterwards, and can restore the
+          exact order from ``(run_id, seq)``.
+        """
+        # ``asyncio.Lock.acquire`` on an uncontended lock does not suspend,
+        # so the block below is atomic with respect to other publishers in
+        # the common case, and serialised by the lock otherwise.
         async with self._lock:
+            self._assign_seq(event)
             self._event_log.append(event)
 
             subscribers: list[Subscriber] = []
             subscribers.extend(self._subscribers.get(event.event_type.value, []))
             subscribers.extend(self._subscribers.get("*", []))
 
-        # Persist (offloaded to thread pool so synchronous file I/O doesn't block the event loop)
-        if self._store is not None:
-            await asyncio.to_thread(self._store.persist, event)
+            self._enqueue_persist(event)
 
-        # Notify subscribers concurrently
-        if subscribers:
-            tasks = []
+            pending: list[Any] = []
             for sub in subscribers:
-                tasks.append(self._notify_subscriber(sub, event))
-            await asyncio.gather(*tasks, return_exceptions=True)
+                if asyncio.iscoroutinefunction(sub):
+                    pending.append(sub(event))
+                    continue
+                try:
+                    result = sub(event)
+                except Exception:
+                    logger.exception("Subscriber failed for event %s", event.event_type)
+                    continue
+                if asyncio.iscoroutine(result):
+                    pending.append(result)
+
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _enqueue_persist(self, event: OrchestratorEvent) -> None:
+        """Hand the event to the background writer; never block the caller."""
+        if self._store is None:
+            return
+        if self._persist_task is None or self._persist_task.done():
+            try:
+                self._persist_queue = asyncio.Queue()
+                self._persist_task = asyncio.get_running_loop().create_task(
+                    self._drain_persist_queue()
+                )
+            except RuntimeError:
+                # No running loop (synchronous test context): persist inline.
+                self._store.persist(event)
+                return
+        assert self._persist_queue is not None
+        with contextlib.suppress(Exception):
+            self._persist_queue.put_nowait(event)
+
+    async def _drain_persist_queue(self) -> None:
+        queue = self._persist_queue
+        assert queue is not None
+        while True:
+            event = await queue.get()
+            try:
+                if event is None or self._store is None:
+                    return
+                await asyncio.to_thread(self._store.persist, event)
+            except Exception:
+                logger.exception("EventStore.persist failed")
+            finally:
+                queue.task_done()
+
+    async def flush(self) -> None:
+        """Wait until every queued event has been persisted."""
+        queue = self._persist_queue
+        if queue is not None:
+            await queue.join()
 
     async def _notify_subscriber(self, subscriber: Subscriber, event: OrchestratorEvent) -> None:
         """Notify a single subscriber, catching exceptions."""
@@ -210,8 +300,12 @@ class EventBus:
         queue: asyncio.Queue[OrchestratorEvent | None] = asyncio.Queue(maxsize=self._max_queue_size)
         dropped_events = 0
 
-        async def on_event(event: OrchestratorEvent) -> None:
+        def on_event(event: OrchestratorEvent) -> None:
             """Enqueue without ever applying subscriber backpressure upstream.
+
+            Deliberately synchronous: :meth:`publish` calls sync subscribers
+            inline, so the queue receives events in exactly publish order
+            even when several coroutines publish concurrently.
 
             The event bus awaits subscriber callbacks in :meth:`publish`.
             Using ``await queue.put`` here therefore made a full client queue

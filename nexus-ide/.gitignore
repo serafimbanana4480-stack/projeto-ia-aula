@@ -138,11 +138,17 @@ rollback/
 
 # Ficheiros de auditoria (nao comitar)
 *.md
+# Os prompts de sistema dos agentes sao configuracao obrigatoria, nao
+# auditoria: sem eles um clone limpo rebenta com FileNotFoundError ao
+# carregar o agente (foi o caso do planner.md ate 2026-08-14).
+!config/prompts/**/*.md
+!docs/**/*.md
 !README.md
 !CONTRIBUTING.md
 !CHANGELOG.md
 !NEXUS_FULL_AUDIT.md
 !NEXUS_TEST_MATRIX.md
+!NEXUS_RUNTIME_REBUILD.md
 !LICENSE
 # IDEs
 .windsurf/

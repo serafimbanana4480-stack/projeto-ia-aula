@@ -111,10 +111,38 @@ def test_parse_plan_accepts_structured_provider_envelopes(wrapper_key: str) -> N
 
 
 def test_planning_prompt_uses_bounded_economical_step_count() -> None:
+    """Planning is a tool, not a ceremony: keep the plan small.
+
+    The previous prompt demanded "at least 10 steps ... 15-25 steps", which
+    made every request pay for a long planning turn before any tool ran.
+    The bound is now 3-8 steps.
+    """
     prompt = _creator()._build_planning_prompt("Audit Nexus", "")
 
-    assert "6-12 necessary steps" in prompt
+    assert "Emit 3 to 8 steps" in prompt
     assert "10-25 steps" not in prompt
+    assert "at least 10 steps" not in prompt
+
+
+def test_planning_prompt_documents_every_field_the_validator_requires() -> None:
+    """The prompt and the validator must not disagree.
+
+    Regression guard for the reproduced defect where the worked example in
+    the prompt failed the planner's own validator with 57 errors.
+    """
+    prompt = _creator()._build_planning_prompt("Audit Nexus", "")
+
+    for required in (
+        "model_key",
+        "file_scope",
+        "completion_criteria",
+        "verification_commands",
+        "risk",
+        "rollback",
+        "lock_scope",
+        "allowed_tools",
+    ):
+        assert required in prompt, f"prompt never mentions required field {required!r}"
 
 
 def test_parse_plan_rejects_cyclic_dependencies_without_repairing() -> None:

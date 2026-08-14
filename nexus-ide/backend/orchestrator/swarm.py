@@ -68,11 +68,18 @@ class SwarmOrchestrator:
         event_bus: Any,
         max_agents: int = 5,
         event_queue: Any = None,
+        max_parallel: int = 3,
     ) -> None:
         self.llm_client = llm_client
         self.registry = registry
         self.events = event_bus
         self.max_agents = max_agents
+        # Fan-out used to be an unbounded ``asyncio.gather``: every selected
+        # agent entered its first provider call at once (an "agent storm"),
+        # and the observable start order was whichever coroutine happened to
+        # reach its first await first — which is why a worker created last
+        # could appear to start first. Both are now controlled explicitly.
+        self.max_parallel = max(1, int(max_parallel))
         # Optional asyncio.Queue used by the chat route to stream per-agent
         # swarm progress live to the frontend (previously the UI saw nothing
         # until the entire swarm finished — up to 300s of apparent silence).
@@ -229,6 +236,60 @@ class SwarmOrchestrator:
         return result
 
     # ------------------------------------------------------------------
+    # Bounded, order-preserving fan-out
+    # ------------------------------------------------------------------
+    async def _run_fanout(
+        self,
+        specs: list[tuple[str, str, str]],
+        session_id: str,
+        project_path: str,
+        **kwargs: Any,
+    ) -> list[Any]:
+        """Run ``(agent, query, subtask_id)`` triples with two guarantees.
+
+        1. **Bounded concurrency** — at most ``self.max_parallel`` agents are
+           in flight, so N selected agents no longer mean N simultaneous
+           provider calls.
+        2. **Declared start order** — agent *i* only begins after agent
+           *i - 1* has actually started, so the timeline the user sees
+           matches the order the orchestrator decided on.
+
+        Results are returned positionally, exactly like ``asyncio.gather``.
+        """
+        limiter = asyncio.Semaphore(self.max_parallel)
+        started = [asyncio.Event() for _ in specs]
+
+        async def runner(index: int, agent: str, query: str, subtask_id: str) -> Any:
+            if index:
+                await started[index - 1].wait()
+            async with limiter:
+                # Set before the agent emits ``agent_started`` so the next
+                # agent is released only once this one is genuinely running.
+                started[index].set()
+                return await self._run_with_timeout(
+                    agent,
+                    query,
+                    session_id,
+                    project_path,
+                    subtask_id=subtask_id,
+                    **kwargs,
+                )
+
+        try:
+            return await asyncio.gather(
+                *(
+                    runner(index, agent, query, subtask_id)
+                    for index, (agent, query, subtask_id) in enumerate(specs)
+                ),
+                return_exceptions=True,
+            )
+        finally:
+            # Release anyone still waiting on a gate that will never be set
+            # (for example after cancellation), so no coroutine leaks.
+            for event in started:
+                event.set()
+
+    # ------------------------------------------------------------------
     # Strategies
     # ------------------------------------------------------------------
 
@@ -261,22 +322,14 @@ class SwarmOrchestrator:
             agent = self._pick_agent_for_task(subtask, agents)
             tasks.append((agent, subtask, f"subtask-{i + 1}"))
 
-        results = await asyncio.gather(
-            *[
-                self._run_with_timeout(
-                    agent,
-                    subtask,
-                    session_id,
-                    project_path,
-                    subtask_id=subtask_id,
-                    history=history,
-                    max_iterations=max_iterations,
-                    enable_thinking=enable_thinking,
-                    autonomous=autonomous,
-                )
-                for agent, subtask, subtask_id in tasks
-            ],
-            return_exceptions=True,
+        results = await self._run_fanout(
+            tasks,
+            session_id,
+            project_path,
+            history=history,
+            max_iterations=max_iterations,
+            enable_thinking=enable_thinking,
+            autonomous=autonomous,
         )
 
         agent_results: list[AgentResult] = []
@@ -315,22 +368,14 @@ class SwarmOrchestrator:
         autonomous: bool = True,
     ) -> SwarmResult:
         """All agents work on the same objective, merge results intelligently."""
-        results = await asyncio.gather(
-            *[
-                self._run_with_timeout(
-                    agent,
-                    objective,
-                    session_id,
-                    project_path,
-                    subtask_id="ensemble",
-                    history=history,
-                    max_iterations=max_iterations,
-                    enable_thinking=enable_thinking,
-                    autonomous=autonomous,
-                )
-                for agent in agents
-            ],
-            return_exceptions=True,
+        results = await self._run_fanout(
+            [(agent, objective, "ensemble") for agent in agents],
+            session_id,
+            project_path,
+            history=history,
+            max_iterations=max_iterations,
+            enable_thinking=enable_thinking,
+            autonomous=autonomous,
         )
 
         agent_results: list[AgentResult] = []
@@ -442,23 +487,22 @@ class SwarmOrchestrator:
     ) -> SwarmResult:
         """Agents propose solutions, then a moderator picks and integrates the best."""
         # Phase 1: Each agent proposes a solution
-        proposals = await asyncio.gather(
-            *[
-                self._run_with_timeout(
+        proposals = await self._run_fanout(
+            [
+                (
                     agent,
                     f"Propose a concrete solution or answer for: {objective}\n\n"
                     "Be specific. Include rationale, trade-offs, and implementation steps if applicable.",
-                    session_id,
-                    project_path,
-                    subtask_id=f"proposal-{agent}",
-                    history=history,
-                    max_iterations=max_iterations,
-                    enable_thinking=enable_thinking,
-                    autonomous=autonomous,
+                    f"proposal-{agent}",
                 )
                 for agent in agents
             ],
-            return_exceptions=True,
+            session_id,
+            project_path,
+            history=history,
+            max_iterations=max_iterations,
+            enable_thinking=enable_thinking,
+            autonomous=autonomous,
         )
 
         agent_results: list[AgentResult] = []

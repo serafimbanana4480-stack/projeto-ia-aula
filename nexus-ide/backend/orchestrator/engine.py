@@ -640,6 +640,33 @@ class OrchestrationEngine:
         self._state[session_id] = OrchestrationState.CANCELLED
         logger.info("Cancelled orchestration for session %s (%d task(s))", session_id, cancelled)
 
+    @staticmethod
+    def _validated_fallback_plan(
+        planning: PlanningResult,
+        project_path: str,
+    ) -> ExecutionPlan | None:
+        """Return the deterministic proposal iff it is safe to execute.
+
+        Returns ``None`` when there is no proposal or when the proposal
+        itself fails validation, so a broken snapshot still blocks loudly
+        instead of running something unvalidated.
+        """
+        proposal = planning.deterministic_proposal
+        if proposal is None or not getattr(proposal, "steps", None):
+            return None
+        validation = validate_execution_plan(
+            proposal,
+            {"absolute_path": project_path},
+            PlanCreator.MAX_PLAN_STEPS,
+        )
+        if not validation.valid:
+            logger.warning(
+                "Deterministic fallback is not executable: %s",
+                "; ".join(validation.errors[:4]),
+            )
+            return None
+        return proposal
+
     async def execute_autonomous(
         self,
         objective: str,
@@ -673,12 +700,52 @@ class OrchestrationEngine:
             project_path=project_path,
         )
         if planning.status == "blocked" or planning.plan is None:
-            return OrchestrationResult(
-                run_id=uuid.uuid4().hex[:12],
-                state=OrchestrationState.PLANNING_BLOCKED,
-                plan=planning.deterministic_proposal,
-                errors=[planning.error] if planning.error else ["planning blocked"],
+            # A planner that cannot emit valid structured JSON is a *planner*
+            # failure, not a system failure. The deterministic proposal is
+            # built locally from the measured project snapshot — it never
+            # contains model-invented paths or commands — so when it passes
+            # validation we continue with it instead of ending the run.
+            fallback = self._validated_fallback_plan(planning, project_path)
+            if fallback is None:
+                return OrchestrationResult(
+                    run_id=uuid.uuid4().hex[:12],
+                    state=OrchestrationState.PLANNING_BLOCKED,
+                    plan=planning.deterministic_proposal,
+                    errors=[planning.error] if planning.error else ["planning blocked"],
+                )
+            logger.warning(
+                "Planner blocked for session %s (%s); continuing with the "
+                "validated deterministic plan instead of aborting the run",
+                session_id,
+                planning.error,
             )
+            await self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.AUTONOMY_DECISION,
+                    source="NEXUS",
+                    session_id=session_id,
+                    content=(
+                        "O planeamento estruturado falhou; continuo com o "
+                        "plano determinístico validado."
+                    ),
+                    data={
+                        "reason": "planner_output_not_structured",
+                        "planner_error": planning.error,
+                        "fallback": "deterministic_plan",
+                        "steps": len(fallback.steps),
+                    },
+                )
+            )
+            fallback.approved = True
+            self._plans[fallback.plan_id] = fallback
+            self._session_plans[session_id] = fallback.plan_id
+            planning = PlanningResult(
+                status="ready",
+                plan=fallback,
+                source="deterministic_recovered",
+                deterministic_proposal=planning.deterministic_proposal,
+            )
+            self._planning_results[session_id] = planning
         plan = planning.plan
 
         await self._events.publish(

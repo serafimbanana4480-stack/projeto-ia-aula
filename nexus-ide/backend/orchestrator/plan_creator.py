@@ -285,24 +285,23 @@ class PlanCreator:
         planner_model: str,
         planner_cfg: Mapping[str, Any],
     ) -> str:
-        """Ask the same planner for one bounded, JSON-only repair attempt."""
-        prompt = f"""Repair the following planner response into a valid JSON object.
+        """Ask the same planner for one bounded, JSON-only repair attempt.
 
-The required shape is {{"goal": "...", "tasks": [{{
-  "id": "stable-name", "description": "...", "dependencies": [],
-  "agent": "CODER", "acceptance_criteria": [], "validation": [],
-  "file_scope": [], "model_key": "coder", "risk": "low",
-  "rollback": "...", "lock_scope": "read:...", "allowed_tools": []
-}}]}}.
+        The repair prompt must restate *the same* schema the planning prompt
+        asked for. An earlier version asked for a differently-named envelope
+        object, so the repair pass converted near-valid output into a shape
+        the parser could not read — turning a recoverable formatting slip
+        into a blocked run.
+        """
+        prompt = f"""Repair the following planner response into the required JSON array.
 
-OBJECTIVE: {objective}
+{self._build_planning_prompt(objective, "")}
 
-INVALID RESPONSE:
+INVALID RESPONSE TO REPAIR:
 {invalid_content[:20000]}
 
-Return ONLY valid JSON. Do not invent files, commands, tools, or dependencies.
-If required facts are unavailable, leave the corresponding array empty so the
-validator can reject the plan and the deterministic fallback can take over."""
+Return ONLY the JSON array. Keep the intent of the invalid response; do not
+invent file paths, commands, or tool names that it did not mention."""
         parts: list[str] = []
         try:
             async with asyncio.timeout(self.PLAN_REPAIR_TIMEOUT_SECONDS):
@@ -528,62 +527,89 @@ validator can reject the plan and the deterministic fallback can take over."""
 
         return "\n\n".join(section for section in sections if section)
 
+    @staticmethod
+    def _agent_contract_table() -> str:
+        """Render the *real* agent/model/tool contract for the prompt.
+
+        The previous prompt hard-coded a prose list of agents and never
+        mentioned ``model_key`` or legal tool names, so a model that
+        followed it produced a plan the validator rejected on every step.
+        Deriving the table from ``capability_matrix()`` keeps the prompt and
+        the validator in sync by construction.
+        """
+        try:
+            from backend.orchestrator.agent_capabilities import capability_matrix
+
+            matrix = capability_matrix()
+        except Exception:  # pragma: no cover - capability matrix is optional
+            return (
+                "- CODER (model_key: coder) — implementation\n"
+                "- DEBUGGER (model_key: coder) — verification, runs tests\n"
+                "- ANALYZER (model_key: reasoning) — review and audit\n"
+            )
+        wanted = ("ARCHITECT", "CODER", "ANALYZER", "DEBUGGER", "RESEARCHER", "DOCUMENTER")
+        lines: list[str] = []
+        for agent in wanted:
+            capability = matrix.get(agent)
+            if capability is None:
+                continue
+            models = [m for m in capability.allowed_models if "/" not in m]
+            tools = ", ".join(sorted(capability.allowed_tools)[:12]) or "(none)"
+            lines.append(
+                f'- {agent} — model_key: "{models[0] if models else "coder"}" — '
+                f"allowed_tools must be a subset of: {tools}"
+            )
+        return "\n".join(lines)
+
     def _build_planning_prompt(self, objective: str, context: str) -> str:
-        """Build the prompt for creating a professional multi-phase execution plan."""
-        return f"""You are a senior software architect and project manager. Create a COMPREHENSIVE, PROFESSIONAL execution plan for:
+        """Build the planning prompt.
+
+        Every field the validator requires is described *and* present in the
+        worked example, so a model that copies the example produces an
+        executable plan. ``backend/tests/runtime/test_evidence_planner_contract.py``
+        pins this: the example is parsed and validated on every test run.
+        """
+        return f"""Create a small, executable plan for this objective.
 
 OBJECTIVE: {objective}
 
 ADDITIONAL CONTEXT: {context or "None"}
 
-IMPORTANT: Create a DETAILED but economical plan with 6-12 necessary steps organized into phases.
-Combine closely related checks handled by the same agent; do not split work merely to increase the step count.
-Each phase builds on the previous one: setup -> implementation -> testing -> documentation -> review.
+Respond with ONLY a JSON array of steps. No prose, no markdown fence.
 
-Available agents and their specialties:
-- ARCHITECT: system design, architecture decisions, code review, final approval
-- CODER: writing code, implementing features, creating files, scaffolding, refactoring
-- ANALYZER: reviewing code quality, security audit, finding issues, code smells
-- DEBUGGER: fixing bugs, troubleshooting, running tests, verifying fixes
-- RESEARCHER: searching web, reading docs, gathering info, API documentation
-- DOCUMENTER: writing docs, README, API docs, inline comments, changelogs
-- OPTIMIZER: performance tuning, benchmarking, profiling, optimization
+Each step is an object with EXACTLY these keys:
+  "name"                  short imperative step name
+  "description"           what the step does
+  "agent"                 one of the agents listed below
+  "model_key"             the model_key listed for that agent
+  "depends_on"            array of 0-based indexes of earlier steps
+  "priority"              "high" | "medium" | "low"
+  "file_scope"            array of concrete project-relative paths the step touches
+  "completion_criteria"   array of observable, checkable outcomes
+  "verification_commands" array of concrete commands (REQUIRED for DEBUGGER)
+  "risk"                  "low" | "medium" | "high"
+  "rollback"              a concrete rollback instruction
+  "lock_scope"            "read:<path>" or "write:<path>" — the smallest scope
+  "allowed_tools"         array of tool names allowed for that agent
+  "sandboxed"             boolean
 
-PHASE GUIDELINES:
-1. SETUP: Project initialization, directory structure, dependencies, configuration
-2. CORE IMPLEMENTATION: Main features, data models, business logic, API endpoints
-3. TESTING: Unit tests, integration tests, edge cases, error handling
-4. QUALITY ASSURANCE: Code review, security audit, performance check
-5. DOCUMENTATION: README, API docs, inline comments, usage examples
-6. FINAL REVIEW: Architecture review, integration verification, polish
+AGENTS:
+{self._agent_contract_table()}
 
-Respond with ONLY a JSON array. No markdown, no explanation, just the JSON:
+HARD RULES:
+- Emit 3 to 8 steps. Fewer, larger steps beat many tiny ones.
+- The final step MUST be a DEBUGGER step with non-empty
+  "verification_commands"; a plan with no verification step is rejected.
+- Never invent file paths, commands, or tool names. If you do not know a
+  path, use "." as the file_scope entry.
+- Never name a step "Execute Objective".
+
+WORKED EXAMPLE (copy this shape exactly):
 [
-  {{"name": "Phase 1: Setup - Initialize project structure", "description": "Create directory structure, setup configuration files, install dependencies", "agent": "CODER", "depends_on": [], "priority": "high", "sandboxed": false}},
-  {{"name": "Phase 1: Setup - Configure development environment", "description": "Set up linting, formatting, and build configuration", "agent": "CODER", "depends_on": [0], "priority": "high", "sandboxed": false}},
-  {{"name": "Phase 2: Core - Implement data models", "description": "Define core data structures and types", "agent": "CODER", "depends_on": [0], "priority": "high", "sandboxed": false}},
-  {{"name": "Phase 2: Core - Implement business logic", "description": "Write main application logic and algorithms", "agent": "CODER", "depends_on": [2], "priority": "high", "sandboxed": false}},
-  {{"name": "Phase 3: Testing - Write unit tests", "description": "Create comprehensive unit tests for all modules", "agent": "DEBUGGER", "depends_on": [3], "priority": "high", "sandboxed": false}},
-  {{"name": "Phase 4: QA - Code review and security audit", "description": "Review code quality, identify issues, check for security vulnerabilities", "agent": "ANALYZER", "depends_on": [3], "priority": "medium", "sandboxed": false}},
-  {{"name": "Phase 4: QA - Fix issues from review", "description": "Address all issues found during code review and security audit", "agent": "DEBUGGER", "depends_on": [5], "priority": "high", "sandboxed": false}},
-  {{"name": "Phase 5: Docs - Write documentation", "description": "Create README, API documentation, and usage examples", "agent": "DOCUMENTER", "depends_on": [6], "priority": "medium", "sandboxed": false}},
-  {{"name": "Phase 6: Review - Final architecture review", "description": "Verify all components work together, review final code quality", "agent": "ARCHITECT", "depends_on": [7], "priority": "medium", "sandboxed": false}}
-]
-
-The depends_on field uses 0-based index of the step this depends on.
-Every step MUST include:
-- "file_scope": an array of measured project-relative or absolute paths
-- "completion_criteria": an array of observable acceptance criteria
-- "verification_commands": an array of concrete commands (required for DEBUGGER)
-- "risk": "low", "medium", or "high"
-- "rollback": a concrete rollback instruction
-- "lock_scope": the smallest read/write scope
-- "allowed_tools": an array containing only tools available to the selected agent
-Use a registered agent and model key for every step; do not emit "Execute Objective".
-Priority values: "high", "medium", "low".
-Make steps SPECIFIC and ACTIONABLE. Each step must produce a concrete deliverable.
-Include at least 10 steps. More complex objectives should have 15-25 steps.
-Use phase prefixes in step names: "Phase N: Name - Description"."""
+  {{"name": "Locate the failing scheduler path", "description": "Read the scheduler and the failing test to identify the ordering defect.", "agent": "ANALYZER", "model_key": "reasoning", "depends_on": [], "priority": "high", "file_scope": ["backend/orchestrator/plan_executor.py"], "completion_criteria": ["the defective code path is identified with a file and line"], "verification_commands": [], "risk": "low", "rollback": "no change is made in this step", "lock_scope": "read:backend/orchestrator", "allowed_tools": ["read_file", "search_codebase"], "sandboxed": false}},
+  {{"name": "Fix dependency admission in the scheduler", "description": "Only mark a task READY once every dependency is COMPLETED.", "agent": "CODER", "model_key": "coder", "depends_on": [0], "priority": "high", "file_scope": ["backend/orchestrator/plan_executor.py"], "completion_criteria": ["no task starts while a dependency is unfinished"], "verification_commands": [], "risk": "medium", "rollback": "git checkout -- backend/orchestrator/plan_executor.py", "lock_scope": "write:backend/orchestrator/plan_executor.py", "allowed_tools": ["read_file", "write_file", "search_codebase"], "sandboxed": false}},
+  {{"name": "Verify the ordering fix", "description": "Run the scheduler ordering tests and confirm they pass.", "agent": "DEBUGGER", "model_key": "coder", "depends_on": [1], "priority": "high", "file_scope": ["backend/tests/runtime"], "completion_criteria": ["the ordering tests pass"], "verification_commands": ["python -m pytest backend/tests/runtime -q"], "risk": "low", "rollback": "revert the previous step", "lock_scope": "read:backend/tests", "allowed_tools": ["run_tests", "read_file"], "sandboxed": false}}
+]"""
 
     def _parse_plan(
         self,
