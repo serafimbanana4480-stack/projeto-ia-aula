@@ -161,3 +161,32 @@ logs/
 __pycache__/
 *.pyc
 
+
+# ---------------------------------------------------------------
+# LIMPEZA 2026-08-16 - regras consolidadas (as ultimas ganham)
+# ---------------------------------------------------------------
+.pytest_tmp*/
+.pytest-*/
+.pytest_codex*/
+.pytest_cache/
+.venv*/
+venv*/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+_to_delete/
+_xfer/
+.backend-runtime.*.log
+frontend/.next*/
+.next*/
+audit/metrics/*.nexus-tmp
+frontend/test-results/
+
+# CORRECAO CRITICA: a regra "*.md" acima apanhava os prompts dos agentes,
+# o que fazia o planner rebentar com FileNotFoundError num clone limpo.
+!config/prompts/**/*.md
+!config/**/*.md
+!docs/**/*.md
+!.github/**/*.md
