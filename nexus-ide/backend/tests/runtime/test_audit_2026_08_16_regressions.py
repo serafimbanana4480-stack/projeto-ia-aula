@@ -237,3 +237,19 @@ def test_p10_policy_denies_a_proposal_without_objective() -> None:
     )
     assert decision.verdict is SpawnVerdict.PRIMARY_AGENT_ONLY
     assert decision.allowed is False
+
+
+# ---------------------------------------------------------------------------
+# P9g — uma correção obedecida não pode ficar a viajar no contexto
+# ---------------------------------------------------------------------------
+
+
+def test_p9g_obeyed_format_correction_is_forgotten() -> None:
+    directives = ["\n[SYSTEM] outra coisa", AgentBase._FORMAT_CORRECTION_INSTRUCTION]
+
+    AgentBase._forget_sticky_directive(
+        directives, AgentBase._FORMAT_CORRECTION_INSTRUCTION
+    )
+
+    assert AgentBase._FORMAT_CORRECTION_INSTRUCTION not in directives
+    assert "\n[SYSTEM] outra coisa" in directives, "as outras não são afetadas"

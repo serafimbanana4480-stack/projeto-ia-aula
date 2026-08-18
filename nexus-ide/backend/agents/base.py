@@ -1356,6 +1356,19 @@ class AgentBase(ABC):
         """Re-append pinned corrections that a trim pass removed."""
         missing = [text for text in directives if text and text not in context]
         return context + "".join(missing) if missing else context
+
+    @staticmethod
+    def _forget_sticky_directive(directives: list[str], text: str) -> None:
+        """Drop a correction the model has since obeyed.
+
+        A directive that is never cleared is a permanent accusation: the
+        "tool call in an invalid format" warning was still in the context five
+        calls later, with successful tool calls in between (audit 2026-08-16,
+        P9g). For a small local model that stale instruction competes with the
+        real task for attention, and it costs tokens on every single call.
+        """
+        if text and text in directives:
+            directives.remove(text)
     _AUTONOMOUS_BLOCKED_TOOL_CORRECTION = (
         "\n[SYSTEM] The previous tool was blocked by the autonomous safety gate. "
         "Do NOT retry that tool or a cosmetic variation of the same command. "
@@ -2276,6 +2289,13 @@ class AgentBase(ABC):
                 iteration,
                 len(tool_calls),
             )
+            if tool_calls:
+                # The model produced an executable call: the format complaint
+                # has been answered and must stop travelling in the context.
+                self._forget_sticky_directive(
+                    sticky_directives, self._FORMAT_CORRECTION_INSTRUCTION
+                )
+                context = context.replace(self._FORMAT_CORRECTION_INSTRUCTION, "")
 
             if not tool_calls:
                 # Model sometimes returns Python "usage examples" instead of tool
