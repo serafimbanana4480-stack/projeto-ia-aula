@@ -73,7 +73,11 @@ export async function postChat(
   mode: string = "auto",
   signal?: AbortSignal,
   model: string = "",
-  projectPath: string = ".",
+  // "" means "no project selected". It used to default to "." which the
+  // backend resolves against its OWN working directory, so a chat with no
+  // project silently pointed the agent at the NEXUS repository itself
+  // (audit 2026-08-16, P4). Never send "." from here.
+  projectPath: string = "",
   thinkingStrength?: string,
   swarmOptions?: {
     agents?: string[];
@@ -84,7 +88,14 @@ export async function postChat(
   provider?: string,
 ): Promise<Response> {
   try {
-    const body: Record<string, unknown> = { message, session_id: sessionId, mode, project_path: projectPath };
+    const normalisedProjectPath =
+      projectPath && ![".", "./", ".\\"].includes(projectPath.trim()) ? projectPath : "";
+    const body: Record<string, unknown> = {
+      message,
+      session_id: sessionId,
+      mode,
+      project_path: normalisedProjectPath,
+    };
     if (model) body.model = model;
     if (provider) body.provider = provider;
     if (thinkingStrength) body.thinking_strength = thinkingStrength;

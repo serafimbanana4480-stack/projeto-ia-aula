@@ -108,6 +108,8 @@ def test_reload_scope_excludes_agent_written_dirs(launcher: Path) -> None:
 def test_next_dev_and_build_use_separate_output_directories() -> None:
     """A production build must not corrupt a concurrently running dev server."""
     frontend = REPO_ROOT / "frontend"
+    if not (frontend / "node_modules" / "next").is_dir():
+        pytest.skip("dependências do frontend não instaladas (node_modules/next)")
     script = """
 import configFactory from './next.config.mjs';
 import {

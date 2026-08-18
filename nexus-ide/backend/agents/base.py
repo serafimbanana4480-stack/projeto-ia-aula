@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.agents.action_registry import get_action_registry
+from backend.agents.event_protocol import encode_event
 from backend.config.settings import get_model_config, load_prompt
 from backend.core.conversation_log import get_conversation_logger
 from backend.history_sanitizer import sanitize_history_content
@@ -1589,6 +1590,212 @@ class AgentBase(ABC):
         "and state that the audit found no further in-scope action."
     )
 
+    #: Tools whose success means the run actually changed or executed
+    #: something, i.e. the only situation where a "bounded improvement audit"
+    #: has anything to audit. A read-only question ("is there a bug in X?")
+    #: gains nothing from a second pass and pays for it twice: once in latency
+    #: (measured: 21s -> 41s) and once in quality, because the audit answer
+    #: used to overwrite the real one.
+    _AUDITABLE_TOOLS: frozenset[str] = frozenset(
+        {
+            "write_file",
+            "write_file_absolute",
+            "apply_patch",
+            "edit_file",
+            "create_file",
+            "delete_file",
+            "move_file",
+            "run_shell",
+            "execute_code",
+            "run_tests",
+            "git_commit",
+            "format_code",
+        }
+    )
+
+    #: Marks the produced answer inside the audit prompt. Kept in one place so
+    #: the reconciliation heuristic and the prompt can never drift apart.
+    _AUDIT_ANSWER_HEADER: str = "\n[RESULTADO JÁ PRODUZIDO NESTE TURNO]\n"
+
+    @classmethod
+    def _should_run_completion_audit(cls, successful_tools: set[str]) -> bool:
+        """Decide whether the bounded improvement audit pass is worth a call.
+
+        ``NEXUS_AUTONOMOUS_AUDIT_PASS`` overrides the heuristic:
+        ``off`` disables it, ``always`` restores the historical behaviour,
+        ``auto`` (default) audits only runs that changed or executed something.
+        """
+        mode = (os.environ.get("NEXUS_AUTONOMOUS_AUDIT_PASS", "auto") or "auto").strip().lower()
+        if mode in {"off", "0", "false", "never"}:
+            return False
+        if mode in {"always", "1", "true"}:
+            return True
+        if not successful_tools:
+            # The model declared completion without executing anything. Here
+            # the second pass earns its cost: it is the difference between a
+            # claim and a check.
+            return True
+        # Read-only work that already produced an answer has nothing to audit,
+        # and auditing it cost a full extra inference AND overwrote the answer.
+        return bool(successful_tools & cls._AUDITABLE_TOOLS)
+
+    @classmethod
+    def _render_answer_for_audit(cls, answer: str) -> str:
+        """Show the audit pass the result it is supposed to audit."""
+        text = (answer or "").strip()
+        if not text:
+            return ""
+        limit = 8000
+        if len(text) > limit:
+            text = f"{text[: limit // 2]}\n[... {len(text) - limit} caracteres omitidos ...]\n{text[-limit // 2 :]}"
+        return (
+            f"{cls._AUDIT_ANSWER_HEADER}{text}\n"
+            "[FIM DO RESULTADO JÁ PRODUZIDO]\n"
+        )
+
+    #: Wordings a model uses when the audit found nothing. An answer that is
+    #: *only* this is not a replacement for the real answer.
+    _AUDIT_NOOP_MARKERS: tuple[str, ...] = (
+        "não encontrou",
+        "nao encontrou",
+        "nada a fazer",
+        "no further",
+        "found no",
+        "sem mais",
+        "nenhuma melhoria",
+        "nenhuma ação",
+        "nenhuma acao",
+        "tudo verificado",
+        "confirmado",
+        "audit",
+        "auditoria",
+    )
+
+    @classmethod
+    def _reconcile_audited_answer(
+        cls,
+        audit_answer: str,
+        pending_final_answer: str,
+        *,
+        audited_with_new_evidence: bool,
+    ) -> str:
+        """Return the answer the user must actually receive.
+
+        Rules, in order:
+
+        1. no audit ran -> the answer is the answer;
+        2. the audit executed further tools -> it did real work and its answer
+           supersedes the earlier one;
+        3. otherwise the audit only re-stated a verdict. The real answer is the
+           one produced before it, and the audit note is appended only when it
+           carries substance of its own.
+        """
+        if not pending_final_answer:
+            return audit_answer
+        if audited_with_new_evidence and audit_answer.strip():
+            return audit_answer
+        audit_text = (audit_answer or "").strip()
+        if not audit_text:
+            return pending_final_answer
+        lowered = audit_text.lower()
+        is_noop_verdict = len(audit_text) < 400 and any(
+            marker in lowered for marker in cls._AUDIT_NOOP_MARKERS
+        )
+        if is_noop_verdict:
+            return pending_final_answer
+        # The audit produced independent substance without new tool evidence.
+        # Keep both, with the real answer first, rather than silently dropping
+        # either one.
+        return f"{pending_final_answer.rstrip()}\n\n{audit_text}"
+
+    #: Hard ceiling, in characters, for a single tool result copied into the
+    #: model context. Before this existed one ``read_file`` of a 4k-line file
+    #: added ~45k tokens to every later call in the same turn (audit
+    #: 2026-08-16, P5) — enough to blow the window of any local quantised
+    #: model on its own. Override with ``NEXUS_TOOL_RESULT_CONTEXT_CHARS``.
+    _DEFAULT_TOOL_RESULT_CONTEXT_CHARS: int = 6000
+
+    @classmethod
+    def _tool_result_context_budget(cls) -> int:
+        raw = os.environ.get("NEXUS_TOOL_RESULT_CONTEXT_CHARS", "").strip()
+        if raw:
+            try:
+                value = int(raw)
+            except ValueError:
+                value = cls._DEFAULT_TOOL_RESULT_CONTEXT_CHARS
+            else:
+                if value > 0:
+                    return max(800, value)
+        return cls._DEFAULT_TOOL_RESULT_CONTEXT_CHARS
+
+    @classmethod
+    def _truncate_middle(cls, text: str, budget: int) -> str:
+        """Keep the head and the tail of ``text`` and say what was dropped.
+
+        Head-heavy on purpose: for source files the head carries imports and
+        the module docstring, the tail carries the most recently appended
+        code, and the middle is the cheapest part to lose.
+        """
+        if len(text) <= budget:
+            return text
+        head = int(budget * 0.7)
+        tail = budget - head
+        dropped = len(text) - budget
+        return (
+            f"{text[:head]}"
+            f"\n\n[... {dropped} caracteres omitidos deste resultado por orçamento de "
+            "contexto. O ficheiro/saída COMPLETA não está aqui: se precisares do "
+            "trecho em falta, chama a ferramenta outra vez com um alvo mais "
+            "estreito (offset/limit, um caminho específico, ou uma pesquisa por "
+            "símbolo). NÃO afirmes ter lido o que está omitido. ...]\n\n"
+            f"{text[len(text) - tail :]}"
+        )
+
+    @classmethod
+    def _render_tool_result_for_context(cls, tool_name: str, result: Any) -> str:
+        """Serialise a tool result for the model context under a hard budget.
+
+        Truncation is applied to the *largest string field* first (typically
+        file content or command output) so the surrounding structure — status
+        flags, paths, error messages, counts — always survives intact. Only if
+        that is not enough is the whole blob cut.
+        """
+        budget = cls._tool_result_context_budget()
+        payload = result
+        try:
+            if isinstance(result, dict):
+                payload = cls._shrink_payload_strings(result, budget)
+            rendered = json.dumps(payload, default=str)
+        except (TypeError, ValueError):
+            rendered = str(payload)
+        rendered = cls._truncate_middle(rendered, budget)
+        return f"\nTool {tool_name} returned: {rendered}"
+
+    @classmethod
+    def _shrink_payload_strings(cls, payload: Any, budget: int, _depth: int = 0) -> Any:
+        """Recursively cap oversized string leaves inside a tool payload."""
+        if _depth > 6:
+            return payload
+        if isinstance(payload, str):
+            return cls._truncate_middle(payload, budget)
+        if isinstance(payload, dict):
+            return {
+                key: cls._shrink_payload_strings(value, budget, _depth + 1)
+                for key, value in payload.items()
+            }
+        if isinstance(payload, list):
+            # A very long list of results is itself a context bomb (search
+            # hits, directory listings). Keep a bounded prefix and say so.
+            max_items = 200
+            shrunk = [
+                cls._shrink_payload_strings(item, budget, _depth + 1)
+                for item in payload[:max_items]
+            ]
+            if len(payload) > max_items:
+                shrunk.append(f"[... {len(payload) - max_items} entradas omitidas ...]")
+            return shrunk
+        return payload
+
     def _is_file_task(self, query: str) -> bool:
         lowered = query.lower()
         return any(m in lowered for m in self._FILE_TASK_MARKERS) or bool(
@@ -1820,6 +2027,16 @@ class AgentBase(ABC):
         repeated_tool_calls_seen = 0
         permission_deferral_corrections = 0
         autonomous_completion_audit_done = False
+        # The answer produced *before* the bounded improvement audit runs. It
+        # is the real answer to the user's question; the audit pass may only
+        # replace it when the audit itself produced new tool evidence.
+        pending_final_answer: str = ""
+        audit_started_after_tools: int | None = None
+        # While the audit pass runs, its tokens are held back. In streaming
+        # mode the real answer has already reached the user; letting the audit
+        # stream on top of it is how "AUDITORIA-SEM-CONTEXTO" ended up
+        # appended to (or replacing) a correct answer.
+        audit_stream_suppressed = False
         tool_evidence_corrections = 0
         successful_tools: set[str] = set()
         # Autonomous tool-capable turns are buffered until their role is known.
@@ -1874,7 +2091,7 @@ class AgentBase(ABC):
 
             # Yield thinking block if enabled
             if request.enable_thinking:
-                yield f"<event>thinking|iteration:{iteration}</event>"
+                yield encode_event("thinking", f"iteration:{iteration}")
 
             # Stream LLM response.
             #
@@ -1905,7 +2122,7 @@ class AgentBase(ABC):
                         full_response += token
                         token_count += 1
                         emitted_this_attempt = True
-                        if not buffer_model_output:
+                        if not buffer_model_output and not audit_stream_suppressed:
                             yield token
                         if self._has_complete_tool_transport(full_response):
                             parsed_early = self._parse_tool_calls(full_response)
@@ -2003,7 +2220,7 @@ class AgentBase(ABC):
                         iteration,
                         alternate,
                     )
-                    yield f"<event>warning|Model failed — retrying on {alternate}</event>"
+                    yield encode_event("warning", f"Model failed — retrying on {alternate}")
                     full_response = ""
                     token_count = 0
                     continue
@@ -2011,7 +2228,7 @@ class AgentBase(ABC):
                 # Every recovery path is spent. Never let ``run()`` persist this
                 # as a successful exchange.
                 self._last_run_success = False
-                yield f"<event>error|LLM stream failed: {stream_failure}</event>"
+                yield encode_event("error", f"LLM stream failed: {stream_failure}")
                 return
             stream_elapsed = time.monotonic() - stream_start
             logger.info(
@@ -2051,7 +2268,7 @@ class AgentBase(ABC):
                     else:
                         tool_errors_seen = True
                         message = f"Agent contract forbids tool '{tool_name}'"
-                        yield f"<event>tool_error|{tool_name}|{message}</event>"
+                        yield encode_event("tool_error", tool_name, message)
                 tool_calls = permitted_calls
             logger.info(
                 "[%s] Tool calls parsed | iteration=%d | count=%d",
@@ -2221,12 +2438,24 @@ class AgentBase(ABC):
                     request.autonomous
                     and not autonomous_completion_audit_done
                     and can_continue
+                    and self._should_run_completion_audit(successful_tools)
                 ):
+                    # The audit pass must never be blind to the result it is
+                    # auditing (audit 2026-08-16, P1): before this, the second
+                    # model call received no ``role=assistant`` message for the
+                    # turn, so it was asked to "audit the result already
+                    # produced" without being shown that result — and its own
+                    # output then *replaced* the real answer, which never
+                    # reached the user nor the history.
                     autonomous_completion_audit_done = True
+                    audit_started_after_tools = len(successful_tools)
+                    pending_final_answer = answer
+                    audit_stream_suppressed = not buffer_model_output
+                    context += self._render_answer_for_audit(answer)
                     context += self._AUTONOMOUS_COMPLETION_AUDIT
-                    yield (
-                        "<event>warning|Resultado provisório — a executar auditoria "
-                        "autónoma de melhorias</event>"
+                    yield encode_event(
+                        "warning",
+                        "Resultado provisório — a executar auditoria autónoma de melhorias",
                     )
                     continue
 
@@ -2256,8 +2485,28 @@ class AgentBase(ABC):
                         iteration,
                     )
                 self._last_run_success = (not tool_errors_seen) or tool_errors_recovered
-                if buffer_model_output and answer:
-                    yield answer
+                final_answer = self._reconcile_audited_answer(
+                    answer,
+                    pending_final_answer,
+                    audited_with_new_evidence=(
+                        audit_started_after_tools is not None
+                        and len(successful_tools) > audit_started_after_tools
+                    ),
+                )
+                if buffer_model_output:
+                    to_emit = final_answer
+                elif audit_stream_suppressed and final_answer != pending_final_answer:
+                    # Only what the audit genuinely added; the earlier answer
+                    # was already streamed token by token.
+                    to_emit = (
+                        final_answer[len(pending_final_answer) :]
+                        if final_answer.startswith(pending_final_answer)
+                        else final_answer
+                    )
+                else:
+                    to_emit = ""
+                if to_emit:
+                    yield to_emit
                 yield "<event>answer</event>"
                 return
 
@@ -2408,7 +2657,7 @@ class AgentBase(ABC):
                         tool_name,
                     )
                     conv_log.log_tool_call(self.name, tool_name, args, iteration=iteration)
-                    yield f"<event>tool_call|{tool_name}|{json.dumps(args)}</event>"
+                    yield encode_event("tool_call", tool_name, json.dumps(args))
                     tasks.append(_run_parallel_call(tool_name, args))
 
                 outcomes = await asyncio.gather(*tasks)
@@ -2431,7 +2680,7 @@ class AgentBase(ABC):
                             result["error"],
                             recoverable=bool(result.get("recoverable")),
                         )
-                        yield f"<event>tool_error|{tool_name}|{result['error']}</event>"
+                        yield encode_event("tool_error", tool_name, str(result["error"]))
                     else:
                         successful_tools.add(tool_name)
                         if tool_errors_seen and not tool_errors_recovered:
@@ -2464,7 +2713,7 @@ class AgentBase(ABC):
                     args,
                 )
                 conv_log.log_tool_call(self.name, tool_name, args, iteration=iteration)
-                yield f"<event>tool_call|{tool_name}|{json.dumps(args)}</event>"
+                yield encode_event("tool_call", tool_name, json.dumps(args))
 
                 tool_start = time.monotonic()
                 result = await execute_tool(
@@ -2556,7 +2805,7 @@ class AgentBase(ABC):
                         iteration=iteration,
                         recoverable=bool(result.get("recoverable")),
                     )
-                    yield f"<event>tool_error|{tool_name}|{result['error']}</event>"
+                    yield encode_event("tool_error", tool_name, str(result["error"]))
                     if result.get("autonomous_blocked"):
                         _blocked_nudge = self._blocked_tool_correction(request)
                         context += _blocked_nudge
@@ -2599,9 +2848,9 @@ class AgentBase(ABC):
                     conv_log.log_tool_result(
                         self.name, tool_name, ok=True, elapsed_ms=tool_elapsed * 1000
                     )
-                    yield f"<event>tool_result|{tool_name}|{json.dumps(result.get('result', ''))}</event>"
+                    yield encode_event("tool_result", tool_name, json.dumps(result.get("result", ""), default=str))
 
-                context += f"\nTool {tool_name} returned: {json.dumps(result, default=str)}"
+                context += self._render_tool_result_for_context(tool_name, result)
 
                 # A successful write is evidence of progress, not necessarily
                 # completion. Continue one turn so the model can verify work
@@ -2635,7 +2884,7 @@ class AgentBase(ABC):
             max_iterations,
             request.session_id,
         )
-        yield f"<event>warning|Reached maximum iterations ({max_iterations}) — task NOT completed</event>"
+        yield encode_event("warning", f"Reached maximum iterations ({max_iterations}) — task NOT completed")
         yield "<event>answer</event>"
         yield (
             f"[TAREFA NÃO CONCLUÍDA] O agente atingiu o limite de "
@@ -2734,7 +2983,7 @@ class AgentBase(ABC):
             )
             if errors:
                 self._last_run_success = False
-                yield f"<event>agent_contract_error|{json.dumps(errors)}</event>"
+                yield encode_event("agent_contract_error", json.dumps(errors))
                 return
 
         from backend.core.agent_state import AgentStateStore

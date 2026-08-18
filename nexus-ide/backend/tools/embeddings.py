@@ -21,6 +21,7 @@ import hashlib
 import inspect
 import json
 import logging
+import re
 import math
 import os
 from dataclasses import dataclass, field
@@ -934,6 +935,56 @@ register_tool(
 # ---------------------------------------------------------------------------
 
 
+def _rank_symbol_results(results: list, query: str) -> list:
+    """Order symbol hits by how likely each one is the definition asked for.
+
+    Sort key (descending): exact symbol-name match, name containment,
+    definition-like content, backend score, then a shorter chunk as a
+    tie-break (a focused chunk beats a whole-file blob).
+    """
+    target = query.strip().lower()
+
+    def sort_key(item) -> tuple:
+        name = (getattr(item, "symbol_name", "") or "").strip().lower()
+        content = getattr(item, "content", "") or ""
+        symbol_type = (getattr(item, "symbol_type", "") or "").lower()
+        exact = name == target
+        contains = bool(target) and target in name
+        defines = bool(
+            re.search(
+                rf"\b(?:def|class|function|const|let|var|fn|type|interface)\s+{re.escape(target)}\b",
+                content,
+                re.IGNORECASE,
+            )
+        )
+        concrete = symbol_type not in {"", "overview", "file", "module"}
+        return (
+            exact,
+            defines,
+            contains,
+            concrete,
+            float(getattr(item, "score", 0.0) or 0.0),
+            -len(content),
+        )
+
+    return sorted(results, key=sort_key, reverse=True)
+
+
+async def _index_is_populated(project_path: str) -> bool:
+    """True when the symbol index exists and holds at least one chunk."""
+    try:
+        stats = await _index_stats_tool()
+    except Exception:  # noqa: BLE001 - a stats failure must not break search
+        return False
+    if not isinstance(stats, dict):
+        return False
+    for key in ("total_chunks", "chunks", "count", "documents", "total"):
+        value = stats.get(key)
+        if isinstance(value, int | float) and value > 0:
+            return True
+    return False
+
+
 async def _search_symbols_handler(
     query: str = "",
     kind: str = "any",
@@ -954,9 +1005,26 @@ async def _search_symbols_handler(
         return {"error": f"Semantic search unavailable: {exc}"}
 
     if not results:
+        # "No hits" and "no index" are different facts and the model cannot act
+        # on them the same way. Conflating them told the agent to re-index in a
+        # session where indexing had just succeeded, and left it unable to
+        # conclude that a symbol simply does not exist (audit 2026-08-16, P6).
+        indexed = await _index_is_populated(project_path)
+        if indexed:
+            return {
+                "query": query,
+                "results": [],
+                "indexed": True,
+                "message": (
+                    f"O índice está construído e não contém nenhum símbolo "
+                    f"correspondente a '{query}'. Trata isto como INEXISTENTE: "
+                    "não voltes a indexar e não assumas que o símbolo existe."
+                ),
+            }
         return {
             "query": query,
             "results": [],
+            "indexed": False,
             "message": (
                 "Codebase not indexed yet. Use the index_symbols tool "
                 "to index the project first."
@@ -975,10 +1043,16 @@ async def _search_symbols_handler(
         if key not in seen:
             seen.add(key)
             deduped.append(r)
-    results = deduped[:limit]
+    # Rank before truncating. The backend returns a flat score (every hit at
+    # 1.0 in the audit), so the actual definition of the searched symbol could
+    # land last and be cut by ``limit``. Re-rank on evidence the tool has:
+    # exact symbol-name match first, then definition-like chunks, then the
+    # backend score.
+    results = _rank_symbol_results(deduped, query)[:limit]
 
     return {
         "query": query,
+        "indexed": True,
         "results": [
             {
                 "file": r.file,

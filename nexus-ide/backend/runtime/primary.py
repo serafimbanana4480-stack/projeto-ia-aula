@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -429,7 +430,30 @@ class PrimaryLoop:
             # -- 5. REPORT ------------------------------------------------
             self._phase = PrimaryPhase.REPORT
             self.telemetry.enter_phase(RunPhase.FINISHED)
-            self.outcome.answer = "".join(self._answer_parts).strip()
+            raw_answer = "".join(self._answer_parts).strip()
+            corrections = self._unsupported_claims(raw_answer)
+            if corrections:
+                # The run already MEASURED that these statements are false.
+                # Delivering them unchallenged is how "corri os testes (4
+                # passed)" reached the user in a run whose own verification
+                # said 0 passed / 1 failed (audit 2026-08-16, P8).
+                yield emit(
+                    RuntimeEventType.STATUS_UPDATE,
+                    phase=PrimaryPhase.REPORT.value,
+                    label="afirmações não suportadas por evidência",
+                    claims=list(corrections),
+                )
+                notice = (
+                    "\n\n> ⚠️ **Verificação do próprio NEXUS** — as afirmações "
+                    "seguintes não são suportadas pela evidência medida "
+                    "nesta execução:\n"
+                    + "\n".join(f"> - {item}" for item in corrections)
+                )
+                # Emitted as a delta, not only appended to the stored answer:
+                # a correction the user never sees corrects nothing.
+                yield emit(RuntimeEventType.MESSAGE_DELTA, text=notice)
+                raw_answer = f"{raw_answer}{notice}"
+            self.outcome.answer = raw_answer
             self.outcome.changed_files = tuple(dict.fromkeys(self._changed_files))
             self.outcome.subagents = tuple(self._subagent_results)
             self.outcome.declined_subagents = tuple(self._declined)
@@ -790,6 +814,66 @@ class PrimaryLoop:
             return result
 
         return body
+
+    #: Claim patterns paired with the measurement that would have to be true.
+    #: Kept deliberately narrow: a false positive here would contradict a
+    #: correct answer, which is worse than missing one exaggeration.
+    _CLAIM_PATTERNS: tuple[tuple[str, str, str], ...] = (
+        (
+            "tests",
+            r"(?:corri|executei|rodei|ran|executed)\s+(?:a\s+|os\s+|the\s+|todos\s+os\s+|all\s+)?"
+            r"(?:su[ií]te\s+de\s+)?(?:testes|tests)|"
+            r"(?:testes|tests)\s+(?:passaram|passed|pass)|"
+            r"\b\d+\s+(?:passed|passaram)\b|"
+            r"(?:todos\s+os\s+testes|all\s+tests)\s+(?:passam|passaram|pass)",
+            "diz que executou testes, mas nenhum teste foi executado nesta execução",
+        ),
+        (
+            "files_read",
+            r"(?:analisei|li|revi|inspecionei|examinei|reviewed|analy[sz]ed|inspected)\s+"
+            r"(?:todos\s+os\s+|cada\s+|all\s+(?:the\s+)?|every\s+)?"
+            r"(?:ficheiros?|arquivos?|files?|c[oó]digo|codebase)",
+            "diz que analisou ficheiros, mas nenhum ficheiro foi lido nesta execução",
+        ),
+        (
+            "files_changed",
+            r"(?:corrigi|alterei|modifiquei|apliquei|escrevi|criei|fixed|changed|applied|wrote|created)\s+"
+            r"(?:o\s+|os\s+|a\s+|as\s+|the\s+)?(?:ficheiros?|arquivos?|files?|bugs?|patch|"
+            r"corre[cç][ãa]o|corre[cç][õo]es)",
+            "diz que alterou ficheiros, mas nenhuma escrita foi registada nesta execução",
+        ),
+        (
+            "subagent",
+            r"(?:sub-?agente|subagent|agente\s+\w+)\s+(?:est[áa]|ficou|continua|is)\s+"
+            r"(?:a\s+trabalhar|em\s+background|running|working)",
+            "diz que um sub-agente ficou a trabalhar, mas nenhuma delegação foi aceite",
+        ),
+    )
+
+    def _unsupported_claims(self, answer: str) -> tuple[str, ...]:
+        """Return the claims in ``answer`` that this run's telemetry refutes.
+
+        This is not a style check. It compares what the answer *asserts* with
+        what the loop actually measured — tests executed, files read, files
+        changed, subagents started — and reports only the contradictions.
+        """
+        if not answer.strip():
+            return ()
+        text = " ".join(answer.split())
+        verification_green = self.outcome.verification.ran and self.outcome.verification.ok
+        evidence = {
+            "tests": self.telemetry.tests_run > 0 and verification_green,
+            "files_read": self.telemetry.files_read > 0,
+            "files_changed": self.telemetry.files_changed > 0 or bool(self._changed_files),
+            "subagent": bool(self._subagent_results),
+        }
+        found: list[str] = []
+        for key, pattern, message in self._CLAIM_PATTERNS:
+            if evidence.get(key):
+                continue
+            if re.search(pattern, text, re.IGNORECASE):
+                found.append(message)
+        return tuple(found)
 
     async def _run_verification(
         self, turn: PrimaryTurn, emit: Callable[..., RuntimeEvent]

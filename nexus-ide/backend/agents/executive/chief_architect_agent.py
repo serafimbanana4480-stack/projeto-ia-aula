@@ -8,6 +8,7 @@ from backend.agents.executive.pattern_catalog import PatternCatalog, PatternCate
 from backend.agents.executive.system_designer import SystemDesigner, SystemComponent
 from backend.agents.executive.quality_gate import QualityGate
 from backend.agents.executive.integration_planner import IntegrationPlanner
+from backend.agents.event_protocol import encode_event
 
 
 class ChiefArchitectAgent(AgentBase):
@@ -41,7 +42,7 @@ class ChiefArchitectAgent(AgentBase):
     # ── Core Agent Interface ──────────────────────────────────────────
 
     async def run(self, request: AgentRequest) -> AsyncIterator[str]:
-        yield f"<event>architect_start|{request.query[:50]}</event>"
+        yield encode_event("architect_start", request.query[:50])
 
         query = request.query.lower()
 

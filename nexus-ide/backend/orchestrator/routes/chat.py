@@ -31,6 +31,12 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from backend.agents.base import AgentRequest
+from backend.agents.event_protocol import (
+    EVENT_CLOSE,
+    EVENT_OPEN,
+    EVENT_RE,
+    decode_payload,
+)
 from backend.config.settings import (
     REPO_ROOT,
     get_mode_config,
@@ -62,6 +68,9 @@ from backend.tools.sanitizer import detect_injection
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+#: Hard cap on a single user message, enforced on every lane.
+_MAX_MESSAGE_LENGTH = 50000
 
 
 def _json_safe(value: Any, _depth: int = 0) -> Any:
@@ -206,7 +215,7 @@ async def _demo_response(req: "ChatRequest", agent_name: AgentName) -> AsyncIter
 # Inline event tags emitted by the ReAct loop in backend/agents/base.py.
 # We convert them into first-class SSE events so the frontend can render
 # tool calls cleanly instead of showing raw JSON.
-_INLINE_EVENT_RE = re.compile(r"<event>([^|>]+)(?:\|(.*?))?</event>", re.DOTALL)
+_INLINE_EVENT_RE = EVENT_RE
 
 _THINK_OPEN_RE = re.compile(r"<(?:think|thinking)>", re.IGNORECASE)
 _THINK_CLOSE_RE = re.compile(r"</(?:think|thinking)>", re.IGNORECASE)
@@ -229,6 +238,10 @@ class _IncrementalResponseParser:
     _TOOL_CLOSE_TAG = "</tool_call>"
     _TOOL_FENCE_OPEN = "```tool"
     _TOOL_FENCE_CLOSE = "```"
+    #: An unterminated ``<event>`` opener is a bug somewhere upstream. Hold at
+    #: most this much before giving up and showing the text, so a truncated
+    #: frame can never swallow the rest of a reply.
+    _MAX_PENDING_EVENT_CHARS = 262144
 
     def __init__(self, agent: str) -> None:
         self.agent = agent
@@ -259,6 +272,35 @@ class _IncrementalResponseParser:
         events: list[StreamEvent] = []
 
         while self.buffer:
+            # A complete control frame is ATOMIC: it is emitted by the ReAct
+            # loop, not by the model, and its payload may legitimately contain
+            # "<thinking>" or "<tool_call>" (e.g. reading a file that mentions
+            # them). Handling it before the markup state machine is what stops
+            # the internal protocol from leaking into the chat — audit
+            # 2026-08-16, P2/P11/P12.
+            event_at = self.buffer.find(EVENT_OPEN)
+            if event_at >= 0 and not self.in_thinking and self.tool_delimiter is None:
+                close_at = self.buffer.find(EVENT_CLOSE, event_at)
+                if close_at >= 0:
+                    if event_at:
+                        events.extend(self._text_events(self.buffer[:event_at]))
+                    frame_end = close_at + len(EVENT_CLOSE)
+                    events.extend(
+                        _parse_inline_events(self.buffer[event_at:frame_end], self.agent)
+                    )
+                    self.buffer = self.buffer[frame_end:]
+                    continue
+                # Frame still arriving. Release the text before it and wait,
+                # bounded: a malformed opener must not buffer forever.
+                if event_at:
+                    events.extend(self._text_events(self.buffer[:event_at]))
+                    self.buffer = self.buffer[event_at:]
+                if len(self.buffer) <= self._MAX_PENDING_EVENT_CHARS:
+                    break
+                events.extend(self._text_events(self.buffer))
+                self.buffer = ""
+                break
+
             if self.tool_delimiter == "xml":
                 close_at = self.buffer.lower().find(self._TOOL_CLOSE_TAG)
                 if close_at >= 0:
@@ -359,6 +401,12 @@ class _IncrementalResponseParser:
         if self.tool_delimiter is not None:
             self.tool_delimiter = None
             return []
+        if EVENT_OPEN in text and EVENT_CLOSE not in text:
+            # A control frame that never closed: protocol debris, not content.
+            # Emit whatever preceded it and drop the truncated frame instead of
+            # painting "<event>tool_result|..." into the conversation.
+            head = text[: text.find(EVENT_OPEN)]
+            return self._text_events(head) if head.strip() else []
         if self.in_thinking:
             self.in_thinking = False
             return (
@@ -419,7 +467,10 @@ def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
         last_end = match.end()
 
         event_type = match.group(1)
-        payload = match.group(2) or ""
+        # Payloads are escaped at the source (backend.agents.event_protocol) so
+        # that file content containing <thinking>, <tool_call> or </event> can
+        # never desynchronise this parser. Reverse it exactly once, here.
+        payload = decode_payload(match.group(2) or "")
 
         if event_type == "tool_call":
             # payload: tool_name|json_args
@@ -1013,6 +1064,13 @@ _QUOTED_WINDOWS_PATH_RE = re.compile(
     r"""(?P<quote>["'`])(?P<path>[A-Za-z]:[\\/][^"'`\r\n]+)(?P=quote)"""
 )
 _WINDOWS_PATH_TAIL_RE = re.compile(r"(?P<path>[A-Za-z]:[\\/][^\r\n]+)")
+#: The same recovery for POSIX absolute paths. Without it, the Docker image and
+#: any Linux/macOS/WSL install could not resolve a pasted project path at all —
+#: the path was silently ignored and the run fell back to the NEXUS repo.
+_QUOTED_POSIX_PATH_RE = re.compile(
+    r"""(?P<quote>["'`])(?P<path>/[^"'`\r\n]+)(?P=quote)"""
+)
+_POSIX_PATH_TAIL_RE = re.compile(r"(?<![\w])(?P<path>/(?:[^\s/][^\r\n]*)?)")
 _COMMAND_HELP_RE = re.compile(
     r"^\s*(?:/commands?|/comandos?|"
     r"(?:q|que|quais)\s+comandos?(?:\s+(?:tens?|tem|existem|consegues\s+executar))?.*)\s*$",
@@ -1028,10 +1086,15 @@ def _existing_directory_from_message(message: str) -> str:
     recovers ``C:\\...\\red nexus`` without treating the following instruction
     as part of the path.
     """
-    quoted = _QUOTED_WINDOWS_PATH_RE.search(message or "")
-    candidates: list[str] = [quoted.group("path")] if quoted else []
-    tail = _WINDOWS_PATH_TAIL_RE.search(message or "")
-    if tail:
+    candidates: list[str] = []
+    for quoted_re in (_QUOTED_WINDOWS_PATH_RE, _QUOTED_POSIX_PATH_RE):
+        quoted = quoted_re.search(message or "")
+        if quoted:
+            candidates.append(quoted.group("path"))
+    for tail_re in (_WINDOWS_PATH_TAIL_RE, _POSIX_PATH_TAIL_RE):
+        tail = tail_re.search(message or "")
+        if not tail:
+            continue
         raw = tail.group("path").strip()
         boundaries = [
             len(raw),
@@ -2116,6 +2179,48 @@ async def _select_pipeline(
     def legacy() -> AsyncIterator[str]:
         return _run_pipeline(req, llm_client, registry, context, event_bus, request)
 
+    # Input guards belong to the *entry point*, not to one lane. They used to
+    # live only inside ``_run_pipeline``, so every request routed to the
+    # primary runtime skipped prompt-injection detection, session-id
+    # validation and the length cap entirely.
+    if not re.match(r"^[a-zA-Z0-9_-]{1,128}$", req.session_id or ""):
+        yield _sse(
+            StreamEvent(
+                type="error",
+                content=(
+                    "Invalid session id. Use 1-128 alphanumeric characters, "
+                    "hyphens or underscores."
+                ),
+            )
+        )
+        yield _sse(StreamEvent(type="done"))
+        return
+
+    injection = detect_injection(req.message)
+    if injection.detected:
+        logger.info("Blocked potential prompt injection: %s", injection.pattern)
+        yield _sse(
+            StreamEvent(
+                type="error",
+                content=f"Request blocked: potential prompt injection ({injection.pattern}).",
+            )
+        )
+        yield _sse(StreamEvent(type="done"))
+        return
+
+    if len(req.message or "") > _MAX_MESSAGE_LENGTH:
+        yield _sse(
+            StreamEvent(
+                type="error",
+                content=(
+                    f"Message too long ({len(req.message)} chars). "
+                    f"Maximum is {_MAX_MESSAGE_LENGTH} characters."
+                ),
+            )
+        )
+        yield _sse(StreamEvent(type="done"))
+        return
+
     try:
         from backend.orchestrator.routes import chat_primary
     except Exception:
@@ -2372,7 +2477,7 @@ async def _run_pipeline(
         yield _sse(StreamEvent(type="done"))
         return
 
-    MAX_MESSAGE_LENGTH = 50000
+    MAX_MESSAGE_LENGTH = _MAX_MESSAGE_LENGTH
     if len(req.message) > MAX_MESSAGE_LENGTH:
         yield _sse(
             StreamEvent(
@@ -3298,11 +3403,16 @@ async def _run_pipeline(
             StreamEvent(
                 type="progress",
                 agent=decision.primary_agent,  # type: ignore[arg-type]
-                content=f"Nenhum projeto selecionado; a usar diretório raiz: {project_path}",
+                content=(
+                    "⚠️ Nenhum projeto selecionado. A leitura recai sobre o "
+                    f"repositório do próprio NEXUS ({project_path}); seleciona "
+                    "um projeto antes de pedires alterações a ficheiros."
+                ),
                 data={
                     "event": "project_defaulted",
                     "kind": "status",
-                    "status": "success",
+                    "status": "warning",
+                    "project_path": project_path,
                 },
             )
         )
@@ -3483,6 +3593,21 @@ async def _run_pipeline(
                 agent_context["_project_memory"] = project_memory
             if enriched_addon:
                 agent_context["_system_addon"] = enriched_addon
+            if project_path_defaulted:
+                # The user never chose a project; the path in use is the NEXUS
+                # repository itself. Say so in the model's own context, or the
+                # agent will happily "fix" the IDE instead of the user's code
+                # (audit 2026-08-16, P4). Appended AFTER the mode addon so it
+                # cannot be overwritten by it.
+                agent_context["_project_not_selected"] = True
+                agent_context["_system_addon"] = (
+                    str(agent_context.get("_system_addon") or "")
+                    + "\n[SYSTEM] O utilizador NÃO selecionou nenhum projeto. O caminho "
+                    f"'{project_path}' é o repositório do próprio NEXUS IDE, usado apenas "
+                    "como fallback de leitura. NÃO escrevas, alteres nem apagues ficheiros "
+                    "aí. Se a tarefa exigir alterar ficheiros, responde a explicar que é "
+                    "preciso selecionar um projeto primeiro."
+                )
             if fast_chat_turn:
                 # CHAT is a direct, schema-free lane: no tools, memory,
                 # planning, subagents, or A2A consultations.

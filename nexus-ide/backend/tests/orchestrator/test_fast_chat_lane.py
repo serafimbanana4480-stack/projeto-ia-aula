@@ -49,13 +49,26 @@ def test_spawn_task_receives_principal_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spawn_task_keeps_declarative_fallback_without_runtime_manager() -> None:
+async def test_spawn_task_never_reports_success_without_a_real_subagent() -> None:
+    """A declined or unstartable delegation must NOT read as "spawned".
+
+    This test previously asserted the opposite: that ``spawn_task`` returned
+    ``status="spawned"`` even with no lifecycle manager and no policy approval.
+    The 2026-08-16 audit (P10) showed what that costs — the runtime declined
+    the delegation while the tool told the model a background ANALYZER was
+    running, so the model reported work to the user that never existed. A model
+    can only be honest if its tools are.
+    """
     result = await spawn_task(
         name="verify",
         description="Run focused tests",
         agent="DEBUGGER",
         session_id="chat-session",
     )
-    assert result["status"] == "spawned"
+    assert result["status"] in {"denied", "queued", "not_started"}
+    assert result["spawned"] is False
+    assert result.get("background") is False
     assert result["agent"] == "DEBUGGER"
-    assert result["depends_on"] == []
+    assert "instance_id" not in result
+    # The reason must be actionable for the model, not a bare status.
+    assert str(result.get("reason") or result.get("error") or "").strip()

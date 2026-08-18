@@ -16,6 +16,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.agents.event_protocol import split_stream
 from backend.contracts.a2a import A2AMessage, MessagePriority, TaskType
 from backend.tools.registry import ToolSpec, register_tool
 
@@ -190,7 +191,11 @@ async def consult_agent(
                 },
             }
 
-        response_text = "".join(parts)
+        # A sub-agent's control frames belong to its own run. Returning them
+        # as the tool "response" injected <event> markup into the parent's
+        # stream and broke its parser (audit 2026-08-16, P12).
+        response_text, _sub_frames = split_stream("".join(parts))
+        response_text = response_text.strip()
 
         # Only close the client if we created it (not the shared one)
         if not hasattr(client, "_shared") and hasattr(client, "aclose"):

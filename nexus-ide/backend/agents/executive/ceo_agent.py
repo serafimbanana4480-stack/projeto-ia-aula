@@ -11,6 +11,7 @@ from backend.agents.executive.goal_hierarchy import GoalHierarchy, GoalPriority
 from backend.agents.executive.resource_allocator import ResourceAllocator
 from backend.agents.executive.priority_manager import PriorityManager, PriorityLevel
 from backend.agents.executive.vision_aligner import VisionAligner
+from backend.agents.event_protocol import encode_event
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class CEOAgent(AgentBase):
 
     async def run(self, request: AgentRequest) -> AsyncIterator[str]:
         """Execute the CEO agent — yields strategic decisions and plans."""
-        yield f"<event>ceo_start|{request.query[:50]}</event>"
+        yield encode_event("ceo_start", request.query[:50])
 
         # Parse the request
         query = request.query.lower()
