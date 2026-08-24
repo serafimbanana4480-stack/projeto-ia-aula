@@ -1194,7 +1194,7 @@ export default function ChatPanel({
           {/* Thinking strength selector */}
           <motion.div
             whileTap={{ scale: 0.97 }}
-            className="flex items-center rounded-lg border border-nexus-border bg-nexus-card p-0.5"
+            className="flex shrink-0 items-center rounded-lg border border-nexus-border bg-nexus-card p-0.5"
           >
             {THINKING_STRENGTH_OPTIONS.map((option) => {
               const Icon = option.icon;
@@ -1223,10 +1223,14 @@ export default function ChatPanel({
             whileHover={{ scale: 1.03 }}
             whileTap={{ scale: 0.95 }}
             onClick={handleNewChat}
-            className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-3 py-1.5 text-xs text-nexus-muted hover:text-nexus-text transition-all duration-200 hover:border-nexus-accent/30"
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-2.5 py-1.5 text-xs text-nexus-muted hover:text-nexus-text transition-all duration-200 hover:border-nexus-accent/30"
+            title="Novo chat"
           >
             <Plus className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Novo Chat</span>
+            {/* Text label only when there is room for every header control:
+                with the right panel open at ~1600px it used to clip the
+                thinking-strength buttons. */}
+            <span className="hidden min-[1740px]:inline">Novo Chat</span>
           </motion.button>
           <motion.button
             whileHover={{ scale: 1.05 }}

@@ -733,7 +733,15 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             priority=priority_for("opencode_go", 1),
         )
 
-    kilo_api_key = _usable_api_key(_setting_value(settings, values, "kilo_api_key", ""))
+    # Audit 2026-08-24 (B3): Kilo is a PAID gateway. Registering it under
+    # free_only=true let real spending happen while the operator believed
+    # the fail-closed free policy was active. Same rule as every other
+    # paid provider: key present AND free-only disabled.
+    kilo_api_key = (
+        _usable_api_key(_setting_value(settings, values, "kilo_api_key", ""))
+        if not free_only
+        else ""
+    )
     if kilo_api_key:
         manager.register_provider(
             "kilo",
@@ -956,7 +964,9 @@ def create_llm_client(**overrides: Any) -> Any:
         .strip()
     )
 
-    if free_only and provider not in {"local", "ollama", "openrouter", "kilo", "dev"}:
+    # "kilo" removed (audit 2026-08-24 B3): paid gateway is never
+    # free-validated, so it must not bypass the fail-closed policy.
+    if free_only and provider not in {"local", "ollama", "openrouter", "dev"}:
         raise ProviderUnavailableError(
             f"Configured provider '{provider}' is not validated free",
             category="eligibility",

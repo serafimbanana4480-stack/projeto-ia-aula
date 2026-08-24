@@ -36,11 +36,32 @@ class CircuitBreaker:
     _failures: int = 0
     _last_failure_time: float = 0.0
     _half_open_calls: int = 0
+    # Terminal errors (auth/billing) open the breaker for longer than the
+    # normal cooldown clamp; 0.0 means "no forced opening in effect".
+    _forced_open_until: float = 0.0
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     def __post_init__(self) -> None:
         self.failure_threshold = max(1, int(self.failure_threshold))
         self.cooldown_seconds = min(60.0, max(0.0, float(self.cooldown_seconds)))
         self.half_open_max_calls = max(1, int(self.half_open_max_calls))
+
+    def force_open(self, seconds: float) -> None:
+        """Open immediately for *seconds*, bypassing the ≤60 s cooldown clamp.
+
+        Used for terminal provider errors (invalid key 401, out of credit
+        402): retrying sooner only burns more of the failover chain.
+        """
+        with self._lock:
+            self._state = CircuitState.OPEN
+            self._failures = max(self._failures, self.failure_threshold)
+            self._last_failure_time = time.monotonic()
+            self._forced_open_until = time.monotonic() + max(1.0, float(seconds))
+            self._half_open_calls = 0
+
+    def _cooldown_elapsed(self, now: float) -> bool:
+        if self._forced_open_until:
+            return now >= self._forced_open_until
+        return now - self._last_failure_time >= self.cooldown_seconds
 
     @property
     def state(self) -> CircuitState:
@@ -52,6 +73,8 @@ class CircuitBreaker:
         with self._lock:
             if self._state != CircuitState.OPEN:
                 return None
+            if self._forced_open_until:
+                return max(0.0, self._forced_open_until - time.monotonic())
             return max(
                 0.0,
                 self.cooldown_seconds - (time.monotonic() - self._last_failure_time),
@@ -62,7 +85,7 @@ class CircuitBreaker:
             if self._state == CircuitState.CLOSED:
                 return True
             if self._state == CircuitState.OPEN:
-                if time.monotonic() - self._last_failure_time >= self.cooldown_seconds:
+                if self._cooldown_elapsed(time.monotonic()):
                     logger.info("Circuit breaker [%s]: OPEN → HALF_OPEN (cooldown elapsed)", self.name)
                     self._state = CircuitState.HALF_OPEN
                     self._half_open_calls = 1
@@ -82,6 +105,7 @@ class CircuitBreaker:
             self._state = CircuitState.CLOSED
             self._failures = 0
             self._half_open_calls = 0
+            self._forced_open_until = 0.0
 
     async def record_failure(self) -> None:
         with self._lock:

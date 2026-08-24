@@ -17,6 +17,20 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+class ProviderHTTPStatusError(RuntimeError):
+    """HTTP error from an OpenAI-compatible API carrying the status code.
+
+    The multi-provider manager uses ``status_code`` to distinguish terminal
+    errors (401 invalid key, 402 out of credit) — which must open the
+    provider's circuit breaker for a long period instead of failing over and
+    silently spending on the next paid provider (audit 2026-08-24, B5).
+    """
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(f"OpenAI-compatible API error {status_code}: {message}")
+        self.status_code = int(status_code)
+
+
 def _system_verify_context() -> ssl.SSLContext:
     """Build a TLS context that trusts operating-system certificates."""
     try:
@@ -164,7 +178,7 @@ class OpenAIProvider:
         async with self._client.stream("POST", self._api_path("chat/completions"), json=payload) as resp:
             if resp.status_code != 200:
                 text = await resp.aread()
-                raise RuntimeError(f"OpenAI API error {resp.status_code}: {text.decode()}")
+                raise ProviderHTTPStatusError(resp.status_code, text.decode())
 
             async for line in resp.aiter_lines():
                 line = line.strip()
@@ -260,7 +274,7 @@ class OpenAIProvider:
 
         resp = await self._client.post(self._api_path("chat/completions"), json=payload)
         if resp.status_code != 200:
-            raise RuntimeError(f"OpenAI API error {resp.status_code}: {resp.text}")
+            raise ProviderHTTPStatusError(resp.status_code, resp.text)
 
         data = resp.json()
         self._last_usage = self._extract_usage(data)
@@ -302,7 +316,7 @@ class OpenAIProvider:
             json={"model": model, "input": texts},
         )
         if resp.status_code != 200:
-            raise RuntimeError(f"OpenAI API error {resp.status_code}: {resp.text}")
+            raise ProviderHTTPStatusError(resp.status_code, resp.text)
 
         data = resp.json()
         return [item["embedding"] for item in data["data"]]

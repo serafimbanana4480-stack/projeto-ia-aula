@@ -17,12 +17,18 @@ from typing import Any
 import httpx
 
 from backend.llm.circuit_breaker import get_breaker
+from backend.llm.cost_governor import BudgetExceededError
 from backend.llm.free_policy import (
     FreeModelPolicy,
     FreeModelRequirement,
     ProviderUnavailableError,
 )
 logger = logging.getLogger(__name__)
+
+# 401/402/403 = credenciais/crédito: reintentar cedo só queima a cadeia
+# de failover (audit 2026-08-24, B5). Ver ProviderHTTPStatusError.
+_TERMINAL_AUTH_STATUSES = {401, 402, 403}
+_TERMINAL_AUTH_OPEN_SECONDS = 900.0
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +359,30 @@ class MultiLLMManager:
             cost_usd=cost,
         )
 
+        # Durable ledger + budget accounting (audit 2026-08-24 B2).
+        # Accounting failures must never break a chat in flight.
+        try:
+            from backend.llm.cost_governor import get_cost_governor
+
+            governor = get_cost_governor()
+            governor.record(
+                cost_usd=cost,
+                provider=provider_name,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+            if (
+                governor.daily_budget_usd > 0
+                and governor.today_spend() >= governor.daily_budget_usd
+            ):
+                logger.critical(
+                    "LLM daily budget reached during this call: %s",
+                    governor.snapshot(),
+                )
+        except Exception:  # pragma: no cover - accounting must not break chat
+            logger.exception("Cost governor recording failed")
+
     def get_best_provider(self) -> str:
         """Return the healthiest provider based on latency and success rate."""
         candidates = [
@@ -386,6 +416,12 @@ class MultiLLMManager:
                 provider=name,
                 model=model,
             )
+        # Hard cost cap (audit 2026-08-24 B1): no paid dispatch may start
+        # once the configured budget is exhausted. Free-only traffic costs
+        # $0 so this is a no-op unless a daily budget is configured.
+        from backend.llm.cost_governor import get_cost_governor
+
+        get_cost_governor().check()
         if not self.free_only:
             return
         validator = getattr(provider, "validate_model", None)
@@ -581,6 +617,16 @@ class MultiLLMManager:
                 continue
             try:
                 self._ensure_dispatch_allowed(name, model)
+            except BudgetExceededError as exc:
+                # Orçamento esgotado: não vale a pena tentar os restantes
+                # providers pagos — todos falham pelo mesmo motivo.
+                last_error = ProviderUnavailableError(
+                    str(exc),
+                    category="budget_exceeded",
+                    provider=name,
+                    model=model,
+                )
+                continue
             except ProviderUnavailableError as exc:
                 last_error = exc
                 continue
@@ -607,6 +653,15 @@ class MultiLLMManager:
                 raise
             except Exception as exc:
                 typed = self._typed_provider_error(exc, name, model)
+                status_code = getattr(exc, "status_code", None)
+                if status_code in _TERMINAL_AUTH_STATUSES:
+                    breaker.force_open(_TERMINAL_AUTH_OPEN_SECONDS)
+                    logger.critical(
+                        "Provider '%s' terminal status %s — breaker aberto %ss",
+                        name,
+                        status_code,
+                        _TERMINAL_AUTH_OPEN_SECONDS,
+                    )
                 if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
                     await breaker.record_failure()
                 last_error = typed
@@ -666,6 +721,16 @@ class MultiLLMManager:
                 continue
             try:
                 self._ensure_dispatch_allowed(name, model)
+            except BudgetExceededError as exc:
+                # Orçamento esgotado: não vale a pena tentar os restantes
+                # providers pagos — todos falham pelo mesmo motivo.
+                last_error = ProviderUnavailableError(
+                    str(exc),
+                    category="budget_exceeded",
+                    provider=name,
+                    model=model,
+                )
+                continue
             except ProviderUnavailableError as exc:
                 last_error = exc
                 continue
@@ -695,6 +760,15 @@ class MultiLLMManager:
                 raise
             except Exception as exc:
                 typed = self._typed_provider_error(exc, name, model)
+                status_code = getattr(exc, "status_code", None)
+                if status_code in _TERMINAL_AUTH_STATUSES:
+                    breaker.force_open(_TERMINAL_AUTH_OPEN_SECONDS)
+                    logger.critical(
+                        "Provider '%s' terminal status %s — breaker aberto %ss",
+                        name,
+                        status_code,
+                        _TERMINAL_AUTH_OPEN_SECONDS,
+                    )
                 if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
                     await breaker.record_failure()
                 last_error = typed
@@ -756,6 +830,15 @@ class MultiLLMManager:
                 raise
             except Exception as exc:
                 typed = self._typed_provider_error(exc, name, model)
+                status_code = getattr(exc, "status_code", None)
+                if status_code in _TERMINAL_AUTH_STATUSES:
+                    breaker.force_open(_TERMINAL_AUTH_OPEN_SECONDS)
+                    logger.critical(
+                        "Provider '%s' terminal status %s — breaker aberto %ss",
+                        name,
+                        status_code,
+                        _TERMINAL_AUTH_OPEN_SECONDS,
+                    )
                 if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
                     await breaker.record_failure()
                 last_error = typed
@@ -898,6 +981,15 @@ class MultiLLMManager:
                 return name, result
             except Exception as exc:
                 typed = self._typed_provider_error(exc, name, model)
+                status_code = getattr(exc, "status_code", None)
+                if status_code in _TERMINAL_AUTH_STATUSES:
+                    breaker.force_open(_TERMINAL_AUTH_OPEN_SECONDS)
+                    logger.critical(
+                        "Provider '%s' terminal status %s — breaker aberto %ss",
+                        name,
+                        status_code,
+                        _TERMINAL_AUTH_OPEN_SECONDS,
+                    )
                 if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
                     await breaker.record_failure()
                 raise typed from exc
@@ -980,6 +1072,15 @@ class MultiLLMManager:
                 results[name] = result
             except Exception as exc:
                 typed = self._typed_provider_error(exc, name, model)
+                status_code = getattr(exc, "status_code", None)
+                if status_code in _TERMINAL_AUTH_STATUSES:
+                    breaker.force_open(_TERMINAL_AUTH_OPEN_SECONDS)
+                    logger.critical(
+                        "Provider '%s' terminal status %s — breaker aberto %ss",
+                        name,
+                        status_code,
+                        _TERMINAL_AUTH_OPEN_SECONDS,
+                    )
                 if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
                     await breaker.record_failure()
                 self._update_health(name, False, 0.0)
