@@ -511,8 +511,23 @@ class MultiLLMManager:
                         model=model,
                         retry_after=breaker.retry_after,
                     )
+            # An opaque "no provider" here reads like a crash and stops the
+            # chat before a single model call, with nothing the user can act
+            # on (audit 2026-08-16, P9a). Name the guard, what it filtered,
+            # and the two ways out.
+            tried = ", ".join(sorted({
+                str(getattr(item, "provider", None) or (
+                    item.get("provider") if isinstance(item, dict) else ""
+                ))
+                for item in eligible_candidates
+            } - {""})) or "nenhum"
             raise ProviderUnavailableError(
-                "No validated healthy free provider satisfies the request",
+                "Nenhum provider gratuito validado satisfaz este pedido "
+                f"(modelo='{model or 'auto'}', providers avaliados: {tried}). "
+                "NEXUS_FREE_ONLY=true limita a execução a modelos de custo zero "
+                "já validados. Opções: (1) usar um modelo local (Ollama/Foundry) "
+                "e configurá-lo em Definições → Modelos; (2) definir "
+                "NEXUS_FREE_ONLY=false no .env para autorizar modelos pagos.",
                 category="provider_unavailable",
                 model=model,
             )

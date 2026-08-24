@@ -116,9 +116,17 @@ class TestAutoMode:
         types = [e["type"] for e in events]
 
         assert "routing" in types
-        routing = next(e for e in events if e["type"] == "routing")["routing"]
-        assert routing["primary_agent"] == "CODER"
-        assert routing["routing_reason"] == "classified:assisted"
+        # Phase 3 moved ownership of a normal turn to NEXUS PRIMARY: the router
+        # no longer picks a specialist up front. The contract that MUST hold is
+        # that the routing frame names the agent that will answer and explains
+        # why — clients label the message from it.
+        routing_event = next(e for e in events if e["type"] == "routing")
+        routing = routing_event["routing"]
+        assert routing is not None, "routing frame must carry a routing decision"
+        assert routing["primary_agent"] == "NEXUS"
+        assert routing["routing_reason"].startswith("triage:")
+        assert routing_event["data"]["path"] == "nexus_primary"
+        assert routing_event["data"]["triage"]["class"] in {"direct", "conversational", "planned"}
 
         assert "agent_started" in types
         assert types[-1] == "done"
@@ -138,8 +146,10 @@ class TestAutoMode:
         assert response.status_code == 200
         events = _iter_sse_events(response.content)
         routing = next(e for e in events if e["type"] == "routing")["routing"]
-        assert routing["primary_agent"] == "MICRO"
-        assert routing["routing_reason"] == "classified:chat"
+        # Phase 3: NEXUS PRIMARY owns the turn; triage records that a short
+        # informational question needs no tools, instead of picking MICRO.
+        assert routing["primary_agent"] == "NEXUS"
+        assert routing["routing_reason"] == "triage:conversational"
 
     def test_auto_mode_persists_history(self, client_with_fake_agents: TestClient) -> None:
         sid = "t-auto-history"

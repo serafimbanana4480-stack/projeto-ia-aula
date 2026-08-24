@@ -8,13 +8,18 @@ passed/failed counts, coverage, and failed test details.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
 import shutil
+import sys
+import tempfile
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Any
 
+from backend.tools.interpreters import resolve_python_interpreter
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
@@ -26,6 +31,7 @@ logger = logging.getLogger(__name__)
 def _has_pytest_module() -> bool:
     try:
         import pytest  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -34,19 +40,27 @@ def _has_pytest_module() -> bool:
 _PYTEST_AVAILABLE = shutil.which("pytest") is not None or _has_pytest_module()
 
 
-def _has_pytest_module() -> bool:
-    try:
-        import pytest  # noqa: F401
-        return True
-    except ImportError:
-        return False
+#: Substrings proving pytest never started. A run that never started has no
+#: results — reporting "0 passed, 0 failed" as success is the failure mode this
+#: guards against.
+_PYTEST_MISSING_MARKERS: tuple[str, ...] = (
+    "no module named pytest",
+    "not installed",
+    "command not found",
+    "cannot find the path",
+    "is not recognized",
+)
 
 
 async def _run_pytest(
-    args: list[str], cwd: str | None = None, timeout: int = 600
+    args: list[str],
+    cwd: str | None = None,
+    timeout: int = 600,
+    interpreter: str | None = None,
 ) -> tuple[int, str, str]:
     """Run pytest as subprocess and return (returncode, stdout, stderr)."""
-    cmd = ["python", "-m", "pytest", *args]
+    python_bin = interpreter or resolve_python_interpreter(cwd)
+    cmd = [python_bin, "-m", "pytest", *args]
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -63,7 +77,7 @@ async def _run_pytest(
     except TimeoutError:
         return (-1, "", f"Timeout after {timeout}s")
     except FileNotFoundError:
-        return (-1, "", "pytest not installed (pip install pytest)")
+        return (-1, "", f"interpreter not found: {python_bin}")
 
 
 # ---------------------------------------------------------------------------
@@ -182,8 +196,12 @@ async def run_tests(
     if marker:
         args.extend(["-m", marker])
 
-    # JUnit XML for structured results
-    junit_path = "/tmp/nexus-junit.xml"
+    # JUnit XML for structured results. A hardcoded POSIX /tmp path is wrong
+    # on Windows, where it resolves to the current drive root and frequently
+    # is not writable — the parser then silently fell back to counting zero.
+    junit_path = str(Path(tempfile.gettempdir()) / "nexus-junit.xml")
+    with contextlib.suppress(OSError):
+        Path(junit_path).unlink()  # never reuse a previous run's results
     args.extend([f"--junit-xml={junit_path}"])
 
     # Add test path
@@ -191,7 +209,10 @@ async def run_tests(
         args.append(test_path)
 
     # Run
-    returncode, stdout, stderr = await _run_pytest(args, cwd=project_path, timeout=timeout)
+    interpreter = resolve_python_interpreter(project_path)
+    returncode, stdout, stderr = await _run_pytest(
+        args, cwd=project_path, timeout=timeout, interpreter=interpreter
+    )
 
     # Parse results
     summary = _parse_summary_line(stdout)
@@ -201,8 +222,85 @@ async def run_tests(
     duration_match = re.search(r"in\s+([\d.]+)s", stdout)
     duration_s = float(duration_match.group(1)) if duration_match else None
 
+    executed = (
+        junit_data["total"] > 0
+        or summary["passed"] > 0
+        or summary["failed"] > 0
+        or summary["errors"] > 0
+        or summary["skipped"] > 0
+    )
+    combined_output = f"{stdout}\n{stderr}".lower()
+    runner_missing = any(marker in combined_output for marker in _PYTEST_MISSING_MARKERS)
+    # returncode 4 = pytest usage error, 5 = no tests collected. Neither is a
+    # pass, and neither may be reported as one.
+    could_not_run = runner_missing or returncode in (4, 5) or (
+        not executed and returncode != 0
+    )
+
+    # "This project has no tests" is a different fact from "the test runner is
+    # broken". Treating the first as a failure sent the primary loop into a
+    # recovery cycle — a second full inference — for read-only questions about
+    # projects that simply have no suite.
+    if returncode == 5 and not runner_missing:
+        return {
+            "status": "no_tests",
+            "ran": True,
+            "executed": False,
+            "ok": True,
+            "no_tests_found": True,
+            "interpreter": interpreter,
+            "returncode": returncode,
+            "passed": 0,
+            "failed": 0,
+            "errors": 0,
+            "skipped": 0,
+            "total": 0,
+            "duration_s": duration_s,
+            "error": (
+                "Nenhum teste foi recolhido neste alvo: o projeto pode não ter "
+                "testes. Nada foi verificado — não afirmes que os testes passaram."
+            ),
+            "stdout_tail": stdout[-2000:] if stdout else "",
+            "stderr_tail": stderr[-1000:] if stderr else "",
+        }
+
+    if could_not_run:
+        reason = (
+            f"pytest não arrancou com o interpretador '{interpreter}'"
+            if runner_missing
+            else (
+                "pytest não recolheu nenhum teste"
+                if returncode == 5
+                else f"pytest terminou com returncode {returncode} sem executar testes"
+            )
+        )
+        return {
+            "status": "not_run",
+            "ran": False,
+            "executed": False,
+            "ok": False,
+            "error": (
+                f"{reason}. Nenhum teste foi executado, por isso NÃO existe "
+                "verificação verde: não afirmes que os testes passaram."
+            ),
+            "interpreter": interpreter,
+            "returncode": returncode,
+            "passed": 0,
+            "failed": 0,
+            "errors": summary["errors"],
+            "skipped": 0,
+            "total": 0,
+            "duration_s": duration_s,
+            "stdout_tail": stdout[-2000:] if stdout else "",
+            "stderr_tail": stderr[-1000:] if stderr else "",
+        }
+
     return {
         "status": "passed" if returncode == 0 else ("failed" if returncode in (1, 2) else "error"),
+        "ran": True,
+        "executed": executed,
+        "ok": returncode == 0 and summary["failed"] == 0 and summary["errors"] == 0,
+        "interpreter": interpreter,
         "returncode": returncode,
         "passed": summary["passed"],
         "failed": summary["failed"],

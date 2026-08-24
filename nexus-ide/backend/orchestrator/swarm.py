@@ -21,6 +21,7 @@ from typing import Any
 from backend.agents.base import AgentBase, AgentRequest
 from backend.observability.advanced_logging import get_structured_logger
 from backend.tools.ollama_client import ChatMessage
+from backend.agents.event_protocol import split_stream
 
 logger = logging.getLogger(__name__)
 
@@ -930,14 +931,34 @@ class SwarmOrchestrator:
                 parts.append(token)
                 tokens += 1
 
-            output = "".join(parts)
+            # The control frames an agent emits are transport, not answer.
+            # Joining them into ``output`` is what made SWARM print
+            # "<event>thinking|iteration:1</event>..." to the user on every
+            # run (audit 2026-08-16, P11) and made a frames-only run count as
+            # a success. Strip them; keep the text.
+            output, _frames = split_stream("".join(parts))
+            output = output.strip()
+            if not output:
+                # The agent produced only control frames — typically an error
+                # frame after every provider failed. Silently returning "" here
+                # would hide the reason from the user; returning the frames
+                # verbatim (the old behaviour) printed raw protocol AND counted
+                # as a success. Surface the error text, honestly, as a failure.
+                errors = [
+                    payload
+                    for kind, payload in _frames
+                    if kind in {"error", "tool_error", "warning"} and payload.strip()
+                ]
+                if errors:
+                    output = errors[-1].strip()
             duration = int((time.time() - start) * 1000)
 
             # A run that raised no exception is NOT automatically a success.
             # When the ReAct loop exhausts its iterations it emits a
             # "[TAREFA NÃO CONCLUÍDA]" marker instead of a real answer.
             exhausted = "[TAREFA NÃO CONCLUÍDA]" in output
-            success = not exhausted and bool(output.strip())
+            failed_frame = any(kind == "error" for kind, _payload in _frames)
+            success = not exhausted and not failed_frame and bool(output.strip())
 
             self._slog.agent_end(agent_name, session_id, tokens, duration, success)
 

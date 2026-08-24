@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 LANGUAGE_CONFIG: dict[str, dict[str, str]] = {
     "python": {
+        # Resolved at call time via ``resolve_python_interpreter``; the literal
+        # here is only the last-resort fallback. Hardcoding "python3" broke on
+        # Windows, where the command usually does not exist at all.
         "command": "python3",
         "args": ["-u"],  # unbuffered output
         "extension": ".py",

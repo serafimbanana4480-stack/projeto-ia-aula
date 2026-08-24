@@ -130,6 +130,11 @@ class OpenAIProvider:
             "model": model,
             "messages": messages,
             "stream": True,
+            # An OpenAI-compatible provider does NOT send `usage` on a stream
+            # unless it is asked to. Without this the session panel showed
+            # "ENTRADA 0 / SAÍDA 0" forever while 380 tools had run (audit
+            # 2026-08-16, P9d) and no cost or context-pressure signal existed.
+            "stream_options": {"include_usage": True},
         }
         if options:
             for key in (

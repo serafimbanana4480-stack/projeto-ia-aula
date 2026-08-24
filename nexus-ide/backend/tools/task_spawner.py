@@ -21,6 +21,7 @@ async def spawn_task(
     description: str,
     agent: str = "CODER",
     priority: str = "medium",
+    definition_of_done: str = "",
     context: str = "",
     parent_id: str | None = None,
     depends_on: list[str] | None = None,
@@ -35,6 +36,9 @@ async def spawn_task(
         description: Detailed instructions for the task.
         agent: Agent type to execute the task (CODER, ANALYZER, etc).
         priority: Task priority (low, medium, high, critical).
+        definition_of_done: Checkable condition that says the task is finished.
+            Required by the spawn policy: without it the delegation is denied
+            and the primary agent keeps the work.
         context: Additional context to provide to the agent.
         parent_id: Optional ID of the parent task/phase.
         depends_on: Optional list of task IDs this task depends on.
@@ -57,8 +61,64 @@ async def spawn_task(
             "task_name": name,
         }
 
+    # The spawn policy decides whether delegating is actually better than
+    # doing the work inline. Consulting it here is what keeps the tool result
+    # honest: before this, the policy could decline the delegation while this
+    # tool still told the model "status: spawned" for a subagent that never
+    # started (audit 2026-08-16, P10). The model cannot be honest with the
+    # user if its own tools lie to it.
+    decision_reason = ""
+    try:
+        from backend.runtime.spawn_policy import (
+            SpawnPolicy,
+            SpawnVerdict,
+            SubagentProposal,
+        )
+        from backend.runtime.spawn_registry import get_policy
+
+        policy = get_policy(session_id) or SpawnPolicy()
+        proposal = SubagentProposal(
+            name=name,
+            objective=description or "",
+            definition_of_done=str(definition_of_done or context or ""),
+            estimated_seconds=float(
+                os.environ.get("NEXUS_SPAWN_ESTIMATED_SECONDS", "120") or 120
+            ),
+            requires_deep_exploration=True,
+        )
+        decision = policy.evaluate(proposal)
+        decision_reason = decision.reason
+        if decision.verdict is not SpawnVerdict.SPAWN:
+            logger.info(
+                "spawn_task declined by policy | task=%s | verdict=%s | reason=%s",
+                name,
+                decision.verdict.value,
+                decision.reason,
+            )
+            return {
+                "status": "denied" if decision.verdict is SpawnVerdict.PRIMARY_AGENT_ONLY else "queued",
+                "spawned": False,
+                "background": False,
+                "task_name": name,
+                "agent": agent,
+                "priority": priority,
+                "description": description,
+                "context": context,
+                "parent_id": parent_id,
+                "depends_on": depends_on or [],
+                "verdict": decision.verdict.value,
+                "reason": decision.reason,
+                "failed_conditions": list(decision.failed_conditions),
+                "message": (
+                    "A delegação NÃO foi criada: "
+                    f"{decision.reason}. Trata isto tu próprio agora e não "
+                    "digas ao utilizador que um sub-agente ficou a trabalhar."
+                ),
+            }
+    except ImportError:  # pragma: no cover - runtime without the phase-3 policy
+        logger.debug("Spawn policy unavailable; falling back to lifecycle check")
+
     result: dict[str, Any] = {
-        "status": "spawned",
         "task_name": name,
         "agent": agent,
         "priority": priority,
@@ -67,16 +127,22 @@ async def spawn_task(
         "parent_id": parent_id,
         "depends_on": depends_on or [],
     }
+    if decision_reason:
+        result["reason"] = decision_reason
 
     # In normal chat there is no active OrchestrationEngine to intercept the
     # old declarative result. Attach it to the real lifecycle manager so the
     # principal can answer immediately while the specialist continues in the
     # background and remains visible in Agent Instances.
+    instance_id: str | None = None
+    attach_error = ""
     try:
         from backend.orchestrator.main import app
 
         lifecycle = getattr(app.state, "agent_lifecycle", None)
-        if lifecycle is not None:
+        if lifecycle is None:
+            attach_error = "não há gestor de ciclo de vida de agentes ativo"
+        else:
             try:
                 background_budget = max(
                     60,
@@ -105,15 +171,37 @@ async def spawn_task(
                 token_budget=background_tokens,
                 time_budget_seconds=background_budget,
             )
-            result.update(
-                {
-                    "background": True,
-                    "instance_id": instance_id,
-                    "message": f"{agent} continua em background; a conversa principal permanece livre.",
-                }
-            )
     except Exception as exc:  # pragma: no cover - runtime fallback
+        attach_error = str(exc)
         logger.warning("Could not attach spawned task to agent lifecycle: %s", exc)
+
+    if not instance_id:
+        # No instance means no subagent. Saying "spawned" here is exactly the
+        # lie the audit caught; report the truth so the model does the work.
+        result.update(
+            {
+                "status": "not_started",
+                "spawned": False,
+                "background": False,
+                "error": (
+                    "O sub-agente NÃO arrancou"
+                    + (f": {attach_error}" if attach_error else ".")
+                    + " Executa a tarefa tu próprio e não afirmes que há "
+                    "trabalho a decorrer em background."
+                ),
+            }
+        )
+        return result
+
+    result.update(
+        {
+            "status": "spawned",
+            "spawned": True,
+            "background": True,
+            "instance_id": instance_id,
+            "message": f"{agent} continua em background; a conversa principal permanece livre.",
+        }
+    )
 
     return result
 
@@ -157,6 +245,14 @@ register_tool(
                     "enum": ["low", "medium", "high", "critical"],
                     "description": "Task priority level",
                 },
+                "definition_of_done": {
+                    "type": "string",
+                    "description": (
+                        "Checkable condition that proves the delegated task is "
+                        "finished (e.g. 'os testes de scoring passam'). Required: "
+                        "without it the spawn policy denies the delegation."
+                    ),
+                },
                 "context": {
                     "type": "string",
                     "description": "Additional context for the agent",
@@ -171,7 +267,7 @@ register_tool(
                     "description": "Optional list of task IDs this task depends on",
                 },
             },
-            "required": ["name", "description"],
+            "required": ["name", "description", "definition_of_done"],
         },
         handler=spawn_task,
     )

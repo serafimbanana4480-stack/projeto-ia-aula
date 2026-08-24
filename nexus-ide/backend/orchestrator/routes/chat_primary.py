@@ -30,7 +30,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from backend.models.api import StreamEvent
+from backend.models.api import RoutingDecision, StreamEvent
 from backend.runtime.events import RuntimeEvent, RuntimeEventType
 from backend.runtime.primary import (
     AgentSignal,
@@ -42,7 +42,15 @@ from backend.runtime.primary import (
     VerificationRequest,
     VerificationResult,
 )
+from backend.agents.event_protocol import split_stream
+from backend.persistence.db import upsert_session_run
 from backend.runtime.spawn_policy import SpawnPolicy, SubagentProposal
+from backend.runtime.spawn_registry import (
+    clear_policy as clear_spawn_policy,
+)
+from backend.runtime.spawn_registry import (
+    register_policy as register_spawn_policy,
+)
 from backend.runtime.telemetry import RunTelemetry
 from backend.runtime.triage import RequestClass, TriageDecision, triage_request
 
@@ -224,18 +232,64 @@ async def _verify(
 
     payload = raw.get("result") if isinstance(raw, dict) else None
     payload = payload if isinstance(payload, dict) else {}
-    ok = bool(raw.get("ok")) and int(payload.get("failed", 0) or 0) == 0
-    passed = payload.get("passed")
-    failed = payload.get("failed")
-    summary = payload.get("summary") or raw.get("error") or ""
-    if passed is not None or failed is not None:
-        summary = f"{passed or 0} passaram, {failed or 0} falharam"
+    passed = int(payload.get("passed", 0) or 0)
+    failed = int(payload.get("failed", 0) or 0)
+    errors = int(payload.get("errors", 0) or 0)
+    total = int(payload.get("total", 0) or 0)
+    # "No tests ran" is NOT "everything passed". The old expression was
+    # ``ok = raw.ok and failed == 0``: when pytest could not start at all it
+    # reported failed == 0, so a run where nothing executed was rendered to the
+    # user as a green "0 passaram, 0 falharam" (audit 2026-08-16, P3).
+    executed = bool(payload.get("executed")) or (passed + failed + errors + total) > 0
+    runner_ran = payload.get("ran")
+    could_not_run = runner_ran is False or payload.get("status") == "not_run"
+    if payload.get("no_tests_found") or payload.get("status") == "no_tests":
+        # Nothing to verify is not a red verification, and must not trigger a
+        # recovery cycle. It is also NOT a green one: ran=False keeps the
+        # honesty check from accepting "os testes passaram".
+        return VerificationResult(
+            ran=False,
+            ok=True,
+            summary="o projeto não tem testes a executar; nada foi verificado",
+            command=str(raw.get("command") or "run_tests"),
+            details={"executed": False, "target": target, "no_tests_found": True},
+        )
+    if could_not_run or not executed:
+        reason = (
+            str(payload.get("error") or raw.get("error") or "").strip()
+            or "nenhum teste chegou a ser executado"
+        )
+        return VerificationResult(
+            ran=True,
+            ok=False,
+            summary=f"NÃO VERIFICADO: {reason}",
+            command=str(raw.get("command") or "run_tests"),
+            details={
+                "passed": passed,
+                "failed": failed,
+                "errors": errors,
+                "executed": False,
+                "target": target,
+                "interpreter": payload.get("interpreter"),
+            },
+        )
+
+    ok = bool(raw.get("ok", True)) and failed == 0 and errors == 0
+    summary = f"{passed} passaram, {failed} falharam"
+    if errors:
+        summary = f"{summary}, {errors} erros"
     return VerificationResult(
         ran=True,
         ok=ok,
-        summary=str(summary) or ("verificação verde" if ok else "verificação vermelha"),
+        summary=summary,
         command=str(raw.get("command") or "run_tests"),
-        details={"passed": passed, "failed": failed, "target": target},
+        details={
+            "passed": passed,
+            "failed": failed,
+            "errors": errors,
+            "executed": True,
+            "target": target,
+        },
     )
 
 
@@ -552,6 +606,18 @@ async def run_primary_chat(
     if decision.request_class is RequestClass.CONVERSATIONAL:
         agent_context["_fast_chat_lane"] = True
         agent_context["_allowed_tools"] = ()
+    if decision.needs_clarification:
+        # No target, no scope. Guessing produces a project-wide sweep against
+        # an invented objective; one short question costs a second and gets
+        # the real one (audit 2026-08-16, P7).
+        agent_context["_needs_clarification"] = True
+        agent_context["_system_addon"] = (
+            str(agent_context.get("_system_addon") or "")
+            + "\n[SYSTEM] O pedido do utilizador não identifica um alvo concreto "
+            "(ficheiro, função, erro ou objetivo). NÃO inventes um alvo e não "
+            "faças um varrimento do projeto. Faz UMA pergunta curta a pedir o "
+            "alvo, ou refere o alvo do turno anterior se ele for inequívoco."
+        )
 
     max_iterations = decision.max_iterations or int(
         os.environ.get("NEXUS_PRIMARY_MAX_ITERATIONS", "12")
@@ -572,6 +638,13 @@ async def run_primary_chat(
         request.forced = request.forced or decision.force_verification
         return await _verify(request, session_id=session_id, project_path=project_path)
 
+    # One policy object per run, shared with the spawn_task tool so the tool's
+    # answer and the runtime's verdict can never disagree (audit P10).
+    spawn_policy = SpawnPolicy(
+        max_parallel_workers=int(os.environ.get("NEXUS_MAX_PARALLEL_WORKERS", "3"))
+    )
+    register_spawn_policy(session_id, spawn_policy)
+
     loop = PrimaryLoop(
         run_id=run_id,
         query=req.message,
@@ -585,22 +658,52 @@ async def run_primary_chat(
             project_path=project_path,
         ),
         telemetry=telemetry,
-        spawn_policy=SpawnPolicy(
-            max_parallel_workers=int(os.environ.get("NEXUS_MAX_PARALLEL_WORKERS", "3"))
-        ),
+        spawn_policy=spawn_policy,
         steering=steering,
         session_id=session_id,
         project_path=project_path,
         max_cycles=1 if decision.request_class is RequestClass.CONVERSATIONAL else 2,
     )
 
+    # The relational session row must exist BEFORE the run: tools log to
+    # tables with a foreign key to sessions, and /sessions/{id}/runs answers
+    # 404 without it. The legacy lane created it; the primary lane did not, so
+    # run history simply did not exist for primary turns.
+    with contextlib.suppress(Exception):
+        from backend.persistence.db import create_session, get_session
+
+        if get_session(session_id) is None:
+            create_session(
+                title=(getattr(req, "message", "") or "")[:60] or "Nova sessão",
+                mode=getattr(req, "mode", "") or "auto",
+                session_id=session_id,
+            )
+
     steering_registry.register_run(run_id, steering, session_id=session_id)
     started_wall = time.time()
+    # The ``routing`` field is part of the SSE contract clients read to label
+    # a message and explain the choice. The primary lane left it empty, so the
+    # UI fell back to stale labels ("ROUTER", "NEXUS IDE") depending on which
+    # lane produced the message (audit 2026-08-16, P9c).
+    routing_decision = RoutingDecision(
+        primary_agent=PRIMARY_AGENT_NAME,  # type: ignore[arg-type]
+        routing_reason=f"triage:{decision.request_class.value}",
+        task_type=decision.request_class.value,
+        thinking_mode="fast" if decision.request_class is RequestClass.CONVERSATIONAL else "deep",
+        estimated_complexity=(
+            2 if decision.request_class is RequestClass.CONVERSATIONAL
+            else 8 if decision.request_class is RequestClass.PLANNED
+            else 5
+        ),
+        context_needed="low" if decision.request_class is RequestClass.CONVERSATIONAL else "medium",
+        routing_confidence=0.9,
+    )
     yield _sse(
         StreamEvent(
             type="routing",
             agent=PRIMARY_AGENT_NAME,  # type: ignore[arg-type]
             content=decision.reason,
+            routing=routing_decision,
             data={
                 "run_id": run_id,
                 "path": "nexus_primary",
@@ -611,13 +714,51 @@ async def run_primary_chat(
     try:
         async for event in loop.run():
             for frame in runtime_event_to_stream_events(event):
+                if frame.type == "metric" and isinstance(frame.data, dict) and (
+                    "telemetry" in frame.data
+                ):
+                    # The run's telemetry frame is also where the session panel
+                    # reads token usage. Enriching it here keeps ONE metric
+                    # event per run instead of two competing ones.
+                    frame.data["usage"] = build_usage_metric(
+                        llm_client=llm_client,
+                        req=req,
+                        answer=loop.outcome.answer,
+                        history=history,
+                        finish_reason=provider_finish_reason(llm_client),
+                    )
                 yield _sse(frame)
+        finish_reason = provider_finish_reason(llm_client)
+        if finish_reason in _TRUNCATION_FINISH_REASONS:
+            # Say it out loud: a truncated answer that looks complete is the
+            # kind of silent failure this whole runtime is meant to remove.
+            yield _sse(
+                StreamEvent(
+                    type="progress",
+                    agent=PRIMARY_AGENT_NAME,  # type: ignore[arg-type]
+                    content=_TRUNCATION_NOTICE,
+                    data={
+                        "level": "warning",
+                        "reason": "provider_token_limit",
+                        "finish_reason": finish_reason,
+                        "run_id": run_id,
+                    },
+                )
+            )
+        _persist_run_record(
+            run_id=run_id,
+            session_id=session_id,
+            req=req,
+            loop=loop,
+            finish_reason=finish_reason,
+        )
         await _persist(context, req, loop, session_id)
     except asyncio.CancelledError:
         steering.abort()
         raise
     finally:
         steering_registry.unregister_run(run_id)
+        clear_spawn_policy(session_id)
         with contextlib.suppress(Exception):
             await loop.events.aclose()
 
@@ -664,9 +805,174 @@ def _make_subagent_runner(
         chunks: list[str] = []
         async for chunk in agent.run(request):
             chunks.append(chunk)
-        return "".join(chunks)
+        # Control frames belong to the subagent's own run; merging them into
+        # the primary's text is the P11/P12 leak in another costume.
+        text, _frames = split_stream("".join(chunks))
+        return text.strip()
 
     return run_subagent
+
+
+_TRUNCATION_FINISH_REASONS = frozenset(
+    {"length", "max_tokens", "max_output_tokens", "token_limit"}
+)
+
+_TRUNCATION_NOTICE = (
+    "A resposta foi interrompida pelo limite de tokens do provider; "
+    "o estado ficou incompleto e pode ser continuado numa nova mensagem."
+)
+
+
+def provider_finish_reason(llm_client: Any) -> str:
+    """Best-effort finish reason reported by the provider for the last call."""
+    holders = (
+        getattr(llm_client, "last_provider", None),
+        getattr(llm_client, "active_provider", None),
+        llm_client,
+    )
+    for holder in holders:
+        reason = str(getattr(holder, "last_finish_reason", "") or "").lower()
+        if reason:
+            return reason
+    return ""
+
+
+def _persist_run_record(
+    *,
+    run_id: str,
+    session_id: str,
+    req: Any,
+    loop: PrimaryLoop,
+    finish_reason: str,
+) -> None:
+    """Record the run so history, resume and audit see the same truth.
+
+    The primary lane wrote no run row at all, so a turn cut short by the
+    provider's token limit was indistinguishable from a completed one — the
+    legacy lane had recorded it as ``interrupted``.
+    """
+    truncated = finish_reason in _TRUNCATION_FINISH_REASONS
+    answer = loop.outcome.answer or ""
+    if truncated and _TRUNCATION_NOTICE not in answer:
+        answer = f"{answer.rstrip()}\n\n⚠️ {_TRUNCATION_NOTICE}"
+        loop.outcome.answer = answer
+    if loop.outcome.stopped:
+        status, state, phase = "cancelled", "cancelled", "stop_requested"
+    elif truncated:
+        status, state, phase = "interrupted", "interrupted", "provider_output_truncated"
+    else:
+        status, state, phase = "completed", "completed", "finished"
+    with contextlib.suppress(Exception):
+        upsert_session_run(
+            run_id,
+            session_id,
+            status=status,
+            agent=PRIMARY_AGENT_NAME,
+            phase=phase,
+            prompt=getattr(req, "message", "") or "",
+            partial_output=answer,
+            execution_state=state,
+            mode=getattr(req, "mode", "") or "auto",
+            model=getattr(req, "model", "") or None,
+            finished=True,
+            checkpoint={
+                "path": "nexus_primary",
+                "cycles": loop.outcome.cycles,
+                "changed_files": list(loop.outcome.changed_files),
+                "verification": {
+                    "ran": loop.outcome.verification.ran,
+                    "ok": loop.outcome.verification.ok,
+                    "summary": loop.outcome.verification.summary,
+                },
+                "finish_reason": finish_reason or None,
+            },
+        )
+
+
+def build_usage_metric(
+    *,
+    llm_client: Any,
+    req: Any,
+    answer: str,
+    history: list[Any],
+    finish_reason: str,
+) -> dict[str, Any]:
+    """Assemble the usage payload the session panel renders.
+
+    The primary lane emitted telemetry but no ``usage`` block, so the UI
+    counters sat at "ENTRADA 0 / SAÍDA 0" for the whole session while hundreds
+    of tools ran (audit 2026-08-16, P9d). Provider-reported numbers are used
+    when present — they now arrive because the OpenAI-compatible provider asks
+    for them via ``stream_options`` — and a local estimate is labelled as such
+    rather than silently passed off as measured.
+    """
+    from backend.token_management import count_tokens
+
+    provider = (
+        getattr(llm_client, "last_provider", None)
+        or getattr(llm_client, "active_provider", None)
+        or llm_client
+    )
+    raw_usage = getattr(provider, "last_usage", {})
+    raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
+    model_for_counting = str(getattr(req, "model", "") or "fast")
+
+    def _as_int(*keys: str) -> int:
+        for key in keys:
+            value = raw_usage.get(key)
+            if isinstance(value, int | float) and value > 0:
+                return int(value)
+        return 0
+
+    provider_in = _as_int("input_tokens", "prompt_tokens")
+    provider_out = _as_int("output_tokens", "completion_tokens")
+    provider_total = _as_int("total_tokens")
+    measured = bool(provider_in or provider_out or provider_total)
+
+    prompt_tokens = count_tokens(getattr(req, "message", "") or "", model_for_counting)
+    history_tokens = 0
+    for message in history:
+        content = getattr(message, "content", None)
+        if content is None and isinstance(message, dict):
+            content = message.get("content")
+        history_tokens += count_tokens(str(content or ""), model_for_counting)
+    output_tokens = count_tokens(answer or "", model_for_counting)
+
+    truncated = finish_reason in _TRUNCATION_FINISH_REASONS
+    return {
+        "input_tokens": provider_in if measured else prompt_tokens + history_tokens,
+        "output_tokens": provider_out if measured else output_tokens,
+        "reasoning_tokens": 0,
+        "total_tokens": (
+            provider_total
+            if provider_total
+            else (provider_in + provider_out)
+            if measured
+            else prompt_tokens + history_tokens + output_tokens
+        ),
+        "source": "provider" if measured else "estimated",
+        "cache_read_tokens": None,
+        "cache_write_tokens": None,
+        "cache_status": "not_reported",
+        "provider": {
+            "name": str(
+                getattr(provider, "provider_name", "")
+                or provider.__class__.__name__.removesuffix("Provider").lower()
+            ),
+            "model": str(getattr(req, "model", "") or "") or None,
+            "simulation": bool(getattr(provider, "simulation", False)),
+            "source": "nexus_primary",
+            "finish_reason": finish_reason or None,
+            "complete": not truncated,
+        },
+        "context": {
+            "prompt": prompt_tokens,
+            "history": history_tokens,
+            "response": output_tokens,
+            "total": prompt_tokens + history_tokens + output_tokens,
+            "source": "estimated",
+        },
+    }
 
 
 async def _persist(context: Any, req: Any, loop: PrimaryLoop, session_id: str) -> None:
@@ -677,7 +983,13 @@ async def _persist(context: Any, req: Any, loop: PrimaryLoop, session_id: str) -
 
     answer = loop.outcome.answer
     if not answer:
-        return
+        # A run that produced no answer still happened. Dropping the whole turn
+        # meant the user's own message disappeared on refresh, and the failure
+        # left no trace anywhere the user could see it.
+        answer = (
+            "⚠️ Esta execução terminou sem resposta do modelo. "
+            "Nada foi alterado. Vê o painel de atividade para o erro do provider."
+        )
     now = datetime.now(UTC).isoformat()
     with contextlib.suppress(Exception):
         await context.append_message(

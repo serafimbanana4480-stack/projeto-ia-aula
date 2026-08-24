@@ -12,6 +12,7 @@ from backend.agents.executive.architecture_decision_maker import ArchitectureDec
 from backend.agents.executive.technical_roadmapper import TechnicalRoadmapper
 from backend.agents.executive.stack_selector import StackSelector
 from backend.agents.executive.technical_debt_manager import TechnicalDebtManager
+from backend.agents.event_protocol import encode_event
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ class CTOAgent(AgentBase):
 
     async def run(self, request: AgentRequest) -> AsyncIterator[str]:
         """Execute the CTO agent — yields technical decisions and strategy."""
-        yield f"<event>cto_start|{request.query[:50]}</event>"
+        yield encode_event("cto_start", request.query[:50])
 
         query = request.query.lower()
 
