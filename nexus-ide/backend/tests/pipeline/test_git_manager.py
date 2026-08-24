@@ -107,7 +107,10 @@ class TestConventionalCommit:
 
 
 class TestGitErrors:
-    def test_invalid_command_raises(self, tmp_path: Path) -> None:
+    def test_invalid_command_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # GIT_CEILING_DIRECTORIES impede o git de descobrir o repo pai
+        # (o basetemp vive dentro do proprio repo nexus-ide).
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
         repo = tmp_path / "not-a-repo"
         repo.mkdir()
         gm = GitManager(repo)

@@ -9,6 +9,7 @@ import ast
 import json
 import logging
 import subprocess
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -294,7 +295,7 @@ class TestRunner:
         cov_xml = project_path / ".coverage.xml"
 
         cmd = [
-            "python", "-m", "pytest",
+            sys.executable, "-m", "pytest",
             "-v",
             "--tb=long",
             f"--junitxml={junit_path}",
@@ -336,7 +337,7 @@ class TestRunner:
 
     def _pip_install(self, cwd: Path, *packages: str) -> None:
         """Install Python packages in the project environment."""
-        cmd = ["python", "-m", "pip", "install", *packages]
+        cmd = [sys.executable, "-m", "pip", "install", *packages]
         result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             logger.warning("pip install warning: %s", result.stderr[:500])

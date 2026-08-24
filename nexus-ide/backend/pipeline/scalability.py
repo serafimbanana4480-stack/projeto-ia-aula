@@ -72,7 +72,25 @@ class TenantManager:
         return self._tenants.get(tenant_id)
 
     def check_rate_limit(self, tenant_id: str) -> bool:
-        """Rate limiting is disabled globally."""
+        """True quando o tenant ativo esta dentro do limite por minuto.
+
+        Tenants inexistentes ou inativos ficam sempre bloqueados.
+        """
+        tenant = self._tenants.get(tenant_id)
+        if not tenant or not tenant.active:
+            return False
+
+        now = time.time()
+        with self._lock:
+            window = [
+                ts for ts in self._rate_limiters.get(tenant_id, [])
+                if now - ts < 60.0
+            ]
+            if len(window) >= tenant.rate_limit_per_minute:
+                self._rate_limiters[tenant_id] = window
+                return False
+            window.append(now)
+            self._rate_limiters[tenant_id] = window
         return True
 
     def can_start_workflow(self, tenant_id: str) -> bool:
