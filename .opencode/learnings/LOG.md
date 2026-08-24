@@ -18,3 +18,5 @@ Padrões que aparecem 2+ vezes devem ser promovidos a skill (ver nexus-skill-for
 2026-08-24 | armadilha | suite-bloqueada-colecao | 1 ficheiro de teste com import quebrado interrompe TODA a coleta pytest; verificar coleção antes de investigar falhas
 2026-08-24 | decisao | dinheiro-real-audit | B1/B2/B3/B5 corrigidos: cost governor pré-dispatch + usage_ledger persistido + kilo fora do free_only + 401/402 abrem breaker 900s; pendente B4 (preço dinâmico), B6 (Redis multi-worker), B7 (keys em claro)
 2026-08-24 | armadilha | early-return-gates | verificação dupla (diário+run) no cost governor era saltada por return antecipado do ramo ilimitado; testar gates compostos sempre
+2026-08-24 | decisao | b4-b6-b7-fechados | preço: YAML→catálogo live→conservador (nunca $0 em modo pago); orçamento autoritativo via SQLite partilhado (sem Redis); chaves enc:v1 Fernet derivado de SECRET_KEY com leitura legado transparente
+2026-08-24 | armadilha | router-prefix-duplo | main.py inclui routers com prefix="/api"; routers novos não devem repetir /api no próprio prefix

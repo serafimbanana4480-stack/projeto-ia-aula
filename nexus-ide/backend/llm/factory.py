@@ -37,8 +37,10 @@ def _load_runtime_overrides() -> dict[str, Any]:
     if not RUNTIME_SETTINGS_PATH.exists():
         return {}
     try:
-        with RUNTIME_SETTINGS_PATH.open("r", encoding="utf-8") as fh:
-            data = json.load(fh)
+        # B7: o ficheiro pode conter valores sensíveis encriptados (enc:v1:).
+        from backend.core.secure_settings_store import load_settings
+
+        data = load_settings(RUNTIME_SETTINGS_PATH)
         # Keep structured local-model metadata as well as scalar settings;
         # the fallback policy needs the verified installed model ids.
         return {
@@ -46,7 +48,7 @@ def _load_runtime_overrides() -> dict[str, Any]:
             for k, v in data.items()
             if isinstance(v, (str, int, float, bool, dict, list)) and v not in ("", None)
         }
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return {}
 
 

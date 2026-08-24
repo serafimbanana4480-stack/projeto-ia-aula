@@ -295,11 +295,11 @@ class AutonomousImprovementOrchestrator:
             result.proposals_approved = len(approved)
             self._save_checkpoint(cycle_id, "approved", result)
 
-            applied = await self._execute(approved)
+            applied = await self._execute(approved, result)
             result.proposals_applied = len(applied)
             self._save_checkpoint(cycle_id, "executed", result)
 
-            verified = await self._verify(applied)
+            verified = await self._verify(applied, result)
             result.proposals_verified = len(verified)
             self._save_checkpoint(cycle_id, "verified", result)
 
@@ -307,7 +307,7 @@ class AutonomousImprovementOrchestrator:
             result.proposals_rejected = rejected
             self._save_checkpoint(cycle_id, "learned", result)
 
-            await self._learn(proposals, applied, verified)
+            await self._learn(proposals, applied, verified, result)
         except Exception as exc:
             logger.exception("Cycle %s failed: %s", cycle_id, exc)
             result.error = str(exc)
@@ -348,14 +348,16 @@ class AutonomousImprovementOrchestrator:
             raw = report.get("stats", {})
             last_proposals = raw.get("last_proposals", [])
             for p in last_proposals:
+                category = p.get("category", "unknown")
+                base_confidence = float(p.get("confidence", 0.5))
                 proposals.append(ImprovementProposal(
                     proposal_id=p.get("id", uuid.uuid4().hex[:12]),
-                    category=p.get("category", "unknown"),
-                    priority=self._priority_for_category(p.get("category", "")),
+                    category=category,
+                    priority=self._priority_for_category(category),
                     target=p.get("target", ""),
                     problem=p.get("problem", ""),
                     proposed_change=p.get("proposed_change", ""),
-                    confidence=float(p.get("confidence", 0.5)),
+                    confidence=max(0.0, min(1.0, base_confidence + self._category_confidence_bias(category))),
                     source="continuous_improvement",
                     estimated_effort="medium",
                 ))
@@ -388,29 +390,41 @@ class AutonomousImprovementOrchestrator:
             unique.append(p)
         return unique
 
-    async def _execute(self, proposals: list[ImprovementProposal]) -> list[ImprovementProposal]:
+    async def _execute(self, proposals: list[ImprovementProposal], result: CycleResult) -> list[ImprovementProposal]:
         applied: list[ImprovementProposal] = []
-        checkpoint = self.auto_rollback.create_checkpoint(f"auto: pre-{len(proposals)}-proposals cycle")
+        # Commit-free safety net: record HEAD + the pre-existing dirty set so a
+        # failure can restore ONLY the system's own files. The old
+        # `git add -A` checkpoint swept unrelated in-progress work into
+        # "auto: ..." commits and `reset --hard` destroyed concurrent edits.
+        snapshot = self.auto_rollback.snapshot(label=f"cycle {result.cycle_id}")
         use_subagents = bool(self.config.get("use_subagents", True))
         for proposal in proposals:
             try:
                 sandbox_passed = await self.sandbox_executor.run_tests()
                 if not sandbox_passed.passed:
                     logger.warning("Sandbox pre-check failed for %s: %s", proposal.proposal_id, sandbox_passed.error)
+                    result.failures_diagnosed += 1
                     continue
 
                 if use_subagents:
-                    result = await self._execute_via_subagents(proposal)
+                    exec_result = await self._execute_via_subagents(proposal)
+                    if not exec_result:
+                        result.failures_diagnosed += 1
+                    applied_result = exec_result
                 elif self.swarm and proposal.category in {"refactor", "architecture"}:
-                    result = await self._execute_via_swarm(proposal)
+                    applied_result = await self._execute_via_swarm(proposal)
                 else:
-                    result = await self._execute_via_healer(proposal)
-                if result:
+                    applied_result = await self._execute_via_healer(proposal)
+                if applied_result:
                     applied.append(proposal)
+                elif not use_subagents:
+                    result.failures_diagnosed += 1
             except Exception as exc:
                 logger.warning("Failed to execute proposal %s: %s", proposal.proposal_id, exc)
-                if checkpoint:
-                    self.auto_rollback.rollback_to(checkpoint)
+                result.failures_diagnosed += 1
+                rollback = self.auto_rollback.restore(snapshot)
+                if rollback.restored_files:
+                    result.regressions_introduced += 1
         return applied
 
     async def _execute_via_subagents(self, proposal: ImprovementProposal) -> bool:
@@ -508,7 +522,7 @@ class AutonomousImprovementOrchestrator:
             return False
         diff_report = self.diff_validator.validate_files(self._get_changed_files())
         if not diff_report.passed:
-            await self.auto_rollback.rollback_last()
+            await self.auto_rollback.restore(self.auto_rollback.snapshot(label="phase verify"))
             return False
         return True
 
@@ -543,8 +557,9 @@ class AutonomousImprovementOrchestrator:
             logger.debug("Healer execution failed for %s", proposal.proposal_id, exc_info=True)
             return False
 
-    async def _verify(self, proposals: list[ImprovementProposal]) -> list[ImprovementProposal]:
+    async def _verify(self, proposals: list[ImprovementProposal], result: CycleResult) -> list[ImprovementProposal]:
         verified: list[ImprovementProposal] = []
+        snapshot = self.auto_rollback.snapshot(label=f"verify {result.cycle_id}")
         for proposal in proposals:
             try:
                 passed = await self.healer._run_quality_gate()
@@ -552,18 +567,22 @@ class AutonomousImprovementOrchestrator:
                     diff_report = self.diff_validator.validate_files(self._get_changed_files())
                     if not diff_report.passed:
                         logger.warning("Diff validation failed for %s: %d issues", proposal.proposal_id, len(diff_report.issues))
-                        await self.auto_rollback.rollback_last()
+                        rollback = self.auto_rollback.restore(snapshot)
+                        if rollback.restored_files:
+                            result.regressions_introduced += 1
                         continue
                     verified.append(proposal)
                     await self._emit("improvement.verification.passed", proposal.proposal_id, {
                         "proposal_id": proposal.proposal_id,
                     })
                 else:
+                    result.failures_diagnosed += 1
                     await self._emit("improvement.verification.failed", proposal.proposal_id, {
                         "proposal_id": proposal.proposal_id,
                     })
             except Exception:
                 logger.debug("Verification failed for %s", proposal.proposal_id, exc_info=True)
+                result.failures_diagnosed += 1
         return verified
 
     def _get_changed_files(self) -> list[Any]:
@@ -586,6 +605,7 @@ class AutonomousImprovementOrchestrator:
         proposals: list[ImprovementProposal],
         applied: list[ImprovementProposal],
         verified: list[ImprovementProposal],
+        result: CycleResult | None = None,
     ) -> None:
         for proposal in applied:
             try:
@@ -604,9 +624,117 @@ class AutonomousImprovementOrchestrator:
             try:
                 from backend.core.knowledge_base import SkillEvolutionEngine
                 engine = SkillEvolutionEngine.get_instance()
-                await engine.evolve_skills(applied)
+                outcome = await engine.evolve_skills(applied)
+                if isinstance(outcome, dict):
+                    result = result or CycleResult(cycle_id="learn-only", started_at=datetime.now(UTC))
+                    result.skills_created += int(outcome.get("created", 0) or 0)
+                    result.skills_evolved += int(outcome.get("evolved", 0) or 0)
             except Exception:
                 logger.debug("Skill evolution failed", exc_info=True)
+
+        # Meta-learning: persist the cycle and per-category success rates so
+        # future `_plan()` calls can trust categories that historically verify
+        # and discount categories that keep failing. Previously the LEARN
+        # phase only wrote patterns for applied proposals — counters like
+        # failures_diagnosed / regressions_introduced stayed at zero and the
+        # cycle history vanished with the process.
+        if result is not None:
+            # Keep counters consistent with the lists this call actually saw,
+            # so direct _learn() invocations persist truthful numbers.
+            result.proposals_generated = max(result.proposals_generated, len(proposals))
+            result.proposals_applied = max(result.proposals_applied, len(applied))
+            result.proposals_verified = max(result.proposals_verified, len(verified))
+            result.meta_learning_updates = self._update_category_stats(proposals, verified)
+            self._persist_cycle(result)
+
+    # -- meta-learning persistence -------------------------------------------
+
+    @property
+    def _cycle_history_path(self) -> Path:
+        return REPO_ROOT / "data" / "improvement_cycles.json"
+
+    def _load_cycle_history(self) -> dict[str, Any]:
+        try:
+            import json
+
+            if self._cycle_history_path.exists():
+                return json.loads(self._cycle_history_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.debug("Cycle history unreadable", exc_info=True)
+        return {"cycles": [], "category_stats": {}}
+
+    def _persist_cycle(self, result: CycleResult, keep_last: int = 100) -> None:
+        try:
+            import json
+
+            data = self._load_cycle_history()
+            data.setdefault("cycles", [])
+            data["cycles"].append(
+                {
+                    "cycle_id": result.cycle_id,
+                    "started_at": result.started_at.isoformat(),
+                    "completed_at": result.completed_at.isoformat() if result.completed_at else None,
+                    "generated": result.proposals_generated,
+                    "applied": result.proposals_applied,
+                    "verified": result.proposals_verified,
+                    "rejected": result.proposals_rejected,
+                    "failures_diagnosed": result.failures_diagnosed,
+                    "regressions_introduced": result.regressions_introduced,
+                    "skills_created": result.skills_created,
+                    "skills_evolved": result.skills_evolved,
+                    "wall_time_seconds": round(result.wall_time_seconds, 2),
+                    "error": result.error,
+                }
+            )
+            data["cycles"] = data["cycles"][-keep_last:]
+            self._cycle_history_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cycle_history_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            logger.debug("Cycle persistence failed", exc_info=True)
+
+    def _update_category_stats(
+        self,
+        proposals: list[ImprovementProposal],
+        verified: list[ImprovementProposal],
+    ) -> dict[str, Any]:
+        """Exponential-moving success rate per category (alpha=0.3)."""
+        try:
+            import json
+
+            data = self._load_cycle_history()
+            stats: dict[str, Any] = data.setdefault("category_stats", {})
+            verified_by_cat: dict[str, int] = {}
+            for p in verified:
+                verified_by_cat[p.category] = verified_by_cat.get(p.category, 0) + 1
+            touched: dict[str, Any] = {}
+            alpha = 0.3
+            for p in proposals:
+                entry = stats.get(p.category) or {"success_ema": 0.5, "samples": 0}
+                outcome = 1.0 if verified_by_cat.get(p.category, 0) > 0 else 0.0
+                entry["success_ema"] = round((1 - alpha) * entry["success_ema"] + alpha * outcome, 4)
+                entry["samples"] = int(entry["samples"]) + 1
+                stats[p.category] = entry
+                touched[p.category] = entry
+            data["category_stats"] = stats
+            self._cycle_history_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cycle_history_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            return touched
+        except Exception:
+            logger.debug("Category stats update failed", exc_info=True)
+            return {}
+
+    def _category_confidence_bias(self, category: str) -> float:
+        """Bounded trust adjustment (±0.1) from historical verification rate."""
+        stats = self._load_cycle_history().get("category_stats", {})
+        entry = stats.get(category)
+        if not entry or int(entry.get("samples", 0)) < 3:
+            return 0.0
+        ema = float(entry.get("success_ema", 0.5))
+        return max(-0.1, min(0.1, (ema - 0.5) * 0.4))
 
     def _save_checkpoint(self, cycle_id: str, step: str, result: CycleResult, completed: bool = False) -> None:
         if not self._checkpoint_id:
