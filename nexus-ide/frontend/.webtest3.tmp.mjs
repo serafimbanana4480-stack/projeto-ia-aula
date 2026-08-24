@@ -36,11 +36,11 @@ async function ensureLogin() {
       await page.waitForTimeout(4000);
     }
   }
-  throw new Error("could not login");
+  await page.screenshot({ path: OUT + "/09-login-fail.png" }); throw new Error("could not login");
 }
 
 const where = await ensureLogin();
-log("where:", where, page.url());
+log("where:", where, page.url()); await page.screenshot({ path: OUT + "/09-after-login.png" });
 await page.waitForSelector("textarea", { timeout: 30_000 });
 await page.waitForTimeout(4000);
 

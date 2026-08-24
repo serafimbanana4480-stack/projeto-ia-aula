@@ -12,7 +12,8 @@ const { chromium } = require('playwright');
   const shot = (name) => page.screenshot({ path: `shots/${name}.png`, fullPage: false });
 
   // 1. Home (redirect to /login if unauthenticated)
-  await page.goto('http://localhost:3000/', { waitUntil: 'networkidle', timeout: 60000 });
+  await page.goto('http://localhost:3000/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(5000);
   await shot('01-initial');
   console.log('URL after goto:', page.url());
 

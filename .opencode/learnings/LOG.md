@@ -16,3 +16,5 @@ Padrões que aparecem 2+ vezes devem ser promovidos a skill (ver nexus-skill-for
 2026-08-24 | armadilha | pytest-dentro-de-repo | tmp_path dentro do repo nexus-ide faz git descobrir o repo pai; usar GIT_CEILING_DIRECTORIES em testes git
 2026-08-24 | decisao | F821-zero | 48 nomes não definidos corrigidos (crashes latentes); política: manter F821/F823 a zero no backend
 2026-08-24 | armadilha | suite-bloqueada-colecao | 1 ficheiro de teste com import quebrado interrompe TODA a coleta pytest; verificar coleção antes de investigar falhas
+2026-08-24 | decisao | dinheiro-real-audit | B1/B2/B3/B5 corrigidos: cost governor pré-dispatch + usage_ledger persistido + kilo fora do free_only + 401/402 abrem breaker 900s; pendente B4 (preço dinâmico), B6 (Redis multi-worker), B7 (keys em claro)
+2026-08-24 | armadilha | early-return-gates | verificação dupla (diário+run) no cost governor era saltada por return antecipado do ramo ilimitado; testar gates compostos sempre

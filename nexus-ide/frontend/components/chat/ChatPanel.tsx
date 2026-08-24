@@ -1213,7 +1213,9 @@ export default function ChatPanel({
                   }`}
                 >
                   <Icon className="h-3 w-3" />
-                  <span className="hidden sm:inline">{option.label}</span>
+                  {/* Icon-only below ~1780px: with the right panel open the
+                      full labels clipped the header's last buttons. */}
+                  <span className="hidden min-[1780px]:inline">{option.label}</span>
                 </motion.button>
               );
             })}
