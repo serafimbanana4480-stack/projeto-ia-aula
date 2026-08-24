@@ -89,7 +89,9 @@ def client_with_fake_agents(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCli
         if hasattr(main_module.app.state, attr):
             delattr(main_module.app.state, attr)
 
-    # Inject a fake registry so agents don't hit real Ollama
+    # Inject a fake registry so agents don't hit real Ollama. NEXUS is
+    # registered so tests that re-enable the primary runtime (phase-3
+    # contract) can resolve it without touching the network.
     fake_registry: dict[AgentName, AgentBase] = {
         "CODER": FakeAgent("CODER"),
         "ANALYZER": FakeAgent("ANALYZER"),
@@ -97,6 +99,7 @@ def client_with_fake_agents(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCli
         "DEBUGGER": FakeAgent("DEBUGGER"),
         "DOCUMENTER": FakeAgent("DOCUMENTER"),
         "MICRO": FakeAgent("MICRO"),
+        "NEXUS": FakeAgent("NEXUS"),
     }
     main_module.app.state.registry = fake_registry
 
@@ -121,7 +124,12 @@ def _iter_sse_events(body: bytes) -> list[dict]:
 
 
 class TestAutoMode:
-    def test_auto_mode_routes_and_streams(self, client_with_fake_agents: TestClient) -> None:
+    def test_auto_mode_routes_and_streams(
+        self, client_with_fake_agents: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Phase-3 contract lives on the primary runtime; re-enable it for this
+        # test (the fixture pins the legacy lane for the rest of the class).
+        monkeypatch.setenv("NEXUS_PRIMARY_ENABLED", "1")
         response = client_with_fake_agents.post(
             "/api/chat",
             json={
@@ -151,8 +159,10 @@ class TestAutoMode:
         assert types[-1] == "done"
 
     def test_auto_mode_upgrades_lightweight_agent(
-        self, client_with_fake_agents: TestClient
+        self, client_with_fake_agents: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Phase-3 contract lives on the primary runtime (see the sibling test).
+        monkeypatch.setenv("NEXUS_PRIMARY_ENABLED", "1")
         # A short informational question must stay on the direct CHAT lane.
         response = client_with_fake_agents.post(
             "/api/chat",
