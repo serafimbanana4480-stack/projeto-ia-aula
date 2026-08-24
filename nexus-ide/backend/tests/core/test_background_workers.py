@@ -206,6 +206,7 @@ class TestBackgroundWorkerManager:
             "MEMORY_WATCHER",
             "SELF_IMPROVEMENT_WATCHER",
             "ESCALATION_WATCHER",
+            "RUN_REAPER",
         }
         for info in infos:
             assert info.status == WorkerStatus.RUNNING.value

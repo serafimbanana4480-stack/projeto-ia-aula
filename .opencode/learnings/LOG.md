@@ -12,3 +12,7 @@ Padrões que aparecem 2+ vezes devem ser promovidos a skill (ver nexus-skill-for
 2026-08-24 | armadilha | pytest-basetemp-lock | backend ativo segura .pytest_tmp\*\test_nexus.db → usar --basetemp fresco; worktrees de verificação precisam de logs/, data/ e .env copiados
 2026-08-24 | armadilha | auto-commit-ciclo | o ciclo autónomo faz "auto: pre-0-proposals cycle" com add -A; pode varrer WIP a meio de operações externas
 2026-08-24 | skill-criada | sistema-opencode | skills nexus-backend/nexus-frontend/nexus-skill-forge + agente hermes criados; requerem restart do opencode
+2026-08-24 | armadilha | python-stub-windows | "python" literal no subprocess resolve para o stub da Microsoft Store (WindowsApps); usar sempre sys.executable
+2026-08-24 | armadilha | pytest-dentro-de-repo | tmp_path dentro do repo nexus-ide faz git descobrir o repo pai; usar GIT_CEILING_DIRECTORIES em testes git
+2026-08-24 | decisao | F821-zero | 48 nomes não definidos corrigidos (crashes latentes); política: manter F821/F823 a zero no backend
+2026-08-24 | armadilha | suite-bloqueada-colecao | 1 ficheiro de teste com import quebrado interrompe TODA a coleta pytest; verificar coleção antes de investigar falhas

@@ -1013,6 +1013,44 @@ class EscalationWatcher(BackgroundWorker):
 
 
 # ---------------------------------------------------------------------------
+# RUN_REAPER
+# ---------------------------------------------------------------------------
+
+
+class RunReaper(BackgroundWorker):
+    """Closes session runs left in ``running`` by a dead client or a hung LLM.
+
+    Startup recovery (``recover_interrupted_runs``) only fires once, when the
+    process boots. A client that disconnects mid-run — browser refresh, mobile
+    network drop — leaves the row ``running`` forever afterwards: it showed up
+    live as a run stuck for 10+ minutes with no agent activity while the UI
+    kept offering "resume". Active runs are safe: every SSE event and every
+    15 s heartbeat rewrites ``updated_at``, so only genuinely silent rows are
+    reaped.
+    """
+
+    def __init__(
+        self,
+        interval_seconds: float = 60.0,
+        max_age_seconds: int = 600,
+    ) -> None:
+        super().__init__("RUN_REAPER", interval_seconds=interval_seconds)
+        self._max_age_seconds = max_age_seconds
+
+    async def _tick(self) -> None:
+        from backend.persistence.db import recover_interrupted_runs
+
+        recovered = await asyncio.to_thread(
+            recover_interrupted_runs, self._max_age_seconds
+        )
+        if recovered:
+            logger.warning(
+                "RUN_REAPER marked %d orphaned session run(s) as interrupted",
+                len(recovered),
+            )
+
+
+# ---------------------------------------------------------------------------
 # BackgroundWorkerManager
 # ---------------------------------------------------------------------------
 
@@ -1036,6 +1074,7 @@ class BackgroundWorkerManager:
             "MEMORY_WATCHER": MemoryWatcher(interval_seconds=3_600),
             "SELF_IMPROVEMENT_WATCHER": SelfImprovementWatcher(interval_seconds=86_400),
             "ESCALATION_WATCHER": EscalationWatcher(self.watch_path, interval_seconds=300),
+            "RUN_REAPER": RunReaper(interval_seconds=60.0, max_age_seconds=600),
         }
 
     async def start_all(self) -> None:
