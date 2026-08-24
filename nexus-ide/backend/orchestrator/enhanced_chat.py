@@ -238,7 +238,7 @@ class EnhancedChatSystem:
         
         # Persist exchange
         full = "".join(parts)
-        from datetime import datetime, timezone
+        from datetime import timezone
         now = datetime.now(timezone.utc).isoformat()
         await context.append_message(session_id, ChatMessage(role="user", content=req.message, timestamp=now))
         await context.append_message(session_id, ChatMessage(role="assistant", content=full, timestamp=now))

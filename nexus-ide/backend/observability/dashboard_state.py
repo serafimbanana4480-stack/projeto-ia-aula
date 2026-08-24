@@ -12,7 +12,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, AsyncIterator
 
 from .event_bus import EventBus
 from .events import Event

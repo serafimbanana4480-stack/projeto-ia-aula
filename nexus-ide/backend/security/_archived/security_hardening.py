@@ -4,6 +4,7 @@ Implements authentication, authorization, encryption, audit logging,
 vulnerability scanning, and security monitoring.
 """
 from __future__ import annotations
+from collections import defaultdict
 
 import asyncio
 import json

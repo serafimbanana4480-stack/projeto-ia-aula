@@ -14,7 +14,10 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from backend.core.self_improvement import ImprovementProposal
 
 logger = logging.getLogger(__name__)
 

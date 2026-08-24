@@ -10,9 +10,10 @@ This enhanced version includes:
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +23,11 @@ from backend.config.settings import get_settings
 from backend.observability.event_system import get_event_bus, shutdown_event_system
 from backend.observability.routes.alerts import router as alerts_router
 from backend.observability.routes.metrics import router as metrics_router
+from backend.agents.event_emitting_agent import (
+    EventEmittingArchitectAgent,
+    EventEmittingCoderAgent,
+    EventEmittingDebuggerAgent,
+)
 from backend.orchestrator.context_manager import ContextStore
 from backend.orchestrator.registry import build_default_registry
 from backend.orchestrator.routes.chat import router as chat_router

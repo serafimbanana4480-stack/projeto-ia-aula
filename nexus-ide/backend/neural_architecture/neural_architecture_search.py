@@ -10,6 +10,7 @@ This module provides:
 """
 
 from __future__ import annotations
+import statistics
 
 import asyncio
 import logging

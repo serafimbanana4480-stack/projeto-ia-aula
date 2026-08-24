@@ -1,6 +1,8 @@
 """Integration tests for workflows API endpoints."""
 from __future__ import annotations
 
+import pytest
+
 
 def test_list_workflows(client):
     """Test GET /api/workflows endpoint."""

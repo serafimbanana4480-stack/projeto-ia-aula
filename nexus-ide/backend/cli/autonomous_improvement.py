@@ -33,6 +33,8 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_config(args: argparse.Namespace) -> int:
+    from backend.core.project_adapter import ProjectAdapter
+
     project = Path(args.project).resolve()
     adapter = ProjectAdapter(project)
     print(json.dumps({

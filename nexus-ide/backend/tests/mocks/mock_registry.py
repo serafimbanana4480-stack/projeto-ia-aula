@@ -56,7 +56,7 @@ class MockAgentRegistry:
         links = [
             {
                 "source": "router",
-                "target": agent.id,
+                "target": agent_id,
                 "value": 1.0,
                 "active": True,
             }

@@ -311,7 +311,7 @@ class PerformanceProfiler:
             component=self.component_name,
             value=profile.duration,
             unit="seconds",
-            labels={"operation": operation}
+            labels={"operation": profile.operation}
         ))
         
         profile.metrics.append(PerformanceMetric(
@@ -319,7 +319,7 @@ class PerformanceProfiler:
             component=self.component_name,
             value=profile.cpu_usage,
             unit="percent",
-            labels={"operation": operation}
+            labels={"operation": profile.operation}
         ))
         
         profile.metrics.append(PerformanceMetric(
@@ -327,7 +327,7 @@ class PerformanceProfiler:
             component=self.component_name,
             value=profile.memory_usage,
             unit="percent",
-            labels={"operation": operation}
+            labels={"operation": profile.operation}
         ))
         
         # Calculate scores

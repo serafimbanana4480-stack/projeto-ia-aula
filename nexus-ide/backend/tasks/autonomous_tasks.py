@@ -273,7 +273,7 @@ class TaskScheduler:
                 for task_type in TaskType
             },
             "task_priorities": {
-                priority.value: len([t for t in tasks.values() if t.priority == priority])
+                priority.value: len([t for t in self.tasks.values() if t.priority == priority])
                 for priority in TaskPriority
             }
         }
