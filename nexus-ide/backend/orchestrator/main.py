@@ -38,6 +38,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.middleware.auth import require_auth
 from backend.observability.health import HealthChecker
 from backend.observability.routes.alerts import router as alerts_router
+from backend.observability.routes.costs import router as costs_router
 from backend.observability.routes.health import router as health_router
 from backend.observability.routes.metrics import router as metrics_router
 from backend.observability.routes.usage import router as usage_router
@@ -745,6 +746,7 @@ app.include_router(cancellation_router)
 app.include_router(dashboard_router, prefix="/api")
 app.include_router(email_router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
+app.include_router(costs_router, prefix="/api")
 app.include_router(health_router, prefix="/api")
 app.include_router(alerts_router, prefix="/api")
 app.include_router(usage_router, prefix="/api")

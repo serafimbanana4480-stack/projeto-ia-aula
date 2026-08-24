@@ -213,13 +213,29 @@ def _extract_provider_usage(provider: Any) -> dict[str, int]:
     return {}
 
 
-def _compute_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Look up pricing from the pricing table and compute cost in USD."""
+def _compute_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    provider: str = "",
+    conservative_unknown: bool = False,
+) -> float:
+    """Look up pricing (YAML → catálogo live) and compute cost in USD.
+
+    Com ``conservative_unknown=True`` (modo pago), modelos sem preço
+    conhecido usam taxas conservadoras em vez de contarem $0 — ver B4.
+    """
     try:
         from backend.llm.pricing import PricingTable
 
         pt = PricingTable.get_instance()
-        return pt.compute_cost(model=model, input_tokens=input_tokens, output_tokens=output_tokens)
+        return pt.compute_cost(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            provider=provider or None,
+            conservative_unknown=conservative_unknown,
+        )
     except Exception:
         return 0.0
 
@@ -349,6 +365,9 @@ class MultiLLMManager:
             model=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            provider=provider_name,
+            # Em modo pago, preço desconhecido nunca pode contar $0 (B4).
+            conservative_unknown=not self.free_only,
         )
 
         self._tracker.record(

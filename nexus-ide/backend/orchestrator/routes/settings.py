@@ -72,19 +72,21 @@ def _is_masked_secret(value: str) -> bool:
 
 
 def _load_runtime_settings() -> dict[str, str]:
-    if not SETTINGS_FILE.exists():
-        return {}
-    try:
-        with SETTINGS_FILE.open("r", encoding="utf-8") as f:
-            return {k: v for k, v in json.load(f).items() if isinstance(v, str)}
-    except (OSError, json.JSONDecodeError):
-        return {}
+    # B7: valores sensíveis são desencriptados de forma transparente.
+    from backend.core.secure_settings_store import load_settings
+
+    return {
+        k: v
+        for k, v in load_settings(SETTINGS_FILE).items()
+        if isinstance(v, str)
+    }
 
 
 def _save_runtime_settings(settings: dict[str, str]) -> None:
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with SETTINGS_FILE.open("w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2, ensure_ascii=False)
+    # B7: chaves/segredos são encriptados em repouso (enc:v1:…).
+    from backend.core.secure_settings_store import save_settings
+
+    save_settings(SETTINGS_FILE, settings)
 
 
 def _get_public_settings() -> dict[str, Any]:

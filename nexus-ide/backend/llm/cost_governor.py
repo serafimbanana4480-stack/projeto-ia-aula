@@ -148,24 +148,51 @@ class CostGovernor:
                 self._run_spend[run_id] = self._run_spend.get(run_id, 0.0) + cost_usd
 
     def today_spend(self) -> float:
+        """Authoritative spend for the UTC day, read from the shared ledger.
+
+        Reads the DB directly instead of trusting the in-process cache: with
+        multiple uvicorn workers each process has its own memory, but they
+        all share the same SQLite file — making it the sync point without
+        needing Redis (audit 2026-08-24, B6).
+        """
         self._roll_day_if_needed()
+        db_total = self._sum_cost("day = ?", (self._day,))
+        if db_total is not None:
+            return round(db_total, 6)
         with self._lock:
             return round(self._day_spend, 6)
 
     def run_spend(self, run_id: str) -> float:
+        if not run_id:
+            return 0.0
+        db_total = self._sum_cost("run_id = ? AND day = ?", (run_id, self._utc_day()))
+        if db_total is not None:
+            return round(db_total, 6)
         with self._lock:
             return round(self._run_spend.get(run_id, 0.0), 6)
+
+    def _sum_cost(self, where: str, params: tuple) -> float | None:
+        """SUM(cost_usd) from the ledger; None on DB failure (fall back to cache)."""
+        try:
+            with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                row = conn.execute(
+                    f"SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_ledger WHERE {where}",
+                    params,
+                ).fetchone()
+            return float(row[0]) if row else 0.0
+        except sqlite3.Error as exc:  # pragma: no cover - disk/db failure
+            logger.error("usage_ledger SUM failed (%s): %s", where, exc)
+            return None
 
     def snapshot(self) -> dict[str, Any]:
         """Small dict for /api/metrics endpoints and logs."""
         self._roll_day_if_needed()
-        with self._lock:
-            return {
-                "daily_budget_usd": self.daily_budget_usd,
-                "per_run_budget_usd": self.per_run_budget_usd,
-                "today_spent_usd": round(self._day_spend, 4),
-                "day": self._day,
-            }
+        return {
+            "daily_budget_usd": self.daily_budget_usd,
+            "per_run_budget_usd": self.per_run_budget_usd,
+            "today_spent_usd": round(self.today_spend(), 4),
+            "day": self._day,
+        }
 
     # ------------------------------------------------------------------
     # Internals
