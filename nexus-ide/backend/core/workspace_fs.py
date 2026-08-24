@@ -221,6 +221,25 @@ def _file_not_found_result(path: str, target: Path) -> dict[str, Any]:
     return result
 
 
+def _read_text_tolerant(target: Path) -> str:
+    """Read a text file without dying on exotic encodings.
+
+    Real projects carry files that are not valid UTF-8 (Windows-1252 comments,
+    UTF-8-BOM exports, latin-1 logs). A hard UnicodeDecodeError here turned a
+    simple ``read_file`` into "Failed to read file: 'utf-8' codec can't
+    decode…" and derailed the agent's plan (observed live 2026-08-24 on
+    requirements.txt). Decode strictly when possible; degrade gracefully
+    otherwise so the agent always gets the content.
+    """
+    raw = target.read_bytes()
+    for encoding in ("utf-8", "utf-8-sig", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 async def read_file_absolute(path: str) -> dict[str, Any]:
     """Read any file the user has permission to read (absolute path)."""
     logger.info("read_file_absolute: %s", path)
@@ -248,7 +267,7 @@ async def read_file_absolute(path: str) -> dict[str, Any]:
         ok, size, err = _check_file_size_limit(target)
         if not ok:
             return {"error": err, "path": str(target), "size": size}
-        content = await asyncio.to_thread(target.read_text, encoding="utf-8")
+        content = await asyncio.to_thread(_read_text_tolerant, target)
         return {"path": str(target), "content": content, "size": len(content)}
     except FileNotFoundError:
         return _file_not_found_result(path, target)

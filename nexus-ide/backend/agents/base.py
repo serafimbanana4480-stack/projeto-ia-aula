@@ -2695,10 +2695,25 @@ class AgentBase(ABC):
                         continue
                     self._last_run_success = not tool_errors_seen
                     yield "<event>answer</event>"
-                    yield (
-                        "A ferramenta já foi executada com estes mesmos argumentos; "
-                        "usei o resultado anterior para concluir esta etapa."
-                    )
+                    if successful_tools:
+                        # The model kept re-requesting executed calls even
+                        # after the forced-synthesis turn. A meta-sentence
+                        # about dedup tells the user nothing (live 2026-08-24,
+                        # free model ended a 4-tool run with exactly that);
+                        # surface what WAS gathered instead.
+                        ordered = ", ".join(sorted(successful_tools))
+                        yield (
+                            f"[RECOLHA CONCLUÍDA — SÍNTESE INCOMPLETA] As ferramentas "
+                            f"correram ({ordered}) mas o modelo não produziu a análise "
+                            f"final dentro do limite de repetições. Os resultados brutais "
+                            f"estão no contexto acima. Pede \"resume os resultados das "
+                            f"ferramentas\" para gerar a conclusão."
+                        )
+                    else:
+                        yield (
+                            "A ferramenta já foi executada com estes mesmos argumentos; "
+                            "usei o resultado anterior para concluir esta etapa."
+                        )
                     return
                 context += (
                     "\n[SYSTEM] You have already requested these exact tool calls and their "
