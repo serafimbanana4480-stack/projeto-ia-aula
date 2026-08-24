@@ -2126,6 +2126,9 @@ class AgentBase(ABC):
         # appended to (or replacing) a correct answer.
         audit_stream_suppressed = False
         tool_evidence_corrections = 0
+        # One bounded final-synthesis turn when the model has tool evidence but
+        # keeps re-requesting the same calls instead of writing its answer.
+        synthesis_forced = False
         successful_tools: set[str] = set()
         # Autonomous tool-capable turns are buffered until their role is known.
         # This prevents a provisional "please confirm" response or raw tool-call
@@ -2676,6 +2679,20 @@ class AgentBase(ABC):
                             "substantiva ou de verificação exigida."
                         )
                         return
+                    # Evidence exists but the model keeps re-requesting tools
+                    # instead of writing up what it found. One bounded
+                    # synthesis turn beats returning a canned meta-sentence as
+                    # the user-visible answer (live 2026-08-24: a free model
+                    # finished a 5-tool run with only the dedup notice).
+                    if not synthesis_forced and iteration < max_iterations:
+                        synthesis_forced = True
+                        context += (
+                            "\n[SYSTEM] Já tens resultados de ferramentas suficientes no contexto. "
+                            "NÃO voltes a pedir ferramentas — qualquer repetição será rejeitada. "
+                            "Escreve AGORA a tua resposta final e completa, sintetizando os "
+                            "resultados que já obtiveste."
+                        )
+                        continue
                     self._last_run_success = not tool_errors_seen
                     yield "<event>answer</event>"
                     yield (

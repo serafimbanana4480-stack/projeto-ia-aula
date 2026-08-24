@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from cache_backends import (
+from backend.cache_backends import (
     CacheBackend,
     TTLCacheBackend,
     InMemoryCacheBackend,
