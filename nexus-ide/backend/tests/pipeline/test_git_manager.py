@@ -1,5 +1,4 @@
 """Tests for GitManager."""
-import subprocess
 from pathlib import Path
 
 import pytest
