@@ -161,7 +161,7 @@ class TestKiloFreeOnlyHole:
 
 class TestTerminalAuthBreaker:
     async def test_force_open_outlasts_default_cooldown(self) -> None:
-        from backend.llm.circuit_breaker import CircuitState, CircuitBreaker
+        from backend.llm.circuit_breaker import CircuitBreaker, CircuitState
 
         breaker = CircuitBreaker(name="t", cooldown_seconds=30.0)
         breaker.force_open(900.0)
@@ -171,7 +171,7 @@ class TestTerminalAuthBreaker:
         assert retry is not None and retry > 60  # muito além do clamp de 60s
 
     async def test_force_open_recovers_after_expiry(self) -> None:
-        from backend.llm.circuit_breaker import CircuitState, CircuitBreaker
+        from backend.llm.circuit_breaker import CircuitBreaker, CircuitState
 
         breaker = CircuitBreaker(name="t2", cooldown_seconds=30.0)
         breaker.force_open(1.0)

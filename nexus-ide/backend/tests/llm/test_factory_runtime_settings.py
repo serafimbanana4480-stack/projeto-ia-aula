@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from backend.llm import factory
+from backend.llm.free_policy import ProviderUnavailableError
 from backend.llm.multi_llm_manager import MultiLLMManager
+
 
 @pytest.fixture(autouse=True)
 def _legacy_factory_contract(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,13 +116,36 @@ async def test_single_provider_ollama_selection_is_an_explicit_opt_in(
 
 
 @pytest.mark.asyncio
-async def test_kilo_selection_builds_kilo_provider(
+async def test_kilo_selection_blocked_under_free_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Audit 2026-08-24 (B3): kilo é um gateway PAGO.
+
+    Com NEXUS_FREE_ONLY=true a seleção direta de kilo tem de falhar — antes,
+    o provider era construído e podia gastar dinheiro real com a política
+    fail-closed aparentemente ativa.
+    """
     settings = _settings()
     settings.multi_llm_enabled = False
     settings.llm_provider = "kilo"
     settings.free_only = True
+    monkeypatch.setattr(factory, "get_settings", lambda: settings)
+    monkeypatch.setattr(factory, "_load_runtime_overrides", lambda: {})
+
+    with pytest.raises(ProviderUnavailableError) as excinfo:
+        factory.create_llm_client(kilo_api_key="test-kilo-key")
+    assert excinfo.value.category == "eligibility"
+
+
+@pytest.mark.asyncio
+async def test_kilo_selection_builds_provider_when_paid_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Com free_only desativado, kilo continua selecionável (chave presente)."""
+    settings = _settings()
+    settings.multi_llm_enabled = False
+    settings.llm_provider = "kilo"
+    settings.free_only = False
     monkeypatch.setattr(factory, "get_settings", lambda: settings)
     monkeypatch.setattr(factory, "_load_runtime_overrides", lambda: {})
 
