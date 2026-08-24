@@ -920,6 +920,45 @@ class PlanExecutor:
     # Internal: Prompt Building
     # ------------------------------------------------------------------
 
+    #: Read-only verbs that mark a step whose goal IS discovery. For those,
+    #: a successful discovery tool already proves the step done — demanding
+    #: "substantive" evidence failed a completed "list folder contents" step
+    #: (live 2026-08-24).
+    _DISCOVERY_TASK_RE = re.compile(
+        r"\b(list(?:ar|ar|a)?|listar|ler|read|procurar|pesquis(ar|a)|search|"
+        r"inspecion(?:ar|a)|inspect|mapear|map(ping)?|inventari(ar|ar)|"
+        r"identific(?:ar|a)|catalog(?:ar|ar)|explorar|explore)\b",
+        re.IGNORECASE,
+    )
+    #: Write/execute verbs that cancel the discovery classification above.
+    _MUTATING_TASK_RE = re.compile(
+        r"\b(escrev|write|cri(a|ar)|create|modific|edit|apag|delete|remov|"
+        r"execut|execute|run|instal|deploy|refator|refactor|corrige|fix|"
+        r"atualiz|update|implement)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _task_is_discovery(cls, task: Any) -> bool:
+        """True when a step only reads the project (list/read/search/inspect).
+
+        The evidence gate then accepts any successful tool instead of demanding
+        writes or verification the step never promised.
+        """
+        text = " ".join(
+            part
+            for part in (
+                getattr(task, "name", ""),
+                getattr(task, "description", ""),
+            )
+            if part
+        )
+        if not text:
+            return False
+        if cls._MUTATING_TASK_RE.search(text):
+            return False
+        return bool(cls._DISCOVERY_TASK_RE.search(text))
+
     def _build_task_prompt(self, task: TaskNode, dep_context: str, project_path: str = ".") -> str:
         """Build the prompt for a specific task execution."""
         return f"""Execute the following task:
