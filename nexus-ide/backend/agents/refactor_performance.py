@@ -1,6 +1,6 @@
 """REFACTOR_PERFORMANCE — performance refactoring agent with ReAct loop.
 
-Model: qwen2.5-coder:7b (CODER tier). Context 8K.
+Model: CODER tier (resolved via config/models.yaml).
 Prompt: config/prompts/refactor_performance.md
 
 Supports autonomous execution via ReAct loop:

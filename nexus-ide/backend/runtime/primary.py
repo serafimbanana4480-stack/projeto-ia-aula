@@ -177,6 +177,7 @@ class PrimaryOutcome:
     subagents: tuple[SubagentResult, ...] = ()
     declined_subagents: tuple[str, ...] = ()
     stopped: bool = False
+    interrupted: bool = False
     failed: bool = False
     error: str = ""
     telemetry: dict[str, Any] = field(default_factory=dict)
@@ -305,6 +306,7 @@ class PrimaryLoop:
         self._subagent_results: list[SubagentResult] = []
         self._declined: list[str] = []
         self._phase = PrimaryPhase.OBSERVE
+        self._failure_event_emitted = False
 
     # ------------------------------------------------------------------
     # public entry point
@@ -388,7 +390,7 @@ class PrimaryLoop:
                 yield emit(RuntimeEventType.MESSAGE_STARTED, cycle=cycle)
                 async for event in self._drive_model(turn, emit):
                     yield event
-                if self._must_stop():
+                if self._must_stop() or self.outcome.failed:
                     break
 
                 # -- 4. TEST ----------------------------------------------
@@ -425,6 +427,15 @@ class PrimaryLoop:
                         detail=result.summary,
                     )
                     continue
+                if result.ran and not result.ok:
+                    # Reaching the cycle limit with a red verification is still
+                    # a failed run.  Never turn an exhausted repair loop into a
+                    # false RUN_COMPLETED merely because the model produced text.
+                    self.outcome.failed = True
+                    self.outcome.error = (
+                        "A verificação final falhou: "
+                        f"{result.summary or 'resultado sem detalhes'}"
+                    )
                 break
 
             # -- 5. REPORT ------------------------------------------------
@@ -460,7 +471,20 @@ class PrimaryLoop:
             self.telemetry.finish()
             self.outcome.telemetry = self.telemetry.snapshot()
 
-            if self.outcome.stopped:
+            if not self.outcome.stopped and not self.outcome.failed and not self.outcome.answer:
+                self.outcome.failed = True
+                self.outcome.error = (
+                    "O provider terminou a execução sem uma resposta visível."
+                )
+
+            if self.outcome.failed:
+                if not self._failure_event_emitted:
+                    yield emit(
+                        RuntimeEventType.RUN_FAILED,
+                        error=self.outcome.error or "A execução falhou sem uma mensagem técnica.",
+                        telemetry=self.outcome.telemetry,
+                    )
+            elif self.outcome.stopped:
                 yield emit(
                     RuntimeEventType.RUN_CANCELLED,
                     reason="stop_requested",
@@ -533,13 +557,15 @@ class PrimaryLoop:
 
                 for event in self._handle_signal(signal, turn, emit, proposals):
                     yield event
+                if self.outcome.failed:
+                    break
         finally:
             aclose = getattr(stream, "aclose", None)
             if aclose is not None:
                 with contextlib.suppress(Exception):
                     await aclose()
 
-        if proposals and not self.outcome.stopped:
+        if proposals and not self.outcome.stopped and not self.outcome.failed:
             async for event in self._delegate(proposals, emit):
                 yield event
 
@@ -645,8 +671,35 @@ class PrimaryLoop:
             return events
 
         if kind is AgentSignalKind.ERROR:
+            if signal.payload.get("reason") == "provider_token_limit":
+                notice = signal.text.strip() or (
+                    "A resposta foi interrompida pelo limite de tokens do provider; "
+                    "o estado ficou incompleto e pode ser continuado numa nova mensagem."
+                )
+                self.outcome.interrupted = True
+                self.outcome.stopped = True
+                self._answer_parts.append(f"\n\n⚠️ {notice}")
+                events.append(
+                    emit(
+                        RuntimeEventType.STATUS_UPDATE,
+                        label=notice,
+                        reason="provider_token_limit",
+                        finish_reason=signal.payload.get("finish_reason"),
+                    )
+                )
+                events.append(
+                    emit(
+                        RuntimeEventType.PROVIDER_RESULT,
+                        summary=notice,
+                        usage=signal.payload.get("usage") or {},
+                    )
+                )
+                return events
             self.telemetry.mark_agent_failure()
-            events.append(emit(RuntimeEventType.RUN_FAILED, error=signal.text))
+            self.outcome.failed = True
+            self.outcome.error = signal.text.strip() or "O provider devolveu um erro sem detalhes."
+            self._failure_event_emitted = True
+            events.append(emit(RuntimeEventType.RUN_FAILED, error=self.outcome.error))
         return events
 
     def _record_tool_effect(

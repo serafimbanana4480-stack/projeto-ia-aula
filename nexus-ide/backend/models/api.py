@@ -171,6 +171,10 @@ class ProjectUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
+    # The Projects edit modal always submits ``path``; with ``extra=forbid`` and
+    # no field here every update — including the trust toggle — failed with 422
+    # and the UI silently fell back to a local-only edit (QA C4).
+    path: str | None = None
     description: str | None = None
     mode: str | None = None
     preferred_model: str | None = None
@@ -283,6 +287,15 @@ class StreamEvent(BaseModel):
     tool_error: str | None = None
     data: dict[str, Any] = Field(default_factory=dict)
     timestamp: str = Field(default_factory=_utcnow_iso)
+
+    # Runtime ordering envelope (phase 2/3). These fields are the only
+    # contract the UI must rely on for a total order; ``timestamp`` is coarse
+    # and non-total on Windows. The legacy pipeline omits them (the client
+    # treats such frames as legacy/arrival-ordered), so they stay optional.
+    run_id: str = ""
+    event_id: str = ""
+    seq: int | None = None
+    task_id: str = ""
 
 
 # ---------------------------------------------------------------------------

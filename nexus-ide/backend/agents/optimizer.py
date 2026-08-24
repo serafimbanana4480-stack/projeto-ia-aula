@@ -1,6 +1,6 @@
 """OPTIMIZER — performance tuning agent.
 
-Model: qwen2.5-coder:7b (CODER tier) with optional thinking mode.
+Model: CODER tier (resolved via config/models.yaml) with optional thinking mode.
 Prompt: config/prompts/optimizer.md
 See ARCHITECTURE.md §3.8.
 
@@ -17,7 +17,7 @@ from .base import AgentAction, AgentBase
 
 class OptimizerAgent(AgentBase):
     name = "OPTIMIZER"
-    model_key = "coder"  # qwen2.5-coder:7b for benchmarking + code optimization
+    model_key = "coder"  # coder tier: benchmarking + code optimization
     prompt_file = "optimizer"
     supported_actions = {
         AgentAction.READ_FILE,

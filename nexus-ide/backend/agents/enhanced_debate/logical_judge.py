@@ -71,7 +71,7 @@ class ClarificationRequest:
 class LogicalJudge:
     """Logical judge for adjudicating agent debates.
     
-    Uses a LARGE model (llama3:70b or qwen2.5:32b) to:
+    Uses a LARGE-tier model (see config/models.yaml) to:
     - Analyze arguments from multiple agents
     - Consider weighted voting results
     - Make final decisions when consensus is not reached

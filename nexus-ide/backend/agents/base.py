@@ -2024,9 +2024,9 @@ class AgentBase(ABC):
         max_iterations = request.max_iterations if request.max_iterations > 0 else max(
             1, min(configured_budget, 1000)
         )
-        # Every distinct tool-call payload issued this run. Consecutive-only
-        # comparison let A/B/A/B discovery loops run to the iteration cap.
-        seen_tool_call_keys: set[str] = set()
+        # Successful tool-call payloads this run. Only these may be skipped as
+        # repeats — a failed call must never be reported as "already executed".
+        successful_tool_call_keys: set[str] = set()
         # "[SYSTEM] ..." corrections that must survive context trimming.
         sticky_directives: list[str] = []
         previous_thinking = ""  # Track to avoid repeating identical thinking blocks
@@ -2542,7 +2542,7 @@ class AgentBase(ABC):
             # path at iterations 1, 3, 6 and 8 and was never flagged. The seen
             # set catches a repeat at any distance.
             current_key = json.dumps(tool_calls, sort_keys=True, default=str)
-            if current_key in seen_tool_call_keys:
+            if current_key in successful_tool_call_keys:
                 repeated_tool_calls_seen += 1
                 logger.warning(
                     "[%s] Detected repeated identical tool calls — breaking loop | "
@@ -2583,7 +2583,7 @@ class AgentBase(ABC):
                             self._remember_sticky_directive(
                                 sticky_directives, _evidence_nudge
                             )
-                            # Deliberately keep ``seen_tool_call_keys`` and the
+                            # Deliberately keep ``successful_tool_call_keys`` and the
                             # nudge flag: clearing them would re-authorise the
                             # very call we just refused and let the loop cycle
                             # until the iteration cap. A genuinely new call
@@ -2601,7 +2601,7 @@ class AgentBase(ABC):
                             "substantiva ou de verificação exigida."
                         )
                         return
-                    self._last_run_success = (not tool_errors_seen) or tool_errors_recovered
+                    self._last_run_success = not tool_errors_seen
                     yield "<event>answer</event>"
                     yield (
                         "A ferramenta já foi executada com estes mesmos argumentos; "
@@ -2617,7 +2617,6 @@ class AgentBase(ABC):
                 )
                 repeated_tool_nudge_sent = True
                 continue
-            seen_tool_call_keys.add(current_key)
             repeated_tool_nudge_sent = False
 
             prepared_calls = [
@@ -2681,11 +2680,13 @@ class AgentBase(ABC):
                     tasks.append(_run_parallel_call(tool_name, args))
 
                 outcomes = await asyncio.gather(*tasks)
+                batch_failed = False
                 for tool_name, _args, result, elapsed in outcomes:
                     evidence = result.get("evidence")
                     if isinstance(evidence, dict):
                         request.context.setdefault("_tool_evidence", []).append(evidence)
                     if "error" in result:
+                        batch_failed = True
                         tool_errors_seen = True
                         logger.warning(
                             "[%s] Parallel tool error | tool=%s | error=%s | elapsed_ms=%.1f",
@@ -2721,9 +2722,12 @@ class AgentBase(ABC):
                         f"\nTool {tool_name} returned: "
                         f"{json.dumps(result, default=str)}"
                     )
+                if not batch_failed:
+                    successful_tool_call_keys.add(current_key)
                 continue
 
             # Mutating or dependent calls remain sequential.
+            batch_failed = False
             for tool_name, args in prepared_calls:
                 logger.info(
                     "[%s] Executing tool | iteration=%d | tool=%s | args=%s",
@@ -2809,6 +2813,7 @@ class AgentBase(ABC):
                     request.context.setdefault("_tool_evidence", []).append(evidence)
 
                 if "error" in result:
+                    batch_failed = True
                     tool_errors_seen = True
                     logger.warning(
                         "[%s] Tool error | iteration=%d | tool=%s | error=%s | elapsed_ms=%.1f",
@@ -2895,6 +2900,9 @@ class AgentBase(ABC):
                         "then provide a concise final answer only when no further "
                         "evidence-backed improvement remains."
                     )
+
+            if not batch_failed:
+                successful_tool_call_keys.add(current_key)
 
             # Continue loop with context
 

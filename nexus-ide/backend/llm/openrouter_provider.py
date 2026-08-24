@@ -13,6 +13,8 @@ import logging
 import os
 import re
 import time
+from typing import Any
+
 from backend.llm.free_policy import FreeModelRequirement, ProviderUnavailableError
 from backend.llm.openai_provider import OpenAIProvider
 from backend.observability.advanced_logging import get_structured_logger
@@ -192,7 +194,8 @@ class OpenRouterProvider:
         if isinstance(entries, dict):
             entries = entries.get("models", entries.get("data", []))
         now = time.time()
-        for entry in entries or []:
+
+        def _entry_matches(entry: Any) -> tuple[bool, str | None]:
             entry_id = getattr(entry, "id", None) or (
                 entry.get("id") if isinstance(entry, dict) else None
             )
@@ -201,14 +204,16 @@ class OpenRouterProvider:
             )
             if router_alias:
                 if str(entry_id) != "openrouter/free":
-                    continue
+                    return False, None
             elif str(entry_id) != str(resolved):
-                continue
+                return False, None
             if entry_provider != "openrouter":
-                continue
+                return False, None
+
             def field(name: str, default: Any = None) -> Any:
                 value = getattr(entry, name, default)
                 return entry.get(name, value) if isinstance(entry, dict) else value
+
             input_price = field("input_price_per_1m")
             output_price = field("output_price_per_1m")
             quota = field("quota_available")
@@ -217,7 +222,7 @@ class OpenRouterProvider:
             try:
                 context_window = int(field("context_window", 0) or 0)
             except (TypeError, ValueError):
-                continue
+                return False, None
             caps = {str(cap).lower().replace("-", "_") for cap in capabilities}
             if isinstance(capabilities, str):
                 caps = {capabilities.lower().replace("-", "_")}
@@ -239,33 +244,68 @@ class OpenRouterProvider:
             try:
                 validated_value = float(validated_at)
             except (TypeError, ValueError):
-                continue
+                return False, None
             try:
                 latency_value = float(latency) if latency is not None else None
             except (TypeError, ValueError):
-                continue
-            if (
+                return False, None
+            if not (
                 input_price == 0
                 and output_price == 0
                 and requirement_ok
                 and quota is not False
-                and 0 <= now - validated_value <= self._validation_ttl_seconds
                 and (latency_value is None or 0 <= latency_value <= self._max_latency_ms)
             ):
-                self.quota_available = quota is True
-                self.validated_at = validated_value
+                return False, None
+            fresh = 0 <= now - validated_value <= self._validation_ttl_seconds
+            return True, "fresh" if fresh else "stale"
+
+        for entry in entries or []:
+            matched, freshness = _entry_matches(entry)
+            if not matched:
+                continue
+            quota = getattr(entry, "quota_available", None) if not isinstance(entry, dict) else entry.get("quota_available")
+            validated_at = getattr(entry, "validated_at", None) if not isinstance(entry, dict) else entry.get("validated_at")
+            try:
+                validated_value = float(validated_at)
+            except (TypeError, ValueError):
+                continue
+            self.quota_available = quota is True
+            self.validated_at = validated_value
+            if freshness == "fresh":
                 self.eligibility_reason = (
                     "live catalog confirmed zero prices; request quota observed at dispatch"
                 )
                 return resolved
+            self.eligibility_reason = "stale catalog fallback; background refresh scheduled"
+            self._schedule_catalog_refresh()
+            return resolved
+
         self.quota_available = False
         self.eligibility_reason = "model lacks current zero-price/quota validation"
+        self._schedule_catalog_refresh()
         raise ProviderUnavailableError(
             f"OpenRouter model '{model}' is not confirmed free and available",
             category="eligibility",
             provider=self.provider_name,
             model=model,
         )
+
+    def _schedule_catalog_refresh(self) -> None:
+        """Trigger an async catalog refresh when validation data is stale."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._refresh_catalog_task())
+
+    async def _refresh_catalog_task(self) -> None:
+        from backend.llm.model_catalog import load_validated_models, refresh_provider_catalog
+
+        if await refresh_provider_catalog("openrouter"):
+            models = load_validated_models("openrouter")
+            if models:
+                self._catalog = models
 
     async def health_check(self, timeout: float = 5.0) -> bool:
         """Bounded live health probe; free-only also requires validated catalog."""

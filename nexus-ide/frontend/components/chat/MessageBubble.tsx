@@ -12,26 +12,9 @@ import {
 import type { ChatMessage, AgentName } from "../../lib/types";
 import { stripAnsiCodes } from "../../lib/utils";
 import { useThemeStore } from "../../stores/themeStore";
-import AgentBadge from "./AgentBadge";
-import ToolCallTimeline from "./ToolCallTimeline";
-import ThinkingBlock from "./ThinkingBlock";
-import ExecutionActivity from "./ExecutionActivity";
+import RunTimeline from "./RunTimeline";
 import { sanitizeAssistantContent } from "../../lib/chatPresentation";
-
-const AGENT_HEX_COLORS: Partial<Record<AgentName, string>> = {
-  ROUTER: "#4b5563",
-  ARCHITECT: "#4f46e5",
-  RESEARCHER: "#2563eb",
-  CODER: "#059669",
-  ANALYZER: "#d97706",
-  DEBUGGER: "#dc2626",
-  DOCUMENTER: "#0284c7",
-  OPTIMIZER: "#9333ea",
-  DASHBOARD: "#0d9488",
-  ORCHESTRATOR: "#7c3aed",
-  SWARM: "#db2777",
-  MICRO: "#6b7280",
-};
+import { agentColor } from "../../lib/foldRun";
 
 function getRelativeTime(date: Date): string {
   const now = new Date();
@@ -95,7 +78,7 @@ function MessageBubbleComponent({
   );
   const theme = useThemeStore((s) => s.theme);
   const visibleContent = isUser ? message.content : sanitizeAssistantContent(message.content);
-  const agentColor = AGENT_HEX_COLORS[message.agent || "ROUTER"] || "#7c3aed";
+  const color = agentColor(message.agent || "");
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -109,145 +92,146 @@ function MessageBubbleComponent({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: "easeOut" }}
-      className={`flex ${isUser ? "justify-end" : "justify-start"}`}
+      className={`group flex gap-3 ${isUser ? "justify-end" : "justify-start"}`}
     >
+      {/* Assistant avatar */}
+      {!isUser && (
+        <div
+          className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white shadow-md"
+          style={{
+            background: `linear-gradient(135deg, ${color}, ${color}cc)`,
+            boxShadow: `0 2px 8px -2px ${color}66`,
+          }}
+          title={message.agent || "NEXUS"}
+        >
+          {(message.agent || "N").charAt(0).toUpperCase()}
+        </div>
+      )}
+
       <div
-        className={`group rounded-2xl text-[15px] leading-7 transition-all duration-200 ${
+        className={`min-w-0 text-[15px] leading-7 transition-all duration-200 ${
           isUser
-            ? "max-w-[82%] bg-gradient-to-br from-nexus-accent/90 to-nexus-accent/70 p-4 text-white shadow-lg hover:scale-[1.01]"
-            : "w-full max-w-[920px] border border-nexus-border/50 bg-nexus-card/70 p-4 text-nexus-text shadow-sm hover:border-nexus-border"
+            ? "max-w-[78%] rounded-2xl rounded-br-md bg-gradient-to-br from-nexus-accent to-nexus-accent-deep p-4 text-white shadow-lg shadow-nexus-accent/20 hover:scale-[1.01]"
+            : "w-full max-w-[880px]"
         }`}
       >
-        <div className="mb-2 flex items-center justify-between gap-3 text-[11px] text-nexus-muted">
-          <div className="flex items-center gap-2.5">
-            {!isUser && (
-              <motion.div
-                initial={{ scale: 0.8, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                transition={{ delay: 0.1 }}
-                className="flex items-center gap-2"
-              >
-                <AgentBadge agent={message.agent || "ROUTER"} />
-                  <div
-                    className="flex h-7 w-7 items-center justify-center rounded-full text-[10px] font-bold text-white shadow-md"
-                    style={{
-                      background: `linear-gradient(135deg, ${agentColor}, ${agentColor}dd)`,
-                    }}
-                  >
-                    {(message.agent || "N").charAt(0).toUpperCase()}
-                  </div>
-              </motion.div>
-            )}
-            <span className="font-medium">{isUser ? "Você" : message.agent || "NEXUS IDE"}</span>
-          </div>
-          <span className="tabular-nums opacity-70">{relativeTime}</span>
+        {/* Meta row: name + time */}
+        <div className={`mb-1 flex items-center gap-2 text-[11px] ${isUser ? "justify-end" : ""}`}>
+          {!isUser && (
+            <>
+              <span className="font-semibold" style={{ color }}>
+                {message.agent === "NEXUS" ? "NEXUS" : message.agent || "NEXUS"}
+              </span>
+              {isStreaming && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-nexus-accent/10 px-1.5 py-px text-[9px] font-medium text-nexus-accent">
+                  <span className="h-1 w-1 animate-pulse rounded-full bg-nexus-accent" />
+                  ao vivo
+                </span>
+              )}
+            </>
+          )}
+          {isUser && <span className="font-medium text-white/70">Você</span>}
+          <span className={`tabular-nums opacity-60 ${isUser ? "text-white/60" : "text-nexus-muted"}`}>
+            {relativeTime}
+          </span>
         </div>
 
-        {!isUser && message.thinking && (
-          <ThinkingBlock content={message.thinking} isStreaming={isStreaming} />
-        )}
+        <div
+          className={
+            !isUser
+              ? "rounded-2xl rounded-tl-md border border-nexus-border/40 bg-nexus-card/50 px-4 py-3 shadow-sm backdrop-blur-sm"
+              : ""
+          }
+        >
+          {visibleContent.trim() && typeof ReactMarkdown !== "undefined" ? (
+            <ReactMarkdown
+              className="prose prose-base max-w-none leading-7"
+              components={{
+                code({ inline, className, children, ...props }: any) {
+                  const match = /language-(\w+)/.exec(className || "");
+                  const lang = match ? match[1] : "";
+                  const codeString = String(children).replace(/\n$/, "");
 
-        {!isUser && message.activities && message.activities.length > 0 && (
-          <ExecutionActivity items={message.activities} isStreaming={isStreaming} />
-        )}
-
-        {visibleContent.trim() && typeof ReactMarkdown !== "undefined" ? (
-          <ReactMarkdown
-            className="prose prose-base max-w-none leading-7"
-            components={{
-              code({ inline, className, children, ...props }: any) {
-                const match = /language-(\w+)/.exec(className || "");
-                const lang = match ? match[1] : "";
-                const codeString = String(children).replace(/\n$/, "");
-
-                if (!inline && lang) {
-                  const style = theme === "light" ? oneLight : oneDark;
-                  return (
-                    <div className="relative group/code">
-                      <div className="absolute right-2 top-2 z-10 flex items-center gap-1.5">
-                        <span className="rounded bg-nexus-bg/60 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-nexus-muted font-mono border border-nexus-border/40">
-                          {lang}
-                        </span>
-                        <CopyCodeButton code={codeString} />
+                  if (!inline && lang) {
+                    const style = theme === "light" ? oneLight : oneDark;
+                    return (
+                      <div className="relative group/code">
+                        <div className="absolute right-2 top-2 z-10 flex items-center gap-1.5">
+                          <span className="rounded bg-nexus-bg/60 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-nexus-muted font-mono border border-nexus-border/40">
+                            {lang}
+                          </span>
+                          <CopyCodeButton code={codeString} />
+                        </div>
+                        <SyntaxHighlighter
+                          language={lang}
+                          style={style}
+                          customStyle={{
+                            margin: 0,
+                            borderRadius: "0.5rem",
+                            fontSize: "0.75rem",
+                            lineHeight: "1.4",
+                            padding: "1rem",
+                            background: "rgba(11, 11, 20, 0.8)",
+                          }}
+                          PreTag="div"
+                          showLineNumbers={codeString.split("\n").length > 3}
+                        >
+                          {codeString}
+                        </SyntaxHighlighter>
                       </div>
-                      <SyntaxHighlighter
-                        language={lang}
-                        style={style}
-                        customStyle={{
-                          margin: 0,
-                          borderRadius: "0.5rem",
-                          fontSize: "0.75rem",
-                          lineHeight: "1.4",
-                          padding: "1rem",
-                          background: "rgba(11, 11, 20, 0.8)",
-                        }}
-                        PreTag="div"
-                        showLineNumbers={codeString.split("\n").length > 3}
-                      >
-                        {codeString}
-                      </SyntaxHighlighter>
-                    </div>
+                    );
+                  }
+
+                  const mergedClassName = `${className ?? ""} ${inline ? "rounded bg-nexus-bg/80 px-1 py-0.5 text-[11px]" : "rounded-lg bg-nexus-bg/80 p-3 text-xs overflow-x-auto border border-nexus-border/60 block"}`.trim();
+                  return (
+                    <code className={mergedClassName} {...props}>
+                      {children}
+                    </code>
                   );
-                }
+                },
+              }}
+            >
+              {stripAnsiCodes(visibleContent)}
+            </ReactMarkdown>
+          ) : visibleContent.trim() ? (
+            <div className="whitespace-pre-wrap leading-relaxed">{visibleContent}</div>
+          ) : null}
 
-                const mergedClassName = `${className ?? ""} ${inline ? "rounded bg-nexus-bg/80 px-1 py-0.5 text-[11px]" : "rounded-lg bg-nexus-bg/80 p-3 text-xs overflow-x-auto border border-nexus-border/60 block"}`.trim();
-                return (
-                  <code className={mergedClassName} {...props}>
-                    {children}
-                  </code>
-                );
-              },
-            }}
-          >
-            {stripAnsiCodes(visibleContent)}
-          </ReactMarkdown>
-        ) : visibleContent.trim() ? (
-          <div className="whitespace-pre-wrap leading-relaxed">{visibleContent}</div>
-        ) : null}
+          {!isUser && isStreaming && !visibleContent.trim() && !message.thinking && (!message.toolCalls || message.toolCalls.length === 0) && (!message.activities || message.activities.length === 0) && (
+            <div className="mt-2 flex items-center gap-2 text-xs text-nexus-muted">
+              <TypingDots />
+            </div>
+          )}
 
-        {!isUser && isStreaming && !visibleContent.trim() && (!message.toolCalls || message.toolCalls.length === 0) && (!message.activities || message.activities.length === 0) && (
-          <div className="mt-2 flex items-center gap-2 text-xs text-nexus-muted">
-            <TypingDots />
-          </div>
-        )}
+          {!isUser && (
+            <RunTimeline
+              message={message}
+              isStreaming={isStreaming}
+              sessionId={sessionId}
+            />
+          )}
 
-        {!isUser && message.toolCalls && message.toolCalls.length > 0 && (
-          <ToolCallTimeline calls={message.toolCalls} sessionId={sessionId} />
-        )}
-
-        {message.metrics && (
-          <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-nexus-muted">
-            {Object.entries(message.metrics).map(([k, v], idx) => (
-              <span
-                key={`${idx}-${k}`}
-                className="rounded-lg bg-nexus-bg/80 px-2.5 py-1 backdrop-blur-sm"
-              >
-                {k}: {v}
+          {/* Error retry + copy actions (only for error messages) */}
+          {!isUser && message.metadata?.kind === "error" && (
+            <div className="mt-3 flex items-center gap-2 border-t border-rose-500/20 pt-2">
+              <AlertCircle className="h-3.5 w-3.5 text-rose-400" />
+              <span className="text-[10px] uppercase tracking-wider text-rose-400/80">
+                Erro
               </span>
-            ))}
-          </div>
-        )}
-
-        {/* Error retry + copy actions (only for error messages) */}
-        {!isUser && message.metadata?.kind === "error" && (
-          <div className="mt-3 flex items-center gap-2 border-t border-rose-500/20 pt-2">
-            <AlertCircle className="h-3.5 w-3.5 text-rose-400" />
-            <span className="text-[10px] uppercase tracking-wider text-rose-400/80">
-              Erro
-            </span>
-            {message.metadata?.canRetry && onRetry && message.metadata?.prompt && (
-              <button
-                onClick={() => onRetry(message.metadata!.prompt as string)}
-                className="ml-auto flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[11px] font-medium text-rose-300 transition-colors hover:bg-rose-500/20"
-                title="Reenviar a mesma mensagem"
-              >
-                <RefreshCw className="h-3 w-3" />
-                Tentar novamente
-              </button>
-            )}
-            <CopyMessageButton text={visibleContent} />
-          </div>
-        )}
+              {message.metadata?.canRetry && onRetry && message.metadata?.prompt && (
+                <button
+                  onClick={() => onRetry(message.metadata!.prompt as string)}
+                  className="ml-auto flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[11px] font-medium text-rose-300 transition-colors hover:bg-rose-500/20"
+                  title="Reenviar a mesma mensagem"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  Tentar novamente
+                </button>
+              )}
+              <CopyMessageButton text={visibleContent} />
+            </div>
+          )}
+        </div>
 
         {/* Edit mode for user messages */}
         {isUser && isEditing && (
@@ -286,7 +270,7 @@ function MessageBubbleComponent({
 
         {/* Action buttons (edit, regenerate, copy) */}
         {!isStreaming && visibleContent.trim() && !isEditing && (
-          <div className="mt-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+          <div className={`mt-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 ${isUser ? "justify-end" : ""}`}>
             {/* Edit button (user messages only) */}
             {isUser && onEdit && (
               <button
@@ -307,13 +291,20 @@ function MessageBubbleComponent({
                 <RotateCw className="h-3 w-3" />
               </button>
             )}
-            {/* Copy button (always for non-error messages) */}
-            {(!isUser || isUser) && message.metadata?.kind !== "error" && (
+            {/* Copy button */}
+            {message.metadata?.kind !== "error" && (
               <CopyMessageButton text={visibleContent} />
             )}
           </div>
         )}
       </div>
+
+      {/* User avatar */}
+      {isUser && (
+        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-nexus-border/60 bg-nexus-elevated text-[10px] font-bold text-nexus-muted shadow-sm">
+          TU
+        </div>
+      )}
     </motion.div>
   );
 }

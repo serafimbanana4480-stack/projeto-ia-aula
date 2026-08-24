@@ -260,6 +260,9 @@ class TestEmbedAndHealth:
 
 class TestProviderRegistration:
     def test_factory_creates_anthropic_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # This test exercises provider *construction*, not the free-only
+        # eligibility policy, so opt out of the default fail-closed mode.
+        monkeypatch.setenv("NEXUS_FREE_ONLY", "false")
         monkeypatch.setenv("LLM_PROVIDER", "anthropic")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
         from backend.config.settings import get_settings

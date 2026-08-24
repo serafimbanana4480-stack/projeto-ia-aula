@@ -39,6 +39,8 @@ class TestCoderAgent:
             AgentAction.RUN_LINT,
             AgentAction.TYPE_CHECK,
             AgentAction.SPAWN_TASK,
+            AgentAction.MCP_PROJECT_CONTEXT,
+            AgentAction.MCP_IMPACT_ANALYSIS,
         }
         assert agent.supported_actions == expected
 

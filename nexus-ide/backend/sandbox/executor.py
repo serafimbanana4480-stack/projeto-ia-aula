@@ -385,14 +385,20 @@ class SandboxExecutor:
         - Linux: resource.setrlimit for memory limits
         """
         start = time.time()
+        tmpdir_ctx = tempfile.TemporaryDirectory(prefix=f"nexus-sandbox-{execution_id}-")
 
         try:
+            tmp = Path(tmpdir_ctx.name)
             if language == "python":
                 import sys
 
-                cmd = [sys.executable, "-c", code]
+                code_file = tmp / "code.py"
+                code_file.write_text(code, encoding="utf-8")
+                cmd = [sys.executable, str(code_file)]
             elif language == "javascript":
-                cmd = ["node", "-e", code]
+                code_file = tmp / "code.js"
+                code_file.write_text(code, encoding="utf-8")
+                cmd = ["node", str(code_file)]
             elif language == "bash":
                 bash = shutil.which("bash")
                 if os.name == "nt" and bash:
@@ -507,6 +513,8 @@ class SandboxExecutor:
                 timed_out=False,
                 duration_ms=duration_ms,
             )
+        finally:
+            tmpdir_ctx.cleanup()
 
 
 class SecurityPolicy:

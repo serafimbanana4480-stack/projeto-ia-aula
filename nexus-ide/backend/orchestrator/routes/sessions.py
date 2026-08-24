@@ -184,9 +184,12 @@ async def get_messages_endpoint(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """Fetch persisted messages for a session (for reload + history view)."""
+    if get_session(session_id) is None and session_id == "default":
+        return {"messages": [], "count": 0}
     if get_session(session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
-    return {"messages": get_messages(session_id, limit=limit), "count": limit}
+    messages = get_messages(session_id, limit=limit)
+    return {"messages": messages, "count": len(messages)}
 
 
 @router.get("/{session_id}/runs")
@@ -196,6 +199,11 @@ async def get_runs_endpoint(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """Return durable run/checkpoint history for recovery and observability."""
+    # ``default`` is an implicit frontend session and may not have a durable
+    # row until its first message.  Recovery must be empty, not a misleading
+    # 404, while arbitrary unknown session ids remain strict 404s.
+    if get_session(session_id) is None and session_id == "default":
+        return {"runs": []}
     if get_session(session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
     return {"runs": list_session_runs(session_id, limit=limit)}

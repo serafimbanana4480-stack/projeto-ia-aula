@@ -1,6 +1,6 @@
 """DASHBOARD AGENT — autonomous system monitor and metrics interpreter.
 
-Model: qwen2.5-coder:1.5b (DASHBOARD tier) on the configured Ollama instance.
+Model: DASHBOARD tier (resolved via config/models.yaml).
 Prompt: config/prompts/dashboard.md
 See ARCHITECTURE.md §3.9 and §9.
 

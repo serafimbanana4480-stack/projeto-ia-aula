@@ -709,7 +709,7 @@ def update_project(project_id: str, **fields: Any) -> dict | None:
         return get_project(project_id)
     fields["updated_at"] = _now_iso()
     # Whitelist allowed columns to prevent SQL injection
-    ALLOWED_COLS = {"name", "description", "mode", "preferred_model", "trust", "updated_at"}
+    ALLOWED_COLS = {"name", "path", "description", "mode", "preferred_model", "trust", "updated_at"}
     safe_fields = {k: v for k, v in fields.items() if k in ALLOWED_COLS}
     if not safe_fields:
         return get_project(project_id)

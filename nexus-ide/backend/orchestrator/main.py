@@ -129,12 +129,17 @@ def _allow_degraded_startup() -> bool:
     opt-in only keeps health, authentication, and read-only UI available so a
     developer can recover the workspace and free space without a dead login.
     """
-    return os.environ.get("NEXUS_ALLOW_DEGRADED_STARTUP", "").strip().lower() in {
+    if os.environ.get("NEXUS_ALLOW_DEGRADED_STARTUP", "").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
-    }
+    }:
+        return True
+    try:
+        return get_settings().environment == "development"
+    except Exception:
+        return False
 
 
 def _claim_worker(name: str, owned: set[str]) -> bool:
@@ -252,6 +257,7 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     """Create long-lived singletons and guarantee clean shutdown."""
     owned_workers: set[str] = set()
     app.state.worker_ownership = owned_workers
+    catalog_refresh_owned = False
 
     from backend.core.auto_correction import get_auto_correction_loop
     from backend.llm import create_llm_client
@@ -337,6 +343,34 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     enable_auto_trigger  = _svc("AUTO_TRIGGER")
     enable_session_gc    = _svc("SESSION_GC")
 
+    # ``NEXUS_ALLOW_DEGRADED_STARTUP`` only means that the HTTP service may
+    # come up.  It must not silently turn a critical disk condition into
+    # autonomous writers, checkpoints, or watchers running as normal.  Chat
+    # and health remain available; autonomous background work is opt-in via a
+    # separate, deliberately explicit override.
+    disk_critical = (
+        isinstance(getattr(app.state, "disk_pressure", None), dict)
+        and app.state.disk_pressure.get("status") == "critical"
+    )
+    degraded_autonomy = os.environ.get("NEXUS_ALLOW_DEGRADED_AUTONOMY", "").strip().lower()
+    autonomy_blocked_by_disk = disk_critical and degraded_autonomy not in {"1", "true", "yes", "on"}
+    if autonomy_blocked_by_disk:
+        enable_workers = False
+        enable_dashboard = False
+        enable_guardian = False
+        enable_auto_correct = False
+        enable_exec_engine = False
+        enable_improvement = False
+        enable_self_improve = False
+        enable_self_healing = False
+        enable_ai_orchestrator = False
+        enable_auto_trigger = False
+        enable_session_gc = False
+        logger.warning(
+            "Critical disk pressure: autonomous background services disabled; "
+            "set NEXUS_ALLOW_DEGRADED_AUTONOMY=1 only for an explicit operator override"
+        )
+
     off = [n for n, on in [
         ("BACKGROUND_WORKERS", enable_workers),
         ("DASHBOARD_AGENT", enable_dashboard),
@@ -358,6 +392,17 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
 
     if not hasattr(app.state, "llm_client") or app.state.llm_client is None:
         app.state.llm_client = create_llm_client()
+
+    from backend.llm.model_catalog import start_catalog_refresh_worker
+
+    catalog_refresh_owned = False
+    if not autonomy_blocked_by_disk:
+        catalog_refresh_owned = _claim_worker("catalog_refresh", owned_workers)
+    if catalog_refresh_owned:
+        await start_catalog_refresh_worker(app)
+        logger.info("Catalog refresh worker started")
+    elif autonomy_blocked_by_disk:
+        logger.info("Catalog refresh worker disabled under critical disk pressure")
 
     registry = get_registry(app)
     app.state.context = ContextStore()
@@ -651,6 +696,10 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
             "background_workers",
             _stop_workers_safely(worker_manager) if workers_owned and worker_manager else asyncio.sleep(0),
         )
+        if catalog_refresh_owned:
+            from backend.llm.model_catalog import stop_catalog_refresh_worker
+
+            await _safe_shutdown("catalog_refresh", stop_catalog_refresh_worker())
         for name in tuple(owned_workers):
             _release_worker(name, owned_workers)
         from backend.orchestrator.llm_client_lifecycle import close_all_llm_clients

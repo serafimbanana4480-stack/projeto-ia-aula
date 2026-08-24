@@ -107,3 +107,14 @@ async def test_completed_run_replays_events_before_closing(monkeypatch) -> None:
     assert len(frames) == 2
     assert json.loads(frames[0].split("data: ", 1)[1])["type"] == "mission_plan"
     assert json.loads(frames[1].split("data: ", 1)[1])["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_implicit_default_session_has_empty_recovery_instead_of_404(monkeypatch) -> None:
+    monkeypatch.setattr(sessions_routes, "get_session", lambda _session_id: None)
+
+    response = await sessions_routes.get_runs_endpoint(
+        "default", limit=20, _user={"sub": "test"}
+    )
+
+    assert response == {"runs": []}

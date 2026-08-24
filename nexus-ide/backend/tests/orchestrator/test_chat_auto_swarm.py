@@ -51,6 +51,10 @@ class FakeAgent(AgentBase):
 @pytest.fixture
 def client_with_fake_agents(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """FastAPI TestClient with mocked Ollama and a minimal fake registry."""
+    # These tests exercise the LEGACY pipeline contracts (routing events,
+    # fake agent registry). The NEXUS primary runtime bypasses both and would
+    # dispatch real provider requests from CI, so pin the legacy lane.
+    monkeypatch.setenv("NEXUS_PRIMARY_ENABLED", "0")
     mock_transport = _install_mock_ollama(["ok"])
 
     original = OllamaClient.__init__
@@ -64,6 +68,21 @@ def client_with_fake_agents(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCli
         return original(self, base_url, **kwargs)
 
     monkeypatch.setattr(OllamaClient, "__init__", patched_init)
+
+    # Pin the app-level LLM client to the mocked local provider. Without
+    # this, routing/model classification dispatched REAL requests to whatever
+    # cloud provider the developer machine had configured.
+    from backend.llm.factory import create_llm_client
+
+    monkeypatch.setattr(
+        "backend.llm.create_llm_client",
+        lambda: create_llm_client(
+            multi_llm_enabled=False,
+            llm_provider="ollama",
+            ollama_host="http://ollama.test",
+            free_only=False,
+        ),
+    )
 
     # Reset any previously cached app state
     for attr in ("ollama", "llm_client"):

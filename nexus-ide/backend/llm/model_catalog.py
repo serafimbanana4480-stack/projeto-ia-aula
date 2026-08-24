@@ -946,3 +946,158 @@ def load_validated_models(provider: str) -> list[ModelInfo]:
             continue
         models.append(model)
     return models
+
+
+def load_stale_models(provider: str) -> list[ModelInfo]:
+    """Load cached models even when validated_at is past TTL (emergency fallback)."""
+    entry = _load_cache().get(provider)
+    if not isinstance(entry, dict):
+        return []
+    models: list[ModelInfo] = []
+    for raw in entry.get("models", []):
+        try:
+            model = ModelInfo(**raw)
+        except (TypeError, ValueError):
+            continue
+        if model.provider != provider:
+            continue
+        if model.quota_available is False:
+            continue
+        models.append(model)
+    return models
+
+
+def apply_catalog_to_llm_client(client: Any, provider: str, models: list[ModelInfo]) -> int:
+    """Push refreshed catalog entries into live provider instances."""
+    updated = 0
+    stack: list[Any] = [client]
+    while stack:
+        obj = stack.pop()
+        if obj is None:
+            continue
+        if getattr(obj, "provider_name", None) == provider and hasattr(obj, "_catalog"):
+            obj._catalog = models
+            obj.validated_at = None
+            obj.eligibility_reason = "live catalog refresh"
+            updated += 1
+        policy_candidates = getattr(obj, "policy_candidates", None)
+        if policy_candidates is not None and provider == "openrouter":
+            obj.policy_candidates = list(models)
+        for attr in ("primary", "last_provider"):
+            val = getattr(obj, attr, None)
+            if val is not None:
+                stack.append(val)
+        fallbacks = getattr(obj, "fallbacks", None)
+        if isinstance(fallbacks, (list, tuple)):
+            stack.extend(fallbacks)
+        providers = getattr(obj, "providers", None)
+        if isinstance(providers, dict):
+            stack.extend(providers.values())
+    return updated
+
+
+_catalog_refresh_task: asyncio.Task[Any] | None = None
+_catalog_refresh_stop: asyncio.Event | None = None
+_catalog_refresh_inflight: set[str] = set()
+
+
+def catalog_age_seconds(provider: str = "openrouter") -> float | None:
+    """Return seconds since the provider catalog was last fetched, or None."""
+    entry = _load_cache().get(provider)
+    if not isinstance(entry, dict):
+        return None
+    fetched_at = _cache_timestamp(entry.get("fetched_at"))
+    if not fetched_at:
+        return None
+    return max(0.0, time.time() - fetched_at)
+
+
+def catalog_is_fresh(provider: str = "openrouter") -> bool:
+    """Return whether the on-disk catalog is within the validation TTL."""
+    age = catalog_age_seconds(provider)
+    if age is None:
+        return False
+    ttl = max(1, int(getattr(get_settings(), "provider_validation_ttl_seconds", CACHE_TTL_SECONDS)))
+    return age <= ttl
+
+
+async def refresh_provider_catalog(provider: str = "openrouter") -> bool:
+    """Fetch and persist a fresh provider catalog."""
+    result = await discover_models(provider, refresh=True)
+    return bool(result.models)
+
+
+def schedule_provider_catalog_refresh(app: Any, provider: str = "openrouter") -> None:
+    """Fire-and-forget catalog refresh for one provider."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if provider in _catalog_refresh_inflight:
+        return
+
+    async def _run() -> None:
+        _catalog_refresh_inflight.add(provider)
+        try:
+            if await refresh_provider_catalog(provider):
+                models = load_validated_models(provider) or load_stale_models(provider)
+                client = getattr(app.state, "llm_client", None)
+                if client is not None and models:
+                    apply_catalog_to_llm_client(client, provider, models)
+        except Exception:
+            logger.exception("Scheduled catalog refresh failed for %s", provider)
+        finally:
+            _catalog_refresh_inflight.discard(provider)
+
+    loop.create_task(_run())
+
+
+async def _catalog_refresh_loop(app: Any) -> None:
+    """Background worker: refresh catalogs before the in-memory TTL expires."""
+    interval = max(
+        60,
+        int(os.environ.get("NEXUS_CATALOG_REFRESH_SECONDS", "500")),
+    )
+    stop = _catalog_refresh_stop
+    while stop is not None and not stop.is_set():
+        try:
+            if await refresh_provider_catalog("openrouter"):
+                models = load_validated_models("openrouter")
+                client = getattr(app.state, "llm_client", None)
+                if client is not None and models:
+                    count = apply_catalog_to_llm_client(client, "openrouter", models)
+                    logger.info(
+                        "Background catalog refresh applied to %d provider instance(s)",
+                        count,
+                    )
+        except Exception:
+            logger.exception("Background catalog refresh tick failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            continue
+
+
+async def start_catalog_refresh_worker(app: Any) -> None:
+    """Start the periodic catalog refresh background task."""
+    global _catalog_refresh_task, _catalog_refresh_stop
+    if _catalog_refresh_task is not None and not _catalog_refresh_task.done():
+        return
+    _catalog_refresh_stop = asyncio.Event()
+    _catalog_refresh_task = asyncio.create_task(_catalog_refresh_loop(app))
+    logger.info("Catalog refresh worker started")
+
+
+async def stop_catalog_refresh_worker() -> None:
+    """Stop the periodic catalog refresh background task."""
+    global _catalog_refresh_task, _catalog_refresh_stop
+    if _catalog_refresh_stop is not None:
+        _catalog_refresh_stop.set()
+    if _catalog_refresh_task is not None:
+        _catalog_refresh_task.cancel()
+        try:
+            await _catalog_refresh_task
+        except asyncio.CancelledError:
+            pass
+    _catalog_refresh_task = None
+    _catalog_refresh_stop = None

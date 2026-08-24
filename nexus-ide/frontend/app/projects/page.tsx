@@ -40,6 +40,7 @@ export default function ProjectsPage() {
     trust: false,
   });
   const [hasDuplicatePaths, setHasDuplicatePaths] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
   const pathInputRef = useRef<HTMLInputElement>(null);
   const { setCurrentProject } = useProjectStore();
 
@@ -105,27 +106,47 @@ export default function ProjectsPage() {
       preferred_model: project.preferred_model ?? "",
       trust: Boolean(project.trust),
     });
+    setEditError(null);
     setShowEditModal(true);
   }
 
   async function handleUpdateProject() {
     if (!editingProject) return;
+    setEditError(null);
     try {
       const res = await fetch(apiUrl(`/api/projects/${editingProject.id}`), {
         method: "PUT",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify(editForm),
       });
-      if (!res.ok) throw new Error("Failed to update");
+      if (!res.ok) {
+        // A rejected update must stay rejected. Writing the edit into local
+        // state anyway made the Trust toggle look saved while the backend kept
+        // the project untrusted, so every file write kept failing (QA C4).
+        let detail = `Update failed (HTTP ${res.status})`;
+        try {
+          const body = await res.json();
+          if (body?.detail) detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+        } catch {
+          // response had no JSON body — keep the status-based message
+        }
+        setEditError(detail);
+        return;
+      }
+      const payload = await res.json();
+      // PUT /api/projects/{id} answers {"project": {...}}, not the bare project.
+      const updated: Partial<Project> = payload?.project ?? payload;
       setShowEditModal(false);
       setEditingProject(null);
-      const updated = await res.json();
       setProjects((prev) => prev.map((p) => (p.id === editingProject.id ? { ...p, ...updated } : p)));
       const current = useProjectStore.getState().currentProject;
       if (current && current.id === editingProject.id) {
         useProjectStore.getState().setCurrentProject({ ...editingProject, ...updated });
       }
     } catch {
+      // Network-level failure only (backend unreachable): keep the edit locally
+      // so the page stays usable, and say so.
+      setEditError("Backend unreachable — change applied locally only, not saved.");
       const localProject: Project = {
         ...editingProject,
         name: editForm.name,
@@ -548,11 +569,18 @@ export default function ProjectsPage() {
                 </label>
               </div>
 
+              {editError && (
+                <p className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                  {editError}
+                </p>
+              )}
+
               <div className="flex gap-2 pt-2">
                 <button
                   onClick={() => {
                     setShowEditModal(false);
                     setEditingProject(null);
+                    setEditError(null);
                   }}
                   className="flex-1 rounded border border-nexus-border px-3 py-2 text-sm hover:bg-nexus-border/50"
                 >

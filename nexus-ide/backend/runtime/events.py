@@ -69,6 +69,7 @@ class RuntimeEventType(StrEnum):
 
     TEST_STARTED = "test_started"
     TEST_RESULT = "test_result"
+    PROVIDER_RESULT = "provider_result"
 
     SUBAGENT_STARTED = "subagent_started"
     SUBAGENT_PROGRESS = "subagent_progress"

@@ -53,6 +53,24 @@ def _mask(value: str) -> str:
     return value[:4] + "****" + value[-4:]
 
 
+def _is_masked_secret(value: str) -> bool:
+    """Recognise values produced by this API's masking contract.
+
+    A masked value is display-only.  Treating it as a new credential would
+    silently replace a working environment/runtime secret with a string that
+    can never authenticate.  This check intentionally accepts only the
+    stable forms emitted by :func:`_mask`, not arbitrary values containing an
+    asterisk sequence.
+    """
+    candidate = value.strip()
+    return candidate == "********" or (
+        len(candidate) >= 12
+        and candidate[4:8] == "****"
+        and "*" not in candidate[:4]
+        and "*" not in candidate[8:]
+    )
+
+
 def _load_runtime_settings() -> dict[str, str]:
     if not SETTINGS_FILE.exists():
         return {}
@@ -124,26 +142,38 @@ async def update_settings(
     sensitive keys are validated before storage.
     """
     current = _load_runtime_settings()
+    env_settings = get_settings()
     for key, value in update.settings.items():
         if not isinstance(key, str) or not isinstance(value, str):
             raise HTTPException(status_code=400, detail=f"Invalid type for key '{key}'")
         if not key.strip():
             continue
+        normalized_key = key.strip()
+        if _is_sensitive(normalized_key) and _is_masked_secret(value):
+            # GET /api/settings and older clients expose masked secrets.  Keep
+            # the real value from runtime overrides/.env, or reject the
+            # request explicitly when no value exists to preserve.
+            existing = current.get(normalized_key) or getattr(env_settings, normalized_key, "")
+            if existing:
+                continue
+            raise HTTPException(
+                status_code=400,
+                detail=f"A masked value cannot be saved for '{normalized_key}'; send the new secret explicitly.",
+            )
         # Settings UI forms intentionally submit empty password fields for
         # providers that were not edited. Do not erase an existing secret just
         # because another provider was saved.
-        if key.endswith("_api_key") and not value.strip() and current.get(key):
+        if normalized_key.endswith("_api_key") and not value.strip() and (
+            current.get(normalized_key) or getattr(env_settings, normalized_key, "")
+        ):
             continue
-        current[key.strip()] = value
+        current[normalized_key] = value
 
-    from backend.llm.model_catalog import invalidate_cache
     changed_providers = {
         "ollama" if key == "ollama_host" else key.removesuffix("_api_key").removesuffix("_base_url")
         for key in update.settings
         if key.endswith(("_api_key", "_base_url", "_host"))
     }
-    for changed_provider in changed_providers:
-        invalidate_cache(changed_provider)
     # Build the replacement before persisting it.  A malformed provider
     # configuration must not leave the saved settings pointing at a client
     # that could not be initialized.
@@ -178,6 +208,14 @@ async def update_settings(
 
     if previous_client is not replacement_client:
         await retire_llm_client(request.app, previous_client)
+
+    # Refresh catalogs after a successful rebuild — never invalidate before
+    # rebuild, which wiped disk cache and left chat with an empty catalog (QA C2).
+    if changed_providers:
+        from backend.llm.model_catalog import schedule_provider_catalog_refresh
+
+        for provider in changed_providers:
+            schedule_provider_catalog_refresh(request.app, provider)
 
     logger.info("Runtime settings updated (%d keys)", len(update.settings))
     return {

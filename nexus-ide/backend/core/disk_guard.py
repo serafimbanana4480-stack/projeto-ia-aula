@@ -139,6 +139,9 @@ class DiskPressureError(RuntimeError):
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "status": "critical",
+            "pressure": True,
+            "write_blocked": True,
             "path": self.snapshot.path,
             "free_bytes": self.snapshot.free_bytes,
             "free_percent": self.snapshot.free_percent,

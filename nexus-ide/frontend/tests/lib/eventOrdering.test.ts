@@ -1,10 +1,10 @@
-import { describe, expect, it } from "vitest";
-
+import { describe, expect, it, beforeEach } from "vitest";
 import {
   RunEventBuffer,
   dedupeAndOrder,
   isOrderable,
   type RuntimeEventLike,
+  type OrderedEvent,
 } from "../../lib/eventOrdering";
 
 const event = (
@@ -18,6 +18,22 @@ const event = (
   ts: 1_700_000_000,
   ...overrides,
 });
+
+function makeEvent(
+  type: string,
+  seq: number,
+  eventId: string,
+  runId: string = "run-1",
+  extra: Record<string, unknown> = {},
+): OrderedEvent {
+  return {
+    type,
+    seq,
+    event_id: eventId,
+    run_id: runId,
+    ...extra,
+  };
+}
 
 describe("event ordering", () => {
   it("restores order when events arrive shuffled", () => {
@@ -90,5 +106,146 @@ describe("event ordering", () => {
   it("orders a batch in one call", () => {
     const ordered = dedupeAndOrder([event(2), event(1), event(2)]);
     expect(ordered.map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  // ─── Extended coverage ─────────────────────────────────────────────────
+
+  describe("isOrderable edge cases", () => {
+    it("returns false when run_id is missing", () => {
+      const e: RuntimeEventLike = { type: "token", seq: 1, event_id: "e1" };
+      expect(isOrderable(e)).toBe(false);
+    });
+
+    it("returns false when run_id is empty string", () => {
+      const e: RuntimeEventLike = { type: "token", run_id: "", seq: 1, event_id: "e1" };
+      expect(isOrderable(e)).toBe(false);
+    });
+
+    it("returns false when seq is missing", () => {
+      const e: RuntimeEventLike = { type: "token", run_id: "r", event_id: "e1" };
+      expect(isOrderable(e)).toBe(false);
+    });
+
+    it("returns false when seq is not a number", () => {
+      const e: RuntimeEventLike = { type: "token", run_id: "r", seq: "1" as any, event_id: "e1" };
+      expect(isOrderable(e)).toBe(false);
+    });
+
+    it("returns false when seq is NaN", () => {
+      const e: RuntimeEventLike = { type: "token", run_id: "r", seq: NaN, event_id: "e1" };
+      expect(isOrderable(e)).toBe(false);
+    });
+
+    it("returns false when event_id is missing", () => {
+      const e: RuntimeEventLike = { type: "token", run_id: "r", seq: 1 };
+      expect(isOrderable(e)).toBe(false);
+    });
+
+    it("returns false when event_id is empty string", () => {
+      const e: RuntimeEventLike = { type: "token", run_id: "r", seq: 1, event_id: "" };
+      expect(isOrderable(e)).toBe(false);
+    });
+
+    it("returns true for complete event", () => {
+      expect(isOrderable(makeEvent("token", 1, "e1", "run-1"))).toBe(true);
+    });
+  });
+
+  describe("RunEventBuffer", () => {
+    let buffer: RunEventBuffer;
+
+    beforeEach(() => {
+      buffer = new RunEventBuffer();
+    });
+
+    it("starts with null runId", () => {
+      expect(buffer.currentRunId).toBeNull();
+    });
+
+    it("starts with lastSeq 0", () => {
+      expect(buffer.lastSeq).toBe(0);
+    });
+
+    it("returns empty events array initially", () => {
+      expect(buffer.events()).toEqual([]);
+    });
+
+    it("accepts events from a new run only if runId is null", () => {
+      const buf = new RunEventBuffer();
+      buf.push(makeEvent("token", 1, "e1", "run-X"));
+      expect(buf.currentRunId).toBe("run-X");
+      buf.push(makeEvent("token", 2, "e2", "run-X"));
+      expect(buf.events()).toHaveLength(2);
+    });
+
+    it("accepts extra data fields", () => {
+      buffer.push(makeEvent("progress", 1, "e1", "run-1", { phase: "planning", progress: 0.5 }));
+      const events = buffer.events();
+      expect((events[0] as any).phase).toBe("planning");
+    });
+
+    it("handles large seq numbers", () => {
+      buffer.push(makeEvent("token", 1000000, "e1"));
+      buffer.push(makeEvent("token", 999999, "e2"));
+      const events = buffer.events();
+      expect(events.map((e: any) => e.seq)).toEqual([999999, 1000000]);
+    });
+
+    it("push returns false for out-of-run events", () => {
+      const buf = new RunEventBuffer();
+      buf.push(makeEvent("token", 1, "e1", "run-1"));
+      expect(buf.push(makeEvent("token", 2, "e2", "run-2"))).toBe(false);
+    });
+
+    it("push returns false for duplicate events", () => {
+      buffer.push(makeEvent("token", 1, "dup"));
+      const result = buffer.push(makeEvent("token", 2, "dup"));
+      expect(result).toBe(false);
+      expect(buffer.events()).toHaveLength(1);
+    });
+
+    it("reset clears all state", () => {
+      buffer.push(makeEvent("token", 1, "e1"));
+      buffer.push(makeEvent("token", 2, "e2"));
+      buffer.reset();
+      expect(buffer.events()).toEqual([]);
+      expect(buffer.lastSeq).toBe(0);
+      expect(buffer.currentRunId).toBeNull();
+    });
+  });
+
+  describe("dedupeAndOrder", () => {
+    it("returns empty array for empty input", () => {
+      expect(dedupeAndOrder([])).toEqual([]);
+    });
+
+    it("throws on null input (iteration protocol)", () => {
+      expect(() => dedupeAndOrder(null as any)).toThrow();
+    });
+
+    it("preserves extra fields on events", () => {
+      const events: RuntimeEventLike[] = [
+        makeEvent("progress", 1, "e1", "run-1", { progress: 0.8, phase: "testing" }),
+      ];
+      const result = dedupeAndOrder(events) as OrderedEvent[];
+      expect((result[0] as any).phase).toBe("testing");
+      expect((result[0] as any).progress).toBe(0.8);
+    });
+
+    it("separates events from different runs", () => {
+      const events: RuntimeEventLike[] = [
+        makeEvent("token", 1, "e1", "run-1"),
+        makeEvent("token", 2, "e2", "run-2"),
+        makeEvent("token", 3, "e3", "run-1"),
+      ];
+      const result = dedupeAndOrder(events);
+      expect(result).toHaveLength(2);
+    });
+
+    it("deduplicates by event_id in batch", () => {
+      const e = event(2);
+      const result = dedupeAndOrder([event(2), event(1), e]);
+      expect(result.map((x: any) => x.seq)).toEqual([1, 2]);
+    });
   });
 });

@@ -1,6 +1,6 @@
 """DEBUGGER — root cause analysis.
 
-Model: qwen2.5-coder:7b (CODER tier). Can execute code in Docker sandbox.
+Model: CODER tier (resolved via config/models.yaml). Can execute code in Docker sandbox.
 Prompt: config/prompts/debugger.md
 See ARCHITECTURE.md §3.6.
 

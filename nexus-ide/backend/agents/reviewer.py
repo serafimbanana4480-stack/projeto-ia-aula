@@ -1,6 +1,6 @@
 """REVIEWER — peer code review agent with security, quality, and style analysis.
 
-Model: qwen2.5-coder:7b (CODER tier). Context 8K.
+Model: CODER tier (resolved via config/models.yaml).
 Prompt: config/prompts/reviewer.md
 See ARCHITECTURE.md §3.4.
 

@@ -44,6 +44,9 @@ class TestAgentAction:
             "format_code",
             "type_check",
             "spawn_task",
+            "mcp_project_context",
+            "mcp_impact_analysis",
+            "mcp_sequential_thinking",
         }
         assert actions == expected
 

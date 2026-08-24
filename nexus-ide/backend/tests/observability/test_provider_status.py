@@ -23,6 +23,8 @@ async def test_direct_provider_is_reported_as_available() -> None:
     result = await get_providers_status(request, _user={"id": "test"})
 
     assert result["providers"]["openrouter"]["healthy"] is True
+    assert result["providers"]["openrouter"]["status"] == "unknown"
+    assert result["providers"]["openrouter"]["health_basis"] == "eligibility_only"
     assert "Unsupported LLM client" not in result.get("note", "")
 
 
@@ -45,5 +47,6 @@ async def test_resilient_provider_reports_observed_real_fallback() -> None:
 
     assert result["providers"]["ollama"]["healthy"] is True
     assert result["providers"]["ollama"]["runtime_observed"] is True
+    assert result["providers"]["ollama"]["status"] == "healthy"
     assert result["providers"]["ollama"]["latency"] == 42.5
     assert result["providers"]["openrouter"]["last_check"] is None

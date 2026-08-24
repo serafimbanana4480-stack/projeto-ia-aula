@@ -28,7 +28,8 @@ export type AgentName =
   | "BUG_HUNTER_STATIC"
   | "BUG_HUNTER_RUNTIME"
   | "META_ANALYZER"
-  | "MICRO"; // MICRO is used by ask mode
+  | "MICRO"
+  | "NEXUS"; // MICRO is used by ask mode; NEXUS is the primary agent (§8 item 2)
 
 export type ThinkingMode = "fast" | "deep" | "iterative";
 export type ContextNeed = "low" | "medium" | "high";
@@ -43,6 +44,34 @@ export interface RoutingDecision {
   context_needed: ContextNeed;
   routing_confidence: number;
   routing_reason: string;
+}
+
+export type StepStatus =
+  | "running"
+  | "success"
+  | "error"
+  | "awaiting_confirmation"
+  | "pending";
+
+/**
+ * One row of the unified run timeline.
+ *
+ * `kind` + `seq` come from the runtime envelope (see §8 item 3), so the row can
+ * be ordered and de-duplicated without touching wall-clock `timestamp`.
+ */
+export interface RunStep {
+  seq: number;
+  kind: string;
+  label: string;
+  target: string;
+  verb: "thinking" | "tool" | "file" | "command" | "test" | "agent" | "status" | "message" | "other";
+  status: StepStatus;
+  icon: string;
+  startedAt?: number;
+  durationMs?: number;
+  detail?: unknown;
+  /** The original SSE event this step was built from, for collapsible detail. */
+  event?: StreamEvent;
 }
 
 export interface StreamEvent {
@@ -83,6 +112,14 @@ export interface StreamEvent {
   tool_result?: unknown;
   tool_error?: string;
   timestamp: string;
+
+  // Runtime ordering envelope (§8 item 3). Optional because the legacy SSE
+  // pipeline still emits frames without them; the frontend RunEventBuffer
+  // treats their absence as "legacy" (arrival-ordered).
+  run_id?: string;
+  seq?: number;
+  event_id?: string;
+  task_id?: string;
 }
 
 export interface ChatMessageMetadata {
@@ -101,6 +138,8 @@ export interface ChatMessage {
   agent?: AgentName;
   content: string;
   thinking?: string;
+  /** Unified timeline produced by `foldRun`; feeds `RunTimeline`. */
+  steps?: RunStep[];
   metrics?: Record<string, number | string>;
   timestamp: string;
   toolCalls?: ToolCallItem[];

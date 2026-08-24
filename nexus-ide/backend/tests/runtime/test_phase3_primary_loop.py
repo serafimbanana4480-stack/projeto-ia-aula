@@ -159,6 +159,7 @@ async def test_run_continues_with_no_plan_and_no_planner() -> None:
         stream=signals(
             tool_call("write_file", path="tests/test_config.py"),
             tool_result("write_file", ok=True, paths=["tests/test_config.py"]),
+            token("Adicionei o teste e a execução terminou com sucesso."),
         ),
         observe=observe_project,
         verify=lambda request: VerificationResult(
@@ -214,6 +215,28 @@ async def test_failed_verification_loops_back_instead_of_ending() -> None:
     assert loop.telemetry.retries == 1
 
 
+@pytest.mark.asyncio
+async def test_final_failed_verification_is_not_reported_as_completed() -> None:
+    loop = PrimaryLoop(
+        run_id="run-final-red",
+        query="corrige o bug",
+        stream=signals(token("Apliquei a alteração.")),
+        observe=observe_project,
+        verify=lambda request: VerificationResult(
+            ran=True, ok=False, summary="1 falhou", command="pytest"
+        ),
+        max_cycles=1,
+        project_path="/tmp/project",
+    )
+
+    events = await collect(loop)
+
+    assert loop.outcome.failed is True
+    assert loop.outcome.error == "A verificação final falhou: 1 falhou"
+    assert "run_failed" in types_of(events)
+    assert "run_completed" not in types_of(events)
+
+
 # ------------------------------------------------------- 3./4. delegation
 def deep_proposal(name: str, **extra) -> dict:
     payload = {
@@ -258,7 +281,9 @@ async def test_independent_subagents_run_in_parallel() -> None:
     elapsed = time.monotonic() - started
 
     assert peak == 2, "independent workers must overlap"
-    assert elapsed < 0.09, "two 50ms workers ran sequentially"
+    # Keep a margin below the ~150ms sequential case without making the test
+    # depend on sub-10ms scheduler noise on Windows/CI.
+    assert elapsed < 0.14, "two 50ms workers ran sequentially"
     assert {result.status for result in loop.outcome.subagents} == {"completed"}
     assert types_of(events).count("subagent_started") == 2
 
@@ -637,3 +662,43 @@ async def test_a_tool_failure_is_reported_not_swallowed() -> None:
     assert "tool_failed" in types_of(events)
     assert loop.telemetry.agent_failures == 1
     assert loop.outcome.succeeded  # the run finished honestly, reporting the failure
+
+
+@pytest.mark.asyncio
+async def test_fatal_provider_error_never_becomes_completed() -> None:
+    loop = PrimaryLoop(
+        run_id="run-fatal-provider",
+        query="responde",
+        stream=signals(
+            AgentSignal(
+                AgentSignalKind.ERROR,
+                text="provider timeout",
+                ok=False,
+            ),
+        ),
+        project_path="/tmp/project",
+    )
+
+    events = await collect(loop)
+
+    assert loop.outcome.failed is True
+    assert loop.outcome.error == "provider timeout"
+    assert "run_failed" in types_of(events)
+    assert "run_completed" not in types_of(events)
+
+
+@pytest.mark.asyncio
+async def test_empty_model_response_is_an_explicit_failure() -> None:
+    loop = PrimaryLoop(
+        run_id="run-empty-provider",
+        query="responde",
+        stream=signals(),
+        project_path="/tmp/project",
+    )
+
+    events = await collect(loop)
+
+    assert loop.outcome.failed is True
+    assert "sem uma resposta visível" in loop.outcome.error
+    assert types_of(events)[-1] == "run_failed"
+    assert "run_completed" not in types_of(events)

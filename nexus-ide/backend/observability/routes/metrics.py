@@ -418,9 +418,18 @@ async def get_providers_status(
                 else 0.0
             )
             observed_real_success = observed_at > 0 and not bool(getattr(prov, "simulation", False))
+            health_status = (
+                "healthy"
+                if observed_real_success
+                else "unknown"
+                if eligible and not bool(getattr(prov, "simulation", False))
+                else "unavailable"
+            )
             providers[name] = {
                 "healthy": observed_real_success
                 or (eligible and not bool(getattr(prov, "simulation", False))),
+                "status": health_status,
+                "health_basis": "runtime_observation" if observed_real_success else "eligibility",
                 "latency": (
                     getattr(llm_client, "last_provider_latency_ms", None) if observed_at else None
                 ),
@@ -451,6 +460,12 @@ async def get_providers_status(
             "providers": {
                 name: {
                     "healthy": eligible and not bool(getattr(llm_client, "simulation", False)),
+                    "status": (
+                        "unknown"
+                        if eligible and not bool(getattr(llm_client, "simulation", False))
+                        else "unavailable"
+                    ),
+                    "health_basis": "eligibility_only",
                     "latency": 0.0,
                     "last_check": 0.0,
                     "eligibility_reason": reason,

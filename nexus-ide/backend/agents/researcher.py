@@ -1,6 +1,6 @@
 """RESEARCHER — online research agent.
 
-Model: qwen2.5-coder:7b (CODER tier) with DuckDuckGo Search + URL fetching.
+Model: CODER tier (resolved via config/models.yaml) with DuckDuckGo Search + URL fetching.
 Prompt: config/prompts/researcher.md
 See ARCHITECTURE.md §3.3 and §5.3 (web search pipeline).
 
@@ -17,7 +17,7 @@ from .base import AgentAction, AgentBase
 
 class ResearcherAgent(AgentBase):
     name = "RESEARCHER"
-    model_key = "coder"  # qwen2.5-coder:7b for thorough research with tool use
+    model_key = "coder"  # coder tier: thorough research with tool use
     prompt_file = "researcher"
     supported_actions = {
         AgentAction.SEARCH_WEB,

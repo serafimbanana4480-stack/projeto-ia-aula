@@ -563,6 +563,25 @@ _DANGEROUS_MODULES: set[str] = {
 }
 
 
+def _fix_windows_path_literals(code: str) -> str:
+    """Rewrite bare Windows drive-path string literals to raw strings."""
+    pattern = re.compile(
+        r'''(?P<prefix>^|[=\(\[\{,\s])'''
+        r'''(?P<quote>["'])'''
+        r'''(?P<path>[A-Za-z]:\\(?:[^'"\\]|\\.)*)'''
+        r'''(?P=quote)''',
+        re.MULTILINE,
+    )
+
+    def _repl(match: re.Match[str]) -> str:
+        return (
+            f"{match.group('prefix')}r{match.group('quote')}"
+            f"{match.group('path')}{match.group('quote')}"
+        )
+
+    return pattern.sub(_repl, code)
+
+
 def _check_python_sandbox(code: str) -> tuple[bool, str]:
     """Scan Python code for dangerous imports / operations using AST.
 
@@ -570,10 +589,26 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
     imports, string concatenation, etc.  AST parsing gives us a reliable
     view of every import and dangerous call in the code.
     """
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as exc:
-        return False, f"Invalid Python syntax: {exc}"
+    parse_candidates = (code,)
+    if "\\" in code:
+        parse_candidates = (code, _fix_windows_path_literals(code))
+    tree = None
+    last_exc: SyntaxError | None = None
+    for candidate in parse_candidates:
+        try:
+            tree = ast.parse(candidate)
+            break
+        except SyntaxError as exc:
+            last_exc = exc
+    if tree is None:
+        message = str(last_exc) if last_exc else "unknown syntax error"
+        if "unicodeescape" in message.lower():
+            return (
+                False,
+                "Invalid Python syntax: Windows paths in strings must use raw "
+                "strings (r'C:\\\\Users\\\\...') or forward slashes",
+            )
+        return False, f"Invalid Python syntax: {last_exc}"
 
     def _resolve_string_arg(node: ast.expr) -> str | None:
         """Resolve an AST expression to a string constant if possible.

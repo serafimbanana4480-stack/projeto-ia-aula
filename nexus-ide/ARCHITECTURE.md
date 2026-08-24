@@ -13,17 +13,24 @@ This document is the authoritative architecture reference for NEXUS IDE. The sca
 ## 2. Provider Model
 
 ```
-OpenRouter (primary) ── deepseek/deepseek-v4-flash
+OpenCode Go (primary)  ── "openrouter/free" pool, resolved by tier
     ↓ fallback
-DeepSeek API         ── deepseek-chat / deepseek-reasoner
+OpenRouter (direct)    ── free-pool models validated against the live catalog
     ↓ fallback
-Ollama (local)       ── qwen2.5:0.5b, qwen2.5:1.5b, llama3.1:8b, etc.
+Ollama (local)         ── only with explicitly enabled/validated local models
     ↓ fallback
-MockProvider         ── graceful degradation message
+MockProvider           ── graceful degradation message
 ```
 
-All model tiers (micro, fast, coder, reasoning, deep, etc.) use `deepseek/deepseek-v4-flash` on OpenRouter.
-Local Ollama models serve as offline fallback and for embeddings (nomic-embed-text).
+Provider selection lives in `backend/llm/factory.py::create_llm_client` and
+honours `LLM_PROVIDER` (`opencode_go`, `openrouter`, `ollama`/`local`,
+`openai`, `deepseek`, `anthropic`, `gemini`, `kimi`, `groq`, `kilo`,
+`airllm`, `dev`). The **free-only policy** (`NEXUS_FREE_ONLY`, default on)
+fail-closes: paid or unvalidated providers are rejected unless explicitly
+opted out. Model tiers (micro/fast/coder/reasoning/deep) are declared in
+`config/models.yaml`; the smart router picks a tier and the OpenRouter
+provider resolves it to a live-validated free model via
+`MODEL_ALIASES`.
 
 ## 3. Agents
 

@@ -1,6 +1,6 @@
 """ANALYZER — critical code/architecture reviewer.
 
-Model: deepseek-r1:8b (REASONING tier) with thinking mode.
+Model: REASONING tier (resolved via config/models.yaml) with thinking mode.
 Prompt: config/prompts/analyzer.md
 See ARCHITECTURE.md §3.5.
 

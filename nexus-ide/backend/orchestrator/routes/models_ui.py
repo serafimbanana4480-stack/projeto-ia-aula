@@ -97,18 +97,10 @@ TIER_TO_OPENCODE_MODEL: dict[str, str] = {
 
 
 OPENROUTER_FREE_MODELS: list[dict[str, object]] = [
-    {
-        "id": "tencent/hy3:free",
-        "name": "Tencent Hy3",
-        "provider": "OpenRouter",
-        "tier": "reasoning",
-        "free": True,
-        "color": "#fbbf24",
-        "pricing": "free",
-        "estimated_tokens_per_sec": 28,
-        "context_window": 262_144,
-        "description": "Raciocínio e agentes para tarefas complexas.",
-    },
+    # Curated fallback for fresh installs where live discovery yields nothing.
+    # Every id here must be a *resolved* OpenRouter model id that actually has
+    # endpoints — dead ids used to be silently remapped by
+    # OpenRouterProvider.MODEL_ALIASES while the UI kept advertising them.
     {
         "id": "nvidia/nemotron-3-super-120b-a12b:free",
         "name": "NVIDIA Nemotron 3 Super",
@@ -134,8 +126,8 @@ OPENROUTER_FREE_MODELS: list[dict[str, object]] = [
         "description": "Rápido, económico e orientado a reasoning/código.",
     },
     {
-        "id": "poolside/laguna-m.1:free",
-        "name": "Poolside Laguna M.1",
+        "id": "poolside/laguna-s-2.1:free",
+        "name": "Poolside Laguna S.1",
         "provider": "OpenRouter",
         "tier": "coder",
         "free": True,

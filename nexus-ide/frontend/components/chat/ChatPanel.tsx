@@ -54,15 +54,11 @@ import {
   Search,
   MessageSquare,
 } from "lucide-react";
-import type { AgentName, ChatMessage, StreamEvent } from "../../lib/types";
+import type { ChatMessage } from "../../lib/types";
 import { log } from "../../lib/log";
 import { stripAnsiCodes } from "../../lib/utils";
-import {
-  activityFromProgress,
-  activityFromMissionEvent,
-  agentActivity,
-  sanitizeAssistantContent,
-} from "../../lib/chatPresentation";
+import { foldRun } from "../../lib/foldRun";
+import { sanitizeAssistantContent } from "../../lib/chatPresentation";
 
 interface ChatPanelProps {
   rightOpen?: boolean;
@@ -97,213 +93,123 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
   { value: "high", label: "Alto", icon: Sparkles, description: "High thinking" },
 ];
 
-/** Fold the raw SSE event stream into an ordered list of ChatMessages. */
-  function foldEvents(
-    pendingUser: ChatMessage[],
-    events: StreamEvent[],
-    lastUserMessage: string = "",
-  ): ChatMessage[] {
-    const out: ChatMessage[] = [...pendingUser];
-    let current: ChatMessage | null = null;
-    // Track the latest agent_started so we can attach tool calls
-    // that arrive without a fresh agent_started (e.g. legacy events).
-    let currentAgent: AgentName = "CODER";
-    let lastThinkingIteration = 0;
+/** Compact single-button mode picker: one click opens every available mode. */
+function ModeDropdown() {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const { currentMode, modes, modesLoaded, setMode } = useModeStore();
 
-    const ensureCurrent = (event: StreamEvent) => {
-      if (current) return current;
-      current = {
-        id: `a-${out.length}-${event.timestamp}`,
-        role: "assistant",
-        agent: currentAgent,
-        content: "",
-        timestamp: event.timestamp,
-        toolCalls: [],
-        activities: [],
-      };
-      out.push(current);
-      return current;
-    };
-
-    const upsertActivity = (activity: NonNullable<ChatMessage["activities"]>[number]) => {
-      const message = ensureCurrent({ type: "progress", timestamp: activity.timestamp });
-      message.activities = message.activities || [];
-      const existing = message.activities.findIndex((item) => item.id === activity.id);
-      if (existing >= 0) {
-        const previous = message.activities[existing];
-        message.activities[existing] = {
-          ...previous,
-          ...activity,
-          detail: activity.detail ?? previous.detail,
-        };
-      } else {
-        message.activities.push(activity);
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
       }
     };
-
-    const findRunningTool = (name?: string) => {
-      if (!current?.toolCalls) return -1;
-      const calls = current.toolCalls;
-      for (let i = calls.length - 1; i >= 0; i--) {
-        if (calls[i].status !== "running") continue;
-        if (!name || calls[i].name === name) return i;
-      }
-      return -1;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
     };
-
-    for (const e of events) {
-      switch (e.type) {
-        case "agent_started": {
-          currentAgent = (e.agent ?? "CODER") as AgentName;
-          const message = ensureCurrent(e);
-          if (!message.agent || message.agent === "CODER") message.agent = currentAgent;
-          upsertActivity(agentActivity(e, out.length, "running"));
-          break;
-        }
-        case "token": {
-          // Skip if this is an embedded thinking iteration marker
-          if (e.content && e.content.startsWith("<event>thinking|iteration:")) {
-            break;
-          }
-          ensureCurrent(e).content += e.content ?? "";
-          break;
-        }
-        case "thinking": {
-          // Parse iteration number to detect and skip duplicates
-          const iterMatch = (e.content ?? "").match(/thinking\|iteration:(\d+)/);
-          if (iterMatch) {
-            const iteration = parseInt(iterMatch[1], 10);
-            if (iteration <= lastThinkingIteration) {
-              break; // Skip duplicate thinking iteration marker
-            }
-            lastThinkingIteration = iteration;
-          }
-          const message = ensureCurrent(e);
-          const separator = message.thinking && e.content ? "\n" : "";
-          message.thinking = (message.thinking ?? "") + separator + (e.content ?? "");
-          break;
-        }
-        case "tool_call": {
-          current = ensureCurrent(e);
-          current.toolCalls = current.toolCalls || [];
-          current.toolCalls.push({
-            id: `tc-${current.toolCalls.length}-${e.timestamp}`,
-            name: e.tool_name || "tool",
-            args: e.tool_args || {},
-            status: "running",
-            timestamp: e.timestamp,
-          });
-          break;
-        }
-        case "progress": {
-          upsertActivity(activityFromProgress(e, out.length));
-          break;
-        }
-        case "mission_brief":
-        case "mission_plan":
-        case "mission_wave":
-        case "mission_agent":
-        case "mission_decision":
-        case "mission_verification":
-        case "mission_completed": {
-          upsertActivity(activityFromMissionEvent(e, out.length));
-          break;
-        }
-        case "tool_result": {
-          const idx = findRunningTool(e.tool_name);
-          if (idx >= 0 && current) {
-            current.toolCalls![idx].status = "success";
-            current.toolCalls![idx].result = e.tool_result;
-            const duration = e.data?.duration_ms;
-            if (typeof duration === "number") current.toolCalls![idx].durationMs = duration;
-          }
-          break;
-        }
-        case "tool_error": {
-          const idx = findRunningTool(e.tool_name);
-          if (idx >= 0 && current) {
-            current.toolCalls![idx].status = "error";
-            current.toolCalls![idx].error = e.tool_error;
-          }
-          break;
-        }
-        case "tool_confirmation": {
-          const idx = findRunningTool(e.tool_name);
-          if (idx >= 0 && current) {
-            const confirmation = e.data ?? {};
-            current.toolCalls![idx].status = "awaiting_confirmation";
-            current.toolCalls![idx].confirmationId = String(confirmation.confirmation_id ?? "");
-            current.toolCalls![idx].suggestion = String(confirmation.suggestion ?? "");
-            current.toolCalls![idx].riskLevel = String(confirmation.risk_level ?? "medium");
-          }
-          break;
-        }
-        case "metric": {
-          current = ensureCurrent(e);
-          const usage = e.data?.usage;
-          if (usage && typeof usage === "object") {
-            const u = usage as Record<string, unknown>;
-            current.metrics = {
-              "Input": String(u.input_tokens ?? 0),
-              "Output": String(u.output_tokens ?? 0),
-              "Raciocínio": String(u.reasoning_tokens ?? 0),
-              "Total": String(u.total_tokens ?? 0),
-            };
-          }
-          break;
-        }
-        case "error": {
-          out.push({
-            id: `err-${out.length}-${e.timestamp}`,
-            role: "assistant",
-            agent: "CODER",
-            content: `⚠ ${e.content || "Erro desconhecido (sem mensagem do servidor)"}`,
-            timestamp: e.timestamp,
-            metadata: { kind: "error", canRetry: true, prompt: lastUserMessage },
-          });
-          current = null;
-          break;
-        }
-        case "routing": {
-          // Routing decisions are metadata; ignore null content. The user
-          // will see the agent badge on the first token event.
-          break;
-        }
-        case "agent_finished": {
-          upsertActivity(agentActivity(e, out.length, "success"));
-          break;
-        }
-        case "done": {
-          current = null;
-          break;
-        }
-        default:
-          break;
-      }
-    }
-
-  const extractThinking = (text: string) => {
-    const thinkingParts: string[] = [];
-    const cleaned = text.replace(/<thinking>([\s\S]*?)<\/thinking>/g, (_, inner) => {
-      thinkingParts.push(inner.trim());
-      return "";
-    });
-    return {
-      content: cleaned.trim(),
-      thinking: thinkingParts.length > 0 ? thinkingParts.join("\n\n---\n\n") : undefined,
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
     };
+  }, [open]);
+
+  const list: Mode[] = modesLoaded
+    ? modes
+    : ([{ id: currentMode }] as Mode[]);
+  const activeCfg = MODE_CONFIG[currentMode] || {
+    icon: Sparkles,
+    label: currentMode,
+    color: "text-nexus-accent bg-nexus-accent/10 border-nexus-accent/40",
   };
+  const ActiveIcon = activeCfg.icon;
 
-  for (const m of out) {
-    if (m.content) {
-      m.content = sanitizeAssistantContent(stripAnsiCodes(m.content));
-      const { content, thinking } = extractThinking(m.content);
-      m.content = content;
-      if (thinking) m.thinking = thinking;
-    }
-  }
+  return (
+    <div ref={containerRef} className="relative">
+      <motion.button
+        type="button"
+        whileTap={{ scale: 0.97 }}
+        onClick={() => setOpen((value) => !value)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title="Escolher modo"
+        className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium shadow-sm transition-all duration-200 ${
+          open
+            ? activeCfg.color
+            : `${activeCfg.color} border-opacity-60 hover:border-opacity-100`
+        }`}
+      >
+        <ActiveIcon className="h-3.5 w-3.5" />
+        <span className="hidden sm:inline">{activeCfg.label}</span>
+        <ChevronDown
+          className={`h-3 w-3 transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+        />
+      </motion.button>
 
-  return out;
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: -6, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -6, scale: 0.98 }}
+            transition={{ duration: 0.16, ease: "easeOut" }}
+            role="listbox"
+            aria-label="Modos disponíveis"
+            data-testid="mode-dropdown-menu"
+            className="absolute right-0 top-full z-50 mt-1.5 max-h-80 w-64 overflow-y-auto thin-scrollbar rounded-xl border border-nexus-border bg-nexus-panel/95 p-1 shadow-xl backdrop-blur-md"
+          >
+            <div className="px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
+              Modo de raciocínio
+            </div>
+            {list.map((mode) => {
+              const cfg = MODE_CONFIG[mode.id] || {
+                icon: Sparkles,
+                label: mode.id,
+                color: "text-nexus-muted bg-transparent border-transparent",
+              };
+              const Icon = cfg.icon;
+              const active = mode.id === currentMode;
+              return (
+                <button
+                  key={mode.id}
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  onClick={() => {
+                    setMode(mode.id);
+                    setOpen(false);
+                  }}
+                  className={`flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                    active ? "bg-nexus-accent/15" : "hover:bg-nexus-bg/60"
+                  }`}
+                >
+                  <span
+                    className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md border ${cfg.color}`}
+                  >
+                    <Icon className="h-3.5 w-3.5" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className={`block text-xs font-medium ${active ? "text-nexus-accent" : "text-nexus-text"}`}>
+                      {cfg.label}
+                    </span>
+                    {mode.description && (
+                      <span className="mt-0.5 block truncate text-[10px] text-nexus-muted" title={mode.description}>
+                        {mode.description}
+                      </span>
+                    )}
+                  </span>
+                  {active && <Check className="mt-1 h-3.5 w-3.5 shrink-0 text-nexus-accent" />}
+                </button>
+              );
+            })}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
 }
 
 export default function ChatPanel({
@@ -377,6 +283,28 @@ export default function ChatPanel({
   // just submitted. The initial poll can overlap the POST /chat request and
   // abort the legitimate stream as if it were a stale run.
   const submittedTurnRef = useRef(false);
+  // Sessions we already tried to auto-title from their first message.
+  const autoTitledSessionsRef = useRef<Set<string>>(new Set());
+
+  // Auto-title a generic ("Chat <date>" / "Nova sessão") session from its
+  // first real message — the pattern every modern chat UI uses. Fire-and-
+  // forget: titling must never delay or fail the send itself.
+  function autoTitleSession(firstMessage: string) {
+    const record = sessions.sessions.find((s) => s.id === sessionId);
+    if (!record) return;
+    if (autoTitledSessionsRef.current.has(sessionId)) return;
+    const isGenericTitle =
+      record.title === "Nova sessão" ||
+      /^Chat\s\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}/.test(record.title);
+    if (!isGenericTitle) {
+      autoTitledSessionsRef.current.add(sessionId);
+      return;
+    }
+    autoTitledSessionsRef.current.add(sessionId);
+    const compact = firstMessage.replace(/\s+/g, " ").trim();
+    const title = compact.length > 60 ? `${compact.slice(0, 60)}…` : compact;
+    void sessions.rename(sessionId, title);
+  }
 
   // The dashboard can hand off a prompt through the URL. Pre-fill it without
   // replacing anything the user has already started typing.
@@ -577,9 +505,10 @@ export default function ChatPanel({
     return `${message}\n${parts.join("\n")}`;
   }
 
-  const doSendMessage = async () => {
-    const trimmed = input.trim();
+  const doSendMessage = async (overrideText?: string) => {
+    const trimmed = (overrideText ?? input).trim();
     if (!trimmed || streaming) return;
+    autoTitleSession(trimmed);
     const hasAttachments = attachedFiles.length > 0;
     const displayContent = hasAttachments
       ? `${trimmed}\n\n[${attachedFiles.length} ficheiro(s) anexado(s): ${attachedFiles.map(f => f.name).join(", ")}]`
@@ -843,7 +772,7 @@ export default function ChatPanel({
   const messages = useMemo(
     () => [
       ...historyMessages,
-      ...foldEvents(pendingUser, events, lastUserMessageRef.current),
+      ...foldRun(pendingUser, events, lastUserMessageRef.current ?? "").messages,
     ],
     [historyMessages, pendingUser, events],
   );
@@ -960,31 +889,41 @@ export default function ChatPanel({
     cancel();
   }
 
-  // Edit a user message: replace its content and regenerate the assistant response
+  // Edit a user message: update its content and immediately regenerate the
+  // assistant response (modern chat UX — no second "Send" click). Everything
+  // after the edited turn is dropped from the local view; the resent prompt
+  // appears once as a fresh pending bubble.
   function handleEditMessage(messageId: string, newContent: string) {
-    setHistoryMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, content: newContent } : m)));
-    setInput(newContent);
-    toast.info("Mensagem editada. Reenvia para regenerar a resposta.");
+    if (streaming) return;
+    const idx = historyMessages.findIndex((m) => m.id === messageId);
+    if (idx < 0) return;
+    setHistoryMessages(historyMessages.slice(0, idx));
+    setPendingUser([]);
+    reset();
+    void doSendMessage(newContent);
   }
 
-  // Regenerate the assistant response for a given message
-  async function handleRegenerateMessage(messageId: string) {
-    // Find the previous user message
+  // Regenerate the assistant response for a given message: drop the reply and
+  // everything after it, then resend the original prompt right away.
+  function handleRegenerateMessage(messageId: string) {
+    if (streaming) return;
     const idx = historyMessages.findIndex((m) => m.id === messageId);
-    if (idx < 1) {
+    if (idx < 0) {
       toast.error("Não foi possível regenerar");
       return;
     }
-    const prev = historyMessages[idx - 1];
-    if (prev.role !== "user") {
+    // Walk back to the user prompt that produced this assistant message.
+    let userIdx = idx - 1;
+    while (userIdx >= 0 && historyMessages[userIdx].role !== "user") userIdx -= 1;
+    if (userIdx < 0) {
       toast.error("Apenas é possível regenerar a partir de uma mensagem do utilizador");
       return;
     }
-    // Remove everything after the user message
-    const newHistory = historyMessages.slice(0, idx - 1);
-    setHistoryMessages(newHistory);
-    setInput(prev.content);
-    toast.info("Pronto. Envia para regenerar a resposta.");
+    const prompt = historyMessages[userIdx].content;
+    setHistoryMessages(historyMessages.slice(0, userIdx));
+    setPendingUser([]);
+    reset();
+    void doSendMessage(prompt);
   }
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
@@ -1007,15 +946,12 @@ export default function ChatPanel({
     void send(last, currentMode, activeModel, projectPath, thinkingStrength, undefined, activeProvider).then(() => loadHistory());
   }
 
-  // Retry the prompt from an error bubble (passed to MessageBubble)
-  const handleRetryFromError = useCallback(
-    (prompt: string) => {
-      if (streaming || !prompt.trim()) return;
-      setInput(prompt);
-      toast.info("Mensagem pronta para reenvio", "Clique em Enviar para tentar novamente");
-    },
-    [streaming, toast],
-  );
+  // Retry the prompt from an error bubble (passed to MessageBubble):
+  // resend immediately instead of asking for a second "Send" click.
+  function handleRetryFromError(prompt: string) {
+    if (streaming || !prompt.trim()) return;
+    void doSendMessage(prompt);
+  }
 
   async function handleNewChat() {
     const title = `Chat ${new Date().toLocaleString("pt-PT")}`;
@@ -1035,7 +971,7 @@ export default function ChatPanel({
   function handleShare() {
     const allMessages = [
       ...historyMessages,
-      ...foldEvents(pendingUser, events),
+      ...foldRun(pendingUser, events).messages,
     ];
     if (allMessages.length === 0) return;
     const text = allMessages
@@ -1246,38 +1182,8 @@ export default function ChatPanel({
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Mode selector */}
-          <motion.div
-            whileTap={{ scale: 0.97 }}
-            className="flex items-center rounded-lg border border-nexus-border bg-nexus-card p-0.5"
-          >
-            {(modesLoaded ? modes : ([{ id: currentMode }] as Mode[])).map((mode) => {
-              const cfg = MODE_CONFIG[mode.id] || {
-                icon: Sparkles,
-                label: mode.id,
-                color: "text-nexus-muted bg-transparent border-transparent",
-              };
-              const Icon = cfg.icon;
-              const active = mode.id === currentMode;
-              return (
-                <motion.button
-                  key={mode.id}
-                  type="button"
-                  onClick={() => useModeStore.getState().setMode(mode.id)}
-                  title={mode.description || cfg.label}
-                  whileTap={{ scale: 0.9 }}
-                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all duration-200 ${
-                    active
-                      ? `${cfg.color} border shadow-sm`
-                      : "text-nexus-muted hover:text-nexus-text hover:bg-nexus-bg border border-transparent"
-                  }`}
-                >
-                  <Icon className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">{cfg.label}</span>
-                </motion.button>
-              );
-            })}
-          </motion.div>
+          {/* Mode selector — compact dropdown instead of one button per mode */}
+          <ModeDropdown />
 
           {/* Advanced mode indicator + toggle */}
           <AdvancedModeHeaderIndicator />
@@ -1434,23 +1340,37 @@ export default function ChatPanel({
             animate={{ opacity: 1, y: 0 }}
             className="flex h-full flex-col items-center justify-center text-center"
           >
-            <motion.div
-              animate={{
-                scale: [1, 1.08, 1],
-                opacity: [0.7, 1, 0.7],
-              }}
-              transition={{
-                duration: 3,
-                repeat: Infinity,
-                ease: "easeInOut",
-              }}
-              className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-nexus-accent/15 to-nexus-accent/5 text-nexus-accent shadow-lg shadow-nexus-accent/10"
-            >
-              <Sparkles className="h-8 w-8" />
-            </motion.div>
-            <h2 className="mb-2 text-xl font-bold tracking-tight text-nexus-text">NEXUS IDE</h2>
-            <p className="mb-8 max-w-xs text-sm text-nexus-muted leading-relaxed">
-              Pergunte, analise, crie. A sua IA, os seus dados.
+            <div className="relative mb-6">
+              <div className="absolute inset-0 rounded-2xl bg-nexus-accent/20 blur-2xl motion-safe:animate-pulse-slow" />
+              <motion.div
+                animate={{
+                  scale: [1, 1.06, 1],
+                }}
+                transition={{
+                  duration: 3,
+                  repeat: Infinity,
+                  ease: "easeInOut",
+                }}
+                className="relative flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-nexus-accent/25 to-nexus-accent/5 text-nexus-accent shadow-nx-accent"
+              >
+                <Sparkles className="h-8 w-8" />
+              </motion.div>
+            </div>
+            <h2 className="mb-2 text-2xl font-bold tracking-tight text-nexus-text">
+              {currentProject?.name ? (
+                <>
+                  Vamos trabalhar em{" "}
+                  <span className="bg-gradient-to-r from-nexus-accent to-nexus-accent-bright bg-clip-text text-transparent">
+                    {currentProject.name}
+                  </span>
+                  ?
+                </>
+              ) : (
+                "Como posso ajudar?"
+              )}
+            </h2>
+            <p className="mb-8 max-w-sm text-sm leading-relaxed text-nexus-muted">
+              Pergunte, analise, crie — vejo cada passo do raciocínio, das ferramentas usadas e dos ficheiros tocados.
             </p>
             <div className="grid w-full max-w-md grid-cols-2 gap-2.5">
               {suggestions.map((s) => (
@@ -1467,6 +1387,39 @@ export default function ChatPanel({
                   <span className="font-medium">{s.label}</span>
                 </motion.button>
               ))}
+            </div>
+            <div className="mt-8 flex flex-wrap items-center justify-center gap-2 text-[11px] text-nexus-faint">
+              <button
+                type="button"
+                onClick={() => setShowCommands(true)}
+                className="rounded-full border border-nexus-border/70 px-2.5 py-1 transition-colors hover:border-nexus-accent/40 hover:text-nexus-text"
+              >
+                <span className="font-mono text-nexus-muted">/</span> comandos
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setInput("@");
+                  requestAnimationFrame(() => inputRef.current?.focus());
+                }}
+                className="rounded-full border border-nexus-border/70 px-2.5 py-1 transition-colors hover:border-nexus-accent/40 hover:text-nexus-text"
+              >
+                <span className="font-mono text-nexus-muted">@</span> agentes
+              </button>
+              <button
+                type="button"
+                onClick={() => setSearchOpen(true)}
+                className="rounded-full border border-nexus-border/70 px-2.5 py-1 transition-colors hover:border-nexus-accent/40 hover:text-nexus-text"
+              >
+                <span className="font-mono text-nexus-muted">Ctrl+K</span> procurar
+              </button>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="rounded-full border border-nexus-border/70 px-2.5 py-1 transition-colors hover:border-nexus-accent/40 hover:text-nexus-text"
+              >
+                anexar ficheiros
+              </button>
             </div>
           </motion.div>
         )}

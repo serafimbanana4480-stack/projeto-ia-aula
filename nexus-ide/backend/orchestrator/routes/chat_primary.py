@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -53,6 +54,7 @@ from backend.runtime.spawn_registry import (
 )
 from backend.runtime.telemetry import RunTelemetry
 from backend.runtime.triage import RequestClass, TriageDecision, triage_request
+from backend.tools.sanitizer import detect_injection
 
 logger = logging.getLogger(__name__)
 
@@ -91,11 +93,30 @@ def plan_turn(message: str, requested_mode: str, project_path: str) -> TriageDec
 
 
 def should_use_primary(decision: TriageDecision) -> bool:
-    """Phase 3 owns the direct lanes; planned work still uses the old path.
+    """Policy seam: which triage classes ride the NEXUS primary runtime.
 
-    This is the gradual-migration seam. Widening it to ``PLANNED`` is a
-    one-line change once the planned lane has the same evidence behind it.
+    Per §8 (integration phase), ``DIRECT`` and ``CONVERSATIONAL`` — the wide
+    default — go through the primary runtime because the
+    ``observe -> act -> tool -> observe -> test -> report`` loop and its
+    ``PROJECT STATE`` already cover them with proof behind them. ``PLANNED``
+    stays on the legacy planner pipeline: §8 item 1 states the primary loop has
+    not yet replaced ``_run_pipeline`` for genuinely multi-phase work, and the
+    mid-stream fallback only triggers when zero frames are produced, so pushing
+    a plan through the primary path risks degrading output without surfacing a
+    regression.
+
+    Legacy is opt-in for regressions via ``NEXUS_PRIMARY_ENABLED=0`` (reverts
+    every class) or ``NEXUS_LEGACY_PLANNED=1`` (pins multi-phase work to the
+    legacy planner independently of the flag above, ready for a future flip of
+    the default once the planner seam is proven).
     """
+    if os.environ.get("NEXUS_LEGACY_PLANNED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    } and decision.request_class is RequestClass.PLANNED:
+        return False
     return decision.request_class in {RequestClass.DIRECT, RequestClass.CONVERSATIONAL}
 
 
@@ -386,6 +407,43 @@ def make_signal_stream(
                     signal = stream_events_to_signals(event)
                     if signal is not None:
                         yield signal
+
+                # Provider metadata is exposed only after the final stream
+                # frame.  Preserve a truncation as an explicit interrupted
+                # lifecycle event instead of silently presenting partial text
+                # as a completed answer.
+                runtime_provider = getattr(llm_client, "last_provider", None) or llm_client
+                finish_reason = str(
+                    getattr(runtime_provider, "last_finish_reason", "")
+                    or getattr(llm_client, "last_finish_reason", "")
+                    or ""
+                ).lower()
+                if finish_reason in {
+                    "length",
+                    "max_tokens",
+                    "max_output_tokens",
+                    "token_limit",
+                }:
+                    usage = getattr(runtime_provider, "last_usage", {}) or {}
+                    if not isinstance(usage, dict):
+                        usage = {}
+                    provider_usage = {
+                        **usage,
+                        "finish_reason": finish_reason,
+                        "complete": False,
+                    }
+                    yield AgentSignal(
+                        AgentSignalKind.ERROR,
+                        text=(
+                            "A resposta foi interrompida pelo limite de tokens do provider; "
+                            "o estado ficou incompleto e pode ser continuado numa nova mensagem."
+                        ),
+                        payload={
+                            "reason": "provider_token_limit",
+                            "finish_reason": finish_reason,
+                            "usage": {"provider": provider_usage},
+                        },
+                    )
             finally:
                 aclose = getattr(stream, "aclose", None)
                 if aclose is not None:
@@ -404,13 +462,115 @@ def _sse(event: StreamEvent) -> str:
     return f"data: {event.model_dump_json()}\n\n"
 
 
+def _label_and_target(
+    kind: RuntimeEventType, payload: dict[str, Any]
+) -> tuple[str, str]:
+    """Human-readable verb (``label``) and the entity acted upon (``target``).
+
+    These two strings are what the ``RunTimeline`` renders as the per-step
+    description; ``kind`` is the stable semantic event type and ``seq`` is the
+    ordering key — together they let the UI rebuild a single, deduplicated,
+    totally-ordered timeline without re-deriving anything from wall time.
+    """
+    tool = str(payload.get("tool") or "")
+    name = str(payload.get("name") or "")
+    paths = payload.get("paths")
+    if isinstance(paths, list) and paths:
+        target = ", ".join(str(p) for p in paths)
+    else:
+        target = name or tool
+
+    if kind is RuntimeEventType.RUN_STARTED:
+        return "a iniciar", target
+    if kind is RuntimeEventType.RUN_COMPLETED:
+        return "concluído", target
+    if kind is RuntimeEventType.RUN_FAILED:
+        return "falhou", target
+    if kind is RuntimeEventType.RUN_CANCELLED:
+        return "cancelado", target
+    if kind is RuntimeEventType.MESSAGE_DELTA:
+        return "a pensar", target
+    if kind is RuntimeEventType.STATUS_UPDATE:
+        label = str(payload.get("label") or "")
+        if not label:
+            label = _progress_label(kind, payload)
+        return label or "a avançar", target
+    if kind is RuntimeEventType.TOOL_STARTED:
+        return "a usar ferramenta", target
+    if kind in (RuntimeEventType.TOOL_COMPLETED, RuntimeEventType.TOOL_FAILED):
+        return (
+            "concluído" if kind is RuntimeEventType.TOOL_COMPLETED else "falhou",
+            target,
+        )
+    if kind is RuntimeEventType.FILE_READ:
+        return "a ler", target
+    if kind is RuntimeEventType.FILE_CHANGED:
+        return "ficheiros alterados", target
+    if kind in (
+        RuntimeEventType.COMMAND_STARTED,
+        RuntimeEventType.COMMAND_COMPLETED,
+    ):
+        return (
+            "a executar comando"
+            if kind is RuntimeEventType.COMMAND_STARTED
+            else "comando concluído",
+            target,
+        )
+    if kind is RuntimeEventType.TEST_STARTED:
+        return "a verificar", target
+    if kind is RuntimeEventType.TEST_RESULT:
+        return "verificação concluída", target
+    if kind is RuntimeEventType.SUBAGENT_STARTED:
+        return "a delegar", target
+    if kind is RuntimeEventType.SUBAGENT_COMPLETED:
+        return "subagente concluído", target
+    if kind is RuntimeEventType.WAITING_DEPENDENCY:
+        return "à espera de dependência", target
+    if kind is RuntimeEventType.HEARTBEAT:
+        return "a processar", target
+    if kind is RuntimeEventType.RECOVERY:
+        return "a recuperar", target
+    if kind is RuntimeEventType.USER_STEERING:
+        return "instrução do utilizador aplicada", target
+    return "", target
+
+
+def _stamps_runtime_envelope(
+    func,
+):
+    """Decorate ``runtime_event_to_stream_events`` so every frame carries the
+    ``(run_id, seq, event_id, task_id)`` contract at the top level.
+
+    This is the missing half of §8 item 3: the backend already emitted these
+    inside ``data``, but the frontend's ``RunEventBuffer`` reads them as
+    top-level fields. Stamping here (rather than rewriting every return) keeps
+    the per-event-kind mapping untouched and the existing tests green.
+    """
+
+    @functools.wraps(func)
+    def wrapper(event: RuntimeEvent, *args: Any, **kwargs: Any) -> list[StreamEvent]:
+        frames = func(event, *args, **kwargs)
+        return _stamp_runtime_envelope(event, frames)
+
+    return wrapper
+
+
 def _envelope(event: RuntimeEvent, extra: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Every frame carries ``run_id``/``seq`` so the client can order and replay."""
+    """Runtime ordering + semantic envelope carried in ``data``.
+
+    ``kind`` is the stable RuntimeEventType; ``label``/``target`` are the
+    human-readable verb + entity the timeline renders; ``seq`` is the only
+    ordering key the UI must trust. ``runtime_type`` is kept as a legacy alias.
+    """
+    label, target = _label_and_target(event.type, event.payload)
     data = {
         "run_id": event.run_id,
         "seq": event.seq,
         "event_id": event.event_id,
+        "kind": event.type.value,
         "runtime_type": event.type.value,
+        "label": label,
+        "target": target,
         "task_id": event.task_id,
     }
     if extra:
@@ -418,6 +578,22 @@ def _envelope(event: RuntimeEvent, extra: dict[str, Any] | None = None) -> dict[
     return data
 
 
+def _stamp_runtime_envelope(event: RuntimeEvent, frames: list[StreamEvent]) -> list[StreamEvent]:
+    """Promote ``run_id`` / ``seq`` / ``event_id`` / ``task_id`` to top-level.
+
+    The legacy pipeline still emits frames without these fields; the frontend's
+    ``RunEventBuffer`` treats their absence as "legacy" and appends them in
+    arrival order, so this stays additive and non-breaking.
+    """
+    for frame in frames:
+        frame.run_id = event.run_id
+        frame.event_id = event.event_id
+        frame.seq = event.seq
+        frame.task_id = event.task_id
+    return frames
+
+
+@_stamps_runtime_envelope
 def runtime_event_to_stream_events(event: RuntimeEvent) -> list[StreamEvent]:
     """Render one runtime event as zero or more frames the frontend knows.
 
@@ -435,6 +611,15 @@ def runtime_event_to_stream_events(event: RuntimeEvent) -> list[StreamEvent]:
                 type="agent_started",
                 agent=agent,  # type: ignore[arg-type]
                 data=_envelope(event, {"query": payload.get("query", "")}),
+            )
+        ]
+    if kind is RuntimeEventType.PROVIDER_RESULT:
+        return [
+            StreamEvent(
+                type="metric",
+                agent=agent,  # type: ignore[arg-type]
+                content=str(payload.get("summary") or ""),
+                data=_envelope(event, dict(payload)),
             )
         ]
     if kind is RuntimeEventType.MESSAGE_DELTA:
@@ -457,6 +642,7 @@ def runtime_event_to_stream_events(event: RuntimeEvent) -> list[StreamEvent]:
                         "phase": payload.get("phase"),
                         "blocked_on": payload.get("blocked_on"),
                         "reason": payload.get("reason"),
+                        "finish_reason": payload.get("finish_reason"),
                     },
                 ),
             )
@@ -589,7 +775,7 @@ async def run_primary_chat(
     from backend.runtime import steering_registry
 
     run_id = f"run-{uuid.uuid4().hex}"
-    session_id = getattr(req, "session_id", "default")
+    session_id = (getattr(req, "session_id", "default") or "default").strip()
     project_path = (getattr(req, "project_path", "") or "").strip()
     steering = SteeringChannel()
     telemetry = RunTelemetry(run_id=run_id)
@@ -665,19 +851,16 @@ async def run_primary_chat(
         max_cycles=1 if decision.request_class is RequestClass.CONVERSATIONAL else 2,
     )
 
-    # The relational session row must exist BEFORE the run: tools log to
-    # tables with a foreign key to sessions, and /sessions/{id}/runs answers
-    # 404 without it. The legacy lane created it; the primary lane did not, so
-    # run history simply did not exist for primary turns.
-    with contextlib.suppress(Exception):
-        from backend.persistence.db import create_session, get_session
-
-        if get_session(session_id) is None:
-            create_session(
-                title=(getattr(req, "message", "") or "")[:60] or "Nova sessão",
-                mode=getattr(req, "mode", "") or "auto",
-                session_id=session_id,
-            )
+    # The primary runtime used to persist only a non-empty assistant answer at
+    # the very end.  That made failures, cancellations, and even the run row
+    # disappear from the recovery surface.  Create the durable envelope before
+    # the first SSE frame and close it in ``_persist`` below.
+    try:
+        _start_primary_run(run_id, session_id, req, decision)
+    except Exception:
+        # The model may still answer, but the missing durable envelope is an
+        # operational fault and must be visible in logs rather than swallowed.
+        logger.exception("primary run envelope could not be created for %s", run_id)
 
     steering_registry.register_run(run_id, steering, session_id=session_id)
     started_wall = time.time()
@@ -976,10 +1159,11 @@ def build_usage_metric(
 
 
 async def _persist(context: Any, req: Any, loop: PrimaryLoop, session_id: str) -> None:
-    """Store the turn so a refresh shows the same conversation."""
+    """Store the turn and terminal run state so refresh/recovery is truthful."""
     from datetime import UTC, datetime
 
     from backend.tools.ollama_client import ChatMessage
+    from backend.persistence.db import add_message, upsert_session_run
 
     answer = loop.outcome.answer
     if not answer:
@@ -991,21 +1175,94 @@ async def _persist(context: Any, req: Any, loop: PrimaryLoop, session_id: str) -
             "Nada foi alterado. Vê o painel de atividade para o erro do provider."
         )
     now = datetime.now(UTC).isoformat()
-    with contextlib.suppress(Exception):
+
+    # A failed/cancelled run still has a user turn worth recovering.  The
+    # assistant row is intentionally omitted when no visible answer exists.
+    try:
         await context.append_message(
             session_id, ChatMessage(role="user", content=req.message, timestamp=now)
         )
-        await context.append_message(
-            session_id, ChatMessage(role="assistant", content=answer, timestamp=now)
-        )
-    with contextlib.suppress(Exception):
-        from backend.persistence.db import add_message
-
         add_message(session_id, "user", req.message)
-        add_message(session_id, "assistant", answer, tier_used=PRIMARY_AGENT_NAME)
-    with contextlib.suppress(Exception):
-        logger.info(
-            "[NEXUS] run=%s telemetry=%s",
+        if answer:
+            await context.append_message(
+                session_id, ChatMessage(role="assistant", content=answer, timestamp=now)
+            )
+            add_message(session_id, "assistant", answer, tier_used=PRIMARY_AGENT_NAME)
+    except Exception:
+        # The stream has already run; retain the failure evidence in the log
+        # instead of pretending persistence succeeded through a bare suppress.
+        logger.exception("primary message persistence failed for run %s", loop.run_id)
+
+    if loop.outcome.interrupted:
+        status = "interrupted"
+        execution_state = "interrupted"
+        terminal_phase = "provider_output_truncated"
+    elif loop.outcome.failed:
+        status = "failed"
+        execution_state = "failed"
+        terminal_phase = "failed"
+    elif loop.outcome.stopped:
+        status = "cancelled"
+        execution_state = "cancelled"
+        terminal_phase = "cancelled"
+    else:
+        status = "completed"
+        execution_state = "completed"
+        terminal_phase = "completed"
+    try:
+        upsert_session_run(
             loop.run_id,
-            json.dumps(loop.outcome.telemetry, default=str)[:2000],
+            session_id,
+            status=status,
+            agent=PRIMARY_AGENT_NAME,
+            phase=terminal_phase,
+            prompt=req.message,
+            partial_output=answer,
+            error=loop.outcome.error or None,
+            finished=True,
+            mode=getattr(req, "mode", None),
+            execution_state=execution_state,
+            correlation_id=loop.run_id,
+            evidence={
+                "path": "nexus_primary",
+                "changed_files": list(loop.outcome.changed_files),
+                "verification": {
+                    "ran": loop.outcome.verification.ran,
+                    "ok": loop.outcome.verification.ok,
+                    "summary": loop.outcome.verification.summary,
+                    "command": loop.outcome.verification.command,
+                },
+                "telemetry": loop.outcome.telemetry,
+            },
         )
+    except Exception:
+        logger.exception("primary run persistence failed for %s", loop.run_id)
+    logger.info(
+        "[NEXUS] run=%s telemetry=%s",
+        loop.run_id,
+        json.dumps(loop.outcome.telemetry, default=str)[:2000],
+    )
+
+
+def _start_primary_run(run_id: str, session_id: str, req: Any, decision: TriageDecision) -> None:
+    """Create the session and running envelope before streaming starts."""
+    from backend.persistence.db import create_session, get_session, upsert_session_run
+
+    if get_session(session_id) is None:
+        create_session(
+            session_id=session_id,
+            title=str(getattr(req, "message", "Nova sessão"))[:120] or "Nova sessão",
+            mode=str(getattr(req, "mode", "auto") or "auto"),
+        )
+    upsert_session_run(
+        run_id,
+        session_id,
+        status="running",
+        agent=PRIMARY_AGENT_NAME,
+        phase="routing",
+        prompt=str(getattr(req, "message", "")),
+        mode=str(getattr(req, "mode", "auto") or "auto"),
+        execution_state="running",
+        correlation_id=run_id,
+        evidence={"path": "nexus_primary", "triage": decision.to_dict()},
+    )

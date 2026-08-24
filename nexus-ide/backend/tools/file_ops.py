@@ -75,8 +75,10 @@ async def write_file(
 ) -> dict:
     """Write content to file. Logs as proposed change for audit.
 
-    Trust check: if the project is not trusted, the write is blocked
-    unless a session_id is provided (interactive mode).
+    Trust check: writes to a project that is not trusted are blocked, with or
+    without a session. An interactive session is not consent: the agent runs
+    with one on every turn, so honouring it turned the gate into a no-op (QA
+    C4). The refusal carries the data the UI needs to offer a one-click grant.
 
     Backward-compatible wrapper around ``file_api.write`` with legacy
     trust verification and ``propose_change`` logging.
@@ -100,9 +102,16 @@ async def write_file(
     if project and not project.get("trust", False):
         return {
             "error": (
-                f"Project '{project['name']}' is NOT trusted. "
-                "Enable trust in project settings before allowing file modifications."
-            )
+                f"Project '{project['name']}' is NOT trusted, so the file was NOT "
+                "written. Grant trust in Projects -> Edit -> Trust (or "
+                f"PUT /api/projects/{project['id']} with {{\"trust\": true}}) and "
+                "run the tool again."
+            ),
+            "requires_trust": True,
+            "project_id": project["id"],
+            "project_name": project["name"],
+            "project_path": project["path"],
+            "trust_endpoint": f"/api/projects/{project['id']}",
         }
 
     result = await _write(

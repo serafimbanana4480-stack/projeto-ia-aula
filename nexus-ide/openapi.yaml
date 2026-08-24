@@ -1,13 +1,40 @@
 openapi: 3.0.0
 info:
-  title: Nexus Todo API
+  title: Nexus API
   version: 1.0.0
+  description: |
+    Nexus API – a todo‑management service with versioned endpoints,
+    JWT‑based authentication, and standardized error responses.
+  termsOfService: ''
+  contact:
+    name: Nexus Team
+    email: team@nexus.example.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
 servers:
-  - url: http://localhost:8000
+  - url: http://localhost:8000/api/v1
+    description: Local development server
+  - url: https://api.nexus.example.com/v1
+    description: Production server
+schemes:
+  - http
+  - https
+security:
+  - bearerAuth: []
+securitySchemes:
+  bearerAuth:
+    type: http
+    scheme: bearer
+    bearerFormat: JWT
+    description: JWT access token issued by the authentication service.
 paths:
-  /todos:
+  /v1/todos:
     get:
       summary: List todos
+      operationId: listTodos
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: A list of todos
@@ -17,8 +44,20 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Todo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      description: >
+        Retrieve all todos for the authenticated user.
+        Pagination and filtering may be added in future versions.
     post:
       summary: Create a new todo
+      operationId: createTodo
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -32,15 +71,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Todo'
-  /todos/{id}:
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      description: >
+        Create a new todo item. The request must include a valid JWT token.
+  /v1/todos/{id}:
     parameters:
       - name: id
         in: path
         required: true
         schema:
           type: integer
+          format: int64
     get:
       summary: Get a todo by id
+      operationId: getTodo
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Todo object
@@ -49,9 +100,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/Todo'
         '404':
-          description: Not found
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      description: Retrieve a single todo item by its unique identifier.
     put:
       summary: Update a todo
+      operationId: updateTodo
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -65,13 +124,33 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Todo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '404':
-          description: Not found
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      description: >
+        Fully replace a todo item. All fields are optional; omitted fields
+        retain their previous values (partial update behaviour).
     delete:
       summary: Delete a todo
+      operationId: deleteTodo
+      security:
+        - bearerAuth: []
       responses:
         '204':
           description: No content
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      description: Remove a todo item permanently.
+
 components:
   schemas:
     Todo:
@@ -84,18 +163,26 @@ components:
         id:
           type: integer
           format: int64
+          description: Unique identifier
         title:
           type: string
+          maxLength: 200
+          description: Short title of the todo
         description:
           type: string
+          nullable: true
+          description: Optional detailed description
         completed:
           type: boolean
+          description: Whether the todo is completed
         created_at:
           type: string
           format: date-time
+          description: ISO‑8601 timestamp when the todo was created
         updated_at:
           type: string
           format: date-time
+          description: ISO‑8601 timestamp of the last update
     TodoCreate:
       type: object
       required:
@@ -103,16 +190,104 @@ components:
       properties:
         title:
           type: string
+          maxLength: 200
+          description: Required title of the new todo
         description:
           type: string
+          nullable: true
+          description: Optional description
         completed:
           type: boolean
+          default: false
+          description: Initial completion status
     TodoUpdate:
       type: object
       properties:
         title:
           type: string
+          maxLength: 200
+          description: Optional new title
         description:
           type: string
+          nullable: true
+          description: Optional new description
         completed:
           type: boolean
+          description: Optional new completion status
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+          description: Machine‑readable error code
+        message:
+          type: string
+          description: Human‑readable error summary
+        details:
+          type: array
+          items:
+            type: string
+          description: Optional list of validation or debug details
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO‑8601 time when the error occurred
+    ValidationError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          required:
+            - code
+          properties:
+            code:
+              type: integer
+              enum:
+                - 400
+          description: Validation‑related error
+  responses:
+    NotFound:
+      description: The requested resource does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    BadRequest:
+      description: The request was malformed or missing required fields.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationError'
+    Unauthorized:
+      description: Authentication failed or token missing/invalid.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: The authenticated user does not have permission to perform this action.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: An unexpected server error occurred.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+versioning:
+  strategy: path‑based versioning
+  rationale:
+    - URL path versioning (/v1/, /v2/) is explicit, cache‑friendly, and
+      allows breaking changes without affecting existing clients.
+    - Major version bumps correspond to API‑level breaking changes;
+      minor versions add non‑breaking features.
+    - Clients should pin to a specific version; the default endpoint
+      resolves to the latest stable minor version (currently v1).
+  deprecationPolicy:
+    - Deprecated fields/methods are marked with `deprecated: true` in the
+      schema and documented in the release notes.
+    - A deprecation period of at least 6 months is provided before removal.
+    - Clients are notified via the `Link: rel="deprecation"` header on
+      affected responses.

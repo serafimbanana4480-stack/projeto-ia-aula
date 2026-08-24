@@ -103,6 +103,8 @@ class EmbeddingService:
     def __init__(self, model: str = "sentence-transformers/all-MiniLM-L6-v2") -> None:
         self._model = model
         self._dimension = 384  # default for all-MiniLM-L6-v2
+        self._backend = "unavailable"
+        self._last_error = "no embedding attempt yet"
 
     async def embed(self, text: str) -> list[float]:
         """Generate embedding vector for text.
@@ -116,8 +118,11 @@ class EmbeddingService:
             result = await _shared_embed(text, model=self._model)
             if result:
                 self._dimension = len(result)
+                self._backend = "provider"
+                self._last_error = ""
             return result
         except (ImportError, RuntimeError) as exc:
+            self._last_error = str(exc)
             logger.debug("Shared embedding unavailable, trying direct provider: %s", exc)
 
         # Direct provider call as secondary fallback
@@ -128,14 +133,28 @@ class EmbeddingService:
             result = await provider.embed([text], model=self._model)
             if result and result[0]:
                 self._dimension = len(result[0])
+                self._backend = "provider"
+                self._last_error = ""
                 return result[0]
         except Exception as exc:
+            self._last_error = str(exc)
             logger.warning(
                 "Direct embedding provider failed, using deterministic fallback: %s", exc
             )
 
         # Final deterministic fallback
+        self._backend = "deterministic_lexical_fallback"
         return self._fallback_embed(text)
+
+    def status(self) -> dict[str, Any]:
+        """Expose whether memory is using real or degraded embeddings."""
+        return {
+            "backend": self._backend,
+            "degraded": self._backend != "provider",
+            "model": self._model,
+            "dimension": self._dimension,
+            "last_error": self._last_error or None,
+        }
 
     def _fallback_embed(self, text: str) -> list[float]:
         """Deterministic lexical embedding when a model is unavailable.
@@ -471,6 +490,7 @@ class MemoryStore:
             "total_memories": len(self._memories),
             "by_type": types,
             "max_capacity": self._max_memories,
+            "embedding": self._embeddings.status(),
         }
 
     def _evict_least_important(self) -> None:

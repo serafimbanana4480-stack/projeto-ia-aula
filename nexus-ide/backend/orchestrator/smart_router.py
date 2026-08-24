@@ -188,7 +188,7 @@ def _classify_by_heuristics(user_input: str, config: dict) -> TierDecision | Non
     if _contains_code(user_input):
         return TierDecision(
             tier="coder",
-            model_id=models.get("coder", {}).get("id", "qwen2.5-coder:7b"),
+            model_id=models.get("coder", {}).get("id", "kimi-k2.7-code"),
             reason="Code-related query detected",
             confidence=0.85,
             decision_ms=int((time.time() - start) * 1000),
@@ -212,7 +212,7 @@ def _classify_by_heuristics(user_input: str, config: dict) -> TierDecision | Non
     if any(kw in user_input.lower() for kw in all_reasoning):
         return TierDecision(
             tier="reasoning",
-            model_id=models.get("reasoning", {}).get("id", "deepseek-r1:8b"),
+            model_id=models.get("reasoning", {}).get("id", "glm-5.2"),
             reason="Reasoning task detected",
             confidence=0.8,
             decision_ms=int((time.time() - start) * 1000),
@@ -234,7 +234,7 @@ def _classify_by_heuristics(user_input: str, config: dict) -> TierDecision | Non
     if any(kw in user_input.lower() for kw in all_deep) or word_count > 100:
         return TierDecision(
             tier="deep",
-            model_id=models.get("deep", {}).get("id", "qwen2.5:32b"),
+            model_id=models.get("deep", {}).get("id", "deepseek-v4-pro"),
             reason=f"Deep analysis (word_count={word_count})",
             confidence=0.75,
             decision_ms=int((time.time() - start) * 1000),
@@ -254,7 +254,7 @@ def _classify_by_heuristics(user_input: str, config: dict) -> TierDecision | Non
     if word_count <= 50:
         return TierDecision(
             tier="coder",
-            model_id=models.get("coder", {}).get("id", "qwen2.5-coder:7b"),
+            model_id=models.get("coder", {}).get("id", "kimi-k2.7-code"),
             reason=f"Moderate query defaulting to coder (word_count={word_count})",
             confidence=0.6,
             decision_ms=int((time.time() - start) * 1000),
@@ -299,7 +299,7 @@ async def _classify_by_llm(user_input: str, client: Any, config: dict) -> TierDe
         logger.error("LLM classification failed: %s", exc)
         return TierDecision(
             tier="coder",
-            model_id=models.get("coder", {}).get("id", "qwen2.5-coder:7b"),
+            model_id=models.get("coder", {}).get("id", "kimi-k2.7-code"),
             reason="LLM fallback failed, defaulting to CODER",
             confidence=0.5,
             decision_ms=int((time.time() - start) * 1000),

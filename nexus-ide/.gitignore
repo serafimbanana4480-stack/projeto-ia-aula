@@ -190,3 +190,6 @@ frontend/test-results/
 !config/**/*.md
 !docs/**/*.md
 !.github/**/*.md
+
+# Logs arquivados (2026-08-24)
+nexus-ide/archive/logs-execucao/

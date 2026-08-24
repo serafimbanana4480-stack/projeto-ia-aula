@@ -14,6 +14,7 @@ from backend.persistence.db import (
     create_project,
     delete_project,
     get_project,
+    get_project_by_path,
     list_projects,
     update_project,
 )
@@ -93,8 +94,28 @@ async def update_project_endpoint(
     req: ProjectUpdateRequest,
     _user: dict = Depends(require_auth),
 ) -> dict:
-    """Update a project."""
+    """Update a project (including the trust flag)."""
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
+
+    # ``path`` gets the same validation as creation: an update must not be able
+    # to point a project at a blocked location or at a directory that is not
+    # there, and it must not create a second row for a path already tracked.
+    new_path = fields.get("path")
+    if new_path is not None:
+        resolved = Path(new_path).resolve()
+        blocked, reason = _is_blocked_path(str(resolved))
+        if blocked:
+            raise HTTPException(status_code=400, detail=f"Blocked path: {reason}")
+        if not resolved.is_dir():
+            raise HTTPException(status_code=400, detail=f"Path is not a directory: {new_path}")
+        duplicate = get_project_by_path(str(resolved))
+        if duplicate and duplicate["id"] != project_id:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Another project ('{duplicate['name']}') already uses this path",
+            )
+        fields["path"] = str(resolved)
+
     project = update_project(project_id, **fields)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

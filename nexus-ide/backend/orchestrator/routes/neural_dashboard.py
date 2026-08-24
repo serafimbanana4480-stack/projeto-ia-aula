@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 AGENT_TYPES = ["ROUTER", "ARCHITECT", "RESEARCHER", "CODER", "ANALYZER", "DEBUGGER", "DOCUMENTER", "OPTIMIZER"]
-MODELS = ["qwen2.5:7b", "llama3:8b", "mistral:7b", "qwen3:14b", "deepseek-r1:8b"]
 REASONING_TEMPLATES = [
     "Analyzing the current task requirements...",
     "Evaluating potential implementation strategies...",

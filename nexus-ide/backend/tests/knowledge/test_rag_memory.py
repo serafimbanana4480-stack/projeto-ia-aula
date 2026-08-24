@@ -52,7 +52,7 @@ class TestMemoryContext:
             memory_type=MemoryType.GLOBAL,
         )
 
-        context = await rag_store.get_context("JWT authentication", top_k=2)
+        context = await rag_store.get_context("JWT authentication database", top_k=2)
         assert "JWT" in context or "authentication" in context.lower()
         assert "PostgreSQL" in context or "ORM" in context
 

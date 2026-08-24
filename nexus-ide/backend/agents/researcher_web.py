@@ -1,6 +1,6 @@
 """RESEARCHER_WEB — deep web research agent.
 
-Model: qwen2.5-coder:7b (CODER tier) with recursive link following.
+Model: CODER tier (resolved via config/models.yaml) with recursive link following.
 Prompt: config/prompts/researcher_web.md
 
 Supports autonomous execution via ReAct loop:
