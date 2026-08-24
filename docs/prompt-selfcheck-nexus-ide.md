@@ -66,7 +66,7 @@ Para cada página: carrega sem erro? consola limpa? os dados são reais ou place
 
 Testes de fluxo obrigatórios:
 
-1. **Chat end-to-end** — escolhe um modelo específico, envia mensagem, confirma nos logs do backend **qual modelo foi realmente executado**. (Há um bug conhecido: o selector envia `tier` em vez do `id` do modelo, ver `AUDITORIA-PROVIDER-UI.md`. Confirma se ainda existe e corrige-o de raiz: provider com `list_models()`, uma única fonte de verdade, id do modelo a chegar intacto ao provider.)
+1. **Chat end-to-end** — escolhe um modelo específico, envia mensagem, confirma nos logs do backend **qual modelo foi realmente executado**. (Há um bug conhecido: o selector envia `tier` em vez do `id` do modelo, ver `auditorias/AUDITORIA-PROVIDER-UI-2026-07-25.md`. Confirma se ainda existe e corrige-o de raiz: provider com `list_models()`, uma única fonte de verdade, id do modelo a chegar intacto ao provider.)
 2. **Editor Monaco** — abrir ficheiro, editar, gravar, confirmar no disco.
 3. **Terminal xterm** — correr comando, ver output.
 4. **Providers/keys** — meter uma chave, ver a lista de modelos daquele provider popular-se, escolher um, usá-lo.

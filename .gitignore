@@ -86,5 +86,8 @@ nexus-ide/frontend/.next-*/
 .projectmind/
 _to_delete/
 _xfer/
+# Pacotes de correcções pendentes de aplicar (ver docs/auditorias/NEXUS_CORRECOES_2026-08-18.md)
+_fixes/
+_fixes2/
 *.tgz
 *.tar.gz

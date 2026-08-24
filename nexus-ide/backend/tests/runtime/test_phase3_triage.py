@@ -1,7 +1,7 @@
 """Phase 3 — triage keeps the planner off the critical path.
 
 The planner cost minutes before the first tool call (see
-``NEXUS_RUNTIME_REBUILD.md`` §1, C5). These tests pin the rule that decides
+``docs/auditorias/NEXUS_RUNTIME_REBUILD.md`` §1, C5). These tests pin the rule that decides
 whether a turn pays that cost at all.
 """
 
