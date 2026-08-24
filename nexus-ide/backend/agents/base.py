@@ -1502,6 +1502,14 @@ class AgentBase(ABC):
                 requirement == "substantive"
                 and any(name not in self._DISCOVERY_ONLY_TOOLS for name in successful_tools)
             )
+            or (
+                # A step whose goal IS reading (list/read/search) is complete
+                # once any tool ran. Demanding non-discovery evidence there
+                # failed a finished "list folder contents" step as
+                # "[TAREFA NÃO CONCLUÍDA]" (live 2026-08-24).
+                requirement == "discovery"
+                and bool(successful_tools)
+            )
         )
 
     #: Words stripped when reducing a query to a storable topic. These are the

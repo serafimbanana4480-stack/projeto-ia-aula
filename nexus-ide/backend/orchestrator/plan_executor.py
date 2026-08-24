@@ -605,7 +605,11 @@ class PlanExecutor:
                             "verification"
                             if task.agent == "DEBUGGER"
                             or task.name.strip().lower().startswith("verify")
-                            else "substantive"
+                            else (
+                                "discovery"
+                                if self._task_is_discovery(task)
+                                else "substantive"
+                            )
                         ),
                         "_tool_evidence": [],
                     },
