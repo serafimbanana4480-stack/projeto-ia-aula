@@ -241,9 +241,36 @@ class AgentBase(ABC):
                 "are missing, or the next action is destructive, irreversible, financial, or externally visible.\n"
             )
 
-        # Inject tool usage instructions if agent supports ReAct actions
-        if self.supported_actions:
-            tool_instructions = self._build_tool_instructions()
+        # Inject tool usage instructions if agent supports ReAct actions.
+        # ``_allowed_tools`` is the runtime contract set by the orchestrator.
+        # When it is configured it is the source of truth for what the prompt
+        # may advertise: advertising forbidden tools makes the model call them
+        # and burn iterations on guaranteed "Agent contract forbids tool"
+        # failures (observed live 2026-08-24 in ask mode).
+        runtime_allowed = self._runtime_allowed_tools(request)
+        no_tools_lane = False
+        advertised: frozenset[str] | None = None
+        if runtime_allowed is None:
+            advertised = None  # no contract — advertise every supported action
+        elif not runtime_allowed:
+            no_tools_lane = True
+        else:
+            action_registry = get_action_registry()
+            permitted = {
+                mapping.tool
+                for action in self.supported_actions
+                if (mapping := action_registry.get(action.name))
+                and mapping.tool in runtime_allowed
+            }
+            if permitted:
+                advertised = frozenset(permitted)
+            else:
+                # Contract allows tools this agent cannot even name: treat as
+                # a no-tools turn rather than advertising nothing useful.
+                no_tools_lane = True
+
+        if self.supported_actions and not no_tools_lane:
+            tool_instructions = self._build_tool_instructions(only=advertised)
             if tool_instructions:
                 system_content += "\n\n" + tool_instructions
             if request.autonomous:
@@ -258,6 +285,19 @@ class AgentBase(ABC):
                     "- Never invent an approval requirement. Only a structured tool result "
                     "can prove that approval is required.\n"
                 )
+        elif self.supported_actions and no_tools_lane:
+            system_content += (
+                "\n\n"
+                + "=" * 60
+                + "\nNO-TOOLS LANE — TOOLS ARE DISABLED FOR THIS TURN\n"
+                + "=" * 60
+                + "\n"
+                "- Nenhuma ferramenta está disponível nesta conversa. NÃO emitas blocos "
+                "```tool, <tool_call> ou <tool> — seriam rejeitados.\n"
+                "- Responde diretamente com texto, em uma única mensagem.\n"
+                "- Se o pedido exigir ficheiros, comandos ou pesquisa, diz ao utilizador "
+                "para mudar para um modo com ferramentas (ex.: auto)."
+            )
 
         # Allow the orchestrator to inject mode-specific instructions cleanly
         # via the request context instead of polluting the user message.
@@ -373,8 +413,32 @@ class AgentBase(ABC):
             self.abuild_messages(request, context), loop
         ).result(timeout=12.0)
 
-    def _build_tool_instructions(self) -> str:
-        """Build tool usage instructions for agents with ReAct support."""
+    @staticmethod
+    def _runtime_allowed_tools(request: AgentRequest) -> frozenset[str] | None:
+        """Read the orchestrator's runtime tool contract for this request.
+
+        Returns ``None`` when the caller did not configure ``_allowed_tools``
+        (no contract — everything advertised by the agent is permitted),
+        otherwise the (possibly empty) set of permitted tool names.
+        """
+        context = getattr(request, "context", None) or {}
+        if "_allowed_tools" not in context:
+            return None
+        return frozenset(
+            str(name).strip()
+            for name in (context.get("_allowed_tools") or ())
+            if str(name).strip()
+        )
+
+    def _build_tool_instructions(self, only: frozenset[str] | None = None) -> str:
+        """Build tool usage instructions for agents with ReAct support.
+
+        ``only`` restricts the advertised tools to the runtime contract
+        (``_allowed_tools``). Advertising a tool that the contract forbids makes
+        the model call it and burn iterations on guaranteed failures (observed
+        live 2026-08-24: ask-mode tried ``list_dir`` twice against an empty
+        allow-list).
+        """
         lines = [
             "=" * 60,
             "TOOL USAGE - You MUST use tools to act. Do not just describe actions.",
@@ -398,6 +462,8 @@ class AgentBase(ABC):
         for action in self.supported_actions:
             mapping = get_action_registry().get(action.name)
             if mapping:
+                if only is not None and mapping.tool not in only:
+                    continue
                 tool_name = mapping.tool
                 example_args = mapping.example_args
                 usage_hint = f" — {mapping.when_to_use}" if mapping.when_to_use else ""
@@ -455,12 +521,17 @@ class AgentBase(ABC):
             return "object"
         return "string"
 
-    def _openai_tool_schemas(self) -> list[dict[str, Any]] | None:
+    def _openai_tool_schemas(
+        self, only: frozenset[str] | None = None
+    ) -> list[dict[str, Any]] | None:
         """Build native OpenAI-compatible tool schemas for this agent.
 
         Derived from ``supported_actions`` via the action registry so the model
         can use structured function calling. Returns ``None`` when the agent has
         no actions, which keeps ordinary conversational calls schema-free.
+        ``only`` (when given) restricts the schemas to the runtime contract so
+        a forbidden tool is never advertised through native function calling
+        either.
         """
         if not self.supported_actions:
             return None
@@ -472,6 +543,8 @@ class AgentBase(ABC):
         for action in self.supported_actions:
             mapping = action_registry.get(action.name)
             if not mapping or mapping.tool in seen:
+                continue
+            if only is not None and mapping.tool not in only:
                 continue
             spec = get_tool(mapping.tool)
             # Optional browser/Playwright modules are catalogued for truthful
@@ -653,7 +726,9 @@ class AgentBase(ABC):
         import os as _os
 
         if _os.environ.get("NEXUS_NATIVE_TOOL_CALLING", "1").strip() not in ("0", "false", "no"):
-            tool_schemas = self._openai_tool_schemas()
+            tool_schemas = self._openai_tool_schemas(
+                only=self._runtime_allowed_tools(request)
+            )
             if tool_schemas:
                 options["tools"] = tool_schemas
                 options["tool_choice"] = "auto"

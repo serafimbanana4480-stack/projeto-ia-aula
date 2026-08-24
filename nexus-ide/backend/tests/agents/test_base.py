@@ -876,6 +876,45 @@ class TestRejectedToolCallIsNotCompletion:
         assert agent._parse_tool_calls(documentation) == []
         assert agent._unparsed_tool_call_snippet(documentation) is None
 
+    @pytest.mark.asyncio
+    async def test_empty_allowed_tools_contract_switches_to_no_tools_lane(self) -> None:
+        """Conversational lane pins _allowed_tools=(): the prompt must say so.
+
+        Advertising the full tool list while the runtime forbids every call made
+        ask-mode burn two iterations trying ``list_dir`` and failing
+        ("Agent contract forbids tool", live 2026-08-24).
+        """
+        agent = _scripted_agent(["unused"])
+        request = _request(context={"_allowed_tools": ()})
+        messages = await agent.abuild_messages(request)
+        system = messages[0]["content"]
+
+        assert "NO-TOOLS LANE" in system
+        assert "Available tools:" not in system
+
+    @pytest.mark.asyncio
+    async def test_allowed_tools_contract_filters_advertised_tools(self) -> None:
+        """A non-empty contract advertises only tools the runtime permits."""
+        agent = _scripted_agent(["unused"])
+        request = _request(context={"_allowed_tools": ("read_file",)})
+        messages = await agent.abuild_messages(request)
+        system = messages[0]["content"]
+        assert "Available tools:" in system
+
+        advertised_section = system.split("Available tools:")[1].split("CRITICAL RULES")[0]
+        assert "- read_file" in advertised_section
+        assert "list_dir" not in advertised_section
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_contract_keeps_full_tool_advertisement(self) -> None:
+        """No _allowed_tools key means no contract: everything stays listed."""
+        agent = _scripted_agent(["unused"])
+        messages = await agent.abuild_messages(_request())
+        system = messages[0]["content"]
+
+        assert "Available tools:" in system
+        assert "NO-TOOLS LANE" not in system
+
     async def test_rejected_call_is_corrected_and_then_executed(self, monkeypatch) -> None:
         executed: list[str] = []
 
