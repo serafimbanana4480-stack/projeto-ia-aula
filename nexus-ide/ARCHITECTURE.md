@@ -1,5 +1,19 @@
 # NEXUS IDE — Architecture v2.0
 
+> **⚠️ Nota de leitura (2026-08-24):** este documento descreve a arquitetura
+> v2.0 e está **atrasado** relativamente ao código em dois pontos principais:
+>
+> 1. **Fase 3 — PRIMARY runtime**: `POST /api/chat` passa por triagem
+>    determinística (`backend/runtime/triage.py`) e, nos turnos
+>    CONVERSATIONAL/DIRECT, executa o `PrimaryLoop` com o agente único NEXUS
+>    (`runtime/primary.py`), em vez do pipeline multi-agente legacy (que se
+>    mantém para trabalho PLANNED). Ver `docs/FASE3-NEXUS-PRIMARY.md`.
+> 2. **Sistema swarm novo**: package `backend/swarm/` (coordenador, message bus,
+>    RAG híbrido, quality gate), exposto em `/api/swarm/*`. Ver
+>    `docs/SWARM_DELIVERY.md`.
+>
+> O resto deste documento continua válido como referência histórica v2.0.
+
 This document is the authoritative architecture reference for NEXUS IDE. The scaffold files in this repo map 1:1 to the sections below.
 
 ## 1. Philosophy
