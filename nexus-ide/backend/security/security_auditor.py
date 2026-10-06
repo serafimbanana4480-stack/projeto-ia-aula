@@ -12,21 +12,17 @@ This system provides:
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
-import json
+import contextlib
 import logging
-import time
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass, field
-from enum import Enum
-import uuid
 import re
-import ipaddress
+import uuid
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any
 
-from backend.observability.event_system import EventBus, Event, EventType, EventPriority
+from backend.observability.event_system import Event, EventBus, EventPriority, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +76,12 @@ class SecurityEvent:
     
     # Event details
     source_ip: str = ""
-    user_id: Optional[str] = None
-    session_id: Optional[str] = None
+    user_id: str | None = None
+    session_id: str | None = None
     endpoint: str = ""
     method: str = ""
     user_agent: str = ""
-    request_data: Dict[str, Any] = field(default_factory=dict)
+    request_data: dict[str, Any] = field(default_factory=dict)
     
     # Detection details
     detection_rule: str = ""
@@ -95,18 +91,18 @@ class SecurityEvent:
     # Context
     description: str = ""
     remediation: str = ""
-    compliance_impact: List[ComplianceStandard] = field(default_factory=list)
+    compliance_impact: list[ComplianceStandard] = field(default_factory=list)
     
     # Status
     status: str = "active"  # active, investigating, resolved, false_positive
-    assigned_to: Optional[str] = None
-    resolved_at: Optional[datetime] = None
+    assigned_to: str | None = None
+    resolved_at: datetime | None = None
     resolution_notes: str = ""
     
     # Metadata
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "event_id": self.event_id,
@@ -143,8 +139,8 @@ class SecurityRule:
     event_type: SecurityEventType
     security_level: SecurityLevel
     pattern: str
-    conditions: Dict[str, Any]
-    actions: List[str]
+    conditions: dict[str, Any]
+    actions: list[str]
     enabled: bool = True
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
@@ -155,14 +151,14 @@ class SecurityAuditor:
     
     def __init__(self, event_bus: EventBus):
         self.event_bus = event_bus
-        self.security_events: List[SecurityEvent] = []
-        self.active_rules: Dict[str, SecurityRule] = {}
-        self.blocked_ips: Set[str] = set()
-        self.suspicious_users: Set[str] = set()
+        self.security_events: list[SecurityEvent] = []
+        self.active_rules: dict[str, SecurityRule] = {}
+        self.blocked_ips: set[str] = set()
+        self.suspicious_users: set[str] = set()
         
         # Monitoring
         self._running = False
-        self._monitor_task: Optional[asyncio.Task] = None
+        self._monitor_task: asyncio.Task | None = None
         
         # Statistics
         self.stats = {
@@ -176,8 +172,8 @@ class SecurityAuditor:
         }
         
         # Rate limiting
-        self.request_tracker: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
-        self.failed_logins: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
+        self.request_tracker: dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+        self.failed_logins: dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
         
         # Initialize default rules
         self._initialize_default_rules()
@@ -197,15 +193,13 @@ class SecurityAuditor:
         
         if self._monitor_task:
             self._monitor_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._monitor_task
-            except asyncio.CancelledError:
-                pass
             self._monitor_task = None
         
         logger.info("SecurityAuditor stopped")
     
-    async def audit_request(self, request_data: Dict[str, Any]) -> Optional[SecurityEvent]:
+    async def audit_request(self, request_data: dict[str, Any]) -> SecurityEvent | None:
         """Audit a request for security threats."""
         try:
             # Extract request information
@@ -257,7 +251,7 @@ class SecurityAuditor:
             logger.error(f"Error auditing request: {e}")
             return None
     
-    async def audit_authentication(self, auth_data: Dict[str, Any]) -> Optional[SecurityEvent]:
+    async def audit_authentication(self, auth_data: dict[str, Any]) -> SecurityEvent | None:
         """Audit authentication events."""
         try:
             success = auth_data.get("success", False)
@@ -336,10 +330,10 @@ class SecurityAuditor:
             return None
     
     async def get_security_events(self, 
-                                 level: Optional[SecurityLevel] = None,
-                                 event_type: Optional[SecurityEventType] = None,
-                                 status: Optional[str] = None,
-                                 limit: int = 100) -> List[SecurityEvent]:
+                                 level: SecurityLevel | None = None,
+                                 event_type: SecurityEventType | None = None,
+                                 status: str | None = None,
+                                 limit: int = 100) -> list[SecurityEvent]:
         """Get security events with filtering."""
         events = self.security_events
         
@@ -355,7 +349,7 @@ class SecurityAuditor:
         events.sort(key=lambda e: e.timestamp, reverse=True)
         return events[:limit]
     
-    async def get_security_stats(self) -> Dict[str, Any]:
+    async def get_security_stats(self) -> dict[str, Any]:
         """Get security statistics."""
         # Update statistics
         self.stats["blocked_ips"] = len(self.blocked_ips)
@@ -406,7 +400,7 @@ class SecurityAuditor:
         
         logger.warning(f"Security event: {event.event_type.value} - {event.description}")
     
-    async def _evaluate_rule(self, rule: SecurityRule, request_data: Dict[str, Any]) -> bool:
+    async def _evaluate_rule(self, rule: SecurityRule, request_data: dict[str, Any]) -> bool:
         """Evaluate a security rule against request data."""
         try:
             # Check pattern match
@@ -445,7 +439,7 @@ class SecurityAuditor:
             logger.error(f"Error evaluating rule {rule.rule_id}: {e}")
             return False
     
-    async def _execute_rule_actions(self, rule: SecurityRule, event: SecurityEvent, request_data: Dict[str, Any]) -> None:
+    async def _execute_rule_actions(self, rule: SecurityRule, event: SecurityEvent, request_data: dict[str, Any]) -> None:
         """Execute actions for a security rule."""
         for action in rule.actions:
             try:
@@ -476,7 +470,7 @@ class SecurityAuditor:
             except Exception as e:
                 logger.error(f"Error executing action {action}: {e}")
     
-    async def _check_rate_limits(self, request_data: Dict[str, Any]) -> None:
+    async def _check_rate_limits(self, request_data: dict[str, Any]) -> None:
         """Check for rate limit violations."""
         source_ip = request_data.get("source_ip", "")
         endpoint = request_data.get("endpoint", "")
@@ -510,7 +504,7 @@ class SecurityAuditor:
             
             await self._add_security_event(event)
     
-    async def _check_suspicious_patterns(self, request_data: Dict[str, Any]) -> None:
+    async def _check_suspicious_patterns(self, request_data: dict[str, Any]) -> None:
         """Check for suspicious request patterns."""
         source_ip = request_data.get("source_ip", "")
         endpoint = request_data.get("endpoint", "")
@@ -716,7 +710,7 @@ class SecurityAuditor:
 
 
 # Global security auditor instance
-_security_auditor: Optional[SecurityAuditor] = None
+_security_auditor: SecurityAuditor | None = None
 
 
 async def get_security_auditor(event_bus: EventBus) -> SecurityAuditor:

@@ -7,15 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
-from .team_leader import TeamLeader, TeamCapability
 from ..agents.base import AgentBase, AgentRequest
-from ..observability.events import Event
 from ..observability.event_bus import EventBus
 
 logger = logging.getLogger(__name__)
@@ -35,15 +33,15 @@ class AgentRole(str, Enum):
 class AgentNode:
     """Node in agent hierarchy with relationships and capabilities."""
     node_id: str = field(default_factory=lambda: f"node-{uuid.uuid4().hex[:8]}")
-    agent: Optional[AgentBase] = None
+    agent: AgentBase | None = None
     role: AgentRole = AgentRole.WORKER
-    parent_id: Optional[str] = None
-    children_ids: Set[str] = field(default_factory=set)
-    capabilities: List[str] = field(default_factory=list)
+    parent_id: str | None = None
+    children_ids: set[str] = field(default_factory=set)
+    capabilities: list[str] = field(default_factory=list)
     status: str = "idle"  # idle, busy, failed, offline
     load: float = 0.0  # Current load (0.0-1.0)
     max_concurrent: int = 1
-    current_tasks: Set[str] = field(default_factory=set)
+    current_tasks: set[str] = field(default_factory=set)
     
     def can_handle(self, capability: str) -> bool:
         """Check if agent can handle a capability."""
@@ -61,8 +59,8 @@ class HierarchicalOrchestrator:
     
     def __init__(
         self,
-        agent_registry: Dict[str, AgentBase],
-        event_bus: Optional[EventBus] = None,
+        agent_registry: dict[str, AgentBase],
+        event_bus: EventBus | None = None,
         max_depth: int = 5,
         max_nodes: int = 100,
     ):
@@ -72,15 +70,15 @@ class HierarchicalOrchestrator:
         self.max_nodes = max_nodes
         
         # Agent hierarchy
-        self.nodes: Dict[str, AgentNode] = {}
-        self.root_nodes: Set[str] = set()
+        self.nodes: dict[str, AgentNode] = {}
+        self.root_nodes: set[str] = set()
         
         # Task tracking
-        self.active_tasks: Dict[str, Dict[str, Any]] = {}
-        self.task_dependencies: Dict[str, Set[str]] = {}
+        self.active_tasks: dict[str, dict[str, Any]] = {}
+        self.task_dependencies: dict[str, set[str]] = {}
         
         # Spawning control
-        self.temporal_agents: Dict[str, AgentNode] = {}
+        self.temporal_agents: dict[str, AgentNode] = {}
         self.spawn_lock = asyncio.Lock()
         
         # Initialize hierarchy
@@ -164,7 +162,7 @@ class HierarchicalOrchestrator:
         else:
             return AgentRole.WORKER
             
-    def _get_agent_capabilities(self, agent_name: str) -> List[str]:
+    def _get_agent_capabilities(self, agent_name: str) -> list[str]:
         """Get capabilities for an agent."""
         capability_map = {
             "ARCHITECT": ["design", "architecture", "planning", "system_design"],
@@ -192,7 +190,7 @@ class HierarchicalOrchestrator:
         }
         return limits.get(agent_name, 1)
         
-    def _find_supervisor_for_agent(self, agent_name: str) -> Optional[str]:
+    def _find_supervisor_for_agent(self, agent_name: str) -> str | None:
         """Find appropriate supervisor for an agent."""
         agent_caps = self._get_agent_capabilities(agent_name)
         
@@ -218,9 +216,9 @@ class HierarchicalOrchestrator:
         task_id: str,
         task_type: str,
         description: str,
-        context: Optional[Dict[str, Any]] = None,
+        context: dict[str, Any] | None = None,
         priority: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Execute a task through the hierarchical system."""
         logger.info("Executing task %s: %s", task_id, task_type)
         
@@ -288,7 +286,7 @@ class HierarchicalOrchestrator:
                 "error": str(exc),
             }
             
-    def _find_capable_nodes(self, task_type: str) -> List[AgentNode]:
+    def _find_capable_nodes(self, task_type: str) -> list[AgentNode]:
         """Find nodes that can handle a task type."""
         capable = []
         
@@ -298,7 +296,7 @@ class HierarchicalOrchestrator:
                 
         return capable
         
-    def _select_best_node(self, nodes: List[AgentNode]) -> AgentNode:
+    def _select_best_node(self, nodes: list[AgentNode]) -> AgentNode:
         """Select best node based on load and capability."""
         if not nodes:
             raise ValueError("No available nodes")
@@ -309,7 +307,7 @@ class HierarchicalOrchestrator:
     async def _execute_node_task(
         self,
         node: AgentNode,
-        task_record: Dict[str, Any],
+        task_record: dict[str, Any],
     ) -> Any:
         """Execute task on a specific node."""
         node.status = "busy"
@@ -332,7 +330,7 @@ class HierarchicalOrchestrator:
     async def _execute_agent_task(
         self,
         node: AgentNode,
-        task_record: Dict[str, Any],
+        task_record: dict[str, Any],
     ) -> Any:
         """Execute task with real agent."""
         if not node.agent:
@@ -358,7 +356,7 @@ class HierarchicalOrchestrator:
     async def _execute_delegated_task(
         self,
         node: AgentNode,
-        task_record: Dict[str, Any],
+        task_record: dict[str, Any],
     ) -> Any:
         """Execute task through delegation to child nodes."""
         # Find capable child nodes
@@ -385,7 +383,7 @@ class HierarchicalOrchestrator:
         
         return result
         
-    async def _spawn_temporary_agent(self, task_type: str) -> Optional[AgentNode]:
+    async def _spawn_temporary_agent(self, task_type: str) -> AgentNode | None:
         """Spawn a temporary agent for a specific task type."""
         async with self.spawn_lock:
             if len(self.temporal_agents) >= 10:  # Limit temporal agents
@@ -412,7 +410,7 @@ class HierarchicalOrchestrator:
             
             return temp_node
             
-    def _find_template_agent(self, task_type: str) -> Optional[AgentBase]:
+    def _find_template_agent(self, task_type: str) -> AgentBase | None:
         """Find a template agent for spawning."""
         # Simple mapping - in real system would be more sophisticated
         if task_type in ["code_generation", "implementation"]:
@@ -424,14 +422,14 @@ class HierarchicalOrchestrator:
         else:
             return self.agent_registry.get("CODER")  # Default
             
-    async def _publish_task_event(self, event_type: str, task_data: Dict[str, Any]) -> None:
+    async def _publish_task_event(self, event_type: str, task_data: dict[str, Any]) -> None:
         """Publish task-related event."""
         if self.event_bus:
             from ..observability.events import Event
             event = Event(type=event_type, payload=task_data)
             await self.event_bus.publish(event)
             
-    def get_hierarchy_stats(self) -> Dict[str, Any]:
+    def get_hierarchy_stats(self) -> dict[str, Any]:
         """Get hierarchy statistics."""
         stats = {
             "total_nodes": len(self.nodes),

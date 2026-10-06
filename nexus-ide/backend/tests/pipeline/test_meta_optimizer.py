@@ -1,8 +1,6 @@
 """Tests for MetaOptimizer — RL-driven orchestrator parameter tuning."""
 from __future__ import annotations
 
-import pytest
-
 from backend.pipeline.meta_optimizer import MetaOptimizer, OptimizationResult
 
 
@@ -78,7 +76,7 @@ class TestMetaOptimizer:
         params = OptimizationResult()
 
         # Record 60 outcomes to trigger decay
-        for i in range(60):
+        for _i in range(60):
             optimizer.record_outcome("medium", "code_gen", params, success=True, tests_passed=True)
 
         # After 50 workflows, epsilon should have decayed

@@ -18,7 +18,6 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +49,10 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 async def _run_once(project: Path) -> int:
+    from backend.config.settings import get_autonomous_improvement_config
     from backend.orchestrator.autonomous_improvement_orchestrator import (
         get_autonomous_improvement_orchestrator,
     )
-    from backend.config.settings import get_autonomous_improvement_config
 
     config = get_autonomous_improvement_config()
     orchestrator = get_autonomous_improvement_orchestrator(config=config)
@@ -74,10 +73,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 async def _run_daemon(project: Path) -> int:
+    from backend.config.settings import get_autonomous_improvement_config
     from backend.orchestrator.autonomous_improvement_orchestrator import (
         get_autonomous_improvement_orchestrator,
     )
-    from backend.config.settings import get_autonomous_improvement_config
 
     config = get_autonomous_improvement_config()
     orchestrator = get_autonomous_improvement_orchestrator(config=config)
@@ -91,10 +90,10 @@ async def _run_daemon(project: Path) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    from backend.config.settings import get_autonomous_improvement_config
     from backend.orchestrator.autonomous_improvement_orchestrator import (
         get_autonomous_improvement_orchestrator,
     )
-    from backend.config.settings import get_autonomous_improvement_config
 
     config = get_autonomous_improvement_config()
     orchestrator = get_autonomous_improvement_orchestrator(config=config)

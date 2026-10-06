@@ -1,4 +1,4 @@
-"""Quantum Computing — Integration framework for quantum computing capabilities.
+﻿"""Quantum Computing â€” Integration framework for quantum computing capabilities.
 
 This module provides:
 - Quantum algorithm integration
@@ -10,23 +10,35 @@ This module provides:
 """
 
 from __future__ import annotations
-from collections import defaultdict
-import statistics
 
 import asyncio
+import contextlib
 import logging
-import json
-import numpy as np
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Union
-from dataclasses import dataclass, field
-from enum import Enum
+import statistics
 import uuid
-from abc import ABC, abstractmethod
-import math
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any
 
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
+from backend.observability.optional_deps import optional_module
+
+# numpy is an optional extra (``uv sync --extra quantum``), not a hard
+# dependency -- the quantum simulator is unreachable from main.py. The stand-in
+# keeps this module importable and raises a guided error on the first array
+# operation, instead of a bare "No module named 'numpy'" at import time.
+np = optional_module("numpy", extra="quantum", owner=__name__)
+
+#: What ``np.ndarray`` used to say in the annotations below. numpy ships type
+#: information, but the extra is not installed in the default environment, so a
+#: type checker cannot resolve ``np.ndarray`` -- and because ``np`` is now a
+#: variable holding a stand-in rather than a module, ``np.ndarray`` is not a type
+#: to it either. ``Any`` is the honest annotation here and becomes redundant the
+#: day the extra is a hard dependency.
+type Array = Any
 
 logger = logging.getLogger(__name__)
 
@@ -81,10 +93,10 @@ class QuantumCircuit:
     circuit_id: str
     name: str
     num_qubits: int
-    gates: List[Dict[str, Any]]
+    gates: list[dict[str, Any]]
     depth: int
     created_at: datetime
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -92,12 +104,12 @@ class QuantumState:
     """Represents a quantum state."""
     state_id: str
     circuit_id: str
-    state_vector: np.ndarray
-    density_matrix: np.ndarray
+    state_vector: Array
+    density_matrix: Array
     state_type: QuantumStateType
     entanglement_measure: float
     created_at: datetime
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -107,11 +119,11 @@ class QuantumAlgorithm:
     name: str
     algorithm_type: QuantumAlgorithmType
     circuit: QuantumCircuit
-    parameters: Dict[str, Any]
-    expected_results: Dict[str, Any]
-    complexity_metrics: Dict[str, Any]
+    parameters: dict[str, Any]
+    expected_results: dict[str, Any]
+    complexity_metrics: dict[str, Any]
     created_at: datetime
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -119,26 +131,26 @@ class QuantumResult:
     """Represents results from quantum computation."""
     result_id: str
     algorithm_id: str
-    measurements: List[Dict[str, Any]]
-    probabilities: Dict[str, float]
+    measurements: list[dict[str, Any]]
+    probabilities: dict[str, float]
     execution_time: float
     fidelity: float
-    error_rates: Dict[str, float]
+    error_rates: dict[str, float]
     created_at: datetime
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class QuantumGate:
     """Represents a quantum gate operation."""
     
-    def __init__(self, gate_type: QuantumGateType, target_qubits: List[int], 
-                 control_qubits: List[int] = None, params: Dict[str, Any] = None):
+    def __init__(self, gate_type: QuantumGateType, target_qubits: list[int],
+                 control_qubits: list[int] = None, params: dict[str, Any] = None):
         self.gate_type = gate_type
         self.target_qubits = target_qubits
         self.control_qubits = control_qubits or []
         self.params = params or {}
     
-    def to_matrix(self) -> np.ndarray:
+    def to_matrix(self) -> Array:
         """Convert gate to matrix representation."""
         
         if self.gate_type == QuantumGateType.PAULI_X:
@@ -169,7 +181,7 @@ class QuantumGate:
             # Default to identity
             return np.eye(2)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert gate to dictionary representation."""
         return {
             'gate_type': self.gate_type.value,
@@ -201,8 +213,8 @@ class QuantumSimulator:
             # Apply gate
             self.state_vector = system_matrix @ self.state_vector
     
-    def _create_system_matrix(self, gate_matrix: np.ndarray, 
-                            target_qubits: List[int]) -> np.ndarray:
+    def _create_system_matrix(self, gate_matrix: Array,
+                            target_qubits: list[int]) -> Array:
         """Create system matrix for multi-qubit system."""
         
         dim = 2 ** self.num_qubits
@@ -222,7 +234,7 @@ class QuantumSimulator:
         
         return system_matrix
     
-    def _get_qubit_bits(self, index: int, qubits: List[int]) -> Tuple[int, ...]:
+    def _get_qubit_bits(self, index: int, qubits: list[int]) -> tuple[int, ...]:
         """Get bits of specific qubits from index."""
         bits = []
         for qubit in qubits:
@@ -230,7 +242,7 @@ class QuantumSimulator:
             bits.append(bit)
         return tuple(bits)
     
-    def _get_subspace_index(self, index: int, target_qubits: List[int]) -> int:
+    def _get_subspace_index(self, index: int, target_qubits: list[int]) -> int:
         """Get index in the subspace defined by target qubits."""
         subspace_index = 0
         for i, qubit in enumerate(target_qubits):
@@ -266,11 +278,11 @@ class QuantumSimulator:
         
         return result
     
-    def get_state_vector(self) -> np.ndarray:
+    def get_state_vector(self) -> Array:
         """Get current state vector."""
         return self.state_vector.copy()
     
-    def get_density_matrix(self) -> np.ndarray:
+    def get_density_matrix(self) -> Array:
         """Get density matrix representation."""
         return np.outer(self.state_vector, np.conj(self.state_vector))
 
@@ -280,8 +292,8 @@ class QuantumAlgorithmExecutor:
     
     def __init__(self, event_bus: EventBus):
         self.event_bus = event_bus
-        self.algorithms: Dict[str, QuantumAlgorithm] = {}
-        self.results: Dict[str, QuantumResult] = {}
+        self.algorithms: dict[str, QuantumAlgorithm] = {}
+        self.results: dict[str, QuantumResult] = {}
     
     async def create_grover_circuit(self, num_qubits: int, target_state: int) -> QuantumCircuit:
         """Create Grover's search algorithm circuit."""
@@ -319,7 +331,7 @@ class QuantumAlgorithmExecutor:
         
         return circuit
     
-    def _create_oracle(self, num_qubits: int, target_state: int) -> List[Dict[str, Any]]:
+    def _create_oracle(self, num_qubits: int, target_state: int) -> list[dict[str, Any]]:
         """Create oracle for Grover's algorithm."""
         
         gates = []
@@ -341,7 +353,7 @@ class QuantumAlgorithmExecutor:
         
         return gates
     
-    def _create_diffusion_operator(self, num_qubits: int) -> List[Dict[str, Any]]:
+    def _create_diffusion_operator(self, num_qubits: int) -> list[dict[str, Any]]:
         """Create diffusion operator for Grover's algorithm."""
         
         gates = []
@@ -508,7 +520,7 @@ class QuantumAlgorithmExecutor:
         # Return simulated result for now
         return await self._execute_on_simulator(algorithm)
     
-    def _dict_to_gate(self, gate_dict: Dict[str, Any]) -> QuantumGate:
+    def _dict_to_gate(self, gate_dict: dict[str, Any]) -> QuantumGate:
         """Convert dictionary to QuantumGate object."""
         
         gate_type = QuantumGateType(gate_dict['gate_type'])
@@ -518,8 +530,8 @@ class QuantumAlgorithmExecutor:
         
         return QuantumGate(gate_type, target_qubits, control_qubits, params)
     
-    def _calculate_fidelity(self, state_vector: np.ndarray, 
-                          expected_results: Dict[str, Any]) -> float:
+    def _calculate_fidelity(self, state_vector: Array,
+                          expected_results: dict[str, Any]) -> float:
         """Calculate fidelity of quantum state."""
         
         # Simplified fidelity calculation
@@ -529,7 +541,7 @@ class QuantumAlgorithmExecutor:
             return 1.0
         
         # Calculate overlap with expected state
-        expected_state = expected_results.get('expected_state', None)
+        expected_state = expected_results.get('expected_state')
         
         if expected_state is None:
             return 1.0
@@ -538,8 +550,8 @@ class QuantumAlgorithmExecutor:
         purity = np.abs(np.vdot(state_vector, state_vector))**2
         return min(1.0, purity)
     
-    def _calculate_error_rates(self, measurements: List[Dict[str, Any]], 
-                             expected_results: Dict[str, Any]) -> Dict[str, float]:
+    def _calculate_error_rates(self, measurements: list[dict[str, Any]],
+                             expected_results: dict[str, Any]) -> dict[str, float]:
         """Calculate error rates for measurements."""
         
         error_rates = {}
@@ -566,9 +578,9 @@ class QuantumComputingOrchestrator:
     def __init__(self, event_bus: EventBus):
         self.event_bus = event_bus
         self.algorithm_executor = QuantumAlgorithmExecutor(event_bus)
-        self.quantum_algorithms: Dict[str, QuantumAlgorithm] = {}
-        self.quantum_backends: Dict[QuantumBackend, Dict[str, Any]] = {}
-        self.performance_metrics: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self.quantum_algorithms: dict[str, QuantumAlgorithm] = {}
+        self.quantum_backends: dict[QuantumBackend, dict[str, Any]] = {}
+        self.performance_metrics: dict[str, list[dict[str, Any]]] = defaultdict(list)
         
         # Initialize backends
         self._initialize_backends()
@@ -604,7 +616,7 @@ class QuantumComputingOrchestrator:
         }
     
     async def create_quantum_algorithm(self, name: str, algorithm_type: QuantumAlgorithmType,
-                                       parameters: Dict[str, Any]) -> str:
+                                       parameters: dict[str, Any]) -> str:
         """Create a quantum algorithm."""
         
         algorithm_id = str(uuid.uuid4())
@@ -692,7 +704,7 @@ class QuantumComputingOrchestrator:
         
         return result.result_id
     
-    def _calculate_complexity_metrics(self, circuit: QuantumCircuit) -> Dict[str, Any]:
+    def _calculate_complexity_metrics(self, circuit: QuantumCircuit) -> dict[str, Any]:
         """Calculate complexity metrics for a quantum circuit."""
         
         # Gate count
@@ -717,7 +729,7 @@ class QuantumComputingOrchestrator:
             "num_qubits": circuit.num_qubits
         }
     
-    async def optimize_quantum_circuit(self, algorithm_id: str) -> Dict[str, Any]:
+    async def optimize_quantum_circuit(self, algorithm_id: str) -> dict[str, Any]:
         """Optimize a quantum circuit."""
         
         if algorithm_id not in self.quantum_algorithms:
@@ -768,7 +780,7 @@ class QuantumComputingOrchestrator:
             "improvement_percentage": (original_circuit.depth - len(optimized_gates)) / original_circuit.depth * 100
         }
     
-    def _cancel_adjacent_gates(self, gates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _cancel_adjacent_gates(self, gates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Cancel adjacent gates that are inverses of each other."""
         
         optimized_gates = []
@@ -791,7 +803,7 @@ class QuantumComputingOrchestrator:
         
         return optimized_gates
     
-    def _gates_cancel(self, gate1: Dict[str, Any], gate2: Dict[str, Any]) -> bool:
+    def _gates_cancel(self, gate1: dict[str, Any], gate2: dict[str, Any]) -> bool:
         """Check if two gates cancel each other."""
         
         # Same target qubits
@@ -803,12 +815,9 @@ class QuantumComputingOrchestrator:
             return True
         
         # Check for H followed by H
-        if (gate1['gate_type'] == 'hadamard' and gate2['gate_type'] == 'hadamard'):
-            return True
-        
-        return False
+        return bool(gate1['gate_type'] == 'hadamard' and gate2['gate_type'] == 'hadamard')
     
-    def _merge_gates(self, gates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _merge_gates(self, gates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Merge compatible gates."""
         
         optimized_gates = []
@@ -832,7 +841,7 @@ class QuantumComputingOrchestrator:
         
         return optimized_gates
     
-    def _merge_two_gates(self, gate1: Dict[str, Any], gate2: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _merge_two_gates(self, gate1: dict[str, Any], gate2: dict[str, Any]) -> dict[str, Any] | None:
         """Try to merge two gates."""
         
         # Same target qubits and gate type
@@ -859,7 +868,7 @@ class QuantumComputingOrchestrator:
         
         return None
     
-    async def get_quantum_computing_stats(self) -> Dict[str, Any]:
+    async def get_quantum_computing_stats(self) -> dict[str, Any]:
         """Get comprehensive quantum computing statistics."""
         
         stats = {
@@ -919,7 +928,7 @@ class QuantumComputingOrchestrator:
                 # Collect performance metrics
                 for algorithm_id, metrics in self.performance_metrics.items():
                     if metrics:
-                        latest_metric = metrics[-1]
+                        metrics[-1]
                         
                         # Check for performance degradation
                         if len(metrics) > 10:
@@ -949,9 +958,7 @@ class QuantumComputingOrchestrator:
         # Cancel background tasks
         if self._performance_monitor_task:
             self._performance_monitor_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._performance_monitor_task
-            except asyncio.CancelledError:
-                pass
         
         logger.info("Quantum computing orchestrator shutdown completed")

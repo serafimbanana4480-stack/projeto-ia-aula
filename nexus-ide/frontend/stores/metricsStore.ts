@@ -1,15 +1,15 @@
 /**
  * Metrics Store — Single source of truth for all dashboard metrics.
  *
- * Eliminates redundant fetches across components. One SSE connection
- * feeds all subscribers. Polling fallback when SSE unavailable.
+ * One poller feeds all subscribers, so N widgets cost one request per tick
+ * instead of N. A 3 s interval is the transport: see the note above
+ * `pollingTimer` for why there is no SSE branch.
  */
 import { create } from "zustand";
 import { apiUrl, authHeaders, getMetricsHistory } from "../lib/api";
 import {
   authenticatedFetch,
   autoLoginDev,
-  getAccessToken,
   isAuthenticated,
   isAutoLoginEnabled,
 } from "../lib/auth";
@@ -63,7 +63,7 @@ interface MetricsState {
   metrics: SystemMetrics | null;
   history: SystemMetrics[];
   backendOnline: boolean;
-  connectionStatus: "connecting" | "connected" | "degraded" | "offline";
+  connectionStatus: "connecting" | "connected" | "degraded" | "offline" | "auth_required";
   connectionMode: "none" | "sse" | "polling";
   lastUpdate: string;
 
@@ -238,28 +238,22 @@ function normalizeHistorySeries(
   return [];
 }
 
-// ── Singleton SSE manager ────────────────────────────────────────────────
-let sseInstance: EventSource | null = null;
+// ── Singleton poller ───────────────────────────────────────────────────────
+//
+// There is deliberately no SSE path here. `/api/dashboard/stream` needs a
+// bearer token, and native `EventSource` cannot send an Authorization header;
+// the only ways to reach it are to put the token in the query string — which
+// leaks it into browser history, proxies and Uvicorn access logs — or to move
+// to `fetch`-based streaming. Until one of those is worth it, polling is the
+// real transport. An earlier revision kept a full `EventSource` block behind an
+// unconditional `return`, which made it look wired while being unreachable.
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
 let isInitialized = false;
 let isStopped = false;
-let backoffTimer: ReturnType<typeof setTimeout> | null = null;
 let authHeartbeat: ReturnType<typeof setInterval> | null = null;
 let authRecovery: Promise<boolean> | null = null;
 
-// SSE throttle: prevent re-render storms by limiting updates to one per 300ms
-let lastSseUpdate = 0;
-const SSE_THROTTLE_MS = 300;
-
-function clearBackoff() {
-  if (backoffTimer) {
-    clearTimeout(backoffTimer);
-    backoffTimer = null;
-  }
-}
-
-function startAuthHeartbeat() {
-  if (authHeartbeat) return;
+function startAuthHeartbeat() {  if (authHeartbeat) return;
   authHeartbeat = setInterval(() => {
     if (isAuthenticated() && (!isInitialized || isStopped)) {
       initMetricsStream();
@@ -285,11 +279,6 @@ async function recoverMetricsAuth(): Promise<boolean> {
 }
 
 function stopAll() {
-  clearBackoff();
-  if (sseInstance) {
-    sseInstance.close();
-    sseInstance = null;
-  }
   if (pollingTimer) {
     clearInterval(pollingTimer);
     pollingTimer = null;
@@ -297,11 +286,11 @@ function stopAll() {
 }
 
 async function fetchMetrics() {
-  // In dev mode the backend metrics endpoints are open (no auth required),
-  // so we still fetch even when not authenticated. Only bail out on a real
-  // 401 from the backend (production with invalid/expired credentials).
+  // In development, start polling before login finishes so the auth bootstrap
+  // can recover. The endpoint still requires a valid JWT; a 401 is handled
+  // below as an authentication state, not a connectivity failure.
   if (!isAuthenticated() && process.env.NODE_ENV !== "development") {
-    if (sseInstance || pollingTimer) {
+    if (pollingTimer) {
       stopAll();
     }
     return false;
@@ -314,8 +303,8 @@ async function fetchMetrics() {
     });
 
     if (response.status === 401) {
-      useMetricsStore.getState()._setBackendOnline(false);
-      useMetricsStore.getState()._setConnectionStatus("offline");
+      useMetricsStore.getState()._setBackendOnline(true);
+      useMetricsStore.getState()._setConnectionStatus("auth_required");
       useMetricsStore.getState()._setConnectionMode("none");
       // The next authenticated request may refresh the access token. Do not
       // leave the singleton latched after this transient authentication miss.
@@ -332,11 +321,16 @@ async function fetchMetrics() {
     if (response.ok) {
       const data = (await response.json()) as SystemMetrics;
       useMetricsStore.getState()._setMetrics(data);
-      useMetricsStore.getState()._setConnectionMode(
-        useMetricsStore.getState().connectionMode === "sse" ? "sse" : "polling",
-      );
+      // `startPolling` already set the mode; re-asserting it here is a no-op
+      // and only existed to preserve an "sse" value that could never be set.
       return true;
     }
+
+    // An HTTP response proves the backend answered, even when the metrics
+    // endpoint failed. Keep the last successful snapshot visible, but mark it
+    // degraded and do not advance its freshness timestamp.
+    useMetricsStore.getState()._setBackendOnline(true);
+    useMetricsStore.getState()._setConnectionStatus("degraded");
   } catch {
     // Keep the heartbeat alive so a temporary backend restart can recover
     // without requiring a route change or a full browser reload.
@@ -351,71 +345,10 @@ async function fetchMetrics() {
   return false;
 }
 
-function startSSE() {
-  stopAll();
-
-  if (isStopped) return;
-
-  const token = getAccessToken();
-  // Native EventSource cannot send an Authorization header. Never put bearer
-  // tokens in a query string: URLs are written to browser history, proxies and
-  // Uvicorn access logs. Authenticated clients use the existing polling path;
-  // anonymous clients must not open an unauthed SSE connection.
-  if (token || process.env.NODE_ENV !== "development") {
-    startPolling();
-    return;
-  }
-  return;
-
-  try {
-    const es = new EventSource(apiUrl("/api/dashboard/stream"));
-    sseInstance = es;
-
-    es.onopen = () => {
-      useMetricsStore.getState()._setConnectionMode("sse");
-    };
-
-    es.onmessage = (e) => {
-      const now = Date.now();
-      if (now - lastSseUpdate < SSE_THROTTLE_MS) return;
-      lastSseUpdate = now;
-      try {
-        const data = JSON.parse(e.data) as SystemMetrics;
-        useMetricsStore.getState()._setMetrics(data);
-      } catch {
-        /* ignore parse errors */
-      }
-    };
-
-    let errorHandled = false;
-    es.onerror = () => {
-      if (errorHandled) return;
-      errorHandled = true;
-
-      es.close();
-      sseInstance = null;
-
-      if (!isStopped) {
-        clearBackoff();
-        backoffTimer = setTimeout(() => {
-          backoffTimer = null;
-          if (!isStopped) {
-            startPolling();
-          }
-        }, 2000);
-      }
-    };
-  } catch {
-    if (!isStopped) {
-      startPolling();
-    }
-  }
-}
-
 function startPolling() {
   if (pollingTimer || isStopped) return;
-  // Metrics are intentionally public in development, matching the SSE
-  // endpoint. Do not leave the HUD frozen when SSE is unavailable locally.
+  // Development may start before login so auth bootstrap can recover, but the
+  // endpoint still requires a JWT and reports missing auth as a 401.
   if (!isAuthenticated() && process.env.NODE_ENV !== "development") return;
 
   useMetricsStore.getState()._setConnectionMode("polling");
@@ -423,16 +356,14 @@ function startPolling() {
   pollingTimer = setInterval(fetchMetrics, 3000);
 }
 
-/** Initialize the metrics stream (SSE → polling fallback). Idempotent. */
+/** Initialize metrics polling. Idempotent. */
 export function initMetricsStream() {
-  clearBackoff();
-
   // Allow restart after an auth failure stopped the stream.
   if (isInitialized && !isStopped) return;
 
-  // In dev mode the backend metrics endpoints are open, so we start the
-  // stream immediately even before authentication completes. In production
-  // we wait for auth (the endpoints require a valid JWT).
+  // In development, start polling before authentication completes so the
+  // bootstrap/recovery flow can run. Metrics endpoints still require a valid
+  // JWT; in production we wait for authentication before polling.
   if (!isAuthenticated() && process.env.NODE_ENV !== "development") {
     isInitialized = false;
     isStopped = false;
@@ -444,9 +375,10 @@ export function initMetricsStream() {
   isStopped = false;
   startAuthHeartbeat();
   useMetricsStore.getState()._setConnectionStatus("connecting");
-  // Establish polling first so "connected" reflects a real metrics payload.
+  // Polling is the only transport, and it sets "connected" itself once a real
+  // metrics payload lands. This used to call `startSSE()` afterwards, which
+  // tore the interval down again and restarted it for no reason.
   startPolling();
-  startSSE();
 }
 
 /** Stop all metrics streaming. Call on app unmount if needed. */

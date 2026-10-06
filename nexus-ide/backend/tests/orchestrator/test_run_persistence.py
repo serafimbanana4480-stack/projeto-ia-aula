@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime, timedelta
+
 import pytest
 
 
@@ -42,6 +43,87 @@ def test_upsert_round_trips_execution_envelope_fields() -> None:
     assert row["error_category"] == "none"
     assert row["retry_after"] == 12
     assert row["evidence"] == [{"verified": True, "kind": "tests"}]
+
+
+def test_terminal_upsert_without_checkpoint_preserves_durable_progress() -> None:
+    import json
+
+    from backend.persistence.db import upsert_session_run
+
+    session_id = _make_session()
+    checkpoint = {"cycles": 3, "changed_files": ["src/app.py"]}
+    usage = {"total_tokens": 128}
+
+    upsert_session_run(
+        "run-checkpoint-preserved",
+        session_id,
+        checkpoint=checkpoint,
+        usage=usage,
+    )
+    final = upsert_session_run(
+        "run-checkpoint-preserved",
+        session_id,
+        status="completed",
+        finished=True,
+    )
+
+    assert final is not None
+    assert json.loads(final["checkpoint_json"]) == checkpoint
+    assert json.loads(final["usage_json"]) == usage
+
+
+def test_messages_retain_run_links_and_identical_assistant_answers() -> None:
+    from backend.persistence.db import add_message, get_messages, upsert_session_run
+
+    session_id = _make_session()
+    upsert_session_run("run-answer-a", session_id, execution_state="completed")
+    upsert_session_run("run-answer-b", session_id, execution_state="completed")
+    add_message(session_id, "assistant", "Done", run_id="run-answer-a")
+    add_message(session_id, "assistant", "Done", run_id="run-answer-b")
+
+    answers = [
+        message for message in get_messages(session_id) if message.get("role") == "assistant"
+    ]
+
+    assert [message["run_id"] for message in answers] == ["run-answer-a", "run-answer-b"]
+
+
+def test_primary_run_persists_user_prompt_before_stream_recovery() -> None:
+    from types import SimpleNamespace
+
+    from backend.orchestrator.routes.chat_primary import _start_primary_run
+    from backend.persistence.db import get_messages
+
+    session_id = _make_session()
+    decision = SimpleNamespace(to_dict=lambda: {"lane": "primary"})
+
+    _start_primary_run(
+        "run-start-prompt",
+        session_id,
+        SimpleNamespace(message="continue after reload", mode="auto"),
+        decision,
+    )
+
+    messages = get_messages(session_id)
+    assert any(
+        message["role"] == "user"
+        and message["content"] == "continue after reload"
+        and message["run_id"] == "run-start-prompt"
+        for message in messages
+    )
+
+
+def test_message_history_limit_returns_the_most_recent_messages_in_order() -> None:
+    from backend.persistence.db import add_message, get_messages
+
+    session_id = _make_session()
+    add_message(session_id, "user", "first")
+    add_message(session_id, "user", "second")
+    add_message(session_id, "user", "third")
+
+    messages = get_messages(session_id, limit=2)
+
+    assert [message["content"] for message in messages] == ["second", "third"]
 
 
 def test_terminal_update_sets_finished_at_and_correlation_lookup() -> None:
@@ -104,8 +186,7 @@ def test_failed_run_can_store_blocked_execution_state() -> None:
 
 
 def test_recover_interrupted_runs_marks_stale_running_rows() -> None:
-    from backend.persistence.db import recover_interrupted_runs, upsert_session_run
-    from backend.persistence.db import DB_PATH
+    from backend.persistence.db import DB_PATH, recover_interrupted_runs, upsert_session_run
 
     session_id = _make_session()
     upsert_session_run("run-stale", session_id, execution_state="running")

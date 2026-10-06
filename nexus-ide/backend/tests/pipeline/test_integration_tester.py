@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import pytest
 
-from backend.pipeline.integration_tester import APIContractTester, EventBusTester
-from backend.pipeline.integration_tester import LoadTestGenerator, SLAChecker
-from backend.pipeline.integration_tester import IntegrationTest
+from backend.pipeline.integration_tester import (
+    APIContractTester,
+    EventBusTester,
+    LoadTestGenerator,
+    SLAChecker,
+)
 
 
 class TestAPIContractTester:

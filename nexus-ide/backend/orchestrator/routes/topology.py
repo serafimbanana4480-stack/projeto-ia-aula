@@ -1,8 +1,10 @@
+"""API routes for agent topology visualization."""
+
 from __future__ import annotations
 
-"""API routes for agent topology visualization."""
-from fastapi import APIRouter, HTTPException
 from typing import Any
+
+from fastapi import APIRouter, HTTPException
 
 from backend.orchestrator.agent_topology import AgentTopology
 

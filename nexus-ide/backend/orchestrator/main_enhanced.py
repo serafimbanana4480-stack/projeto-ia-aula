@@ -10,45 +10,44 @@ This enhanced version includes:
 
 from __future__ import annotations
 
-from datetime import datetime
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from datetime import datetime
+from typing import Any
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
-from backend.config.settings import get_settings
-from backend.observability.event_system import get_event_bus, shutdown_event_system
-from backend.observability.routes.alerts import router as alerts_router
-from backend.observability.routes.metrics import router as metrics_router
+from backend import tools as _tools  # noqa: F401
 from backend.agents.event_emitting_agent import (
     EventEmittingArchitectAgent,
     EventEmittingCoderAgent,
     EventEmittingDebuggerAgent,
 )
+from backend.config.settings import get_settings
+from backend.dashboard.websocket_server import get_websocket_server, stop_websocket_server
+from backend.memory.memory_dashboard import get_memory_dashboard, shutdown_memory_dashboard
+from backend.metrics.realtime_metrics import get_metrics_collector, shutdown_metrics_collector
+from backend.observability.event_system import get_event_bus, shutdown_event_system
+from backend.observability.routes.alerts import router as alerts_router
+from backend.observability.routes.metrics import router as metrics_router
 from backend.orchestrator.context_manager import ContextStore
 from backend.orchestrator.registry import build_default_registry
+from backend.orchestrator.routes.additional import router as additional_router
+from backend.orchestrator.routes.agents import router as agents_router
 from backend.orchestrator.routes.chat import router as chat_router
-from backend.orchestrator.routes.enhanced_chat import router as enhanced_chat_router
 from backend.orchestrator.routes.dashboard import router as dashboard_router
+from backend.orchestrator.routes.enhanced_chat import router as enhanced_chat_router
 from backend.orchestrator.routes.files import router as files_router
+from backend.orchestrator.routes.knowledge import router as knowledge_router
 from backend.orchestrator.routes.modes import router as modes_router
 from backend.orchestrator.routes.observability import router as observability_router
-from backend.orchestrator.routes.projects import router as projects_router
-from backend.orchestrator.routes.agents import router as agents_router
-from backend.orchestrator.routes.tasks import router as tasks_router
-from backend.orchestrator.routes.knowledge import router as knowledge_router
-from backend.orchestrator.routes.additional import router as additional_router
 from backend.orchestrator.routes.omega import router as omega_router
-from backend import tools as _tools  # noqa: F401
+from backend.orchestrator.routes.projects import router as projects_router
+from backend.orchestrator.routes.tasks import router as tasks_router
 from backend.persistence import init_db
 from backend.tools.ollama_client import OllamaClient
-from backend.dashboard.websocket_server import get_websocket_server, stop_websocket_server
-from backend.metrics.realtime_metrics import get_metrics_collector, shutdown_metrics_collector
-from backend.memory.memory_dashboard import get_memory_dashboard, shutdown_memory_dashboard
-from backend.agents.event_emitting_agent import EventEmittingAgent
 
 logger = logging.getLogger(__name__)
 

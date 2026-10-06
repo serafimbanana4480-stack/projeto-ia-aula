@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 
 from backend.cache_backends import (
     CacheBackend,
-    TTLCacheBackend,
     InMemoryCacheBackend,
     NullCacheBackend,
+    TTLCacheBackend,
 )
 
 

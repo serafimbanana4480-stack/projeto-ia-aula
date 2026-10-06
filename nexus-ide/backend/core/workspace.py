@@ -1299,6 +1299,9 @@ register_tool(
     ToolSpec(
         name="git_commit_all",
         description="Stage all changes and commit in a git repository",
+        # ``git add -A`` over the whole worktree plus a commit, with no undo.
+        # The registry's high-risk gate requires human approval for every call.
+        risk_level="high",
         schema={
             "type": "object",
             "properties": {

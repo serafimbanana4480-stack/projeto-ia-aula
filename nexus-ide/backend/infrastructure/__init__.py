@@ -4,15 +4,15 @@ Provides low-level runtime and VCS utilities used by agents and the
 orchestrator to execute code safely and manage parallel repository branches.
 """
 from backend.infrastructure.docker_sandbox import (
+    ContainerInfo,
     DockerSandbox,
     DockerSandboxConfig,
-    ContainerInfo,
 )
 from backend.infrastructure.worktree_manager import (
+    WorktreeError,
+    WorktreeInfo,
     WorktreeManager,
     WorktreeManagerConfig,
-    WorktreeInfo,
-    WorktreeError,
 )
 
 __all__ = [

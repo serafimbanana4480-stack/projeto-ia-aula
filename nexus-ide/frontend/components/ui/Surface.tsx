@@ -161,10 +161,10 @@ export function Surface({
       className={[
         ROUNDED[rounded],
         glass ? "nx-glass" : ELEVATION[elevation],
-        "nx-surface",
+        "nx-surface min-w-0",
         PADDING[padding],
         TONE[tone],
-        interactive || onClick ? "nx-lift cursor-pointer" : "",
+        interactive || onClick ? "nx-lift cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/70 focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg" : "",
         tilt ? "nx-tilt" : "",
         spotlight ? "nx-spotlight" : "",
         live ? "nx-live-rim" : "",
@@ -212,17 +212,17 @@ export function SurfaceHeader({
       <div className="flex min-w-0 items-center gap-2.5">
         {icon ? (
           <span
-            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg shadow-rim ${ICON_TONE[tone]}`}
+            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${ICON_TONE[tone]}`}
           >
             {icon}
           </span>
         ) : null}
         <div className="min-w-0">
-          <h3 className="truncate text-[13px] font-semibold tracking-tight text-nexus-text">
+          <h3 className="text-[13px] font-semibold leading-snug tracking-tight text-nexus-text">
             {title}
           </h3>
           {subtitle ? (
-            <p className="truncate text-[11px] leading-tight text-nexus-faint">{subtitle}</p>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-nexus-muted">{subtitle}</p>
           ) : null}
         </div>
       </div>

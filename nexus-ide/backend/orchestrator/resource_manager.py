@@ -6,14 +6,14 @@ based on workload patterns, cost optimization, and performance requirements.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
-import psutil
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any
+
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ class ResourceAllocation:
     requirement: ResourceRequirement
     allocated_amount: float
     start_time: float
-    end_time: Optional[float] = None
+    end_time: float | None = None
     actual_usage: float = 0.0
     efficiency_score: float = 1.0
     
@@ -150,18 +150,18 @@ class ResourceManager:
         self.enable_cost_optimization = enable_cost_optimization
         
         # Resource capacities
-        self._capacities: Dict[ResourceType, ResourceCapacity] = {}
-        self._allocations: Dict[str, ResourceAllocation] = {}
+        self._capacities: dict[ResourceType, ResourceCapacity] = {}
+        self._allocations: dict[str, ResourceAllocation] = {}
         self._pending_requirements: deque = deque()
         
         # Performance tracking
-        self._metrics: Dict[ResourceType, ResourceMetrics] = {}
-        self._usage_history: Dict[ResourceType, deque] = defaultdict(lambda: deque(maxlen=1000))
-        self._efficiency_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=efficiency_window))
+        self._metrics: dict[ResourceType, ResourceMetrics] = {}
+        self._usage_history: dict[ResourceType, deque] = defaultdict(lambda: deque(maxlen=1000))
+        self._efficiency_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=efficiency_window))
         
         # Background tasks
-        self._monitoring_task: Optional[asyncio.Task] = None
-        self._optimization_task: Optional[asyncio.Task] = None
+        self._monitoring_task: asyncio.Task | None = None
+        self._optimization_task: asyncio.Task | None = None
         self._running = False
         
         # Lock for thread safety
@@ -201,9 +201,9 @@ class ResourceManager:
     
     async def request_resources(
         self,
-        requirements: List[ResourceRequirement],
+        requirements: list[ResourceRequirement],
         timeout: float = 30.0
-    ) -> Dict[str, Optional[str]]:
+    ) -> dict[str, str | None]:
         """Request resources for a task."""
         allocation_ids = {}
         
@@ -214,13 +214,13 @@ class ResourceManager:
         
         return allocation_ids
     
-    async def release_resources(self, allocation_ids: List[str]) -> None:
+    async def release_resources(self, allocation_ids: list[str]) -> None:
         """Release allocated resources."""
         async with self._lock:
             for allocation_id in allocation_ids:
                 await self._deallocate_resource(allocation_id)
     
-    async def get_resource_status(self) -> Dict[str, Any]:
+    async def get_resource_status(self) -> dict[str, Any]:
         """Get current resource status and metrics."""
         async with self._lock:
             status = {
@@ -248,7 +248,7 @@ class ResourceManager:
             
             return status
     
-    async def optimize_allocation(self) -> Dict[str, Any]:
+    async def optimize_allocation(self) -> dict[str, Any]:
         """Manually trigger resource optimization."""
         async with self._lock:
             optimization_result = await self._perform_optimization()
@@ -300,10 +300,10 @@ class ResourceManager:
         )
         
         # Initialize metrics
-        for resource_type in self._capacities.keys():
+        for resource_type in self._capacities:
             self._metrics[resource_type] = ResourceMetrics(resource_type=resource_type)
     
-    async def _allocate_resource(self, requirement: ResourceRequirement) -> Optional[str]:
+    async def _allocate_resource(self, requirement: ResourceRequirement) -> str | None:
         """Allocate a resource for a requirement."""
         resource_type = requirement.resource_type
         
@@ -532,7 +532,7 @@ class ResourceManager:
                 if self.allocation_strategy == AllocationStrategy.ADAPTIVE:
                     await self._perform_optimization()
     
-    async def _perform_optimization(self) -> Dict[str, Any]:
+    async def _perform_optimization(self) -> dict[str, Any]:
         """Perform resource optimization."""
         optimization_actions = []
         
@@ -551,7 +551,7 @@ class ResourceManager:
             "total_actions": len(optimization_actions)
         }
     
-    async def _optimize_for_performance(self) -> List[str]:
+    async def _optimize_for_performance(self) -> list[str]:
         """Optimize resource allocation for performance."""
         actions = []
         
@@ -563,7 +563,7 @@ class ResourceManager:
         
         return actions
     
-    async def _optimize_for_cost(self) -> List[str]:
+    async def _optimize_for_cost(self) -> list[str]:
         """Optimize resource allocation for cost."""
         actions = []
         
@@ -573,7 +573,7 @@ class ResourceManager:
         
         return actions
     
-    async def _adaptive_optimization(self) -> List[str]:
+    async def _adaptive_optimization(self) -> list[str]:
         """Perform adaptive optimization based on current conditions."""
         actions = []
         
@@ -594,7 +594,7 @@ class ResourceManager:
 
 
 # Global resource manager instance
-_resource_manager: Optional[ResourceManager] = None
+_resource_manager: ResourceManager | None = None
 
 
 def get_resource_manager(**kwargs) -> ResourceManager:

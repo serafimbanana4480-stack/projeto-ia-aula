@@ -43,14 +43,19 @@ def upgrade() -> None:
     """)
 
     # Create permissions table
+    # NOTE: no `created_at` column. backend/persistence/schemas.sql -- the
+    # canonical schema (AGENTS.md rule 6) -- has no such column, and
+    # persistence/db.py seeds this table with an explicit column list that omits
+    # it, so keeping it here produced a schema the runtime can never produce.
+    # Removed 2026-09-26 to make the two sources converge; see
+    # backend/tests/persistence/test_schema_parity.py.
     op.execute("""
         CREATE TABLE IF NOT EXISTS permissions (
             id            TEXT PRIMARY KEY,
             name          TEXT NOT NULL UNIQUE,
             description   TEXT,
             resource      TEXT NOT NULL,
-            action        TEXT NOT NULL,
-            created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            action        TEXT NOT NULL
         )
     """)
 
@@ -68,12 +73,12 @@ def upgrade() -> None:
     """)
 
     # Create role_permissions junction table
+    # NOTE: no `assigned_at` column, for the same reason as permissions above.
     op.execute("""
         CREATE TABLE IF NOT EXISTS role_permissions (
             id            TEXT PRIMARY KEY,
             role_id       TEXT NOT NULL,
             permission_id TEXT NOT NULL,
-            assigned_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
             FOREIGN KEY (permission_id) REFERENCES permissions(id) ON DELETE CASCADE,
             UNIQUE(role_id, permission_id)
@@ -81,15 +86,14 @@ def upgrade() -> None:
     """)
 
     # Create indexes
-    op.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+    # NOTE: idx_users_username, idx_user_roles_role, idx_permissions_resource
+    # and idx_role_permissions_permission were dropped 2026-09-26 because
+    # schemas.sql does not define them. Every remaining UNIQUE column is already
+    # covered by the implicit sqlite_autoindex, so they were pure overhead.
     op.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+    op.execute("CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active)")
     op.execute("CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id)")
-    op.execute("CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(role_id)")
     op.execute("CREATE INDEX IF NOT EXISTS idx_role_permissions_role ON role_permissions(role_id)")
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS idx_role_permissions_permission ON role_permissions(permission_id)"
-    )
-    op.execute("CREATE INDEX IF NOT EXISTS idx_permissions_resource ON permissions(resource)")
 
     # Insert default roles
     op.execute("""

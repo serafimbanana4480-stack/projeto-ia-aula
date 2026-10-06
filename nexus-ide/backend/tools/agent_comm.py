@@ -57,6 +57,8 @@ async def consult_agent(
     timeout_seconds: int = 60,
     project_path: str = "",
     autonomous: bool = False,
+    sentinel_enforced: bool = False,
+    allowed_tools: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Consult another agent for specialized input via A2A protocol.
 
@@ -142,7 +144,12 @@ async def consult_agent(
         target_agent = resolve(registry, agent_upper)  # type: ignore[arg-type]
 
         # Build a request for the sub-agent, passing through context
-        extra_context: dict[str, Any] = {"a2a_message_id": a2a_msg.message_id}
+        extra_context: dict[str, Any] = {
+            "a2a_message_id": a2a_msg.message_id,
+            "_sentinel_enforced": sentinel_enforced,
+        }
+        if allowed_tools is not None:
+            extra_context["_allowed_tools"] = tuple(allowed_tools)
         if context:
             extra_context["consultation_context"] = context
 

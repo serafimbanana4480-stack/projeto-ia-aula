@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.mcp.store import MCPConnectorStore
+from backend.mcp.store import MCPConnector, MCPConnectorStore
 from backend.middleware.auth import create_access_token
 from backend.orchestrator.main import app
 
@@ -28,8 +28,11 @@ def isolated_store(tmp_path, monkeypatch):
     from backend.mcp import store as store_module
 
     monkeypatch.setattr(store_module, "MCP_STORE_FILE", tmp_path / "mcp_connectors.json")
+    monkeypatch.setattr(store_module, "MCP_ACTIVITY_FILE", tmp_path / "mcp_activity.jsonl")
     fresh = MCPConnectorStore.__new__(MCPConnectorStore)
     fresh._connectors = {}
+    fresh._activity_events = {}
+    fresh._activity_lock = store_module.threading.RLock()
     store_module.mcp_store._connectors = {}
     store_module.mcp_store.__dict__.update(fresh.__dict__)
     yield
@@ -219,6 +222,44 @@ def test_overview_marks_real_tool_activity(client: TestClient, auth_headers):
     item = next(entry for entry in response.json()["activity"] if entry["connector_id"] == connector.id)
     assert item["kind"] == "tool_call"
     assert item["tool"] == "probe"
+
+
+def test_readonly_tool_permission_is_user_granted_and_schema_bound(client: TestClient, auth_headers):
+    from backend.mcp import store as store_module
+
+    connector = MCPConnector(
+        id="mcp_read_permission",
+        name="Read permission",
+        template_id="custom",
+        command="python",
+        last_test_status="ok",
+        tools=[
+            {
+                "name": "search_items",
+                "description": "Search items",
+                "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}},
+                "annotations": {"readOnlyHint": True, "destructiveHint": False},
+            }
+        ],
+    )
+    store_module.mcp_store.register_connector(connector)
+
+    response = client.put(
+        f"/api/mcp/connectors/{connector.id}",
+        headers=auth_headers,
+        json={"approved_readonly_tools": ["search_items"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["approved_readonly_tools"] == ["search_items"]
+    assert connector.readonly_tool_fingerprints["search_items"]
+
+    invalid = client.put(
+        f"/api/mcp/connectors/{connector.id}",
+        headers=auth_headers,
+        json={"approved_readonly_tools": ["unknown_tool"]},
+    )
+    assert invalid.status_code == 400
 
 
 def test_dashboard_status_includes_mcp_summary(client: TestClient, auth_headers):

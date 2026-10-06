@@ -13,7 +13,8 @@ import logging
 import os
 import re
 import shutil
-import sys
+import signal
+import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -61,23 +62,109 @@ async def _run_pytest(
     """Run pytest as subprocess and return (returncode, stdout, stderr)."""
     python_bin = interpreter or resolve_python_interpreter(cwd)
     cmd = [python_bin, "-m", "pytest", *args]
+    proc: asyncio.subprocess.Process | None = None
+    communication: asyncio.Task[tuple[bytes, bytes]] | None = None
     try:
+        process_options: dict[str, Any] = {}
+        if os.name == "nt":
+            process_options["creationflags"] = getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            )
+        else:
+            process_options["start_new_session"] = True
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            **process_options,
         )
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        communication = asyncio.create_task(proc.communicate())
+        stdout_b, stderr_b = await asyncio.wait_for(
+            asyncio.shield(communication), timeout=timeout
+        )
         return (
             proc.returncode if proc.returncode is not None else -1,
             (stdout_b or b"").decode(errors="replace"),
             (stderr_b or b"").decode(errors="replace"),
         )
     except TimeoutError:
-        return (-1, "", f"Timeout after {timeout}s")
+        if proc is None or communication is None:
+            return (-1, "", f"Timeout after {timeout}s")
+        await _terminate_process_tree(proc)
+        stdout_b, stderr_b = await _finish_communication(communication)
+        return (
+            -1,
+            (stdout_b or b"").decode(errors="replace"),
+            f"Timeout after {timeout}s\n{(stderr_b or b'').decode(errors='replace')}".rstrip(),
+        )
+    except asyncio.CancelledError:
+        if proc is not None:
+            try:
+                await _terminate_process_tree(proc)
+            except Exception:  # noqa: BLE001 - preserve cancellation after best-effort cleanup
+                logger.exception("Failed to terminate cancelled pytest process tree")
+        if communication is not None:
+            await _finish_communication(communication)
+        raise
     except FileNotFoundError:
         return (-1, "", f"interpreter not found: {python_bin}")
+
+
+async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Stop pytest and every child it spawned, then reap the direct process."""
+    if proc.returncode is not None:
+        return
+
+    if os.name == "nt":
+        terminator: asyncio.subprocess.Process | None = None
+        try:
+            terminator = await asyncio.create_subprocess_exec(
+                "taskkill.exe",
+                "/PID",
+                str(proc.pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            await asyncio.wait_for(terminator.wait(), timeout=5.0)
+        except (OSError, TimeoutError):
+            if terminator is not None and terminator.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    terminator.kill()
+    else:
+        kill_process_group = getattr(os, "killpg", None)
+        kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+        if callable(kill_process_group):
+            with contextlib.suppress(ProcessLookupError):
+                kill_process_group(proc.pid, kill_signal)
+
+    if proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+
+
+async def _finish_communication(
+    communication: asyncio.Task[tuple[bytes, bytes]],
+) -> tuple[bytes, bytes]:
+    """Drain subprocess pipes after termination without allowing a hang."""
+    try:
+        return await asyncio.wait_for(asyncio.shield(communication), timeout=5.0)
+    except TimeoutError:
+        communication.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await communication
+        return b"", b""
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +244,36 @@ def _parse_coverage_output(stdout: str) -> float | None:
     return None
 
 
+async def _run_pytest_with_results(
+    args: list[str],
+    *,
+    cwd: str | None,
+    timeout: int,
+    interpreter: str,
+    coverage: bool,
+) -> tuple[int, str, str, dict[str, Any]]:
+    """Keep each run's reports private and remove only its own temporary files."""
+    with tempfile.TemporaryDirectory(prefix="nexus-pytest-") as output_dir:
+        junit_path = str(Path(output_dir) / "junit.xml")
+        command_args = [*args, f"--junit-xml={junit_path}"]
+        if coverage:
+            coverage_path = Path(output_dir) / "coverage.xml"
+            command_args.append(f"--cov-report=xml:{coverage_path}")
+
+        returncode, stdout, stderr = await _run_pytest(
+            command_args, cwd=cwd, timeout=timeout, interpreter=interpreter
+        )
+        fallback: dict[str, Any] = {
+            "tests": [],
+            "failures": [],
+            "errors": [],
+            "skipped": [],
+            "total": 0,
+        }
+        junit_data = _parse_junit_xml(junit_path) if os.path.exists(junit_path) else fallback
+        return returncode, stdout, stderr, junit_data
+
+
 # ---------------------------------------------------------------------------
 # Tool handler
 # ---------------------------------------------------------------------------
@@ -168,7 +285,7 @@ async def run_tests(
     fail_fast: bool = False,
     project_path: str | None = None,
     timeout: int = 600,
-) -> dict:
+) -> dict[str, Any]:
     """Run pytest tests and return structured results.
 
     Args:
@@ -192,31 +309,27 @@ async def run_tests(
     if fail_fast:
         args.append("-x")
     if coverage:
-        args.extend(["--cov", ".", "--cov-report=term", "--cov-report=xml:/tmp/nexus-cov.xml"])
+        args.extend(["--cov", ".", "--cov-report=term"])
     if marker:
         args.extend(["-m", marker])
-
-    # JUnit XML for structured results. A hardcoded POSIX /tmp path is wrong
-    # on Windows, where it resolves to the current drive root and frequently
-    # is not writable — the parser then silently fell back to counting zero.
-    junit_path = str(Path(tempfile.gettempdir()) / "nexus-junit.xml")
-    with contextlib.suppress(OSError):
-        Path(junit_path).unlink()  # never reuse a previous run's results
-    args.extend([f"--junit-xml={junit_path}"])
 
     # Add test path
     if test_path:
         args.append(test_path)
 
-    # Run
+    # Each invocation owns its temporary JUnit and coverage reports. Concurrent
+    # chat sessions must not overwrite or delete one another's test evidence.
     interpreter = resolve_python_interpreter(project_path)
-    returncode, stdout, stderr = await _run_pytest(
-        args, cwd=project_path, timeout=timeout, interpreter=interpreter
+    returncode, stdout, stderr, junit_data = await _run_pytest_with_results(
+        args,
+        cwd=project_path,
+        timeout=timeout,
+        interpreter=interpreter,
+        coverage=coverage,
     )
 
     # Parse results
     summary = _parse_summary_line(stdout)
-    junit_data = _parse_junit_xml(junit_path) if os.path.exists(junit_path) else {"tests": [], "failures": [], "errors": [], "skipped": [], "total": 0}
     cov_pct = _parse_coverage_output(stdout) if coverage else None
 
     duration_match = re.search(r"in\s+([\d.]+)s", stdout)

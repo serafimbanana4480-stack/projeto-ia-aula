@@ -14,8 +14,9 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Optional
+from typing import Any
 
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
@@ -64,7 +65,7 @@ class AgentMessage:
         })
 
     @classmethod
-    def from_json(cls, data: str) -> "AgentMessage":
+    def from_json(cls, data: str) -> AgentMessage:
         """Deserialize message from JSON."""
         obj = json.loads(data)
         return cls(
@@ -93,11 +94,11 @@ class MessageBus:
         self._pending: dict[str, asyncio.Queue[AgentMessage]] = {}
         self._redis_url = redis_url
         self._use_redis = use_redis and REDIS_AVAILABLE
-        self._redis: Optional[redis.Redis] = None
-        self._pubsub: Optional[Any] = None
+        self._redis: redis.Redis | None = None
+        self._pubsub: Any | None = None
         self._redis_connected = False
         self._message_queues: dict[str, asyncio.Queue[AgentMessage]] = {}
-        self._listener_task: Optional[asyncio.Task] = None
+        self._listener_task: asyncio.Task | None = None
 
     async def connect_redis(self) -> bool:
         """Connect to Redis for distributed messaging.
@@ -203,7 +204,7 @@ class MessageBus:
         try:
             await self.send(message)
             return await asyncio.wait_for(response_queue.get(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("Request timeout: %s", message.correlation_id)
             return None
         finally:
@@ -255,7 +256,7 @@ class MessageBus:
 
         try:
             await asyncio.wait_for(task, timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
 
         return responses

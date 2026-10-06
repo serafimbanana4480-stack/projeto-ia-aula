@@ -21,7 +21,7 @@
  * difference between supervising and watching.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -35,7 +35,8 @@ import {
   XCircle,
 } from "lucide-react";
 
-import { apiUrl, authHeaders } from "../../lib/api";
+import { apiUrl } from "../../lib/api";
+import { authenticatedFetch } from "../../lib/auth";
 import { Surface, SurfaceHeader } from "../ui/Surface";
 import { CardEmpty, CardStat } from "../ui/Card";
 
@@ -175,21 +176,41 @@ export default function MissionPanel() {
   const [active, setActive] = useState<boolean | null>(null);
   const [tab, setTab] = useState<TabId>("brief");
   const [error, setError] = useState<string | null>(null);
+  const [unauthorized, setUnauthorized] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const requestInFlight = useRef(false);
+  const tabButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const load = useCallback(async () => {
+    if (requestInFlight.current) return;
+    requestInFlight.current = true;
     try {
-      const res = await fetch(apiUrl("/api/mission/current"), { headers: authHeaders() });
+      const res = await authenticatedFetch(apiUrl("/api/mission/current"), {
+        signal: AbortSignal.timeout(8000),
+      });
       if (res.status === 401) {
-        setError("Autenticação necessária");
+        setUnauthorized(true);
+        setMission(null);
+        setActive(null);
+        setError(null);
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as { active: boolean; mission: Mission | null };
       setActive(data.active);
       setMission(data.mission);
+      setUnauthorized(false);
       setError(null);
-    } catch {
-      setError("Sem ligação ao backend");
+    } catch (cause) {
+      setUnauthorized(false);
+      setError(
+        cause instanceof Error && cause.message.startsWith("HTTP ")
+          ? `Não foi possível carregar Mission Control (${cause.message}).`
+          : "Não foi possível contactar Mission Control.",
+      );
+    } finally {
+      requestInFlight.current = false;
+      setLoading(false);
     }
   }, []);
 
@@ -204,7 +225,59 @@ export default function MissionPanel() {
     [mission],
   );
 
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (currentIndex + 1) % TABS.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (currentIndex - 1 + TABS.length) % TABS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = TABS.length - 1;
+    }
+    if (nextIndex === null) return;
+
+    event.preventDefault();
+    setTab(TABS[nextIndex].id);
+    tabButtonRefs.current[nextIndex]?.focus();
+  };
+
   // ── Empty / error ────────────────────────────────────────────────────────
+  if (loading && !mission) {
+    return (
+      <Surface elevation={1} padding="lg" className="nx-dashboard-widget">
+        <SurfaceHeader
+          icon={<Radar className="h-4 w-4" />}
+          title="Mission Control"
+          subtitle="Planeamento, execução supervisionada, verificação e relatório"
+        />
+        <div className="mt-4">
+          <CardEmpty icon={<Radar className="h-3.5 w-3.5" />}>
+            A carregar Mission Control…
+          </CardEmpty>
+        </div>
+      </Surface>
+    );
+  }
+
+  if (unauthorized) {
+    return (
+      <Surface elevation={1} padding="lg" className="nx-dashboard-widget">
+        <SurfaceHeader
+          icon={<Radar className="h-4 w-4" />}
+          title="Mission Control"
+          subtitle="Planeamento, execução supervisionada, verificação e relatório"
+        />
+        <div className="mt-5 rounded-xl border border-dashed border-nexus-border/70 bg-nexus-card/20 px-2 py-3">
+          <CardEmpty icon={<AlertTriangle className="h-3.5 w-3.5" />}>
+            Autenticação necessária para ver Mission Control.
+          </CardEmpty>
+        </div>
+      </Surface>
+    );
+  }
+
   if (error && !mission) {
     return (
       <Surface elevation={1} padding="lg">
@@ -247,7 +320,7 @@ export default function MissionPanel() {
       padding="lg"
       tone="accent"
       live={mission.state === "executing"}
-
+      className="nx-dashboard-widget"
     >
       <SurfaceHeader
         icon={<Radar className="h-4 w-4" />}
@@ -269,6 +342,16 @@ export default function MissionPanel() {
           </span>
         }
       />
+
+      {error ? (
+        <div
+          role="alert"
+          className="mt-3 flex items-start gap-2 rounded-lg border border-amber-400/25 bg-amber-400/[0.06] px-3 py-2 text-[11px] text-amber-200"
+        >
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{error} A mostrar os últimos dados recebidos, que podem estar desatualizados.</span>
+        </div>
+      ) : null}
 
       {/* ── The eight numbers ─────────────────────────────────────────── */}
       <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-7">
@@ -306,17 +389,25 @@ export default function MissionPanel() {
 
       {/* ── Tabs ─────────────────────────────────────────────────────── */}
       <div
-        className="mt-5 flex flex-wrap gap-1.5 border-b border-nexus-border/60 pb-2"
+        className="mt-5 flex gap-1.5 overflow-x-auto border-b border-nexus-border/60 pb-2"
         role="tablist"
+        aria-label="Secções da missão"
       >
-        {TABS.map(({ id, label, icon: Icon }) => (
+        {TABS.map(({ id, label, icon: Icon }, index) => (
           <button
             key={id}
+            id={`mission-tab-${id}`}
             type="button"
             role="tab"
             aria-selected={tab === id}
+            aria-controls="mission-tabpanel"
+            tabIndex={tab === id ? 0 : -1}
+            ref={(node) => {
+              tabButtonRefs.current[index] = node;
+            }}
             onClick={() => setTab(id)}
-            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+            onKeyDown={(event) => handleTabKeyDown(event, index)}
+            className={`flex min-h-10 shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent ${
               tab === id
                 ? "bg-[rgba(124,106,251,0.14)] text-nexus-accent-bright shadow-rim"
                 : "text-nexus-muted hover:text-nexus-text"
@@ -328,7 +419,13 @@ export default function MissionPanel() {
         ))}
       </div>
 
-      <div className="mt-4 max-h-[460px] space-y-3 overflow-y-auto pr-1">
+      <div
+        id="mission-tabpanel"
+        role="tabpanel"
+        aria-labelledby={`mission-tab-${tab}`}
+        tabIndex={0}
+        className="mt-4 max-h-[460px] space-y-3 overflow-y-auto pr-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent"
+      >
         {tab === "brief" && <BriefTab mission={mission} />}
         {tab === "plan" && <PlanTab mission={mission} />}
         {tab === "agents" && <AgentsTab waves={mission.waves} />}
@@ -494,9 +591,9 @@ function AgentsTab({ waves }: { waves: Wave[] }) {
 function ContractCard({ contract: c }: { contract: Contract }) {
   const skipped = c.state === "skipped";
   return (
-    <div className={`nx-inset rounded-xl p-3 ${skipped ? "opacity-55" : ""}`}>
-      <div className="flex items-start justify-between gap-2">
-        <span className="text-[11px] font-bold uppercase tracking-wider text-nexus-text">
+    <div className={`nx-inset min-w-0 rounded-xl p-4 ${skipped ? "opacity-55" : ""}`}>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <span className="min-w-0 break-words text-xs font-semibold tracking-wide text-nexus-text">
           {c.name}
         </span>
         <span
@@ -506,9 +603,9 @@ function ContractCard({ contract: c }: { contract: Contract }) {
         </span>
       </div>
 
-      <p className="mt-1.5 text-[11px] leading-relaxed text-nexus-muted">{c.objective}</p>
+      <p className="mt-2 text-xs leading-relaxed text-nexus-muted">{c.objective}</p>
 
-      <p className="mt-2 border-l-2 border-nexus-border pl-2 text-[10px] leading-relaxed text-nexus-faint">
+      <p className="mt-3 border-l-2 border-nexus-border pl-3 text-[11px] leading-relaxed text-nexus-faint">
         <strong className="text-nexus-muted">Motivo:</strong> {c.justification}
       </p>
 
@@ -717,7 +814,7 @@ function Block({
     >
       <div className="mb-2 flex items-center gap-1.5">
         <FileText className="h-3 w-3 text-nexus-faint" />
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+        <span className="text-xs font-medium text-nexus-muted">
           {title}
         </span>
       </div>

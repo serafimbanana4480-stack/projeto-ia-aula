@@ -6,7 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +36,12 @@ class Goal:
     description: str
     status: GoalStatus = GoalStatus.PENDING
     priority: GoalPriority = GoalPriority.MEDIUM
-    parent_id: Optional[str] = None
+    parent_id: str | None = None
     subgoals: list[str] = field(default_factory=list)
-    assigned_agent: Optional[str] = None
+    assigned_agent: str | None = None
     created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    completed_at: Optional[float] = None
+    started_at: float | None = None
+    completed_at: float | None = None
     progress: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -76,7 +76,7 @@ class GoalHierarchy:
         title: str,
         description: str,
         priority: GoalPriority = GoalPriority.MEDIUM,
-        parent_id: Optional[str] = None,
+        parent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Goal:
         goal_id = f"goal-{uuid.uuid4().hex[:8]}"
@@ -96,10 +96,10 @@ class GoalHierarchy:
         logger.info("Goal created: %s (%s)", title, goal_id)
         return goal
 
-    def get_goal(self, goal_id: str) -> Optional[Goal]:
+    def get_goal(self, goal_id: str) -> Goal | None:
         return self._goals.get(goal_id)
 
-    def update_goal(self, goal_id: str, **fields: Any) -> Optional[Goal]:
+    def update_goal(self, goal_id: str, **fields: Any) -> Goal | None:
         goal = self._goals.get(goal_id)
         if not goal:
             return None
@@ -123,7 +123,7 @@ class GoalHierarchy:
 
     # ── Status transitions ───────────────────────────────────────────
 
-    def start_goal(self, goal_id: str) -> Optional[Goal]:
+    def start_goal(self, goal_id: str) -> Goal | None:
         goal = self._goals.get(goal_id)
         if goal and goal.status == GoalStatus.PENDING:
             goal.status = GoalStatus.ACTIVE
@@ -131,7 +131,7 @@ class GoalHierarchy:
             logger.info("Goal started: %s", goal_id)
         return goal
 
-    def complete_goal(self, goal_id: str) -> Optional[Goal]:
+    def complete_goal(self, goal_id: str) -> Goal | None:
         goal = self._goals.get(goal_id)
         if goal and goal.status == GoalStatus.ACTIVE:
             goal.status = GoalStatus.COMPLETED
@@ -141,7 +141,7 @@ class GoalHierarchy:
             logger.info("Goal completed: %s", goal_id)
         return goal
 
-    def fail_goal(self, goal_id: str, reason: str = "") -> Optional[Goal]:
+    def fail_goal(self, goal_id: str, reason: str = "") -> Goal | None:
         goal = self._goals.get(goal_id)
         if goal:
             goal.status = GoalStatus.FAILED
@@ -149,7 +149,7 @@ class GoalHierarchy:
             logger.warning("Goal failed: %s — %s", goal_id, reason)
         return goal
 
-    def block_goal(self, goal_id: str, blocker: str) -> Optional[Goal]:
+    def block_goal(self, goal_id: str, blocker: str) -> Goal | None:
         goal = self._goals.get(goal_id)
         if goal:
             goal.status = GoalStatus.BLOCKED
@@ -157,14 +157,14 @@ class GoalHierarchy:
             logger.info("Goal blocked: %s — %s", goal_id, blocker)
         return goal
 
-    def update_progress(self, goal_id: str, progress: float) -> Optional[Goal]:
+    def update_progress(self, goal_id: str, progress: float) -> Goal | None:
         goal = self._goals.get(goal_id)
         if goal:
             goal.progress = max(0.0, min(1.0, progress))
             self._update_parent_progress(goal.parent_id)
         return goal
 
-    def _update_parent_progress(self, parent_id: Optional[str]) -> None:
+    def _update_parent_progress(self, parent_id: str | None) -> None:
         if not parent_id or parent_id not in self._goals:
             return
         parent = self._goals[parent_id]
@@ -184,9 +184,9 @@ class GoalHierarchy:
 
     def list_goals(
         self,
-        status: Optional[GoalStatus] = None,
-        priority: Optional[GoalPriority] = None,
-        parent_id: Optional[str] = None,
+        status: GoalStatus | None = None,
+        priority: GoalPriority | None = None,
+        parent_id: str | None = None,
     ) -> list[Goal]:
         results = list(self._goals.values())
         if status:

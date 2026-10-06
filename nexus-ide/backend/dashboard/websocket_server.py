@@ -11,18 +11,19 @@ This server provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
-import time
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
-from dataclasses import dataclass, field
-from enum import Enum
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any
+
 import websockets
 from websockets.server import WebSocketServerProtocol
 
-from backend.observability.event_system import EventBus, Event, EventType
+from backend.observability.event_system import Event, EventBus
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +57,14 @@ class WebSocketClient:
     client_type: ClientType = ClientType.DASHBOARD
     connected_at: datetime = field(default_factory=datetime.now)
     last_heartbeat: datetime = field(default_factory=datetime.now)
-    subscriptions: Set[str] = field(default_factory=set)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    subscriptions: set[str] = field(default_factory=set)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
     def is_alive(self) -> bool:
         """Check if client is still alive."""
         return (datetime.now() - self.last_heartbeat).seconds < 60
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert client to dictionary."""
         return {
             "client_id": self.client_id,
@@ -81,11 +82,11 @@ class WebSocketMessage:
     """WebSocket message."""
     message_id: str = field(default_factory=lambda: f"msg-{uuid.uuid4().hex[:12]}")
     message_type: MessageType = MessageType.EVENT
-    data: Dict[str, Any] = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.now)
-    client_id: Optional[str] = None
+    client_id: str | None = None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert message to dictionary."""
         return {
             "message_id": self.message_id,
@@ -106,10 +107,10 @@ class WebSocketServer:
     def __init__(self, host: str = "localhost", port: int = 8765):
         self.host = host
         self.port = port
-        self.clients: Dict[str, WebSocketClient] = {}
-        self.event_bus: Optional[EventBus] = None
+        self.clients: dict[str, WebSocketClient] = {}
+        self.event_bus: EventBus | None = None
         self._running = False
-        self._server: Optional[websockets.WebSocketServer] = None
+        self._server: websockets.WebSocketServer | None = None
         self._stats = {
             "total_connections": 0,
             "active_connections": 0,
@@ -117,7 +118,7 @@ class WebSocketServer:
             "messages_received": 0,
             "errors": 0
         }
-        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: asyncio.Task | None = None
     
     async def start(self, event_bus: EventBus) -> None:
         """Start the WebSocket server."""
@@ -148,18 +149,14 @@ class WebSocketServer:
         # Cancel heartbeat task
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
             self._heartbeat_task = None
         
         # Close all client connections
         for client in list(self.clients.values()):
-            try:
+            with contextlib.suppress(Exception):
                 await client.websocket.close()
-            except Exception:
-                pass
         
         # Close server
         if self._server:
@@ -288,7 +285,7 @@ class WebSocketServer:
             if client.client_type == client_type:
                 await self.send_message(client, message)
     
-    async def get_client_stats(self) -> Dict[str, Any]:
+    async def get_client_stats(self) -> dict[str, Any]:
         """Get client statistics."""
         return {
             "total_clients": len(self.clients),
@@ -319,10 +316,8 @@ class WebSocketServer:
                 for client_id, client in self.clients.items():
                     if not client.is_alive():
                         dead_clients.append(client_id)
-                        try:
+                        with contextlib.suppress(Exception):
                             await client.websocket.close()
-                        except Exception:
-                            pass
                 
                 # Remove dead clients
                 for client_id in dead_clients:
@@ -346,7 +341,7 @@ class WebSocketServer:
                 logger.error(f"Error in heartbeat monitor: {e}")
                 await asyncio.sleep(5)
     
-    async def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self) -> dict[str, Any]:
         """Get server statistics."""
         return {
             "running": self._running,
@@ -358,7 +353,7 @@ class WebSocketServer:
 
 
 # Global WebSocket server instance
-_websocket_server: Optional[WebSocketServer] = None
+_websocket_server: WebSocketServer | None = None
 
 
 async def get_websocket_server() -> WebSocketServer:

@@ -36,7 +36,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import IntEnum
 from pathlib import Path
 from typing import Any
@@ -110,6 +110,8 @@ class AdvisorAgent(AgentBase):
         AgentAction.LIST_DIR,
         AgentAction.SEARCH_CODEBASE,
         AgentAction.EXECUTE_CODE,
+        AgentAction.CONSULT_AGENT,
+        AgentAction.RECALL_CONTEXT,
     }
 
     async def _execute(self, request: AgentRequest) -> AsyncIterator[str]:
@@ -140,7 +142,7 @@ class AdvisorAgent(AgentBase):
         as "unverified" rather than smoothed over.
         """
         facts: dict[str, Any] = {
-            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "checked_at": datetime.now(UTC).isoformat(),
             "referenced_files": [],
             "missing_files": [],
             "test_runs": [],
@@ -298,9 +300,7 @@ class AdvisorAgent(AgentBase):
         findings.extend(facts.get("unverified", []))
 
         # Verdict: facts outrank heuristics.
-        if factual_failures:
-            intervention = InterventionLevel.COMPLETION_BLOCK
-        elif missing_evidence:
+        if factual_failures or missing_evidence:
             intervention = InterventionLevel.COMPLETION_BLOCK
         elif len(findings) >= 3:
             intervention = InterventionLevel.MANDATORY_FIX
@@ -315,7 +315,7 @@ class AdvisorAgent(AgentBase):
             "missing_evidence": missing_evidence,
             "verified_files": [f["ref"] for f in facts.get("referenced_files", [])],
             "debate_rounds": DEBATE_ROUNDS if intervention >= InterventionLevel.COMPLETION_BLOCK else [],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
 

@@ -11,13 +11,16 @@ import {
   Loader2,
   Clock,
 } from "lucide-react";
-import { summarizeApproachContent } from "../../lib/chatPresentation";
+import { operationalSummaryForThinking, summarizeApproachContent } from "../../lib/chatPresentation";
 
 interface ThinkingBlockProps {
   content: string;
   isStreaming?: boolean;
   defaultOpen?: boolean;
+  /** Real elapsed milliseconds for the completed reasoning block. */
   durationMs?: number;
+  /** Epoch ms the block started, used for the live timer after a remount. */
+  startedAt?: number;
 }
 
 export interface PlanTask {
@@ -87,7 +90,8 @@ export default function ThinkingBlock({
   content,
   isStreaming = false,
   defaultOpen = false,
-  durationMs: _durationMs,
+  durationMs,
+  startedAt,
 }: ThinkingBlockProps) {
   const [open, setOpen] = useState(defaultOpen || isStreaming);
   const [copied, setCopied] = useState(false);
@@ -96,13 +100,15 @@ export default function ThinkingBlock({
 
   useEffect(() => {
     if (isStreaming) {
-      startRef.current = Date.now();
+      // A remount mid-run must not restart the clock at zero: the block
+      // already started, and `startedAt` says when.
+      startRef.current = startedAt ?? Date.now();
       setNow(null);
       setOpen(true);
     } else if (startRef.current !== null) {
       setNow(Date.now() - startRef.current);
     }
-  }, [isStreaming]);
+  }, [isStreaming, startedAt]);
 
   useEffect(() => {
     if (!isStreaming || now !== null) return;
@@ -128,35 +134,55 @@ export default function ThinkingBlock({
 
   const plan = extractStructuredPlan(content);
   const visibleContent = plan ? content : summarizeApproachContent(content);
+  // Operational one-liner for the collapsed header (Activity level).
+  // The full reasoning wall stays behind the toggle (Detail level).
+  const operational = plan
+    ? `Planeando ${plan.length} tarefa${plan.length === 1 ? "" : "s"}…`
+    : operationalSummaryForThinking(content);
   if (!plan && !visibleContent) return null;
-  const totalSec = now !== null ? Math.round(now / 1000) : 0;
+  // ``durationMs`` used to be destructured into ``_durationMs`` and thrown away,
+  // so a completed block always read "concluído" no matter how long the model
+  // actually thought. It is now the primary source; the local clock is the
+  // fallback for a block that is still streaming.
+  const elapsedMs = isStreaming
+    ? (now ?? 0)
+    : (durationMs ?? (now !== null ? now : undefined));
+  const totalSec = typeof elapsedMs === "number" ? Math.round(elapsedMs / 1000) : 0;
 
   return (
     <motion.div
       initial={{ opacity: 0, y: -4 }}
       animate={{ opacity: 1, y: 0 }}
-      className="my-2 overflow-hidden rounded-xl border border-sky-500/25 bg-gradient-to-br from-sky-500/[0.04] via-cyan-500/[0.03] to-blue-600/[0.05] shadow-sm shadow-sky-900/10"
+      className="my-2 overflow-hidden rounded-xl border border-nexus-accent/15 bg-nexus-accent/[0.035]"
     >
       <button
         onClick={toggle}
-        className="group flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-[12px] font-medium text-sky-200/90 transition-colors hover:bg-sky-500/5"
+        aria-expanded={open}
+        aria-controls="thinking-block-body"
+        className="group flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-[12px] font-medium text-nexus-text transition-colors hover:bg-nexus-accent/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-accent/50"
       >
-        {/* Pulsing dot or finished icon */}
+        {/* Discreet operational dot: ◉ pulses while streaming, Brain when done */}
         <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
           {isStreaming ? (
-            <>
-              <span className="absolute inset-0 animate-ping rounded-full bg-sky-400/50" />
-              <span className="relative h-2 w-2 rounded-full bg-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.6)]" />
-            </>
+            <span aria-hidden="true" className="animate-pulse text-[13px] leading-none text-nexus-accent">
+              ◉
+            </span>
           ) : (
-            <Brain className="h-3.5 w-3.5 text-sky-300" />
+            <Brain className="h-3.5 w-3.5 text-nexus-accent" />
           )}
         </span>
 
-        <span className="flex items-center gap-1.5">
-          <Sparkles className="h-3 w-3 text-sky-300/70" />
-          <span className="uppercase tracking-wider text-sky-100/90">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <Sparkles className="hidden h-3 w-3 shrink-0 text-nexus-accent/70 sm:block" />
+          <span className="truncate text-[11px] font-medium text-nexus-text">
             {plan ? "Plano de execução" : isStreaming ? "A definir a abordagem" : "Resumo da abordagem"}
+          </span>
+          <span
+            data-testid="thinking-operational"
+            className="hidden truncate text-[11px] font-normal normal-case tracking-normal text-nexus-muted sm:block"
+            title={operational}
+          >
+            · {operational}
           </span>
         </span>
 
@@ -167,17 +193,17 @@ export default function ThinkingBlock({
           </span>
         )}
         {/* Duration */}
-        <span className="ml-auto flex items-center gap-1 text-[10px] text-sky-300/60">
+        <span className="ml-auto flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-nexus-muted">
           {isStreaming ? (
             <Loader2 className="h-2.5 w-2.5 animate-spin" />
           ) : (
             <Clock className="h-2.5 w-2.5" />
           )}
-          {isStreaming ? `${totalSec}s` : totalSec > 0 ? `${totalSec}s` : "concluído"}
+          {isStreaming || totalSec > 0 ? `${totalSec}s` : "concluído"}
         </span>
 
         <ChevronDown
-          className={`h-3 w-3 text-sky-300/60 transition-transform ${
+          className={`h-3 w-3 shrink-0 text-nexus-muted transition-transform ${
             open ? "rotate-180" : ""
           }`}
         />
@@ -186,28 +212,30 @@ export default function ThinkingBlock({
       <AnimatePresence initial={false}>
         {open && (
           <motion.div
+            id="thinking-block-body"
+            data-testid="thinking-block-body"
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: "easeOut" }}
-            className="overflow-hidden border-t border-sky-500/15"
+            transition={{ duration: 0.16, ease: "easeOut" }}
+            className="overflow-hidden border-t border-nexus-accent/10 [content-visibility:auto]"
           >
             <div className="relative">
               {/* Subtle left blue accent line */}
-              <div className="absolute left-0 top-0 h-full w-0.5 bg-gradient-to-b from-sky-400/40 via-cyan-400/30 to-transparent" />
+              <div className="absolute left-0 top-0 h-full w-0.5 bg-gradient-to-b from-nexus-accent/40 to-transparent" />
 
               {plan ? (
                 <ol className="space-y-2 px-4 py-3 pl-5" aria-label="Tarefas do plano">
                   {plan.map((task, index) => (
                     <li
                       key={`${task.name}-${index}`}
-                      className="rounded-lg border border-sky-500/15 bg-slate-950/20 px-3 py-2.5"
+                      className="rounded-lg border border-nexus-border/60 bg-nexus-bg/30 px-3 py-2.5"
                     >
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-sky-400/15 text-[10px] font-semibold text-sky-200">
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-nexus-accent/10 text-[10px] font-semibold text-nexus-accent">
                           {index + 1}
                         </span>
-                        <span className="text-xs font-medium text-sky-50">{task.name}</span>
+                        <span className="text-xs font-medium text-nexus-text">{task.name}</span>
                         {task.agent && (
                           <span className="rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-0.5 text-[9px] font-medium tracking-wide text-violet-200">
                             {task.agent}
@@ -220,12 +248,12 @@ export default function ThinkingBlock({
                         )}
                       </div>
                       {task.description && (
-                        <p className="mt-1.5 pl-7 text-[11px] leading-relaxed text-sky-100/65">
+                        <p className="mt-1.5 pl-7 text-[12px] leading-relaxed text-nexus-muted">
                           {task.description}
                         </p>
                       )}
                       {task.dependencies && task.dependencies.length > 0 && (
-                        <p className="mt-1 pl-7 text-[10px] text-sky-300/45">
+                        <p className="mt-1 pl-7 text-[10px] text-nexus-faint">
                           Depende das tarefas {task.dependencies.map((dependency) => dependency + 1).join(", ")}
                         </p>
                       )}
@@ -233,19 +261,19 @@ export default function ThinkingBlock({
                   ))}
                 </ol>
               ) : (
-                <pre className="whitespace-pre-wrap break-words px-4 py-2.5 pl-5 font-mono text-[11.5px] leading-relaxed text-sky-100/80 thin-scrollbar">
+                <pre className="whitespace-pre-wrap break-words px-4 py-3 pl-5 font-mono text-[12px] leading-relaxed text-nexus-muted thin-scrollbar">
                   {visibleContent}
                   {isStreaming && (
-                    <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-sky-300/80" />
+                    <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-nexus-accent/80" />
                   )}
                 </pre>
               )}
 
               {/* Footer with copy button */}
-              <div className="flex items-center justify-end gap-1 border-t border-sky-500/10 bg-sky-500/[0.02] px-3 py-1">
+              <div className="flex items-center justify-end gap-1 border-t border-nexus-border/40 px-3 py-1.5">
                 <button
                   onClick={onCopy}
-                  className="flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-sky-300/70 transition-colors hover:bg-sky-500/10 hover:text-sky-200"
+                  className="flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-nexus-muted transition-colors hover:bg-nexus-accent/10 hover:text-nexus-text"
                   title="Copiar pensamento"
                 >
                   {copied ? (
@@ -262,7 +290,7 @@ export default function ThinkingBlock({
                 </button>
                 <button
                   onClick={toggle}
-                  className="flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-sky-300/70 transition-colors hover:bg-sky-500/10 hover:text-sky-200"
+                  className="flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-nexus-muted transition-colors hover:bg-nexus-accent/10 hover:text-nexus-text"
                   title="Fechar"
                 >
                   <X className="h-2.5 w-2.5" />

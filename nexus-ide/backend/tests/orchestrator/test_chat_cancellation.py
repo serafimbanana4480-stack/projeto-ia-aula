@@ -19,8 +19,9 @@ from backend.orchestrator.chat_cancellation import (
     chat_cancellation_middleware,
 )
 from backend.orchestrator.main import app
+from backend.orchestrator.routes.cancellation_routes import cancel_request
+from backend.orchestrator.routes.cancellation_routes import router as cancellation_router
 from backend.orchestrator.routes.chat import _stream_autonomous_execution
-from backend.orchestrator.routes.cancellation_routes import cancel_request, router as cancellation_router
 
 
 @pytest.fixture(autouse=True)

@@ -330,13 +330,11 @@ class AutonomousImprovementOrchestrator:
         }
 
         if self.knowledge_base:
-            try:
+            with contextlib.suppress(Exception):
                 analysis["knowledge_base"] = {
                     "total_patterns": len(getattr(self.knowledge_base, "patterns", {})),
                     "total_signatures": len(getattr(self.knowledge_base, "signatures", {})),
                 }
-            except Exception:
-                pass
 
         return analysis
 

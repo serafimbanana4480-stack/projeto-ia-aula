@@ -14,6 +14,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import AsyncIterator
 
@@ -23,9 +24,11 @@ from pydantic import BaseModel, Field
 
 from backend.middleware.auth import require_auth
 from backend.models.api import StreamEvent
+from backend.orchestrator.dependency_graph import ExecutionPlan
 from backend.orchestrator.engine import OrchestrationEngine, OrchestrationState
 from backend.orchestrator.events import EventBus
 from backend.orchestrator.registry import get_registry
+from backend.persistence.db import add_message, create_session, get_session_for_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -40,9 +43,8 @@ class PlanCreateRequest(BaseModel):
     objective: str = Field(min_length=1, max_length=10_000)
     session_id: str = Field(default="default", min_length=1, max_length=128)
     context: str = Field(default="", max_length=10_000)
-    # The product default is unattended execution. Callers that need a review
-    # gate can still send ``auto_approve=false`` explicitly.
-    auto_approve: bool = True
+    auto_approve: bool = False
+    persist_conversation: bool = False
 
 
 class PlanApproveRequest(BaseModel):
@@ -123,6 +125,104 @@ def _get_event_bus(request: Request) -> EventBus:
     return request.app.state.event_bus
 
 
+def _authenticated_user_id(user: dict) -> str:
+    user_id = str(user.get("user_id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authenticated user is missing an id")
+    return user_id
+
+
+def _resolve_owned_session(
+    session_id: str,
+    user_id: str,
+    *,
+    create_default: bool = False,
+) -> str:
+    """Resolve the implicit default session and enforce durable ownership."""
+    is_default = session_id == "default"
+    if is_default:
+        user_suffix = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:24]
+        session_id = f"default-{user_suffix}"
+
+    if get_session_for_user(session_id, user_id) is not None:
+        return session_id
+
+    if create_default and is_default:
+        try:
+            create_session(
+                title="Plano",
+                mode="auto",
+                session_id=session_id,
+                user_id=user_id,
+            )
+        except Exception:
+            # The first request can race with chat's creation of the same
+            # user-scoped default session. Accept only that user's row.
+            if get_session_for_user(session_id, user_id) is None:
+                raise HTTPException(status_code=404, detail="Session not found") from None
+        if get_session_for_user(session_id, user_id) is not None:
+            return session_id
+
+    raise HTTPException(status_code=404, detail="Session not found")
+
+
+def _get_owned_plan(engine: OrchestrationEngine, plan_id: str, user_id: str) -> ExecutionPlan:
+    plan = engine.get_plan(plan_id)
+    if plan is None or get_session_for_user(plan.session_id, user_id) is None:
+        # Use one response for absent and foreign plans to avoid disclosing IDs.
+        raise HTTPException(status_code=404, detail="Plano não encontrado")
+    return plan
+
+
+def _require_current_pending_plan(
+    engine: OrchestrationEngine,
+    plan: ExecutionPlan,
+) -> None:
+    current_plan = engine.get_plan_by_session(plan.session_id)
+    approval_request = engine.request_approval(plan.plan_id)
+    if (
+        current_plan is None
+        or current_plan.plan_id != plan.plan_id
+        or approval_request is None
+        or getattr(approval_request, "session_id", plan.session_id) != plan.session_id
+        or plan.approved
+        or not plan.requires_approval
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="O plano já não tem um pedido de aprovação pendente nesta sessão.",
+        )
+
+
+def _plan_state_for_status(engine: OrchestrationEngine, plan: ExecutionPlan) -> str:
+    """Return a plan's state without borrowing a later plan's session state.
+
+    The engine's execution state is keyed by session, while plan records live
+    by plan ID. If the session has since started another plan, derive the old
+    plan's lifecycle from its own step records and approval request instead.
+    """
+    state = engine.get_state(plan.session_id)
+    current_plan = engine.get_plan_by_session(plan.session_id)
+    if current_plan is None or current_plan.plan_id == plan.plan_id:
+        return state.value
+
+    steps = list(plan.steps)
+    step_statuses = [step.status.value for step in steps]
+    if any(status in {"failed", "blocked"} for status in step_statuses):
+        return OrchestrationState.FAILED.value
+    if "cancelled" in step_statuses:
+        return OrchestrationState.CANCELLED.value
+    if steps and all(status in {"completed", "skipped"} for status in step_statuses):
+        return OrchestrationState.COMPLETED.value
+    if any(status in {"running", "retrying"} for status in step_statuses):
+        return OrchestrationState.EXECUTING.value
+    if not plan.approved and engine.request_approval(plan.plan_id) is not None:
+        return OrchestrationState.AWAITING_APPROVAL.value
+    if plan.approved:
+        return "approved"
+    return "pending"
+
+
 # ---------------------------------------------------------------------------
 # Endpoints — Plan CRUD & Approval
 # ---------------------------------------------------------------------------
@@ -136,10 +236,24 @@ async def create_plan(
 ) -> dict:
     """Generate a structured execution plan for an objective.
 
-    By default the plan is auto-approved for unattended execution. Send
-    ``auto_approve=false`` explicitly when a human review gate is required.
+    Plans require an explicit approval by default. Callers may opt into
+    unattended approval deliberately; chat clients can also persist the
+    objective and generated plan in the session transcript.
     """
+    user_id = _authenticated_user_id(_user)
+    req.session_id = _resolve_owned_session(req.session_id, user_id, create_default=True)
+
     engine = _get_engine(request)
+    current_plan = engine.get_plan_by_session(req.session_id)
+    if (
+        current_plan is not None
+        and engine.get_state(req.session_id) == OrchestrationState.AWAITING_APPROVAL
+        and engine.request_approval(current_plan.plan_id) is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Esta sessão já tem um plano à espera de aprovação.",
+        )
     planning = await engine.create_plan(
         objective=req.objective,
         session_id=req.session_id,
@@ -148,11 +262,36 @@ async def create_plan(
     )
 
     result = planning.to_dict()
+    if req.persist_conversation:
+        add_message(req.session_id, "user", req.objective)
     # Add approval-request metadata when the plan is blocked
     if planning.plan is not None and not req.auto_approve:
         approval_req = engine.request_approval(planning.plan.plan_id)
         if approval_req:
             result["approval"] = approval_req.to_dict()
+
+    if req.persist_conversation:
+        plan = planning.plan or planning.deterministic_proposal
+        if plan is not None:
+            lines = ["# Plano de execução", f"**Objetivo:** {req.objective}", ""]
+            if planning.status == "blocked":
+                lines.append(
+                    "> O planeamento automático foi bloqueado; esta proposta segura precisa de revisão.\n"
+                )
+            for index, step in enumerate(plan.steps, 1):
+                lines.extend(
+                    [
+                        f"## Passo {index}: {step.name}",
+                        f"- **Agente:** {step.agent}",
+                        f"- **Descrição:** {step.description}",
+                    ]
+                )
+                if step.depends_on:
+                    lines.append(f"- **Depende de:** {', '.join(step.depends_on)}")
+                lines.append("")
+            add_message(req.session_id, "assistant", "\n".join(lines))
+        elif planning.error:
+            add_message(req.session_id, "assistant", f"O planeamento foi bloqueado: {planning.error}")
 
     return result
 
@@ -168,12 +307,14 @@ async def continue_plan(
     Malformed provider formatting therefore does not strand the workflow, but
     it also cannot silently become an auto-approved multi-agent execution.
     """
+    user_id = _authenticated_user_id(_user)
+    req.session_id = _resolve_owned_session(req.session_id, user_id)
     engine = _get_engine(request)
     planning = await engine.continue_planning(req.session_id)
     if planning is None or planning.plan is None:
         raise HTTPException(
             status_code=409,
-            detail="No blocked deterministic proposal is available for this session",
+            detail="Não existe uma proposta segura bloqueada para continuar nesta sessão.",
         )
     result = planning.to_dict()
     approval = engine.request_approval(planning.plan.plan_id)
@@ -193,16 +334,31 @@ async def approve_plan_legacy(
     Delegates to ``POST /api/plan/{plan_id}/approve`` internally.
     """
     engine = _get_engine(request)
-    user_id = _user.get("user_id", "anonymous")
+    user_id = _authenticated_user_id(_user)
+    req.session_id = _resolve_owned_session(req.session_id, user_id)
+    plan = _get_owned_plan(engine, req.plan_id, user_id)
+    if plan.session_id != req.session_id:
+        raise HTTPException(
+            status_code=404,
+            detail="O plano não pertence à sessão ativa. Atualiza a conversa e tenta novamente.",
+        )
+    _require_current_pending_plan(engine, plan)
+    state = engine.get_state(plan.session_id)
+    if state != OrchestrationState.AWAITING_APPROVAL:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Não é possível aprovar o plano no estado '{state.value}'. "
+                "É necessária aprovação pendente."
+            ),
+        )
 
     result = await engine.approve_plan(req.plan_id, user_id)
     if result is None:
-        return {
-            "error": (
-                f"Plan {req.plan_id} not found or not in AWAITING_APPROVAL state. "
-                "Create a plan first via POST /api/plan/create"
-            )
-        }
+        raise HTTPException(
+            status_code=409,
+            detail=f"O plano {req.plan_id} deixou de estar disponível para aprovação.",
+        )
 
     return {
         "status": "approved",
@@ -224,19 +380,29 @@ async def execute_plan(
     _user: dict = Depends(require_auth),
 ) -> dict:
     """Execute an approved plan."""
+    user_id = _authenticated_user_id(_user)
+    req.session_id = _resolve_owned_session(req.session_id, user_id)
     engine = _get_engine(request)
 
     # Fetch plan from engine's in-memory store
     plan = engine.get_plan(req.plan_id)
     if plan is None:
-        plan = engine.get_plan_by_session(req.session_id)
-    if plan is None:
-        return {"error": f"Plan {req.plan_id} not found. Create a plan first via /api/plan/create"}
+        raise HTTPException(
+            status_code=404,
+            detail=f"O plano {req.plan_id} não foi encontrado. Cria novamente o plano nesta conversa.",
+        )
+    if get_session_for_user(plan.session_id, user_id) is None:
+        raise HTTPException(status_code=404, detail="Plano não encontrado")
+    if plan.session_id != req.session_id:
+        raise HTTPException(
+            status_code=404,
+            detail="O plano não pertence à sessão ativa. Atualiza a conversa e tenta novamente.",
+        )
 
     if plan.requires_approval and not plan.approved:
         raise HTTPException(
             status_code=409,
-            detail="Plan requires explicit approval before execution",
+            detail="O plano requer aprovação explícita antes da execução.",
         )
 
     result = await engine.execute_plan(
@@ -263,12 +429,15 @@ async def get_plan_status(
     _user: dict = Depends(require_auth),
 ) -> dict:
     """Get the current status of a plan execution."""
+    user_id = _authenticated_user_id(_user)
     engine = _get_engine(request)
     plan = engine.get_plan(plan_id)
     if plan is None:
-        return {"plan_id": plan_id, "status": "not_found"}
+        raise HTTPException(status_code=404, detail=f"O plano {plan_id} não foi encontrado.")
+    if get_session_for_user(plan.session_id, user_id) is None:
+        raise HTTPException(status_code=404, detail="Plano não encontrado")
 
-    state = engine.get_state(plan.session_id)
+    status = _plan_state_for_status(engine, plan)
     steps_info = []
     for step in plan.steps:
         steps_info.append(
@@ -283,7 +452,7 @@ async def get_plan_status(
 
     return {
         "plan_id": plan_id,
-        "status": state.value,
+        "status": status,
         "title": plan.title,
         "total_steps": len(plan.steps),
         "steps": steps_info,
@@ -299,6 +468,8 @@ async def cancel_plan(
     _user: dict = Depends(require_auth),
 ) -> dict:
     """Cancel an active plan execution."""
+    user_id = _authenticated_user_id(_user)
+    req.session_id = _resolve_owned_session(req.session_id, user_id)
     engine = _get_engine(request)
     await engine.cancel(req.session_id)
     return {"status": "cancelled", "session_id": req.session_id}
@@ -315,6 +486,8 @@ async def stream_plan_events(
     The stream emits ``plan_awaiting_approval`` events when a plan is
     ready for user review. The frontend should show a modal/banner.
     """
+    user_id = _authenticated_user_id(_user)
+    session_id = _resolve_owned_session(session_id, user_id)
     event_bus = _get_event_bus(request)
 
     async def event_stream() -> AsyncIterator[str]:
@@ -355,12 +528,11 @@ async def get_plan_by_id(
 
     The frontend can use this to render the plan review UI.
     """
+    user_id = _authenticated_user_id(_user)
     engine = _get_engine(request)
-    plan = engine.get_plan(plan_id)
-    if plan is None:
-        return {"error": f"Plan {plan_id} not found"}
+    plan = _get_owned_plan(engine, plan_id, user_id)
 
-    state = engine.get_state(plan.session_id)
+    state = _plan_state_for_status(engine, plan)
     approval_req = engine.request_approval(plan_id)
 
     return {
@@ -368,7 +540,7 @@ async def get_plan_by_id(
         "title": plan.title,
         "description": plan.description,
         "session_id": plan.session_id,
-        "status": state.value,
+        "status": state,
         "requires_approval": plan.requires_approval,
         "approved": plan.approved,
         "approved_by": plan.approved_by,
@@ -405,24 +577,27 @@ async def approve_plan_by_id(
     The engine will immediately execute the approved plan and return the
     orchestration result.
     """
+    user_id = _authenticated_user_id(_user)
     engine = _get_engine(request)
-    user_id = _user.get("user_id", "anonymous")
 
     # Check plan exists and is in correct state
-    plan = engine.get_plan(plan_id)
-    if plan is None:
-        return {"error": f"Plan {plan_id} not found"}
+    plan = _get_owned_plan(engine, plan_id, user_id)
+    _require_current_pending_plan(engine, plan)
 
     session_id = plan.session_id
     state = engine.get_state(session_id)
     if state != OrchestrationState.AWAITING_APPROVAL:
-        return {
-            "error": f"Cannot approve plan in state '{state.value}'. Expected 'awaiting_approval'."
-        }
+        raise HTTPException(
+            status_code=409,
+            detail=f"Não é possível aprovar o plano no estado '{state.value}'. É necessária aprovação pendente.",
+        )
 
     result = await engine.approve_plan(plan_id, user_id)
     if result is None:
-        return {"error": f"Failed to approve plan {plan_id}"}
+        raise HTTPException(
+            status_code=409,
+            detail=f"O plano {plan_id} deixou de estar disponível para aprovação.",
+        )
 
     logger.info(
         "Plan %s approved by user %s — execution result: state=%s",
@@ -456,22 +631,26 @@ async def reject_plan_by_id(
 
     The plan transitions to ``CANCELLED`` and no execution occurs.
     """
+    user_id = _authenticated_user_id(_user)
     engine = _get_engine(request)
 
-    plan = engine.get_plan(plan_id)
-    if plan is None:
-        return {"error": f"Plan {plan_id} not found"}
+    plan = _get_owned_plan(engine, plan_id, user_id)
+    _require_current_pending_plan(engine, plan)
 
     session_id = plan.session_id
     state = engine.get_state(session_id)
     if state != OrchestrationState.AWAITING_APPROVAL:
-        return {
-            "error": f"Cannot reject plan in state '{state.value}'. Expected 'awaiting_approval'."
-        }
+        raise HTTPException(
+            status_code=409,
+            detail=f"Não é possível rejeitar o plano no estado '{state.value}'. É necessária aprovação pendente.",
+        )
 
     success = await engine.reject_plan(plan_id, reason=req.reason)
     if not success:
-        return {"error": f"Failed to reject plan {plan_id}"}
+        raise HTTPException(
+            status_code=409,
+            detail=f"O plano {plan_id} deixou de estar disponível para rejeição.",
+        )
 
     logger.info("Plan %s rejected (reason: %s)", plan_id, req.reason or "none")
 
@@ -494,18 +673,19 @@ async def modify_plan_by_id(
     Supports removing steps, adding new steps, reordering, and changing
     title/risk level. Returns the updated plan.
     """
+    user_id = _authenticated_user_id(_user)
     engine = _get_engine(request)
 
-    plan = engine.get_plan(plan_id)
-    if plan is None:
-        return {"error": f"Plan {plan_id} not found"}
+    plan = _get_owned_plan(engine, plan_id, user_id)
+    _require_current_pending_plan(engine, plan)
 
     session_id = plan.session_id
     state = engine.get_state(session_id)
     if state != OrchestrationState.AWAITING_APPROVAL:
-        return {
-            "error": f"Cannot modify plan in state '{state.value}'. Expected 'awaiting_approval'."
-        }
+        raise HTTPException(
+            status_code=409,
+            detail=f"Não é possível alterar o plano no estado '{state.value}'. É necessária aprovação pendente.",
+        )
 
     # Convert Pydantic models to dicts for the engine
     modifications: dict = {}
@@ -522,7 +702,10 @@ async def modify_plan_by_id(
 
     updated = await engine.modify_plan(plan_id, modifications)
     if updated is None:
-        return {"error": f"Failed to modify plan {plan_id}"}
+        raise HTTPException(
+            status_code=409,
+            detail=f"O plano {plan_id} deixou de estar disponível para alteração.",
+        )
 
     logger.info(
         "Plan %s modified by user — steps: %d, title: %s",

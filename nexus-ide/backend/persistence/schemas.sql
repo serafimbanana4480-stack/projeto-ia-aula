@@ -101,6 +101,7 @@ CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
 
 CREATE TABLE IF NOT EXISTS sessions (
     id            TEXT PRIMARY KEY,
+    user_id       TEXT,
     project_id    TEXT,
     title         TEXT,
     mode          TEXT DEFAULT 'auto',
@@ -113,6 +114,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_mode ON sessions(mode);
 CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(last_active_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_active ON sessions(user_id, last_active_at DESC);
 
 -- ---------------------------------------------------------------------------
 -- SESSION RUNS / CHECKPOINTS — durable progress for long-running streams
@@ -153,6 +155,7 @@ CREATE INDEX IF NOT EXISTS idx_session_runs_correlation_updated ON session_runs(
 CREATE INDEX IF NOT EXISTS idx_session_runs_mission_updated ON session_runs(mission_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_session_runs_goal_updated ON session_runs(goal_id, updated_at);
 
+-- run_id links a persisted message to the durable execution that produced it.
 CREATE TABLE IF NOT EXISTS messages (
     id            TEXT PRIMARY KEY,
     session_id    TEXT NOT NULL,
@@ -165,6 +168,7 @@ CREATE TABLE IF NOT EXISTS messages (
     tokens_out    INTEGER DEFAULT 0,
     cost_usd      REAL DEFAULT 0.0,
     latency_ms    INTEGER DEFAULT 0,
+    run_id        TEXT,
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -175,6 +179,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
 CREATE INDEX IF NOT EXISTS idx_messages_model ON messages(model_used);
 CREATE INDEX IF NOT EXISTS idx_messages_tier ON messages(tier_used);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_run_id ON messages(run_id);
 
 CREATE TABLE IF NOT EXISTS tool_executions (
     id            TEXT PRIMARY KEY,

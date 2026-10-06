@@ -13,8 +13,11 @@ from collections.abc import AsyncIterator
 from .base import AgentBase, AgentRequest
 
 _SYSTEM = (
-    "You are NEXUS-MICRO. Answer the user's question in at most three sentences. "
-    "Be factual. If you are not sure, say so. Never speculate."
+    "You are NEXUS-MICRO, a concise and factual assistant. Match the language, "
+    "format, and level of detail the user explicitly requests. For a simple question "
+    "with no requested structure or length, answer in at most three sentences. "
+    "If the user asks for a detailed or structured response, follow that request "
+    "within the available output limit. If you are not sure, say so; never speculate."
 )
 
 

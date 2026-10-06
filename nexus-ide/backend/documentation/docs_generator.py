@@ -5,20 +5,17 @@ user guides, and interactive documentation with auto-generation.
 """
 from __future__ import annotations
 
-import asyncio
+import ast
+import importlib
 import json
 import logging
 import time
 import uuid
-import inspect
-import ast
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union, Callable
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-import importlib
-import sys
+from typing import Any
 
 try:
     import redis.asyncio as redis
@@ -66,18 +63,18 @@ class DocumentationSection:
     level: int = 1  # Heading level
     
     # Navigation
-    parent_section: Optional[str] = None
-    child_sections: List[str] = field(default_factory=list)
+    parent_section: str | None = None
+    child_sections: list[str] = field(default_factory=list)
     
     # Tags and categories
-    tags: Set[str] = field(default_factory=set)
+    tags: set[str] = field(default_factory=set)
     category: str = ""
     
     # Generation metadata
     generated_at: float = field(default_factory=time.time)
-    source_files: List[str] = field(default_factory=list)
+    source_files: list[str] = field(default_factory=list)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "section_id": self.section_id,
             "title": self.title,
@@ -104,16 +101,16 @@ class DocumentationPage:
     # Page classification
     doc_type: DocumentationType = DocumentationType.CODE
     category: str = ""
-    tags: Set[str] = field(default_factory=set)
+    tags: set[str] = field(default_factory=set)
     
     # Content structure
-    sections: List[DocumentationSection] = field(default_factory=list)
-    table_of_contents: List[Dict[str, Any]] = field(default_factory=list)
+    sections: list[DocumentationSection] = field(default_factory=list)
+    table_of_contents: list[dict[str, Any]] = field(default_factory=list)
     
     # Navigation
-    prev_page: Optional[str] = None
-    next_page: Optional[str] = None
-    breadcrumb: List[str] = field(default_factory=list)
+    prev_page: str | None = None
+    next_page: str | None = None
+    breadcrumb: list[str] = field(default_factory=list)
     
     # Metadata
     author: str = ""
@@ -122,9 +119,9 @@ class DocumentationPage:
     
     # Generation info
     generated_at: float = field(default_factory=time.time)
-    source_files: List[str] = field(default_factory=list)
+    source_files: list[str] = field(default_factory=list)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "page_id": self.page_id,
             "title": self.title,
@@ -157,19 +154,19 @@ class APIEndpoint:
     description: str = ""
     
     # Parameters
-    path_params: List[Dict[str, Any]] = field(default_factory=list)
-    query_params: List[Dict[str, Any]] = field(default_factory=list)
-    request_body: Optional[Dict[str, Any]] = None
+    path_params: list[dict[str, Any]] = field(default_factory=list)
+    query_params: list[dict[str, Any]] = field(default_factory=list)
+    request_body: dict[str, Any] | None = None
     
     # Responses
-    responses: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    responses: dict[str, dict[str, Any]] = field(default_factory=dict)
     
     # Metadata
-    tags: List[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     deprecated: bool = False
-    security: List[Dict[str, Any]] = field(default_factory=list)
+    security: list[dict[str, Any]] = field(default_factory=list)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "endpoint_id": self.endpoint_id,
             "path": self.path,
@@ -190,9 +187,9 @@ class CodeAnalyzer:
     """Analyzes Python code for documentation generation."""
     
     def __init__(self):
-        self.analyzed_modules: Dict[str, Dict[str, Any]] = {}
+        self.analyzed_modules: dict[str, dict[str, Any]] = {}
         
-    def analyze_module(self, module_path: str) -> Dict[str, Any]:
+    def analyze_module(self, module_path: str) -> dict[str, Any]:
         """Analyze Python module for documentation."""
         try:
             # Import module
@@ -215,7 +212,7 @@ class CodeAnalyzer:
             }
             
             # Parse AST
-            with open(module_path, 'r') as f:
+            with open(module_path) as f:
                 tree = ast.parse(f.read())
                 
             # Analyze AST nodes
@@ -244,7 +241,7 @@ class CodeAnalyzer:
             logger.error("Failed to analyze module %s: %s", module_path, exc)
             return {}
             
-    def _analyze_class(self, node: ast.ClassDef) -> Dict[str, Any]:
+    def _analyze_class(self, node: ast.ClassDef) -> dict[str, Any]:
         """Analyze class node."""
         class_info = {
             "name": node.name,
@@ -265,7 +262,7 @@ class CodeAnalyzer:
                         
         return class_info
         
-    def _analyze_function(self, node: ast.FunctionDef) -> Dict[str, Any]:
+    def _analyze_function(self, node: ast.FunctionDef) -> dict[str, Any]:
         """Analyze function node."""
         func_info = {
             "name": node.name,
@@ -295,7 +292,7 @@ class CodeAnalyzer:
             
         return func_info
         
-    def _analyze_constant(self, node: ast.Assign) -> Dict[str, Any]:
+    def _analyze_constant(self, node: ast.Assign) -> dict[str, Any]:
         """Analyze constant assignment."""
         return {
             "value": self._get_default_value(node.value),
@@ -315,7 +312,7 @@ class CodeAnalyzer:
         else:
             return str(decorator)
             
-    def _get_type_annotation(self, annotation) -> Optional[str]:
+    def _get_type_annotation(self, annotation) -> str | None:
         """Get type annotation string."""
         if annotation is None:
             return None
@@ -353,14 +350,14 @@ class DocumentationGenerator:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Components
         self.code_analyzer = CodeAnalyzer()
         
         # Generated documentation
-        self.pages: Dict[str, DocumentationPage] = {}
-        self.api_endpoints: List[APIEndpoint] = []
+        self.pages: dict[str, DocumentationPage] = {}
+        self.api_endpoints: list[APIEndpoint] = []
         
         # Configuration
         self.output_dir: str = "docs/"
@@ -700,7 +697,7 @@ JWT tokens contain the following claims:
 - Monitor for suspicious activity
 """
         
-    async def generate_code_documentation(self, source_paths: List[str]) -> DocumentationPage:
+    async def generate_code_documentation(self, source_paths: list[str]) -> DocumentationPage:
         """Generate code documentation."""
         page = DocumentationPage(
             title="Code Documentation",
@@ -740,7 +737,7 @@ JWT tokens contain the following claims:
         
         return page
         
-    def _generate_module_docs(self, module_info: Dict[str, Any]) -> str:
+    def _generate_module_docs(self, module_info: dict[str, Any]) -> str:
         """Generate documentation for a module."""
         content = f"""
 # Module: {module_info['module_name']}
@@ -1281,7 +1278,7 @@ nexus-omega/
 - **PCI DSS**: Payment compliance
 """
         
-    def _generate_table_of_contents(self, sections: List[DocumentationSection]) -> List[Dict[str, Any]]:
+    def _generate_table_of_contents(self, sections: list[DocumentationSection]) -> list[dict[str, Any]]:
         """Generate table of contents from sections."""
         toc = []
         
@@ -2350,7 +2347,7 @@ Check our roadmap page for the latest updates.
             sections=sections_html
         )
         
-    def get_documentation_stats(self) -> Dict[str, Any]:
+    def get_documentation_stats(self) -> dict[str, Any]:
         """Get documentation generation statistics."""
         return {
             "total_pages": len(self.pages),
@@ -2362,4 +2359,4 @@ Check our roadmap page for the latest updates.
 
 
 # Global documentation generator instance
-docs_generator: Optional[DocumentationGenerator] = None
+docs_generator: DocumentationGenerator | None = None

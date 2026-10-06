@@ -4,61 +4,98 @@ import React from "react";
 import { motion } from "framer-motion";
 import {
   GitBranch, CheckCircle2, XCircle, Clock, Loader2,
-  RotateCcw, ArrowRight, Zap, Bot, Cpu,
+  RotateCcw, ArrowRight,
 } from "lucide-react";
 import { useTaskStore, type Workflow, type WorkflowStep } from "../../../stores/useTaskStore";
-import type { StoreApi } from "zustand";
 
 const STATUS_CONFIG: Record<string, { icon: React.ElementType; color: string; label: string }> = {
-  pending: { icon: Clock, color: "#475569", label: "Pending" },
-  running: { icon: Loader2, color: "#a78bfa", label: "Running" },
-  done: { icon: CheckCircle2, color: "#10b981", label: "Done" },
-  failed: { icon: XCircle, color: "#ef4444", label: "Failed" },
-  skipped: { icon: RotateCcw, color: "#64748b", label: "Skipped" },
+  pending: { icon: Clock, color: "#475569", label: "Pendente" },
+  running: { icon: Loader2, color: "#a78bfa", label: "Em curso" },
+  done: { icon: CheckCircle2, color: "#10b981", label: "Concluída" },
+  failed: { icon: XCircle, color: "#ef4444", label: "Falhou" },
+  skipped: { icon: RotateCcw, color: "#64748b", label: "Ignorada" },
+  unknown: { icon: Clock, color: "#64748b", label: "Desconhecido" },
+};
+
+const WORKFLOW_STATUS_LABELS: Record<string, string> = {
+  pending: "Pendente",
+  running: "Em curso",
+  completed: "Concluído",
+  failed: "Falhou",
+  paused: "Pausado",
+  cancelled: "Cancelado",
+  unknown: "Desconhecido",
 };
 
 function WorkflowCard({ workflow }: { workflow: Workflow }) {
-  const stepConfig = (s: WorkflowStep) => STATUS_CONFIG[s.status] || STATUS_CONFIG.pending;
+  const stepConfig = (s: WorkflowStep) => STATUS_CONFIG[s.status] ?? STATUS_CONFIG.unknown;
+  const steps = Array.isArray(workflow.steps)
+    ? workflow.steps.filter((step): step is WorkflowStep => (
+      typeof step === "object" && step !== null && typeof step.id === "string"
+    ))
+    : [];
+  const progress = typeof workflow.progress === "number" && Number.isFinite(workflow.progress)
+    ? Math.min(100, Math.max(0, workflow.progress))
+    : undefined;
+  const runningStep = steps.find((step) => step.status === "running");
+  const workflowName = typeof workflow.name === "string" && workflow.name.trim()
+    ? workflow.name.trim()
+    : "Fluxo sem nome";
 
   return (
-    <div className="p-4 border-b border-slate-800/60 last:border-0">
+    <div className="border-b border-slate-800/60 p-3 last:border-0 sm:p-4">
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           <GitBranch size={13} className="text-violet-400" />
-          <span className="text-[12px] font-bold text-slate-200">{workflow.name}</span>
+          <span className="truncate text-[12px] font-bold text-slate-200">{workflowName}</span>
           <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold border ${
             workflow.status === "running" ? "bg-violet-500/15 border-violet-500/40 text-violet-300" :
             workflow.status === "completed" ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300" :
             workflow.status === "failed" ? "bg-red-500/15 border-red-500/40 text-red-300" :
             "bg-slate-700/50 border-slate-600/60 text-slate-400"
           }`}>
-            {workflow.status}
+            {WORKFLOW_STATUS_LABELS[workflow.status] ?? WORKFLOW_STATUS_LABELS.unknown}
           </span>
         </div>
         <div className="flex items-center gap-3 text-[10px] text-slate-500">
-          <span>${workflow.totalCost.toFixed(4)}</span>
-          <span>{(workflow.totalTokens / 1000).toFixed(1)}K tok</span>
-          <span>{workflow.progress.toFixed(0)}%</span>
+          {typeof workflow.totalCost === "number" && Number.isFinite(workflow.totalCost) && (
+            <span>${workflow.totalCost.toFixed(4)}</span>
+          )}
+          {typeof workflow.totalTokens === "number" && Number.isFinite(workflow.totalTokens) && (
+            <span>{(workflow.totalTokens / 1000).toFixed(1)}K tok</span>
+          )}
+          {progress !== undefined && (
+            <span>{progress.toFixed(0)}%</span>
+          )}
         </div>
       </div>
 
       {/* Progress bar */}
-      <div className="h-1.5 rounded-full bg-slate-800 mb-3 overflow-hidden">
-        <motion.div
-          className="h-full rounded-full bg-gradient-to-r from-violet-600 to-cyan-500"
-          animate={{ width: `${workflow.progress}%` }}
-          transition={{ duration: 0.8 }}
-        />
-      </div>
+      {progress !== undefined && (
+        <div
+          className="mb-3 h-1.5 overflow-hidden rounded-full bg-slate-800"
+          role="progressbar"
+          aria-label="Progresso do fluxo"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progress}
+        >
+          <motion.div
+            className="h-full rounded-full bg-gradient-to-r from-violet-600 to-cyan-500"
+            animate={{ width: `${progress}%` }}
+            transition={{ duration: 0.8 }}
+          />
+        </div>
+      )}
 
       {/* Timeline steps */}
       <div className="relative">
         <div className="flex items-center gap-1 overflow-x-auto pb-1">
-          {workflow.steps.map((step, idx) => {
+          {steps.length > 0 ? steps.map((step, idx) => {
             const cfg = stepConfig(step);
             const Icon = cfg.icon;
-            const isLast = idx === workflow.steps.length - 1;
+            const isLast = idx === steps.length - 1;
 
             return (
               <React.Fragment key={step.id}>
@@ -87,7 +124,7 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
                     )}
                   </div>
                   <span className="text-[8px] text-slate-500 text-center max-w-[64px] truncate">
-                    {step.agentId}
+                    {step.agentId || step.name || `Etapa ${idx + 1}`}
                   </span>
                 </motion.div>
 
@@ -101,28 +138,30 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
                     }`} />
                     <ArrowRight size={10} className="text-slate-600 mx-0.5 shrink-0" />
                     <div className={`h-px flex-1 ${
-                      workflow.steps[idx + 1]?.status === "done" ? "bg-emerald-500" :
-                      workflow.steps[idx + 1]?.status === "running" ? "bg-violet-500" :
+                      steps[idx + 1]?.status === "done" ? "bg-emerald-500" :
+                      steps[idx + 1]?.status === "running" ? "bg-violet-500" :
                       "bg-slate-700"
                     }`} />
                   </div>
                 )}
               </React.Fragment>
             );
-          })}
+          }) : (
+            <p className="w-full py-3 text-center text-[10px] text-slate-500">Este fluxo ainda não tem etapas.</p>
+          )}
         </div>
       </div>
 
       {/* Duration */}
-      {workflow.steps.find(s => s.status === "running") && (
+      {runningStep && (
         <div className="mt-2 flex items-center gap-2 text-[10px] text-slate-500">
           <Clock size={10} />
           {(() => {
-            const running = workflow.steps.find(s => s.status === "running");
+            const running = steps.find(s => s.status === "running");
             if (running?.startedAt) {
               const elapsed = Math.floor((Date.now() - running.startedAt) / 1000);
               const m = Math.floor(elapsed / 60); const s = elapsed % 60;
-              return <span>Running for {m > 0 ? `${m}m ` : ""}${s}s</span>;
+              return <span>Em curso há {m > 0 ? `${m}m ` : ""}${s}s</span>;
             }
             return null;
           })()}
@@ -134,35 +173,37 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
 
 export default function WorkflowTimeline() {
   const workflows = useTaskStore((s) => s.workflows);
-  const workflowList = Object.values(workflows);
+  const loading = useTaskStore((s) => s.workflowsLoading);
+  const error = useTaskStore((s) => s.workflowsError);
+  const workflowList = Object.values(workflows ?? {}).filter((workflow): workflow is Workflow => (
+    typeof workflow === "object" && workflow !== null &&
+    typeof workflow.id === "string" && typeof workflow.status === "string"
+  ));
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       {/* Header */}
       <div className="px-4 py-3 border-b border-slate-800/60 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <GitBranch size={13} className="text-emerald-400" />
-          <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Workflow Timeline</span>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-400 border border-slate-700/60">
-            {workflowList.filter(w => w.status === "running").length} active
-          </span>
+          <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Fluxos</span>
         </div>
-        <div className="flex items-center gap-3 text-[10px] text-slate-500">
-          {Object.values(STATUS_CONFIG).map(cfg => (
-            <span key={cfg.label} className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full" style={{ background: cfg.color }} />
-              {cfg.label}
-            </span>
-          ))}
-        </div>
+        <span className="text-[10px] text-slate-500">{workflowList.length > 0 ? `${workflowList.length} ${workflowList.length === 1 ? "fluxo" : "fluxos"}` : ""}</span>
       </div>
 
       {/* Workflows */}
       <div className="flex-1 overflow-y-auto">
+        {error && (
+          <p role="status" className="border-b border-rose-500/20 px-4 py-2 text-[10px] text-rose-300">
+            {workflowList.length > 0
+              ? "Não foi possível atualizar os fluxos. A mostrar a última versão recebida."
+              : "Não foi possível obter os fluxos agora."}
+          </p>
+        )}
         {workflowList.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-40 text-slate-500">
-            <GitBranch size={24} className="mb-2 opacity-25" />
-            <p className="text-xs">No active workflows</p>
+          <div className="flex h-40 flex-col items-center justify-center gap-2 text-slate-500">
+            {loading ? <Loader2 size={18} className="animate-spin" aria-label="A carregar fluxos" /> : <GitBranch size={24} className="opacity-25" />}
+            <p className="text-xs">{loading ? "A carregar fluxos…" : error ? "Lista de fluxos indisponível" : "Ainda não há fluxos registados"}</p>
           </div>
         ) : (
           workflowList.map(wf => <WorkflowCard key={wf.id} workflow={wf} />)

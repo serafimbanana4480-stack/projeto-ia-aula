@@ -1,8 +1,8 @@
-import pytest
+
 from backend.orchestrator.neural_dashboard import (
+    AgentHealth,
     NeuralDashboard,
     SystemMetric,
-    AgentHealth,
 )
 
 

@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,8 @@ class CircuitBreakerStats:
     state: CircuitState = CircuitState.CLOSED
     failure_count: int = 0
     success_count: int = 0
-    last_failure_time: Optional[float] = None
-    last_success_time: Optional[float] = None
+    last_failure_time: float | None = None
+    last_success_time: float | None = None
     total_calls: int = 0
     total_failures: int = 0
     total_successes: int = 0
@@ -62,7 +63,7 @@ class CircuitBreaker:
     
     def __init__(
         self,
-        config: Optional[CircuitBreakerConfig] = None,
+        config: CircuitBreakerConfig | None = None,
         name: str = "default"
     ):
         """Initialize circuit breaker.
@@ -101,10 +102,7 @@ class CircuitBreaker:
                 return True
             return False
         
-        if self.stats.state == CircuitState.HALF_OPEN:
-            return True
-        
-        return False
+        return self.stats.state == CircuitState.HALF_OPEN
     
     def _record_success(self) -> None:
         """Record a successful call."""

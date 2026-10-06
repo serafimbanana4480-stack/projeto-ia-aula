@@ -5,17 +5,85 @@ Detects frameworks, dependencies, test coverage, and potential issues.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any
 
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
+
+# --- TTL cache layer for analyze_project ---
+
+def _cache_ttl() -> float:
+    return float(os.environ.get("NEXUS_ANALYZE_CACHE_TTL", "30"))
+
+_MAX_CACHE_ENTRIES = 8
+
+_cache_data: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+_cache_computes = 0
+_cache_hits = 0
+_in_flight: dict[str, asyncio.Event] = {}
+
+
+def _reset_analyze_cache() -> None:
+    global _cache_data, _cache_computes, _cache_hits, _in_flight
+    _cache_data.clear()
+    _cache_computes = 0
+    _cache_hits = 0
+    _in_flight.clear()
+
+
+def _cache_stats() -> dict:
+    return {"computes": _cache_computes, "hits": _cache_hits, "entries": len(_cache_data)}
+
+
+async def _cached_analyze(project_path: str) -> dict:
+    global _cache_computes, _cache_hits
+
+    now = time.monotonic()
+    ttl = _cache_ttl()
+
+    expired = [k for k, (ts, _) in _cache_data.items() if now - ts > ttl]
+    for k in expired:
+        del _cache_data[k]
+
+    if project_path in _cache_data:
+        ts, result = _cache_data[project_path]
+        if now - ts <= ttl:
+            _cache_data.move_to_end(project_path)
+            _cache_hits += 1
+            return dict(result)
+        del _cache_data[project_path]
+
+    if project_path in _in_flight:
+        await _in_flight[project_path].wait()
+        if project_path in _cache_data:
+            _cache_data.move_to_end(project_path)
+            _cache_hits += 1
+            return dict(_cache_data[project_path][1])
+
+    event = asyncio.Event()
+    _in_flight[project_path] = event
+    try:
+        result = await _analyze_uncached(project_path=project_path)
+    finally:
+        del _in_flight[project_path]
+        event.set()
+
+    _cache_data[project_path] = (now, result)
+    _cache_data.move_to_end(project_path)
+    _cache_computes += 1
+
+    while len(_cache_data) > _MAX_CACHE_ENTRIES:
+        _cache_data.popitem(last=False)
+
+    return dict(result)
 
 _FRAMEWORK_SIGNATURES: dict[str, list[str]] = {
     "django": ["django", "settings.py", "urls.py", "wsgi.py", "asgi.py"],
@@ -371,16 +439,8 @@ def _detect_issues(project: Path, files: list[Path]) -> list[dict]:
     return issues
 
 
-async def analyze_project(project_path: str = ".") -> dict:
-    """Deep analysis of a project.
-
-    Args:
-        project_path: Path to the project root.
-
-    Returns:
-        Structured JSON report with project statistics, framework detection,
-        dependencies, lines of code, test coverage, and issues.
-    """
+async def _analyze_uncached(project_path: str = ".") -> dict:
+    """Deep analysis of a project — uncached, used as the handler."""
     try:
         project = Path(project_path).resolve()
         if not project.exists():
@@ -390,7 +450,9 @@ async def analyze_project(project_path: str = ".") -> dict:
         files = list(_walk_project(project, state=scan_state))
 
         ext_counter: Counter = Counter()
-        for f in files:
+        for i, f in enumerate(files):
+            if i and i % 2 == 0:
+                await asyncio.sleep(0)
             ext = f.suffix.lower() or "no_extension"
             ext_counter[ext] += 1
 
@@ -452,6 +514,11 @@ register_tool(
                 },
             },
         },
-        handler=analyze_project,
+        handler=_analyze_uncached,
     )
 )
+
+
+async def analyze_project(project_path: str = ".") -> dict:
+    """Deep analysis of a project — cached version."""
+    return await _cached_analyze(project_path)

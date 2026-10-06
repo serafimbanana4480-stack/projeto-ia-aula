@@ -1,14 +1,26 @@
 """ChiefArchitectAgent — system design and pattern expertise agent."""
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+import logging
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
-from backend.agents.executive.pattern_catalog import PatternCatalog, PatternCategory
-from backend.agents.executive.system_designer import SystemDesigner, SystemComponent
-from backend.agents.executive.quality_gate import QualityGate
-from backend.agents.executive.integration_planner import IntegrationPlanner
 from backend.agents.event_protocol import encode_event
+from backend.agents.executive.integration_planner import IntegrationPlanner
+from backend.agents.executive.pattern_catalog import PatternCatalog
+from backend.agents.executive.quality_gate import QualityGate
+from backend.agents.executive.system_designer import SystemDesigner
+
+logger = logging.getLogger(__name__)
+
+#: Executive prompts live next to the agents, not in config/prompts/.
+#: ``AgentBase.system_prompt()`` reads ``config/prompts/<name>.md``, so without
+#: this override ``ChiefArchitectAgent().system_prompt()`` raised
+#: FileNotFoundError on the first prompt (audit P1-6).  Same resolution as
+#: ``CTOAgent``.
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 
 class ChiefArchitectAgent(AgentBase):
@@ -38,6 +50,13 @@ class ChiefArchitectAgent(AgentBase):
         self._designer = system_designer or SystemDesigner()
         self._gate = quality_gate or QualityGate()
         self._planner = integration_planner or IntegrationPlanner()
+
+    def system_prompt(self) -> str:
+        """Load the chief-architect system prompt from the executive prompts directory."""
+        prompt_path = PROMPTS_DIR / f"{self.prompt_file}.md"
+        if not prompt_path.exists():
+            raise FileNotFoundError(f"Prompt not found: {prompt_path}")
+        return prompt_path.read_text(encoding="utf-8")
 
     # ── Core Agent Interface ──────────────────────────────────────────
 

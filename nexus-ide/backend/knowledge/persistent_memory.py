@@ -89,6 +89,7 @@ class PersistentMemoryStore(MemoryStore):
             row[1] for row in conn.execute("PRAGMA table_info(persistent_memories)").fetchall()
         }
         additions = [
+            ("user_id", "TEXT"),
             ("session_id", "TEXT"),
             ("project_id", "TEXT"),
             ("file_path", "TEXT"),
@@ -101,7 +102,22 @@ class PersistentMemoryStore(MemoryStore):
                 conn.execute(f"ALTER TABLE persistent_memories ADD COLUMN {col} {dtype}")
                 logger.info("Migrated persistent_memories: added %s", col)
 
-    def _save_memory(self, memory: Memory, user_id: str = "") -> None:
+    def _user_for_session(self, session_id: str) -> str | None:
+        """Resolve an owned session to its user without exposing session data."""
+        if not session_id:
+            return None
+        try:
+            with sqlite3.connect(str(DB_PATH)) as conn:
+                row = conn.execute(
+                    "SELECT user_id FROM sessions WHERE id = ? LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+            return str(row[0]) if row and row[0] else None
+        except sqlite3.Error:
+            return None
+
+    def _save_memory(self, memory: Memory, user_id: str | None = None) -> None:
+        owner_id = memory.user_id if user_id is None else user_id
         with sqlite3.connect(str(DB_PATH)) as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO persistent_memories
@@ -111,7 +127,7 @@ class PersistentMemoryStore(MemoryStore):
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     memory.memory_id,
-                    user_id,
+                    owner_id,
                     memory.session_id,
                     memory.project_id,
                     memory.content,
@@ -132,12 +148,15 @@ class PersistentMemoryStore(MemoryStore):
             )
             conn.commit()
 
-    def _delete_from_db(self, memory_id: str) -> None:
+    def _delete_from_db(self, memory_id: str, user_id: str | None = None) -> None:
         with sqlite3.connect(str(DB_PATH)) as conn:
-            conn.execute(
-                "DELETE FROM persistent_memories WHERE id = ?",
-                (memory_id,),
-            )
+            if user_id is None:
+                conn.execute("DELETE FROM persistent_memories WHERE id = ?", (memory_id,))
+            else:
+                conn.execute(
+                    "DELETE FROM persistent_memories WHERE id = ? AND user_id = ?",
+                    (memory_id, user_id),
+                )
             conn.commit()
 
     def _load_from_db(self) -> None:
@@ -164,6 +183,7 @@ class PersistentMemoryStore(MemoryStore):
     def _row_to_memory(self, row: sqlite3.Row) -> Memory:
         return Memory(
             memory_id=row["id"],
+            user_id=str(row["user_id"] or ""),
             memory_type=(
                 MemoryType(row["memory_type"]) if row["memory_type"] else MemoryType.GLOBAL
             ),
@@ -210,8 +230,10 @@ class PersistentMemoryStore(MemoryStore):
         related_memory_ids: list[str] | None = None,
     ) -> Memory:
         """Store a new memory and persist it to SQLite."""
+        owner_id = user_id or self._user_for_session(session_id) or ""
         memory = await super().store(
             content,
+            user_id=owner_id,
             memory_type=memory_type,
             session_id=session_id,
             project_id=project_id,
@@ -224,13 +246,13 @@ class PersistentMemoryStore(MemoryStore):
             kind=kind,
             related_memory_ids=related_memory_ids,
         )
-        self._save_memory(memory, user_id=user_id)
+        self._save_memory(memory)
         return memory
 
-    async def delete(self, memory_id: str) -> bool:
-        result = await super().delete(memory_id)
+    async def delete(self, memory_id: str, *, user_id: str | None = None) -> bool:
+        result = await super().delete(memory_id, user_id=user_id)
         if result:
-            self._delete_from_db(memory_id)
+            self._delete_from_db(memory_id, user_id=user_id)
         return result
 
     async def clear_session(self, session_id: str) -> int:
@@ -240,14 +262,41 @@ class PersistentMemoryStore(MemoryStore):
             self._delete_from_db(mem.memory_id)
         return count
 
-    def stats(self) -> dict[str, Any]:
-        stats = super().stats()
+    def stats(self, *, user_id: str | None = None) -> dict[str, Any]:
+        stats = super().stats(user_id=user_id)
         stats["persistent_db"] = str(DB_PATH)
         return stats
 
     async def search(self, *args: Any, **kwargs: Any) -> list[tuple[Memory, float]]:
         """Search and persist access telemetry for the returned memories."""
+        if kwargs.get("user_id") is None:
+            session_id = str(kwargs.get("session_id") or "")
+            if session_id:
+                kwargs["user_id"] = self._user_for_session(session_id) or "__unowned_session__"
         results = await super().search(*args, **kwargs)
         for memory, _score in results:
             self._save_memory(memory)
         return results
+
+    async def get_context(
+        self,
+        query: str,
+        session_id: str = "",
+        project_id: str = "",
+        *,
+        user_id: str | None = None,
+        max_tokens: int = 4000,
+        top_k: int = 5,
+    ) -> str:
+        """Build recall context within the owner of the associated session."""
+        owner_id = user_id
+        if owner_id is None and session_id:
+            owner_id = self._user_for_session(session_id) or "__unowned_session__"
+        return await super().get_context(
+            query,
+            session_id=session_id,
+            project_id=project_id,
+            user_id=owner_id,
+            max_tokens=max_tokens,
+            top_k=top_k,
+        )

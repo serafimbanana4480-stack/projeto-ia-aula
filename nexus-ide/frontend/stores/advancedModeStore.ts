@@ -38,6 +38,12 @@ export interface AdvancedMode {
   runtime_summary?: string;
   handler?: string | null;
   config?: AdvancedModeConfig;
+  execution_target?: { kind: string; agent: string | null };
+  limitations?: string;
+  activity_evidence_status?: string;
+  evidence_count?: number;
+  intervention_count?: number;
+  checkpoint_count?: number;
   sessions?: Array<{
     session_id: string;
     state: string;
@@ -64,7 +70,7 @@ export interface AdvancedExecutionProfile {
   addon?: string;
 }
 
-interface AdvancedModeHealth {
+export interface AdvancedModeHealth {
   healthy: boolean;
   active_modes: number;
   total_modes: number;
@@ -82,9 +88,23 @@ interface AdvancedModeHealth {
     runtime_role?: string;
     runtime_summary?: string;
     handler?: string | null;
+    available?: boolean;
+    execution_target?: AdvancedMode["execution_target"];
+    limitations?: string;
+    activity_evidence_status?: string;
+    evidence_count?: number;
+    intervention_count?: number;
+    checkpoint_count?: number;
   }>;
   groups: Record<string, AdvancedModeGroup>;
   execution_profile?: AdvancedExecutionProfile;
+  activity_evidence_status?: string;
+  disk_guard?: {
+    status: string;
+    write_blocked?: boolean;
+    threshold_percent?: number;
+    snapshot?: { free_percent: number; measured_at: string };
+  };
 }
 
 interface AdvancedModeStore {
@@ -98,6 +118,9 @@ interface AdvancedModeStore {
   error: string | null;
   health: AdvancedModeHealth | null;
   executionProfile: AdvancedExecutionProfile | null;
+  pendingModeIds: string[];
+  actionError: string | null;
+  lastSyncedAt: number | null;
 
   loadModes: () => Promise<void>;
   loadCommands: () => Promise<void>;
@@ -108,6 +131,19 @@ interface AdvancedModeStore {
   resolveCommand: (command: string) => Promise<{ resolved_to: string; display_name: string; description: string; icon: string; color: string } | null>;
   isModeActive: (modeId: string) => boolean;
   getActiveModesByGroup: (group: string) => AdvancedMode[];
+}
+
+let healthRequest: Promise<void> | null = null;
+let healthGeneration = 0;
+
+async function responseError(response: Response): Promise<string> {
+  let detail: unknown;
+  try {
+    const data = await response.json();
+    detail = data.detail ?? data.message ?? data.error;
+  } catch { /* A gateway may return HTML instead of JSON. */ }
+  if (response.status === 401) return "Sessão expirada. Volta a iniciar sessão.";
+  return typeof detail === "string" ? detail : `O servidor recusou a alteração (HTTP ${response.status}).`;
 }
 
 export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
@@ -121,16 +157,28 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
   error: null,
   health: null,
   executionProfile: null,
+  pendingModeIds: [],
+  actionError: null,
+  lastSyncedAt: null,
 
   loadModes: async () => {
-    if (get().loading) return;
-    set({ loading: true, error: null });
+    if (healthRequest) return healthRequest;
+    const generation = healthGeneration;
+    set({ loading: true });
+    healthRequest = (async () => {
     try {
       const res = await authenticatedFetch(apiUrl("/api/advanced-modes/health"), {
         credentials: "include",
+        signal: AbortSignal.timeout(10_000),
       });
-      if (res.ok) {
+      if (!res.ok) throw new Error(await responseError(res));
         const data: AdvancedModeHealth = await res.json();
+        if (!data.modes || typeof data.modes !== "object" || Array.isArray(data.modes)) {
+          throw new Error("O backend devolveu um catálogo inválido.");
+        }
+        // A response started before a confirmed mutation cannot restore the
+        // old state. The mutation will request a fresh snapshot afterwards.
+        if (generation !== healthGeneration) return;
         const activeIds = Object.entries(data.modes)
           .filter(([, m]) => m.active)
           .map(([id]) => id);
@@ -151,24 +199,35 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
                  session_count: m.session_count,
                  active_session_count: m.active_session_count ?? m.session_count,
                  total_session_count: m.total_session_count ?? m.session_count,
-                 available: true,
+                 available: m.available ?? true,
                  runtime_status: m.runtime_status,
                  runtime_role: m.runtime_role,
                  runtime_summary: m.runtime_summary,
                  handler: m.handler,
+                 execution_target: m.execution_target,
+                 limitations: m.limitations,
+                 activity_evidence_status: m.activity_evidence_status,
+                 evidence_count: m.evidence_count,
+                 intervention_count: m.intervention_count,
+                 checkpoint_count: m.checkpoint_count,
                } as AdvancedMode,
             ])
           ),
           groups: data.groups || {},
           activeModeIds: activeIds,
-          loading: false,
+          lastSyncedAt: Date.now(),
+          error: null,
         });
-      } else {
-        set({ error: `Failed to load advanced modes (HTTP ${res.status})`, loading: false });
-      }
     } catch (e) {
-      set({ error: `Failed to load advanced modes: ${e instanceof Error ? e.message : String(e)}`, loading: false });
+      if (generation === healthGeneration) {
+        set({ error: e instanceof Error ? e.message : "Sem ligação ao backend." });
+      }
+    } finally {
+      set({ loading: false });
+      healthRequest = null;
     }
+    })();
+    return healthRequest;
   },
 
   loadCommands: async () => {
@@ -220,13 +279,19 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
   },
 
   activateMode: async (modeId: string) => {
+    if (get().pendingModeIds.includes(modeId)) return { success: false, message: "A alteração já está em curso." };
+    healthGeneration += 1;
+    set((state) => ({ pendingModeIds: [...state.pendingModeIds, modeId], actionError: null }));
     try {
       const res = await authenticatedFetch(apiUrl(`/api/advanced-modes/${modeId}/activate`), {
         method: "POST",
         credentials: "include",
+        signal: AbortSignal.timeout(10_000),
       });
+      if (!res.ok) throw new Error(await responseError(res));
       const data = await res.json();
-      if (data.success) {
+      if (data.success !== true) throw new Error(data.message ?? data.error ?? "O servidor não confirmou a ativação.");
+      healthGeneration += 1;
         set((state) => ({
           activeModeIds: state.activeModeIds.includes(modeId)
             ? state.activeModeIds
@@ -238,30 +303,46 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
             // server refresh confirms one exists.
             [modeId]: { ...state.modes[modeId], active: true },
           },
+          executionProfile: null,
         }));
-      }
+      await get().refreshHealth();
       return data;
     } catch (e) {
-      return { success: false, message: `Error: ${e instanceof Error ? e.message : String(e)}` };
+      const message = e instanceof Error ? e.message : "A ativação falhou.";
+      set({ actionError: message });
+      return { success: false, message };
+    } finally {
+      set((state) => ({ pendingModeIds: state.pendingModeIds.filter((id) => id !== modeId) }));
     }
   },
 
   deactivateMode: async (modeId: string) => {
+    if (get().pendingModeIds.includes(modeId)) return { success: false, message: "A alteração já está em curso." };
+    healthGeneration += 1;
+    set((state) => ({ pendingModeIds: [...state.pendingModeIds, modeId], actionError: null }));
     try {
       const res = await authenticatedFetch(apiUrl(`/api/advanced-modes/${modeId}/deactivate`), {
         method: "POST",
         credentials: "include",
+        signal: AbortSignal.timeout(10_000),
       });
+      if (!res.ok) throw new Error(await responseError(res));
       const data = await res.json();
-      if (data.success) {
+      if (data.success !== true) throw new Error(data.message ?? data.error ?? "O servidor não confirmou a desativação.");
+      healthGeneration += 1;
         set((state) => ({
           activeModeIds: state.activeModeIds.filter((id) => id !== modeId),
           modes: { ...state.modes, [modeId]: { ...state.modes[modeId], active: false } },
+          executionProfile: null,
         }));
-      }
+      await get().refreshHealth();
       return data;
     } catch (e) {
-      return { success: false, message: `Error: ${e instanceof Error ? e.message : String(e)}` };
+      const message = e instanceof Error ? e.message : "A desativação falhou.";
+      set({ actionError: message });
+      return { success: false, message };
+    } finally {
+      set((state) => ({ pendingModeIds: state.pendingModeIds.filter((id) => id !== modeId) }));
     }
   },
 
@@ -269,6 +350,7 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
     try {
       const res = await authenticatedFetch(apiUrl(`/api/advanced-modes/${modeId}`), {
         credentials: "include",
+        signal: AbortSignal.timeout(10_000),
       });
       if (res.ok) {
         return await res.json();
@@ -280,17 +362,8 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
   },
 
   refreshHealth: async () => {
-    try {
-      const res = await authenticatedFetch(apiUrl("/api/advanced-modes/health"), {
-        credentials: "include",
-      });
-      if (res.ok) {
-        const data: AdvancedModeHealth = await res.json();
-        set({ health: data, executionProfile: data.execution_profile ?? null });
-      }
-    } catch {
-      // ignore
-    }
+    if (healthRequest) await healthRequest;
+    await get().loadModes();
   },
 
   resolveCommand: async (command: string) => {
@@ -310,5 +383,5 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
   isModeActive: (modeId: string) => get().activeModeIds.includes(modeId),
 
   getActiveModesByGroup: (group: string) =>
-    Object.values(get().modes).filter((m) => m.group === group && m.available),
+    Object.values(get().modes).filter((m) => m.group === group && m.available && m.active),
 }));

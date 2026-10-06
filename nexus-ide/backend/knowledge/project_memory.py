@@ -118,7 +118,7 @@ def _generated_header(root: Path) -> str:
 
 - (a preencher por decisões verificadas)
 
-## Últimas sessões verificadas
+## Últimas sessões
 
 - Ainda não existem registos.
 """
@@ -167,7 +167,7 @@ def _clean_fact(value: str, limit: int = 180) -> str:
     return value[:limit]
 
 
-def record_verified_session(
+def record_session(
     project_path: str | os.PathLike[str],
     *,
     session_id: str,
@@ -175,15 +175,15 @@ def record_verified_session(
     topic: str = "",
     evidence: str = "",
 ) -> Path:
-    """Append a compact, inert record for a completed session.
+    """Append a compact, inert record about a session's runtime outcome.
 
-    Only the status and caller-supplied, already-sanitised facts are stored.
-    The bounded history prevents the bootstrap file from becoming a transcript.
+    A completed chat session does not imply that requested code changes were
+    verified. Detailed task and validation state belongs to project continuity.
     """
     target = ensure_project_memory(project_path)
     with _lock:
         content = target.read_text(encoding="utf-8")
-        marker = "## Últimas sessões verificadas"
+        marker = "## Últimas sessões"
         before, separator, after = content.partition(marker)
         if not separator:
             before, after = content, ""
@@ -205,11 +205,30 @@ def record_verified_session(
     return target
 
 
+def record_verified_session(
+    project_path: str | os.PathLike[str],
+    *,
+    session_id: str,
+    status: str,
+    topic: str = "",
+    evidence: str = "",
+) -> Path:
+    """Backward-compatible alias; the record describes a session, not task proof."""
+    return record_session(
+        project_path,
+        session_id=session_id,
+        status=status,
+        topic=topic,
+        evidence=evidence,
+    )
+
+
 __all__ = [
     "MAX_CONTEXT_CHARS",
     "PROJECT_MEMORY_RELATIVE_PATH",
     "ensure_project_memory",
     "project_memory_path",
     "read_project_memory",
+    "record_session",
     "record_verified_session",
 ]

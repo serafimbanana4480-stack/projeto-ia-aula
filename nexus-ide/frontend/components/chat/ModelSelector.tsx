@@ -53,6 +53,7 @@ function providerLabel(provider: string | undefined): string {
     opencode_go: "OpenCode Go",
     kilo: "Kilo AI Gateway",
     ollama: "Ollama (local)",
+    lmstudio: "LM Studio (local)",
   };
   return labels[provider] ?? provider;
 }
@@ -203,7 +204,12 @@ export default function ModelSelector() {
     }
   }
 
-  const failedProviders = providerStatus.filter((p) => p.error && p.configured);
+  const failedProviders = providerStatus.filter(
+    (p) => p.error && p.configured && !p.error.includes("Sem chave API configurada"),
+  );
+  const unconfiguredProviders = providerStatus.filter(
+    (p) => p.error && p.configured && p.error.includes("Sem chave API configurada"),
+  );
 
   return (
     <div className="relative" ref={containerRef}>
@@ -425,6 +431,17 @@ export default function ModelSelector() {
                 {failedProviders.length} provider
                 {failedProviders.length > 1 ? "s" : ""} sem responder:{" "}
                 {failedProviders.map((p) => p.label).join(", ")}
+              </span>
+            </div>
+          ) : null}
+          {unconfiguredProviders.length > 0 ? (
+            <div className="border-t border-nexus-border px-3 py-2 text-[10px] text-nexus-muted">
+              <span className="flex items-center gap-1.5">
+                <AlertCircle className="h-3 w-3" />
+                {unconfiguredProviders.length} provider
+                {unconfiguredProviders.length > 1 ? "s" : ""} não configurado
+                {unconfiguredProviders.length > 1 ? "s" : ""}:{" "}
+                {unconfiguredProviders.map((p) => p.label).join(", ")}
               </span>
             </div>
           ) : null}

@@ -12,17 +12,15 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import json
-import hashlib
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Union
-from dataclasses import dataclass, field
-from enum import Enum
-import uuid
-import numpy as np
-from collections import defaultdict
 import statistics
+import uuid
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any
 
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
@@ -74,14 +72,14 @@ class EdgeNode:
     node_id: str
     name: str
     node_type: EdgeNodeType
-    location: Dict[str, Any]
-    capabilities: List[str]
-    resources: Dict[str, Any]
+    location: dict[str, Any]
+    capabilities: list[str]
+    resources: dict[str, Any]
     status: EdgeNodeStatus
     last_heartbeat: datetime
-    performance_metrics: Dict[str, float]
-    network_info: Dict[str, Any]
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    performance_metrics: dict[str, float]
+    network_info: dict[str, Any]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -90,18 +88,18 @@ class EdgeTask:
     task_id: str
     name: str
     task_type: str
-    requirements: Dict[str, Any]
+    requirements: dict[str, Any]
     priority: TaskPriority
     estimated_duration: timedelta
-    deadline: Optional[datetime]
-    payload: Dict[str, Any]
-    constraints: Dict[str, Any]
+    deadline: datetime | None
+    payload: dict[str, Any]
+    constraints: dict[str, Any]
     created_at: datetime
-    assigned_node: Optional[str] = None
+    assigned_node: str | None = None
     status: str = "pending"
     progress: float = 0.0
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
 
 
 @dataclass
@@ -109,13 +107,13 @@ class EdgeDeployment:
     """Represents a deployment configuration for edge nodes."""
     deployment_id: str
     name: str
-    target_nodes: List[str]
-    deployment_config: Dict[str, Any]
-    resource_requirements: Dict[str, Any]
-    network_requirements: Dict[str, Any]
-    security_requirements: Dict[str, Any]
+    target_nodes: list[str]
+    deployment_config: dict[str, Any]
+    resource_requirements: dict[str, Any]
+    network_requirements: dict[str, Any]
+    security_requirements: dict[str, Any]
     created_at: datetime
-    deployed_at: Optional[datetime]
+    deployed_at: datetime | None
     status: str = "pending"
 
 
@@ -126,28 +124,28 @@ class EdgeComputingOrchestrator:
         self.event_bus = event_bus
         
         # Edge nodes
-        self.edge_nodes: Dict[str, EdgeNode] = {}
-        self.node_groups: Dict[str, List[str]] = defaultdict(list)
+        self.edge_nodes: dict[str, EdgeNode] = {}
+        self.node_groups: dict[str, list[str]] = defaultdict(list)
         
         # Tasks and deployments
-        self.edge_tasks: Dict[str, EdgeTask] = {}
-        self.task_queue: List[str] = []
-        self.edge_deployments: Dict[str, EdgeDeployment] = {}
+        self.edge_tasks: dict[str, EdgeTask] = {}
+        self.task_queue: list[str] = []
+        self.edge_deployments: dict[str, EdgeDeployment] = {}
         
         # Load balancing
         self.load_balancer: LoadBalancingStrategy = LoadBalancingStrategy.RESOURCE_BASED
-        self.node_loads: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        self.node_loads: dict[str, dict[str, Any]] = defaultdict(dict)
         
         # Network topology
-        self.network_topology: Dict[str, List[str]] = defaultdict(list)
-        self.latency_matrix: Dict[str, Dict[str, float]] = defaultdict(dict)
+        self.network_topology: dict[str, list[str]] = defaultdict(list)
+        self.latency_matrix: dict[str, dict[str, float]] = defaultdict(dict)
         
         # Resource management
-        self.resource_pools: Dict[str, Dict[str, Any]] = {}
-        self.resource_allocation: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        self.resource_pools: dict[str, dict[str, Any]] = {}
+        self.resource_allocation: dict[str, dict[str, Any]] = defaultdict(dict)
         
         # Performance tracking
-        self.performance_metrics: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self.performance_metrics: dict[str, list[dict[str, Any]]] = defaultdict(list)
         
         # Start background tasks
         self._heartbeat_monitor_task = asyncio.create_task(self._monitor_heartbeats())
@@ -156,8 +154,8 @@ class EdgeComputingOrchestrator:
         self._performance_monitor_task = asyncio.create_task(self._monitor_performance())
     
     async def register_edge_node(self, node_id: str, name: str, node_type: EdgeNodeType,
-                                location: Dict[str, Any], capabilities: List[str],
-                                resources: Dict[str, Any], network_info: Dict[str, Any]) -> None:
+                                location: dict[str, Any], capabilities: list[str],
+                                resources: dict[str, Any], network_info: dict[str, Any]) -> None:
         """Register a new edge node."""
         
         edge_node = EdgeNode(
@@ -207,9 +205,9 @@ class EdgeComputingOrchestrator:
         
         logger.info(f"Edge node registered: {node_id} ({name})")
     
-    async def submit_edge_task(self, name: str, task_type: str, requirements: Dict[str, Any],
+    async def submit_edge_task(self, name: str, task_type: str, requirements: dict[str, Any],
                              priority: TaskPriority, estimated_duration: timedelta,
-                             payload: Dict[str, Any], constraints: Dict[str, Any] = None,
+                             payload: dict[str, Any], constraints: dict[str, Any] = None,
                              deadline: datetime = None) -> str:
         """Submit a task for edge execution."""
         
@@ -261,7 +259,7 @@ class EdgeComputingOrchestrator:
         
         return task_id
     
-    async def deploy_to_edge(self, deployment_config: Dict[str, Any]) -> str:
+    async def deploy_to_edge(self, deployment_config: dict[str, Any]) -> str:
         """Deploy a service to edge nodes."""
         
         deployment_id = str(uuid.uuid4())
@@ -301,7 +299,7 @@ class EdgeComputingOrchestrator:
         
         return deployment_id
     
-    async def _select_deployment_targets(self, config: Dict[str, Any]) -> List[str]:
+    async def _select_deployment_targets(self, config: dict[str, Any]) -> list[str]:
         """Select target nodes for deployment based on requirements."""
         
         target_nodes = []
@@ -454,7 +452,7 @@ class EdgeComputingOrchestrator:
                 logger.error(f"Error in task scheduling: {e}")
                 await asyncio.sleep(1)
     
-    async def _select_node_for_task(self, task: EdgeTask) -> Optional[str]:
+    async def _select_node_for_task(self, task: EdgeTask) -> str | None:
         """Select the best edge node for a task."""
         
         suitable_nodes = []
@@ -526,14 +524,14 @@ class EdgeComputingOrchestrator:
         
         return True
     
-    def _select_by_resources(self, nodes: List[str], task: EdgeTask) -> str:
+    def _select_by_resources(self, nodes: list[str], task: EdgeTask) -> str:
         """Select node based on resource availability."""
         
         best_node = None
         best_score = -1
         
         for node_id in nodes:
-            node = self.edge_nodes[node_id]
+            self.edge_nodes[node_id]
             node_load = self.node_loads[node_id]
             
             # Calculate resource score
@@ -550,7 +548,7 @@ class EdgeComputingOrchestrator:
         
         return best_node
     
-    def _select_by_connections(self, nodes: List[str]) -> str:
+    def _select_by_connections(self, nodes: list[str]) -> str:
         """Select node with least active connections."""
         
         best_node = None
@@ -565,7 +563,7 @@ class EdgeComputingOrchestrator:
         
         return best_node
     
-    def _select_by_latency(self, nodes: List[str]) -> str:
+    def _select_by_latency(self, nodes: list[str]) -> str:
         """Select node with lowest latency."""
         
         best_node = None
@@ -673,7 +671,7 @@ class EdgeComputingOrchestrator:
     def _update_node_load(self, node_id: str, task: EdgeTask) -> None:
         """Update node load metrics."""
         
-        node = self.edge_nodes[node_id]
+        self.edge_nodes[node_id]
         node_load = self.node_loads[node_id]
         
         # Simulate resource usage based on task requirements
@@ -708,7 +706,7 @@ class EdgeComputingOrchestrator:
         
         node = self.edge_nodes[node_id]
         current_avg = node.performance_metrics.get("avg_execution_time", execution_time)
-        completed_tasks = node.performance_metrics.get("tasks_completed", 1)
+        node.performance_metrics.get("tasks_completed", 1)
         
         # Exponential moving average
         alpha = 0.1
@@ -716,7 +714,7 @@ class EdgeComputingOrchestrator:
         
         return new_avg
     
-    def _update_network_topology(self, node_id: str, network_info: Dict[str, Any]) -> None:
+    def _update_network_topology(self, node_id: str, network_info: dict[str, Any]) -> None:
         """Update network topology with new node."""
         
         # Add connections to other nodes
@@ -943,7 +941,7 @@ class EdgeComputingOrchestrator:
                 logger.error(f"Error in performance monitoring: {e}")
                 await asyncio.sleep(15)
     
-    async def get_edge_computing_stats(self) -> Dict[str, Any]:
+    async def get_edge_computing_stats(self) -> dict[str, Any]:
         """Get comprehensive edge computing statistics."""
         
         stats = {
@@ -1008,30 +1006,22 @@ class EdgeComputingOrchestrator:
         # Cancel background tasks
         if self._heartbeat_monitor_task:
             self._heartbeat_monitor_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._heartbeat_monitor_task
-            except asyncio.CancelledError:
-                pass
         
         if self._task_scheduler_task:
             self._task_scheduler_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task_scheduler_task
-            except asyncio.CancelledError:
-                pass
         
         if self._load_balancer_task:
             self._load_balancer_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._load_balancer_task
-            except asyncio.CancelledError:
-                pass
         
         if self._performance_monitor_task:
             self._performance_monitor_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._performance_monitor_task
-            except asyncio.CancelledError:
-                pass
         
         logger.info("Edge computing orchestrator shutdown completed")

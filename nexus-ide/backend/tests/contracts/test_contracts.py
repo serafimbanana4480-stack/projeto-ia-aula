@@ -184,3 +184,13 @@ class TestSkillManifest:
                 domain="quality",
                 required_tools=["execute_code", "execute_code"],
             )
+
+
+    def test_skill_manifest_rejects_case_insensitive_duplicate_triggers(self) -> None:
+        with pytest.raises(ValidationError, match="list values must be unique"):
+            SkillManifest(
+                skill_id="testing",
+                name="Testing",
+                domain="quality",
+                triggers=["python audit", "Python Audit"],
+            )

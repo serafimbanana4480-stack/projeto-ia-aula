@@ -1,6 +1,7 @@
 """TechnicalDebtManager — tracks and manages technical debt."""
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
@@ -126,10 +127,8 @@ class TechnicalDebtManager:
         if not item:
             return None
         if severity is not None:
-            try:
+            with contextlib.suppress(ValueError):
                 item.severity = Severity(severity)
-            except ValueError:
-                pass
         if estimated_effort is not None:
             item.estimated_effort = estimated_effort
         if notes is not None:

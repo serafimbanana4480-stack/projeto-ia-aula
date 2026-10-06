@@ -1,8 +1,6 @@
 """Tests for deploy_manager.py."""
 from __future__ import annotations
 
-import pytest
-
 from backend.pipeline.deploy_manager import (
     BlueGreenDeployer,
     CanaryDeployer,

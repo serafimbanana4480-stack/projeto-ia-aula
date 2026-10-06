@@ -1,11 +1,9 @@
 """Tests for DatabaseManager schema and seeding."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
-
-from backend.sandbox.database import DatabaseConfig, DatabaseManager, DatabaseProvisionResult
+from backend.sandbox.database import DatabaseConfig, DatabaseManager
 from backend.sandbox.sidecar import PostgresConnection, RedisConnection, SidecarManager
 
 

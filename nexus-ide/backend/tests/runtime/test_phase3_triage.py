@@ -11,7 +11,6 @@ import pytest
 
 from backend.runtime.triage import RequestClass, triage_request
 
-
 SIMPLE_TASKS = [
     "corrige o typo no README",
     "lê o ficheiro backend/main.py e diz-me o que faz",
@@ -33,6 +32,17 @@ def test_a_question_needs_no_tools() -> None:
     assert decision.request_class is RequestClass.CONVERSATIONAL
     assert decision.uses_tools is False
     assert decision.needs_planner is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["tas ai", "tás aí?", "estás aí", "tás por aí?", "estas por ai!"],
+)
+def test_casual_presence_check_is_smalltalk(message: str) -> None:
+    decision = triage_request(message)
+    assert decision.request_class is RequestClass.CONVERSATIONAL
+    assert decision.uses_tools is False
+    assert decision.max_iterations == 1
 
 
 def test_a_question_about_the_project_still_uses_tools() -> None:

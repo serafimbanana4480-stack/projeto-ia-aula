@@ -47,6 +47,7 @@ class Memory:
     """A single memory entry with embedding and metadata."""
 
     memory_id: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
+    user_id: str = ""
     memory_type: MemoryType = MemoryType.SESSION
     session_id: str = ""
     project_id: str = ""
@@ -75,6 +76,7 @@ class Memory:
     def to_dict(self) -> dict[str, Any]:
         return {
             "memory_id": self.memory_id,
+            "user_id": self.user_id,
             "memory_type": self.memory_type.value,
             "session_id": self.session_id,
             "project_id": self.project_id,
@@ -225,6 +227,7 @@ class MemoryStore:
         self,
         content: str,
         *,
+        user_id: str = "",
         memory_type: MemoryType = MemoryType.SESSION,
         session_id: str = "",
         project_id: str = "",
@@ -245,6 +248,7 @@ class MemoryStore:
         embedding = await self._embeddings.embed(content)
 
         memory = Memory(
+            user_id=user_id,
             memory_type=memory_type,
             session_id=session_id,
             project_id=project_id,
@@ -280,6 +284,7 @@ class MemoryStore:
         self,
         query: str,
         *,
+        user_id: str | None = None,
         session_id: str | None = None,
         project_id: str | None = None,
         memory_type: MemoryType | None = None,
@@ -291,6 +296,8 @@ class MemoryStore:
 
         results: list[tuple[Memory, float]] = []
         for mem_id, mem in self._memories.items():
+            if user_id is not None and mem.user_id != user_id:
+                continue
             # Filter by session/type/project
             if session_id and mem.session_id and mem.session_id != session_id:
                 continue
@@ -317,6 +324,7 @@ class MemoryStore:
         session_id: str = "",
         project_id: str = "",
         *,
+        user_id: str | None = None,
         max_tokens: int = 4000,
         top_k: int = 5,
     ) -> str:
@@ -327,6 +335,7 @@ class MemoryStore:
         """
         results = await self.search(
             query,
+            user_id=user_id,
             session_id=session_id or None,
             project_id=project_id or None,
             top_k=top_k,
@@ -343,6 +352,8 @@ class MemoryStore:
             keyword_matches: list[tuple[Memory, float]] = []
             for mem in self._memories.values():
                 if mem.memory_id in seen_ids:
+                    continue
+                if user_id is not None and mem.user_id != user_id:
                     continue
                 if session_id and mem.session_id and mem.session_id != session_id:
                     continue
@@ -397,10 +408,12 @@ class MemoryStore:
         project_id: str = "",
         source: str = "",
         importance: float = 0.5,
+        user_id: str = "",
     ) -> tuple[Memory, Memory]:
         """Store a user/assistant exchange as conversation memories."""
         user_mem = await self.store(
             content=f"User: {user_message}",
+            user_id=user_id,
             memory_type=MemoryType.CONVERSATION,
             session_id=session_id,
             project_id=project_id,
@@ -410,6 +423,7 @@ class MemoryStore:
         )
         assistant_mem = await self.store(
             content=f"Assistant: {assistant_message[:2000]}",
+            user_id=user_id,
             memory_type=MemoryType.CONVERSATION,
             session_id=session_id,
             project_id=project_id,
@@ -428,10 +442,12 @@ class MemoryStore:
         session_id: str = "",
         project_id: str = "",
         top_k: int = 5,
+        user_id: str | None = None,
     ) -> str:
         """Convenience alias for ``get_context`` used by agents."""
         return await self.get_context(
             query,
+            user_id=user_id,
             session_id=session_id,
             project_id=project_id,
             top_k=top_k,
@@ -451,22 +467,32 @@ class MemoryStore:
         """Get all memories scoped to a project."""
         return [m for m in self._memories.values() if m.project_id == project_id]
 
-    async def list_all(self, limit: int = 1000) -> list[Memory]:
+    async def list_all(
+        self, limit: int = 1000, *, user_id: str | None = None
+    ) -> list[Memory]:
         """Return all memories ordered by creation time (newest first)."""
-        memories = sorted(self._memories.values(), key=lambda m: m.created_at, reverse=True)
+        memories = sorted(
+            (m for m in self._memories.values() if user_id is None or m.user_id == user_id),
+            key=lambda m: m.created_at,
+            reverse=True,
+        )
         return memories[:limit]
 
-    def get(self, memory_id: str) -> Memory | None:
+    def get(self, memory_id: str, *, user_id: str | None = None) -> Memory | None:
         """Return a memory by ID, or None when missing."""
-        return self._memories.get(memory_id)
+        memory = self._memories.get(memory_id)
+        if memory is not None and user_id is not None and memory.user_id != user_id:
+            return None
+        return memory
 
     def all_memories(self) -> list[Memory]:
         """Return all stored memories (unsorted snapshot)."""
         return list(self._memories.values())
 
-    async def delete(self, memory_id: str) -> bool:
+    async def delete(self, memory_id: str, *, user_id: str | None = None) -> bool:
         """Delete a memory by ID."""
-        if memory_id in self._memories:
+        memory = self.get(memory_id, user_id=user_id)
+        if memory is not None:
             del self._memories[memory_id]
             self._index.pop(memory_id, None)
             return True
@@ -480,14 +506,15 @@ class MemoryStore:
             self._index.pop(mid, None)
         return len(to_delete)
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self, *, user_id: str | None = None) -> dict[str, Any]:
         """Return memory store statistics."""
         types = {}
-        for m in self._memories.values():
+        memories = [m for m in self._memories.values() if user_id is None or m.user_id == user_id]
+        for m in memories:
             t = m.memory_type.value
             types[t] = types.get(t, 0) + 1
         return {
-            "total_memories": len(self._memories),
+            "total_memories": len(memories),
             "by_type": types,
             "max_capacity": self._max_memories,
             "embedding": self._embeddings.status(),

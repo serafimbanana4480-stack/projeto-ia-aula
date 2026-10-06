@@ -6,14 +6,14 @@ to ensure 99.9% uptime and continuous operation under various failure scenarios.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Callable
-from collections import defaultdict, deque
-from enum import Enum
 import traceback
+from collections import defaultdict, deque
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
 
 from backend.tools.ollama_client import OllamaClient
 
@@ -68,11 +68,11 @@ class FaultEvent:
     component: str
     description: str
     timestamp: float
-    context: Dict[str, Any] = field(default_factory=dict)
-    stack_trace: Optional[str] = None
-    recovery_actions: List[RecoveryAction] = field(default_factory=list)
+    context: dict[str, Any] = field(default_factory=dict)
+    stack_trace: str | None = None
+    recovery_actions: list[RecoveryAction] = field(default_factory=list)
     resolved: bool = False
-    resolution_time: Optional[float] = None
+    resolution_time: float | None = None
     
     def __post_init__(self) -> None:
         self.fault_id = self.fault_id or f"fault_{int(time.time())}_{self.component}"
@@ -84,7 +84,7 @@ class CircuitBreakerConfig:
     failure_threshold: int = 5
     recovery_timeout: float = 60.0
     expected_exception: type = Exception
-    fallback_function: Optional[Callable] = None
+    fallback_function: Callable | None = None
 
 
 @dataclass
@@ -124,7 +124,7 @@ class CircuitBreaker:
             result = await func(*args, **kwargs)
             self._on_success()
             return result
-        except self.config.expected_exception as e:
+        except self.config.expected_exception:
             self._on_failure()
             if self.config.fallback_function:
                 return await self.config.fallback_function(*args, **kwargs)
@@ -178,15 +178,15 @@ class FaultToleranceSystem:
         
         # Fault tracking
         self._fault_history: deque = deque(maxlen=fault_history_size)
-        self._active_faults: Dict[str, FaultEvent] = {}
-        self._circuit_breakers: Dict[str, CircuitBreaker] = {}
+        self._active_faults: dict[str, FaultEvent] = {}
+        self._circuit_breakers: dict[str, CircuitBreaker] = {}
         
         # Health monitoring
-        self._health_checks: Dict[str, HealthCheck] = {}
-        self._component_status: Dict[str, str] = defaultdict(lambda: "unknown")
+        self._health_checks: dict[str, HealthCheck] = {}
+        self._component_status: dict[str, str] = defaultdict(lambda: "unknown")
         
         # Recovery strategies
-        self._recovery_strategies: Dict[FaultType, List[RecoveryAction]] = {
+        self._recovery_strategies: dict[FaultType, list[RecoveryAction]] = {
             FaultType.MODEL_FAILURE: [RecoveryAction.RETRY, RecoveryAction.FALLBACK, RecoveryAction.CIRCUIT_BREAK],
             FaultType.AGENT_TIMEOUT: [RecoveryAction.RETRY, RecoveryAction.FALLBACK],
             FaultType.RESOURCE_EXHAUSTION: [RecoveryAction.SCALE_UP, RecoveryAction.GRACEFUL_DEGRADATION],
@@ -202,8 +202,8 @@ class FaultToleranceSystem:
         self._emergency_mode = False
         
         # Background tasks
-        self._health_monitor_task: Optional[asyncio.Task] = None
-        self._recovery_task: Optional[asyncio.Task] = None
+        self._health_monitor_task: asyncio.Task | None = None
+        self._recovery_task: asyncio.Task | None = None
         self._running = False
         
         # Lock for thread safety
@@ -245,7 +245,7 @@ class FaultToleranceSystem:
         func: Callable,
         component: str,
         *args,
-        circuit_breaker_config: Optional[CircuitBreakerConfig] = None,
+        circuit_breaker_config: CircuitBreakerConfig | None = None,
         **kwargs
     ) -> Any:
         """Execute a function with fault tolerance protection."""
@@ -263,8 +263,8 @@ class FaultToleranceSystem:
         component: str,
         description: str,
         severity: FaultSeverity = FaultSeverity.MEDIUM,
-        context: Optional[Dict[str, Any]] = None,
-        exception: Optional[Exception] = None
+        context: dict[str, Any] | None = None,
+        exception: Exception | None = None
     ) -> str:
         """Report a fault event."""
         fault = FaultEvent(
@@ -318,7 +318,7 @@ class FaultToleranceSystem:
                 
                 logger.info("Fault %s resolved: %s", fault_id, resolution)
     
-    async def get_system_status(self) -> Dict[str, Any]:
+    async def get_system_status(self) -> dict[str, Any]:
         """Get current system status and health."""
         async with self._lock:
             return {
@@ -346,7 +346,7 @@ class FaultToleranceSystem:
                 ]
             }
     
-    async def get_fault_statistics(self) -> Dict[str, Any]:
+    async def get_fault_statistics(self) -> dict[str, Any]:
         """Get fault statistics and trends."""
         async with self._lock:
             if not self._fault_history:
@@ -402,7 +402,7 @@ class FaultToleranceSystem:
     async def _get_circuit_breaker(
         self,
         component: str,
-        config: Optional[CircuitBreakerConfig]
+        config: CircuitBreakerConfig | None
     ) -> CircuitBreaker:
         """Get or create a circuit breaker for a component."""
         if component not in self._circuit_breakers:
@@ -564,7 +564,7 @@ class FaultToleranceSystem:
                     if health_check.consecutive_failures >= health_check.failure_threshold:
                         await self._handle_health_check_failure(health_check)
                 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 health_check.consecutive_failures += 1
                 self._component_status[component] = "timeout"
                 
@@ -709,7 +709,7 @@ class FaultToleranceSystem:
 
 
 # Global fault tolerance system instance
-_fault_tolerance_system: Optional[FaultToleranceSystem] = None
+_fault_tolerance_system: FaultToleranceSystem | None = None
 
 
 def get_fault_tolerance_system(ollama_client: OllamaClient, **kwargs) -> FaultToleranceSystem:

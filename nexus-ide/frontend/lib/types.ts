@@ -4,6 +4,7 @@
 export type AgentName =
   | "ROUTER"
   | "PLANNER"
+  | "ADVISOR"
   | "ARCHITECT"
   | "ARCHITECT_DESIGN"
   | "ARCHITECT_COMPLEXITY"
@@ -50,6 +51,9 @@ export type StepStatus =
   | "running"
   | "success"
   | "error"
+  | "warning"
+  | "cancelled"
+  | "paused"
   | "awaiting_confirmation"
   | "pending";
 
@@ -67,8 +71,13 @@ export interface RunStep {
   verb: "thinking" | "tool" | "file" | "command" | "test" | "agent" | "status" | "message" | "other";
   status: StepStatus;
   icon: string;
+  /** Stable runtime identity when this step belongs to a declared task. */
+  taskId?: string;
+  /** Actor reported on the event; this is not a parent/child relation. */
+  agent?: AgentName;
   startedAt?: number;
   durationMs?: number;
+  repeatCount?: number;
   detail?: unknown;
   /** The original SSE event this step was built from, for collapsible detail. */
   event?: StreamEvent;
@@ -128,12 +137,16 @@ export interface ChatMessageMetadata {
   canRetry?: boolean;
   /** The original user prompt (for retry). */
   prompt?: string;
+  /** Paths explicitly reported by the runtime when the run completed. */
+  changedFiles?: string[];
   /** Free-form extra data. */
   [key: string]: unknown;
 }
 
 export interface ChatMessage {
   id: string;
+  /** Stable durable link to the run that produced this message, when available. */
+  runId?: string;
   role: "user" | "assistant";
   agent?: AgentName;
   content: string;
@@ -153,7 +166,7 @@ export interface ActivityItem {
   title: string;
   detail?: string;
   agent?: AgentName;
-  status: "pending" | "running" | "success" | "error";
+  status: "pending" | "running" | "success" | "error" | "warning" | "cancelled" | "paused";
   timestamp: string;
   data?: Record<string, unknown>;
 }
@@ -180,11 +193,11 @@ export interface SessionHistoryResponse {
 export interface ModelStatus {
   id: string;
   name?: string;
-  size_bytes: number;
+  size_bytes: number | null;
   size_gb?: number;
   parameter_size?: string;
   provider?: string;
-  modified_at?: string;
+  modified_at?: string | null;
   details?: Record<string, unknown>;
   status: "available" | "loading" | "error";
   pricing?: string;
@@ -225,12 +238,16 @@ export interface Tool {
   name: string;
   description: string;
   enabled: boolean;
+  available?: boolean;
   schema: Record<string, unknown>;
   status?: "available" | "missing_dependency" | "blocked" | "requires_confirmation" | string;
   category?: string;
   risk_level?: string;
   requires_confirmation?: boolean;
   dependency?: string;
+  missing_dependency?: string;
+  unavailable_reason?: string;
+  timeout_seconds?: number;
   error?: string;
   when_to_use?: string;
   tags?: string[];

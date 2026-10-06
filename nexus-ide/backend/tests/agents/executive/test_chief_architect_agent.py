@@ -1,13 +1,11 @@
 """Tests for Chief Architect Agent and components."""
 from __future__ import annotations
 
-import pytest
-
-from backend.agents.executive.pattern_catalog import PatternCatalog, PatternCategory
-from backend.agents.executive.system_designer import SystemDesigner
-from backend.agents.executive.quality_gate import QualityGate, CheckSeverity
-from backend.agents.executive.integration_planner import IntegrationPlanner, IntegrationStatus
 from backend.agents.executive.chief_architect_agent import ChiefArchitectAgent
+from backend.agents.executive.integration_planner import IntegrationPlanner, IntegrationStatus
+from backend.agents.executive.pattern_catalog import PatternCatalog, PatternCategory
+from backend.agents.executive.quality_gate import CheckSeverity, QualityGate
+from backend.agents.executive.system_designer import SystemDesigner
 
 
 class TestPatternCatalog:
@@ -123,7 +121,7 @@ class TestIntegrationPlanner:
 
     def test_list_by_status(self) -> None:
         planner = IntegrationPlanner()
-        plan = planner.create_plan("Test", "a", "b", "api", "REST")
+        planner.create_plan("Test", "a", "b", "api", "REST")
         assert len(planner.list_plans(IntegrationStatus.PLANNED)) == 1
         assert len(planner.list_plans(IntegrationStatus.COMPLETED)) == 0
 

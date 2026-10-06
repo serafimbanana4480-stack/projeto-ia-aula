@@ -25,7 +25,7 @@ import logging
 import os
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -116,7 +116,7 @@ class CostGovernor:
         if cost_usd <= 0:
             return
         day = self._utc_day()
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         try:
             with sqlite3.connect(self._db_path) as conn:
                 conn.execute(
@@ -199,7 +199,7 @@ class CostGovernor:
     # ------------------------------------------------------------------
     @staticmethod
     def _utc_day() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return datetime.now(UTC).strftime("%Y-%m-%d")
 
     def _roll_day_if_needed(self) -> None:
         today = self._utc_day()

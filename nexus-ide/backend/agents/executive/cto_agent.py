@@ -1,18 +1,18 @@
 """CTOAgent — Chief Technology Officer executive agent for the NEXUS AI Company."""
 from __future__ import annotations
 
-import json
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
-from backend.agents.executive.technology_strategist import TechnologyStrategist
+from backend.agents.event_protocol import encode_event
 from backend.agents.executive.architecture_decision_maker import ArchitectureDecisionMaker
-from backend.agents.executive.technical_roadmapper import TechnicalRoadmapper
 from backend.agents.executive.stack_selector import StackSelector
 from backend.agents.executive.technical_debt_manager import TechnicalDebtManager
-from backend.agents.event_protocol import encode_event
+from backend.agents.executive.technical_roadmapper import TechnicalRoadmapper
+from backend.agents.executive.technology_strategist import TechnologyStrategist
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,12 @@ class CTOAgent(AgentBase):
         self._debt_manager = technical_debt_manager or TechnicalDebtManager()
 
     def system_prompt(self) -> str:
-        """Load the CTO system prompt from the local executive prompts directory."""
+        """Load the CTO system prompt from the local executive prompts directory.
+
+        This is the reference pattern the other executive agents now follow:
+        ``AgentBase.system_prompt()`` reads ``config/prompts/`` and these prompts
+        ship in ``backend/agents/executive/prompts/`` (audit P1-6).
+        """
         prompt_path = PROMPTS_DIR / f"{self.prompt_file}.md"
         if not prompt_path.exists():
             raise FileNotFoundError(f"Prompt not found: {prompt_path}")
@@ -101,7 +106,7 @@ class CTOAgent(AgentBase):
             matched = [n for n in names if n.lower() in query]
             if matched:
                 result = self._stack_selector.compare_stacks(matched)
-                yield f"### Comparison Results\n\n"
+                yield "### Comparison Results\n\n"
                 yield f"**Best overall:** {result.get('best_overall', 'N/A')}\n\n"
                 for comp in result.get("comparisons", []):
                     yield f"- **{comp['name']}**: overall {comp['overall']:.2f}\n"

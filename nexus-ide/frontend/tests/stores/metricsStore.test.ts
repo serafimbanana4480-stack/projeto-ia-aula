@@ -1,21 +1,24 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { act } from "@testing-library/react";
-import { useMetricsStore } from "../../stores/metricsStore";
+import { refreshMetrics, stopMetricsStream, useMetricsStore } from "../../stores/metricsStore";
 
-const { mockGetMetricsHistory } = vi.hoisted(() => ({
+const { mockGetMetricsHistory, mockAuthenticatedFetch, mockIsAuthenticated } = vi.hoisted(() => ({
   mockGetMetricsHistory: vi.fn(),
+  mockAuthenticatedFetch: vi.fn(),
+  mockIsAuthenticated: vi.fn(() => false),
 }));
 
 vi.mock("../../lib/api", () => ({
   apiUrl: (path: string) => `/api${path}`,
+  authHeaders: vi.fn(() => ({})),
   getMetricsHistory: mockGetMetricsHistory,
 }));
 
 vi.mock("../../lib/auth", () => ({
-  authenticatedFetch: vi.fn(),
+  authenticatedFetch: mockAuthenticatedFetch,
   authHeaders: vi.fn(() => ({})),
   getAccessToken: vi.fn(() => null),
-  isAuthenticated: vi.fn(() => false),
+  isAuthenticated: mockIsAuthenticated,
   isAutoLoginEnabled: vi.fn(() => false),
   autoLoginDev: vi.fn(),
 }));
@@ -27,6 +30,8 @@ vi.mock("../../lib/log", () => ({
 describe("useMetricsStore", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAuthenticatedFetch.mockReset();
+    mockIsAuthenticated.mockReturnValue(false);
     act(() => {
       useMetricsStore.setState({
         metrics: null,
@@ -189,6 +194,61 @@ describe("useMetricsStore", () => {
         });
       }
       expect(useMetricsStore.getState().history).toHaveLength(100);
+    });
+  });
+
+  describe("refreshMetrics", () => {
+    it("marks HTTP failures degraded while preserving the last successful snapshot", async () => {
+      const previousMetrics = {
+        tokens_per_second: 12,
+        active_model: "model-a",
+        active_sessions: 1,
+        queue_depth: 0,
+        ram_used_bytes: 1000,
+        ram_total_bytes: 2000,
+        ram_percent: 50,
+        cpu_percent: 25,
+        disk_used_bytes: 500,
+        disk_total_bytes: 1000,
+        disk_percent: 50,
+        uptime_seconds: 3600,
+        requests_total: 4,
+        requests_successful: 4,
+        requests_failed: 0,
+        avg_latency_ms: 50,
+        timestamp: 1234,
+      };
+      const previousUpdate = "12:34:56";
+      useMetricsStore.setState({
+        metrics: previousMetrics,
+        history: [previousMetrics as any],
+        backendOnline: true,
+        connectionStatus: "connected",
+        lastUpdate: previousUpdate,
+      });
+      mockIsAuthenticated.mockReturnValue(true);
+      mockAuthenticatedFetch.mockResolvedValue({ status: 503, ok: false });
+
+      const succeeded = await refreshMetrics();
+
+      expect(succeeded).toBe(false);
+      expect(useMetricsStore.getState().connectionStatus).toBe("degraded");
+      expect(useMetricsStore.getState().backendOnline).toBe(true);
+      expect(useMetricsStore.getState().metrics).toEqual(previousMetrics);
+      expect(useMetricsStore.getState().lastUpdate).toBe(previousUpdate);
+    });
+
+    it("reports an HTTP 401 as reachable backend with authentication required", async () => {
+      mockIsAuthenticated.mockReturnValue(true);
+      mockAuthenticatedFetch.mockResolvedValue({ status: 401, ok: false });
+
+      const succeeded = await refreshMetrics();
+
+      expect(succeeded).toBe(false);
+      expect(useMetricsStore.getState().backendOnline).toBe(true);
+      expect(useMetricsStore.getState().connectionStatus).toBe("auth_required");
+      expect(useMetricsStore.getState().connectionMode).toBe("none");
+      stopMetricsStream();
     });
   });
 

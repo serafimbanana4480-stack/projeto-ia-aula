@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -24,8 +24,8 @@ class TestAuditLogger:
             agent_id="agent-1",
             role=Role.DEVELOPER,
             sandbox_id="sandbox-1",
-            issued_at=datetime.now(timezone.utc),
-            expires_at=datetime.now(timezone.utc),
+            issued_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC),
             token_jti="jti-123",
         )
         result = SandboxResult(
@@ -46,7 +46,7 @@ class TestAuditLogger:
         log_files = list(Path(logger._output_dir).glob("audit-*.jsonl"))
         assert len(log_files) == 1
 
-        with open(log_files[0], "r") as f:
+        with open(log_files[0]) as f:
             entry = json.loads(f.readline())
 
         assert entry["event_type"] == "sandbox_execution"
@@ -65,7 +65,7 @@ class TestAuditLogger:
         assert audit_id.startswith("audit-violation-")
 
         log_files = list(Path(logger._output_dir).glob("audit-*.jsonl"))
-        with open(log_files[0], "r") as f:
+        with open(log_files[0]) as f:
             entry = json.loads(f.readline())
 
         assert entry["event_type"] == "policy_violation"
@@ -79,8 +79,8 @@ class TestAuditLogger:
                 agent_id=agent_id,
                 role=Role.DEVELOPER,
                 sandbox_id="sandbox-1",
-                issued_at=datetime.now(timezone.utc),
-                expires_at=datetime.now(timezone.utc),
+                issued_at=datetime.now(UTC),
+                expires_at=datetime.now(UTC),
                 token_jti=f"jti-{agent_id}",
             )
             result = SandboxResult(

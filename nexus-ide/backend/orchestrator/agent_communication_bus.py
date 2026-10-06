@@ -1,13 +1,12 @@
 """Real-time Agent Communication Bus — pub/sub messaging between agents."""
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +58,8 @@ class AgentCommunicationBus:
 
     def unsubscribe(self, agent_id: str, handler: Callable[[AgentMessage], Any]) -> None:
         """Unsubscribe an agent."""
-        if agent_id in self._subscribers:
-            if handler in self._subscribers[agent_id]:
-                self._subscribers[agent_id].remove(handler)
+        if agent_id in self._subscribers and handler in self._subscribers[agent_id]:
+            self._subscribers[agent_id].remove(handler)
 
     def send(self, message: AgentMessage) -> bool:
         """Send a message (direct or broadcast)."""
@@ -96,9 +94,9 @@ class AgentCommunicationBus:
 
     def get_history(
         self,
-        sender: Optional[str] = None,
-        recipient: Optional[str] = None,
-        message_type: Optional[str] = None,
+        sender: str | None = None,
+        recipient: str | None = None,
+        message_type: str | None = None,
         limit: int = 100,
     ) -> list[AgentMessage]:
         """Query message history with filters."""

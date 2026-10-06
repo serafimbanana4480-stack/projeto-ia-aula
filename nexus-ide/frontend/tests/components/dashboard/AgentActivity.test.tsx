@@ -64,22 +64,22 @@ describe("AgentActivity", () => {
 
   it("renderiza o título PT e o carregamento quando não há métricas", () => {
     render(<AgentActivity />);
-    expect(screen.getByText("Atividade de Agentes")).toBeDefined();
+    expect(screen.getByText("Utilização por perfil")).toBeDefined();
     expect(
-      screen.getByRole("status", { name: "A carregar atividade de agentes" }),
+      screen.getByRole("status", { name: "A carregar utilização por perfil" }),
     ).toBeDefined();
   });
 
-  it("mostra o placeholder PT quando não há agentes ativos", () => {
+  it("mostra o placeholder PT quando não há respostas recentes", () => {
     useMetricsStore.setState({ metrics: makeMetrics() });
     render(<AgentActivity />);
-    expect(screen.getByText("Sem atividade de agentes")).toBeDefined();
+    expect(screen.getByText("Sem respostas recentes")).toBeDefined();
     expect(
-      screen.getByText(/Nenhuma sessão ativa no momento/),
+      screen.getByText(/As respostas com perfil de execução aparecem aqui/),
     ).toBeDefined();
   });
 
-  it("mostra agentes e contagem de tarefas quando há atividade", () => {
+  it("mostra perfis e contagem de respostas sem tratar erros de sessão como tarefas", () => {
     useMetricsStore.setState({
       metrics: makeMetrics({
         agent_activity: [
@@ -97,7 +97,8 @@ describe("AgentActivity", () => {
     render(<AgentActivity />);
     expect(screen.getByText("CODER")).toBeDefined();
     expect(screen.getByText("5")).toBeDefined();
-    expect(screen.getByText("6 no total")).toBeDefined();
-    expect(screen.getByText("1 ativo")).toBeDefined();
+    expect(screen.getByText("5 no total")).toBeDefined();
+    expect(screen.getByText("1 em execução")).toBeDefined();
+    expect(screen.queryByLabelText("Falhadas")).toBeNull();
   });
 });

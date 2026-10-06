@@ -6,17 +6,17 @@ model selection, and response quality over time.
 from __future__ import annotations
 
 import asyncio
-import json
+import contextlib
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
-from backend.tools.ollama_client import OllamaClient
 from backend.config.settings import get_model_config
-from backend.orchestrator.events import EventBus, OrchestratorEvent, EventType
+from backend.orchestrator.events import EventBus, EventType, OrchestratorEvent
+from backend.tools.ollama_client import OllamaClient
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class FeedbackEvent:
     feedback_type: FeedbackType
     value: float  # Rating, time in seconds, or binary indicator
     timestamp: float
-    context: Dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -62,7 +62,7 @@ class RoutingDecision:
     query_hash: str
     query_type: str
     chosen_model: str
-    alternative_models: List[str]
+    alternative_models: list[str]
     success_score: float
     response_time_ms: float
     user_feedback: float
@@ -84,7 +84,7 @@ class MetaLearner:
         self,
         ollama_client: OllamaClient,
         *,
-        event_bus: Optional[EventBus] = None,
+        event_bus: EventBus | None = None,
         feedback_history_size: int = 10000,
         performance_window_hours: float = 24.0,
         min_feedback_for_learning: int = 50,
@@ -101,16 +101,16 @@ class MetaLearner:
         
         # Feedback storage
         self._feedback_history: deque = deque(maxlen=feedback_history_size)
-        self._model_performance: Dict[str, ModelPerformance] = {}
-        self._routing_decisions: List[RoutingDecision] = []
+        self._model_performance: dict[str, ModelPerformance] = {}
+        self._routing_decisions: list[RoutingDecision] = []
         
         # Learning models
-        self._model_preferences: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
-        self._query_patterns: Dict[str, List[str]] = defaultdict(list)
-        self._user_profiles: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        self._model_preferences: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        self._query_patterns: dict[str, list[str]] = defaultdict(list)
+        self._user_profiles: dict[str, dict[str, Any]] = defaultdict(dict)
         
         # Background tasks
-        self._learning_task: Optional[asyncio.Task] = None
+        self._learning_task: asyncio.Task | None = None
         self._running = False
         self._initialized = False
         
@@ -149,10 +149,8 @@ class MetaLearner:
         self._running = False
         if self._learning_task:
             self._learning_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._learning_task
-            except asyncio.CancelledError:
-                pass
         logger.info("Meta-Learning system stopped")
     
     async def record_feedback(
@@ -163,7 +161,7 @@ class MetaLearner:
         response: str,
         feedback_type: FeedbackType,
         value: float,
-        context: Optional[Dict[str, Any]] = None
+        context: dict[str, Any] | None = None
     ) -> None:
         """Record a feedback event."""
         async with self._lock:
@@ -196,7 +194,7 @@ class MetaLearner:
         query_hash: str,
         query_type: str,
         chosen_model: str,
-        alternative_models: List[str],
+        alternative_models: list[str],
         response_time_ms: float,
         success_score: float = 1.0
     ) -> None:
@@ -223,9 +221,9 @@ class MetaLearner:
         self,
         query: str,
         query_type: str,
-        available_models: List[str],
-        session_id: Optional[str] = None
-    ) -> Tuple[str, float]:
+        available_models: list[str],
+        session_id: str | None = None
+    ) -> tuple[str, float]:
         """Get the best model recommendation based on learning."""
         async with self._lock:
             if not available_models:
@@ -244,7 +242,7 @@ class MetaLearner:
             
             return model, confidence
     
-    async def get_model_insights(self, model_key: str) -> Dict[str, Any]:
+    async def get_model_insights(self, model_key: str) -> dict[str, Any]:
         """Get detailed insights about a model's performance."""
         async with self._lock:
             if model_key not in self._model_performance:
@@ -278,7 +276,7 @@ class MetaLearner:
             
             return insights
     
-    async def get_learning_stats(self) -> Dict[str, Any]:
+    async def get_learning_stats(self) -> dict[str, Any]:
         """Get meta-learning statistics."""
         async with self._lock:
             return {
@@ -306,7 +304,7 @@ class MetaLearner:
         """Initialize performance tracking for all models."""
         model_configs = get_model_config()
         
-        for model_key in model_configs.keys():
+        for model_key in model_configs:
             if isinstance(model_configs[model_key], dict):
                 self._model_performance[model_key] = ModelPerformance(
                     model_key=model_key
@@ -388,7 +386,7 @@ class MetaLearner:
         import random
         return random.random() < self.exploration_rate
     
-    async def _explore_model(self, available_models: List[str], query_type: str) -> str:
+    async def _explore_model(self, available_models: list[str], query_type: str) -> str:
         """Explore by selecting a less-used model."""
         import random
         
@@ -421,9 +419,9 @@ class MetaLearner:
         self,
         query: str,
         query_type: str,
-        available_models: List[str],
-        session_id: Optional[str] = None
-    ) -> Tuple[str, float]:
+        available_models: list[str],
+        session_id: str | None = None
+    ) -> tuple[str, float]:
         """Exploit by selecting the best known model."""
         best_model = ""
         best_score = -1.0
@@ -445,7 +443,7 @@ class MetaLearner:
         model_key: str,
         query: str,
         query_type: str,
-        session_id: Optional[str] = None
+        session_id: str | None = None
     ) -> float:
         """Calculate a score for a model based on learned preferences."""
         if model_key not in self._model_performance:
@@ -483,8 +481,8 @@ class MetaLearner:
     async def _calculate_trends(
         self,
         model_key: str,
-        recent_feedback: List[FeedbackEvent]
-    ) -> Dict[str, float]:
+        recent_feedback: list[FeedbackEvent]
+    ) -> dict[str, float]:
         """Calculate performance trends for a model."""
         if len(recent_feedback) < 10:
             return {"trend": 0.0, "direction": "stable"}
@@ -508,7 +506,7 @@ class MetaLearner:
         
         return {"trend": trend, "direction": direction}
     
-    async def _identify_strengths(self, model_key: str) -> List[str]:
+    async def _identify_strengths(self, model_key: str) -> list[str]:
         """Identify a model's strengths based on performance."""
         strengths = []
         perf = self._model_performance[model_key]
@@ -524,7 +522,7 @@ class MetaLearner:
         
         return strengths
     
-    async def _identify_weaknesses(self, model_key: str) -> List[str]:
+    async def _identify_weaknesses(self, model_key: str) -> list[str]:
         """Identify a model's weaknesses based on performance."""
         weaknesses = []
         perf = self._model_performance[model_key]
@@ -540,7 +538,7 @@ class MetaLearner:
         
         return weaknesses
     
-    async def _get_recommended_use_cases(self, model_key: str) -> List[str]:
+    async def _get_recommended_use_cases(self, model_key: str) -> list[str]:
         """Get recommended use cases for a model based on performance."""
         use_cases = []
         
@@ -646,7 +644,7 @@ class MetaLearner:
 
 
 # Global meta-learner instance
-_meta_learner: Optional[MetaLearner] = None
+_meta_learner: MetaLearner | None = None
 
 
 async def get_meta_learner() -> MetaLearner:

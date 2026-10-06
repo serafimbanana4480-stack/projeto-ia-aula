@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import uuid
 from collections import deque
@@ -81,16 +82,73 @@ def _ensure_table() -> None:
 class LogStore:
     """In-memory ring buffer + SQLite persistence for structured logs."""
 
+    #: Hard cap on in-flight persist tasks.  ``insert()`` is called once per log
+    #: line; without a cap a burst of logging can spawn an unbounded number of
+    #: threads in the default executor and exhaust memory.
+    MAX_INFLIGHT_PERSISTS = 512
+
     def __init__(self, ring_size: int = RING_BUFFER_SIZE) -> None:
         self._buffer: deque[dict[str, Any]] = deque(maxlen=ring_size)
         self._lock = asyncio.Lock()
         self._initialized = False
+        # Strong references to the persist tasks.  ``asyncio.create_task``
+        # returns an object the event loop only weakly references, so without
+        # this set a task can be garbage-collected mid-flight (losing the log
+        # line) and nothing is ever inspected for failure.
+        self._persist_tasks: set[asyncio.Task[None]] = set()
+        self._dropped_persists = 0
 
     async def _init(self) -> None:
         if self._initialized:
             return
         self._initialized = True
         await asyncio.to_thread(_ensure_table)
+
+    @property
+    def inflight_persists(self) -> int:
+        """Number of persist tasks currently running (diagnostics/tests)."""
+        return len(self._persist_tasks)
+
+    @property
+    def dropped_persists(self) -> int:
+        """Persists skipped because the in-flight cap was reached."""
+        return self._dropped_persists
+
+    def _schedule_persist(self, entry: dict[str, Any]) -> bool:
+        """Persist *entry* in the background, supervised.
+
+        Keeps a strong reference, attaches a done-callback that logs failures
+        and removes the reference, and refuses new work past
+        :attr:`MAX_INFLIGHT_PERSISTS` so a log storm cannot exhaust the default
+        thread pool.  Returns ``False`` when the write was dropped.
+        """
+        if len(self._persist_tasks) >= self.MAX_INFLIGHT_PERSISTS:
+            self._dropped_persists += 1
+            if self._dropped_persists == 1 or self._dropped_persists % 1000 == 0:
+                logger.warning(
+                    "Dropped %d structured-log persist(s): %d already in flight",
+                    self._dropped_persists,
+                    len(self._persist_tasks),
+                )
+            return False
+        try:
+            task = asyncio.create_task(self._persist(entry))
+        except RuntimeError as exc:  # no running loop
+            logger.debug("Log persistence skipped (no event loop): %s", exc)
+            return False
+        self._persist_tasks.add(task)
+        task.add_done_callback(self._on_persist_done)
+        return True
+
+    def _on_persist_done(self, task: asyncio.Task[None]) -> None:
+        self._persist_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            # Never swallow silently: an unobserved persist failure is how a
+            # dead log sink goes unnoticed for weeks.
+            logger.error("Structured log persistence failed: %s", exc, exc_info=exc)
 
     async def insert(
         self,
@@ -121,9 +179,19 @@ class LogStore:
         async with self._lock:
             self._buffer.append(entry)
 
-        # Persist asynchronously without blocking the caller
-        asyncio.create_task(self._persist(entry))
+        # Persist asynchronously without blocking the caller.  The task is
+        # supervised (strong reference + done-callback); the previous bare
+        # ``create_task`` could be collected mid-flight and never reported a
+        # failure.
+        self._schedule_persist(entry)
         return entry
+
+    async def drain(self, timeout: float = 5.0) -> None:
+        """Wait for in-flight persist tasks (used on shutdown and in tests)."""
+        pending = list(self._persist_tasks)
+        if not pending:
+            return
+        await asyncio.wait(pending, timeout=timeout)
 
     async def _persist(self, entry: dict[str, Any]) -> None:
         """Persist a single entry to SQLite (background task)."""
@@ -290,7 +358,6 @@ class LogStore:
     async def prune_old_logs(self, days: int = 30) -> int:
         """Remove logs older than N days. Returns number of rows deleted."""
         await self._init()
-        datetime.now(UTC).isoformat().replace("+00:00", "Z")
         # Simple date math: we rely on SQLite for the actual comparison
         from datetime import timedelta
 
@@ -308,8 +375,55 @@ class LogStore:
         return await asyncio.to_thread(_run)
 
 
-# Global singleton
+#: Global singleton
 _log_store: LogStore | None = None
+
+#: How often the retention sweep runs, and how much history it keeps.
+PRUNE_INTERVAL_SECONDS = 6 * 3600
+PRUNE_RETENTION_DAYS = 30
+
+
+def _read_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(float(raw))
+    except ValueError:
+        logger.warning("Invalid %s=%r — using %d", name, raw, default)
+        return default
+    return max(1, value)
+
+
+async def prune_logs_forever(interval_seconds: int | None = None) -> None:
+    """Supervised retention sweep for ``structured_logs``.
+
+    ``prune_old_logs`` existed but was called from nowhere, so the table grew
+    without bound.  This loop is the caller: it runs once at startup and then on
+    a timer, logs its own failures, and stops cleanly on cancellation.
+    """
+    interval = interval_seconds or _read_int_env(
+        "NEXUS_LOG_PRUNE_INTERVAL_SECONDS", PRUNE_INTERVAL_SECONDS
+    )
+    retention_days = _read_int_env("NEXUS_LOG_RETENTION_DAYS", PRUNE_RETENTION_DAYS)
+    store = get_log_store()
+    while True:
+        try:
+            removed = await store.prune_old_logs(days=retention_days)
+            if removed:
+                logger.info(
+                    "Pruned %d structured log(s) older than %d day(s)",
+                    removed,
+                    retention_days,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - the sweep must never die
+            logger.exception("Structured log retention sweep failed")
+        try:
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
 
 
 def get_log_store() -> LogStore:

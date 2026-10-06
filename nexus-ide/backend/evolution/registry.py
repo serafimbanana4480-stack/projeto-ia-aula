@@ -406,6 +406,20 @@ class ChampionRegistry:
                 ).fetchall()
         return [self._row_to_version(r) for r in rows]
 
+    def history(self, component_kind: str) -> list[ComponentVersion]:
+        """List all versions for a component kind in chronological order.
+
+        Unlike :meth:`list_versions` (which is newest-first), this returns
+        the full lifecycle history oldest → newest, matching insertion order.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM evolution_versions WHERE component_kind = ? "
+                "ORDER BY created_at ASC, rowid ASC",
+                (component_kind,),
+            ).fetchall()
+        return [self._row_to_version(r) for r in rows]
+
     def list_all_kinds(self) -> list[str]:
         """Return all component kinds that have registered versions."""
         with self._conn() as conn:

@@ -113,7 +113,7 @@ class TestReputationAwareAllocator:
         scores_go = allocator.score_agents("design", stack="go")
 
         architect_python = next(s for s in scores_python if s.agent_name == "ARCHITECT")
-        architect_go = next(s for s in scores_go if s.agent_name == "ARCHITECT")
+        next(s for s in scores_go if s.agent_name == "ARCHITECT")
 
         # ARCHITECT supports both python and typescript, but not go
         # So python should have stack bonus

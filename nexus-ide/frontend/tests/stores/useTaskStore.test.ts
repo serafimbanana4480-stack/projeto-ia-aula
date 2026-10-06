@@ -1,6 +1,7 @@
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { act } from "@testing-library/react";
 import { useTaskStore, type Task, type Workflow, type TaskStatus } from "../../stores/useTaskStore";
+import { clearAuth, setAccessToken } from "../../lib/auth";
 
 function makeTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -26,6 +27,10 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 }
 
 describe("useTaskStore", () => {
+  afterEach(() => {
+    clearAuth();
+  });
+
   beforeEach(() => {
     act(() => {
       useTaskStore.setState({
@@ -34,12 +39,19 @@ describe("useTaskStore", () => {
         taskQueue: [],
         isLoading: false,
         error: null,
+        tasksLoading: false,
+        hasFetchedTasks: false,
+        workflowsLoading: false,
+        tasksError: null,
+        tasksWarnings: [],
+        workflowsError: null,
       });
     });
   });
 
   it("starts with empty tasks", () => {
     expect(useTaskStore.getState().tasks).toEqual({});
+    expect(useTaskStore.getState().hasFetchedTasks).toBe(false);
   });
 
   it("starts with empty workflows", () => {
@@ -178,17 +190,85 @@ describe("useTaskStore", () => {
     expect(useTaskStore.getState().error).toBeNull();
   });
 
-  it("fetchTasks handles successful response", async () => {
+  it("fetchTasks normalizes the real grouped API response without inventing metrics", async () => {
+    setAccessToken("dashboard-token");
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ tasks: [makeTask({ id: "t1" })] }),
+      json: async () => ({
+        active: [{
+          id: "t1",
+          name: "Index repository",
+          agent: "researcher",
+          status: "running",
+          progress: 0,
+          created_at: "2026-09-27T10:00:00Z",
+        }],
+        queued: [{ id: "t2", name: "Review changes", status: "pending", progress: 0 }],
+        completed: [{ id: "t3", name: "Summarize", status: "completed" }],
+        failed: [{ id: "t4", name: "Run validation", status: "failed", error: "The validation command exited with code 1", progress: 0 }],
+      }),
     }) as any;
 
     await act(async () => {
       await useTaskStore.getState().fetchTasks();
     });
     expect(useTaskStore.getState().isLoading).toBe(false);
-    expect(useTaskStore.getState().tasks["t1"]).toBeDefined();
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/tasks/list"),
+      expect.any(Object),
+    );
+    const requestOptions = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    expect(new Headers(requestOptions.headers).get("Authorization")).toBe("Bearer dashboard-token");
+    expect(useTaskStore.getState().tasks.t1).toMatchObject({
+      id: "t1",
+      title: "Index repository",
+      agentId: "researcher",
+      status: "running",
+    });
+    expect(useTaskStore.getState().tasks.t1.progress).toBeUndefined();
+    expect(useTaskStore.getState().tasks.t1.costActual).toBeUndefined();
+    expect(useTaskStore.getState().tasks.t1.tokensUsed).toBeUndefined();
+    expect(useTaskStore.getState().tasks.t1.priority).toBeUndefined();
+    expect(useTaskStore.getState().taskQueue).toEqual(["t2"]);
+    expect(useTaskStore.getState().tasks.t3.status).toBe("completed");
+    expect(useTaskStore.getState().tasks.t4).toMatchObject({
+      id: "t4",
+      title: "Run validation",
+      status: "failed",
+      error: "The validation command exited with code 1",
+    });
+    expect(useTaskStore.getState().tasks.t4.progress).toBeUndefined();
+    expect(useTaskStore.getState().tasks.t4.costActual).toBeUndefined();
+    expect(useTaskStore.getState().tasks.t4.tokensUsed).toBeUndefined();
+    expect(useTaskStore.getState().tasks.t4.priority).toBeUndefined();
+    expect(useTaskStore.getState().tasksLoading).toBe(false);
+    expect(useTaskStore.getState().hasFetchedTasks).toBe(true);
+  });
+
+  it("distinguishes a valid empty response from an unknown task state", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ active: [], queued: [], completed: [], failed: [], cancelled: [] }),
+    }) as any;
+
+    await act(async () => {
+      await useTaskStore.getState().fetchTasks();
+    });
+
+    expect(useTaskStore.getState().hasFetchedTasks).toBe(true);
+    expect(useTaskStore.getState().tasks).toEqual({});
+    expect(useTaskStore.getState().tasksError).toBeNull();
+  });
+
+  it("does not treat a malformed empty response as a successful zero", async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }) as any;
+
+    await act(async () => {
+      await useTaskStore.getState().fetchTasks();
+    });
+
+    expect(useTaskStore.getState().hasFetchedTasks).toBe(false);
+    expect(useTaskStore.getState().tasksError).toBe("Invalid task response");
   });
 
   it("fetchTasks handles HTTP error", async () => {
@@ -208,24 +288,93 @@ describe("useTaskStore", () => {
       await useTaskStore.getState().fetchTasks();
     });
     expect(useTaskStore.getState().isLoading).toBe(false);
-    expect(useTaskStore.getState().error).toBe("Network error");
+    expect(useTaskStore.getState().error).toBe("Failed to connect to the server");
   });
 
-  it("fetchWorkflows handles successful response", async () => {
+  it("keeps prior rows for a source that failed while applying tasks from the other source", async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          active: [{ id: "workflow-1", title: "Existing workflow", status: "running", kind: "workflow" }],
+          queued: [], completed: [], failed: [],
+          sources: { workflows: { available: true }, plans: { available: true } },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          active: [],
+          queued: [{
+            id: "plan-1", title: "Plan waiting for approval", status: "awaiting_approval", kind: "plan",
+            approved: false, approval_status: "awaiting_approval", completed_steps: 0, total_steps: 2,
+            steps: [{ id: "step-1", title: "Review files", agent: "REVIEWER", status: "pending" }],
+          }],
+          completed: [], failed: [],
+          warnings: ["Workflows could not be refreshed."],
+          sources: { workflows: { available: false }, plans: { available: true } },
+        }),
+      }) as any;
+
+    await act(async () => {
+      await useTaskStore.getState().fetchTasks();
+      await useTaskStore.getState().fetchTasks();
+    });
+
+    expect(useTaskStore.getState().tasks["workflow-1"]).toMatchObject({ status: "running" });
+    expect(useTaskStore.getState().tasks["plan-1"]).toMatchObject({
+      status: "awaiting_approval",
+      kind: "plan",
+      approvalStatus: "awaiting_approval",
+      completedSteps: 0,
+      totalSteps: 2,
+    });
+    expect(useTaskStore.getState().tasksWarnings).toEqual(["Workflows could not be refreshed."]);
+  });
+
+  it("fetchWorkflows normalizes the backend array and leaves absent metrics unset", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ workflows: [{
-        id: "wf-1", name: "Test", status: "running", steps: [],
-        currentStep: 0, createdAt: Date.now(), totalCost: 0,
-        totalTokens: 0, progress: 0,
-      }] }),
+      json: async () => ([{
+        workflow_id: "wf-1",
+        story_id: "story-1",
+        goal: "Test workflow",
+        status: "running",
+        created_at: 1_760_000_000,
+        steps: [{
+          step_id: "step-1",
+          name: "Inspect repository",
+          agent: "researcher",
+          status: "completed",
+          started_at: 1_760_000_001,
+          duration_ms: 1250,
+        }],
+      }]),
     }) as any;
 
     await act(async () => {
       await useTaskStore.getState().fetchWorkflows();
     });
     expect(useTaskStore.getState().isLoading).toBe(false);
-    expect(useTaskStore.getState().workflows["wf-1"]).toBeDefined();
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/api/workflows"));
+    expect(useTaskStore.getState().workflows["wf-1"]).toMatchObject({
+      id: "wf-1",
+      name: "Test workflow",
+      status: "running",
+      createdAt: 1_760_000_000_000,
+      steps: [{
+        id: "step-1",
+        name: "Inspect repository",
+        agentId: "researcher",
+        status: "done",
+        startedAt: 1_760_000_001_000,
+        duration: 1250,
+      }],
+    });
+    expect(useTaskStore.getState().workflows["wf-1"].progress).toBeUndefined();
+    expect(useTaskStore.getState().workflows["wf-1"].totalCost).toBeUndefined();
+    expect(useTaskStore.getState().workflows["wf-1"].totalTokens).toBeUndefined();
+    expect(useTaskStore.getState().workflowsLoading).toBe(false);
   });
 
   it("fetchWorkflows handles HTTP error", async () => {

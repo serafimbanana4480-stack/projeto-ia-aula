@@ -3,15 +3,20 @@
 import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Database, Brain, Network, Search,
-  ChevronRight, Tag, FileText, Clock,
-  TrendingUp, Layers, Zap,
+  Database, Brain, Network,
+  Tag, Clock,
+  TrendingUp,
 } from "lucide-react";
 import { useMemoryStore, type MemoryChunk, type KnowledgeNode } from "../../../stores/useMemoryStore";
 
 const SOURCE_COLORS: Record<string, string> = {
   file: "#06b6d4", web: "#10b981", conversation: "#f59e0b",
   task: "#7c3aed", document: "#ec4899",
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  file: "Ficheiro", web: "Web", conversation: "Conversa",
+  task: "Tarefa", document: "Documento",
 };
 
 function ChunkCard({ chunk }: { chunk: MemoryChunk }) {
@@ -29,14 +34,14 @@ function ChunkCard({ chunk }: { chunk: MemoryChunk }) {
             className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase"
             style={{ color, borderColor: `${color}50`, background: `${color}15` }}
           >
-            {chunk.sourceType}
+            {SOURCE_LABELS[chunk.sourceType] ?? "Outro"}
           </span>
           <span className="text-[10px] font-semibold text-slate-200 line-clamp-1">{chunk.content.slice(0, 80)}...</span>
         </div>
         <div className="flex items-center gap-3 text-[9px] text-slate-500">
           <span className="flex items-center gap-1"><Clock size={9} />{new Date(chunk.createdAt).toLocaleDateString()}</span>
-          <span>Relevance: <span className="text-emerald-400 font-semibold">{(chunk.relevance * 100).toFixed(0)}%</span></span>
-          <span>Accessed: {chunk.accessCount}x</span>
+          <span>Relevância: <span className="font-semibold text-emerald-400">{(chunk.relevance * 100).toFixed(0)}%</span></span>
+          <span>Acedida {chunk.accessCount}×</span>
           {chunk.tags.slice(0, 3).map(tag => (
             <span key={tag} className="px-1 py-0.5 rounded bg-slate-800/80 text-slate-400">{tag}</span>
           ))}
@@ -152,38 +157,56 @@ function KnowledgeGraph({ nodes }: { nodes: KnowledgeNode[] }) {
 
 export default function MemoryRAG() {
   const [tab, setTab] = useState<"chunks" | "graph" | "stats">("chunks");
-  const { chunks, nodes, vectorDbSize, totalRetrievals, avgRelevance } = useMemoryStore();
+  const chunks = useMemoryStore((state) => state.chunks);
+  const nodes = useMemoryStore((state) => state.nodes);
+  const vectorDbSize = useMemoryStore((state) => state.vectorDbSize);
+  const totalRetrievals = useMemoryStore((state) => state.totalRetrievals);
+  const avgRelevance = useMemoryStore((state) => state.avgRelevance);
+  const hasStats = useMemoryStore((state) => state.hasStats);
+  const statsStale = useMemoryStore((state) => state.statsStale);
+  const measuredStats = useMemoryStore((state) => state.measuredStats);
+  const isLoading = useMemoryStore((state) => state.isLoading);
+  const error = useMemoryStore((state) => state.error);
+  const fetchMemoryStats = useMemoryStore((state) => state.fetchMemoryStats);
   const chunkList = Object.values(chunks);
   const nodeList = Object.values(nodes);
 
+  useEffect(() => {
+    void fetchMemoryStats();
+  }, [fetchMemoryStats]);
+
+  const vectorCountLabel = measuredStats.vectorDbSize ? vectorDbSize.toLocaleString() : "—";
+  const retrievalsLabel = measuredStats.totalRetrievals ? totalRetrievals.toLocaleString() : "—";
+  const relevanceLabel = measuredStats.avgRelevance ? `${(avgRelevance * 100).toFixed(0)}%` : "—";
+
   const tabs = [
-    { key: "chunks", label: "Vector Chunks", icon: Database, count: chunkList.length },
-    { key: "graph", label: "Knowledge Graph", icon: Network, count: nodeList.length },
-    { key: "stats", label: "Statistics", icon: TrendingUp, count: 0 },
+    { key: "chunks", label: "Fragmentos", icon: Database, count: chunkList.length },
+    { key: "graph", label: "Grafo", icon: Network, count: nodeList.length },
+    { key: "stats", label: "Resumo", icon: TrendingUp },
   ] as const;
 
   return (
-    <div className="h-full flex flex-col">
+    <section className="flex h-full min-h-0 flex-col" aria-label="Memória e conhecimento">
       {/* Header + tabs */}
-      <div className="px-4 py-3 border-b border-slate-800/60 space-y-2">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
+      <div className="space-y-2 border-b border-slate-800/70 px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <Brain size={13} className="text-pink-400" />
-            <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Memory & RAG</span>
+            <h2 className="truncate text-xs font-semibold text-slate-100">Memória</h2>
           </div>
-          <div className="flex items-center gap-3 text-[10px] text-slate-500">
-            <span>{(vectorDbSize / 1_000_000).toFixed(2)}M vectors</span>
-            <span>{(avgRelevance * 100).toFixed(0)}% avg relevance</span>
-            <span>{totalRetrievals.toLocaleString()} retrievals</span>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-500">
+            <span>{vectorCountLabel} vetores</span>
+            <span>{relevanceLabel} relevância</span>
+            <span>{retrievalsLabel} consultas</span>
           </div>
         </div>
 
-        <div className="flex gap-1">
+        <div className="flex flex-wrap gap-1">
           {tabs.map(t => (
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all ${
+              className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-semibold transition-all ${
                 tab === t.key
                   ? "bg-violet-600/30 text-violet-300 border border-violet-500/40"
                   : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
@@ -191,46 +214,74 @@ export default function MemoryRAG() {
             >
               <t.icon size={11} />
               {t.label}
-              <span className="text-[9px] opacity-60">({t.count})</span>
+              {"count" in t && <span className="text-[9px] opacity-60">{t.count}</span>}
             </button>
           ))}
         </div>
       </div>
 
+      {error && (
+        <p role="status" className="border-b border-amber-500/20 px-4 py-2 text-[10px] leading-relaxed text-amber-200">
+          {statsStale ? "Estatísticas desatualizadas; a mostrar os últimos valores recebidos." : "Não foi possível obter estatísticas de memória."}
+        </p>
+      )}
+
       {/* Content */}
-      <div className="flex-1 overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-hidden">
         {tab === "chunks" && (
           <div className="h-full overflow-y-auto">
-            {chunkList.map(chunk => <ChunkCard key={chunk.id} chunk={chunk} />)}
+            {chunkList.length === 0 ? (
+              <div className="flex h-full min-h-[180px] flex-col items-center justify-center gap-2 px-5 text-center text-slate-500">
+                <Database size={21} className="opacity-35" />
+                <p className="text-xs">Ainda não há fragmentos carregados.</p>
+                <p className="max-w-xs text-[10px] leading-relaxed text-slate-600">As estatísticas do serviço podem estar disponíveis mesmo sem conteúdo nesta lista.</p>
+              </div>
+            ) : chunkList.map(chunk => <ChunkCard key={chunk.id} chunk={chunk} />)}
           </div>
         )}
 
         {tab === "graph" && (
-          <div className="h-full">
-            <KnowledgeGraph nodes={nodeList} />
+          <div className="relative h-full min-h-[180px]">
+            {nodeList.length > 0 ? (
+              <KnowledgeGraph nodes={nodeList} />
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-5 text-center text-slate-500">
+                <Network size={21} className="opacity-35" />
+                <p className="text-xs">O grafo ainda não tem nós carregados.</p>
+                <p className="text-[10px] text-slate-600">Quando houver ligações, aparecem aqui.</p>
+              </div>
+            )}
           </div>
         )}
 
         {tab === "stats" && (
-          <div className="p-4 space-y-3">
-            <div className="grid grid-cols-3 gap-3">
+          <div className="space-y-3 p-4">
+            {isLoading && !hasStats && (
+              <p role="status" className="text-[10px] text-slate-500">A carregar estatísticas…</p>
+            )}
+            {!hasStats && !isLoading && !error && (
+              <p className="text-[10px] text-slate-500">As estatísticas ainda não foram recebidas.</p>
+            )}
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {[
-                { label: "Total Chunks", value: chunkList.length.toLocaleString(), color: "#7c3aed" },
-                { label: "Knowledge Nodes", value: nodeList.length.toString(), color: "#06b6d4" },
-                { label: "Avg Relevance", value: `${(avgRelevance * 100).toFixed(1)}%`, color: "#10b981" },
-                { label: "Vector DB Size", value: `${(vectorDbSize / 1_000_000).toFixed(2)}M`, color: "#f59e0b" },
-                { label: "Total Retrievals", value: totalRetrievals.toLocaleString(), color: "#ec4899" },
-                { label: "Most Accessed", value: chunkList.sort((a, b) => b.accessCount - a.accessCount)[0]?.sourceType || "N/A", color: "#3b82f6" },
+                { label: "Fragmentos nesta sessão", value: chunkList.length ? chunkList.length.toLocaleString() : "—", color: "#7c3aed" },
+                { label: "Nós carregados", value: nodeList.length ? nodeList.length.toLocaleString() : "—", color: "#06b6d4" },
+                { label: "Relevância média", value: relevanceLabel, color: "#10b981" },
+                { label: "Vetores", value: vectorCountLabel, color: "#f59e0b" },
+                { label: "Consultas", value: retrievalsLabel, color: "#ec4899" },
+                { label: "Origem mais consultada", value: chunkList.length
+                  ? SOURCE_LABELS[chunkList.reduce((mostAccessed, chunk) => chunk.accessCount > mostAccessed.accessCount ? chunk : mostAccessed).sourceType] ?? "Outra"
+                  : "—", color: "#3b82f6" },
               ].map(stat => (
-                <div key={stat.label} className="p-3 rounded-xl border" style={{ background: `${stat.color}0d`, borderColor: `${stat.color}30` }}>
-                  <p className="text-[10px] text-slate-500 uppercase tracking-wider">{stat.label}</p>
-                  <p className="text-lg font-bold mt-1" style={{ color: stat.color }}>{stat.value}</p>
+                <div key={stat.label} className="rounded-xl border p-3" style={{ background: `${stat.color}0d`, borderColor: `${stat.color}30` }}>
+                  <p className="text-[10px] uppercase tracking-wide text-slate-500">{stat.label}</p>
+                  <p className="mt-1 text-lg font-semibold tabular-nums" style={{ color: stat.color }}>{stat.value}</p>
                 </div>
               ))}
             </div>
           </div>
         )}
       </div>
-    </div>
+    </section>
   );
 }

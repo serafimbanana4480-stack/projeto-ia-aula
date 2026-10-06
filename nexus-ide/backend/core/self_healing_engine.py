@@ -14,6 +14,7 @@ Design:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import subprocess
 import time
@@ -74,10 +75,8 @@ class SelfHealingEngine:
         self._running = False
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
         logger.info("Self-healing engine stopped")
 
     async def _healing_loop(self) -> None:

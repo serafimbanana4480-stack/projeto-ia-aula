@@ -68,24 +68,24 @@ export default function AppShell({
   const MainTag = mainAs as "main";
 
   return (
-    <div className="nx-ambient flex h-screen flex-col overflow-hidden bg-nexus-bg text-nexus-text">
+    <div className="nx-ambient flex h-dvh min-h-0 flex-col overflow-hidden bg-nexus-bg text-nexus-text">
       {showTopBar && <TopBar title={title} />}
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         <Sidebar />
 
         <MainTag
           className={
             noPadding
               ? "min-w-0 flex-1 overflow-y-auto overflow-x-hidden"
-              : "min-w-0 flex-1 overflow-auto p-6"
+              : "min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-6 lg:p-7"
           }
         >
           {children}
         </MainTag>
 
         {rightRail ? (
-          <aside className="hidden w-[320px] shrink-0 overflow-y-auto border-l border-nexus-border bg-nexus-panel xl:block">
+          <aside className="hidden w-[320px] shrink-0 overflow-y-auto border-l border-nexus-border/60 bg-nexus-panel xl:block">
             {rightRail}
           </aside>
         ) : null}

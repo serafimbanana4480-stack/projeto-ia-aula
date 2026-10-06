@@ -12,13 +12,6 @@ from typing import Any
 
 from backend.agents.base import AgentBase
 from backend.models.api import AgentName
-from backend.orchestrator.agent_capabilities import (
-    AgentCapability,
-    FileLockRegistry,
-    get_agent_capability,
-    validate_agent_contract,
-)
-
 
 AgentRegistry = Mapping[AgentName, AgentBase]
 
@@ -37,6 +30,7 @@ def _get_agent_classes() -> dict[AgentName, Any]:
         return _AGENT_CLASSES
 
     # Deferred imports â€” only executed on first registry use.
+    from backend.agents.advisor import AdvisorAgent
     from backend.agents.analyzer import AnalyzerAgent
     from backend.agents.architect import ArchitectAgent
     from backend.agents.architect_complexity import ArchitectComplexityAgent
@@ -58,7 +52,6 @@ def _get_agent_classes() -> dict[AgentName, Any]:
     from backend.agents.refactor_performance import RefactorPerformanceAgent
     from backend.agents.researcher import ResearcherAgent
     from backend.agents.researcher_web import ResearcherWebAgent
-    from backend.agents.advisor import AdvisorAgent
     from backend.agents.reviewer import ReviewerAgent
     from backend.agents.supervisor import SupervisorAgent
     from backend.agents.test_runner_e2e import TestRunnerE2EAgent

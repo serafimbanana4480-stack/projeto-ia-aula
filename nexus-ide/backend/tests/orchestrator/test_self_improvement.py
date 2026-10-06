@@ -1,8 +1,8 @@
-import pytest
+
 from backend.orchestrator.self_improvement_loop import (
-    SelfImprovementLoop,
-    PerformanceMetric,
     ImprovementAction,
+    PerformanceMetric,
+    SelfImprovementLoop,
 )
 
 
@@ -31,15 +31,15 @@ def test_register_action():
 def test_analyze_finds_opportunity():
     loop = SelfImprovementLoop()
     # Add metrics below threshold
-    for i in range(5):
+    for _i in range(5):
         loop.record_metric(
             PerformanceMetric(name="response_time", value=80.0, threshold=100.0)
         )
-    for i in range(5):
+    for _i in range(5):
         loop.record_metric(
             PerformanceMetric(name="response_time", value=60.0, threshold=100.0)
         )
-    for i in range(5):
+    for _i in range(5):
         loop.record_metric(
             PerformanceMetric(name="accuracy", value=0.95, threshold=0.90)
         )
@@ -78,7 +78,7 @@ def test_apply_improvements():
     loop.register_action(action)
 
     # Record degraded metric (below threshold = not meeting target)
-    for i in range(20):
+    for _i in range(20):
         loop.record_metric(
             PerformanceMetric(name="response_time", value=60.0, threshold=100.0)
         )

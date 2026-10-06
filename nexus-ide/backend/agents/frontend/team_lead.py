@@ -1,12 +1,13 @@
 """FrontendTeamLead — coordinates frontend development tasks."""
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
-from backend.agents.frontend.uiux_agent import UIUXAgent
 from backend.agents.frontend.component_agent import ComponentAgent
 from backend.agents.frontend.state_manager_agent import StateManagerAgent
+from backend.agents.frontend.uiux_agent import UIUXAgent
 
 
 class FrontendTeamLead(AgentBase):

@@ -23,6 +23,7 @@ from backend.tools.discovery import (
 )
 from backend.tools.registry import (
     ToolSpec,
+    get_tool_catalog,
     get_tool_descriptions_for_llm,
     get_tool_stats,
     get_tools_for_agent,
@@ -31,6 +32,7 @@ from backend.tools.registry import (
     list_tools_by_tag,
     register_tool,
     search_tools,
+    tool_requires_confirmation,
 )
 
 # ---- fixtures ----
@@ -220,6 +222,31 @@ def test_get_tool_stats():
     assert stats["by_risk"]["low"] >= 1
     assert stats["by_risk"]["medium"] >= 1
     assert stats["requires_confirmation"] >= 1
+
+
+def test_confirmation_policy_matches_model_description_catalog_and_stats():
+    # Finish lazy registration before replacing this name with a deliberately
+    # low-risk spec. The policy still requires confirmation by tool name.
+    list_tools(enabled_only=False)
+    register_tool(
+        ToolSpec(
+            name="fetch_url",
+            description="Fetch a web page",
+            risk_level="low",
+            requires_confirmation=False,
+        )
+    )
+
+    description = get_tool_descriptions_for_llm(include_examples=False)
+    fetch_line = next(line for line in description.splitlines() if "`fetch_url`" in line)
+    assert "[requires confirmation]" in fetch_line
+
+    catalog_entry = next(item for item in get_tool_catalog() if item["name"] == "fetch_url")
+    assert catalog_entry["requires_confirmation"] is True
+
+    registered = list_tools(enabled_only=False)
+    expected = sum(tool_requires_confirmation(tool) for tool in registered)
+    assert get_tool_stats()["requires_confirmation"] == expected
 
 
 def test_build_tool_overview_returns_string():

@@ -11,6 +11,8 @@ observability downstream.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -237,3 +239,16 @@ class ExperienceTrace(BaseModel):
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict (JSON-safe)."""
         return self.model_dump(mode="json")
+
+    def compute_content_hash(self) -> str:
+        """Stable SHA-256 over the semantic content of this trace.
+
+        ``timestamp`` and ``task_id`` are excluded: a replayed trace (same
+        work performed, recorded at a different time) hashes equal, which is
+        what lets the trace lake deduplicate identical writes.
+        """
+        payload = self.model_dump(mode="json")
+        payload.pop("timestamp", None)
+        payload.pop("task_id", None)
+        blob = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()

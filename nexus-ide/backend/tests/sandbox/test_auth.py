@@ -1,10 +1,12 @@
 """Tests for TokenManager JWT identity and permissions."""
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
+from jose.exceptions import ExpiredSignatureError, JWTError
 
 from backend.sandbox.auth import (
-    AgentIdentity,
     Permission,
     Role,
     TokenManager,
@@ -33,13 +35,16 @@ class TestTokenManager:
     def test_revoke_token(self, manager: TokenManager) -> None:
         token = manager.issue("agent-1", "developer", "sandbox-1")
         manager.revoke(token)
-        with pytest.raises(Exception):
+        # Was `pytest.raises(Exception)`, which asserted nothing: any error at
+        # all passed, including a TypeError from a broken verify(). The guard
+        # raises JWTError("Token has been revoked") -- see auth.py:150.
+        with pytest.raises(JWTError, match="revoked"):
             manager.verify(token)
 
     def test_revoke_all_for_agent(self, manager: TokenManager) -> None:
         token = manager.issue("agent-1", "developer", "sandbox-1")
         manager.revoke_all_for_agent("agent-1")
-        with pytest.raises(Exception):
+        with pytest.raises(JWTError, match="revoked"):
             manager.verify(token)
 
     def test_refresh_token(self, manager: TokenManager) -> None:
@@ -47,7 +52,7 @@ class TestTokenManager:
         new_token = manager.refresh(old_token)
         assert new_token != old_token
         # Old token should be revoked
-        with pytest.raises(Exception):
+        with pytest.raises(JWTError, match="revoked"):
             manager.verify(old_token)
         # New token should be valid
         identity = manager.verify(new_token)
@@ -56,9 +61,10 @@ class TestTokenManager:
     def test_verify_expired_token(self, manager: TokenManager) -> None:
         # The TokenManager uses a 60s leeway for clock skew.
         # To test expiration we issue a token with a past exp claim directly.
+        from datetime import datetime, timedelta
+
         from jose import jwt
-        from datetime import datetime, timezone, timedelta
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         claims = {
             "sub": "agent-1",
             "role": "developer",
@@ -69,7 +75,10 @@ class TestTokenManager:
             "type": "agent",
         }
         expired_token = jwt.encode(claims, manager._secret, algorithm="HS256")
-        with pytest.raises(Exception):
+        # Was `pytest.raises(Exception)`. Expiry raises ExpiredSignatureError,
+        # a JWTError subclass; naming it keeps the test from silently accepting
+        # an unrelated failure such as a signature mismatch.
+        with pytest.raises(ExpiredSignatureError):
             manager.verify(expired_token)
 
 

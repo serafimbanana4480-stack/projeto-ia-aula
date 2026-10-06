@@ -102,6 +102,9 @@ class AgentLifecycleManager:
         self._overseer_callback: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None = None
         self._state_callback: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None = None
         self._tasks: dict[str, asyncio.Task[Any]] = {}
+        self._resume_events: dict[str, asyncio.Event] = {}
+        self._state_events: dict[str, asyncio.Event] = {}
+        self._paused_at: dict[str, float] = {}
         self._registry = registry
         self._llm_client = llm_client
 
@@ -155,6 +158,7 @@ class AgentLifecycleManager:
         token_budget: int | None = None,
         time_budget_seconds: int | None = None,
         parent_task_id: str = "",
+        start_execution: bool = True,
     ) -> str:
         """Spawn a new agent instance after validating resource limits.
 
@@ -190,6 +194,10 @@ class AgentLifecycleManager:
             instance.status = AgentInstanceStatus.RUNNING.value
             self._instances[instance.instance_id] = instance
             self._locks[instance.instance_id] = asyncio.Lock()
+            resume_event = asyncio.Event()
+            resume_event.set()
+            self._resume_events[instance.instance_id] = resume_event
+            self._state_events[instance.instance_id] = asyncio.Event()
 
             await self._notify_overseer(
                 instance.instance_id,
@@ -210,8 +218,10 @@ class AgentLifecycleManager:
                 mission_id,
             )
 
-            # Actually execute the agent if registry + LLM client are wired
-            if self._registry is not None and self._llm_client is not None:
+            # Actually execute the agent if registry + LLM client are wired.
+            # External runners use this manager only for lifecycle tracking and
+            # must not trigger a second provider/tool execution in parallel.
+            if start_execution and self._registry is not None and self._llm_client is not None:
                 task = asyncio.create_task(self._execute_agent(instance))
                 self._tasks[instance.instance_id] = task
 
@@ -227,6 +237,9 @@ class AgentLifecycleManager:
             raise ValueError(f"Cannot pause agent in state '{instance.status}'")
 
         instance.status = AgentInstanceStatus.PAUSED.value
+        self._paused_at[instance_id] = time.monotonic()
+        self._resume_events.setdefault(instance_id, asyncio.Event()).clear()
+        self._state_events.setdefault(instance_id, asyncio.Event()).set()
         await self._notify_overseer(
             instance_id,
             "agent_paused",
@@ -244,7 +257,12 @@ class AgentLifecycleManager:
         if instance.status != AgentInstanceStatus.PAUSED.value:
             raise ValueError(f"Cannot resume agent in state '{instance.status}'")
 
+        paused_at = self._paused_at.pop(instance_id, None)
+        if paused_at is not None:
+            instance.deadline += max(0.0, time.monotonic() - paused_at)
         instance.status = AgentInstanceStatus.RUNNING.value
+        self._resume_events.setdefault(instance_id, asyncio.Event()).set()
+        self._state_events.setdefault(instance_id, asyncio.Event()).set()
         await self._notify_overseer(
             instance_id,
             "agent_resumed",
@@ -265,6 +283,9 @@ class AgentLifecycleManager:
         instance.status = AgentInstanceStatus.ABORTED.value
         instance.completed_at = time.time()
         instance.error_message = reason or "Aborted by lifecycle manager"
+        self._paused_at.pop(instance_id, None)
+        self._resume_events.setdefault(instance_id, asyncio.Event()).set()
+        self._state_events.setdefault(instance_id, asyncio.Event()).set()
 
         # Cancel any associated task
         task = self._tasks.pop(instance_id, None)
@@ -294,6 +315,8 @@ class AgentLifecycleManager:
         instance.status = AgentInstanceStatus.COMPLETED.value
         instance.completed_at = time.time()
         instance.tokens_used = tokens_used
+        self._resume_events.setdefault(instance_id, asyncio.Event()).set()
+        self._state_events.setdefault(instance_id, asyncio.Event()).set()
         if output:
             instance.context["output"] = output
         await self._notify_overseer(
@@ -318,6 +341,8 @@ class AgentLifecycleManager:
         instance.status = AgentInstanceStatus.FAILED.value
         instance.completed_at = time.time()
         instance.error_message = error
+        self._resume_events.setdefault(instance_id, asyncio.Event()).set()
+        self._state_events.setdefault(instance_id, asyncio.Event()).set()
         await self._notify_overseer(
             instance_id,
             "agent_failed",
@@ -364,6 +389,9 @@ class AgentLifecycleManager:
                     del self._instances[iid]
                     self._locks.pop(iid, None)
                     self._tasks.pop(iid, None)
+                    self._resume_events.pop(iid, None)
+                    self._state_events.pop(iid, None)
+                    self._paused_at.pop(iid, None)
                     removed.append(iid)
         if removed:
             logger.info("GC removed %d agent instances: %s", len(removed), removed)
@@ -405,13 +433,67 @@ class AgentLifecycleManager:
 
         output_parts: list[str] = []
 
+        resume_event = self._resume_events.setdefault(instance.instance_id, asyncio.Event())
+
         async def _consume() -> None:
-            async for token in agent.run(request):
+            stream = agent.run(request).__aiter__()
+            while True:
+                try:
+                    token = await anext(stream)
+                except StopAsyncIteration:
+                    return
+                # Pause at a token boundary. The provider may have yielded one
+                # token while the pause request was in flight; it is held here
+                # and only appended after an explicit resume.
+                await resume_event.wait()
+                if instance.status == AgentInstanceStatus.ABORTED.value:
+                    return
                 output_parts.append(token)
 
+        stream_task = asyncio.create_task(_consume())
         try:
-            timeout = max(1.0, instance.deadline - time.time())
-            await asyncio.wait_for(_consume(), timeout=timeout)
+            remaining = max(1.0, instance.deadline - time.time())
+            state_event = self._state_events.setdefault(instance.instance_id, asyncio.Event())
+            loop = asyncio.get_running_loop()
+            while not stream_task.done():
+                if instance.status == AgentInstanceStatus.ABORTED.value:
+                    stream_task.cancel()
+                    await asyncio.gather(stream_task, return_exceptions=True)
+                    return
+                if instance.status == AgentInstanceStatus.PAUSED.value:
+                    await resume_event.wait()
+                    continue
+
+                state_event.clear()
+                state_wait = asyncio.create_task(state_event.wait())
+                started = loop.time()
+                done, _ = await asyncio.wait(
+                    {stream_task, state_wait},
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                elapsed = loop.time() - started
+                remaining = max(0.0, remaining - elapsed)
+                if stream_task in done:
+                    state_wait.cancel()
+                    await asyncio.gather(state_wait, return_exceptions=True)
+                    break
+                if state_wait in done or instance.status == AgentInstanceStatus.PAUSED.value:
+                    state_wait.cancel()
+                    await asyncio.gather(state_wait, return_exceptions=True)
+                    # If the deadline and pause landed in the same loop turn,
+                    # do not charge time spent waiting for the pause checkpoint.
+                    paused_at = self._paused_at.get(instance.instance_id)
+                    if paused_at is not None and remaining == 0:
+                        remaining += max(0.0, loop.time() - paused_at)
+                    continue
+                state_wait.cancel()
+                await asyncio.gather(state_wait, return_exceptions=True)
+                raise TimeoutError
+
+            await stream_task
+            if instance.status == AgentInstanceStatus.ABORTED.value:
+                return
             output = "".join(output_parts)
             instance.context["output"] = output
             await self.complete(
@@ -427,6 +509,10 @@ class AgentLifecycleManager:
         except Exception as exc:
             logger.exception("Agent execution failed for %s", instance.instance_id)
             await self.fail(instance.instance_id, error=str(exc))
+        finally:
+            if not stream_task.done():
+                stream_task.cancel()
+                await asyncio.gather(stream_task, return_exceptions=True)
 
     def get_stats(self) -> dict[str, Any]:
         """Return aggregate statistics about managed instances."""

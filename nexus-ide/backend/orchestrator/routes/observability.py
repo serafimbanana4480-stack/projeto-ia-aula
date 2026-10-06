@@ -11,9 +11,10 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
+from backend.middleware.auth import require_auth
 from backend.orchestrator.events import EventBus, OrchestratorEvent
 from backend.orchestrator.registry import build_default_registry
 
@@ -165,7 +166,10 @@ async def agents_topology(request: Request) -> dict[str, Any]:
 
 
 @router.get("/tasks/pipeline")
-async def tasks_pipeline(request: Request) -> dict[str, Any]:
+async def tasks_pipeline(
+    request: Request,
+    _user: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
     """Return current task pipeline state from the orchestration engine."""
     engine = _get_engine(request)
     if engine is None:

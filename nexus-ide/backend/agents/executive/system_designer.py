@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
-from backend.agents.executive.pattern_catalog import PatternCatalog, PatternCategory
+from backend.agents.executive.pattern_catalog import PatternCatalog
 
 
 @dataclass
@@ -132,7 +132,7 @@ class SystemDesigner:
 
         return components
 
-    def get_design(self, design_id: str) -> Optional[SystemDesign]:
+    def get_design(self, design_id: str) -> SystemDesign | None:
         return self._designs.get(design_id)
 
     def add_component(self, design_id: str, component: SystemComponent) -> bool:

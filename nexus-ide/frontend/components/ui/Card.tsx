@@ -60,12 +60,12 @@ export function Card({
       onClick={onClick}
       type={onClick ? "button" : undefined}
       className={[
-        "rounded-xl",
+        "min-w-0 rounded-2xl",
         VARIANT[variant],
         // Specular sheen. Without it a dark fill reads as a hole, not an object.
         "nx-surface",
         PADDING[padding],
-        interactive || onClick ? "nx-lift text-left" : "",
+        interactive || onClick ? "nx-lift text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/70 focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg" : "",
         onClick ? "w-full" : "",
         className,
       ]
@@ -101,15 +101,15 @@ export function CardHeader({
       <div className="flex min-w-0 items-center gap-2.5">
         {icon ? (
           <span
-            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${iconClassName}`}
+            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${iconClassName}`}
           >
             {icon}
           </span>
         ) : null}
         <div className="min-w-0">
-          <h3 className="truncate text-sm font-semibold text-nexus-text">{title}</h3>
+          <h3 className="text-sm font-semibold leading-snug tracking-tight text-nexus-text">{title}</h3>
           {subtitle ? (
-            <p className="truncate text-[11px] text-nexus-muted">{subtitle}</p>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-nexus-muted">{subtitle}</p>
           ) : null}
         </div>
       </div>
@@ -135,7 +135,7 @@ export function CardStat({
   hint?: string;
 }) {
   return (
-    <div className="nx-inset rounded-lg px-2.5 py-2" title={hint}>
+    <div className="min-w-0 rounded-xl bg-nexus-bg/40 px-3 py-2.5" title={hint}>
       <div className="text-[10px] uppercase tracking-wider text-nexus-faint">{label}</div>
       <div className="mt-0.5 truncate text-[13px] font-semibold tabular-nums text-nexus-text">
         {value}
@@ -153,7 +153,7 @@ export function CardEmpty({
   icon?: ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-dashed border-nexus-border/70 bg-nexus-bg/30 px-3 py-3 text-[11px] text-nexus-muted">
+    <div className="flex items-center gap-2.5 rounded-xl bg-nexus-bg/35 px-3.5 py-3.5 text-xs leading-relaxed text-nexus-muted">
       {icon}
       <span className="min-w-0">{children}</span>
     </div>

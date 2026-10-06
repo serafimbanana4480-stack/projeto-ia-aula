@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -45,7 +45,7 @@ class DeployResult:
     duration_seconds: float = 0.0
     health_check_passed: bool = False
     error_message: str = ""
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     @property
     def success(self) -> bool:
@@ -292,7 +292,7 @@ class PostDeployMonitor:
         }
 
         num_intervals = max(1, self._config.monitor_duration_seconds // self._config.health_check_interval_seconds)
-        for i in range(min(num_intervals, 10)):  # Limit iterations for simulation
+        for _i in range(min(num_intervals, 10)):  # Limit iterations for simulation
             time.sleep(0.02)  # Simulate
             healthy = True  # Simulated
             if healthy:
@@ -346,7 +346,7 @@ class RollbackManager:
             "project": project_name,
             "version": version,
             "reason": reason,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
         self._rollback_history.append(entry)
 

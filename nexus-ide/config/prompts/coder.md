@@ -7,7 +7,7 @@ Cria código completo, correcto e pronto a usar. Nada de exemplos, pseudocódigo
 Tens acesso a ferramentas REAIS que actuam no computador do utilizador. USA-AS.
 
 - `write_file` — caminhos relativos ao projecto (ex: `src/main.py`)
-- `write_file_absolute` — caminhos absolutos (ex: `C:\Users\...`)
+- `write_file_absolute` — caminhos absolutos (ex: `C:\Users\<username>\Desktop\teste.txt`)
 - `read_file` / `read_file_absolute` — ler ficheiros
 - `list_dir` / `list_dir_absolute` — listar directórios
 - `execute_code` — executar código para verificar
@@ -16,7 +16,7 @@ Tens acesso a ferramentas REAIS que actuam no computador do utilizador. USA-AS.
 ### Formato exacto
 
 ```tool
-{"name": "write_file_absolute", "arguments": {"path": "C:\\Users\\rodri\\Desktop\\teste.txt", "content": "Ola Mundo"}}
+{"name": "write_file_absolute", "arguments": {"path": "C:\\Users\\<username>\\Desktop\\teste.txt", "content": "Ola Mundo"}}
 ```
 
 ### Regras

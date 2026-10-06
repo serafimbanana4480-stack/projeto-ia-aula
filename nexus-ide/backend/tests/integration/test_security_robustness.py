@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
 from backend.orchestrator.agent_communication_bus import AgentCommunicationBus, AgentMessage
-from backend.orchestrator.self_improvement_loop import SelfImprovementLoop, PerformanceMetric
-from backend.orchestrator.agent_topology import AgentTopology, AgentNode, AgentEdge
+from backend.orchestrator.agent_topology import AgentEdge, AgentNode, AgentTopology
+from backend.orchestrator.self_improvement_loop import PerformanceMetric, SelfImprovementLoop
 
 
 class TestSecurityRobustness:

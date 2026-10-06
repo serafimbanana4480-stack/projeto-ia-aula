@@ -16,7 +16,11 @@ interface CircuitBreakerState {
 }
 
 interface ProviderInfo {
-  healthy?: boolean;
+  healthy?: boolean | null;
+  status?: string;
+  health_basis?: string;
+  runtime_observed?: boolean;
+  simulation?: boolean;
   latency?: number;
   last_check?: number;
   request_count?: number;
@@ -44,13 +48,26 @@ export function getStatusInfo(info: ProviderInfo): { tone: StatusTone; label: st
   const cb = info.circuit_breaker;
 
   if (cb?.state === "open") return { tone: "danger", label: "Indisponível (circuito aberto)" };
+  if (info.simulation === true) return { tone: "warning", label: "Simulação" };
   if (cb?.state === "half_open") return { tone: "warning", label: "Degradado (a recuperar)" };
-  if (info.healthy === false) return { tone: "danger", label: "Indisponível" };
+  if (info.status === "unavailable" || info.healthy === false) {
+    return { tone: "danger", label: "Indisponível" };
+  }
+
+  const eligibilityOnly =
+    info.status === "unknown" ||
+    info.health_basis === "eligibility" ||
+    info.health_basis === "eligibility_only" ||
+    info.runtime_observed === false;
+  if (eligibilityOnly) return { tone: "warning", label: "Não verificado" };
+
+  const runtimeObserved =
+    info.runtime_observed === true ||
+    (typeof info.request_count === "number" && info.request_count > 0) ||
+    (typeof info.last_check === "number" && info.last_check > 0);
+  if (!runtimeObserved) return { tone: "warning", label: "Não verificado" };
 
   const sr = info.success_rate;
-  if (info.healthy !== true && sr == null) {
-    return { tone: "warning", label: "Não verificado" };
-  }
   if (sr != null && sr < 0.5) return { tone: "warning", label: "Degradado" };
 
   return { tone: "success", label: "Saudável" };
@@ -76,28 +93,13 @@ function formatTime(ts: number | undefined): string {
   return `há ${(diff / 3600).toFixed(1)}h`;
 }
 
-function getProviderIcon(name: string): string {
-  const lower = name.toLowerCase();
-  if (lower.includes("ollama")) return "🦙";
-  if (lower.includes("openai") || lower.includes("gpt")) return "🤖";
-  if (lower.includes("anthropic") || lower.includes("claude")) return "🧠";
-  if (lower.includes("gemini")) return "🔮";
-  if (lower.includes("deepseek")) return "🧊";
-  if (lower.includes("groq")) return "⚡";
-  if (lower.includes("kimi")) return "🌙";
-  if (lower.includes("openrouter")) return "🔗";
-  if (lower.includes("airllm")) return "🫧";
-  if (lower.includes("mock") || lower.includes("dev")) return "🧪";
-  return "☁️";
-}
-
 function WidgetShell({ children }: { children: ReactNode }) {
   return (
-    <Surface elevation={2} padding="md">
+    <Surface elevation={1} padding="md" className="nx-dashboard-widget h-full">
       <SurfaceHeader
         icon={<Cpu className="h-4 w-4" />}
-        title="Estado dos Providers"
-        subtitle="LLM providers e circuit breakers"
+        title="Providers de IA"
+        subtitle="Disponibilidade observada e proteção de chamadas"
       />
       {children}
     </Surface>
@@ -192,12 +194,12 @@ export default function ProviderStatusWidget() {
   }
 
   return (
-    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-      <Surface elevation={2} padding="md">
+    <motion.div className="h-full" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+      <Surface elevation={1} padding="md" className="nx-dashboard-widget h-full">
         <SurfaceHeader
           icon={<Cpu className="h-4 w-4" />}
-          title="Estado dos Providers"
-          subtitle="LLM providers e circuit breakers"
+          title="Providers de IA"
+          subtitle="Disponibilidade observada e proteção de chamadas"
           action={
             <button
               type="button"
@@ -207,7 +209,7 @@ export default function ProviderStatusWidget() {
               }}
               aria-label="Atualizar estado dos providers"
               title="Atualizar"
-              className="flex h-7 w-7 items-center justify-center rounded-lg text-nexus-faint transition-colors hover:bg-white/[0.06] hover:text-[var(--nx-accent-bright)]"
+              className="flex h-9 w-9 items-center justify-center rounded-lg border border-nexus-border/60 text-nexus-muted transition-colors hover:bg-nexus-card hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent"
             >
               <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
             </button>
@@ -223,20 +225,20 @@ export default function ProviderStatusWidget() {
             return (
               <motion.div key={name} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}>
                 <Surface elevation={0} padding="sm" tone={status.tone}>
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex min-w-0 items-center gap-2">
-                      <span className="text-base" role="img" aria-hidden="true">
-                        {getProviderIcon(name)}
+                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-nexus-border/60 bg-nexus-card font-mono text-[10px] font-semibold uppercase text-nexus-muted" aria-hidden="true">
+                        {name.slice(0, 2)}
                       </span>
-                      <span className="truncate text-xs font-semibold text-nexus-text" title={name}>
+                      <span className="truncate text-[13px] font-semibold text-nexus-text" title={name}>
                         {name}
                       </span>
-                      <StatusDot tone={status.tone} pulse={status.tone !== "success"} label={status.label} />
+                      <StatusDot tone={status.tone} label={status.label} />
                     </div>
                     <Badge tone={status.tone}>{status.label}</Badge>
                   </div>
 
-                  <div className="mt-2.5 grid grid-cols-3 gap-2 text-[10px] text-nexus-muted">
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-nexus-muted">
                     <div className="flex min-w-0 items-center gap-1" title="Latência">
                       <Activity className="h-3 w-3 shrink-0" />
                       <span className="truncate tabular-nums">{formatLatency(info.latency)}</span>
@@ -262,7 +264,7 @@ export default function ProviderStatusWidget() {
 
                   {/* Circuit breaker state */}
                   {cb && (
-                    <div className="mt-2 flex items-center gap-2 text-[10px]">
+                    <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-nexus-border/50 pt-2 text-[11px]">
                       <span className="text-nexus-faint">Disjuntor:</span>
                       <Badge tone={cb.state === "closed" ? "success" : cb.state === "half_open" ? "warning" : "danger"}>
                         {CB_STATE_LABEL[cb.state]}

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 
 class PatternCategory(str, Enum):
@@ -113,7 +113,7 @@ class PatternCatalog:
     def add_pattern(self, pattern: DesignPattern) -> None:
         self._patterns[pattern.pattern_id] = pattern
 
-    def get_pattern(self, pattern_id: str) -> Optional[DesignPattern]:
+    def get_pattern(self, pattern_id: str) -> DesignPattern | None:
         return self._patterns.get(pattern_id)
 
     def search(self, query: str, category: PatternCategory | None = None) -> list[DesignPattern]:

@@ -5,19 +5,85 @@
 #
 # Each action MAY include:
 #   tool:                     (required) tool name in backend/tools/registry
-#   example_args:             (required) JSON example args for the tool
-#   when_to_use:              (optional) 1-sentence hint for the LLM
+#   example_args:             (required) JSON example args for the tool.
+#                             Parsed ONCE into a dict at load time; a malformed
+#                             value is logged as an error and kept verbatim.
+#   when_to_use:              (optional) 1-sentence hint for the LLM. This is
+#                             merged with the tool's own ToolSpec.description
+#                             into the native function-calling `description`
+#                             (see AgentBase._merge_tool_description), so write
+#                             it as "when do I reach for THIS tool rather than
+#                             its neighbour", not as a restatement of the tool.
 #   risk_level:               (optional) "low" | "medium" | "high"
 #   requires_confirmation:    (optional) bool — if true, user must confirm
 #   tags:                     (optional) list of tags for filtering
 #   examples:                 (optional) list of example invocations
+#
+# ---------------------------------------------------------------------------
+# TOOL-SURFACE CONSOLIDATION PROPOSAL (analysis only — no code changed)
+# ---------------------------------------------------------------------------
+# 139 tools are registered in backend/tools/registry.py, but a model can only
+# reach a tool through this file: 63 actions map to 56 distinct tools. The
+# duplicates below are therefore of two very different kinds.
+#
+# A) CO-ADVERTISED — the same model sees both tools at once. This is what
+#    measurably degrades tool selection. Highest priority, and the `when_to_use`
+#    prose below has already been sharpened for each of them.
+#
+#    group                     canonical    duplicates to deprecate
+#    -----------------------   ----------   ---------------------------
+#    web lookup                web_search   search_docs, deep_research,
+#                                         fetch_url, search_github
+#    code execution            execute_code run_shell (keep run_shell for
+#                                         build/test/CLI only)
+#    code search               search_codebase  search_symbols,
+#                                         mcp_project_context
+#    project info              mcp_project_context  (get_project_summary and
+#                                         mcp_project_status are NOT in this
+#                                         file — invisible to agents today)
+#
+#    Deprecation path for all four: (1) the duplicate stops being mapped here
+#    (one-line change, zero code risk); (2) one release later the tool is marked
+#    ``enabled = False`` in backend/tools/registry.py so no caller can reach it;
+#    (3) the tool is moved to archive/. Never delete a tool — AGENTS.md rule 1.
+#
+# B) REGISTERED BUT UNREACHABLE — registered and callable, yet no agent
+#    advertises them, so they add zero prompt noise today. They are not a
+#    selection problem; they are a maintenance and MCP-export problem (the MCP
+#    server in backend/mcp/nexus_server.py exports a safe subset of the whole
+#    registry, so these DO reach external MCP clients).
+#
+#    web v1/v2      web_search, fetch_url          | search_web_v2,
+#                   (canonical)                     fetch_content_v2,
+#                                                   search_and_answer
+#    code exec      execute_code, run_shell       | run_python_script,
+#                                                   execute_shell,
+#                                                   execute_python
+#    filesystem     file_ops.py (8 tools)        | directory_tools.py (6),
+#                                                   file_manager.py
+#    git            git_tools.py                  | git_auto_commit.py
+#    memory         memory_tools (recall/store)   | knowledge_tools,
+#                                                   profile_tools
+#    thinking       sequential_thinking           | mcp_sequential_thinking
+#    project info   mcp_project_context           | get_project_summary,
+#                                                   mcp_project_status
+#    test gen       run_tests                     | test_generator.py
+#                                                   (generate_tests)
+#    vision         analyze_image                 | analyze_screenshot,
+#                                                   compare_images
+#
+#    Proposed canonical set (one tool per job): web_search + fetch_url;
+#    execute_code + run_shell; file_ops.py; git_tools.py; memory_tools.py;
+#    sequential_thinking; mcp_project_context; run_tests; analyze_image.
+#    Everything else becomes an alias, then is retired per the path above.
+# ---------------------------------------------------------------------------
 
 actions:
   # --- File operations ---
   READ_FILE:
     tool: read_file
     example_args: '{"path": "backend/main.py"}'
-    when_to_use: "When you need to inspect the contents of an existing file in the project."
+    when_to_use: "Read a file INSIDE the project (path is relative to the project root). For anything outside it use read_file_absolute."
     risk_level: "low"
     tags: ["file", "read", "fs"]
     examples:
@@ -26,7 +92,7 @@ actions:
   WRITE_FILE:
     tool: write_file
     example_args: '{"path": "src/utils.py", "content": "def hello():\n    pass"}'
-    when_to_use: "When you need to create a new file or modify an existing one within the project."
+    when_to_use: "The normal write: create or overwrite a file INSIDE the project (path relative to the project root). Read it first if it already exists."
     risk_level: "medium"
     requires_confirmation: false
     tags: ["file", "write", "fs"]
@@ -36,26 +102,26 @@ actions:
   WRITE_FILE_ABSOLUTE:
     tool: write_file_absolute
     example_args: '{"path": "/etc/hosts", "content": ""}'
-    when_to_use: "When you need to write to an absolute path outside the project (use with care)."
+    when_to_use: "Write at an absolute path OUTSIDE the project. High risk and confirmed by the user — never use it for project files, use write_file."
     risk_level: "high"
     requires_confirmation: true
     tags: ["file", "write", "fs", "absolute"]
   READ_FILE_ABSOLUTE:
     tool: read_file_absolute
     example_args: '{"path": "/etc/nginx/nginx.conf"}'
-    when_to_use: "When you need to read a file at an absolute path (e.g. system config)."
+    when_to_use: "Read a file at an absolute path outside the project (system config, another checkout). For project files use read_file."
     risk_level: "medium"
     tags: ["file", "read", "fs", "absolute"]
   LIST_DIR:
     tool: list_dir
     example_args: '{"path": "backend/"}'
-    when_to_use: "When you need to see what files exist in a project directory."
+    when_to_use: "List a project directory (path relative to the project root) to see what exists before reading. For paths outside the project use list_dir_absolute."
     risk_level: "low"
     tags: ["file", "list", "fs"]
   LIST_DIR_ABSOLUTE:
     tool: list_dir_absolute
     example_args: '{"path": "/var/log/"}'
-    when_to_use: "When you need to list an absolute directory path (e.g. system logs)."
+    when_to_use: "List an absolute directory OUTSIDE the project (e.g. system logs). For project directories use list_dir."
     risk_level: "medium"
     tags: ["file", "list", "fs", "absolute"]
 
@@ -63,7 +129,7 @@ actions:
   EXECUTE_CODE:
     tool: execute_code
     example_args: '{"code": "print(2 + 2)", "language": "python"}'
-    when_to_use: "When you need to run a code snippet to verify behavior or compute something."
+    when_to_use: "Run a short snippet in the sandbox to compute a value or check behaviour. Prefer this over run_shell for anything expressible as code."
     risk_level: "medium"
     tags: ["code", "exec", "sandbox"]
     examples:
@@ -72,7 +138,7 @@ actions:
   RUN_SHELL:
     tool: run_shell
     example_args: '{"command": "git status --short", "project_path": "."}'
-    when_to_use: "When you need to run a project command, inspect logs, or reproduce a failure in the real workspace."
+    when_to_use: "Run an allow-listed project command (git, npm, pytest, docker, pip) in the workspace, for build/test/CLI work. To compute a value use execute_code; to read a file use read_file."
     risk_level: "medium"
     tags: ["code", "shell", "debug"]
 
@@ -80,19 +146,19 @@ actions:
   SEARCH_CODEBASE:
     tool: search_codebase
     example_args: '{"query": "authentication middleware", "project_path": "."}'
-    when_to_use: "When you need to find semantically similar code in the project (uses embeddings)."
+    when_to_use: "Semantic search over the indexed project: finds code by MEANING when you do not know the name. If you know the name, use search_symbols — it is exact and faster."
     risk_level: "low"
     tags: ["code", "search", "embedding"]
   SEARCH_SYMBOLS:
     tool: search_symbols
     example_args: '{"query": "authenticate", "kind": "function"}'
-    when_to_use: "When you need to find a function, class, or variable by name."
+    when_to_use: "Find a definition by EXACT name (function, class, variable). Use search_codebase instead when the name is unknown or approximate."
     risk_level: "low"
     tags: ["code", "search", "symbol"]
   INDEX_SYMBOLS:
     tool: index_symbols
     example_args: '{"project_path": ".", "force_reindex": false}'
-    when_to_use: "When you need to (re)build the symbol index for fast symbol lookups."
+    when_to_use: "Rebuild the symbol index so search_symbols stays accurate. Only after adding or renaming many symbols — never as a way to find something."
     risk_level: "low"
     tags: ["code", "index"]
 
@@ -100,31 +166,31 @@ actions:
   SEARCH_WEB:
     tool: web_search
     example_args: '{"query": "FastAPI authentication best practices"}'
-    when_to_use: "When you need to search the web for current information."
+    when_to_use: "Canonical open-web search for current facts (releases, incidents, versions, anything not in the repo). For a named library's official docs use search_docs; for a broad multi-source question use deep_research."
     risk_level: "low"
     tags: ["web", "search"]
   FETCH_URL:
     tool: fetch_url
     example_args: '{"url": "https://fastapi.tiangolo.com/tutorial/"}'
-    when_to_use: "When you need to fetch and summarise content from a specific URL."
+    when_to_use: "Fetch and extract ONE url you already have (a page you were given, a link you found, a spec). To discover addresses use web_search, not this."
     risk_level: "low"
     tags: ["web", "fetch"]
   SEARCH_GITHUB:
     tool: search_github
     example_args: '{"query": "rust web framework", "language": "rust", "stars_min": 100}'
-    when_to_use: "When you need to find open-source projects on GitHub matching criteria."
+    when_to_use: "Find real repositories on GitHub — library choice, prior art, reference implementations. Filter by language/stars; not for reading a url you already have."
     risk_level: "low"
     tags: ["web", "github", "search"]
   SEARCH_DOCS:
     tool: search_docs
     example_args: '{"query": "authentication", "framework": "fastapi"}'
-    when_to_use: "When you need to search the official documentation of a framework."
+    when_to_use: "Search ONE named framework's official documentation (fastapi, react, docker). Prefer this over web_search for API and usage questions about a specific library."
     risk_level: "low"
     tags: ["web", "docs", "search"]
   DEEP_RESEARCH:
     tool: deep_research
     example_args: '{"query": "state of vector databases 2026", "max_results": 5}'
-    when_to_use: "When you need a comprehensive research report on a topic from multiple sources."
+    when_to_use: "Multi-source research synthesis for a broad open question; reads several sources and returns a cited answer. Slow and expensive — not for a single lookup, use web_search."
     risk_level: "low"
     tags: ["web", "research", "deep"]
   API_REQUEST:
@@ -141,19 +207,19 @@ actions:
   CONSULT_AGENT:
     tool: consult_agent
     example_args: '{"agent": "ARCHITECT", "question": "How should I structure the auth module?"}'
-    when_to_use: "When you need an expert opinion from a specialist agent (e.g. ARCHITECT, DEBUGGER)."
+    when_to_use: "Ask another NEXUS specialist for judgement you cannot form yourself (ARCHITECT for design, DEBUGGER for a failing test, RESEARCHER for external facts). It costs a full turn — try your own tools first."
     risk_level: "low"
     tags: ["agent", "consult", "a2a"]
   SPAWN_TASK:
     tool: spawn_task
     example_args: '{"name": "Run focused verification", "description": "Execute the affected tests and report failures", "agent": "DEBUGGER", "depends_on": []}'
-    when_to_use: "When an independent follow-up task is required and can be scheduled by the orchestrator."
+    when_to_use: "Hand an independent, well-specified follow-up to the orchestrator to schedule. Use only when the work does not depend on your current result; otherwise just do it."
     risk_level: "low"
     tags: ["agent", "task", "spawn"]
   READ_DOCS:
     tool: read_file
     example_args: '{"path": "docs/auth.md"}'
-    when_to_use: "When you need to read project documentation files."
+    when_to_use: "Read a documentation file (docs/, README, ADRs, specs) as a first-class source of intent — the spec is the contract the code is measured against."
     risk_level: "low"
     tags: ["doc", "read"]
 
@@ -161,13 +227,13 @@ actions:
   RECALL_CONTEXT:
     tool: recall_context
     example_args: '{"query": "user prefers dark mode", "session_id": "sess-123"}'
-    when_to_use: "When you need to remember a fact or context from a previous conversation."
+    when_to_use: "READ a fact stored in an earlier session (decisions, preferences, prior findings). Read-only; to save something use store_memory."
     risk_level: "low"
     tags: ["memory", "recall", "context"]
   STORE_MEMORY:
     tool: store_memory
     example_args: '{"content": "User is working on NEXUS IDE v2", "memory_type": "project", "tags": "context,project"}'
-    when_to_use: "When you need to save a fact, preference, or project context for future sessions."
+    when_to_use: "WRITE a durable fact, decision or convention for future sessions. Only for things that will still matter later; to read one back use recall_context."
     risk_level: "low"
     tags: ["memory", "store", "context"]
 
@@ -175,7 +241,7 @@ actions:
   MCP_PROJECT_CONTEXT:
     tool: mcp_project_context
     example_args: '{"task": "Find the symbols and dependencies relevant to this change", "token_budget": 1200}'
-    when_to_use: "When a bounded semantic map can replace reading large source files before a code change."
+    when_to_use: "Bounded semantic map of the symbols and dependencies around a task — cheaper than reading large files before a change. For orientation only: read any file you are about to modify. To find code by meaning use search_codebase."
     risk_level: "low"
     tags: ["mcp", "projectmind", "semantic", "read"]
   MCP_IMPACT_ANALYSIS:
@@ -184,24 +250,128 @@ actions:
     when_to_use: "Before changing a shared symbol or applying a broad diff, to estimate affected dependants."
     risk_level: "low"
     tags: ["mcp", "projectmind", "impact", "read"]
+  MCP_LIST_TOOLS:
+    tool: mcp_list_tools
+    example_args: '{"connector_id": "mcp_..."}'
+    when_to_use: "Discover the live tools and input schemas on validated MCP connectors. Omit connector_id to list every validated connector; pass one to see its tools."
+    risk_level: "low"
+    tags: ["mcp", "discovery", "read"]
+  MCP_RECOMMEND_TOOLS:
+    tool: mcp_recommend_tools
+    example_args: '{"task": "Find API documentation and inspect a repository"}'
+    when_to_use: "Rank validated MCP tools for the current task before selecting a connector."
+    risk_level: "low"
+    tags: ["mcp", "discovery", "recommendation"]
+  MCP_CALL_READONLY_TOOL:
+    tool: mcp_call_readonly_tool
+    example_args: '{"connector_id": "mcp_...", "tool_name": "search", "arguments": {}}'
+    when_to_use: "Call a read-only MCP tool without repeated confirmation only after its current schema was explicitly approved in the Control Center."
+    risk_level: "low"
+    tags: ["mcp", "read"]
+  MCP_CALL_TOOL:
+    tool: mcp_call_tool
+    example_args: '{"connector_id": "mcp_...", "tool_name": "create_issue", "arguments": {}}'
+    when_to_use: "Call an MCP tool that writes, sends, executes, or has unknown effects; the approval gate remains active."
+    risk_level: "high"
+    requires_confirmation: true
+    tags: ["mcp", "write", "external"]
+  MCP_BUILDER:
+    tool: mcp_builder
+    example_args: '{"description": "Create tools to search and read issues", "base_url": "https://api.example.com"}'
+    when_to_use: "Create a REST MCP when no validated connector covers the user's task; generated tests and protocol handshake must pass before activation."
+    risk_level: "high"
+    requires_confirmation: true
+    tags: ["mcp", "builder", "integration"]
   MCP_SEQUENTIAL_THINKING:
     tool: mcp_sequential_thinking
     example_args: '{"thought": "Compare the architecture options", "thought_number": 1, "total_thoughts": 3, "complexity": 8, "architecture": true}'
-    when_to_use: "Only for complexity >= 7, architecture work, two failed debugging attempts, or confidence < 0.7."
+    when_to_use: "Deliberate step-by-step reasoning for architecture-scale problems only (complexity >= 7, design work, two failed debugging attempts, confidence < 0.7). Heavier than sequential_thinking — do not use it for ordinary questions."
     risk_level: "low"
     tags: ["mcp", "sequential-thinking", "reasoning"]
+
+  # --- Planning / persistent todo list ---
+  TODO_WRITE:
+    tool: todo_write
+    example_args: '{"operation": "add", "content": "Corrigir o bug do login", "priority": "high", "session_id": "sess-123"}'
+    when_to_use: "When planning or updating the persistent task list: add, update, set_all, remove, clear."
+    risk_level: "low"
+    tags: ["plan", "todo", "task"]
+  TODO_LIST:
+    tool: todo_list
+    example_args: '{"session_id": "sess-123"}'
+    when_to_use: "When you need to recall the current plan or check what is still pending."
+    risk_level: "low"
+    tags: ["plan", "todo", "task"]
+
+  # --- Skills (project playbooks) ---
+  LIST_SKILLS:
+    tool: list_skills
+    example_args: '{}'
+    when_to_use: "When you want to see which project playbooks (skills) are available to load."
+    risk_level: "low"
+    tags: ["skills", "docs"]
+  LOAD_SKILL:
+    tool: load_skill
+    example_args: '{"name": "nexus-backend"}'
+    when_to_use: "When a listed skill matches the current task area and you need its playbook."
+    risk_level: "low"
+    tags: ["skills", "docs"]
+  DISCOVER_SKILL_CANDIDATES:
+    tool: discover_skill_candidates
+    example_args: '{"limit": 5}'
+    when_to_use: "When the user asks to find reusable workflows in successful past tasks. Candidates remain inert until reviewed."
+    risk_level: "medium"
+    tags: ["skills", "memory", "experience"]
+  BUILD_SKILL:
+    tool: build_skill
+    example_args: '{"request": "Quero uma skill para fazer auditorias completas de projetos Python"}'
+    when_to_use: "Only when the user asks to create a reusable skill or capture verified experience."
+    risk_level: "medium"
+    tags: ["skills", "knowledge", "memory"]
+
+  # --- Reasoning / long sessions ---
+  SEQUENTIAL_THINKING:
+    tool: sequential_thinking
+    example_args: '{"thought": "Break the bug into steps", "thought_number": 1, "total_thoughts": 3, "session_id": "sess-123"}'
+    when_to_use: "Work through a complex problem in explicit steps before acting — a large refactor, or a bug that already resisted two attempts. Not for simple questions; not for architecture-scale work (use mcp_sequential_thinking)."
+    risk_level: "low"
+    tags: ["reasoning", "thinking"]
+  PAUSE_SESSION:
+    tool: pause_session
+    example_args: '{"session_id": "sess-123", "reason": "Awaiting user input"}'
+    when_to_use: "When the session must be paused (mode 'paused', active runs interrupted)."
+    risk_level: "medium"
+    tags: ["session", "lifecycle"]
+  RESUME_SESSION:
+    tool: resume_session
+    example_args: '{"session_id": "sess-123", "mode": "auto"}'
+    when_to_use: "When a paused session should continue processing."
+    risk_level: "low"
+    tags: ["session", "lifecycle"]
+  GET_SESSION_STATUS:
+    tool: get_session_status
+    example_args: '{"session_id": "sess-123"}'
+    when_to_use: "When you need to inspect session health, message count, and recent runs."
+    risk_level: "low"
+    tags: ["session", "inspect"]
+  CANCEL_RUN:
+    tool: cancel_run
+    example_args: '{"run_id": "run-abc", "reason": "No longer needed"}'
+    when_to_use: "When a specific run is stuck or no longer needed and must be stopped."
+    risk_level: "medium"
+    tags: ["session", "cancel", "run"]
 
   # --- Data / reports ---
   ANALYZE_DATA:
     tool: data_analysis
     example_args: '{"data_path": "data/sales.csv", "query": "What are the top 3 products?"}'
-    when_to_use: "When you need to analyse a CSV/JSON file with statistics."
+    when_to_use: "Compute statistics over a CSV/JSON file that exists in the project. Reads the file only — it does not fetch, scrape or write anything."
     risk_level: "low"
     tags: ["data", "analysis"]
   GENERATE_REPORT:
     tool: report_generation
     example_args: '{"title": "Q4 Performance", "sections": "[{\"name\": \"Overview\", \"content\": \"...\"}]"}'
-    when_to_use: "When you need to generate a structured report (markdown/HTML/text)."
+    when_to_use: "Render an already-decided report (title + sections) to markdown/HTML/text. You supply the content; it only formats it."
     risk_level: "low"
     tags: ["report", "doc"]
 
@@ -315,24 +485,24 @@ actions:
   RUN_TESTS:
     tool: run_tests
     example_args: '{"test_path": "backend/tests", "coverage": true}'
-    when_to_use: "When you need to run pytest and get structured test results."
+    when_to_use: "Execute the pytest suite (optionally with coverage) and get structured results. This is the verification evidence for any 'it works' claim — use it after changing code."
     risk_level: "low"
     tags: ["test", "pytest", "quality"]
   RUN_LINT:
     tool: run_lint
     example_args: '{"path": "backend/", "fix": false}'
-    when_to_use: "When you need to run ruff linter on code."
+    when_to_use: "Run the ruff linter over a path (optionally with --fix) for style and static lint findings. For type errors use type_check; for behaviour use run_tests."
     risk_level: "low"
     tags: ["quality", "lint"]
   FORMAT_CODE:
     tool: format_code
     example_args: '{"path": "backend/", "check": true}'
-    when_to_use: "When you need to run ruff formatter (or just check if code is formatted)."
+    when_to_use: "Run the ruff formatter over a path, or check-only mode. Formatting only — it changes no behaviour and finds no bugs."
     risk_level: "low"
     tags: ["quality", "format"]
   TYPE_CHECK:
     tool: type_check
     example_args: '{"path": "backend/", "strict": false}'
-    when_to_use: "When you need to run mypy type checker (best-effort)."
+    when_to_use: "Run the mypy type checker over a path for type errors the linter does not report. Best-effort; a clean run is not proof of correctness."
     risk_level: "low"
     tags: ["quality", "type", "mypy"]

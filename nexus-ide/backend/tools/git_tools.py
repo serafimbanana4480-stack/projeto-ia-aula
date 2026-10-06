@@ -3,13 +3,17 @@
 Provides read-only git operations and safe write operations (commit, stash)
 so agents can work with version control without destructive operations.
 
-DANGEROUS operations (push, force-push, reset --hard, clean) are blocked.
+DANGEROUS operations (force-push, reset --hard, clean) are blocked. Normal push
+requires the tool registry's explicit high-risk confirmation gate.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from backend.tools.registry import ToolSpec, register_tool
@@ -18,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 # Blocked git commands that could cause data loss
 _BLOCKED_COMMANDS = {
-    "push",
     "pushf",
     "push-force",
     "force-push",
@@ -26,14 +29,12 @@ _BLOCKED_COMMANDS = {
     "reset-hard",
     "clean",
     "checkout",
-    "branch-d",
-    "branch-D",
     "branch-delete",
     "rebase",
     "cherry-pick",
 }
 
-# Allowed safe git commands
+# Explicitly allowed Git subcommands. Mutating calls remain confirmation-gated.
 _SAFE_COMMANDS = {
     "status",
     "diff",
@@ -43,6 +44,9 @@ _SAFE_COMMANDS = {
     "branch",
     "tag",
     "remote",
+    "rev-parse",
+    "pull",
+    "push",
     "stash",
     "add",
     "commit",
@@ -50,12 +54,21 @@ _SAFE_COMMANDS = {
 }
 
 
-def _validate_git_command(command: str) -> tuple[bool, str]:
+def _split_git_command(command: str | Sequence[str]) -> list[str]:
+    if isinstance(command, str):
+        return shlex.split(command, posix=True)
+    return [str(part) for part in command]
+
+
+def _validate_git_command(command: str | Sequence[str]) -> tuple[bool, str]:
     """Validate that a git command is safe to execute.
 
     Returns (is_safe, reason).
     """
-    parts = command.strip().split()
+    try:
+        parts = _split_git_command(command)
+    except ValueError:
+        return False, "Command contains malformed quoting"
     if not parts or parts[0] != "git":
         return False, "Command must start with 'git'"
 
@@ -69,29 +82,55 @@ def _validate_git_command(command: str) -> tuple[bool, str]:
         return False, f"Git '{subcmd}' is blocked for safety"
 
     # Block dangerous flags
-    cmd_str = " ".join(parts).lower()
-    dangerous_flags = ["--force", "--hard", "-f", "-D", "--delete"]
-    for flag in dangerous_flags:
-        if flag in cmd_str:
+    dangerous_flags = {"--force", "--hard", "-f", "-d", "--delete", "--mirror"}
+    for flag in parts[2:]:
+        normalized_flag = flag.lower()
+        if (
+            normalized_flag in dangerous_flags
+            or normalized_flag.startswith("--force-")
+            or normalized_flag.startswith("--force=")
+        ):
             return False, f"Git flag '{flag}' is blocked for safety"
 
-    # Allow known safe commands
+    # Allow only explicitly reviewed subcommands. Unknown git commands can
+    # mutate repository state in ways that are not covered by the safety gate.
     if subcmd in _SAFE_COMMANDS:
         return True, ""
 
-    # Allow unknown commands with caution (whitelist approach would be too restrictive)
-    logger.warning("Unusual git command allowed: %s", command)
-    return True, ""
+    logger.warning("Unusual git command blocked: %s", command)
+    return False, f"Git '{subcmd}' is not in the allowed command list"
+
+
+def normalize_git_path(path: str, project_path: str) -> str:
+    """Return a literal path to an existing project file, rejecting path expansion."""
+    if not isinstance(path, str) or not path or "\0" in path:
+        raise ValueError("Git path must be a non-empty string without NUL bytes")
+
+    root = Path(project_path).expanduser().resolve()
+    target = Path(path).expanduser()
+    if not target.is_absolute():
+        target = root / target
+    target = target.resolve(strict=False)
+
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Git path must stay inside the project directory") from exc
+
+    if not target.is_file():
+        raise ValueError("Git path must identify an existing file")
+    return relative.as_posix()
 
 
 async def git_operation(
-    command: str = "git status",
+    command: str | Sequence[str] = "git status",
     project_path: str = ".",
 ) -> dict[str, Any]:
     """Execute a safe git command in the project directory.
 
-    Only read operations and safe write operations (add, commit, stash) are allowed.
-    Dangerous operations (push, force-push, reset --hard, clean) are blocked.
+    Only explicitly reviewed Git subcommands are allowed. Mutating commands are
+    subject to the tool registry's confirmation policy; force-push, reset --hard,
+    clean, and unknown subcommands are blocked.
 
     Args:
         command: The git command to execute (e.g. "git status", "git diff", "git add .").
@@ -106,8 +145,14 @@ async def git_operation(
         return {"error": f"Blocked: {reason}"}
 
     try:
+        argv = _split_git_command(command)
+    except ValueError:
+        return {"error": "Blocked: Command contains malformed quoting"}
+    command_text = command if isinstance(command, str) else shlex.join(argv)
+
+    try:
         proc = await asyncio.create_subprocess_exec(
-            *command.split(),
+            *argv,
             cwd=project_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -121,17 +166,17 @@ async def git_operation(
             return {
                 "exit_code": proc.returncode,
                 "error": errors.strip() or output.strip(),
-                "command": command,
+                "command": command_text,
             }
 
         return {
             "output": output.strip(),
-            "command": command,
+            "command": command_text,
             "exit_code": 0,
         }
 
     except TimeoutError:
-        return {"error": f"Git command timed out: {command}"}
+        return {"error": f"Git command timed out: {command_text}"}
     except FileNotFoundError:
         return {"error": "Git is not installed or not in PATH"}
     except Exception as exc:
@@ -142,38 +187,73 @@ async def git_commit_safe(
     message: str = "auto: changes from NEXUS agent",
     project_path: str = ".",
     add_all: bool = False,
+    paths: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Safely commit changes to git.
+    """Commit Git changes, isolating path-scoped commits from unrelated staged work.
 
-    This is a convenience wrapper that:
-    1. Optionally runs `git add -A` (if add_all=True)
-    2. Runs `git commit -m "<message>"`
-    Does NOT push.
+    When ``add_all`` is false, explicit paths are required. Those literal paths
+    are staged and passed to ``git commit --only`` so other staged changes stay
+    out of the resulting commit. Does NOT push.
+
+    This tool is declared ``risk_level="high"`` and is listed in
+    ``registry._CONFIRMATION_TOOLS``, so every call is held for human approval
+    by the registry — not only ``add_all``.
 
     Args:
         message: Commit message.
         project_path: Path to the project directory.
         add_all: Whether to stage all changes before committing.
+        paths: Exact project-relative or absolute paths when ``add_all`` is false.
 
     Returns:
         Dict with commit result.
     """
-    results = {}
+    results: dict[str, Any] = {}
+
+    if add_all and paths:
+        return {"error": "Specify either add_all or paths, not both."}
+
+    normalized_paths: list[str] = []
+    if not add_all:
+        if not paths:
+            return {"error": "Explicit paths are required when add_all is false."}
+        try:
+            normalized_paths = [normalize_git_path(path, project_path) for path in paths]
+        except (TypeError, ValueError) as exc:
+            return {"error": f"Invalid commit path: {exc}"}
 
     if add_all:
-        add_result = await git_operation("git add -A", project_path)
-        if "error" in add_result and add_result.get("exit_code", 0) != 0:
-            return {"error": f"git add failed: {add_result.get('error', 'unknown')}"}
+        add_result = await git_operation(["git", "add", "-A"], project_path)
+        if "error" in add_result:
+            return {
+                "error": f"git add failed: {add_result.get('error', 'unknown')}",
+                "commit": {"exit_code": 1, "error": add_result.get("error", "unknown")},
+            }
+        results["add"] = add_result.get("output", "staged")
+    else:
+        pathspecs = [f":(literal){path}" for path in normalized_paths]
+        add_result = await git_operation(["git", "add", "--", *pathspecs], project_path)
+        if "error" in add_result:
+            return {
+                "error": f"git add failed: {add_result.get('error', 'unknown')}",
+                "commit": {"exit_code": 1, "error": add_result.get("error", "unknown")},
+            }
         results["add"] = add_result.get("output", "staged")
 
-    # Sanitize commit message (no shell injection)
-    safe_message = message.replace('"', '\\"').replace("`", "").replace("$", "")[:200]
+    # argv passing prevents shell injection; keep normal commit-message characters intact.
+    safe_message = message[:200]
 
-    commit_result = await git_operation(
-        f'git commit -m "{safe_message}"',
-        project_path,
-    )
+    commit_args = ["git", "commit"]
+    if not add_all:
+        commit_args.append("--only")
+    commit_args.extend(["-m", safe_message])
+    if normalized_paths:
+        commit_args.extend(["--", *[f":(literal){path}" for path in normalized_paths]])
+
+    commit_result = await git_operation(commit_args, project_path)
     results["commit"] = commit_result
+    if "error" in commit_result:
+        results["error"] = f"git commit failed: {commit_result['error']}"
 
     return results
 
@@ -183,9 +263,9 @@ register_tool(
         name="git_operation",
         description=(
             "Execute a safe git command in the project directory. "
-            "Read operations (status, diff, log, show, blame) and safe write "
-            "operations (add, commit, stash) are allowed. "
-            "Dangerous operations (push, force-push, reset --hard, clean) are blocked."
+            "Only explicitly allowed subcommands are accepted. Mutating operations "
+            "require tool confirmation; force-push, reset --hard, clean, and "
+            "unknown subcommands are blocked."
         ),
         schema={
             "type": "object",
@@ -209,8 +289,11 @@ register_tool(
     ToolSpec(
         name="git_commit_safe",
         description=(
-            "Safely commit changes to git. Optionally stages all changes first. "
-            "Does NOT push. Use this after modifying files to create a checkpoint."
+            "Commit Git changes. By default, provide exact paths; only those paths are "
+            "staged and committed, leaving other staged work untouched. Set add_all=true "
+            "only for an explicitly approved whole-project commit. Does NOT push. "
+            "Every call requires confirmation (risk_level high) via the registry's "
+            "approval gate."
         ),
         schema={
             "type": "object",
@@ -225,12 +308,24 @@ register_tool(
                 },
                 "add_all": {
                     "type": "boolean",
-                    "description": "Whether to stage all changes before committing",
+                    "description": (
+                        "Whether to stage and commit all changes. This tool always "
+                        "requires confirmation, with or without add_all."
+                    ),
+                },
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Exact project paths to stage and commit when add_all is false",
                 },
             },
             "required": ["message"],
         },
         handler=git_commit_safe,
+        # A commit writes history with no undo. The registry's high-risk gate is
+        # the real control; the explicit level keeps that true even if the
+        # name-based list in _CONFIRMATION_TOOLS is ever pruned.
+        risk_level="high",
     )
 )
 

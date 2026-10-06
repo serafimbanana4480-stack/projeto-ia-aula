@@ -1,16 +1,17 @@
+"""API routes for debate visualization."""
+
 from __future__ import annotations
 
-"""API routes for debate visualization."""
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from typing import Any, Optional
-
 
 from backend.orchestrator.debate_visualizer import DebateVisualizer, Stance
 
 router = APIRouter(prefix="/api/debate", tags=["debate"])
 
-_debate_viz: Optional[DebateVisualizer] = None
+_debate_viz: DebateVisualizer | None = None
 
 
 def set_debate_visualizer(viz: DebateVisualizer) -> None:
@@ -56,7 +57,7 @@ async def add_argument(session_id: str, request: AddArgumentRequest, http_reques
     try:
         stance = Stance(request.stance)
     except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid stance: {request.stance}")
+        raise HTTPException(status_code=400, detail=f"Invalid stance: {request.stance}") from None
     arg = _debate_viz.add_argument(session_id, request.agent_id, stance, request.content, request.confidence)
     if not arg:
         raise HTTPException(status_code=404, detail="Session not found")

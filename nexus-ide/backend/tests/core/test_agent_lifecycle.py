@@ -133,6 +133,46 @@ class TestLifecycleTransitions:
         inst = await manager.resume(iid)
         assert inst.status == AgentInstanceStatus.RUNNING.value
 
+    async def test_pause_holds_stream_at_token_boundary_until_resume(self) -> None:
+        class StreamingAgent:
+            def __init__(self) -> None:
+                self.waiting_for_second = asyncio.Event()
+                self.release_second = asyncio.Event()
+
+            async def run(self, _request: Any):
+                yield "A"
+                self.waiting_for_second.set()
+                await self.release_second.wait()
+                yield "B"
+
+        agent = StreamingAgent()
+
+        class Registry:
+            def get(self, _agent_type: str) -> StreamingAgent:
+                return agent
+
+        manager = AgentLifecycleManager(registry=Registry(), llm_client=object())
+        iid = await manager.spawn("CODER", "stream a result", time_budget_seconds=5)
+        task = manager._tasks[iid]
+        await asyncio.wait_for(agent.waiting_for_second.wait(), timeout=1)
+
+        original_deadline = manager.get_status(iid).deadline  # type: ignore[union-attr]
+        await manager.pause(iid)
+        agent.release_second.set()
+        await asyncio.sleep(0.02)
+
+        instance = manager.get_status(iid)
+        assert instance is not None
+        assert instance.status == AgentInstanceStatus.PAUSED.value
+        assert not task.done()
+        assert "output" not in instance.context
+
+        await manager.resume(iid)
+        await asyncio.wait_for(task, timeout=1)
+        assert instance.status == AgentInstanceStatus.COMPLETED.value
+        assert instance.context["output"] == "AB"
+        assert instance.deadline > original_deadline
+
     async def test_abort(self, manager: AgentLifecycleManager) -> None:
         iid = await manager.spawn("CODER", "Write tests")
         inst = await manager.abort(iid, reason="test abort")
@@ -235,7 +275,7 @@ class TestGarbageCollect:
         iid = await manager.spawn("CODER", "task")
         await manager.complete(iid)
         # Manually backdate completed_at
-        manager._instances[iid].completed_at = asyncio.get_event_loop().time() - 4000
+        manager._instances[iid].completed_at = time.time() - 4000
 
         removed = await manager.garbage_collect()
         assert iid in removed

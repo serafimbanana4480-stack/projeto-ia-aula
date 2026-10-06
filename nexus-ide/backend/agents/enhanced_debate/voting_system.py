@@ -9,7 +9,8 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ class Vote:
         if not 0 <= self.value <= 10:
             raise ValueError(f"Vote value must be 0-10, got {self.value}")
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "agent_id": self.agent_id,
             "value": self.value,
@@ -57,10 +58,10 @@ class VoteResult:
     weighted_average: float
     consensus_reached: bool
     winning_option: str
-    vote_breakdown: Dict[str, float]  # agent_id -> weighted_vote
+    vote_breakdown: dict[str, float]  # agent_id -> weighted_vote
     timestamp: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "weighted_sum": self.weighted_sum,
             "total_weight": self.total_weight,
@@ -82,7 +83,7 @@ class WeightedVotingSystem:
     
     def __init__(
         self,
-        weights_config_path: Optional[str] = None,
+        weights_config_path: str | None = None,
         consensus_threshold: float = 0.7,
         consensus_std_dev_threshold: float = 0.3
     ):
@@ -172,7 +173,7 @@ class WeightedVotingSystem:
     def _load_weights_from_config(self, config_path: str) -> None:
         """Load agent weights from YAML config file."""
         try:
-            with open(config_path, 'r') as f:
+            with open(config_path) as f:
                 config = yaml.safe_load(f)
             
             if 'agent_weights' in config:
@@ -290,9 +291,9 @@ class WeightedVotingSystem:
     
     async def calculate_weighted_vote(
         self,
-        votes: List[Vote],
+        votes: list[Vote],
         decision_type: DecisionType = DecisionType.DEFAULT,
-        options: Optional[List[str]] = None
+        options: list[str] | None = None
     ) -> VoteResult:
         """Calculate weighted voting result.
         
@@ -357,7 +358,7 @@ class WeightedVotingSystem:
     
     def _check_consensus(
         self,
-        votes: List[Vote],
+        votes: list[Vote],
         decision_type: DecisionType
     ) -> bool:
         """Check if consensus is reached.
@@ -391,15 +392,12 @@ class WeightedVotingSystem:
             return True
         
         # Or if weighted average is high (strong agreement)
-        if mean >= 8.0:
-            return True
-        
-        return False
+        return mean >= 8.0
     
     def _determine_winning_option(
         self,
-        votes: List[Vote],
-        options: List[str],
+        votes: list[Vote],
+        options: list[str],
         decision_type: DecisionType
     ) -> str:
         """Determine winning option from multiple choice vote.
@@ -424,7 +422,7 @@ class WeightedVotingSystem:
     
     async def update_weights(
         self,
-        updates: Dict[str, Dict[DecisionType, float]]
+        updates: dict[str, dict[DecisionType, float]]
     ) -> None:
         """Update agent weights.
         
@@ -493,7 +491,7 @@ class WeightedVotingSystem:
         
         return clamped_weight
     
-    def get_all_weights(self) -> Dict[str, Dict[str, float]]:
+    def get_all_weights(self) -> dict[str, dict[str, float]]:
         """Get all agent weights.
         
         Returns:

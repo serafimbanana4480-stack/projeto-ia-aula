@@ -11,13 +11,13 @@ This module provides comprehensive federated learning capabilities:
 
 from .federated_learning import (
     FederatedLearningOrchestrator,
+    FederatedLearningType,
     FederatedModel,
-    LocalModelUpdate,
     FederatedRound,
     LearningAggregation,
-    FederatedLearningType,
+    LocalModelUpdate,
+    ModelType,
     PrivacyLevel,
-    ModelType
 )
 
 __all__ = [

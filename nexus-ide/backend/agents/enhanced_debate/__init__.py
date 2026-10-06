@@ -8,35 +8,35 @@ This module provides an enhanced multi-agent debate system with:
 - Learning loop for continuous improvement
 """
 
+from .evaluator import (
+    DecisionEvaluator,
+    DecisionScore,
+    EvaluationMetric,
+    TaskResult,
+)
+from .learning_loop import (
+    AgentSpecialization,
+    DecisionPattern,
+    LearningLoop,
+    LearningResult,
+    LearningStrategy,
+)
+from .logical_judge import (
+    ClarificationRequest,
+    JudgeDecision,
+    JudgeReasoning,
+    LogicalJudge,
+)
+from .transcriber import (
+    DebateStatus,
+    DebateTranscriber,
+    DebateTranscript,
+)
 from .voting_system import (
     DecisionType,
     Vote,
     VoteResult,
     WeightedVotingSystem,
-)
-from .logical_judge import (
-    JudgeDecision,
-    JudgeReasoning,
-    ClarificationRequest,
-    LogicalJudge,
-)
-from .transcriber import (
-    DebateStatus,
-    DebateTranscript,
-    DebateTranscriber,
-)
-from .evaluator import (
-    EvaluationMetric,
-    TaskResult,
-    DecisionScore,
-    DecisionEvaluator,
-)
-from .learning_loop import (
-    LearningStrategy,
-    DecisionPattern,
-    AgentSpecialization,
-    LearningResult,
-    LearningLoop,
 )
 
 __all__ = [

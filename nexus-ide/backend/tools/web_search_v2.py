@@ -9,7 +9,8 @@ New capabilities over web_search.py v1:
 - Exponential backoff retry
 - GitHub repository search
 - Cached documentation indices for popular frameworks
-- Cross-referenced fact synthesis
+- Lexical overlap reporting across the pages that were actually fetched
+  (no claim extraction, no corroboration claim, no conflict detection)
 """
 
 from __future__ import annotations
@@ -25,8 +26,13 @@ import httpx
 from bs4 import BeautifulSoup
 
 from backend.cache import cache_result
-from backend.config.settings import get_settings
 from backend.tools.registry import ToolSpec, register_tool
+from backend.tools.safe_http import (
+    PublicAddressHTTPTransport,
+    normalize_public_http_url,
+    remote_reader_enabled,
+)
+from backend.tools.search_errors import SearchProviderError, SearchProvidersUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -261,8 +267,11 @@ async def _search_brave(
     recency_days: int | None = None,
 ) -> list[SearchHit]:
     """Search via Brave Search API."""
-    settings = get_settings()
-    api_key = getattr(settings, "brave_api_key", None)
+    # Keep deep research aligned with the Search settings page: UI-saved keys
+    # are encrypted at rest and resolved by the shared runtime credential path.
+    from backend.tools.web_search import get_brave_api_key
+
+    api_key = get_brave_api_key()
     if not api_key:
         return []
 
@@ -284,7 +293,12 @@ async def _search_brave(
     elif recency_days and recency_days <= 365:
         params["freshness"] = "py"  # past year
 
-    async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=FETCH_TIMEOUT,
+        follow_redirects=False,
+        trust_env=False,
+        transport=PublicAddressHTTPTransport(),
+    ) as client:
         try:
             response = await _request_with_retry(client, "GET", url, headers=headers, params=params)
             data = response.json()
@@ -304,10 +318,10 @@ async def _search_brave(
             return hits
         except httpx.HTTPStatusError as exc:
             logger.error("Brave search HTTP error: %s", exc.response.status_code)
-            return []
+            raise SearchProviderError("brave") from exc
         except Exception as exc:
             logger.error("Brave search failed: %s", exc)
-            return []
+            raise SearchProviderError("brave") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +351,12 @@ async def _search_duckduckgo(
         ),
     }
 
-    async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=FETCH_TIMEOUT,
+        follow_redirects=True,
+        trust_env=False,
+        transport=PublicAddressHTTPTransport(),
+    ) as client:
         try:
             response = await _request_with_retry(client, "POST", url, data=data, headers=headers)
             soup = BeautifulSoup(response.text, "html.parser")
@@ -401,7 +420,45 @@ async def _search_duckduckgo(
             return hits
         except Exception as exc:
             logger.error("DuckDuckGo search failed: %s", exc)
-            return []
+            raise SearchProviderError("duckduckgo") from exc
+
+
+async def _search_with_fallback(
+    query: str,
+    max_results: int,
+    site_filter: str | None,
+    recency_days: int | None,
+) -> list[SearchHit]:
+    """Try both providers without converting outages into empty results."""
+    failures: list[str] = []
+    try:
+        hits = await _search_brave(
+            query,
+            max_results=max_results,
+            site_filter=site_filter,
+            recency_days=recency_days,
+        )
+    except SearchProviderError as exc:
+        failures.append(exc.provider)
+        hits = []
+
+    if hits:
+        return hits
+
+    try:
+        fallback_hits = await _search_duckduckgo(
+            query,
+            max_results=max_results,
+            site_filter=site_filter,
+            recency_days=recency_days,
+        )
+    except SearchProviderError as exc:
+        failures.append(exc.provider)
+        raise SearchProvidersUnavailable(failures) from exc
+
+    if failures and not fallback_hits:
+        raise SearchProvidersUnavailable(failures)
+    return fallback_hits
 
 
 # ---------------------------------------------------------------------------
@@ -430,13 +487,12 @@ async def search_web(
     clean_query, site_from_query = _extract_site_filter(query)
     site_filter = site or site_from_query
 
-    hits = await _search_brave(
-        clean_query, max_results=max_results, site_filter=site_filter, recency_days=recency_days
+    hits = await _search_with_fallback(
+        clean_query,
+        max_results=max_results,
+        site_filter=site_filter,
+        recency_days=recency_days,
     )
-    if not hits:
-        hits = await _search_duckduckgo(
-            clean_query, max_results=max_results, site_filter=site_filter, recency_days=recency_days
-        )
 
     hits = _rank_hits(clean_query, hits)
     return {
@@ -533,9 +589,20 @@ def _extract_text_bs4(html: str, base_url: str) -> tuple[str, str, list[str], st
 
 async def _fetch_via_jina(url: str, max_length: int = 500) -> FetchedContent | None:
     """Try fetching via Jina AI Reader API."""
+    if not remote_reader_enabled():
+        return None
+    try:
+        url = normalize_public_http_url(url)
+    except ValueError:
+        return None
     jina_url = f"https://r.jina.ai/{url}"
     try:
-        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=FETCH_TIMEOUT,
+            follow_redirects=False,
+            trust_env=False,
+            transport=PublicAddressHTTPTransport(),
+        ) as client:
             response = await _request_with_retry(client, "GET", jina_url)
             text = response.text
             lines = text.splitlines()
@@ -577,7 +644,13 @@ async def _fetch_via_jina(url: str, max_length: int = 500) -> FetchedContent | N
 async def _fetch_via_httpx(url: str, max_length: int = 500) -> FetchedContent | None:
     """Fallback fetch via httpx + BeautifulSoup."""
     try:
-        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
+        url = normalize_public_http_url(url)
+        async with httpx.AsyncClient(
+            timeout=FETCH_TIMEOUT,
+            follow_redirects=True,
+            trust_env=False,
+            transport=PublicAddressHTTPTransport(),
+        ) as client:
             response = await _request_with_retry(
                 client,
                 "GET",
@@ -610,7 +683,7 @@ async def _fetch_via_httpx(url: str, max_length: int = 500) -> FetchedContent | 
 
 
 @cache_result("fetch_content_v2:", ttl=FETCH_CACHE_TTL)
-async def fetch_and_summarize(url: str, max_length: int = 500) -> dict[str, Any]:
+async def _fetch_and_summarize_cached(url: str, max_length: int = 500) -> dict[str, Any]:
     """Fetch a URL and return a structured summary with title, content, and publish date.
 
     Args:
@@ -652,17 +725,86 @@ async def fetch_and_summarize(url: str, max_length: int = 500) -> dict[str, Any]
     }
 
 
+async def fetch_and_summarize(url: str, max_length: int = 500) -> dict[str, Any]:
+    """Validate the URL before a cached result can bypass network controls."""
+    try:
+        normalized_url = normalize_public_http_url(url)
+    except ValueError as exc:
+        return {
+            "url": str(url)[:2000],
+            "title": "",
+            "summary": f"Error fetching URL: {exc}",
+            "content": "",
+            "published_date": "",
+            "content_length": 0,
+            "extraction_method": "blocked",
+            "links": [],
+            "status": "error",
+        }
+    return await _fetch_and_summarize_cached(normalized_url, max_length=max_length)
+
+
 # ---------------------------------------------------------------------------
 # Search + fetch + synthesize (deep research)
 # ---------------------------------------------------------------------------
 
+NO_RESULTS_ERROR = "No search provider returned hits for this query; no answer was synthesised."
+NO_EVIDENCE_ERROR = (
+    "Search returned hits but every page fetch failed; no answer was synthesised."
+)
+
+_EVIDENCE_TERM_RE = re.compile(r"\b\w{3,}\b")
+_OVERLAP_BASIS = "phrase_overlap_4gram"
+
+
+def _evidence_confidence(query: str, evidence: list[str], attempted: int) -> float:
+    """Return a confidence derived only from the pages that were actually read.
+
+    A search-hit score ranks *candidate* URLs. It says nothing about whether the
+    page exists, is readable, or says anything about the query, so it can never
+    justify a confidence value on its own -- reporting one would let the tool
+    claim high confidence while nothing at all had been retrieved. This function
+    therefore takes the text that came back from the pages, not the hits.
+
+    The value is a retrieval heuristic: the share of query terms the retrieved
+    pages cover, damped by the share of attempted pages that were readable. It
+    is not a measure of corroboration between sources, and it is ``0.0`` when
+    no evidence was retrieved because there is then nothing to be confident
+    about -- the caller is told separately via ``error_category``.
+    """
+    if not evidence:
+        return 0.0
+    q_words = set(_EVIDENCE_TERM_RE.findall(query.lower()))
+    coverages = [
+        (sum(1 for word in q_words if word in text.lower()) / len(q_words)) if q_words else 0.0
+        for text in evidence
+    ]
+    term_coverage = sum(coverages) / len(coverages)
+    retrieval_ratio = len(evidence) / attempted if attempted else 0.0
+    return round(min(1.0, 0.7 * term_coverage + 0.3 * retrieval_ratio), 2)
+
 
 def _cross_reference_facts(summaries: list[dict[str, Any]]) -> dict[str, Any]:
-    """Cross-reference facts across multiple sources and score consensus."""
-    if not summaries:
-        return {"consensus_score": 0.0, "common_phrases": [], "conflicts": []}
+    """Report the lexical overlap between the summaries that were fetched.
 
-    # Simple heuristic: find common significant phrases (4+ words)
+    This counts 4-word phrases shared by *every* summary. That is surface-form
+    similarity between scraped text, not agreement about a claim, so the score
+    is reported as ``phrase_overlap_score`` and never as ``consensus``: a
+    reader who saw "87% consensus across sources" would take it for
+    independent corroboration, and it is nothing of the kind.
+
+    Contradiction detection is NOT implemented here. No claim is extracted, so
+    this function cannot say whether sources agree or disagree; it therefore
+    returns no ``conflicts`` key at all instead of an empty list, which would
+    imply "checked and found none".
+
+    A single source has nothing to overlap with, so it reports ``0.0`` rather
+    than a mid value: one page cannot corroborate itself.
+    """
+    if not summaries:
+        return {"phrase_overlap_score": 0.0, "common_phrases": [], "basis": _OVERLAP_BASIS}
+
+    # Heuristic: 4-word phrases shared by every fetched summary.
     all_phrases: list[set[str]] = []
     for s in summaries:
         text = f"{s.get('title', '')} {s.get('summary', '')}"
@@ -674,16 +816,15 @@ def _cross_reference_facts(summaries: list[dict[str, Any]]) -> dict[str, Any]:
         all_phrases.append(phrases)
 
     if len(all_phrases) < 2:
-        return {"consensus_score": 0.5, "common_phrases": [], "conflicts": []}
+        return {"phrase_overlap_score": 0.0, "common_phrases": [], "basis": _OVERLAP_BASIS}
 
     common = all_phrases[0].intersection(*all_phrases[1:])
     common_sorted = sorted(common, key=lambda p: len(p), reverse=True)[:10]
 
-    consensus_score = min(len(common) / 10, 1.0) if common else 0.0
     return {
-        "consensus_score": round(consensus_score, 2),
+        "phrase_overlap_score": round(min(len(common) / 10, 1.0), 2),
         "common_phrases": common_sorted,
-        "conflicts": [],
+        "basis": _OVERLAP_BASIS,
     }
 
 
@@ -697,21 +838,36 @@ async def search_and_answer(query: str, max_results: int = 5) -> dict[str, Any]:
 
     Returns:
         dict with ``query``, ``sources``, ``answer``, ``confidence``, ``consensus``.
+
+        ``answer`` is ``""`` -- never a prose shell with empty headings -- and
+        ``error_category`` is set when nothing could be synthesised:
+        ``no_results`` (no provider returned hits) or ``no_evidence`` (hits
+        existed but every page fetch failed). ``confidence`` comes only from
+        the pages that were retrieved, so it is ``0.0`` in both failure shapes.
+        ``consensus`` keeps its top-level name but reports ``phrase_overlap_score``
+        (lexical overlap, not corroboration) and carries no ``conflicts`` key.
     """
     clean_query, site = _extract_site_filter(query)
 
     # 1. Search
-    hits = await _search_brave(clean_query, max_results=max_results * 2, site_filter=site)
-    if not hits:
-        hits = await _search_duckduckgo(clean_query, max_results=max_results * 2, site_filter=site)
+    hits = await _search_with_fallback(
+        clean_query,
+        max_results=max_results * 2,
+        site_filter=site,
+        recency_days=None,
+    )
 
     if not hits:
         return {
             "query": query,
             "sources": [],
-            "answer": "No search results found.",
+            "answer": "",
             "confidence": 0.0,
-            "consensus": {},
+            "consensus": _cross_reference_facts([]),
+            "error": NO_RESULTS_ERROR,
+            "error_category": "no_results",
+            "attempted_urls": [],
+            "fetch_failure_count": 0,
         }
 
     hits = _rank_hits(clean_query, hits)[:max_results]
@@ -721,30 +877,72 @@ async def search_and_answer(query: str, max_results: int = 5) -> dict[str, Any]:
     fetched_list = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
     fetched: list[dict[str, Any]] = []
+    evidence: list[str] = []
+    failed_urls: list[str] = []
     for hit, content in zip(hits, fetched_list, strict=False):
         if isinstance(content, Exception):
             logger.warning("Fetch failed for %s: %s", hit.url, content)
+            failed_urls.append(hit.url)
             continue
         if content.get("status") == "error":
+            failed_urls.append(hit.url)
             continue
+        page_title = content.get("title", "")
+        page_summary = content.get("summary", hit.snippet)
         fetched.append(
             {
                 "url": hit.url,
-                "title": content.get("title") or hit.title,
-                "summary": content.get("summary", hit.snippet),
+                "title": page_title or hit.title,
+                "summary": page_summary,
                 "snippet": hit.snippet,
                 "published_date": content.get("published_date", ""),
                 "extraction_method": content.get("extraction_method", ""),
             }
         )
+        # Only text that came back from the page itself counts as evidence; the
+        # search snippet fallback must not sneak back in as retrieved content.
+        page_text = f"{page_title} {page_summary}".strip()
+        if page_text:
+            evidence.append(page_text)
 
-    # 3. Cross-reference facts
-    consensus = _cross_reference_facts(fetched)
+    confidence = _evidence_confidence(query, evidence, attempted=len(hits))
 
-    # 4. Synthesize answer
+    # 3. No evidence retrieved: say so instead of emitting headings over nothing.
+    if not evidence:
+        logger.warning(
+            "deep_research retrieved no evidence for %s (%d fetch failures)",
+            query,
+            len(failed_urls),
+        )
+        return {
+            "query": query,
+            "sources": [
+                {
+                    "url": h.url,
+                    "title": h.title,
+                    "snippet": h.snippet,
+                    "score": h.score,
+                }
+                for h in hits
+            ],
+            "answer": "",
+            "confidence": 0.0,
+            "consensus": _cross_reference_facts([]),
+            "error": NO_EVIDENCE_ERROR,
+            "error_category": "no_evidence",
+            "attempted_urls": [h.url for h in hits],
+            "fetch_failure_count": len(failed_urls),
+        }
+
+    # 4. Cross-reference fetched text (lexical overlap only)
+    overlap = _cross_reference_facts(fetched)
+
+    # 5. Synthesize answer
     synthesis_parts = [f"# Research: {query}\n"]
     synthesis_parts.append(
-        f"\n*Confidence: {consensus['consensus_score']:.0%} consensus across sources*\n"
+        f"\n*Evidence confidence: {confidence:.0%} "
+        f"(from {len(fetched)} of {len(hits)} retrieved pages; "
+        "a retrieval heuristic, not corroboration between sources)*\n"
     )
 
     synthesis_parts.append("\n## Sources\n")
@@ -759,13 +957,12 @@ async def search_and_answer(query: str, max_results: int = 5) -> dict[str, Any]:
         if item["summary"] and item["summary"] != item["snippet"]:
             synthesis_parts.append(f"\n{item['summary'][:800]}")
 
-    if consensus["common_phrases"]:
-        synthesis_parts.append("\n## Consensus Points\n")
-        for phrase in consensus["common_phrases"][:5]:
+    if overlap["common_phrases"]:
+        synthesis_parts.append("\n## Shared Phrases (lexical overlap, not corroboration)\n")
+        for phrase in overlap["common_phrases"][:5]:
             synthesis_parts.append(f"- {phrase}")
 
     answer = "\n".join(synthesis_parts)
-    confidence = round(sum(h.score for h in hits) / len(hits), 2) if hits else 0.0
 
     return {
         "query": query,
@@ -780,7 +977,7 @@ async def search_and_answer(query: str, max_results: int = 5) -> dict[str, Any]:
         ],
         "answer": answer,
         "confidence": confidence,
-        "consensus": consensus,
+        "consensus": overlap,
     }
 
 
@@ -812,7 +1009,12 @@ async def search_github(
     url = f"https://api.github.com/search/repositories?q={quote_plus(q)}&sort=stars&order=desc&per_page=10"
     headers = {"Accept": "application/vnd.github.v3+json"}
 
-    async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=FETCH_TIMEOUT,
+        follow_redirects=True,
+        trust_env=False,
+        transport=PublicAddressHTTPTransport(),
+    ) as client:
         try:
             response = await _request_with_retry(client, "GET", url, headers=headers)
             data = response.json()

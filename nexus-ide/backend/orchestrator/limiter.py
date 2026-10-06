@@ -1,8 +1,14 @@
-"""Rate limiter singleton for NEXUS IDE.
+"""Backwards-compatible alias for the application rate limiter.
 
-Extracted to its own module to avoid circular imports between main.py and route files.
+This module used to build a *second* ``slowapi`` :class:`Limiter` with a
+hard-coded ``30/minute`` default that nothing ever imported, so
+``@limiter.limit(...)`` decorators bound to it could not work.  It now
+re-exports the single limiter owned by :mod:`backend.middleware.rate_limit`,
+which is the instance the app wires into ``app.state.limiter`` and attaches
+:class:`slowapi.middleware.SlowAPIMiddleware` for.
 """
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["30/minute"])
+from backend.middleware.rate_limit import limiter
+
+__all__ = ["Limiter", "limiter"]

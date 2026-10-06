@@ -26,8 +26,8 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -320,7 +320,7 @@ class WorktreeManager:
             p = Path(path)
             if p.exists():
                 mtime = p.stat().st_mtime
-                last_modified = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                last_modified = datetime.fromtimestamp(mtime, tz=UTC)
         except OSError:
             pass
 
@@ -398,7 +398,7 @@ class WorktreeManager:
         """
         repo = self._validate_repo(repo_path)
         threshold = max_age_hours or self._config.default_max_age_hours
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=threshold)
+        cutoff = datetime.now(UTC) - timedelta(hours=threshold)
         removed: list[str] = []
 
         for wt in self.list_worktrees(repo):

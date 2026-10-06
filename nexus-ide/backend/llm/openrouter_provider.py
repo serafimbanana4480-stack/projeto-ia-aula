@@ -18,6 +18,7 @@ from typing import Any
 from backend.llm.free_policy import FreeModelRequirement, ProviderUnavailableError
 from backend.llm.openai_provider import OpenAIProvider
 from backend.observability.advanced_logging import get_structured_logger
+
 logger = logging.getLogger(__name__)
 
 # All agents in one backend process share the same OpenRouter account quota,
@@ -126,6 +127,11 @@ class OpenRouterProvider:
             )
         except ValueError:
             self._min_request_interval = 3.1
+
+    @property
+    def last_finish_reason(self) -> str:
+        """Expose the OpenAI-compatible response stop reason to the runtime."""
+        return str(getattr(self._client, "last_finish_reason", "") or "")
 
     @staticmethod
     def _rate_limit_reset_delay(error: BaseException) -> float | None:
@@ -330,6 +336,7 @@ class OpenRouterProvider:
         return self.MODEL_ALIASES.get(model, model)
 
     async def chat_stream(self, model, messages, **kwargs):
+        self._client.last_finish_reason = ""
         resolved = self.validate_model(model)
         dispatch_timeout = kwargs.pop("_nexus_dispatch_timeout", None)
         try:
@@ -354,6 +361,7 @@ class OpenRouterProvider:
             raise
 
     async def chat_complete(self, model, messages, **kwargs):
+        self._client.last_finish_reason = ""
         resolved = self.validate_model(model)
         dispatch_timeout = kwargs.pop("_nexus_dispatch_timeout", None)
         try:

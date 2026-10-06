@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from backend.tools.ollama_client import (
-    DEFAULT_LIMITS,
+    _MODEL_ALIASES,
+    _RETRYABLE_EXCEPTIONS,
+    _RETRYABLE_STATUS_CODES,
     ChatMessage,
-    DEFAULT_TIMEOUT,
     OllamaClient,
     OllamaConnectionError,
     OllamaError,
     OllamaModelError,
-    _MODEL_ALIASES,
-    _RETRYABLE_EXCEPTIONS,
-    _RETRYABLE_STATUS_CODES,
 )
 
 
@@ -33,7 +33,9 @@ class TestChatMessageDataclass:
 
     def test_frozen_dataclass(self) -> None:
         msg = ChatMessage(role="user", content="test")
-        with pytest.raises(Exception):
+        # Was `pytest.raises(Exception)`, which asserted nothing. A frozen
+        # dataclass raises FrozenInstanceError, so name it.
+        with pytest.raises(FrozenInstanceError):
             msg.role = "assistant"  # type: ignore[misc]
 
     def test_to_dict_includes_all_fields(self) -> None:
@@ -227,7 +229,7 @@ class TestRetryConstants:
 
     def test_backoff_delays_exist(self) -> None:
         from backend.tools.ollama_client import _BACKOFF_DELAYS
-        assert (1, 2, 4, 8) == _BACKOFF_DELAYS
+        assert _BACKOFF_DELAYS == (1, 2, 4, 8)
 
 
 class TestPrepareDirectAnswerMessages:

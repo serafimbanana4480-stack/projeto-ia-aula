@@ -1043,6 +1043,16 @@ class OrchestrationEngine:
         """Retrieve a stored plan by its ID."""
         return self._plans.get(plan_id)
 
+    def list_plans(self) -> list[ExecutionPlan]:
+        """Return the plans still present in this engine's runtime store.
+
+        Plan state is intentionally process-local today. Exposing it through a
+        public accessor lets task views report the same plan/task objects used
+        by execution without reaching into ``_plans`` or pretending this is a
+        durable history.
+        """
+        return list(self._plans.values())
+
     def get_plan_by_session(self, session_id: str) -> ExecutionPlan | None:
         """Retrieve the plan associated with a session."""
         plan_id = self._session_plans.get(session_id)

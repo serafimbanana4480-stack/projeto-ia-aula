@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from backend.pipeline.cicd_generator import CICDGenerator, CICDConfig
+from backend.pipeline.cicd_generator import CICDConfig, CICDGenerator
 
 
 class TestCICDGenerator:

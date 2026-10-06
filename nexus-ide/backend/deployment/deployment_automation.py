@@ -8,17 +8,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
-import subprocess
-import yaml
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union, Callable
-from datetime import datetime
-from pathlib import Path
-import os
-import shutil
+from typing import Any
+
+import yaml
 
 try:
     import redis.asyncio as redis
@@ -72,7 +69,7 @@ class DeploymentConfig:
     
     # Build configuration
     build_command: str = ""
-    build_args: Dict[str, str] = field(default_factory=dict)
+    build_args: dict[str, str] = field(default_factory=dict)
     dockerfile: str = "Dockerfile"
     context_path: str = "."
     
@@ -83,9 +80,9 @@ class DeploymentConfig:
     
     # Deployment configuration
     replicas: int = 1
-    resources: Dict[str, str] = field(default_factory=dict)
-    environment_vars: Dict[str, str] = field(default_factory=dict)
-    secrets: Dict[str, str] = field(default_factory=dict)
+    resources: dict[str, str] = field(default_factory=dict)
+    environment_vars: dict[str, str] = field(default_factory=dict)
+    secrets: dict[str, str] = field(default_factory=dict)
     
     # Health checks
     health_check_path: str = "/health"
@@ -98,14 +95,14 @@ class DeploymentConfig:
     max_rollback_attempts: int = 3
     
     # Testing configuration
-    pre_deployment_tests: List[str] = field(default_factory=list)
-    post_deployment_tests: List[str] = field(default_factory=list)
+    pre_deployment_tests: list[str] = field(default_factory=list)
+    post_deployment_tests: list[str] = field(default_factory=list)
     
     # Notifications
-    notification_webhooks: List[str] = field(default_factory=list)
-    notification_emails: List[str] = field(default_factory=list)
+    notification_webhooks: list[str] = field(default_factory=list)
+    notification_emails: list[str] = field(default_factory=list)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "config_id": self.config_id,
             "name": self.name,
@@ -151,27 +148,27 @@ class Deployment:
     # Status tracking
     status: DeploymentStatus = DeploymentStatus.PENDING
     started_at: float = field(default_factory=time.time)
-    completed_at: Optional[float] = None
+    completed_at: float | None = None
     duration: float = 0.0
     
     # Deployment steps
-    steps: List[Dict[str, Any]] = field(default_factory=list)
+    steps: list[dict[str, Any]] = field(default_factory=list)
     current_step: int = 0
     
     # Results
-    build_result: Optional[Dict[str, Any]] = None
-    test_results: List[Dict[str, Any]] = field(default_factory=list)
-    deployment_result: Optional[Dict[str, Any]] = None
+    build_result: dict[str, Any] | None = None
+    test_results: list[dict[str, Any]] = field(default_factory=list)
+    deployment_result: dict[str, Any] | None = None
     
     # Rollback information
-    rollback_reason: Optional[str] = None
-    rollback_deployment_id: Optional[str] = None
+    rollback_reason: str | None = None
+    rollback_deployment_id: str | None = None
     
     # Logs
-    logs: List[str] = field(default_factory=list)
-    error_logs: List[str] = field(default_factory=list)
+    logs: list[str] = field(default_factory=list)
+    error_logs: list[str] = field(default_factory=list)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "deployment_id": self.deployment_id,
             "config_id": self.config_id,
@@ -203,8 +200,8 @@ class InfrastructureResource:
     resource_type: str = ""  # kubernetes, docker, terraform, etc.
     
     # Resource configuration
-    configuration: Dict[str, Any] = field(default_factory=dict)
-    dependencies: List[str] = field(default_factory=list)
+    configuration: dict[str, Any] = field(default_factory=dict)
+    dependencies: list[str] = field(default_factory=list)
     
     # Status
     status: str = "pending"  # pending, creating, active, failed, deleting
@@ -212,9 +209,9 @@ class InfrastructureResource:
     
     # Health and metrics
     health_status: str = "unknown"
-    metrics: Dict[str, float] = field(default_factory=dict)
+    metrics: dict[str, float] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "resource_id": self.resource_id,
             "name": self.name,
@@ -232,9 +229,9 @@ class ContainerBuilder:
     """Container image building and management."""
     
     def __init__(self):
-        self.build_cache: Dict[str, Dict[str, Any]] = {}
+        self.build_cache: dict[str, dict[str, Any]] = {}
         
-    async def build_image(self, config: DeploymentConfig) -> Dict[str, Any]:
+    async def build_image(self, config: DeploymentConfig) -> dict[str, Any]:
         """Build Docker image."""
         build_result = {
             "success": False,
@@ -301,7 +298,7 @@ class ContainerBuilder:
             
         return build_result
         
-    async def push_image(self, config: DeploymentConfig) -> Dict[str, Any]:
+    async def push_image(self, config: DeploymentConfig) -> dict[str, Any]:
         """Push Docker image to registry."""
         push_result = {
             "success": False,
@@ -368,7 +365,7 @@ class KubernetesDeployer:
         self.kubeconfig_path = os.getenv("KUBECONFIG", "~/.kube/config")
         self.namespace = "default"
         
-    async def deploy(self, config: DeploymentConfig, image_id: str) -> Dict[str, Any]:
+    async def deploy(self, config: DeploymentConfig, image_id: str) -> dict[str, Any]:
         """Deploy to Kubernetes."""
         deployment_result = {
             "success": False,
@@ -406,7 +403,7 @@ class KubernetesDeployer:
             
         return deployment_result
         
-    def _generate_manifests(self, config: DeploymentConfig, image_id: str) -> List[Dict[str, Any]]:
+    def _generate_manifests(self, config: DeploymentConfig, image_id: str) -> list[dict[str, Any]]:
         """Generate Kubernetes manifests."""
         manifests = []
         
@@ -493,7 +490,7 @@ class KubernetesDeployer:
         
         return manifests
         
-    async def _apply_manifest(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    async def _apply_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
         """Apply Kubernetes manifest."""
         result = {
             "success": False,
@@ -535,7 +532,7 @@ class KubernetesDeployer:
             
         return result
         
-    async def rollback(self, deployment_name: str, revision: int) -> Dict[str, Any]:
+    async def rollback(self, deployment_name: str, revision: int) -> dict[str, Any]:
         """Rollback Kubernetes deployment."""
         rollback_result = {
             "success": False,
@@ -569,7 +566,7 @@ class KubernetesDeployer:
             
         return rollback_result
         
-    async def get_deployment_status(self, deployment_name: str) -> Dict[str, Any]:
+    async def get_deployment_status(self, deployment_name: str) -> dict[str, Any]:
         """Get deployment status."""
         try:
             cmd = ["kubectl", "get", "deployment", deployment_name, "-o", "json"]
@@ -600,9 +597,9 @@ class TestRunner:
     """Automated testing for deployments."""
     
     def __init__(self):
-        self.test_results: List[Dict[str, Any]] = []
+        self.test_results: list[dict[str, Any]] = []
         
-    async def run_tests(self, test_commands: List[str], environment: str) -> List[Dict[str, Any]]:
+    async def run_tests(self, test_commands: list[str], environment: str) -> list[dict[str, Any]]:
         """Run test commands."""
         results = []
         
@@ -612,7 +609,7 @@ class TestRunner:
             
         return results
         
-    async def _run_single_test(self, test_command: str, environment: str) -> Dict[str, Any]:
+    async def _run_single_test(self, test_command: str, environment: str) -> dict[str, Any]:
         """Run a single test command."""
         result = {
             "command": test_command,
@@ -658,7 +655,7 @@ class TestRunner:
             
         return result
         
-    async def run_health_checks(self, service_url: str, health_path: str = "/health") -> Dict[str, Any]:
+    async def run_health_checks(self, service_url: str, health_path: str = "/health") -> dict[str, Any]:
         """Run health checks."""
         result = {
             "success": False,
@@ -695,7 +692,7 @@ class DeploymentAutomation:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Components
         self.container_builder = ContainerBuilder()
@@ -703,12 +700,12 @@ class DeploymentAutomation:
         self.test_runner = TestRunner()
         
         # Storage
-        self.configs: Dict[str, DeploymentConfig] = {}
-        self.deployments: Dict[str, Deployment] = {}
-        self.resources: Dict[str, InfrastructureResource] = {}
+        self.configs: dict[str, DeploymentConfig] = {}
+        self.deployments: dict[str, Deployment] = {}
+        self.resources: dict[str, InfrastructureResource] = {}
         
         # Background tasks
-        self.monitoring_task: Optional[asyncio.Task] = None
+        self.monitoring_task: asyncio.Task | None = None
         
     async def initialize(self) -> None:
         """Initialize deployment automation."""
@@ -957,7 +954,7 @@ class DeploymentAutomation:
             deployment.error_logs.append(f"Rollback error: {exc}")
             logger.error("Rollback error: %s", exc)
             
-    async def get_deployment_status(self, deployment_id: str) -> Dict[str, Any]:
+    async def get_deployment_status(self, deployment_id: str) -> dict[str, Any]:
         """Get deployment status."""
         if deployment_id not in self.deployments:
             return {"error": "Deployment not found"}
@@ -1007,7 +1004,7 @@ class DeploymentAutomation:
                 if not health_result["success"]:
                     logger.warning("Deployment %s health check failed", deployment.deployment_id)
                     
-    def get_deployment_stats(self) -> Dict[str, Any]:
+    def get_deployment_stats(self) -> dict[str, Any]:
         """Get deployment statistics."""
         total_deployments = len(self.deployments)
         completed_deployments = len([
@@ -1030,4 +1027,4 @@ class DeploymentAutomation:
 
 
 # Global deployment automation instance
-deployment_automation: Optional[DeploymentAutomation] = None
+deployment_automation: DeploymentAutomation | None = None

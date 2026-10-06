@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from backend.cache_backends import NullCacheBackend, TTLCacheBackend
 from backend.models.api import RoutingDecision
 from backend.orchestrator.router_engine import (
@@ -127,7 +125,7 @@ class TestRouterRoute:
                 return RoutingDecision(primary_agent="MICRO")
 
         router = Router(strategies=[CountingStrategy()])
-        decision1 = await router.route("test query")
+        await router.route("test query")
         assert counter["count"] == 1
         # Second call should hit cache if using a cache backend
         router_with_cache = Router(strategies=[CountingStrategy()])

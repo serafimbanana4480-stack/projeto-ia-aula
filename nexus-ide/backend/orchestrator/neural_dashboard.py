@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass
@@ -95,7 +95,7 @@ class NeuralDashboard:
             "timestamp": time.time(),
         }
 
-    def get_agent_details(self, agent_id: str) -> Optional[dict[str, Any]]:
+    def get_agent_details(self, agent_id: str) -> dict[str, Any] | None:
         health = self._agent_health.get(agent_id)
         if not health:
             return None

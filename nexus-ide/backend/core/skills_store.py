@@ -46,6 +46,7 @@ class Skill:
     updated_at: float = field(default_factory=time.time)
     source: str = ""  # How this skill was learned (auto|manual)
     auto_apply: bool = False  # Auto-apply when trigger matches
+    user_id: str = ""
 
 
 class SkillsStore:
@@ -81,6 +82,7 @@ class SkillsStore:
         tags: list[str] | None = None,
         source: str = "auto",
         auto_apply: bool = False,
+        user_id: str = "",
     ) -> Skill:
         """Create and persist a new skill."""
         import uuid
@@ -97,6 +99,7 @@ class SkillsStore:
             tags=tags or [],
             source=source,
             auto_apply=auto_apply,
+            user_id=user_id,
         )
         self._skills[skill_id] = skill
         self._save_skill(skill)
@@ -104,16 +107,23 @@ class SkillsStore:
         logger.info("Skill created: %s (%s)", name, skill_type)
         return skill
 
-    def get_skill(self, skill_id: str) -> Skill | None:
-        return self._skills.get(skill_id)
+    def get_skill(self, skill_id: str, *, user_id: str | None = None) -> Skill | None:
+        skill = self._skills.get(skill_id)
+        if skill is not None and user_id is not None and skill.user_id != user_id:
+            return None
+        return skill
 
     def list_skills(
         self,
         skill_type: str | None = None,
         tags: list[str] | None = None,
         limit: int = 50,
+        *,
+        user_id: str | None = None,
     ) -> list[Skill]:
         results = list(self._skills.values())
+        if user_id is not None:
+            results = [s for s in results if s.user_id == user_id]
         if skill_type:
             results = [s for s in results if s.skill_type == skill_type]
         if tags:
@@ -121,11 +131,15 @@ class SkillsStore:
         results.sort(key=lambda s: (s.confidence, s.times_used), reverse=True)
         return results[:limit]
 
-    def search_skills(self, query: str, limit: int = 10) -> list[Skill]:
+    def search_skills(
+        self, query: str, limit: int = 10, *, user_id: str | None = None
+    ) -> list[Skill]:
         """Search skills by name, description, trigger, and tags."""
         q = query.lower()
         results = []
         for skill in self._skills.values():
+            if user_id is not None and skill.user_id != user_id:
+                continue
             if (
                 q in skill.name.lower()
                 or q in skill.description.lower()
@@ -136,11 +150,15 @@ class SkillsStore:
         results.sort(key=lambda s: s.confidence, reverse=True)
         return results[:limit]
 
-    def find_matching_skills(self, context: str) -> list[Skill]:
+    def find_matching_skills(
+        self, context: str, *, user_id: str | None = None
+    ) -> list[Skill]:
         """Find skills whose trigger matches the given context string."""
         q = context.lower()
         matches = []
         for skill in self._skills.values():
+            if user_id is not None and skill.user_id != user_id:
+                continue
             pattern = skill.trigger_pattern.lower()
             # Simple keyword matching (can be enhanced with regex/LLM)
             if any(kw.strip() in q for kw in pattern.split(",")):
@@ -148,10 +166,12 @@ class SkillsStore:
         matches.sort(key=lambda s: (s.confidence, s.times_used), reverse=True)
         return matches
 
-    def record_use(self, skill_id: str, success: bool) -> None:
+    def record_use(
+        self, skill_id: str, success: bool, *, user_id: str | None = None
+    ) -> None:
         """Record a skill usage outcome."""
         skill = self._skills.get(skill_id)
-        if not skill:
+        if not skill or (user_id is not None and skill.user_id != user_id):
             return
         skill.times_used += 1
         if success:
@@ -166,8 +186,9 @@ class SkillsStore:
         self._save_skill(skill)
         self._rebuild_index()
 
-    def delete_skill(self, skill_id: str) -> bool:
-        if skill_id not in self._skills:
+    def delete_skill(self, skill_id: str, *, user_id: str | None = None) -> bool:
+        skill = self._skills.get(skill_id)
+        if skill is None or (user_id is not None and skill.user_id != user_id):
             return False
         del self._skills[skill_id]
         skill_path = SKILLS_DIR / f"{skill_id}.json"
@@ -197,6 +218,7 @@ class SkillsStore:
             "updated_at": skill.updated_at,
             "source": skill.source,
             "auto_apply": skill.auto_apply,
+            "user_id": skill.user_id,
         }
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -228,15 +250,18 @@ class SkillsStore:
             json.dumps(index_data, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self, *, user_id: str | None = None) -> dict[str, Any]:
+        skills = list(self._skills.values())
+        if user_id is not None:
+            skills = [skill for skill in skills if skill.user_id == user_id]
         return {
-            "total_skills": len(self._skills),
+            "total_skills": len(skills),
             "by_type": {
-                t: len([s for s in self._skills.values() if s.skill_type == t])
+                t: len([s for s in skills if s.skill_type == t])
                 for t in {"bug_fix", "workflow", "config", "prompt", "pattern"}
             },
-            "total_uses": sum(s.times_used for s in self._skills.values()),
+            "total_uses": sum(s.times_used for s in skills),
             "avg_confidence": round(
-                sum(s.confidence for s in self._skills.values()) / max(1, len(self._skills)), 2
+                sum(s.confidence for s in skills) / max(1, len(skills)), 2
             ),
         }

@@ -8,12 +8,11 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Any
 
 try:
-    from jose import jwt, JWTError
+    from jose import JWTError, jwt
 except ImportError:
     jwt = None  # type: ignore
     JWTError = Exception  # type: ignore
@@ -106,7 +105,7 @@ class TokenManager:
         Returns:
             JWT token string.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires = now + timedelta(seconds=ttl or self._default_ttl)
         jti = str(uuid.uuid4())
 
@@ -156,8 +155,8 @@ class TokenManager:
             agent_id=agent_id,
             role=Role(claims.get("role", "readonly")),
             sandbox_id=claims.get("sandbox_id", ""),
-            issued_at=claims.get("iat", datetime.now(timezone.utc)),
-            expires_at=claims.get("exp", datetime.now(timezone.utc)),
+            issued_at=claims.get("iat", datetime.now(UTC)),
+            expires_at=claims.get("exp", datetime.now(UTC)),
             token_jti=jti,
         )
 

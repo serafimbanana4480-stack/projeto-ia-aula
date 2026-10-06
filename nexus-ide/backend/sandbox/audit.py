@@ -9,7 +9,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +48,7 @@ class AuditLogger:
 
     def _today_file(self) -> Path:
         """Get the log file path for today."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         return self._output_dir / f"audit-{today}.jsonl"
 
     @staticmethod
@@ -72,10 +72,10 @@ class AuditLogger:
         Returns:
             Audit entry ID.
         """
-        audit_id = f"audit-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{result.execution_id}"
+        audit_id = f"audit-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{result.execution_id}"
 
         entry = AuditEntry(
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             event_type="sandbox_execution",
             audit_id=audit_id,
             agent_id=identity.agent_id if identity else "anonymous",
@@ -115,10 +115,10 @@ class AuditLogger:
         Returns:
             Audit entry ID.
         """
-        audit_id = f"audit-violation-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        audit_id = f"audit-violation-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
 
         entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "event_type": "policy_violation",
             "audit_id": audit_id,
             "agent_id": identity.agent_id if identity else "anonymous",
@@ -155,7 +155,7 @@ class AuditLogger:
 
         # Read all audit files
         for log_file in sorted(self._output_dir.glob("audit-*.jsonl")):
-            with open(log_file, "r", encoding="utf-8") as f:
+            with open(log_file, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:

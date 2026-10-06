@@ -4,7 +4,9 @@ All custom middleware should inherit from this class and implement the
 ``process_request`` and ``process_response`` hooks.
 """
 
-from typing import Callable, Any, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 from starlette.middleware.base import BaseHTTPMiddleware
 
 

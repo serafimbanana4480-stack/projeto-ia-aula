@@ -73,7 +73,7 @@ export function Button({
       onClick={onClick}
       className={[
         "inline-flex items-center justify-center font-semibold whitespace-nowrap",
-        "transition-all duration-200 ease-nx",
+        "transition-[background-color,border-color,color,box-shadow,transform] duration-150 ease-nx focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/70 focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg",
         "active:translate-y-px disabled:opacity-45 disabled:pointer-events-none",
         BTN_VARIANT[variant],
         BTN_SIZE[size],
@@ -120,7 +120,7 @@ export function Badge({
     <span
       className={[
         "inline-flex items-center gap-1 rounded-full border px-2 py-0.5",
-        "text-[10px] font-semibold uppercase tracking-wide shadow-rim",
+        "text-[10px] font-medium tracking-wide",
         BADGE_TONE[tone],
         className,
       ].join(" ")}
@@ -426,13 +426,13 @@ export function EmptyState({
 }) {
   return (
     <div
-      className={`flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[var(--nx-line-strong)] bg-black/20 text-center ${
-        compact ? "px-3 py-4" : "px-4 py-8"
+      className={`flex flex-col items-center justify-center gap-2.5 rounded-2xl bg-nexus-bg/35 text-center ${
+        compact ? "px-3 py-5" : "px-5 py-10"
       }`}
     >
-      {icon ? <div className="text-nexus-faint opacity-60">{icon}</div> : null}
-      <div className="text-xs font-medium text-nexus-muted">{title}</div>
-      {hint ? <div className="max-w-[36ch] text-[11px] text-nexus-faint">{hint}</div> : null}
+      {icon ? <div className="mb-1 flex h-11 w-11 items-center justify-center rounded-2xl bg-nexus-accent/10 text-nexus-accent-bright">{icon}</div> : null}
+      <div className="text-sm font-medium text-nexus-text">{title}</div>
+      {hint ? <div className="max-w-[40ch] text-xs leading-relaxed text-nexus-muted">{hint}</div> : null}
       {action}
     </div>
   );

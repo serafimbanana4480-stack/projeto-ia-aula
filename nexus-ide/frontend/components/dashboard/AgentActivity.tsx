@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { useMetricsStore } from "../../stores/metricsStore";
-import { Bot, CheckCircle2, XCircle, Zap, Clock } from "lucide-react";
+import { Bot, CheckCircle2, Zap, Clock } from "lucide-react";
 import DashboardCharts, { CHART_COLORS } from "../dashboard-charts";
 import { Surface, SurfaceHeader } from "../ui/Surface";
 import { Badge, StatusDot, EmptyState } from "../ui/Primitives";
@@ -59,9 +59,9 @@ const AGENT_BAR_COLORS: Record<string, string> = {
 };
 
 const STATUS_LABEL: Record<AgentActivityData["status"], string> = {
-  active: "ativo",
-  idle: "inativo",
-  error: "erro",
+  active: "em execução",
+  idle: "sem execução",
+  error: "sessão com falha de ferramenta",
 };
 
 const STATUS_TONE: Record<AgentActivityData["status"], "success" | "neutral" | "danger"> = {
@@ -96,22 +96,21 @@ export default function AgentActivity() {
 
   const loading = !metrics;
 
-  const activeCount = useMemo(
+  const activeProfileCount = useMemo(
     () => activities.filter((a) => a.status === "active").length,
     [activities],
   );
-  const totalTasks = useMemo(
-    () => activities.reduce((acc, a) => acc + a.tasks_completed + a.tasks_failed, 0),
+  const totalResponses = useMemo(
+    () => activities.reduce((acc, a) => acc + a.tasks_completed, 0),
     [activities],
   );
 
-  // Dados para o gráfico de barras: tasks_completed por agente.
+  // O backend agrupa respostas pelo tier usado; não são tarefas de agentes.
   const chartData = useMemo(
     () =>
       activities.map((a) => ({
         agent: a.agent,
-        tasks_completed: a.tasks_completed,
-        tasks_failed: a.tasks_failed,
+        responses: a.tasks_completed,
       })),
     [activities],
   );
@@ -141,13 +140,13 @@ export default function AgentActivity() {
     <Surface elevation={1} padding="sm" live={backendOnline}>
       <SurfaceHeader
         icon={<Bot className="h-4 w-4" />}
-        title="Atividade de Agentes"
-        subtitle="Tarefas concluídas e falhadas por agente"
+        title="Utilização por perfil"
+        subtitle="Respostas recentes e estado das execuções"
         action={
           <div className="flex items-center gap-1.5" aria-live="polite" aria-atomic="true">
             {!backendOnline && !loading && <Badge tone="warning">offline</Badge>}
-            <Badge tone={activeCount > 0 ? "success" : "neutral"} icon={<StatusDot tone={activeCount > 0 ? "success" : "neutral"} pulse={activeCount > 0} size={6} />}>
-              {activeCount} ativo{activeCount === 1 ? "" : "s"}
+            <Badge tone={activeProfileCount > 0 ? "success" : "neutral"} icon={<StatusDot tone={activeProfileCount > 0 ? "success" : "neutral"} pulse={activeProfileCount > 0} size={6} />}>
+              {activeProfileCount} em execução
             </Badge>
           </div>
         }
@@ -157,7 +156,7 @@ export default function AgentActivity() {
         <div
           className="mt-3 space-y-2"
           role="status"
-          aria-label="A carregar atividade de agentes"
+          aria-label="A carregar utilização por perfil"
           aria-live="polite"
         >
           <div className="nx-shimmer h-[180px] rounded-lg" />
@@ -169,16 +168,16 @@ export default function AgentActivity() {
           <EmptyState
             compact
             icon={<Bot className="h-5 w-5" />}
-            title="Sem atividade de agentes"
-            hint="Nenhuma sessão ativa no momento — inicia uma conversa para veres os agentes a trabalhar."
+            title="Sem respostas recentes"
+            hint="As respostas com perfil de execução aparecem aqui quando o backend as registar."
           />
         </div>
       ) : (
         <div className="mt-3 space-y-3">
           <div>
             <div className="mb-1 flex items-center justify-between text-[11px] font-medium text-nexus-muted">
-              <span>Tarefas concluídas por agente</span>
-              <span className="tabular-nums text-nexus-faint">{totalTasks} no total</span>
+              <span>Respostas recentes por perfil</span>
+              <span className="tabular-nums text-nexus-faint">{totalResponses} no total</span>
             </div>
             <DashboardCharts
               kind="bar"
@@ -189,8 +188,8 @@ export default function AgentActivity() {
               showGrid={false}
               series={[
                 {
-                  key: "tasks_completed",
-                  name: "Concluídas",
+                  key: "responses",
+                  name: "Respostas",
                   cells: chartCells,
                 },
               ]}
@@ -218,25 +217,17 @@ export default function AgentActivity() {
                       {activity.agent}
                     </span>
                     <div className="mt-0.5 flex items-center gap-2">
-                      <span className="flex items-center gap-1 text-[10px] text-nexus-faint" title="Concluídas">
+                      <span className="flex items-center gap-1 text-[10px] text-nexus-faint" title="Respostas recentes">
                         <CheckCircle2 className="h-3 w-3 text-emerald-400" aria-hidden="true" />
-                        <span className="tabular-nums" aria-label="Concluídas">
+                        <span className="tabular-nums" aria-label="Respostas">
                           {activity.tasks_completed}
                         </span>
                       </span>
-                      {activity.tasks_failed > 0 && (
-                        <span className="flex items-center gap-1 text-[10px] text-nexus-faint" title="Falhadas">
-                          <XCircle className="h-3 w-3 text-rose-400" aria-hidden="true" />
-                          <span className="tabular-nums" aria-label="Falhadas">
-                            {activity.tasks_failed}
-                          </span>
-                        </span>
-                      )}
                     </div>
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2.5 text-[10px] text-nexus-muted">
-                  <span className="flex items-center gap-1 tabular-nums" title="Latência média">
+                  <span className="flex items-center gap-1 tabular-nums" title="Latência média das respostas">
                     <Zap className="h-3 w-3" aria-hidden="true" />
                     {formatLatency(activity.avg_latency_ms)}
                   </span>

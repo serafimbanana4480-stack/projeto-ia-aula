@@ -30,6 +30,8 @@ describe("useSystemStore", () => {
           runningAgents: 0,
         },
         isLive: false,
+        hasTelemetry: false,
+        measuredMetrics: {},
         isLoading: false,
         error: null,
         globalStatus: "operational",
@@ -153,7 +155,7 @@ describe("useSystemStore", () => {
       json: async () => ({
         cpu_percent: 30,
         ram_percent: 60,
-        queue_size: 5,
+        queue_depth: 5,
         api_errors_per_min: 2,
       }),
     }) as any;
@@ -169,6 +171,87 @@ describe("useSystemStore", () => {
     expect(metrics.memoryUsage).toBe(60);
     expect(metrics.queueSize).toBe(5);
     expect(metrics.apiErrorsPerMin).toBe(2);
+    expect(useSystemStore.getState().hasTelemetry).toBe(true);
+    expect(useSystemStore.getState().measuredMetrics.queueSize).toBe(true);
+  });
+
+  it("treats a valid zero as measured telemetry", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        cpu_percent: 0,
+        ram_percent: 0,
+        disk_percent: 0,
+        queue_depth: 0,
+        avg_latency_ms: 0,
+        tokens_per_second: 0,
+      }),
+    }) as any;
+
+    await act(() => useSystemStore.getState().fetchMetrics());
+
+    const state = useSystemStore.getState();
+    expect(state.isLive).toBe(true);
+    expect(state.hasTelemetry).toBe(true);
+    expect(state.metrics.cpuUsage).toBe(0);
+    expect(state.metrics.memoryUsage).toBe(0);
+    expect(state.metrics.diskUsage).toBe(0);
+    expect(state.metrics.queueSize).toBe(0);
+    expect(state.measuredMetrics.cpuUsage).toBe(true);
+    expect(state.measuredMetrics.gpuUsage).toBeUndefined();
+  });
+
+  it("does not turn an empty successful response into zero telemetry", async () => {
+    useSystemStore.setState({
+      metrics: { ...useSystemStore.getState().metrics, cpuUsage: 42 },
+      measuredMetrics: { cpuUsage: true },
+      hasTelemetry: true,
+    });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    }) as any;
+
+    await act(() => useSystemStore.getState().fetchMetrics());
+
+    const state = useSystemStore.getState();
+    expect(state.isLive).toBe(true);
+    expect(state.hasTelemetry).toBe(false);
+    expect(state.measuredMetrics).toEqual({});
+    expect(state.metrics.cpuUsage).toBe(42);
+    expect(state.error).toMatch(/sem dados de telemetria/i);
+  });
+
+  it("preserves the last measurement and marks it stale on refresh failure", async () => {
+    useSystemStore.setState({
+      metrics: { ...useSystemStore.getState().metrics, cpuUsage: 23 },
+      measuredMetrics: { cpuUsage: true },
+      hasTelemetry: true,
+    });
+    global.fetch = vi.fn().mockRejectedValue(new Error("Network error")) as any;
+
+    await act(() => useSystemStore.getState().fetchMetrics());
+
+    const state = useSystemStore.getState();
+    expect(state.isLive).toBe(false);
+    expect(state.hasTelemetry).toBe(true);
+    expect(state.measuredMetrics.cpuUsage).toBe(true);
+    expect(state.metrics.cpuUsage).toBe(23);
+    expect(state.error).toBe("Network error");
+  });
+
+  it("handles a malformed successful response without crashing", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    }) as any;
+
+    await act(() => useSystemStore.getState().fetchMetrics());
+
+    const state = useSystemStore.getState();
+    expect(state.isLive).toBe(true);
+    expect(state.hasTelemetry).toBe(false);
+    expect(state.error).toMatch(/formato de métricas inválido/i);
   });
 
   it("fetchMetrics handles HTTP errors", async () => {

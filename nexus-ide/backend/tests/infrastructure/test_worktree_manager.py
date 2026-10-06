@@ -8,16 +8,17 @@ Covers:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from backend.infrastructure.worktree_manager import (
+    WorktreeError,
+    WorktreeInfo,
     WorktreeManager,
     WorktreeManagerConfig,
-    WorktreeInfo,
-    WorktreeError,
 )
 
 
@@ -148,7 +149,7 @@ class TestWorktreeManagerCreate:
         # Force should remove existing path before creating
         with patch.object(wm := WorktreeManager(), "_run_git") as mock_git:
             mock_git.return_value = MagicMock(stdout="", stderr="", returncode=0)
-            info = wm.create_worktree(repo, "feature-force", force=True)
+            wm.create_worktree(repo, "feature-force", force=True)
             assert not wt.exists()  # path was removed during creation
 
 
@@ -290,7 +291,7 @@ class TestWorktreeManagerSync:
 
         wm = WorktreeManager()
         with patch.object(wm, "_run_git", side_effect=capture):
-            info = wm.sync_worktree(wt, rebase=True)
+            wm.sync_worktree(wt, rebase=True)
 
         pull_call = next(c for c in calls if c[0] == "pull")
         assert "--rebase" in pull_call
@@ -309,7 +310,7 @@ class TestWorktreeManagerCleanup:
         wt = tmp_path / "repo_feature-old_wt"
         wt.mkdir()
         # Make it look very old
-        old_time = (datetime.now(timezone.utc) - timedelta(days=2)).timestamp()
+        (datetime.now(UTC) - timedelta(days=2)).timestamp()
         (wt / "dummy.txt").write_text("x")
         # We can't easily set mtime in a cross-platform way in these tests,
         # so we patch the list_worktrees result instead.
@@ -319,14 +320,14 @@ class TestWorktreeManagerCleanup:
             path=str(wt),
             branch="feature-old",
             commit="abc",
-            last_modified=datetime.now(timezone.utc) - timedelta(days=2),
+            last_modified=datetime.now(UTC) - timedelta(days=2),
         )
         main_wt = WorktreeInfo(
             path=str(repo),
             branch="main",
             commit="def",
             is_main=True,
-            last_modified=datetime.now(timezone.utc),
+            last_modified=datetime.now(UTC),
         )
 
         with patch.object(wm, "list_worktrees", return_value=[main_wt, stale_wt]):
@@ -345,11 +346,11 @@ class TestWorktreeManagerCleanup:
         wm = WorktreeManager()
         main_wt = WorktreeInfo(
             path=str(repo), branch="main", commit="abc", is_main=True,
-            last_modified=datetime.now(timezone.utc) - timedelta(days=5),
+            last_modified=datetime.now(UTC) - timedelta(days=5),
         )
         bare_wt = WorktreeInfo(
             path=str(tmp_path / "bare"), branch="", commit="", is_bare=True,
-            last_modified=datetime.now(timezone.utc) - timedelta(days=5),
+            last_modified=datetime.now(UTC) - timedelta(days=5),
         )
 
         with patch.object(wm, "list_worktrees", return_value=[main_wt, bare_wt]):
@@ -381,7 +382,7 @@ class TestWorktreeManagerCleanup:
         wm = WorktreeManager(WorktreeManagerConfig(default_max_age_hours=12))
         stale = WorktreeInfo(
             path=str(tmp_path / "stale"), branch="stale", commit="abc",
-            last_modified=datetime.now(timezone.utc) - timedelta(hours=13),
+            last_modified=datetime.now(UTC) - timedelta(hours=13),
         )
 
         with patch.object(wm, "list_worktrees", return_value=[stale]):

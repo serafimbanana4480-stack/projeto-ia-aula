@@ -1,4 +1,4 @@
-"""Multi-User System - Comprehensive user management and collaboration.
+﻿"""Multi-User System - Comprehensive user management and collaboration.
 
 This system provides:
 - User authentication and authorization
@@ -11,27 +11,25 @@ This system provides:
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
-import json
 import logging
 import secrets
-import time
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass, field
-from enum import Enum
 import uuid
-import jwt
-from collections import defaultdict, deque
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import StrEnum
+from typing import Any
 
-from backend.observability.event_system import EventBus, Event, EventType, EventPriority
+import jwt
+
+from backend.observability.event_system import Event, EventBus, EventPriority, EventType
 
 logger = logging.getLogger(__name__)
 
 
-class UserRole(str, Enum):
+class UserRole(StrEnum):
     """User roles."""
     ADMIN = "admin"
     MODERATOR = "moderator"
@@ -41,7 +39,7 @@ class UserRole(str, Enum):
     GUEST = "guest"
 
 
-class UserStatus(str, Enum):
+class UserStatus(StrEnum):
     """User status."""
     ACTIVE = "active"
     INACTIVE = "inactive"
@@ -49,7 +47,7 @@ class UserStatus(str, Enum):
     BANNED = "banned"
 
 
-class SessionStatus(str, Enum):
+class SessionStatus(StrEnum):
     """Session status."""
     ACTIVE = "active"
     EXPIRED = "expired"
@@ -75,19 +73,19 @@ class User:
     language: str = "en"
     
     # Permissions
-    permissions: Set[str] = field(default_factory=set)
-    groups: Set[str] = field(default_factory=set)
+    permissions: set[str] = field(default_factory=set)
+    groups: set[str] = field(default_factory=set)
     
     # Activity
-    last_login: Optional[datetime] = None
+    last_login: datetime | None = None
     login_count: int = 0
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     
     # Metadata
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary (without sensitive data)."""
         return {
             "user_id": self.user_id,
@@ -128,9 +126,9 @@ class Session:
     # Connection details
     ip_address: str = ""
     user_agent: str = ""
-    device_info: Dict[str, Any] = field(default_factory=dict)
+    device_info: dict[str, Any] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "session_id": self.session_id,
@@ -156,17 +154,17 @@ class UserGroup:
     # Group settings
     is_private: bool = False
     max_members: int = 100
-    permissions: Set[str] = field(default_factory=set)
+    permissions: set[str] = field(default_factory=set)
     
     # Membership
-    members: Set[str] = field(default_factory=set)
-    admins: Set[str] = field(default_factory=set)
+    members: set[str] = field(default_factory=set)
+    admins: set[str] = field(default_factory=set)
     
     # Timestamps
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "group_id": self.group_id,
@@ -194,14 +192,14 @@ class ActivityLog:
     
     # Activity details
     description: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
     ip_address: str = ""
     user_agent: str = ""
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "activity_id": self.activity_id,
@@ -225,16 +223,16 @@ class MultiUserSystem:
         self.jwt_secret = jwt_secret or secrets.token_urlsafe(32)
         
         # Storage
-        self.users: Dict[str, User] = {}
-        self.sessions: Dict[str, Session] = {}
-        self.groups: Dict[str, UserGroup] = {}
-        self.activity_logs: List[ActivityLog] = []
+        self.users: dict[str, User] = {}
+        self.sessions: dict[str, Session] = {}
+        self.groups: dict[str, UserGroup] = {}
+        self.activity_logs: list[ActivityLog] = []
         
         # Indexes
-        self.username_to_id: Dict[str, str] = {}
-        self.email_to_id: Dict[str, str] = {}
-        self.user_sessions: Dict[str, Set[str]] = defaultdict(set)
-        self.group_members: Dict[str, Set[str]] = defaultdict(set)
+        self.username_to_id: dict[str, str] = {}
+        self.email_to_id: dict[str, str] = {}
+        self.user_sessions: dict[str, set[str]] = defaultdict(set)
+        self.group_members: dict[str, set[str]] = defaultdict(set)
         
         # Settings
         self.session_timeout = timedelta(hours=24)
@@ -336,7 +334,7 @@ class MultiUserSystem:
             raise
     
     async def authenticate_user(self, username: str, password: str,
-                              ip_address: str = "", user_agent: str = "") -> Optional[Session]:
+                              ip_address: str = "", user_agent: str = "") -> Session | None:
         """Authenticate user and create session."""
         try:
             # Get user
@@ -415,7 +413,7 @@ class MultiUserSystem:
             logger.error(f"Failed to authenticate user {username}: {e}")
             return None
     
-    async def validate_session(self, token: str) -> Optional[User]:
+    async def validate_session(self, token: str) -> User | None:
         """Validate session token and return user."""
         try:
             # Decode token
@@ -621,18 +619,18 @@ class MultiUserSystem:
             logger.error(f"Failed to leave group {group_id}: {e}")
             return False
     
-    async def get_user(self, user_id: str) -> Optional[User]:
+    async def get_user(self, user_id: str) -> User | None:
         """Get user by ID."""
         return self.users.get(user_id)
     
-    async def get_user_by_username(self, username: str) -> Optional[User]:
+    async def get_user_by_username(self, username: str) -> User | None:
         """Get user by username."""
         user_id = self.username_to_id.get(username)
         return self.users.get(user_id) if user_id else None
     
-    async def get_users(self, status: Optional[UserStatus] = None,
-                       role: Optional[UserRole] = None,
-                       limit: int = 100) -> List[User]:
+    async def get_users(self, status: UserStatus | None = None,
+                       role: UserRole | None = None,
+                       limit: int = 100) -> list[User]:
         """Get users with optional filtering."""
         users = list(self.users.values())
         
@@ -646,8 +644,8 @@ class MultiUserSystem:
         users.sort(key=lambda u: u.created_at, reverse=True)
         return users[:limit]
     
-    async def get_groups(self, user_id: Optional[str] = None,
-                       limit: int = 100) -> List[UserGroup]:
+    async def get_groups(self, user_id: str | None = None,
+                       limit: int = 100) -> list[UserGroup]:
         """Get groups with optional filtering."""
         groups = list(self.groups.values())
         
@@ -659,23 +657,23 @@ class MultiUserSystem:
         groups.sort(key=lambda g: g.created_at, reverse=True)
         return groups[:limit]
     
-    async def get_activity_logs(self, user_id: Optional[str] = None,
-                              action: Optional[str] = None,
-                              limit: int = 100) -> List[ActivityLog]:
+    async def get_activity_logs(self, user_id: str | None = None,
+                              action: str | None = None,
+                              limit: int = 100) -> list[ActivityLog]:
         """Get activity logs with optional filtering."""
         logs = self.activity_logs
         
         # Apply filters
         if user_id:
-            logs = [l for l in logs if l.user_id == user_id]
+            logs = [entry for entry in logs if entry.user_id == user_id]
         if action:
-            logs = [l for l in logs if l.action == action]
+            logs = [entry for entry in logs if entry.action == action]
         
         # Sort and limit
-        logs.sort(key=lambda l: l.timestamp, reverse=True)
+        logs.sort(key=lambda entry: entry.timestamp, reverse=True)
         return logs[:limit]
     
-    async def get_user_stats(self) -> Dict[str, Any]:
+    async def get_user_stats(self) -> dict[str, Any]:
         """Get user system statistics."""
         # Update statistics
         self.stats["active_users"] = len([u for u in self.users.values() if u.status == UserStatus.ACTIVE])
@@ -706,7 +704,10 @@ class MultiUserSystem:
             salt, hash_hex = password_hash.split(':')
             computed_hash = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
             return hmac.compare_digest(computed_hash.hex(), hash_hex)
-        except:
+        except (ValueError, AttributeError, TypeError):
+            # A malformed stored hash must fail closed, not crash. Bare `except:`
+            # also swallowed KeyboardInterrupt and SystemExit, which made this
+            # impossible to Ctrl-C and hid real bugs (E722).
             return False
     
     def _generate_token(self, user_id: str, refresh: bool = False) -> str:
@@ -725,7 +726,7 @@ class MultiUserSystem:
     async def _log_activity(self, user_id: str, action: str, resource_type: str,
                           resource_id: str, description: str,
                           ip_address: str = "", user_agent: str = "",
-                          metadata: Dict[str, Any] = None) -> None:
+                          metadata: dict[str, Any] = None) -> None:
         """Log user activity."""
         activity = ActivityLog(
             user_id=user_id,
@@ -824,7 +825,7 @@ class MultiUserSystem:
 
 
 # Global multi-user system instance
-_multi_user_system: Optional[MultiUserSystem] = None
+_multi_user_system: MultiUserSystem | None = None
 
 
 async def get_multi_user_system(event_bus: EventBus, jwt_secret: str = None) -> MultiUserSystem:

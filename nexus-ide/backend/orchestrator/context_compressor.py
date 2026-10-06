@@ -7,16 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Set
-from collections import defaultdict
-import re
+from dataclasses import dataclass
+from typing import Any
 
-from backend.tools.ollama_client import OllamaClient, ChatMessage
-from backend.config.settings import get_model_config
+from backend.tools.ollama_client import OllamaClient
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +84,8 @@ class ContextCompressor:
         self.redundancy_threshold = redundancy_threshold
         
         # Context storage
-        self._segments: List[ContextSegment] = []
-        self._embedding_cache: Dict[str, str] = {}
+        self._segments: list[ContextSegment] = []
+        self._embedding_cache: dict[str, str] = {}
         
         # Statistics
         self._stats = CompressionStats()
@@ -136,12 +132,12 @@ class ContextCompressor:
             
             return await self._get_compressed_context()
     
-    async def get_context(self, max_tokens: Optional[int] = None) -> str:
+    async def get_context(self, max_tokens: int | None = None) -> str:
         """Get the current compressed context."""
         async with self._lock:
             return await self._get_compressed_context(max_tokens)
     
-    async def compress_context(self, force: bool = False) -> Dict[str, Any]:
+    async def compress_context(self, force: bool = False) -> dict[str, Any]:
         """Manually trigger context compression."""
         async with self._lock:
             if force or await self._should_compress():
@@ -160,7 +156,7 @@ class ContextCompressor:
             self._stats = CompressionStats()
             logger.info("Context cleared")
     
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Get compression statistics."""
         return {
             "original_tokens": self._stats.original_tokens,
@@ -174,7 +170,7 @@ class ContextCompressor:
             "active_segments": len(self._segments),
         }
     
-    async def _get_compressed_context(self, max_tokens: Optional[int] = None) -> str:
+    async def _get_compressed_context(self, max_tokens: int | None = None) -> str:
         """Build the compressed context string."""
         if not self._segments:
             return ""
@@ -243,7 +239,7 @@ class ContextCompressor:
         unique_segments = []
         redundant_count = 0
         
-        for i, segment in enumerate(self._segments):
+        for _i, segment in enumerate(self._segments):
             is_redundant = False
             
             for existing in unique_segments:
@@ -416,7 +412,7 @@ Provide a clear, concise summary that captures the main points."""
 
 
 # Global context compressor instance
-_context_compressor: Optional[ContextCompressor] = None
+_context_compressor: ContextCompressor | None = None
 
 
 async def get_context_compressor() -> ContextCompressor:

@@ -26,7 +26,7 @@ class TestMessageBus:
 
         try:
             await asyncio.wait_for(task, timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
 
         assert len(received) == 1

@@ -5,7 +5,6 @@ event bus message flows.
 """
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -81,7 +80,7 @@ class APIContractTester:
             f"    response = httpx.{method.lower()}(f'http://localhost:8000{path}')",
         ]
 
-        for code in status_codes:
+        for _code in status_codes:
             lines.append(f"    assert response.status_code in ({', '.join(map(str, status_codes))})")
             break  # Only need one assertion
 

@@ -8,11 +8,13 @@ Subscribes to EventBus and maintains a live view of:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections import deque
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
 
 from .event_bus import EventBus
 from .events import Event
@@ -70,10 +72,8 @@ class DashboardState:
         self._running = False
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
         logger.info("DashboardState stopped")
 

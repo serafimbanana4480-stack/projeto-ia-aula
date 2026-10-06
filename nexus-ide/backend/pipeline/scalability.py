@@ -9,7 +9,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -35,7 +35,7 @@ class TenantConfig:
     max_concurrent_workflows: int = 5
     allowed_stacks: list[str] = field(default_factory=lambda: ["python", "typescript", "go"])
     budget_limit_monthly: float = 1000.0
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     active: bool = True
 
     def to_dict(self) -> dict[str, Any]:
@@ -73,13 +73,20 @@ class TenantManager:
         """True quando o tenant ativo esta dentro do limite por minuto.
 
         Tenants inexistentes ou inativos ficam sempre bloqueados.
-        """
-        tenant = self._tenants.get(tenant_id)
-        if not tenant or not tenant.active:
-            return False
 
+        This used to be dead code — the class was never instantiated, so no
+        request was ever throttled per tenant.  It is now on the request path
+        (see ``backend.middleware.rate_limit.get_tenant_manager``), so the
+        tenant lookup happens under the same lock as the window update: without
+        it, a ``register()`` racing a ``check_rate_limit()`` could observe a
+        half-updated ``_tenants`` map and reject a legitimate tenant.
+        """
         now = time.time()
         with self._lock:
+            tenant = self._tenants.get(tenant_id)
+            if not tenant or not tenant.active:
+                return False
+
             window = [
                 ts for ts in self._rate_limiters.get(tenant_id, [])
                 if now - ts < 60.0
@@ -116,11 +123,11 @@ class TenantManager:
         return list(self._tenants.values())
 
     def get_usage_stats(self, tenant_id: str) -> dict[str, Any]:
-        tenant = self._tenants.get(tenant_id)
-        if not tenant:
-            return {}
-
         with self._lock:
+            tenant = self._tenants.get(tenant_id)
+            if not tenant:
+                return {}
+
             return {
                 "tenant_id": tenant_id,
                 "active_workflows": self._active_workflows[tenant_id],
@@ -254,7 +261,7 @@ class BudgetOptimizer:
         cost = (tokens_used / 1000) * tier.cost_per_1k_tokens
 
         record = UsageRecord(
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             tenant_id=tenant_id,
             agent_id=agent_id,
             model_tier=model_tier,
@@ -345,7 +352,7 @@ class CacheEntry:
     @property
     def is_expired(self) -> bool:
         ts = datetime.fromisoformat(self.timestamp)
-        return (datetime.now(timezone.utc) - ts).total_seconds() > self.ttl_seconds
+        return (datetime.now(UTC) - ts).total_seconds() > self.ttl_seconds
 
 
 class IntelligentCache:
@@ -374,7 +381,7 @@ class IntelligentCache:
             self._cache[key] = CacheEntry(
                 key=key,
                 result=value,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 ttl_seconds=ttl_seconds,
             )
 
@@ -559,7 +566,7 @@ class NeuralOperationsCenter:
                 )
             edge = self._edges[edge_key]
             edge.message_count += 1
-            edge.last_message = datetime.now(timezone.utc).isoformat()
+            edge.last_message = datetime.now(UTC).isoformat()
             edge.width = min(1 + edge.message_count * 0.1, 5.0)
             self._update_count += 1
 
@@ -570,7 +577,7 @@ class NeuralOperationsCenter:
                 "nodes": [self._node_to_dict(n) for n in self._nodes.values()],
                 "edges": [self._edge_to_dict(e) for e in self._edges.values()],
                 "update_count": self._update_count,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
 
     def get_stats(self) -> dict[str, Any]:

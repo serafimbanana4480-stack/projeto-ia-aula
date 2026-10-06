@@ -1,8 +1,8 @@
 """Mock Agent Registry for testing."""
 from __future__ import annotations
 
-from typing import Any
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass

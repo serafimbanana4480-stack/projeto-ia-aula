@@ -126,6 +126,31 @@ async def test_simple_task_completes_without_any_subagent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_conversational_turn_without_observer_skips_project_statuses() -> None:
+    loop = PrimaryLoop(
+        run_id="run-chat-no-observer",
+        query="Quanto é 19 vezes 23?",
+        stream=signals(token("437")),
+        run_subagent=None,
+        project_path="",
+    )
+
+    events = await collect(loop)
+
+    assert loop.outcome.succeeded
+    assert loop.outcome.answer == "437"
+    assert not any(
+        event.type in {RuntimeEventType.FILE_READ, RuntimeEventType.TEST_STARTED}
+        for event in events
+    )
+    assert not any(
+        event.type is RuntimeEventType.STATUS_UPDATE
+        and event.payload.get("label") == "sem observador configurado"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
 async def test_the_first_tool_call_precedes_any_planning_text() -> None:
     """The first action must not wait for a plan to be written."""
     loop = PrimaryLoop(
@@ -281,9 +306,10 @@ async def test_independent_subagents_run_in_parallel() -> None:
     elapsed = time.monotonic() - started
 
     assert peak == 2, "independent workers must overlap"
-    # Keep a margin below the ~150ms sequential case without making the test
-    # depend on sub-10ms scheduler noise on Windows/CI.
-    assert elapsed < 0.14, "two 50ms workers ran sequentially"
+    # Overlap is proven by ``peak == 2`` above; this elapsed bound is only a
+    # coarse guard against pathological scheduler overhead (Windows/CI noise
+    # measured 0.149s against the previous 0.14s bound and flapped).
+    assert elapsed < 0.45, "two 50ms workers took pathologically long"
     assert {result.status for result in loop.outcome.subagents} == {"completed"}
     assert types_of(events).count("subagent_started") == 2
 
@@ -312,7 +338,7 @@ async def test_dependent_subagent_never_starts_before_its_dependency() -> None:
         run_subagent=run_subagent,
         project_path="/tmp/project",
     )
-    await collect(loop)
+    events = await collect(loop)
 
     assert order == [
         "start:ANALYZER",
@@ -320,6 +346,15 @@ async def test_dependent_subagent_never_starts_before_its_dependency() -> None:
         "start:REVIEWER",
         "end:REVIEWER",
     ]
+    started = {
+        event.payload["name"]: event
+        for event in events
+        if event.type.value == "subagent_started"
+    }
+    analyzer_task_id = started["ANALYZER"].task_id
+    reviewer_started = started["REVIEWER"]
+    assert reviewer_started.payload["objective"] == "objetivo de REVIEWER"
+    assert reviewer_started.payload["depends_on"] == [analyzer_task_id]
 
 
 @pytest.mark.asyncio
@@ -390,9 +425,12 @@ async def test_cheap_work_is_declined_and_the_primary_does_it() -> None:
 async def test_stop_pauses_the_run_and_continue_resumes_it() -> None:
     steering = SteeringChannel(pause_timeout=5.0)
     emitted_after_stop: list[str] = []
+    seen_guidance: list[tuple[str, ...]] = []
     gate = asyncio.Event()
 
     def factory(turn: PrimaryTurn) -> AsyncIterator[AgentSignal]:
+        seen_guidance.append(turn.guidance)
+
         async def iterator() -> AsyncIterator[AgentSignal]:
             yield token("a começar")
             gate.set()  # the test stops the run exactly here
@@ -425,7 +463,8 @@ async def test_stop_pauses_the_run_and_continue_resumes_it() -> None:
     steering.cont("continua e não toques nos testes")
     events = await asyncio.wait_for(task, timeout=5)
 
-    assert emitted_after_stop == ["resumed"]
+    assert emitted_after_stop == ["resumed", "resumed"]
+    assert seen_guidance[1] == ("continua e não toques nos testes",)
     assert loop.outcome.stopped is False
     labels = [
         event.payload.get("label", "")
@@ -470,6 +509,198 @@ async def test_guidance_typed_during_a_run_reaches_the_next_cycle() -> None:
 
     assert seen[0] == ("usa pytest, não unittest",)
     assert "user_steering" in types_of(events)
+
+
+@pytest.mark.asyncio
+async def test_mid_run_guidance_gets_a_follow_up_cycle_even_when_initial_limit_is_one() -> None:
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+    seen: list[tuple[str, ...]] = []
+
+    def factory(turn: PrimaryTurn) -> AsyncIterator[AgentSignal]:
+        seen.append(turn.guidance)
+
+        async def iterator() -> AsyncIterator[AgentSignal]:
+            if turn.cycle == 1:
+                stream_started.set()
+                yield token("a verificar a pergunta inicial")
+                await release_stream.wait()
+            yield token(" resposta")
+
+        return iterator()
+
+    steering = SteeringChannel()
+    loop = PrimaryLoop(
+        run_id="run-mid-guidance",
+        query="Quanto é 2 + 2?",
+        stream=factory,
+        steering=steering,
+        max_cycles=1,
+    )
+    task = asyncio.create_task(collect(loop))
+    await asyncio.wait_for(stream_started.wait(), timeout=2)
+    assert steering.steer("Na verdade, explica também a conta.") is True
+    release_stream.set()
+    events = await asyncio.wait_for(task, timeout=5)
+
+    assert seen == [(), ("Na verdade, explica também a conta.",)]
+    assert "user_steering" in types_of(events)
+    assert loop.outcome.cycles == 2
+    assert steering.steer("chegou tarde") is False
+
+
+@pytest.mark.asyncio
+async def test_mid_run_guidance_continues_from_the_answer_already_streamed() -> None:
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+    turns: list[PrimaryTurn] = []
+
+    def factory(turn: PrimaryTurn) -> AsyncIterator[AgentSignal]:
+        turns.append(turn)
+
+        async def iterator() -> AsyncIterator[AgentSignal]:
+            if turn.cycle == 1:
+                yield token("Resposta inicial.")
+                stream_started.set()
+                await release_stream.wait()
+            else:
+                yield token(" Secção complementar.")
+
+        return iterator()
+
+    steering = SteeringChannel()
+    loop = PrimaryLoop(
+        run_id="run-steer-continuation",
+        query="Explica o fluxo e acrescenta uma secção se eu orientar.",
+        stream=factory,
+        steering=steering,
+        max_cycles=1,
+    )
+    task = asyncio.create_task(collect(loop))
+    await asyncio.wait_for(stream_started.wait(), timeout=2)
+    assert steering.steer("Acrescenta isolamento de conversas.") is True
+    release_stream.set()
+    events = await asyncio.wait_for(task, timeout=5)
+
+    assert turns[1].guidance == ("Acrescenta isolamento de conversas.",)
+    assert turns[1].previous_answer == "Resposta inicial."
+    assert loop.outcome.answer == "Resposta inicial. Secção complementar."
+    assert loop.outcome.cycles == 2
+    assert "user_steering" in types_of(events)
+
+
+@pytest.mark.asyncio
+async def test_conversational_followup_drops_regenerated_sections_before_streaming() -> None:
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+    prior = (
+        "**Guia**\n\n**1. Fluxo**\n\n"
+        "O fluxo já foi explicado ao utilizador com os passos e sintomas observáveis.\n\n"
+        "**Checklist**\n\n- Confirmar o fluxo e guardar o resultado."
+    )
+    repeated = (
+        "**Guia**\n\n**1. Fluxo**\n\n"
+        "O fluxo já foi explicado ao utilizador com os passos e sintomas observáveis.\n\n"
+        "**2. Isolamento**\n\nTestar duas conversas em paralelo e confirmar que o histórico não se mistura.\n\n"
+        "**Checklist**\n\n- Confirmar o fluxo e guardar os resultados."
+    )
+    added_section = (
+        "\n\n**2. Isolamento**\n\n"
+        "Testar duas conversas em paralelo e confirmar que o histórico não se mistura."
+    )
+    turns: list[PrimaryTurn] = []
+
+    def factory(turn: PrimaryTurn) -> AsyncIterator[AgentSignal]:
+        turns.append(turn)
+
+        async def iterator() -> AsyncIterator[AgentSignal]:
+            if turn.cycle == 1:
+                yield token(prior)
+                stream_started.set()
+                await release_stream.wait()
+            else:
+                for chunk in (repeated[:35], repeated[35:220], repeated[220:]):
+                    yield token(chunk)
+
+        return iterator()
+
+    steering = SteeringChannel()
+    loop = PrimaryLoop(
+        run_id="run-steer-no-duplicate",
+        query="Escreve um guia e acrescenta isolamento se eu orientar.",
+        stream=factory,
+        steering=steering,
+        max_cycles=1,
+    )
+    task = asyncio.create_task(collect(loop))
+    await asyncio.wait_for(stream_started.wait(), timeout=2)
+    assert steering.steer("Acrescenta uma secção sobre isolamento.") is True
+    release_stream.set()
+    events = await asyncio.wait_for(task, timeout=5)
+
+    deltas = [event.payload["text"] for event in events if event.type is RuntimeEventType.MESSAGE_DELTA]
+    assert turns[1].previous_answer == prior
+    assert deltas == [prior, added_section]
+    assert loop.outcome.answer == prior + added_section
+    assert loop.outcome.answer.count("**1. Fluxo**") == 1
+    assert loop.outcome.answer.count("**Checklist**") == 1
+    assert loop.outcome.answer.count("**2. Isolamento**") == 1
+
+
+@pytest.mark.asyncio
+async def test_conversational_followup_drops_repeated_long_paragraphs_without_headings() -> None:
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+    prior = (
+        "O diagnóstico começa por confirmar o envio, a receção e a persistência da mensagem. "
+        "Observa os eventos do cliente e do servidor, compara os identificadores da sessão "
+        "e verifica se a resposta aparece uma única vez. Este parágrafo já está visível."
+    )
+    new_paragraph = (
+        "Para testar duas conversas ao mesmo tempo, envia marcadores diferentes em cada uma "
+        "e confirma que as respostas e o histórico continuam ligados à sessão correta."
+    )
+    repeated = f"{prior}\n\n{new_paragraph}"
+
+    def factory(turn: PrimaryTurn) -> AsyncIterator[AgentSignal]:
+        async def iterator() -> AsyncIterator[AgentSignal]:
+            if turn.cycle == 1:
+                yield token(prior)
+                stream_started.set()
+                await release_stream.wait()
+            else:
+                yield token(repeated)
+
+        return iterator()
+
+    steering = SteeringChannel()
+    loop = PrimaryLoop(
+        run_id="run-steer-no-duplicate-paragraph",
+        query="Explica o diagnóstico e acrescenta o que eu orientar.",
+        stream=factory,
+        steering=steering,
+        max_cycles=1,
+    )
+    task = asyncio.create_task(collect(loop))
+    await asyncio.wait_for(stream_started.wait(), timeout=2)
+    assert steering.steer("Acrescenta o teste de duas conversas.") is True
+    release_stream.set()
+    events = await asyncio.wait_for(task, timeout=5)
+
+    deltas = [event.payload["text"] for event in events if event.type is RuntimeEventType.MESSAGE_DELTA]
+    assert deltas == [prior, f"\n\n{new_paragraph}"]
+    assert loop.outcome.answer == prior + f"\n\n{new_paragraph}"
+
+
+def test_steering_channel_caps_guidance_and_rejects_after_close() -> None:
+    steering = SteeringChannel()
+    assert [
+        steering.steer(f"orientação {index}") for index in range(4)
+    ] == [True, True, True, False]
+    steering.drain_guidance()
+    assert steering.steer("o limite é por run, não por fila") is False
+    steering.close()
+    assert steering.steer("run terminado") is False
 
 
 @pytest.mark.asyncio

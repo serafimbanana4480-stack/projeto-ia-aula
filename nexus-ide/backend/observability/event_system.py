@@ -1,4 +1,4 @@
-"""Event System - Centralized event management for NEXUS OMEGA.
+﻿"""Event System - Centralized event management for NEXUS OMEGA.
 
 This system provides:
 - Centralized event bus with Redis pub/sub
@@ -11,14 +11,15 @@ This system provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
-import time
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, AsyncIterator, Callable
-from dataclasses import dataclass, field
-from enum import Enum
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import StrEnum
+from typing import Any
 
 try:
     import redis.asyncio as redis
@@ -29,7 +30,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """Types of events in the system."""
     AGENT_STARTED = "agent.started"
     AGENT_COMPLETED = "agent.completed"
@@ -50,7 +51,7 @@ class EventType(str, Enum):
     PERFORMANCE_UPDATE = "performance.update"
 
 
-class EventPriority(str, Enum):
+class EventPriority(StrEnum):
     """Event priority levels."""
     LOW = "low"
     NORMAL = "normal"
@@ -65,13 +66,13 @@ class Event:
     event_type: EventType = EventType.SYSTEM_INFO
     timestamp: datetime = field(default_factory=datetime.now)
     source: str = ""
-    agent: Optional[str] = None
-    session_id: Optional[str] = None
+    agent: str | None = None
+    session_id: str | None = None
     priority: EventPriority = EventPriority.NORMAL
-    payload: Dict[str, Any] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert event to dictionary."""
         return {
             "event_id": self.event_id,
@@ -86,7 +87,7 @@ class Event:
         }
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'Event':
+    def from_dict(cls, data: dict[str, Any]) -> Event:
         """Create event from dictionary."""
         return cls(
             event_id=data.get("event_id", f"evt-{uuid.uuid4().hex[:12]}"),
@@ -105,10 +106,10 @@ class EventSubscriber:
     """Event subscriber with filtering capabilities."""
     
     def __init__(self, 
-                 event_types: Optional[List[EventType]] = None,
-                 agent_filter: Optional[str] = None,
-                 session_filter: Optional[str] = None,
-                 priority_filter: Optional[EventPriority] = None):
+                 event_types: list[EventType] | None = None,
+                 agent_filter: str | None = None,
+                 session_filter: str | None = None,
+                 priority_filter: EventPriority | None = None):
         self.event_types = set(event_types) if event_types else None
         self.agent_filter = agent_filter
         self.session_filter = session_filter
@@ -123,9 +124,7 @@ class EventSubscriber:
             return False
         if self.session_filter and event.session_id != self.session_filter:
             return False
-        if self.priority_filter and event.priority != self.priority_filter:
-            return False
-        return True
+        return not (self.priority_filter and event.priority != self.priority_filter)
     
     async def put(self, event: Event) -> None:
         """Put event in subscriber queue."""
@@ -144,12 +143,12 @@ class EventBus:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
-        self._subscribers: List[EventSubscriber] = []
-        self._event_history: List[Event] = []
+        self._redis: redis.Redis | None = None
+        self._subscribers: list[EventSubscriber] = []
+        self._event_history: list[Event] = []
         self._max_history = 10000
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._stats = {
             "events_published": 0,
             "events_delivered": 0,
@@ -185,10 +184,8 @@ class EventBus:
         
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
         
         if self._redis:
@@ -228,10 +225,10 @@ class EventBus:
             logger.error(f"Failed to publish event {event.event_id}: {e}")
     
     async def subscribe(self, 
-                       event_types: Optional[List[EventType]] = None,
-                       agent_filter: Optional[str] = None,
-                       session_filter: Optional[str] = None,
-                       priority_filter: Optional[EventPriority] = None) -> AsyncIterator[Event]:
+                       event_types: list[EventType] | None = None,
+                       agent_filter: str | None = None,
+                       session_filter: str | None = None,
+                       priority_filter: EventPriority | None = None) -> AsyncIterator[Event]:
         """Subscribe to events with filtering."""
         subscriber = EventSubscriber(event_types, agent_filter, session_filter, priority_filter)
         self._subscribers.append(subscriber)
@@ -247,9 +244,9 @@ class EventBus:
     
     async def get_events(self, 
                        limit: int = 100,
-                       event_type: Optional[EventType] = None,
-                       agent: Optional[str] = None,
-                       session_id: Optional[str] = None) -> List[Event]:
+                       event_type: EventType | None = None,
+                       agent: str | None = None,
+                       session_id: str | None = None) -> list[Event]:
         """Get events from history with filtering."""
         events = self._event_history.copy()
         
@@ -265,7 +262,7 @@ class EventBus:
         events.sort(key=lambda x: x.timestamp, reverse=True)
         return events[:limit]
     
-    async def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self) -> dict[str, Any]:
         """Get event bus statistics."""
         return {
             "running": self._running,
@@ -315,9 +312,9 @@ class EventAggregator:
     
     def __init__(self, event_bus: EventBus):
         self.event_bus = event_bus
-        self._aggregations: Dict[str, Dict[str, Any]] = {}
+        self._aggregations: dict[str, dict[str, Any]] = {}
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
     
     async def start(self) -> None:
         """Start the event aggregator."""
@@ -334,10 +331,8 @@ class EventAggregator:
         
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
         
         logger.info("EventAggregator stopped")
@@ -369,7 +364,7 @@ class EventAggregator:
             if event.session_id:
                 agg["sessions"].add(event.session_id)
     
-    async def get_aggregations(self) -> Dict[str, Any]:
+    async def get_aggregations(self) -> dict[str, Any]:
         """Get event aggregations."""
         result = {}
         for event_type, agg in self._aggregations.items():
@@ -392,8 +387,8 @@ class EventAggregator:
 
 
 # Global event bus instance
-_event_bus: Optional[EventBus] = None
-_event_aggregator: Optional[EventAggregator] = None
+_event_bus: EventBus | None = None
+_event_aggregator: EventAggregator | None = None
 
 
 async def get_event_bus() -> EventBus:

@@ -1,7 +1,25 @@
-"""Disk-pressure and process-local runtime ownership guards."""
+"""Disk-pressure and process-local runtime ownership guards.
+
+Configuration
+-------------
+``NEXUS_DISK_GUARD_MIN_PERCENT``
+    Minimum free-disk percentage (0-100) required before a provider is
+    allocated or a durable artefact is written. Read at *call time* -- not at
+    import time -- so a test or an operator can change it for a live process
+    via ``os.environ``/``monkeypatch.setenv``. An explicit ``threshold_percent``
+    argument always wins over the environment. A missing, empty, malformed, or
+    negative value falls back to :data:`DEFAULT_DISK_HEADROOM_PERCENT`, so the
+    production default is unchanged: **5.0 percent**.
+
+    The test suite sets this to ``0`` in ``backend/tests/conftest.py`` so the
+    suite is hermetic and does not inherit the developer's free-disk state.
+    Production never sets it; do not lower it outside tests.
+"""
 
 from __future__ import annotations
 
+import math
+import os
 import shutil
 import threading
 from dataclasses import asdict, dataclass
@@ -10,6 +28,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+#: Environment variable that overrides the minimum free-disk percentage.
+DISK_GUARD_MIN_PERCENT_ENV = "NEXUS_DISK_GUARD_MIN_PERCENT"
+
+#: Production default minimum free-disk percentage. Production behaviour is
+#: identical whether or not the environment variable is set.
+DEFAULT_DISK_HEADROOM_PERCENT = 5.0
+
+#: Free-disk percentage at which pressure becomes observable but non-blocking.
+DEFAULT_WARNING_PERCENT = 10.0
 
 _CLEANUP_CATEGORIES = (
     "data/ SQLite databases and stale -wal/-shm files",
@@ -17,6 +44,36 @@ _CLEANUP_CATEGORIES = (
     ".next* and frontend/.next* build caches",
     "temporary and package-manager cache directories",
 )
+
+
+def disk_headroom_threshold() -> float:
+    """Resolve the minimum free-disk percentage from the environment.
+
+    This is the single place ``NEXUS_DISK_GUARD_MIN_PERCENT`` is read. A
+    missing, blank, non-numeric, or negative value yields
+    :data:`DEFAULT_DISK_HEADROOM_PERCENT` rather than raising, because a typo in
+    a deployment variable must not take the orchestrator down. It deliberately
+    does not ``warnings.warn``: the project runs pytest with
+    ``filterwarnings = ["error", ...]``, which would turn a configuration typo
+    into a hard test failure.
+    """
+    raw = os.environ.get(DISK_GUARD_MIN_PERCENT_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_DISK_HEADROOM_PERCENT
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_DISK_HEADROOM_PERCENT
+    if value < 0 or not math.isfinite(value):
+        return DEFAULT_DISK_HEADROOM_PERCENT
+    return value
+
+
+def _resolve_threshold(threshold_percent: float | None) -> float:
+    """Return the explicit threshold, or the environment-resolved default."""
+    if threshold_percent is None:
+        return disk_headroom_threshold()
+    return float(threshold_percent)
 
 
 @dataclass(frozen=True)
@@ -50,8 +107,8 @@ class DiskPressureManager:
     def __init__(
         self,
         *,
-        warning_percent: float = 10.0,
-        critical_percent: float = 5.0,
+        warning_percent: float = DEFAULT_WARNING_PERCENT,
+        critical_percent: float = DEFAULT_DISK_HEADROOM_PERCENT,
     ) -> None:
         if critical_percent < 0 or warning_percent < critical_percent:
             raise ValueError("disk thresholds must satisfy 0 <= critical <= warning")
@@ -169,34 +226,53 @@ def measure_disk(path: str | Path) -> DiskSnapshot:
 
 def require_disk_headroom(
     path: str | Path,
-    threshold_percent: float = 5.0,
+    threshold_percent: float | None = None,
 ) -> DiskSnapshot:
-    """Return a snapshot or fail before allocating a provider or writing data."""
-    if threshold_percent < 0:
+    """Return a snapshot or fail before allocating a provider or writing data.
+
+    ``threshold_percent`` defaults to :func:`disk_headroom_threshold`, i.e.
+    ``NEXUS_DISK_GUARD_MIN_PERCENT`` falling back to
+    :data:`DEFAULT_DISK_HEADROOM_PERCENT` (5.0). Pass a value explicitly to
+    override both.
+    """
+    threshold = _resolve_threshold(threshold_percent)
+    if threshold < 0:
         raise ValueError("threshold_percent must be non-negative")
     snapshot = measure_disk(path)
-    if snapshot.free_percent < threshold_percent:
-        raise DiskPressureError(snapshot, threshold_percent)
+    if snapshot.free_percent < threshold:
+        raise DiskPressureError(snapshot, threshold)
     return snapshot
 
 
 def disk_pressure_status(
     path: str | Path,
-    threshold_percent: float = 5.0,
+    threshold_percent: float | None = None,
 ) -> dict[str, Any]:
-    """Return a non-raising health payload for the current volume."""
+    """Return a non-raising health payload for the current volume.
+
+    ``threshold_percent`` defaults to :func:`disk_headroom_threshold`; see
+    :func:`require_disk_headroom`.
+    """
+    threshold = _resolve_threshold(threshold_percent)
     try:
-        snapshot = measure_disk(path)
+        measure_disk(path)
     except OSError as exc:
         return {
             "status": "unknown",
             "pressure": None,
             "error": str(exc),
-            "threshold_percent": threshold_percent,
+            "threshold_percent": threshold,
         }
-    manager = DiskPressureManager(critical_percent=threshold_percent)
+    # ``warning_percent`` must be >= ``critical_percent``. A configured floor
+    # above the 10% default would otherwise raise ValueError from a *health*
+    # endpoint, turning a config typo into a 500. Clamping keeps the ordering
+    # invariant without silently rejecting the operator's value.
+    manager = DiskPressureManager(
+        warning_percent=max(DEFAULT_WARNING_PERCENT, threshold),
+        critical_percent=threshold,
+    )
     payload = manager.inspect(path)
-    payload["threshold_percent"] = threshold_percent
+    payload["threshold_percent"] = threshold
     payload["legacy_status"] = "pressure" if payload["pressure"] else "ok"
     return payload
 

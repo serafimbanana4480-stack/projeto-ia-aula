@@ -2,13 +2,11 @@
 """Enhanced Chat Routes - Real-time chat with dashboard integration."""
 
 
-import json
 import logging
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-
 
 from backend.models.api import ChatRequest
 from backend.observability.event_system import get_event_bus

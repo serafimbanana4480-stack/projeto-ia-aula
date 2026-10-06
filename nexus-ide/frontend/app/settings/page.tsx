@@ -11,6 +11,7 @@ import {
   CheckCircle,
   AlertCircle,
   Brain,
+  Globe2,
 } from "lucide-react";
 import { getSettings, saveSettings } from "../../lib/api";
 
@@ -29,6 +30,7 @@ interface AppSettings {
   gemini_api_key: string;
   openrouter_api_key: string;
   kilo_api_key: string;
+  brave_api_key: string;
 }
 
 const PROVIDER_OPTIONS = [
@@ -59,7 +61,9 @@ export default function SettingsPage() {
     gemini_api_key: "",
     openrouter_api_key: "",
     kilo_api_key: "",
+    brave_api_key: "",
   });
+  const [braveKeyConfigured, setBraveKeyConfigured] = useState<boolean | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -81,8 +85,10 @@ export default function SettingsPage() {
           gemini_api_key: _geminiApiKey,
           openrouter_api_key: _openrouterApiKey,
           kilo_api_key: _kiloApiKey,
+          brave_api_key: _braveApiKey,
           ...publicSettings
         } = data as Partial<AppSettings>;
+        setBraveKeyConfigured(typeof _braveApiKey === "string" && _braveApiKey.length > 0);
         const telemetryValue = (publicSettings as Record<string, unknown>).enable_telemetry;
         setSettings((prev) => ({
           ...prev,
@@ -101,8 +107,10 @@ export default function SettingsPage() {
           gemini_api_key: "",
           openrouter_api_key: "",
           kilo_api_key: "",
+          brave_api_key: "",
         }));
       } catch {
+        setBraveKeyConfigured(null);
         if (process.env.NODE_ENV !== "development") {
           setSettings((prev) => ({
             ...prev,
@@ -115,6 +123,7 @@ export default function SettingsPage() {
             gemini_api_key: "",
             openrouter_api_key: "",
             kilo_api_key: "",
+            brave_api_key: "",
           }));
         } else {
           const stored = localStorage.getItem("nexus_settings");
@@ -138,6 +147,7 @@ export default function SettingsPage() {
                 gemini_api_key: "",
                 openrouter_api_key: "",
                 kilo_api_key: "",
+                brave_api_key: "",
               }));
             } catch { /* ignore */ }
           }
@@ -155,8 +165,21 @@ export default function SettingsPage() {
     try {
       await saveSettings(settings as unknown as Record<string, unknown>);
       setSaved(true);
+      if (settings.brave_api_key.trim()) {
+        setBraveKeyConfigured(true);
+        setSettings((current) => ({ ...current, brave_api_key: "" }));
+      }
       setTimeout(() => setSaved(false), 2000);
-    } catch {
+    } catch (saveError) {
+      if (
+        saveError instanceof Error &&
+        "responseText" in saveError &&
+        typeof saveError.responseText === "string" &&
+        saveError.responseText.includes("invalid format")
+      ) {
+        setError("A chave Brave tem um formato inválido. Revê o valor e tenta novamente.");
+        return;
+      }
       const safeSettings = {
         llm_provider: settings.llm_provider,
         default_mode: settings.default_mode,
@@ -257,6 +280,41 @@ export default function SettingsPage() {
           </motion.div>
 
           {/* AI Provider Config */}
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.025 }}
+            className="rounded border border-nexus-border bg-nexus-panel/50 p-4"
+          >
+            <div className="mb-3 flex items-center gap-2">
+              <Globe2 className="h-4 w-4 text-nexus-accent" />
+              <h3 className="text-sm font-semibold">Pesquisa Web e Imagens</h3>
+            </div>
+            <div>
+              <label htmlFor="brave-api-key" className="mb-1 block text-xs text-gray-400">
+                Brave Search API Key
+              </label>
+              <input
+                id="brave-api-key"
+                type="password"
+                autoComplete="new-password"
+                spellCheck={false}
+                value={settings.brave_api_key}
+                onChange={(event) => setSettings({ ...settings, brave_api_key: event.target.value })}
+                placeholder={braveKeyConfigured ? "Chave guardada; deixa vazio para manter" : "Introduz a chave Brave"}
+                aria-describedby="brave-api-key-help"
+                className="w-full rounded bg-nexus-border px-3 py-2 text-sm text-gray-300 focus:outline-none focus:ring-1 focus:ring-nexus-accent"
+              />
+              <p id="brave-api-key-help" className="mt-1 text-xs text-gray-500">
+                {braveKeyConfigured === true
+                  ? "A chave existente fica oculta. Um valor novo substitui-a; deixa o campo vazio para a manter."
+                  : braveKeyConfigured === false
+                    ? "A chave é guardada cifrada no backend. O campo vazio não apaga uma chave definida no ambiente."
+                    : "Não foi possível confirmar a configuração atual. O campo vazio preserva qualquer chave existente."}
+              </p>
+            </div>
+          </motion.div>
+
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}

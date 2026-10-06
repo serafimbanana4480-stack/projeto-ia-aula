@@ -1,12 +1,11 @@
 """Integration tests for agent communication via the bus."""
 from __future__ import annotations
 
-import pytest
-from backend.orchestrator.agent_communication_bus import AgentCommunicationBus, AgentMessage
-from backend.agents.frontend.team_lead import FrontendTeamLead
 from backend.agents.ai_team.team_lead import AITeamLead
 from backend.agents.executive.ceo_agent import CEOAgent
 from backend.agents.executive.cto_agent import CTOAgent
+from backend.agents.frontend.team_lead import FrontendTeamLead
+from backend.orchestrator.agent_communication_bus import AgentCommunicationBus, AgentMessage
 
 
 class TestAgentCommunicationBus:

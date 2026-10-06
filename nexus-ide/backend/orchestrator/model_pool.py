@@ -6,12 +6,13 @@ with dynamic scaling based on usage patterns and resource constraints.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
-from collections import defaultdict, deque
+from typing import Any
 
 from backend.config.settings import get_model_config
 from backend.tools.ollama_client import OllamaClient
@@ -46,7 +47,7 @@ class PooledModel:
     model_key: str
     status: ModelStatus = ModelStatus.COLD
     metrics: ModelMetrics = field(default_factory=ModelMetrics)
-    load_task: Optional[asyncio.Task] = None
+    load_task: asyncio.Task | None = None
     last_access: float = field(default_factory=time.time)
     reference_count: int = 0
     
@@ -81,16 +82,16 @@ class ModelPool:
         self.preload_threshold = preload_threshold
         
         # Model registry
-        self._models: Dict[str, PooledModel] = {}
-        self._loading_tasks: Set[asyncio.Task] = set()
+        self._models: dict[str, PooledModel] = {}
+        self._loading_tasks: set[asyncio.Task] = set()
         self._memory_used_mb = 0.0
         
         # Usage tracking
         self._usage_history: deque = deque(maxlen=1000)
-        self._hourly_patterns: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self._hourly_patterns: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         
         # Background tasks
-        self._maintenance_task: Optional[asyncio.Task] = None
+        self._maintenance_task: asyncio.Task | None = None
         self._running = False
         
         # Load model configurations
@@ -118,10 +119,8 @@ class ModelPool:
         
         if self._maintenance_task:
             self._maintenance_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._maintenance_task
-            except asyncio.CancelledError:
-                pass
         
         # Cancel all loading tasks
         for task in self._loading_tasks:
@@ -133,7 +132,7 @@ class ModelPool:
         
         logger.info("Model Pool stopped")
     
-    async def get_model(self, model_key: str) -> Optional[str]:
+    async def get_model(self, model_key: str) -> str | None:
         """Get a warmed-up model by key, loading if necessary."""
         if model_key not in self._models:
             logger.warning("Model key %s not found in registry", model_key)
@@ -151,9 +150,8 @@ class ModelPool:
             await self._load_model(model)
         
         # Wait for model to be ready
-        if model.status == ModelStatus.LOADING:
-            if model.load_task:
-                await model.load_task
+        if model.status == ModelStatus.LOADING and model.load_task:
+            await model.load_task
         
         # Update metrics
         model.metrics.total_requests += 1
@@ -348,7 +346,7 @@ class ModelPool:
                     )
                     await self._load_model(model)
     
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Get pool statistics."""
         stats = {
             "total_models": len(self._models),
@@ -376,7 +374,7 @@ class ModelPool:
 
 
 # Global model pool instance
-_model_pool: Optional[ModelPool] = None
+_model_pool: ModelPool | None = None
 
 
 async def get_model_pool() -> ModelPool:

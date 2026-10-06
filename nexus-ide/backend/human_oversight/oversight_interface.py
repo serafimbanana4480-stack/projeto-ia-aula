@@ -11,18 +11,18 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import json
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
-from enum import Enum
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any
 
+from backend.human_oversight.approval_queue import ApprovalPriority, ApprovalQueue, ApprovalType
+from backend.human_oversight.intervention_points import InterventionManager
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
-from backend.human_oversight.approval_queue import ApprovalQueue, ApprovalType, ApprovalPriority
-from backend.human_oversight.intervention_points import InterventionManager, InterventionTrigger
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +51,13 @@ class OversightSession:
     human_id: str
     role: OversightRole
     start_time: datetime
-    end_time: Optional[datetime]
-    activities: List[Dict[str, Any]]
+    end_time: datetime | None
+    activities: list[dict[str, Any]]
     decisions_made: int
     interventions_handled: int
     approvals_processed: int
     session_quality: float
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -68,13 +68,13 @@ class OversightAlert:
     severity: str
     title: str
     description: str
-    context: Dict[str, Any]
+    context: dict[str, Any]
     required_action: str
-    deadline: Optional[datetime]
-    assigned_to: Optional[str]
+    deadline: datetime | None
+    assigned_to: str | None
     status: str
     created_at: datetime
-    resolved_at: Optional[datetime]
+    resolved_at: datetime | None
 
 
 class HumanOversightInterface:
@@ -86,21 +86,21 @@ class HumanOversightInterface:
         self.intervention_manager = InterventionManager(event_bus, self.approval_queue)
         
         # Oversight sessions
-        self.active_sessions: Dict[str, OversightSession] = {}
-        self.session_history: List[OversightSession] = []
+        self.active_sessions: dict[str, OversightSession] = {}
+        self.session_history: list[OversightSession] = []
         
         # Human operators
-        self.humans: Dict[str, Dict[str, Any]] = {}
+        self.humans: dict[str, dict[str, Any]] = {}
         
         # Alerts and notifications
-        self.active_alerts: Dict[str, OversightAlert] = {}
-        self.alert_history: List[OversightAlert] = []
+        self.active_alerts: dict[str, OversightAlert] = {}
+        self.alert_history: list[OversightAlert] = []
         
         # Oversight policies
-        self.oversight_policies: Dict[str, Dict[str, Any]] = {}
+        self.oversight_policies: dict[str, dict[str, Any]] = {}
         
         # Analytics
-        self.oversight_metrics: Dict[str, Any] = {}
+        self.oversight_metrics: dict[str, Any] = {}
         
         # Initialize default policies
         self._initialize_default_policies()
@@ -139,7 +139,7 @@ class HumanOversightInterface:
             }
         }
     
-    async def register_human_operator(self, human_id: str, human_info: Dict[str, Any]) -> None:
+    async def register_human_operator(self, human_id: str, human_info: dict[str, Any]) -> None:
         """Register a human operator for oversight."""
         
         self.humans[human_id] = {
@@ -176,7 +176,7 @@ class HumanOversightInterface:
         logger.info(f"Human operator registered: {human_id}")
     
     async def start_oversight_session(self, human_id: str, operation_type: str, 
-                                    context: Dict[str, Any] = None) -> str:
+                                    context: dict[str, Any] = None) -> str:
         """Start an oversight session."""
         
         if human_id not in self.humans:
@@ -227,7 +227,7 @@ class HumanOversightInterface:
         
         return session_id
     
-    async def end_oversight_session(self, session_id: str, summary: Dict[str, Any] = None) -> bool:
+    async def end_oversight_session(self, session_id: str, summary: dict[str, Any] = None) -> bool:
         """End an oversight session."""
         
         if session_id not in self.active_sessions:
@@ -267,7 +267,7 @@ class HumanOversightInterface:
         
         return True
     
-    async def request_oversight(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def request_oversight(self, context: dict[str, Any]) -> dict[str, Any]:
         """Request human oversight for AI operations."""
         
         # Determine operation type and required level
@@ -312,7 +312,7 @@ class HumanOversightInterface:
             "oversight_policy": policy
         }
     
-    async def get_oversight_dashboard(self, human_id: str) -> Dict[str, Any]:
+    async def get_oversight_dashboard(self, human_id: str) -> dict[str, Any]:
         """Get oversight dashboard for a human operator."""
         
         if human_id not in self.humans:
@@ -365,7 +365,7 @@ class HumanOversightInterface:
             }
         }
     
-    async def get_system_oversight_stats(self) -> Dict[str, Any]:
+    async def get_system_oversight_stats(self) -> dict[str, Any]:
         """Get system-wide oversight statistics."""
         
         # Get approval queue stats
@@ -417,7 +417,7 @@ class HumanOversightInterface:
             }
         }
     
-    def _get_allowed_approval_types(self, role: str) -> List[str]:
+    def _get_allowed_approval_types(self, role: str) -> list[str]:
         """Get allowed approval types for a role."""
         
         role_permissions = {
@@ -430,7 +430,7 @@ class HumanOversightInterface:
         
         return role_permissions.get(role, [])
     
-    def _determine_approval_priority(self, context: Dict[str, Any]) -> str:
+    def _determine_approval_priority(self, context: dict[str, Any]) -> str:
         """Determine approval priority based on context."""
         
         risk_score = context.get("risk_assessment", {}).get("overall_risk", 0.0)
@@ -510,7 +510,7 @@ class HumanOversightInterface:
         total_quality = sum(s.session_quality for s in all_sessions)
         return total_quality / len(all_sessions)
     
-    def _get_operators_by_role(self) -> Dict[str, int]:
+    def _get_operators_by_role(self) -> dict[str, int]:
         """Get count of operators by role."""
         
         role_counts = {}
@@ -521,7 +521,7 @@ class HumanOversightInterface:
         
         return role_counts
     
-    def _get_alerts_by_severity(self) -> Dict[str, int]:
+    def _get_alerts_by_severity(self) -> dict[str, int]:
         """Get count of alerts by severity."""
         
         severity_counts = {}
@@ -532,7 +532,7 @@ class HumanOversightInterface:
         
         return severity_counts
     
-    async def _create_oversight_alert(self, context: Dict[str, Any]) -> str:
+    async def _create_oversight_alert(self, context: dict[str, Any]) -> str:
         """Create an oversight alert."""
         
         alert_id = str(uuid.uuid4())
@@ -637,17 +637,13 @@ class HumanOversightInterface:
         # Cancel background tasks
         if self._alert_monitoring_task:
             self._alert_monitoring_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._alert_monitoring_task
-            except asyncio.CancelledError:
-                pass
         
         if self._session_monitoring_task:
             self._session_monitoring_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._session_monitoring_task
-            except asyncio.CancelledError:
-                pass
         
         # End all active sessions
         for session_id in list(self.active_sessions.keys()):

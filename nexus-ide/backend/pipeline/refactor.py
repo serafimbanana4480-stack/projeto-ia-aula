@@ -53,7 +53,7 @@ class RefactorEngine:
         result = TransformationResult(original=source, transformed=source)
 
         try:
-            tree = ast.parse(source)
+            ast.parse(source)
         except SyntaxError as exc:
             result.errors.append(f"Parse error: {exc}")
             return result
@@ -114,7 +114,7 @@ class RefactorEngine:
         def replacer(match: re.Match[str]) -> str:
             class_name = match.group(1)
             indent = match.group(2)
-            params = match.group(3)
+            match.group(3)
             assignments = match.group(4)
 
             # Extract field names from assignments
@@ -145,7 +145,7 @@ class RefactorEngine:
 
         def replacer(match: re.Match[str]) -> str:
             template = match.group(1)
-            args = match.group(2)
+            match.group(2)
             # For simple cases, just wrap in f-string
             # A real implementation would substitute variables
             changes.append("Modernized string formatting")

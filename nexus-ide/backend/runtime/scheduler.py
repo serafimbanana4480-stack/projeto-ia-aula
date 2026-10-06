@@ -59,7 +59,7 @@ class RuntimeTask:
     """One unit of scheduled work with a provable lifecycle."""
 
     name: str
-    run: Callable[["RuntimeTask"], Awaitable[Any]]
+    run: Callable[[RuntimeTask], Awaitable[Any]]
     task_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     depends_on: frozenset[str] = frozenset()
     read_scope: frozenset[str] = frozenset()

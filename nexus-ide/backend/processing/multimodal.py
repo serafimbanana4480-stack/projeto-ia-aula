@@ -6,16 +6,15 @@ cross-modal fusion, and integrated understanding.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import time
 import uuid
-import base64
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union, Tuple
-from datetime import datetime
-import hashlib
+from typing import Any
 
 try:
     import redis.asyncio as redis
@@ -60,18 +59,18 @@ class MediaContent:
     """Unified media content representation."""
     content_id: str = field(default_factory=lambda: f"content-{uuid.uuid4().hex[:12]}")
     modality: ModalityType = ModalityType.TEXT
-    raw_data: Union[str, bytes] = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    raw_data: str | bytes = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
     
     # Content properties
     mime_type: str = ""
     size_bytes: int = 0
-    duration: Optional[float] = None  # For audio/video
-    dimensions: Optional[Tuple[int, int]] = None  # For images/video
+    duration: float | None = None  # For audio/video
+    dimensions: tuple[int, int] | None = None  # For images/video
     
     # Processing metadata
-    extracted_features: Dict[str, Any] = field(default_factory=dict)
-    processed_data: Optional[Dict[str, Any]] = None
+    extracted_features: dict[str, Any] = field(default_factory=dict)
+    processed_data: dict[str, Any] | None = None
     processing_status: ProcessingStatus = ProcessingStatus.PENDING
     
     # Quality metrics
@@ -80,9 +79,9 @@ class MediaContent:
     
     # Timestamps
     created_at: float = field(default_factory=time.time)
-    processed_at: Optional[float] = None
+    processed_at: float | None = None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "content_id": self.content_id,
             "modality": self.modality.value,
@@ -111,10 +110,10 @@ class ProcessingResult:
     processor_id: str = ""
     
     # Processing results
-    extracted_features: Dict[str, Any] = field(default_factory=dict)
-    structured_data: Dict[str, Any] = field(default_factory=dict)
-    embeddings: Optional[List[float]] = None
-    classifications: Dict[str, float] = field(default_factory=dict)
+    extracted_features: dict[str, Any] = field(default_factory=dict)
+    structured_data: dict[str, Any] = field(default_factory=dict)
+    embeddings: list[float] | None = None
+    classifications: dict[str, float] = field(default_factory=dict)
     
     # Quality metrics
     processing_time: float = 0.0
@@ -122,15 +121,15 @@ class ProcessingResult:
     confidence: float = 0.0
     
     # Errors and warnings
-    errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     
     # Metadata
     processor_version: str = ""
-    processing_parameters: Dict[str, Any] = field(default_factory=dict)
+    processing_parameters: dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "result_id": self.result_id,
             "content_id": self.content_id,
@@ -155,13 +154,13 @@ class ProcessingResult:
 class FusionResult:
     """Result from cross-modal fusion."""
     fusion_id: str = field(default_factory=lambda: f"fusion-{uuid.uuid4().hex[:12]}")
-    content_ids: List[str] = field(default_factory=list)
+    content_ids: list[str] = field(default_factory=list)
     strategy: FusionStrategy = FusionStrategy.LATE_FUSION
     
     # Fusion results
-    unified_features: Dict[str, Any] = field(default_factory=dict)
-    unified_embeddings: Optional[List[float]] = None
-    cross_modal_insights: List[str] = field(default_factory=list)
+    unified_features: dict[str, Any] = field(default_factory=dict)
+    unified_embeddings: list[float] | None = None
+    cross_modal_insights: list[str] = field(default_factory=list)
     
     # Quality metrics
     fusion_quality: float = 0.0
@@ -170,10 +169,10 @@ class FusionResult:
     
     # Processing metadata
     processing_time: float = 0.0
-    fusion_parameters: Dict[str, Any] = field(default_factory=dict)
+    fusion_parameters: dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "fusion_id": self.fusion_id,
             "content_ids": self.content_ids,
@@ -276,7 +275,7 @@ class TextProcessor:
         else:
             return "unknown"
             
-    def _analyze_sentiment(self, text: str) -> Dict[str, float]:
+    def _analyze_sentiment(self, text: str) -> dict[str, float]:
         """Simple sentiment analysis."""
         positive_words = ["good", "great", "excellent", "amazing", "wonderful"]
         negative_words = ["bad", "terrible", "awful", "horrible", "worst"]
@@ -295,7 +294,7 @@ class TextProcessor:
             "neutral": 0.0,
         }
         
-    def _extract_entities(self, text: str) -> List[Dict[str, str]]:
+    def _extract_entities(self, text: str) -> list[dict[str, str]]:
         """Simple entity extraction."""
         # In real implementation, would use NER models
         entities = []
@@ -313,7 +312,7 @@ class TextProcessor:
             
         return entities
         
-    def _extract_keywords(self, text: str) -> List[str]:
+    def _extract_keywords(self, text: str) -> list[str]:
         """Simple keyword extraction."""
         # Remove common words and get most frequent
         common_words = {"the", "and", "is", "to", "a", "in", "that", "it", "with", "for"}
@@ -342,11 +341,10 @@ class TextProcessor:
         readability = max(0.0, 1.0 - (avg_words_per_sentence - 15) / 30)
         return readability
         
-    async def _generate_embeddings(self, text: str) -> List[float]:
+    async def _generate_embeddings(self, text: str) -> list[float]:
         """Generate text embeddings."""
         # In real implementation, would use embedding models
         # Mock embeddings for demonstration
-        import hashlib
         hash_obj = hashlib.md5(text.encode())
         hash_hex = hash_obj.hexdigest()
         
@@ -358,7 +356,7 @@ class TextProcessor:
             
         return embeddings[:128]  # Return 128-dimensional embeddings
         
-    async def _classify_text(self, text: str) -> Dict[str, float]:
+    async def _classify_text(self, text: str) -> dict[str, float]:
         """Classify text content."""
         # Simple classification based on keywords
         categories = {
@@ -385,7 +383,7 @@ class TextProcessor:
             return sentences[0].strip() + "."
         return ""
         
-    async def _extract_topics(self, text: str) -> List[str]:
+    async def _extract_topics(self, text: str) -> list[str]:
         """Extract main topics."""
         # Use keywords as topics
         keywords = self._extract_keywords(text)
@@ -405,7 +403,7 @@ class TextProcessor:
         else:
             return "statement"
             
-    def _calculate_quality_score(self, features: Dict[str, Any]) -> float:
+    def _calculate_quality_score(self, features: dict[str, Any]) -> float:
         """Calculate text quality score."""
         score = 0.0
         
@@ -505,13 +503,13 @@ class ImageProcessor:
                 confidence=0.0,
             )
             
-    def _calculate_aspect_ratio(self, dimensions: Optional[Tuple[int, int]]) -> float:
+    def _calculate_aspect_ratio(self, dimensions: tuple[int, int] | None) -> float:
         """Calculate aspect ratio."""
         if not dimensions or dimensions[1] == 0:
             return 0.0
         return dimensions[0] / dimensions[1]
         
-    def _extract_color_histogram(self, image_data: bytes) -> Dict[str, int]:
+    def _extract_color_histogram(self, image_data: bytes) -> dict[str, int]:
         """Extract color histogram."""
         # Mock implementation
         return {"red": 100, "green": 120, "blue": 80}
@@ -531,10 +529,9 @@ class ImageProcessor:
         # Mock implementation
         return 0.5
         
-    async def _generate_image_embeddings(self, image_data: bytes) -> List[float]:
+    async def _generate_image_embeddings(self, image_data: bytes) -> list[float]:
         """Generate image embeddings."""
         # Mock embeddings
-        import hashlib
         hash_obj = hashlib.md5(image_data)
         hash_hex = hash_obj.hexdigest()
         
@@ -545,7 +542,7 @@ class ImageProcessor:
             
         return embeddings[:256]  # Return 256-dimensional embeddings
         
-    async def _classify_image(self, image_data: bytes) -> Dict[str, float]:
+    async def _classify_image(self, image_data: bytes) -> dict[str, float]:
         """Classify image content."""
         # Mock classification
         return {
@@ -555,7 +552,7 @@ class ImageProcessor:
             "text": 0.1,
         }
         
-    async def _detect_objects(self, image_data: bytes) -> List[Dict[str, Any]]:
+    async def _detect_objects(self, image_data: bytes) -> list[dict[str, Any]]:
         """Detect objects in image."""
         # Mock object detection
         return [
@@ -563,7 +560,7 @@ class ImageProcessor:
             {"type": "car", "confidence": 0.6, "bbox": [200, 150, 300, 200]},
         ]
         
-    async def _classify_scene(self, image_data: bytes) -> List[str]:
+    async def _classify_scene(self, image_data: bytes) -> list[str]:
         """Classify scene type."""
         # Mock scene classification
         return ["outdoor", "urban", "daylight"]
@@ -573,14 +570,14 @@ class ImageProcessor:
         # Mock OCR
         return "Sample extracted text from image"
         
-    async def _detect_faces(self, image_data: bytes) -> List[Dict[str, Any]]:
+    async def _detect_faces(self, image_data: bytes) -> list[dict[str, Any]]:
         """Detect faces in image."""
         # Mock face detection
         return [
             {"bbox": [50, 50, 100, 100], "confidence": 0.9},
         ]
         
-    def _calculate_image_quality_score(self, features: Dict[str, Any]) -> float:
+    def _calculate_image_quality_score(self, features: dict[str, Any]) -> float:
         """Calculate image quality score."""
         score = 0.0
         
@@ -703,10 +700,9 @@ class AudioProcessor:
         # Mock implementation
         return 0.1
         
-    async def _generate_audio_embeddings(self, audio_data: bytes) -> List[float]:
+    async def _generate_audio_embeddings(self, audio_data: bytes) -> list[float]:
         """Generate audio embeddings."""
         # Mock embeddings
-        import hashlib
         hash_obj = hashlib.md5(audio_data)
         hash_hex = hash_obj.hexdigest()
         
@@ -717,7 +713,7 @@ class AudioProcessor:
             
         return embeddings[:128]  # Return 128-dimensional embeddings
         
-    async def _classify_audio(self, audio_data: bytes) -> Dict[str, float]:
+    async def _classify_audio(self, audio_data: bytes) -> dict[str, float]:
         """Classify audio content."""
         # Mock classification
         return {
@@ -742,7 +738,7 @@ class AudioProcessor:
         # Mock language detection
         return "en"
         
-    async def _detect_emotions(self, audio_data: bytes) -> Dict[str, float]:
+    async def _detect_emotions(self, audio_data: bytes) -> dict[str, float]:
         """Detect emotions in speech."""
         # Mock emotion detection
         return {
@@ -757,7 +753,7 @@ class AudioProcessor:
         # Mock genre classification
         return "pop"
         
-    def _calculate_audio_quality_score(self, features: Dict[str, Any]) -> float:
+    def _calculate_audio_quality_score(self, features: dict[str, Any]) -> float:
         """Calculate audio quality score."""
         score = 0.0
         
@@ -857,16 +853,15 @@ class VideoProcessor:
                 confidence=0.0,
             )
             
-    def _calculate_aspect_ratio(self, dimensions: Optional[Tuple[int, int]]) -> float:
+    def _calculate_aspect_ratio(self, dimensions: tuple[int, int] | None) -> float:
         """Calculate aspect ratio."""
         if not dimensions or dimensions[1] == 0:
             return 0.0
         return dimensions[0] / dimensions[1]
         
-    async def _generate_video_embeddings(self, video_data: bytes) -> List[float]:
+    async def _generate_video_embeddings(self, video_data: bytes) -> list[float]:
         """Generate video embeddings."""
         # Mock embeddings
-        import hashlib
         hash_obj = hashlib.md5(video_data)
         hash_hex = hash_obj.hexdigest()
         
@@ -877,7 +872,7 @@ class VideoProcessor:
             
         return embeddings[:512]  # Return 512-dimensional embeddings
         
-    async def _classify_video(self, video_data: bytes) -> Dict[str, float]:
+    async def _classify_video(self, video_data: bytes) -> dict[str, float]:
         """Classify video content."""
         # Mock classification
         return {
@@ -887,7 +882,7 @@ class VideoProcessor:
             "action": 0.1,
         }
         
-    async def _detect_scenes(self, video_data: bytes) -> List[Dict[str, Any]]:
+    async def _detect_scenes(self, video_data: bytes) -> list[dict[str, Any]]:
         """Detect scene changes."""
         # Mock scene detection
         return [
@@ -896,7 +891,7 @@ class VideoProcessor:
             {"timestamp": 60.0, "type": "outro", "confidence": 0.7},
         ]
         
-    async def _track_objects(self, video_data: bytes) -> List[Dict[str, Any]]:
+    async def _track_objects(self, video_data: bytes) -> list[dict[str, Any]]:
         """Track objects across frames."""
         # Mock object tracking
         return [
@@ -904,7 +899,7 @@ class VideoProcessor:
             {"type": "car", "track_id": 2, "confidence": 0.6},
         ]
         
-    async def _detect_actions(self, video_data: bytes) -> List[str]:
+    async def _detect_actions(self, video_data: bytes) -> list[str]:
         """Detect actions in video."""
         # Mock action detection
         return ["walking", "talking", "sitting"]
@@ -914,7 +909,7 @@ class VideoProcessor:
         # Mock transcription
         return "This is a sample transcription of the video content."
         
-    async def _extract_keyframes(self, video_data: bytes) -> List[Dict[str, Any]]:
+    async def _extract_keyframes(self, video_data: bytes) -> list[dict[str, Any]]:
         """Extract keyframes."""
         # Mock keyframe extraction
         return [
@@ -923,7 +918,7 @@ class VideoProcessor:
             {"timestamp": 30.0, "frame_id": 900},
         ]
         
-    def _calculate_video_quality_score(self, features: Dict[str, Any]) -> float:
+    def _calculate_video_quality_score(self, features: dict[str, Any]) -> float:
         """Calculate video quality score."""
         score = 0.0
         
@@ -957,7 +952,7 @@ class MultiModalProcessor:
     def __init__(self, model_client, redis_url: str = "redis://localhost:6379"):
         self.model_client = model_client
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Modality processors
         self.processors = {
@@ -969,11 +964,11 @@ class MultiModalProcessor:
         
         # Processing queue
         self.processing_queue: asyncio.Queue = asyncio.Queue()
-        self.processing_task: Optional[asyncio.Task] = None
+        self.processing_task: asyncio.Task | None = None
         
         # Results storage
-        self.results: Dict[str, ProcessingResult] = {}
-        self.contents: Dict[str, MediaContent] = {}
+        self.results: dict[str, ProcessingResult] = {}
+        self.contents: dict[str, MediaContent] = {}
         
     async def initialize(self) -> None:
         """Initialize the multi-modal processor."""
@@ -1039,10 +1034,10 @@ class MultiModalProcessor:
         
     async def submit_content(
         self,
-        raw_data: Union[str, bytes],
+        raw_data: str | bytes,
         modality: ModalityType,
         mime_type: str = "",
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: dict[str, Any] | None = None
     ) -> str:
         """Submit content for processing."""
         content = MediaContent(
@@ -1057,7 +1052,7 @@ class MultiModalProcessor:
         
         return content.content_id
         
-    async def get_result(self, result_id: str) -> Optional[ProcessingResult]:
+    async def get_result(self, result_id: str) -> ProcessingResult | None:
         """Get processing result."""
         if result_id in self.results:
             return self.results[result_id]
@@ -1093,7 +1088,7 @@ class MultiModalProcessor:
         
     async def fuse_modalities(
         self,
-        content_ids: List[str],
+        content_ids: list[str],
         strategy: FusionStrategy = FusionStrategy.LATE_FUSION
     ) -> FusionResult:
         """Fuse multiple modalities."""
@@ -1125,7 +1120,7 @@ class MultiModalProcessor:
         
         return fusion_result
         
-    async def _late_fusion(self, results: List[ProcessingResult], strategy: FusionStrategy) -> FusionResult:
+    async def _late_fusion(self, results: list[ProcessingResult], strategy: FusionStrategy) -> FusionResult:
         """Late fusion strategy."""
         # Combine features from all results
         unified_features = {}
@@ -1161,12 +1156,12 @@ class MultiModalProcessor:
             completeness_score=len(results) / 4.0,  # 4 modalities total
         )
         
-    async def _early_fusion(self, results: List[ProcessingResult], strategy: FusionStrategy) -> FusionResult:
+    async def _early_fusion(self, results: list[ProcessingResult], strategy: FusionStrategy) -> FusionResult:
         """Early fusion strategy."""
         # Simple implementation - similar to late fusion
         return await self._late_fusion(results, strategy)
         
-    async def _attention_fusion(self, results: List[ProcessingResult], strategy: FusionStrategy) -> FusionResult:
+    async def _attention_fusion(self, results: list[ProcessingResult], strategy: FusionStrategy) -> FusionResult:
         """Attention-based fusion strategy."""
         # Weight results by confidence
         total_confidence = sum(r.confidence for r in results)
@@ -1203,7 +1198,7 @@ class MultiModalProcessor:
             completeness_score=len(results) / 4.0,
         )
         
-    async def _hybrid_fusion(self, results: List[ProcessingResult], strategy: FusionStrategy) -> FusionResult:
+    async def _hybrid_fusion(self, results: list[ProcessingResult], strategy: FusionStrategy) -> FusionResult:
         """Hybrid fusion strategy."""
         # Combine early and late fusion
         early_result = await self._early_fusion(results, FusionStrategy.EARLY_FUSION)
@@ -1221,7 +1216,7 @@ class MultiModalProcessor:
             completeness_score=(early_result.completeness_score + late_result.completeness_score) / 2,
         )
         
-    def get_processing_stats(self) -> Dict[str, Any]:
+    def get_processing_stats(self) -> dict[str, Any]:
         """Get processing statistics."""
         return {
             "total_contents": len(self.contents),
@@ -1246,4 +1241,4 @@ class MultiModalProcessor:
 
 
 # Global multi-modal processor instance
-multimodal_processor: Optional[MultiModalProcessor] = None
+multimodal_processor: MultiModalProcessor | None = None

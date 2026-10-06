@@ -6,14 +6,15 @@ that can be restarted quickly instead of created from scratch.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-import docker
 from docker.models.containers import Container
 
+import docker
 from backend.sandbox.executor import SandboxConfig
 
 logger = logging.getLogger(__name__)
@@ -138,10 +139,8 @@ class SandboxPool:
                         container.short_id,
                         exc,
                     )
-                    try:
+                    with contextlib.suppress(Exception):
                         container.remove(force=True)
-                    except Exception:
-                        pass
 
         # No warm container available — create new one
         logger.info("No warm containers available, creating new one for %s", language)
@@ -171,10 +170,8 @@ class SandboxPool:
         async with self._lock:
             if len(self._warm_pool) >= self._pool_config.max_pool_size:
                 # Pool is full — destroy the container
-                try:
+                with contextlib.suppress(Exception):
                     container.remove(force=True)
-                except Exception:
-                    pass
                 return
 
             # Stop the container cleanly for reuse
@@ -191,20 +188,16 @@ class SandboxPool:
                     "Failed to return container to pool: %s",
                     exc,
                 )
-                try:
+                with contextlib.suppress(Exception):
                     container.remove(force=True)
-                except Exception:
-                    pass
 
     async def drain(self) -> None:
         """Remove all containers from the warm pool."""
         async with self._lock:
             while self._warm_pool:
                 container = self._warm_pool.popleft()
-                try:
+                with contextlib.suppress(Exception):
                     container.remove(force=True)
-                except Exception:
-                    pass
             self._initialized = False
             logger.info("Warm pool drained")
 

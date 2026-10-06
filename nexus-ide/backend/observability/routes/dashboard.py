@@ -14,20 +14,38 @@ Both read from the same source of truth (``get_metrics_collector()``), so
 there is exactly one metrics pipeline. ``DashboardState`` remains importable
 because ``backend/tests/api/conftest.py`` wires it into test fixtures; new
 code must not add endpoints here. See ARCHITECTURE.md §Dashboard.
+
+Why mounting it is a defect, measured rather than assumed (2026-09-26)
+---------------------------------------------------------------------
+``include_router`` of this module does **not** fail and does not duplicate an
+operation id, so the mistake is easy to make and invisible afterwards. What it
+does produce is a tenth duplicate ``(path, method)`` registration:
+``GET /api/dashboard/stream`` is declared both here and by
+``observability/routes/metrics.py``, which is the SSE
+``frontend/stores/metricsStore.ts`` subscribes to. Registration order decides
+which of two different payload shapes answers.
+
+The two unique paths below are the reason the tests were wrong, not the router:
+``/api/dashboard/state`` has no consumer in ``backend/`` or ``frontend/`` (the
+state the dashboard needs is served by ``/api/dashboard/status``), and
+``/api/dashboard/publish`` exists only to inject demo events, reaching into
+``DashboardState._bus`` to do it.
+
+``backend/tests/api/test_backend_hardening_dashboard_wiring.py`` enforces all of
+the above; ``backend/tests/api/test_dashboard_api.py`` asserts the real contract.
 """
 from __future__ import annotations
 
-import asyncio
-import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
+from backend.middleware.auth import require_auth
 from backend.observability.dashboard_state import DashboardState
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
-from backend.middleware.auth import require_auth
 
 router = APIRouter()
 

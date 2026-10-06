@@ -8,14 +8,14 @@ Covers:
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from backend.infrastructure.docker_sandbox import (
     DockerSandbox,
     DockerSandboxConfig,
-    ContainerInfo,
 )
 
 

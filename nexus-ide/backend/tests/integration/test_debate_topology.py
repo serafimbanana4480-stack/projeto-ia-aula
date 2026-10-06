@@ -1,10 +1,8 @@
 """Integration tests for Debate Visualizer and Agent Topology."""
 from __future__ import annotations
 
-import pytest
-
+from backend.orchestrator.agent_topology import AgentEdge, AgentNode, AgentTopology
 from backend.orchestrator.debate_visualizer import DebateVisualizer, Stance
-from backend.orchestrator.agent_topology import AgentTopology, AgentNode, AgentEdge
 
 
 class TestDebateIntegration:

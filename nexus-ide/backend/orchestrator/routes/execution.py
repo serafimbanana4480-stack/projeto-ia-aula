@@ -1,21 +1,21 @@
+"""API routes for the autonomous execution engine."""
+
 from __future__ import annotations
 
-"""API routes for the autonomous execution engine."""
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from typing import Any, Optional
-
 
 from backend.orchestrator.autonomous_execution_engine import (
     AutonomousExecutionEngine,
-    ExecutionTask,
     TaskStatus,
 )
 
 router = APIRouter(prefix="/api/execution", tags=["execution"])
 
 # Module-level singleton (injected at app startup in production)
-_engine: Optional[AutonomousExecutionEngine] = None
+_engine: AutonomousExecutionEngine | None = None
 
 
 def set_engine(engine: AutonomousExecutionEngine) -> None:
@@ -35,7 +35,7 @@ class TaskResponse(BaseModel):
     status: str
     retry_count: int
     result: Any = None
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @router.post("/tasks", response_model=TaskResponse)
@@ -71,13 +71,13 @@ async def get_task(task_id: str) -> TaskResponse:
 
 
 @router.get("/tasks", response_model=list[TaskResponse])
-async def list_tasks(status: Optional[str] = None) -> list[TaskResponse]:
+async def list_tasks(status: str | None = None) -> list[TaskResponse]:
     if _engine is None:
         raise HTTPException(status_code=503, detail="Execution engine not available")
     try:
         tasks = _engine.list_tasks(TaskStatus(status) if status else None)
     except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+        raise HTTPException(status_code=400, detail=f"Invalid status: {status}") from None
     return [
         TaskResponse(
             task_id=t.task_id,

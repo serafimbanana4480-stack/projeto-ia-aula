@@ -10,7 +10,8 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
-import { authHeaders, apiUrl } from "../../lib/api";
+import { apiUrl } from "../../lib/api";
+import { authenticatedFetch } from "../../lib/auth";
 import { formatRelativeTime } from "../../lib/format";
 import { Surface, SurfaceHeader } from "../ui/Surface";
 import { Button, Meter, AnimatedNumber, EmptyState } from "../ui/Primitives";
@@ -21,28 +22,12 @@ interface UsageData {
   total_tokens_in: number;
   total_tokens_out: number;
   total_cost: number;
-  by_model: Record<
-    string,
-    {
-      tokens_in: number;
-      tokens_out: number;
-      total_tokens: number;
-      cost: number;
-      requests: number;
-    }
-  >;
-  by_agent: Record<
-    string,
-    {
-      tokens_in: number;
-      tokens_out: number;
-      total_tokens: number;
-      requests: number;
-    }
-  >;
+  by_model: Record<string, { total_tokens: number; cost: number }>;
+  by_provider: Record<string, number>;
   range_seconds: number;
   generated_at: number;
   currency: string;
+  cost_is_estimated: boolean;
 }
 
 type TimeRange = "24h" | "7d" | "30d";
@@ -108,12 +93,11 @@ function tokensTone(tokens: number): "success" | "warning" | "danger" {
 
 function WidgetShell({ children }: { children: ReactNode }) {
   return (
-    <Surface elevation={2} padding="md">
+    <Surface elevation={1} padding="md" className="nx-dashboard-widget h-full">
       <SurfaceHeader
         icon={<DollarSign className="h-4 w-4" />}
-        title="Custos & Uso"
-        subtitle="Consumo de tokens e custo por modelo e agente"
-        tone="success"
+        title="Tokens e custos"
+        subtitle="Consumo registado e custo estimado"
       />
       {children}
     </Surface>
@@ -128,8 +112,7 @@ export default function UsageWidget() {
 
   const fetchUsage = useCallback(async () => {
     try {
-      const resp = await fetch(apiUrl(`/api/metrics/usage?range=${range}`), {
-        headers: authHeaders(),
+      const resp = await authenticatedFetch(apiUrl(`/api/metrics/usage?range=${range}`), {
         signal: AbortSignal.timeout(8000),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -168,14 +151,14 @@ export default function UsageWidget() {
       }));
   }, [data]);
 
-  const agentRanking = useMemo(() => {
-    if (!data?.by_agent) return [];
-    const entries = Object.entries(data.by_agent);
-    const total = entries.reduce((s, [, v]) => s + v.total_tokens, 0);
-    return entries.slice(0, 5).map(([name, info]) => ({
+  const providerRanking = useMemo(() => {
+    if (!data?.by_provider) return [];
+    const entries = Object.entries(data.by_provider).sort(([, a], [, b]) => b - a);
+    const total = entries.reduce((sum, [, tokens]) => sum + tokens, 0);
+    return entries.slice(0, 5).map(([name, tokens]) => ({
       name,
-      tokens: info.total_tokens,
-      pct: total > 0 ? (info.total_tokens / total) * 100 : 0,
+      tokens,
+      pct: total > 0 ? (tokens / total) * 100 : 0,
     }));
   }, [data]);
 
@@ -186,7 +169,7 @@ export default function UsageWidget() {
           <div className="nx-shimmer h-[62px] rounded-lg" />
           <div className="nx-shimmer h-[62px] rounded-lg" />
         </div>
-        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
           <div className="nx-shimmer h-44 rounded-lg" />
           <div className="nx-shimmer h-44 rounded-lg" />
         </div>
@@ -228,7 +211,7 @@ export default function UsageWidget() {
           <EmptyState
             icon={<Coins className="h-6 w-6" />}
             title="Sem dados de uso registados"
-            hint="Os dados aparecem aqui assim que interagires com um modelo LLM — o sistema está pronto, falta apenas a primeira chamada."
+            hint="O consumo aparece aqui quando o tracker registar a primeira chamada a um modelo."
           />
         </div>
       </WidgetShell>
@@ -241,24 +224,27 @@ export default function UsageWidget() {
   const outShare = data.total_tokens > 0 ? (data.total_tokens_out / data.total_tokens) * 100 : 0;
 
   return (
-    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-      <Surface elevation={2} padding="md">
+    <motion.div className="h-full" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+      <Surface elevation={1} padding="md" className="nx-dashboard-widget h-full">
         <SurfaceHeader
           icon={<DollarSign className="h-4 w-4" />}
-          title="Custos & Uso"
-          subtitle="Consumo de tokens e custo por modelo e agente"
-          tone="success"
+          title="Tokens e custos"
+          subtitle="Consumo registado e custo estimado"
+          className="flex-col items-stretch gap-3 sm:flex-row sm:items-center"
           action={
             <div className="flex items-center gap-1.5">
-              <div className="nx-inset flex gap-0.5 rounded-lg p-0.5" role="tablist" aria-label="Intervalo de tempo">
+              <div
+                className="nx-inset flex gap-0.5 rounded-lg p-0.5"
+                role="group"
+                aria-label="Intervalo de tempo"
+              >
                 {(Object.keys(RANGE_LABELS) as TimeRange[]).map((r) => (
                   <button
                     key={r}
                     type="button"
-                    role="tab"
-                    aria-selected={range === r}
+                    aria-pressed={range === r}
                     onClick={() => setRange(r)}
-                    className={`rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${
+                    className={`min-h-9 min-w-10 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent ${
                       range === r
                         ? "bg-nexus-accent/25 text-[var(--nx-accent-bright)]"
                         : "text-nexus-faint hover:text-nexus-text"
@@ -276,7 +262,7 @@ export default function UsageWidget() {
                 }}
                 aria-label="Atualizar dados de uso"
                 title="Atualizar"
-                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-nexus-faint transition-colors hover:bg-white/[0.06] hover:text-[var(--nx-accent-bright)]"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-nexus-border/60 text-nexus-muted transition-colors hover:bg-nexus-card hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
               </button>
@@ -286,34 +272,34 @@ export default function UsageWidget() {
 
         {/* Big stat cards */}
         <div className="mt-4 grid grid-cols-2 gap-3">
-          <div className="nx-inset rounded-lg p-3">
+          <div className="nx-inset min-w-0 rounded-xl p-3.5">
             <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-nexus-faint">
               <Coins className="h-3 w-3" />
               <span>Total de tokens</span>
             </div>
-            <div className={`mt-1 font-mono text-lg font-bold tabular-nums ${TONE_TEXT[tokensTone(data.total_tokens)]}`}>
+            <div className={`mt-2 text-2xl font-semibold tabular-nums tracking-tight ${TONE_TEXT[tokensTone(data.total_tokens)]}`}>
               <AnimatedNumber value={tot.num} decimals={tot.decimals} />
               {tot.suffix}
             </div>
-            <div className="mt-0.5 flex items-center gap-1 text-[10px] text-nexus-muted">
+            <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-nexus-muted">
               <span className="text-cyan-400">
                 <AnimatedNumber value={totIn.num} decimals={totIn.decimals} />
-                {totIn.suffix} in
+                {totIn.suffix} entrada
               </span>
               <span className="text-nexus-faint">/</span>
               <span className="text-[var(--nx-accent-bright)]">
                 <AnimatedNumber value={totOut.num} decimals={totOut.decimals} />
-                {totOut.suffix} out
+                {totOut.suffix} saída
               </span>
             </div>
             <Meter value={outShare} tone="accent" showThresholds={false} height={4} className="mt-2" />
           </div>
-          <div className="nx-inset rounded-lg p-3">
+          <div className="nx-inset min-w-0 rounded-xl p-3.5">
             <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-nexus-faint">
               <DollarSign className="h-3 w-3" />
-              <span>Custo total</span>
+              <span>Custo estimado</span>
             </div>
-            <div className={`mt-1 font-mono text-lg font-bold tabular-nums ${TONE_TEXT[costTone(data.total_cost)]}`}>
+            <div className={`mt-2 text-2xl font-semibold tabular-nums tracking-tight ${TONE_TEXT[costTone(data.total_cost)]}`}>
               {data.total_cost < 0.01 ? (
                 "$<0.01"
               ) : (
@@ -322,7 +308,7 @@ export default function UsageWidget() {
                 </>
               )}
             </div>
-            <div className="mt-0.5 text-[10px] text-nexus-muted">
+            <div className="mt-1 text-[11px] text-nexus-muted">
               {data.currency} · {RANGE_LABELS[range].toLowerCase()}
             </div>
             <Meter
@@ -335,8 +321,8 @@ export default function UsageWidget() {
           </div>
         </div>
 
-        {/* Pie chart & Agent breakdown */}
-        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* Pie chart & provider breakdown */}
+        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
           {/* Model pie chart */}
           <div>
             <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
@@ -353,7 +339,7 @@ export default function UsageWidget() {
                       nameKey="name"
                       cx="50%"
                       cy="50%"
-                      outerRadius={70}
+                      outerRadius="70%"
                       innerRadius={30}
                       paddingAngle={2}
                     >
@@ -369,7 +355,7 @@ export default function UsageWidget() {
                           <div className="nx-elev-2 nx-surface rounded-lg px-2.5 py-2 text-xs">
                             <p className="font-semibold text-nexus-text">{d.fullName}</p>
                             <p className="text-nexus-muted">{formatTokens(d.value)} tokens</p>
-                            <p className="text-emerald-400">{formatCost(d.cost)}</p>
+                            <p className="text-emerald-400">Custo estimado: {formatCost(d.cost)}</p>
                           </div>
                         );
                       }}
@@ -393,36 +379,36 @@ export default function UsageWidget() {
             )}
           </div>
 
-          {/* Agent ranking */}
+          {/* Provider ranking */}
           <div>
             <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
               <Layers className="h-3 w-3" />
-              Top agentes
+              Top providers
             </div>
-            {agentRanking.length > 0 ? (
+            {providerRanking.length > 0 ? (
               <div className="space-y-2.5">
-                {agentRanking.map((agent, idx) => (
-                  <div key={agent.name} className="min-w-0">
+                {providerRanking.map((provider, idx) => (
+                  <div key={provider.name} className="min-w-0">
                     <div className="flex items-center justify-between gap-2 text-xs">
                       <div className="flex min-w-0 items-center gap-2">
                         <span className="w-4 shrink-0 font-mono text-[10px] text-nexus-faint">
                           #{idx + 1}
                         </span>
-                        <span className="truncate font-medium text-nexus-text" title={agent.name}>
-                          {agent.name}
+                        <span className="truncate font-medium text-nexus-text" title={provider.name}>
+                          {provider.name}
                         </span>
                       </div>
                       <div className="flex shrink-0 items-center gap-2">
                         <span className="font-mono text-[11px] tabular-nums text-nexus-muted">
-                          {formatTokens(agent.tokens)}
+                          {formatTokens(provider.tokens)}
                         </span>
                         <span className="w-9 text-right text-[10px] tabular-nums text-nexus-faint">
-                          <AnimatedNumber value={agent.pct} decimals={1} />%
+                          <AnimatedNumber value={provider.pct} decimals={1} />%
                         </span>
                       </div>
                     </div>
                     <Meter
-                      value={agent.pct}
+                      value={provider.pct}
                       tone={idx === 0 ? "accent" : "neutral"}
                       showThresholds={false}
                       height={4}
@@ -435,15 +421,15 @@ export default function UsageWidget() {
               <EmptyState
                 compact
                 icon={<Layers className="h-5 w-5" />}
-                title="Sem dados de agente"
-                hint="Os agentes aparecem aqui depois de executarem pedidos."
+                title="Sem dados de provider"
+                hint="O tracker regista tokens por provider, não por agente."
               />
             )}
           </div>
         </div>
 
-        <div className="mt-4 flex items-center justify-between border-t border-[var(--nx-line)] pt-3 text-[10px] text-nexus-faint">
-          <span>{RANGE_LABELS[range]} · atualiza a cada 30s</span>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--nx-line)] pt-3 text-[11px] leading-relaxed text-nexus-faint">
+          <span>{RANGE_LABELS[range]} · custo estimado · tracker em memória</span>
           <span>Gerado {formatRelativeTime(data.generated_at)}</span>
         </div>
       </Surface>

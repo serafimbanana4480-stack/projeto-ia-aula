@@ -47,7 +47,7 @@ async function readJson<T>(response: Response): Promise<T> {
     let errorText = "";
     try {
       errorText = await response.text();
-    } catch (e) {
+    } catch {
       errorText = "Unable to read error response";
     }
     throw new ApiError(
@@ -58,7 +58,7 @@ async function readJson<T>(response: Response): Promise<T> {
   }
   try {
     return (await response.json()) as T;
-  } catch (e) {
+  } catch {
     throw new ApiError(
       "Failed to parse JSON response",
       response.status,
@@ -86,6 +86,7 @@ export async function postChat(
   },
   cancellationRequestId?: string,
   provider?: string,
+  modelIsConcrete = false,
 ): Promise<Response> {
   try {
     const normalisedProjectPath =
@@ -97,6 +98,7 @@ export async function postChat(
       project_path: normalisedProjectPath,
     };
     if (model) body.model = model;
+    if (modelIsConcrete) body.model_is_concrete = true;
     if (provider) body.provider = provider;
     if (thinkingStrength) body.thinking_strength = thinkingStrength;
     if (swarmOptions?.agents && swarmOptions.agents.length > 0) {
@@ -128,7 +130,7 @@ export async function postChat(
       let errorText = "";
       try {
         errorText = await response.text();
-      } catch (e) {
+      } catch {
         errorText = "Unable to read error response";
       }
       throw new ApiError(
@@ -187,11 +189,67 @@ export async function cancelChatRequest(requestId: string): Promise<void> {
   );
 }
 
-export async function getSessionHistory(id: string): Promise<ChatMessage[]> {
-  const data = await readJson<SessionHistoryResponse | ChatMessage[]>(
-    await authenticatedFetch(apiUrl(`/api/sessions/${id}/history`)),
+export async function steerChatRun(
+  runId: string,
+  guidance: string,
+): Promise<{ ok: boolean; run_id: string; state?: string; reason?: string }> {
+  return readJson(
+    await fetch(apiUrl(`/api/chat/${encodeURIComponent(runId)}/steer`), {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ guidance }),
+    }),
   );
-  return Array.isArray(data) ? data : (data.messages ?? []);
+}
+
+export async function getSessionHistory(id: string): Promise<ChatMessage[]> {
+  return (await getSessionHistoryPage(id, 500)).messages;
+}
+
+export interface SessionHistoryPage {
+  messages: ChatMessage[];
+  count: number;
+  has_more: boolean;
+  next_cursor: string | null;
+}
+
+export async function getSessionHistoryPage(
+  id: string,
+  limit = 100,
+  beforeId?: string | null,
+): Promise<SessionHistoryPage> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (beforeId) params.set("before_id", beforeId);
+  const data = await readJson<
+    | SessionHistoryResponse
+    | ChatMessage[]
+    | { messages?: Array<ChatMessage & { created_at?: string; run_id?: string }> }
+  >(
+    await authenticatedFetch(
+      apiUrl(`/api/sessions/${encodeURIComponent(id)}/messages?${params.toString()}`),
+    ),
+  );
+  const messages = Array.isArray(data) ? data : (data.messages ?? []);
+  const normalized = messages.map((message, index) => {
+    const persisted = message as ChatMessage & { created_at?: string; run_id?: string };
+    return {
+      ...persisted,
+      id: persisted.id || `${id}-history-${index}`,
+      timestamp: persisted.timestamp || persisted.created_at || "",
+      runId: persisted.runId || persisted.run_id || undefined,
+    };
+  });
+  const page = Array.isArray(data) ? null : data as SessionHistoryResponse & {
+    has_more?: boolean;
+    next_cursor?: string | null;
+    count?: number;
+  };
+  return {
+    messages: normalized,
+    count: Number(page?.count ?? normalized.length),
+    has_more: page?.has_more === true,
+    next_cursor: typeof page?.next_cursor === "string" ? page.next_cursor : null,
+  };
 }
 
 export interface SessionRun {
@@ -202,11 +260,53 @@ export interface SessionRun {
   updated_at?: string;
   started_at?: string;
   finished_at?: string | null;
+  evidence?: unknown;
+  error?: string | null;
 }
 
-export async function getSessionRuns(id: string): Promise<SessionRun[]> {
+export interface SessionRunPage {
+  runs: SessionRun[];
+  has_more: boolean;
+  next_offset: number;
+}
+
+export async function getSessionRunsPage(
+  id: string,
+  limit = 20,
+  offset = 0,
+  signal?: AbortSignal,
+): Promise<SessionRunPage> {
+  const boundedLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+  const boundedOffset = Math.max(0, Math.min(100_000, Math.floor(offset)));
+  const data = await readJson<{
+    runs?: SessionRun[];
+    has_more?: boolean;
+    next_offset?: number;
+  }>(
+    await authenticatedFetch(
+      apiUrl(
+        `/api/sessions/${encodeURIComponent(id)}/runs?limit=${boundedLimit}&offset=${boundedOffset}`,
+      ),
+      { signal },
+    ),
+  );
+  const runs = data.runs ?? [];
+  const nextOffset = Number.isInteger(data.next_offset)
+    ? Math.max(boundedOffset, data.next_offset as number)
+    : boundedOffset + runs.length;
+  return {
+    runs,
+    has_more: data.has_more === true,
+    next_offset: nextOffset,
+  };
+}
+
+export async function getSessionRuns(id: string, limit = 20): Promise<SessionRun[]> {
+  const boundedLimit = Math.max(1, Math.min(100, Math.floor(limit)));
   const data = await readJson<{ runs?: SessionRun[] }>(
-    await authenticatedFetch(apiUrl(`/api/sessions/${encodeURIComponent(id)}/runs`)),
+    await authenticatedFetch(
+      apiUrl(`/api/sessions/${encodeURIComponent(id)}/runs?limit=${boundedLimit}`),
+    ),
   );
   return data.runs ?? [];
 }
@@ -377,7 +477,7 @@ export async function writeFile(
       let errorText = "";
       try {
         errorText = await response.text();
-      } catch (e) {
+      } catch {
         errorText = "Unable to read error response";
       }
       throw new ApiError(
@@ -454,8 +554,8 @@ export interface ToolExecutionResponse {
 export async function executeTool(
   toolName: string,
   args: Record<string, unknown>,
-  sessionId = "default",
-  confirmed = false,
+    sessionId: string,
+    confirmationId?: string,
 ): Promise<ToolExecutionResponse> {
   return readJson<ToolExecutionResponse>(
     await fetch(apiUrl("/api/tools/execute"), {
@@ -465,7 +565,7 @@ export async function executeTool(
         tool_name: toolName,
         args,
         session_id: sessionId,
-        confirmed,
+        confirmation_id: confirmationId,
       }),
     }),
   );
@@ -501,7 +601,7 @@ export async function toggleTool(
       let errorText = "";
       try {
         errorText = await response.text();
-      } catch (e) {
+      } catch {
         errorText = "Unable to read error response";
       }
       throw new ApiError(
@@ -550,7 +650,7 @@ export async function createProject(payload: {
       let errorText = "";
       try {
         errorText = await response.text();
-      } catch (e) {
+      } catch {
         errorText = "Unable to read error response";
       }
       throw new ApiError(
@@ -666,7 +766,8 @@ export async function createPlan(
   objective: string,
   sessionId: string = "default",
   context: string = "",
-  autoApprove: boolean = true,
+  autoApprove: boolean = false,
+  persistConversation: boolean = false,
 ): Promise<PlanningResult> {
   return readJson<PlanningResult>(
     await fetch(apiUrl("/api/plan/create"), {
@@ -677,6 +778,7 @@ export async function createPlan(
         session_id: sessionId,
         context,
         auto_approve: autoApprove,
+        persist_conversation: persistConversation,
       }),
     }),
   );
@@ -772,23 +874,75 @@ export interface Mission {
 }
 
 export interface AgentInstance {
+  /** Stable client-facing identity/name normalized from the lifecycle or mission API. */
   id: string;
   name: string;
   instance_id?: string;
   agent_type?: string;
-  status: "idle" | "running" | "paused" | "failed" | "completed";
+  status: "idle" | "pending" | "running" | "paused" | "failed" | "completed" | "aborted";
   objective?: string;
   error_message?: string;
   parent_task_id?: string;
   current_task?: string;
   cpu_percent?: number;
   memory_mb?: number;
-  tokens_used: number;
+  tokens_used?: number;
+  token_budget?: number;
+  deadline?: number;
+  context?: Record<string, unknown>;
   mission_id?: string;
   started_at?: string;
   start_time?: number;
   completed_at?: number;
   last_heartbeat?: string;
+}
+
+interface AgentInstanceWire extends Partial<Omit<AgentInstance, "id" | "name" | "status">> {
+  id?: string;
+  name?: string;
+  type?: string;
+  status?: string;
+  parent_id?: string;
+}
+
+export interface AgentInstanceActionResponse {
+  success: boolean;
+  action: "pause" | "resume" | "abort";
+  instance: AgentInstance;
+}
+
+function normalizeAgentInstance(value: AgentInstanceWire | null | undefined): AgentInstance | null {
+  if (!value || typeof value !== "object") return null;
+  const id = value.instance_id || value.id;
+  const name = value.agent_type || value.type || value.name || id;
+  const status = String(value.status ?? "").toLowerCase();
+  if (!id || !name || !["idle", "pending", "running", "paused", "failed", "completed", "aborted"].includes(status)) {
+    return null;
+  }
+  return {
+    ...value,
+    id,
+    name,
+    agent_type: value.agent_type || value.type,
+    parent_task_id: value.parent_task_id || value.parent_id,
+    status: status as AgentInstance["status"],
+  };
+}
+
+function normalizeAgentInstanceAction(value: {
+  success?: boolean;
+  action?: string;
+  instance?: AgentInstanceWire;
+}): AgentInstanceActionResponse {
+  const instance = normalizeAgentInstance(value.instance);
+  if (!instance || !["pause", "resume", "abort"].includes(String(value.action))) {
+    throw new Error("Resposta inválida ao controlar a instância do agente.");
+  }
+  return {
+    success: value.success === true,
+    action: value.action as AgentInstanceActionResponse["action"],
+    instance,
+  };
 }
 
 export interface BusMessageItem {
@@ -860,10 +1014,12 @@ export async function getAgentInstances(options?: {
   if (options?.sessionId) query.set("session_id", options.sessionId);
   if (options?.includeTerminal) query.set("include_terminal", "true");
   const suffix = query.toString() ? `?${query.toString()}` : "";
-  const data = await readJson<{ agents?: AgentInstance[] }>(
+  const data = await readJson<{ agents?: AgentInstanceWire[] }>(
     await fetch(apiUrl(`/api/agents/instances${suffix}`), { headers: authHeaders() }),
   );
-  return data.agents ?? [];
+  return (data.agents ?? [])
+    .map(normalizeAgentInstance)
+    .filter((agent): agent is AgentInstance => agent !== null);
 }
 
 export async function interveneAgent(
@@ -971,15 +1127,65 @@ export async function saveSettings(
   );
 }
 
+export interface WebSearchHit {
+  title?: string;
+  url?: string;
+  snippet?: string;
+  score?: number;
+  source_engine?: string;
+  age_hint?: string;
+}
+
+export interface WebSearchResult {
+  query: string;
+  hits: WebSearchHit[];
+  count: number;
+}
+
 export async function webSearch(payload: {
   query: string;
   limit?: number;
-}): Promise<unknown> {
-  return readJson<unknown>(
-    await fetch(apiUrl("/api/web_search"), {
+}, signal?: AbortSignal): Promise<WebSearchResult> {
+  return readJson<WebSearchResult>(
+    await authenticatedFetch(apiUrl("/api/web_search"), {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      ...(signal ? { signal } : {}),
+    }),
+  );
+}
+
+export interface WebImageHit {
+  title: string;
+  url: string;
+  thumbnail_url: string;
+  source: string;
+  width: number | null;
+  height: number | null;
+}
+
+export interface WebImageSearchResult {
+  query: string;
+  hits: WebImageHit[];
+  count: number;
+  configured: boolean;
+  provider?: string;
+  error?: string;
+  error_code?: "not_configured" | "invalid_credentials" | "rate_limited" | "provider_error" | "provider_unavailable";
+}
+
+export async function webImageSearch(payload: {
+  query: string;
+  limit?: number;
+}, signal?: AbortSignal): Promise<WebImageSearchResult> {
+  return readJson<WebImageSearchResult>(
+    await authenticatedFetch(apiUrl("/api/web_search/images"), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+      ...(signal ? { signal } : {}),
     }),
   );
 }
@@ -1052,36 +1258,42 @@ export async function createSession(
 // ═════════════════════════════════════════════════════════════════════════════
 
 export async function getAgentInstance(id: string): Promise<AgentInstance> {
-  return readJson<AgentInstance>(
+  const data = await readJson<AgentInstanceWire>(
     await fetch(apiUrl(`/api/agents/instances/${id}`), { headers: authHeaders() }),
   );
+  const agent = normalizeAgentInstance(data);
+  if (!agent) throw new Error("Resposta inválida ao carregar a instância do agente.");
+  return agent;
 }
 
-export async function pauseAgentInstance(id: string): Promise<{ status: string; agent_id: string }> {
-  return readJson<{ status: string; agent_id: string }>(
+export async function pauseAgentInstance(id: string): Promise<AgentInstanceActionResponse> {
+  const data = await readJson<{ success?: boolean; action?: string; instance?: AgentInstanceWire }>(
     await fetch(apiUrl(`/api/agents/instances/${id}/pause`), {
       method: "POST",
       headers: authHeaders(),
     }),
   );
+  return normalizeAgentInstanceAction(data);
 }
 
-export async function resumeAgentInstance(id: string): Promise<{ status: string; agent_id: string }> {
-  return readJson<{ status: string; agent_id: string }>(
+export async function resumeAgentInstance(id: string): Promise<AgentInstanceActionResponse> {
+  const data = await readJson<{ success?: boolean; action?: string; instance?: AgentInstanceWire }>(
     await fetch(apiUrl(`/api/agents/instances/${id}/resume`), {
       method: "POST",
       headers: authHeaders(),
     }),
   );
+  return normalizeAgentInstanceAction(data);
 }
 
-export async function abortAgentInstance(id: string): Promise<{ status: string; agent_id: string }> {
-  return readJson<{ status: string; agent_id: string }>(
+export async function abortAgentInstance(id: string): Promise<AgentInstanceActionResponse> {
+  const data = await readJson<{ success?: boolean; action?: string; instance?: AgentInstanceWire }>(
     await fetch(apiUrl(`/api/agents/instances/${id}/abort`), {
       method: "POST",
       headers: authHeaders(),
     }),
   );
+  return normalizeAgentInstanceAction(data);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1249,6 +1461,48 @@ export async function resumeWorker(name: string): Promise<Record<string, unknown
 // Skills API
 // ═════════════════════════════════════════════════════════════════════════════
 
+export interface RuntimeSkill {
+  name: string;
+  description: string;
+  version: string;
+  status: string;
+  source: string;
+  tags: string[];
+  triggers: string[];
+  required_tools: string[];
+  required_mcps: string[];
+  path?: string | null;
+}
+
+export async function getRuntimeSkills(projectPath = ""): Promise<RuntimeSkill[]> {
+  const params = new URLSearchParams();
+  const normalized = projectPath.trim() === "." ? "" : projectPath.trim();
+  if (normalized) params.set("project_path", normalized);
+  const data = await readJson<{ skills: RuntimeSkill[] }>(
+    await authenticatedFetch(apiUrl(`/api/skills/catalog?${params.toString()}`)),
+  );
+  return data.skills;
+}
+
+export interface SessionTodo {
+  id: number | string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+  priority?: string;
+}
+
+export interface SessionTodoSnapshot {
+  session_id: string;
+  todos: SessionTodo[];
+  counts: Record<string, number>;
+}
+
+export async function getSessionTodos(sessionId: string): Promise<SessionTodoSnapshot> {
+  return readJson<SessionTodoSnapshot>(
+    await authenticatedFetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/todos`)),
+  );
+}
+
 export async function getSkills(): Promise<Record<string, unknown>[]> {
   const data = await readJson<{ skills?: Record<string, unknown>[] }>(
     await fetch(apiUrl("/api/skills"), { headers: authHeaders() }),
@@ -1397,13 +1651,24 @@ export interface MCPConnector {
   last_test_status: "untested" | "ok" | "warning" | "error";
   last_test_detail: string;
   last_tested_at: number | null;
-  tools?: Array<{ name: string; title?: string; calls?: number; success_rate?: number | null }>;
+  tools?: Array<{
+    name: string;
+    title?: string;
+    description?: string;
+    inputSchema?: Record<string, unknown>;
+    annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; openWorldHint?: boolean };
+    calls?: number;
+    success_rate?: number | null;
+  }>;
+  approved_readonly_tools?: string[];
   tool_count?: number;
   calls_today?: number;
   success_rate?: number | null;
   latency_ms?: number | null;
-  last_activity_tool?: string;
-  last_activity_at?: number | null;
+    last_activity_tool?: string;
+    last_activity_at?: number | null;
+    last_activity_status?: "unknown" | "ok" | "error";
+    pass_through_env?: string[];
   source_root?: string;
   health_score?: number | null;
   index_stats?: Record<string, number> | null;
@@ -1422,14 +1687,20 @@ export interface MCPConnectorsSummary {
 }
 
 export interface MCPActivityItem {
+  id: string;
   at: number;
+  updated_at: number;
   connector_id: string;
   connector: string;
   tool: string;
-  kind?: "tool_call" | "health_check";
-  status: "untested" | "ok" | "warning" | "error";
-  latency_ms: number | null;
+  kind: "tool_call" | "tool_discovery" | "recommendation" | "connector_test" | "builder" | "connector_created" | "connector_removed" | string;
+  source: string;
+  status: "running" | "ok" | "warning" | "error";
+  phase: string;
+  duration_ms: number | null;
   detail: string;
+  argument_names: string[];
+  result_shape: string;
 }
 
 export interface MCPOverview {
@@ -1438,6 +1709,34 @@ export interface MCPOverview {
   activity: MCPActivityItem[];
   generated_at: number;
   data_source: string;
+}
+
+export interface MCPBuildResult {
+  status: "available";
+  connector: MCPConnector;
+  generated_files: Record<string, string>;
+  validation: {
+    schema_validation: string;
+    mock_http: { mock_http_operations: number; result: string };
+    generated_tests: { unittest: string; output: string };
+    mcp_handshake: string;
+    available_to_agent: boolean;
+  };
+  capabilities: Array<{ name: string; description: string; method: string }>;
+}
+
+export async function buildMCPFromDescription(payload: {
+  description: string;
+  base_url: string;
+  auth_secret?: string;
+}): Promise<MCPBuildResult> {
+  return readJson<MCPBuildResult>(
+    await authenticatedFetch(apiUrl("/api/mcp/builder/build"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
 }
 
 export async function getMCPTemplates(): Promise<MCPTemplateSummary[]> {
@@ -1480,7 +1779,7 @@ export async function createMCPConnector(payload: {
 
 export async function updateMCPConnector(
   connectorId: string,
-  payload: { name?: string; enabled?: boolean; env?: Record<string, string> },
+  payload: { name?: string; enabled?: boolean; env?: Record<string, string>; approved_readonly_tools?: string[] },
 ): Promise<MCPConnector> {
   return readJson<MCPConnector>(
     await authenticatedFetch(apiUrl(`/api/mcp/connectors/${connectorId}`), {
@@ -1966,10 +2265,12 @@ export async function abortMission(id: string): Promise<{ status: string; missio
  }
 
  export async function getMissionAgents(id: string): Promise<AgentInstance[]> {
-  const data = await readJson<{ agents?: AgentInstance[] }>(
+  const data = await readJson<{ agents?: AgentInstanceWire[] }>(
     await fetch(apiUrl(`/api/missions/${id}/agents`), { headers: authHeaders() }),
   );
-  return data.agents ?? [];
+  return (data.agents ?? [])
+    .map(normalizeAgentInstance)
+    .filter((agent): agent is AgentInstance => agent !== null);
 }
 
 // ──────────────────────────────────────────────────────────────────────────

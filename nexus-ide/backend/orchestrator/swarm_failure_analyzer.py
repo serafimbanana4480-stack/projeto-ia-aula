@@ -178,7 +178,6 @@ class SwarmFailureAnalyzer:
                 logger.debug("KnowledgeBase lookup failed", exc_info=True)
 
         if not matched_signature:
-            sig_hash = f"{project_id}:{signature.signature_hash}"
             signature.project_id = project_id
             self._knowledge_base.record_signature(
                 signature_hash=signature.signature_hash,

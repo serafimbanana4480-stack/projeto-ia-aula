@@ -41,13 +41,8 @@ const STATUS_LABEL_PT: Record<TimelineEvent['status'], string> = {
 export function ExecutionTimeline() {
   const [selectedEvent, setSelectedEvent] = useState<TimelineEvent | null>(null);
   const [zoom, setZoom] = useState(1);
-  const [scrollPosition, setScrollPosition] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const { data: events, isConnected } = useSSE<TimelineEvent[]>(apiUrl('/api/timeline/stream'));
-
-  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    setScrollPosition(e.currentTarget.scrollLeft);
-  };
 
   return (
     <div className={`execution-timeline nx-elev-2 nx-surface relative h-full w-full overflow-hidden rounded-lg !border !border-cyan-500/25 ${isConnected ? 'nx-live-rim' : ''}`}>
@@ -88,7 +83,6 @@ export function ExecutionTimeline() {
       <div
         ref={containerRef}
         className="h-full overflow-x-auto pt-20 pb-4 px-4"
-        onScroll={handleScroll}
       >
         <div
           className="relative h-full"

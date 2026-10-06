@@ -19,6 +19,10 @@ describe("useMemoryStore", () => {
         vectorDbSize: 0,
         totalRetrievals: 0,
         avgRelevance: 0,
+        hasStats: false,
+        hasCurrentStats: false,
+        statsStale: false,
+        measuredStats: {},
         isLoading: false,
         error: null,
       });
@@ -182,6 +186,14 @@ describe("useMemoryStore", () => {
     expect(useMemoryStore.getState().vectorDbSize).toBe(100);
     expect(useMemoryStore.getState().totalRetrievals).toBe(50);
     expect(useMemoryStore.getState().avgRelevance).toBe(0.85);
+    expect(useMemoryStore.getState().hasStats).toBe(true);
+    expect(useMemoryStore.getState().hasCurrentStats).toBe(true);
+    expect(useMemoryStore.getState().statsStale).toBe(false);
+    expect(useMemoryStore.getState().measuredStats).toEqual({
+      vectorDbSize: true,
+      totalRetrievals: true,
+      avgRelevance: true,
+    });
     expect(useMemoryStore.getState().isLoading).toBe(false);
     expect(useMemoryStore.getState().error).toBeNull();
   });
@@ -201,6 +213,58 @@ describe("useMemoryStore", () => {
 
     expect(useMemoryStore.getState().vectorDbSize).toBe(200);
     expect(useMemoryStore.getState().totalRetrievals).toBe(75);
+    expect(useMemoryStore.getState().measuredStats.vectorDbSize).toBe(true);
+  });
+
+  it("treats zeros returned by the memory API as measured statistics", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        vector_db_size: 0,
+        total_retrievals: 0,
+        avg_relevance: 0,
+      }),
+    });
+
+    await act(async () => {
+      await useMemoryStore.getState().fetchMemoryStats();
+    });
+
+    const state = useMemoryStore.getState();
+    expect(state.hasStats).toBe(true);
+    expect(state.hasCurrentStats).toBe(true);
+    expect(state.statsStale).toBe(false);
+    expect(state.measuredStats.vectorDbSize).toBe(true);
+    expect(state.measuredStats.totalRetrievals).toBe(true);
+    expect(state.measuredStats.avgRelevance).toBe(true);
+    expect(state.vectorDbSize).toBe(0);
+    expect(state.totalRetrievals).toBe(0);
+    expect(state.avgRelevance).toBe(0);
+  });
+
+  it("keeps the last measured values stale when a successful response is empty", async () => {
+    useMemoryStore.setState({
+      vectorDbSize: 17,
+      totalRetrievals: 21,
+      avgRelevance: 0.8,
+      hasStats: true,
+      measuredStats: { vectorDbSize: true, totalRetrievals: true, avgRelevance: true },
+    });
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+
+    await act(async () => {
+      await useMemoryStore.getState().fetchMemoryStats();
+    });
+
+    const state = useMemoryStore.getState();
+    expect(state.hasStats).toBe(true);
+    expect(state.hasCurrentStats).toBe(false);
+    expect(state.statsStale).toBe(true);
+    expect(state.measuredStats).toEqual({ vectorDbSize: true, totalRetrievals: true, avgRelevance: true });
+    expect(state.vectorDbSize).toBe(17);
+    expect(state.totalRetrievals).toBe(21);
+    expect(state.avgRelevance).toBe(0.8);
+    expect(state.error).toMatch(/sem estatísticas/i);
   });
 
   it("fetchMemoryStats handles HTTP error", async () => {
@@ -212,6 +276,7 @@ describe("useMemoryStore", () => {
 
     expect(useMemoryStore.getState().isLoading).toBe(false);
     expect(useMemoryStore.getState().error).toBeDefined();
+    expect(useMemoryStore.getState().statsStale).toBe(false);
   });
 
   it("fetchMemoryStats handles network error", async () => {
@@ -223,6 +288,30 @@ describe("useMemoryStore", () => {
 
     expect(useMemoryStore.getState().isLoading).toBe(false);
     expect(useMemoryStore.getState().error).toBe("Network error");
+  });
+
+  it("keeps the last statistics and reports the refresh failure", async () => {
+    useMemoryStore.setState({
+      vectorDbSize: 17,
+      totalRetrievals: 21,
+      avgRelevance: 0.8,
+      hasStats: true,
+      measuredStats: { vectorDbSize: true, totalRetrievals: true, avgRelevance: true },
+    });
+    mockFetch.mockRejectedValue(new Error("Network error"));
+
+    await act(async () => {
+      await useMemoryStore.getState().fetchMemoryStats();
+    });
+
+    const state = useMemoryStore.getState();
+    expect(state.hasStats).toBe(true);
+    expect(state.vectorDbSize).toBe(17);
+    expect(state.totalRetrievals).toBe(21);
+    expect(state.avgRelevance).toBe(0.8);
+    expect(state.error).toBe("Network error");
+    expect(state.hasCurrentStats).toBe(false);
+    expect(state.statsStale).toBe(true);
   });
 
   it("setLoading sets loading state", () => {

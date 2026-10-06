@@ -11,13 +11,13 @@ This module provides comprehensive analytics capabilities:
 
 from .advanced_analytics import (
     AdvancedAnalyticsEngine,
-    AnalyticsMetric,
+    AlertSeverity,
     AnalyticalInsight,
-    PredictionResult,
-    AnomalyDetection,
+    AnalyticsMetric,
     AnalyticsType,
+    AnomalyDetection,
     InsightLevel,
-    AlertSeverity
+    PredictionResult,
 )
 
 __all__ = [

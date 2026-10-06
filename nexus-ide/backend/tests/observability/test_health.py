@@ -189,13 +189,34 @@ class TestHealthEndpoint:
         assert payload["disk_pressure"]["status"] in {"normal", "warning", "critical"}
         assert payload["disk_pressure"]["snapshot"]["free_percent"] >= 0
 
+    def test_health_deep_requires_authentication(self, client: TestClient) -> None:
+        """AUDIT P1-5 (2026-09-26) — BEHAVIOUR CHANGE, expectation was wrong.
+
+        ``GET /health?deep=true`` returns internal topology (LLM reachability,
+        per-worker status, guardian/auto-correction state).  It used to answer
+        anonymous callers, which is the information leak the audit flagged.  It
+        now requires a bearer token like ``/health/deep`` and ``/api/deep`` do.
+
+        Plain ``GET /health`` deliberately stays cheap and unauthenticated — an
+        orchestrator probe cannot authenticate, and a probe that needs
+        credentials reports "unhealthy" during an auth outage.
+        """
+        assert client.get("/health").status_code == 200
+
+        anonymous = client.get("/health?deep=true")
+        assert anonymous.status_code == 401
+        assert "checks" not in anonymous.json()
+
     def test_health_deep_returns_full_report(self, client: TestClient) -> None:
-        response = client.get("/health?deep=true")
+        # The deep form is authenticated, so this probe now needs a token.
+        from backend.middleware.auth import create_access_token
+
+        token = create_access_token({"sub": "health-test", "email": "h@test.local"})
+        response = client.get(
+            "/health?deep=true", headers={"Authorization": f"Bearer {token}"}
+        )
         assert response.status_code == 200
         data = response.json()
-        # The shallow /health endpoint returns 'ok'; the deep endpoint should
-        # return one of the documented statuses. Accept both shapes so the
-        # test is resilient to either the legacy or new contract.
         assert data["status"] in ("ok", "healthy", "degraded")
         assert "checks" in data
         assert "elapsed_ms" in data

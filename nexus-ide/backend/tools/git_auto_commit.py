@@ -34,7 +34,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from backend.tools.git_tools import git_commit_safe, git_operation
+from backend.tools.git_tools import git_commit_safe, git_operation, normalize_git_path
 from backend.tools.registry import ToolSpec, register_tool
 
 try:
@@ -473,9 +473,15 @@ async def auto_commit_after_write(
         result["error"] = "Not a git repository"
         return result
 
+    try:
+        normalized_file_path = normalize_git_path(file_path, project_path)
+    except ValueError as exc:
+        result["error"] = f"Invalid file path: {exc}"
+        return result
+
     # Get the diff for the specific file
     diff_result = await git_operation(
-        f'git diff -- "{file_path}"',
+        ["git", "diff", "--", f":(literal){normalized_file_path}"],
         project_path,
     )
     diff = diff_result.get("output", "")
@@ -483,7 +489,7 @@ async def auto_commit_after_write(
     if not diff.strip():
         # Check if file is newly staged
         staged_result = await git_operation(
-            f'git diff --cached -- "{file_path}"',
+            ["git", "diff", "--cached", "--", f":(literal){normalized_file_path}"],
             project_path,
         )
         diff = staged_result.get("output", "")
@@ -537,30 +543,22 @@ async def auto_commit_after_write(
         )
         return result
 
-    # Stage the file and commit
+    # Commit only the file that triggered this operation.
     try:
-        # Stage specific file
-        stage_result = await git_operation(
-            f'git add -- "{file_path}"',
-            project_path,
-        )
-        if "error" in stage_result and stage_result.get("exit_code", 0) != 0:
-            result["error"] = f"Failed to stage: {stage_result.get('error')}"
-            return result
-
-        # Commit
         commit_result = await git_commit_safe(
             message=commit_message,
             project_path=project_path,
-            add_all=False,  # Already staged specific file
+            add_all=False,
+            paths=[normalized_file_path],
         )
 
-        commit_output = commit_result.get("commit", {}).get("output", "")
-        commit_exit = commit_result.get("commit", {}).get("exit_code", 0)
+        commit_details = commit_result.get("commit", {})
+        commit_exit = commit_details.get("exit_code")
+        commit_error = commit_result.get("error") or commit_details.get("error")
 
-        if commit_exit != 0 and "nothing to commit" not in commit_output.lower():
+        if commit_error or commit_exit != 0:
             result["error"] = (
-                f"Commit failed: {commit_result.get('commit', {}).get('error', 'unknown')}"
+                f"Commit failed: {commit_error or 'git commit returned no successful exit code'}"
             )
             result["status"] = "failed"
             _record_commit(
@@ -578,11 +576,19 @@ async def auto_commit_after_write(
 
         # Extract commit hash
         hash_result = await git_operation("git rev-parse HEAD", project_path)
-        commit_hash = hash_result.get("output", "").strip()
+        commit_hash = hash_result.get("output", "").strip() or None
+        hash_warning = None
+        if hash_result.get("error") or not commit_hash:
+            hash_warning = (
+                "Commit succeeded, but HEAD hash could not be retrieved: "
+                f"{hash_result.get('error') or 'empty hash output'}"
+            )
 
         result["committed"] = True
         result["hash"] = commit_hash
         result["status"] = "committed"
+        if hash_warning:
+            result["warning"] = hash_warning
 
         # Record in database
         _record_commit(
@@ -594,6 +600,7 @@ async def auto_commit_after_write(
             strategy=strategy,
             status="committed",
             diff_preview=diff[:500] if diff else "",
+            error=hash_warning,
         )
 
         logger.info(
@@ -823,46 +830,56 @@ async def approve_pending_commit(commit_id: str) -> dict[str, Any]:
         except Exception:
             pass
 
-    # Stage and commit
-    stage_result = await git_operation(
-        f'git add -- "{commit_data["file_path"]}"',
-        project_path,
-    )
-    if "error" in stage_result and stage_result.get("exit_code", 0) != 0:
-        return {"error": f"Stage failed: {stage_result.get('error')}"}
+    try:
+        normalized_file_path = normalize_git_path(commit_data["file_path"], project_path)
+    except (TypeError, ValueError) as exc:
+        return {"error": f"Invalid file path: {exc}"}
 
     commit_result = await git_commit_safe(
         message=commit_data["commit_message"],
         project_path=project_path,
         add_all=False,
+        paths=[normalized_file_path],
     )
 
-    commit_output = commit_result.get("commit", {}).get("output", "")
-    if "nothing to commit" in commit_output.lower():
-        return {"error": "Nothing to commit"}
+    commit_details = commit_result.get("commit", {})
+    commit_exit = commit_details.get("exit_code")
+    commit_error = commit_result.get("error") or commit_details.get("error")
+    if commit_error or commit_exit != 0:
+        detail = commit_error or "git commit returned no successful exit code"
+        return {"error": "Nothing to commit" if "nothing to commit" in str(detail).lower() else str(detail)}
 
     # Get hash
     hash_result = await git_operation("git rev-parse HEAD", project_path)
-    commit_hash = hash_result.get("output", "").strip()
+    commit_hash = hash_result.get("output", "").strip() or None
+    hash_warning = None
+    if hash_result.get("error") or not commit_hash:
+        hash_warning = (
+            "Commit succeeded, but HEAD hash could not be retrieved: "
+            f"{hash_result.get('error') or 'empty hash output'}"
+        )
 
     # Update record
     try:
         with get_db() as conn:
             conn.execute(
                 """UPDATE git_commits
-                   SET status = 'committed', commit_hash = ?, created_at = ?
+                   SET status = 'committed', commit_hash = ?, error = ?, created_at = ?
                    WHERE id = ?""",
-                (commit_hash, datetime.now(UTC).isoformat(), commit_id),
+                (commit_hash, hash_warning, datetime.now(UTC).isoformat(), commit_id),
             )
     except Exception as e:
         logger.warning("Failed to update commit record: %s", e)
 
-    return {
+    response = {
         "committed": True,
         "hash": commit_hash,
         "message": commit_data["commit_message"],
         "file_path": commit_data["file_path"],
     }
+    if hash_warning:
+        response["warning"] = hash_warning
+    return response
 
 
 async def reject_pending_commit(commit_id: str, reason: str = "") -> dict[str, Any]:

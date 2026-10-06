@@ -2,10 +2,7 @@
 import pytest
 
 from backend.pipeline.architecture import (
-    ArchitectureTemplate,
     DecisionRecorder,
-    DesignPattern,
-    LayerRule,
     PatternCatalog,
     TemplateRegistry,
 )

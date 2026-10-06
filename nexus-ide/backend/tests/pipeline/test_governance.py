@@ -1,14 +1,10 @@
 """Tests for Governance — autonomy, kill-switch, council, ledger."""
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 
-import pytest
-
 from backend.pipeline.governance import (
-    AuditDecision,
     AutonomyLevel,
     AutonomyManager,
     ComplianceAuditor,
@@ -19,9 +15,7 @@ from backend.pipeline.governance import (
     LedgerEntry,
     SecurityAuditor,
     SnapshotStore,
-    StateSnapshot,
 )
-
 
 # ============================================================================
 # 10-01: AutonomyManager Tests
@@ -204,7 +198,7 @@ class TestSnapshotStore:
     def test_prune_old(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = SnapshotStore(tmpdir)
-            snap = store.capture("Manual", [], 0, [])
+            store.capture("Manual", [], 0, [])
             # All snapshots are recent, so prune should remove 0
             removed = store.prune_old()
             assert removed == 0

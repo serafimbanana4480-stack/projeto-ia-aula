@@ -41,7 +41,7 @@ class MockRedisClient:
         pattern = match.replace("*", ".*")
         import re
         regex = re.compile(pattern)
-        return [k for k in self._data.keys() if regex.match(k)]
+        return [k for k in self._data if regex.match(k)]
     
     def memory_usage(self, key: str) -> int | None:
         """Mock memory_usage operation."""

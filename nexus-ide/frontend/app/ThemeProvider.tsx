@@ -11,19 +11,17 @@ export default function ThemeProvider({
 
   useEffect(() => {
     const root = document.documentElement;
-    if (theme === "dark") {
-      root.classList.add("dark");
-    } else if (theme === "light") {
-      root.classList.remove("dark");
-    } else {
-      // System theme
-      const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-      if (isDark) {
-        root.classList.add("dark");
-      } else {
-        root.classList.remove("dark");
-      }
-    }
+    const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      const isDark = theme === "dark" || (theme === "system" && systemTheme.matches);
+      root.classList.toggle("dark", isDark);
+      root.classList.toggle("light", !isDark);
+      root.style.colorScheme = isDark ? "dark" : "light";
+    };
+    applyTheme();
+    if (theme !== "system") return;
+    systemTheme.addEventListener("change", applyTheme);
+    return () => systemTheme.removeEventListener("change", applyTheme);
   }, [theme]);
 
   return <>{children}</>;

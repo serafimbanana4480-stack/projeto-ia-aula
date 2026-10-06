@@ -101,21 +101,21 @@ export default function RequestFlow() {
     return (metrics?.agent_activity ?? []) as AgentActivity[];
   }, [metrics]);
 
-  const activeAgents = useMemo(
+  const activeProfiles = useMemo(
     () => agents.filter((a) => a.status === "active"),
     [agents],
   );
-  const idleAgents = useMemo(
+  const idleProfiles = useMemo(
     () => agents.filter((a) => a.status === "idle"),
     [agents],
   );
-  const errorAgents = useMemo(
+  const profilesWithSessionErrors = useMemo(
     () => agents.filter((a) => a.status === "error"),
     [agents],
   );
-  const activeCount = activeAgents.length;
-  const idleCount = idleAgents.length;
-  const primaryAgent = activeAgents[0]?.agent ?? null;
+  const activeCount = activeProfiles.length;
+  const idleCount = idleProfiles.length;
+  const primaryProfile = activeProfiles[0]?.agent ?? null;
   const tokensPerSecond = summary?.throughput_tps ?? 0;
   const hasTraffic = tokensPerSecond > 0;
 
@@ -134,16 +134,16 @@ export default function RequestFlow() {
     const parts = [
       "Fluxo de pedidos: Utilizador → Router",
       activeCount > 0
-        ? `→ ${activeCount} agente(s) ativo(s)`
-        : "→ sem agentes ativos",
+        ? `→ ${activeCount} perfil(is) em execução`
+        : "→ sem perfis em execução",
       "→ LLM → Resposta.",
       `${fmtNum(summary.total_requests)} pedidos totais, ${successRate.toFixed(
         1,
       )}% de sucesso, ${fmtNum(summary.failed_requests)} falhas.`,
     ];
-    if (primaryAgent) parts.push(`Agente principal: ${primaryAgent}.`);
+    if (primaryProfile) parts.push(`Perfil em execução: ${primaryProfile}.`);
     return parts.join(" ");
-  }, [summary, activeCount, successRate, primaryAgent]);
+  }, [summary, activeCount, successRate, primaryProfile]);
 
   return (
     <section aria-label="Fluxo de Pedidos">
@@ -151,7 +151,7 @@ export default function RequestFlow() {
         <SurfaceHeader
           icon={<GitBranch className="h-4 w-4" />}
           title="Fluxo de Pedidos"
-          subtitle="Utilizador → Router → Agentes → LLM → Resposta"
+          subtitle="Utilizador → Router → perfis de execução → LLM → Resposta"
           action={
             summary ? (
               <div className="flex items-center gap-2" aria-label={`Taxa de sucesso: ${successRate.toFixed(1)} por cento, ${successLabel}`}>
@@ -211,17 +211,17 @@ export default function RequestFlow() {
                 <FlowLink active={hasTraffic} />
                 <FlowNode
                   icon={<Bot className="h-5 w-5" aria-hidden />}
-                  label={activeCount > 0 ? "Agentes" : "Agente"}
+                  label="Perfis"
                   color="#5eead4"
                   pulse={activeCount > 0}
-                  badge={`${activeCount} ativos`}
+                  badge={`${activeCount} em execução`}
                   badgeTone={activeCount > 0 ? "success" : "neutral"}
                   sub={
                     idleCount > 0
-                      ? `${idleCount} inativos`
-                      : errorAgents.length > 0
-                        ? `${errorAgents.length} com erro`
-                        : primaryAgent ?? undefined
+                      ? `${idleCount} sem execução`
+                      : profilesWithSessionErrors.length > 0
+                        ? `${profilesWithSessionErrors.length} com falha na sessão`
+                        : primaryProfile ?? undefined
                   }
                 />
                 <FlowLink active={hasTraffic} />
@@ -237,19 +237,19 @@ export default function RequestFlow() {
               </div>
             </div>
 
-            {/* Lista de agentes ativos (dinâmica) */}
+            {/* Respostas recentes agrupadas pelo perfil/tier */}
             {agents.length > 0 && (
-              <ul role="list" aria-label="Estado dos agentes" className="mb-3 flex flex-wrap gap-2 text-[11px]">
+              <ul role="list" aria-label="Estado dos perfis de execução" className="mb-3 flex flex-wrap gap-2 text-[11px]">
                 {agents.map((a) => (
                   <li
                     key={a.agent}
                     className="nx-elev-0 flex items-center gap-1.5 rounded-lg px-2 py-1"
-                    title={`Tarefas concluídas: ${a.tasks_completed} · falhadas: ${a.tasks_failed} · latência média: ${fmtLatency(a.avg_latency_ms)}`}
+                    title={`${a.tasks_completed} respostas · latência média: ${fmtLatency(a.avg_latency_ms)}${a.status === "error" ? " · falha de ferramenta na sessão" : ""}`}
                   >
                     <StatusDot tone={STATUS_TONE[a.status]} pulse={a.status === "active"} />
                     <span className="font-medium text-nexus-text">{a.agent}</span>
                     <span className="text-nexus-faint">
-                      {a.status === "active" ? "ativo" : a.status === "error" ? "erro" : "inativo"}
+                      {a.status === "active" ? "em execução" : a.status === "error" ? "falha na sessão" : "sem execução"}
                     </span>
                   </li>
                 ))}
@@ -302,16 +302,16 @@ export default function RequestFlow() {
             <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-nexus-faint">
               <span className="flex items-center gap-1">
                 <Users className="h-3 w-3" aria-hidden />
-                {activeCount} ativo(s)
+                {activeCount} perfil(is) em execução
               </span>
               <span className="flex items-center gap-1">
                 <Bot className="h-3 w-3" aria-hidden />
-                {idleCount} inativo(s)
+                {idleCount} perfil(is) sem execução
               </span>
-              {errorAgents.length > 0 && (
+              {profilesWithSessionErrors.length > 0 && (
                 <span className="flex items-center gap-1 text-rose-400">
                   <XCircle className="h-3 w-3" aria-hidden />
-                  {errorAgents.length} com erro
+                  {profilesWithSessionErrors.length} perfil(is) em sessão com falha
                 </span>
               )}
             </p>

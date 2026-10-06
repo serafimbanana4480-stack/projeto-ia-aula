@@ -8,8 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -177,7 +177,7 @@ class FineTuner:
         )
 
         # The code below documents the intended flow but is not executed
-        run_id = f"ft-{task_type}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+        run_id = f"ft-{task_type}-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
         adapter_path = str(self._output_dir / run_id)
 
         run = FineTuneRun(
@@ -186,7 +186,7 @@ class FineTuner:
             adapter_path=adapter_path,
             task_type=task_type,
             examples_count=self._count_examples(data_path),
-            started_at=datetime.now(timezone.utc).isoformat(),
+            started_at=datetime.now(UTC).isoformat(),
         )
 
         try:
@@ -208,7 +208,7 @@ class FineTuner:
                 json.dump(config, f, indent=2)
 
             run.status = "completed"
-            run.completed_at = datetime.now(timezone.utc).isoformat()
+            run.completed_at = datetime.now(UTC).isoformat()
             run.eval_loss = 0.5  # placeholder
             run.baseline_loss = 0.6  # placeholder
             run.improvement_pct = 16.7  # placeholder
@@ -315,7 +315,7 @@ class FineTuningPipeline:
             FineTuneRun if successful, None if no data available.
         """
         # 1. Collect training examples
-        examples = self._collector.collect_from_logs(logs)
+        self._collector.collect_from_logs(logs)
         task_examples = self._collector.get_examples(task_type)
 
         if len(task_examples) < 10:

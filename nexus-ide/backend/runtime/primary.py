@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import logging
+import os
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -41,11 +43,143 @@ from enum import StrEnum
 from typing import Any
 
 from backend.runtime.events import RunEventStream, RuntimeEvent, RuntimeEventType
+from backend.runtime.reasoning import (
+    ReasoningVisibility,
+    bound_reasoning_text,
+    join_collected_reasoning,
+    reasoning_label_or_default,
+    reasoning_visibility,
+)
 from backend.runtime.scheduler import RuntimeScheduler, RuntimeTask, RuntimeTaskStatus
 from backend.runtime.spawn_policy import SpawnPolicy, SpawnVerdict, SubagentProposal
 from backend.runtime.telemetry import BlockedOn, RunPhase, RunTelemetry
 
+try:
+    from backend.experience.bus import FakeBus
+except (ImportError, AttributeError):
+    FakeBus = None  # type: ignore[assignment-misc]
+
 logger = logging.getLogger(__name__)
+
+_experience_bus_cache: Any = None
+_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30.0
+_MAX_PREVIOUS_ANSWER_CHARS = 12_000
+
+
+def _configured_heartbeat_interval() -> float:
+    """Read the operational heartbeat interval; zero explicitly disables it."""
+    raw = os.environ.get("NEXUS_PRIMARY_HEARTBEAT_INTERVAL", "").strip()
+    if not raw:
+        return _DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    return max(0.0, value)
+
+
+def _bounded_previous_answer(answer: str) -> str:
+    """Keep follow-up context useful without growing the provider prompt unbounded."""
+    if len(answer) <= _MAX_PREVIOUS_ANSWER_CHARS:
+        return answer
+    omitted = len(answer) - _MAX_PREVIOUS_ANSWER_CHARS
+    return (
+        f"[Início da resposta omitido: {omitted} caracteres.]\n"
+        + answer[-_MAX_PREVIOUS_ANSWER_CHARS:]
+    )
+
+
+_MARKDOWN_HEADING = re.compile(
+    r"(?m)^ {0,3}(?:#{1,6}\s+.+|\*\*[^*\n]+(?<!:)\*\*|\d{1,2}[.)]\s+.{1,180})\s*$"
+)
+_REPEATED_SECTION_SIMILARITY = 0.9
+_REPEATED_PARAGRAPH_SIMILARITY = 0.94
+
+
+def _heading_key(heading: str) -> str:
+    text = re.sub(r"^\s*#+\s*", "", heading)
+    text = re.sub(r"^\*\*|\*\*$", "", text).strip()
+    return re.sub(r"\s+", " ", text).casefold()
+
+
+def _normalized_paragraph(paragraph: str) -> str:
+    return re.sub(r"\s+", " ", paragraph).strip().casefold()
+
+
+def _near_duplicate_text(previous: str, candidate: str, threshold: float) -> bool:
+    if previous == candidate:
+        return True
+    longer = max(len(previous), len(candidate))
+    if not longer or min(len(previous), len(candidate)) / longer < threshold:
+        return False
+    return difflib.SequenceMatcher(None, previous, candidate).ratio() >= threshold
+
+
+def _remove_repeated_markdown_sections(previous: str, continuation: str) -> str:
+    """Drop near-identical sections or paragraphs a follow-up regenerated.
+
+    Follow-up turns are buffered until completion, so a repeated section never
+    flashes in the live answer before this filter can remove it. Only sections
+    with an existing heading and strongly similar body are dropped; a genuine
+    correction or addition under the same heading can still be shown. Repeated
+    long paragraphs are also removed when a response has no useful headings.
+    """
+    previous_matches = list(_MARKDOWN_HEADING.finditer(previous))
+    continuation_matches = list(_MARKDOWN_HEADING.finditer(continuation))
+    result = continuation
+    if previous_matches and continuation_matches:
+        prior_sections: dict[str, list[str]] = {}
+        for index, match in enumerate(previous_matches):
+            end = (
+                previous_matches[index + 1].start()
+                if index + 1 < len(previous_matches)
+                else len(previous)
+            )
+            key = _heading_key(match.group())
+            body = _normalized_paragraph(previous[match.end() : end])
+            if key:
+                prior_sections.setdefault(key, []).append(body)
+
+        preamble = continuation[: continuation_matches[0].start()].strip()
+        kept: list[str] = [preamble] if preamble else []
+        for index, match in enumerate(continuation_matches):
+            end = (
+                continuation_matches[index + 1].start()
+                if index + 1 < len(continuation_matches)
+                else len(continuation)
+            )
+            section = continuation[match.start() : end]
+            prior_bodies = prior_sections.get(_heading_key(match.group()), [])
+            new_body = _normalized_paragraph(section[match.end() - match.start() :])
+            duplicate = any(
+                _near_duplicate_text(old_body, new_body, _REPEATED_SECTION_SIMILARITY)
+                for old_body in prior_bodies
+            )
+            if not duplicate:
+                kept.append(section.rstrip())
+        result = "\n\n".join(kept)
+
+    prior_paragraphs = [
+        _normalized_paragraph(part)
+        for part in re.split(r"\n\s*\n", previous)
+        if len(_normalized_paragraph(part)) >= 120
+    ]
+    paragraphs = re.split(r"\n\s*\n", result)
+    kept_paragraphs: list[str] = []
+    removed_paragraph = False
+    for paragraph in paragraphs:
+        normalized = _normalized_paragraph(paragraph)
+        duplicate = len(normalized) >= 120 and any(
+            _near_duplicate_text(old, normalized, _REPEATED_PARAGRAPH_SIMILARITY)
+            for old in prior_paragraphs
+        )
+        if duplicate:
+            removed_paragraph = True
+        else:
+            kept_paragraphs.append(paragraph.strip())
+    if removed_paragraph:
+        result = "\n\n".join(part for part in kept_paragraphs if part)
+    return result
 
 __all__ = [
     "AgentSignal",
@@ -105,6 +239,11 @@ WRITE_TOOLS = frozenset(
 )
 COMMAND_TOOLS = frozenset({"run_shell", "execute_code"})
 TEST_TOOLS = frozenset({"run_tests", "run_lint", "type_check"})
+#: Plan/bookkeeping tools: real work for a long autonomous run (the todo list
+#: is persisted state, not narration), but they emit PLAN_UPDATED, not file
+#: or command events. ``sequential_thinking`` is useful work without a plan
+#: payload.
+PLAN_TOOLS = frozenset({"todo_write", "todo_list", "sequential_thinking"})
 
 
 @dataclass(frozen=True)
@@ -140,6 +279,8 @@ class PrimaryTurn:
     session_id: str = ""
     #: Guidance the user typed while the run was in flight.
     guidance: tuple[str, ...] = ()
+    #: Assistant text already streamed to the user before a follow-up cycle.
+    previous_answer: str = ""
 
 
 @dataclass
@@ -184,7 +325,7 @@ class PrimaryOutcome:
 
     @property
     def succeeded(self) -> bool:
-        return not self.failed and not self.stopped
+        return not self.failed and not self.stopped and not self.interrupted
 
 
 class SteeringChannel:
@@ -197,12 +338,16 @@ class SteeringChannel:
     disconnected.
     """
 
+    MAX_GUIDANCE_MESSAGES = 3
+
     def __init__(self, *, pause_timeout: float = 300.0) -> None:
         self._paused = asyncio.Event()
         self._resumed = asyncio.Event()
         self._resumed.set()
         self._aborted = asyncio.Event()
         self._guidance: list[str] = []
+        self._guidance_count = 0
+        self._closed = False
         self.pause_timeout = pause_timeout
 
     # -- user actions --------------------------------------------------
@@ -212,7 +357,7 @@ class SteeringChannel:
 
     def cont(self, guidance: str = "") -> None:
         if guidance.strip():
-            self._guidance.append(guidance.strip())
+            self.steer(guidance)
         self._paused.clear()
         self._resumed.set()
 
@@ -220,9 +365,22 @@ class SteeringChannel:
         self._aborted.set()
         self._resumed.set()
 
-    def steer(self, guidance: str) -> None:
-        if guidance.strip():
-            self._guidance.append(guidance.strip())
+    def steer(self, guidance: str) -> bool:
+        """Queue bounded user guidance while this run can still consume it."""
+        cleaned = guidance.strip()
+        if not cleaned or self._closed or self._guidance_count >= self.MAX_GUIDANCE_MESSAGES:
+            return False
+        self._guidance.append(cleaned)
+        self._guidance_count += 1
+        return True
+
+    def close(self) -> None:
+        """Reject steering once the run leaves its last work checkpoint."""
+        self._closed = True
+
+    @property
+    def has_guidance(self) -> bool:
+        return bool(self._guidance) and not self._closed
 
     # -- loop side -----------------------------------------------------
     @property
@@ -279,6 +437,12 @@ class PrimaryLoop:
         agent_id: str = "NEXUS",
         max_cycles: int = 2,
         max_parallel_subagents: int = 3,
+        experience_bus: Any = None,
+        run_timeout: float = 0,
+        heartbeat_interval_seconds: float | None = None,
+        skill_activations: list[dict[str, Any]] | None = None,
+        interruption_check: Callable[[], str | None] | None = None,
+        reasoning_visibility: ReasoningVisibility | None = None,
     ) -> None:
         if max_cycles < 1:
             raise ValueError("max_cycles must be >= 1")
@@ -299,6 +463,19 @@ class PrimaryLoop:
         self._verify = verify
         self._run_subagent = run_subagent
         self._max_parallel_subagents = max_parallel_subagents
+        self._experience_bus = experience_bus
+        self._run_timeout = run_timeout
+        self._heartbeat_interval = (
+            _configured_heartbeat_interval()
+            if heartbeat_interval_seconds is None
+            else max(0.0, float(heartbeat_interval_seconds))
+        )
+        self.skill_activations = list(skill_activations or [])
+        self._interruption_check = interruption_check
+        # ``None`` means "read NEXUS_REASONING_VISIBILITY at emit time"; the
+        # route pins it to the user's ``thinking_strength`` when it can.
+        self._reasoning_visibility = reasoning_visibility
+        self._reasoning_parts: list[str] = []
 
         self.outcome = PrimaryOutcome(run_id=run_id)
         self._answer_parts: list[str] = []
@@ -307,6 +484,18 @@ class PrimaryLoop:
         self._declined: list[str] = []
         self._phase = PrimaryPhase.OBSERVE
         self._failure_event_emitted = False
+
+    @property
+    def reasoning_visibility(self) -> ReasoningVisibility:
+        """Effective policy for this run (env-resolved when not pinned)."""
+        if self._reasoning_visibility is not None:
+            return self._reasoning_visibility
+        return reasoning_visibility()
+
+    @property
+    def reasoning_text(self) -> str:
+        """Every reasoning label this run surfaced, joined for token counting."""
+        return join_collected_reasoning(self._reasoning_parts)
 
     # ------------------------------------------------------------------
     # public entry point
@@ -334,12 +523,48 @@ class PrimaryLoop:
             session_id=self.session_id,
             max_cycles=self.max_cycles,
         )
+        if self.skill_activations:
+            names = ", ".join(
+                f"{item['name']} v{item['version']}" for item in self.skill_activations
+            )
+            reasons = "; ".join(
+                f"{item['name']}: {item['reason']}" for item in self.skill_activations
+            )
+            yield emit(
+                RuntimeEventType.STATUS_UPDATE,
+                phase="skills",
+                label=f"Skills ativadas: {names}",
+                reason="skills_selected_for_task",
+                skills=self.skill_activations,
+                activation_reason=reasons,
+            )
+
+        # --- experience bus: start trace ----------------------------
+        bus = self._experience_bus
+        if bus is None:
+            bus = self._get_experience_bus()
+        trace = None
+        if bus is not None and not os.environ.get("NEXUS_EXPERIENCE_OFF"):
+            try:
+                trace = bus.start_trace(
+                    prompt=self.query,
+                    session_id=self.session_id,
+                    version_tags={
+                        f"skill:{item['name']}": str(item["version"])
+                        for item in self.skill_activations
+                    },
+                )
+            except Exception:
+                logger.debug("experience_bus.start_trace failed", exc_info=True)
 
         observation: Observation | None = None
         feedback = ""
+        previous_answer = ""
         cycle = 0
         try:
-            while cycle < self.max_cycles:
+            # Mid-run guidance earns a bounded follow-up model turn even when
+            # triage chose a one-cycle conversational/no-project run.
+            while cycle < self.max_cycles or self.steering.has_guidance:
                 cycle += 1
                 self.outcome.cycles = cycle
                 guidance = self.steering.drain_guidance()
@@ -351,6 +576,7 @@ class PrimaryLoop:
                     project_path=self.project_path,
                     session_id=self.session_id,
                     guidance=guidance,
+                    previous_answer=previous_answer,
                 )
                 for hint in guidance:
                     yield emit(RuntimeEventType.USER_STEERING, guidance=hint, cycle=cycle)
@@ -360,28 +586,35 @@ class PrimaryLoop:
                     yield event
                 if self._must_stop():
                     break
-                self._phase = PrimaryPhase.OBSERVE
-                self.telemetry.enter_phase(RunPhase.CONTEXT_BUILD)
-                self.telemetry.blocked_on = BlockedOn.WORKING
-                observation = await self._call_observer(turn)
-                turn.observation = observation
-                if observation.files_inspected:
-                    # Real inspection of the project: this is useful work and
-                    # is recorded as such, before the provider has replied.
-                    self.telemetry.mark_file_read(observation.files_inspected)
+                if self._observe is not None:
+                    self._phase = PrimaryPhase.OBSERVE
+                    self.telemetry.enter_phase(RunPhase.CONTEXT_BUILD)
+                    self.telemetry.blocked_on = BlockedOn.WORKING
+                    observation = await self._call_observer(turn)
+                    turn.observation = observation
+                    if observation.files_inspected:
+                        # Real inspection of the project: this is useful work and
+                        # is recorded as such, before the provider has replied.
+                        self.telemetry.mark_file_read(observation.files_inspected)
+                        yield emit(
+                            RuntimeEventType.FILE_READ,
+                            count=observation.files_inspected,
+                            phase=PrimaryPhase.OBSERVE.value,
+                        )
                     yield emit(
-                        RuntimeEventType.FILE_READ,
-                        count=observation.files_inspected,
+                        RuntimeEventType.STATUS_UPDATE,
                         phase=PrimaryPhase.OBSERVE.value,
+                        cycle=cycle,
+                        label=observation.summary or "a observar o projeto",
+                        facts=observation.facts,
+                        blocked_on=self.telemetry.blocked_on.value,
                     )
-                yield emit(
-                    RuntimeEventType.STATUS_UPDATE,
-                    phase=PrimaryPhase.OBSERVE.value,
-                    cycle=cycle,
-                    label=observation.summary or "a observar o projeto",
-                    facts=observation.facts,
-                    blocked_on=self.telemetry.blocked_on.value,
-                )
+                else:
+                    # Conversational turns have no project observer by design.
+                    # Keep that absence out of both the model prompt and the
+                    # execution timeline instead of reporting it as a failed step.
+                    observation = None
+                    turn.observation = None
 
                 # -- 2/3. ACT + TOOL --------------------------------------
                 self._phase = PrimaryPhase.ACT
@@ -400,16 +633,32 @@ class PrimaryLoop:
                 if self._must_stop():
                     break
                 result = await self._run_verification(turn, emit)
-                if result.ran:
+                if self._verify is not None:
                     yield emit(
                         RuntimeEventType.TEST_RESULT,
                         ok=result.ok,
+                        ran=result.ran,
                         summary=result.summary,
                         command=result.command,
                         details=result.details,
                         cycle=cycle,
                     )
                 self.outcome.verification = result
+
+                if self.steering.has_guidance:
+                    # Treat the user's intervention as a new instruction, not
+                    # as another ordinary assistant turn or a verification
+                    # retry. It is consumed at the next loop boundary.
+                    feedback = ""
+                    answer_so_far = "".join(self._answer_parts).strip()
+                    previous_answer = _bounded_previous_answer(answer_so_far)
+                    yield emit(
+                        RuntimeEventType.STATUS_UPDATE,
+                        phase="steering",
+                        label="orientação recebida; o NEXUS vai incorporá-la",
+                        cycle=cycle,
+                    )
+                    continue
 
                 if result.ran and not result.ok and cycle < self.max_cycles:
                     # The back-edge of the loop: a failed verification is a new
@@ -418,6 +667,9 @@ class PrimaryLoop:
                         f"A verificação falhou no ciclo {cycle}: {result.summary}\n"
                         f"Comando: {result.command or 'n/d'}\n"
                         "Corrige a causa e volta a verificar."
+                    )
+                    previous_answer = _bounded_previous_answer(
+                        "".join(self._answer_parts).strip()
                     )
                     self.telemetry.mark_retry()
                     yield emit(
@@ -437,6 +689,10 @@ class PrimaryLoop:
                         f"{result.summary or 'resultado sem detalhes'}"
                     )
                 break
+
+            # Close before reporting: a late POST must not be accepted after
+            # the final model/verification checkpoint has already passed.
+            self.steering.close()
 
             # -- 5. REPORT ------------------------------------------------
             self._phase = PrimaryPhase.REPORT
@@ -476,6 +732,55 @@ class PrimaryLoop:
                 self.outcome.error = (
                     "O provider terminou a execução sem uma resposta visível."
                 )
+            if not self.outcome.stopped and not self.outcome.failed:
+                try:
+                    interruption_reason = (
+                        self._interruption_check() if self._interruption_check else None
+                    )
+                    if interruption_reason:
+                        self.outcome.interrupted = True
+                        self.outcome.error = interruption_reason
+                except Exception:
+                    logger.debug("completion status check failed", exc_info=True)
+
+            # --- experience bus: complete trace --------------------
+            if trace is not None and bus is not None:
+                try:
+                    bus.record_trajectory(
+                        trace,
+                        agent=self.agent_id,
+                        action=(
+                            "run_completed"
+                            if self.outcome.succeeded
+                            else "run_interrupted"
+                            if self.outcome.interrupted
+                            else "run_failed"
+                        ),
+                        observation=f"Run ended after {cycle} cycle(s).",
+                        success=self.outcome.succeeded,
+                        error=self.outcome.error or None,
+                        input_data={"cycles": cycle},
+                    )
+                except Exception:
+                    logger.debug(
+                        "experience_bus.record_trajectory failed",
+                        exc_info=True,
+                    )
+                try:
+                    bus.complete(
+                    trace,
+                    success=(
+                        not self.outcome.failed
+                        and not self.outcome.stopped
+                        and not self.outcome.interrupted
+                    ),
+                        output=self.outcome.answer or "",
+                        files_modified=list(self.outcome.changed_files),
+                        error=self.outcome.error or None,
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                    )
+                except Exception:
+                    logger.debug("experience_bus.complete failed", exc_info=True)
 
             if self.outcome.failed:
                 if not self._failure_event_emitted:
@@ -488,6 +793,13 @@ class PrimaryLoop:
                 yield emit(
                     RuntimeEventType.RUN_CANCELLED,
                     reason="stop_requested",
+                    partial_answer=self.outcome.answer,
+                    telemetry=self.outcome.telemetry,
+                )
+            elif self.outcome.interrupted:
+                yield emit(
+                    RuntimeEventType.RUN_INTERRUPTED,
+                    reason=self.outcome.error or "A resposta foi interrompida.",
                     partial_answer=self.outcome.answer,
                     telemetry=self.outcome.telemetry,
                 )
@@ -514,9 +826,49 @@ class PrimaryLoop:
                     telemetry=self.outcome.telemetry,
                 )
         except asyncio.CancelledError:
+            self.steering.close()
             self.outcome.stopped = True
+            self.outcome.answer = "".join(self._answer_parts).strip()
+            self.outcome.changed_files = tuple(dict.fromkeys(self._changed_files))
+            self.outcome.subagents = tuple(self._subagent_results)
+            self.outcome.declined_subagents = tuple(self._declined)
+            self.outcome.error = self.outcome.error or "Execução cancelada."
+            self.telemetry.finish()
+            self.outcome.telemetry = self.telemetry.snapshot()
+            if trace is not None and bus is not None:
+                try:
+                    bus.record_trajectory(
+                        trace,
+                        agent=self.agent_id,
+                        action="run_cancelled",
+                        observation=f"Run cancelled after {cycle} cycle(s).",
+                        success=False,
+                        error=self.outcome.error,
+                        input_data={"cycles": cycle},
+                    )
+                    bus.complete(
+                        trace,
+                        success=False,
+                        output=self.outcome.answer,
+                        files_modified=list(self.outcome.changed_files),
+                        error=self.outcome.error,
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                    )
+                except Exception:
+                    logger.debug(
+                        "experience_bus cancellation capture failed", exc_info=True
+                    )
+            cancelled_event = self.events.emit(
+                RuntimeEventType.RUN_CANCELLED,
+                agent_id=self.agent_id,
+                reason="client_cancelled",
+                partial_answer=self.outcome.answer,
+                telemetry=self.outcome.telemetry,
+            )
+            self.events_sink.append(cancelled_event)
             raise
         except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+            self.steering.close()
             logger.exception("primary loop failed for run %s", self.run_id)
             self.outcome.failed = True
             self.outcome.error = f"{type(exc).__name__}: {exc}"
@@ -536,9 +888,63 @@ class PrimaryLoop:
     ) -> AsyncIterator[RuntimeEvent]:
         """Consume one model turn, executing its tool signals as they arrive."""
         proposals: list[SubagentProposal] = []
+        buffer_followup = bool(
+            turn.previous_answer and turn.guidance and not turn.project_path
+        )
+        followup_tokens: list[str] = []
         stream = self._stream(turn)
+        _timeout = self._run_timeout
+        _retried = False
+        _has_output = False
+        pending_signal: asyncio.Task[AgentSignal] | None = None
+        pending_since = 0.0
         try:
-            async for signal in stream:
+            while True:
+                try:
+                    if pending_signal is None:
+                        pending_since = time.monotonic()
+                        pending_signal = asyncio.create_task(stream.__anext__())
+                    elapsed = time.monotonic() - pending_since
+                    remaining = _timeout - elapsed if _timeout and _timeout > 0 else None
+                    if remaining is not None and remaining <= 0:
+                        raise TimeoutError
+
+                    wait_for = self._heartbeat_interval or remaining
+                    if wait_for is not None and remaining is not None:
+                        wait_for = min(wait_for, remaining)
+                    if wait_for is None:
+                        done, _ = await asyncio.wait({pending_signal})
+                    else:
+                        done, _ = await asyncio.wait({pending_signal}, timeout=wait_for)
+                    if not done:
+                        elapsed = time.monotonic() - pending_since
+                        if remaining is not None and elapsed >= _timeout:
+                            raise TimeoutError
+                        if self._heartbeat_interval > 0:
+                            yield emit(
+                                RuntimeEventType.HEARTBEAT,
+                                phase=self._phase.value,
+                                blocked_on=self.telemetry.blocked_on.value,
+                                waiting_seconds=round(elapsed, 2),
+                            )
+                        continue
+                    signal = pending_signal.result()
+                    pending_signal = None
+                except TimeoutError:
+                    if pending_signal is not None:
+                        pending_signal.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await pending_signal
+                        pending_signal = None
+                    self.outcome.failed = True
+                    self.outcome.error = (
+                        f"limite de {_timeout}s excedido no provider."
+                    )
+                    self.telemetry.finish()
+                    self.outcome.telemetry = self.telemetry.snapshot()
+                    break
+                except StopAsyncIteration:
+                    break
                 # A STOP that arrived between two signals is honoured before
                 # another token is spent — and it is *announced* before the
                 # loop blocks. Blocking first would show the user a frozen
@@ -555,15 +961,65 @@ class PrimaryLoop:
                     self.outcome.stopped = True
                     break
 
+                if buffer_followup and signal.kind is AgentSignalKind.TOKEN and signal.text:
+                    # Keep the already-visible answer intact while we check
+                    # whether this model turn regenerated sections the user
+                    # has already seen. The follow-up text is emitted once,
+                    # after the duplicate-section filter runs below.
+                    self.telemetry.mark_first_token()
+                    followup_tokens.append(signal.text)
+                    _has_output = True
+                    continue
+
+                # --- transient error retry logic (before failure check) --
+                if (
+                    signal.kind is AgentSignalKind.ERROR
+                    and not signal.ok
+                    and not _has_output
+                    and not _retried
+                ):
+                    reason = signal.payload.get("reason", "")
+                    if reason in ("rate_limit", "upstream_error", "timeout"):
+                        _retried = True
+                        self.telemetry.mark_retry()
+                        aclose = getattr(stream, "aclose", None)
+                        if aclose is not None:
+                            with contextlib.suppress(Exception):
+                                await aclose()
+                        stream = self._stream(turn)
+                        continue
+
                 for event in self._handle_signal(signal, turn, emit, proposals):
                     yield event
                 if self.outcome.failed:
                     break
+
+                if signal.kind is AgentSignalKind.TOKEN and signal.text:
+                    _has_output = True
         finally:
+            if pending_signal is not None and not pending_signal.done():
+                pending_signal.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await pending_signal
             aclose = getattr(stream, "aclose", None)
             if aclose is not None:
                 with contextlib.suppress(Exception):
                     await aclose()
+
+        if followup_tokens and not self.outcome.failed and not self.outcome.stopped:
+            prior_answer = "".join(self._answer_parts).strip()
+            continuation = _remove_repeated_markdown_sections(
+                prior_answer, "".join(followup_tokens)
+            )
+            if not continuation.strip():
+                continuation = (
+                    "\n\n> A orientação recebida não acrescentou conteúdo novo; "
+                    "a resposta anterior mantém-se."
+                )
+            elif prior_answer and not continuation.startswith(("\n", " ", "\t")):
+                continuation = f"\n\n{continuation}"
+            self._answer_parts.append(continuation)
+            yield emit(RuntimeEventType.MESSAGE_DELTA, text=continuation)
 
         if proposals and not self.outcome.stopped and not self.outcome.failed:
             async for event in self._delegate(proposals, emit):
@@ -588,15 +1044,36 @@ class PrimaryLoop:
 
         if kind is AgentSignalKind.THINKING:
             # Operational transparency only: a short label, never the private
-            # reasoning transcript.
+            # reasoning transcript. The STATUS_UPDATE is emitted FIRST and
+            # unchanged — phase/telemetry consumers and the existing contract
+            # depend on it — and the THINKING event follows it with the SAME
+            # bounded text so the on-screen reasoning panel has something to
+            # render. Both are bounded by ``reasoning.bound_label``.
+            label = reasoning_label_or_default(signal.text or "a raciocinar")
             events.append(
                 emit(
                     RuntimeEventType.STATUS_UPDATE,
                     phase=PrimaryPhase.ACT.value,
-                    label=(signal.text or "a raciocinar").strip()[:160],
+                    label=label[:160],
                     blocked_on=BlockedOn.WAITING_MODEL.value,
                 )
             )
+            visible = bound_reasoning_text(
+                signal.text or "a raciocinar",
+                visibility=self.reasoning_visibility,
+            )
+            if visible:
+                # Only the public approach is recorded; ``signal.payload`` may
+                # carry provider internals and never leaves the process.
+                self._reasoning_parts.append(visible)
+                events.append(
+                    emit(
+                        RuntimeEventType.THINKING,
+                        text=visible,
+                        label=label[:160],
+                        visibility=self.reasoning_visibility.value,
+                    )
+                )
             return events
 
         if kind is AgentSignalKind.TOOL_CALL:
@@ -604,7 +1081,7 @@ class PrimaryLoop:
             self.telemetry.enter_phase(RunPhase.EXECUTING)
             self.telemetry.blocked_on = BlockedOn.WAITING_TOOL
             useful = signal.tool_name in (
-                READ_TOOLS | WRITE_TOOLS | COMMAND_TOOLS | TEST_TOOLS
+                READ_TOOLS | WRITE_TOOLS | COMMAND_TOOLS | TEST_TOOLS | PLAN_TOOLS
             )
             self.telemetry.mark_tool_call(useful=useful)
             events.append(
@@ -615,6 +1092,28 @@ class PrimaryLoop:
                     cycle=turn.cycle,
                 )
             )
+            if signal.tool_name in COMMAND_TOOLS:
+                events.append(
+                    emit(
+                        RuntimeEventType.COMMAND_STARTED,
+                        tool=signal.tool_name,
+                        command=str(
+                            signal.payload.get("command")
+                            or signal.payload.get("code")
+                            or ""
+                        ),
+                        cycle=turn.cycle,
+                    )
+                )
+            elif signal.tool_name in TEST_TOOLS:
+                events.append(
+                    emit(
+                        RuntimeEventType.TEST_STARTED,
+                        tool=signal.tool_name,
+                        args=signal.payload,
+                        cycle=turn.cycle,
+                    )
+                )
             return events
 
         if kind in (AgentSignalKind.TOOL_RESULT, AgentSignalKind.TOOL_ERROR):
@@ -677,7 +1176,6 @@ class PrimaryLoop:
                     "o estado ficou incompleto e pode ser continuado numa nova mensagem."
                 )
                 self.outcome.interrupted = True
-                self.outcome.stopped = True
                 self._answer_parts.append(f"\n\n⚠️ {notice}")
                 events.append(
                     emit(
@@ -738,6 +1236,22 @@ class PrimaryLoop:
                     summary=str(payload.get("summary") or ""),
                 )
             )
+        elif name in PLAN_TOOLS and name != "sequential_thinking":
+            # The todo handlers return the full list under "todos"; surface it
+            # as a plan update so the UI (and the session replay) can render
+            # the current plan without re-reading the todo file. execute_tool
+            # wraps handler output as {ok, result}, while legacy streams may
+            # already pass the handler payload at the root.
+            result_payload = payload.get("result")
+            todo_payload = (
+                result_payload
+                if isinstance(result_payload, dict)
+                and isinstance(result_payload.get("todos"), list)
+                else payload
+            )
+            todos = todo_payload.get("todos")
+            if isinstance(todos, list):
+                events.append(emit(RuntimeEventType.PLAN_UPDATED, tool=name, todos=todos))
         return events
 
     async def _delegate(
@@ -777,6 +1291,14 @@ class PrimaryLoop:
 
         queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
 
+        def task_context(task: RuntimeTask) -> dict[str, Any]:
+            proposal = by_name.get(task.name)
+            return {
+                "name": task.name,
+                "objective": proposal.objective if proposal is not None else None,
+                "depends_on": sorted(task.depends_on),
+            }
+
         def on_status(task: RuntimeTask) -> None:
             nonlocal live
             if task.status is RuntimeTaskStatus.RUNNING:
@@ -787,7 +1309,7 @@ class PrimaryLoop:
                         RuntimeEventType.SUBAGENT_STARTED,
                         agent_id=task.agent_id,
                         task_id=task.task_id,
-                        name=task.name,
+                        **task_context(task),
                     )
                 )
             elif task.status is RuntimeTaskStatus.WAITING:
@@ -796,7 +1318,7 @@ class PrimaryLoop:
                         RuntimeEventType.WAITING_DEPENDENCY,
                         agent_id=task.agent_id,
                         task_id=task.task_id,
-                        name=task.name,
+                        **task_context(task),
                     )
                 )
             elif task.status in {
@@ -811,7 +1333,7 @@ class PrimaryLoop:
                         RuntimeEventType.SUBAGENT_COMPLETED,
                         agent_id=task.agent_id,
                         task_id=task.task_id,
-                        name=task.name,
+                        **task_context(task),
                         status=task.status.value,
                         error=task.error,
                     )
@@ -995,6 +1517,20 @@ class PrimaryLoop:
         if self.steering.aborted:
             self.outcome.stopped = True
         return self.outcome.stopped
+
+    def _get_experience_bus(self) -> Any:
+        """Lazy-resolve the experience bus from the module cache or import."""
+        global _experience_bus_cache
+        if _experience_bus_cache is not None:
+            return _experience_bus_cache
+        try:
+            from backend.experience.bus import get_experience_bus
+
+            _experience_bus_cache = get_experience_bus()
+            return _experience_bus_cache
+        except Exception:
+            logger.debug("experience bus not available", exc_info=True)
+            return None
 
 
 async def _maybe_await(value: Any) -> Any:

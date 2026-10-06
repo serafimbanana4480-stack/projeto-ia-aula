@@ -9,8 +9,9 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Optional
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
@@ -36,12 +37,12 @@ REASONING_TEMPLATES = [
 ]
 
 
-def get_agent_pool(request: Request) -> Optional[Any]:
+def get_agent_pool(request: Request) -> Any | None:
     """Get AgentPool from app state."""
     return getattr(request.app.state, "agent_pool", None)
 
 
-def get_event_bus(request: Request) -> Optional[Any]:
+def get_event_bus(request: Request) -> Any | None:
     """Get EventBus from app state."""
     return getattr(request.app.state, "event_bus", None)
 
@@ -126,7 +127,7 @@ async def agents_topology_stream(request: Request) -> StreamingResponse:
                 else:
                     # No real agent pool available: emit an empty topology
                     # payload instead of fabricated agents.
-                    yield f"data: []\n\n"
+                    yield "data: []\n\n"
 
                 tick_count += 1
                 await asyncio.sleep(2)
@@ -155,7 +156,7 @@ async def agents_connections_stream(request: Request) -> StreamingResponse:
     Uses agent instance data to build real connections.
     """
     agent_pool = get_agent_pool(request)
-    event_bus = get_event_bus(request)
+    get_event_bus(request)
 
     async def event_generator() -> AsyncIterator[str]:
         while True:
@@ -196,7 +197,7 @@ async def agents_connections_stream(request: Request) -> StreamingResponse:
                 else:
                     # No real agent pool: emit an empty connections payload
                     # instead of fabricated edges.
-                    yield f"data: []\n\n"
+                    yield "data: []\n\n"
                     continue
 
                 yield f"data: {json.dumps(connections)}\n\n"
@@ -229,7 +230,6 @@ async def reasoning_stream(request: Request) -> StreamingResponse:
 
     async def event_generator() -> AsyncIterator[str]:
         message_counter = 0
-        recent_messages: list = []
 
         while True:
             try:
@@ -337,7 +337,7 @@ async def system_metrics_stream(request: Request) -> StreamingResponse:
         while True:
             try:
                 metrics = {
-                    "timestamp": datetime.now(timezone.utc).timestamp(),
+                    "timestamp": datetime.now(UTC).timestamp(),
                     "cpu_usage": None,
                     "memory_usage": None,
                     "gpu_usage": None,

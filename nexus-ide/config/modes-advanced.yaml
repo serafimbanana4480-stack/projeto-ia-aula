@@ -4,6 +4,8 @@
 # Each mode defines an advanced orchestration strategy with sub-modes,
 # tool permissions, memory policies, and quality gates.
 # Toggle via /<command> in chat or the mode selector UI.
+# A max_iterations value of 0 selects the runtime's bounded default budget;
+# it never creates an unbounded model/tool loop.
 # ═══════════════════════════════════════════════════════════════════════════
 
 modes:
@@ -13,7 +15,7 @@ modes:
   # ─────────────────────────────────────────────────────────────────────────
   vibe-infinity:
     display_name: "Vibe Infinity"
-    description: "Diretor autónomo persistente — orquestra projetos completos com planeamento dinâmico, árvore de objetivos, verificação contínua e recuperação automática"
+    description: "Direção do projeto — mantém objetivos e checkpoints e encaminha pedidos para Plan → Execute → Verify"
     group: "infinity"
     version: "2.0"
     icon: "infinity"
@@ -23,7 +25,7 @@ modes:
     router: "smart"
     tools_enabled: ["all"]
     enable_thinking: true
-    max_iterations: 0  # unlimited
+    max_iterations: 0  # use the bounded runtime default
     supports_subagents: true
     experimental: false
     config:
@@ -74,7 +76,7 @@ modes:
   # ─────────────────────────────────────────────────────────────────────────
   advisor-infinity:
     display_name: "Advisor Infinity"
-    description: "Governador inteligente da IA principal — observa, crítica, bloqueia, escala e garante que trabalho incompleto nunca é entregue"
+    description: "Revisão de conclusão — encaminha para ADVISOR e verifica a cobertura das evidências submetidas"
     group: "infinity"
     version: "2.0"
     icon: "shield"
@@ -143,12 +145,12 @@ modes:
   # ─────────────────────────────────────────────────────────────────────────
   forge:
     display_name: "Forge"
-    description: "Fábrica de projetos completos — transforma uma ideia curta num produto operável com arquitetura, código, testes, segurança e documentação"
+    description: "Construção orientada à entrega — encaminha para CODER com requisitos de arquitetura, testes e documentação"
     group: "productivity"
     version: "2.0"
     icon: "hammer"
     color: "#EF4444"
-    default_agent: "ARCHITECT"
+    default_agent: "CODER"
     default_model: "reasoning"
     router: "smart"
     tools_enabled: ["all"]
@@ -212,7 +214,7 @@ modes:
   # ─────────────────────────────────────────────────────────────────────────
   swarm-foundry:
     display_name: "Swarm Foundry"
-    description: "Cria dinamicamente especialistas específicos para cada projeto — analisa o domínio, gera agentes, testa e elimina conforme o desempenho"
+    description: "Especialistas por pedido — encaminha para SWARM com um contrato de colaboração adaptado ao projeto"
     group: "infinity"
     version: "2.0"
     icon: "layers"
@@ -283,7 +285,7 @@ modes:
   # ─────────────────────────────────────────────────────────────────────────
   multiverse:
     display_name: "Multiverse"
-    description: "Torneio de soluções paralelas — cria múltiplas implementações concorrentes, avalia-as em 5 dimensões e integra a melhor"
+    description: "Comparação de alternativas — usa ARCHITECT no chat e classifica pontuações submetidas pelo endpoint de torneio"
     group: "infinity"
     version: "2.0"
     icon: "git-branch"
@@ -346,12 +348,12 @@ modes:
   # ─────────────────────────────────────────────────────────────────────────
   proof:
     display_name: "Proof"
-    description: "Sistema de provas verificáveis — cada afirmação exige evidência concreta com testes, portões obrigatórios e livro de evidências"
+    description: "Requisitos de evidência — encaminha para ADVISOR e pede provas concretas para cada afirmação de conclusão"
     group: "quality"
     version: "2.0"
     icon: "check-circle"
     color: "#22C55E"
-    default_agent: "REVIEWER"
+    default_agent: "ADVISOR"
     default_model: "coder"
     router: "none"
     tools_enabled: ["all"]
@@ -421,12 +423,12 @@ modes:
   # ─────────────────────────────────────────────────────────────────────────
   reality-lab:
     display_name: "Reality Lab"
-    description: "Laboratório de mundo real — testa o projeto em condições adversas: utilizadores reais, falhas de infraestrutura, personas diversas e instalação limpa"
+    description: "Cenários de validação — encaminha para TEST_RUNNER_E2E com casos adversos e requisitos de instalação limpa"
     group: "quality"
     version: "2.0"
     icon: "flask"
     color: "#F97316"
-    default_agent: "TESTER"
+    default_agent: "TEST_RUNNER_E2E"
     default_model: "coder"
     router: "none"
     tools_enabled: ["all"]
@@ -503,12 +505,12 @@ modes:
   # ─────────────────────────────────────────────────────────────────────────
   archaeologist:
     display_name: "Archaeologist"
-    description: "Compreensão profunda do projeto — constrói um mapa vivo da arquitetura com módulos, dependências, fluxos, decisões e documentação desatualizada"
+    description: "Leitura da arquitetura — encaminha para ANALYZER para mapear módulos, dependências e diferenças entre documentação e código"
     group: "analysis"
     version: "2.0"
     icon: "search"
     color: "#6366F1"
-    default_agent: "ARCHITECT"
+    default_agent: "ANALYZER"
     default_model: "deep"
     router: "none"
     tools_enabled: ["read_file", "list_dir", "search_codebase", "search_symbols", "index_symbols", "consult_agent", "recall_context"]
@@ -577,7 +579,7 @@ modes:
   # ─────────────────────────────────────────────────────────────────────────
   evolve:
     display_name: "Evolve"
-    description: "Sistema que aprende com os próprios percursos — guarda trajetórias, extrai padrões, propõe regras e melhora continuamente"
+    description: "Análise de percursos — guarda trajetórias e encaminha para ANALYZER para identificar padrões e propor melhorias"
     group: "infinity"
     version: "2.0"
     icon: "brain"
@@ -585,7 +587,7 @@ modes:
     default_agent: "ANALYZER"
     default_model: "deep"
     router: "smart"
-    tools_enabled: ["read_file", "search_codebase", "recall_context", "store_memory", "consult_agent", "analyze_data"]
+    tools_enabled: ["read_file", "search_codebase", "recall_context", "store_memory", "consult_agent", "data_analysis"]
     enable_thinking: true
     max_iterations: 0
     supports_subagents: true
@@ -646,12 +648,12 @@ modes:
   # ─────────────────────────────────────────────────────────────────────────
   sentinel:
     display_name: "Sentinel"
-    description: "Supervisor independente — controla ações, permissões, riscos, custos e capacidade de recuperação em tempo real"
+    description: "Revisão de risco — encaminha para NEXUS e aplica um gate pré-execução às ferramentas do chat quando Sentinel está armado"
     group: "security"
     version: "2.0"
     icon: "eye"
     color: "#DC2626"
-    default_agent: "GUARDIAN"
+    default_agent: "NEXUS"
     default_model: "auto"
     router: "none"
     tools_enabled: ["read_file", "list_dir", "search_codebase", "execute_code", "recall_context", "consult_agent"]
@@ -901,5 +903,5 @@ commands:
     mode: "sentinel"
   autonomous:
     aliases: ["/auto", "/autonomous", "/omni", "/god-mode"]
-    description: "Modo autónomo completo (todos os modos)"
+    description: "Perfil composto com planeamento, execução, verificação e políticas Infinity"
     mode: "autonomous"

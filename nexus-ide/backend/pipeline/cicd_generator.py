@@ -6,9 +6,9 @@ with stack-specific templates and project variable injection.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+
 import yaml
-from dataclasses import dataclass, field
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -174,8 +174,6 @@ spec:
             parsed = yaml.safe_load(workflow_yaml)
             if not isinstance(parsed, dict):
                 return False
-            if "jobs" not in parsed:
-                return False
-            return True
+            return "jobs" in parsed
         except yaml.YAMLError:
             return False

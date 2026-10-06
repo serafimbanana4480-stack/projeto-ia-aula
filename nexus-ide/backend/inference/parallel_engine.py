@@ -1,4 +1,4 @@
-"""Parallel Inference Engine with Multi-Model Orchestration.
+﻿"""Parallel Inference Engine with Multi-Model Orchestration.
 
 Implements parallel inference across multiple models, batch processing,
 model ensemble, result aggregation, load balancing, and dynamic scaling.
@@ -6,20 +6,21 @@ model ensemble, result aggregation, load balancing, and dynamic scaling.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union, Callable
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-import threading
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
 
 try:
-    import redis.asyncio as redis
-    REDIS_AVAILABLE = True
+    # Availability probe only -- the module itself is never used. Bound to a
+    # private name so it is not a dangling import (F401); the REDIS_AVAILABLE
+    # flag below is the part callers actually read.
+    import redis.asyncio as _redis_asyncio
+
+    REDIS_AVAILABLE = _redis_asyncio is not None
 except ImportError:
     REDIS_AVAILABLE = False
 
@@ -28,7 +29,7 @@ from backend.config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
-class InferenceStrategy(str, Enum):
+class InferenceStrategy(StrEnum):
     """Parallel inference strategies."""
     PARALLEL = "parallel"  # Run all models in parallel
     SEQUENTIAL = "sequential"  # Run models sequentially
@@ -38,7 +39,7 @@ class InferenceStrategy(str, Enum):
     WEIGHTED_AVERAGE = "weighted_average"  # Weighted averaging
 
 
-class ModelStatus(str, Enum):
+class ModelStatus(StrEnum):
     """Model status tracking."""
     IDLE = "idle"
     BUSY = "busy"
@@ -58,7 +59,7 @@ class ModelConfig:
     retry_attempts: int = 3
     weight: float = 1.0
     priority: int = 1
-    capabilities: Set[str] = field(default_factory=set)
+    capabilities: set[str] = field(default_factory=set)
     cost_per_token: float = 0.0
     latency_target: float = 1.0
     
@@ -72,9 +73,9 @@ class InferenceRequest:
     """Request for parallel inference."""
     request_id: str = field(default_factory=lambda: f"req-{uuid.uuid4().hex[:12]}")
     prompt: str = ""
-    context: Dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
     strategy: InferenceStrategy = InferenceStrategy.PARALLEL
-    model_ids: List[str] = field(default_factory=list)
+    model_ids: list[str] = field(default_factory=list)
     max_results: int = 1
     timeout: float = 30.0
     priority: int = 1
@@ -87,15 +88,15 @@ class InferenceRequest:
     presence_penalty: float = 0.0
     
     # Ensemble options
-    ensemble_weights: Optional[Dict[str, float]] = None
+    ensemble_weights: dict[str, float] | None = None
     aggregation_method: str = "best"
     
     # Metadata
     created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    completed_at: Optional[float] = None
+    started_at: float | None = None
+    completed_at: float | None = None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "request_id": self.request_id,
             "prompt": self.prompt,
@@ -124,7 +125,7 @@ class InferenceResult:
     model_id: str
     request_id: str
     response: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
     # Performance metrics
     latency: float = 0.0
@@ -138,10 +139,10 @@ class InferenceResult:
     
     # Status
     status: ModelStatus = ModelStatus.BUSY
-    error: Optional[str] = None
+    error: str | None = None
     completed_at: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "model_id": self.model_id,
             "request_id": self.request_id,
@@ -164,10 +165,10 @@ class EnsembleResult:
     """Aggregated result from multiple models."""
     request_id: str
     strategy: InferenceStrategy
-    individual_results: List[InferenceResult] = field(default_factory=list)
+    individual_results: list[InferenceResult] = field(default_factory=list)
     aggregated_response: str = ""
     aggregated_confidence: float = 0.0
-    aggregation_metadata: Dict[str, Any] = field(default_factory=dict)
+    aggregation_metadata: dict[str, Any] = field(default_factory=dict)
     
     # Performance metrics
     total_latency: float = 0.0
@@ -175,7 +176,7 @@ class EnsembleResult:
     models_used: int = 0
     success_rate: float = 0.0
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "request_id": self.request_id,
             "strategy": self.strategy.value,
@@ -196,9 +197,9 @@ class ModelManager:
     def __init__(self, config: ModelConfig):
         self.config = config
         self.status = ModelStatus.IDLE
-        self.active_requests: Set[str] = set()
+        self.active_requests: set[str] = set()
         self.request_semaphore = asyncio.Semaphore(config.max_concurrent)
-        self.performance_history: List[float] = []
+        self.performance_history: list[float] = []
         self.error_count = 0
         self.last_error_time = 0.0
         
@@ -282,17 +283,14 @@ class ModelManager:
             return False
             
         # Check error rate
-        if self.error_count > 5 and time.time() - self.last_error_time < 300:
-            return False
-            
-        return True
+        return not (self.error_count > 5 and time.time() - self.last_error_time < 300)
 
 
 class LoadBalancer:
     """Load balancer for model selection and routing."""
     
     def __init__(self):
-        self.models: Dict[str, ModelManager] = {}
+        self.models: dict[str, ModelManager] = {}
         self.round_robin_index = 0
         
     def add_model(self, model_manager: ModelManager) -> None:
@@ -303,7 +301,7 @@ class LoadBalancer:
         self,
         request: InferenceRequest,
         strategy: str = "best"
-    ) -> Optional[ModelManager]:
+    ) -> ModelManager | None:
         """Select best model for request."""
         available_models = [
             manager for manager in self.models.values()
@@ -324,21 +322,21 @@ class LoadBalancer:
         else:
             return available_models[0]
             
-    def _select_round_robin(self, models: List[ModelManager]) -> ModelManager:
+    def _select_round_robin(self, models: list[ModelManager]) -> ModelManager:
         """Select model using round-robin."""
         model = models[self.round_robin_index % len(models)]
         self.round_robin_index += 1
         return model
         
-    def _select_least_loaded(self, models: List[ModelManager]) -> ModelManager:
+    def _select_least_loaded(self, models: list[ModelManager]) -> ModelManager:
         """Select model with least active requests."""
         return min(models, key=lambda m: len(m.active_requests))
         
-    def _select_fastest(self, models: List[ModelManager]) -> ModelManager:
+    def _select_fastest(self, models: list[ModelManager]) -> ModelManager:
         """Select model with lowest average latency."""
         return min(models, key=lambda m: m.get_average_latency())
         
-    def _select_best(self, models: List[ModelManager], request: InferenceRequest) -> ModelManager:
+    def _select_best(self, models: list[ModelManager], request: InferenceRequest) -> ModelManager:
         """Select best model based on multiple factors."""
         scored_models = []
         
@@ -377,7 +375,7 @@ class ResultAggregator:
     async def aggregate_results(
         self,
         request: InferenceRequest,
-        results: List[InferenceResult]
+        results: list[InferenceResult]
     ) -> EnsembleResult:
         """Aggregate results based on strategy."""
         successful_results = [r for r in results if r.status == ModelStatus.IDLE]
@@ -405,7 +403,7 @@ class ResultAggregator:
     async def _aggregate_parallel(
         self,
         request: InferenceRequest,
-        results: List[InferenceResult]
+        results: list[InferenceResult]
     ) -> EnsembleResult:
         """Aggregate parallel results (return fastest)."""
         best_result = min(results, key=lambda r: r.latency)
@@ -425,7 +423,7 @@ class ResultAggregator:
     async def _aggregate_ensemble(
         self,
         request: InferenceRequest,
-        results: List[InferenceResult]
+        results: list[InferenceResult]
     ) -> EnsembleResult:
         """Aggregate ensemble results with weights."""
         weights = request.ensemble_weights or {}
@@ -462,7 +460,7 @@ class ResultAggregator:
     async def _aggregate_majority_vote(
         self,
         request: InferenceRequest,
-        results: List[InferenceResult]
+        results: list[InferenceResult]
     ) -> EnsembleResult:
         """Aggregate using majority voting."""
         # Simple implementation - in real would use semantic similarity
@@ -496,7 +494,7 @@ class ResultAggregator:
     async def _aggregate_weighted_average(
         self,
         request: InferenceRequest,
-        results: List[InferenceResult]
+        results: list[InferenceResult]
     ) -> EnsembleResult:
         """Aggregate using weighted average."""
         weights = request.ensemble_weights or {}
@@ -530,7 +528,7 @@ class ResultAggregator:
     async def _aggregate_best(
         self,
         request: InferenceRequest,
-        results: List[InferenceResult]
+        results: list[InferenceResult]
     ) -> EnsembleResult:
         """Aggregate by selecting best result."""
         best_result = max(results, key=lambda r: r.confidence)
@@ -553,11 +551,11 @@ class ParallelInferenceEngine:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self.models: Dict[str, ModelManager] = {}
+        self.models: dict[str, ModelManager] = {}
         self.load_balancer = LoadBalancer()
         self.aggregator = ResultAggregator()
         self.request_queue: asyncio.Queue = asyncio.Queue()
-        self.active_requests: Dict[str, InferenceRequest] = {}
+        self.active_requests: dict[str, InferenceRequest] = {}
         
         # Threading for CPU-bound operations
         self.executor = ThreadPoolExecutor(max_workers=4)
@@ -676,7 +674,7 @@ class ParallelInferenceEngine:
     async def _select_models_for_request(
         self,
         request: InferenceRequest
-    ) -> List[ModelManager]:
+    ) -> list[ModelManager]:
         """Select models for the request."""
         # Select based on strategy and request characteristics
         if request.strategy == InferenceStrategy.ENSEMBLE:
@@ -700,8 +698,8 @@ class ParallelInferenceEngine:
     async def _execute_parallel(
         self,
         request: InferenceRequest,
-        models: List[ModelManager]
-    ) -> List[InferenceResult]:
+        models: list[ModelManager]
+    ) -> list[InferenceResult]:
         """Execute inference in parallel."""
         tasks = []
         
@@ -713,7 +711,7 @@ class ParallelInferenceEngine:
         try:
             results = await asyncio.gather(*tasks, timeout=request.timeout)
             return results
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Cancel remaining tasks
             for task in tasks:
                 task.cancel()
@@ -722,8 +720,8 @@ class ParallelInferenceEngine:
     async def _execute_sequential(
         self,
         request: InferenceRequest,
-        models: List[ModelManager]
-    ) -> List[InferenceResult]:
+        models: list[ModelManager]
+    ) -> list[InferenceResult]:
         """Execute inference sequentially."""
         results = []
         
@@ -745,8 +743,8 @@ class ParallelInferenceEngine:
     async def _execute_cascade(
         self,
         request: InferenceRequest,
-        models: List[ModelManager]
-    ) -> List[InferenceResult]:
+        models: list[ModelManager]
+    ) -> list[InferenceResult]:
         """Execute inference in cascade (try models until success)."""
         return await self._execute_sequential(request, models)
         
@@ -762,8 +760,8 @@ class ParallelInferenceEngine:
                 
     async def batch_infer(
         self,
-        requests: List[InferenceRequest]
-    ) -> List[EnsembleResult]:
+        requests: list[InferenceRequest]
+    ) -> list[EnsembleResult]:
         """Perform batch inference."""
         tasks = []
         
@@ -783,7 +781,7 @@ class ParallelInferenceEngine:
                 
         return valid_results
         
-    def get_engine_stats(self) -> Dict[str, Any]:
+    def get_engine_stats(self) -> dict[str, Any]:
         """Get engine statistics."""
         model_stats = {}
         
@@ -820,4 +818,4 @@ class ParallelInferenceEngine:
 
 
 # Global engine instance
-parallel_engine: Optional[ParallelInferenceEngine] = None
+parallel_engine: ParallelInferenceEngine | None = None

@@ -8,8 +8,9 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable, Optional
+from typing import Any
 
 try:
     import redis.asyncio as redis
@@ -43,7 +44,7 @@ class EventMessage:
         )
     
     @classmethod
-    def from_event(cls, event: Event, priority: int = 0) -> "EventMessage":
+    def from_event(cls, event: Event, priority: int = 0) -> EventMessage:
         return cls(
             event_type=event.type,
             payload=event.payload or {},
@@ -63,7 +64,7 @@ class EventMessage:
         })
     
     @classmethod
-    def deserialize(cls, data: str) -> "EventMessage":
+    def deserialize(cls, data: str) -> EventMessage:
         obj = json.loads(data)
         return cls(**obj)
 
@@ -85,8 +86,8 @@ class RedisEventBus:
         self.max_queue_size = max_queue_size
         self.persistence_ttl = persistence_ttl
         self.consumer_group = consumer_group
-        self._redis: Optional[redis.Redis] = None
-        self._pubsub: Optional[redis.PubSub] = None
+        self._redis: redis.Redis | None = None
+        self._pubsub: redis.PubSub | None = None
         self._subscribers: dict[str, list[Callable]] = {}
         self._running = False
         self._consumer_tasks: list[asyncio.Task] = []
@@ -241,8 +242,8 @@ class RedisEventBus:
                 
     async def replay_events(
         self,
-        since: Optional[float] = None,
-        event_type: Optional[str] = None,
+        since: float | None = None,
+        event_type: str | None = None,
         limit: int = 1000,
     ) -> AsyncIterator[Event]:
         """Replay persisted events."""
@@ -370,8 +371,8 @@ class EventBus:
             
     async def replay_events(
         self,
-        since: Optional[float] = None,
-        event_type: Optional[str] = None,
+        since: float | None = None,
+        event_type: str | None = None,
         limit: int = 1000,
     ) -> AsyncIterator[Event]:
         await self._ensure_connected()

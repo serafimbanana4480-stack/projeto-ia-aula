@@ -8,11 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from backend.orchestrator.events import EventType, OrchestratorEvent
+from backend.orchestrator.routes import sessions as sessions_routes
 from backend.orchestrator.routes.chat import (
     _mission_heartbeat_payload,
     _mission_ui_payload,
 )
-from backend.orchestrator.routes import sessions as sessions_routes
 from backend.orchestrator.routes.sessions import _event_to_chat_frame
 
 
@@ -93,7 +93,9 @@ async def test_completed_run_replays_events_before_closing(monkeypatch) -> None:
         app=SimpleNamespace(state=SimpleNamespace(event_bus=None)),
         is_disconnected=false_async,
     )
-    monkeypatch.setattr(sessions_routes, "get_session", lambda _session_id: {"id": "session-1"})
+    monkeypatch.setattr(
+        sessions_routes, "get_session_for_user", lambda _session_id, _user_id: {"id": "session-1"}
+    )
     monkeypatch.setattr(sessions_routes, "get_event_store", lambda: Store())
     monkeypatch.setattr(
         "backend.persistence.db.get_session_run",
@@ -111,10 +113,17 @@ async def test_completed_run_replays_events_before_closing(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_implicit_default_session_has_empty_recovery_instead_of_404(monkeypatch) -> None:
-    monkeypatch.setattr(sessions_routes, "get_session", lambda _session_id: None)
+    monkeypatch.setattr(
+        sessions_routes, "get_session_for_user", lambda _session_id, _user_id: None
+    )
 
     response = await sessions_routes.get_runs_endpoint(
         "default", limit=20, _user={"sub": "test"}
     )
 
-    assert response == {"runs": []}
+    assert response == {
+        "runs": [],
+        "count": 0,
+        "has_more": False,
+        "next_offset": 0,
+    }

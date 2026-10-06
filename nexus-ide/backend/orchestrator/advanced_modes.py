@@ -13,18 +13,19 @@ Each mode is a self-contained orchestration strategy that can:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
+import math
 import os
-import time
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 import yaml
+
+from backend.agents.advisor import InterventionLevel
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,11 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "config"
 ADVANCED_MODES_YAML = CONFIG_DIR / "modes-advanced.yaml"
-ADVANCED_MODES_STATE_DIR = REPO_ROOT / ".nexus" / "advanced-modes"
-EVIDENCE_DIR = REPO_ROOT / ".nexus" / "evidence"
-TRAJECTORY_DIR = REPO_ROOT / ".nexus" / "trajectories"
-CHECKPOINT_DIR = REPO_ROOT / ".nexus" / "checkpoints"
+STATE_ROOT = Path(os.environ.get("NEXUS_ADVANCED_STATE_ROOT") or REPO_ROOT / ".nexus")
+ADVANCED_MODES_STATE_DIR = STATE_ROOT / "advanced-modes"
+EVIDENCE_DIR = STATE_ROOT / "evidence"
+TRAJECTORY_DIR = STATE_ROOT / "trajectories"
+CHECKPOINT_DIR = STATE_ROOT / "checkpoints"
 
 # Ensure directories exist
 for _dir in [ADVANCED_MODES_STATE_DIR, EVIDENCE_DIR, TRAJECTORY_DIR, CHECKPOINT_DIR]:
@@ -67,12 +69,6 @@ class RiskLevel(Enum):
     PRODUCTION = 4
 
 
-# Single source of truth: the AdvisorAgent owns the intervention taxonomy.
-# This module previously declared its own identical-but-divergent copy; the
-# mode now consumes the agent's enum so the two advisors can never drift.
-from backend.agents.advisor import InterventionLevel  # noqa: F401
-
-
 class EvidenceStatus(Enum):
     UNPROVEN = "unproven"
     PROVEN = "proven"
@@ -86,6 +82,9 @@ class GoalNodeState(Enum):
     IN_REVIEW = "in_review"
     REJECTED = "rejected"
     VERIFIED = "verified"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -95,14 +94,14 @@ class GoalNode:
     title: str
     description: str = ""
     state: GoalNodeState = GoalNodeState.NOT_STARTED
-    parent_id: Optional[str] = None
-    children: List[str] = field(default_factory=list)
-    assigned_agent: Optional[str] = None
-    evidence: List[str] = field(default_factory=list)
-    rejection_reason: Optional[str] = None
-    quality_score: Optional[float] = None
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    parent_id: str | None = None
+    children: list[str] = field(default_factory=list)
+    assigned_agent: str | None = None
+    evidence: list[str] = field(default_factory=list)
+    rejection_reason: str | None = None
+    quality_score: float | None = None
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 @dataclass
@@ -111,33 +110,39 @@ class ModeSession:
     mode_id: str
     session_id: str
     state: ModeState = ModeState.INACTIVE
-    goal_tree: Dict[str, GoalNode] = field(default_factory=dict)
-    goal_root: Optional[str] = None
-    interventions: List[Dict[str, Any]] = field(default_factory=list)
-    evidence_book: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    trajectory: List[Dict[str, Any]] = field(default_factory=list)
-    quality_gates: Dict[str, bool] = field(default_factory=dict)
-    checkpoints: List[str] = field(default_factory=list)
-    decisions: List[Dict[str, Any]] = field(default_factory=list)
-    start_time: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    updated_time: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    metrics: Dict[str, Any] = field(default_factory=dict)
+    goal_tree: dict[str, GoalNode] = field(default_factory=dict)
+    goal_root: str | None = None
+    interventions: list[dict[str, Any]] = field(default_factory=list)
+    evidence_book: dict[str, dict[str, Any]] = field(default_factory=dict)
+    trajectory: list[dict[str, Any]] = field(default_factory=list)
+    quality_gates: dict[str, bool] = field(default_factory=dict)
+    checkpoints: list[str] = field(default_factory=list)
+    decisions: list[dict[str, Any]] = field(default_factory=list)
+    start_time: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_time: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 # The advanced-mode catalog is intentionally honest about its current runtime
 # contract.  A mode can have a rich prompt and state model without yet being a
 # standalone executor.  These labels are exposed to the UI so "active" never
 # implies that a specialised worker is currently running.
-MODE_RUNTIME_STATUS: Dict[str, Dict[str, str]] = {
+MODE_RUNTIME_STATUS: dict[str, dict[str, str]] = {
     "vibe-infinity": {
-        "status": "composed",
+        "status": "integrated",
         "role": "director",
-        "summary": "Maintains the goal tree, replanning and verification contract.",
+        "summary": (
+            "Chat /vibe-infinity reuses a default worker; /spawn, /send, /wait, /result, "
+            "/agents, /workers and /kill manage up to five active workers per session. "
+            "Roster and recent history persist locally per chat; turns interrupted by backend "
+            "restart require resubmission and are never rerun automatically. Passive activation "
+            "keeps Plan -> Execute -> Verify."
+        ),
     },
     "advisor-infinity": {
         "status": "integrated",
         "role": "governor",
-        "summary": "Challenges completion claims and can route to the ADVISOR agent.",
+        "summary": "Live reviewer observes PRIMARY runs when enabled; chat /advisor-infinity review {JSON} calls the static review endpoint. Submitted evidence remains advisory until independently checked.",
     },
     "forge": {
         "status": "composed",
@@ -152,7 +157,7 @@ MODE_RUNTIME_STATUS: Dict[str, Dict[str, str]] = {
     "multiverse": {
         "status": "integrated",
         "role": "tournament",
-        "summary": "Evaluates submitted alternatives through the tournament endpoint.",
+        "summary": "Chat /multiverse rank {JSON} and the tournament endpoint rank submitted alternatives and scores; they do not build, execute or measure candidates.",
     },
     "proof": {
         "status": "composed",
@@ -177,7 +182,7 @@ MODE_RUNTIME_STATUS: Dict[str, Dict[str, str]] = {
     "sentinel": {
         "status": "integrated",
         "role": "safety",
-        "summary": "Applies risk checks and exposes the security-gate endpoint.",
+        "summary": "Chat /sentinel gate {JSON} and the endpoint assess submitted risk. When armed, chat tool calls also receive a pre-execution risk gate with approval for risky actions; this is not a sandbox.",
     },
     "autonomous": {
         "status": "integrated",
@@ -210,10 +215,53 @@ MODE_PREFERRED_AGENTS = {
     "reality-lab": "TEST_RUNNER_E2E",
     "archaeologist": "ANALYZER",
     "evolve": "ANALYZER",
-    "sentinel": "GUARDIAN",
+    # GUARDIAN is a background health monitor, not a chat-capable AgentBase.
+    # Sentinel's chat work uses NEXUS with the pre-execution guard armed.
+    "sentinel": "NEXUS",
 }
 
 COMPOSITE_MODES = {"vibe-infinity", "autonomous"}
+
+
+def sentinel_policy_enabled(
+    profile: dict[str, Any] | None, explicit_mode: str | None = None
+) -> bool:
+    """Whether this server-selected chat path must guard real tool calls."""
+    if str(explicit_mode or "").strip().lower() in {"sentinel", "autonomous"}:
+        return True
+    if not isinstance(profile, dict):
+        return False
+
+    mode_ids: set[str] = set()
+    for key in ("active_mode_ids", "policy_mode_ids", "applied_mode_ids"):
+        values = profile.get(key) or ()
+        if isinstance(values, str):
+            mode_ids.add(values)
+        elif isinstance(values, (list, tuple, set)):
+            mode_ids.update(str(value) for value in values)
+    return "sentinel" in mode_ids or profile.get("primary_mode") == "autonomous"
+
+MODE_LIMITATIONS = {
+    "vibe-infinity": (
+        "O comando explícito usa um worker Vibe predefinido; /spawn pode acrescentar workers "
+        "até ao limite de cinco ativos por sessão. O roster e as últimas 12 mensagens por worker "
+        "ficam em JSON local por sessão (NEXUS_VIBE_STATE_ROOT permite mudar a pasta). Um turno "
+        "ativo é recuperado como interrompido e exige reenvio; nunca é reexecutado automaticamente. "
+        "A eliminação da sessão remove este estado. Com provider fixado sem modelo concreto, ambos "
+        "os tiers usam o modelo resolvido pelo agente. Ativação passiva continua a usar "
+        "Plan → Execute → Verify."
+    ),
+    "advisor-infinity": "O reviewer em tempo real observa runs PRIMARY quando NEXUS_ADVISOR_ENABLED está ativo e tem timeout limitado; /advisor-infinity review {JSON} chama a revisão estática do endpoint. O caminho legacy não é observado pelo reviewer live e as provas submetidas não são verificadas independentemente.",
+    "forge": "Encaminha o pedido para CODER com um contrato de entrega. Build, instalação e publicação precisam de execução e provas próprias.",
+    "swarm-foundry": "Encaminha para SWARM. A criação de especialistas depende do pedido, dos recursos e das políticas do executor.",
+    "multiverse": "/multiverse rank {JSON} e o endpoint comparam pontuações submetidas; não constroem, executam nem medem automaticamente implementações concorrentes.",
+    "proof": "Pede provas ao ADVISOR. Uma descrição, uma pontuação ou um ficheiro registado não certifica um requisito.",
+    "reality-lab": "Encaminha cenários para TEST_RUNNER_E2E. Os cenários só ficam validados depois de serem realmente executados.",
+    "archaeologist": "Encaminha a análise para ANALYZER. O mapa depende dos ficheiros efetivamente consultados.",
+    "evolve": "Regista percursos e pede análise ao ANALYZER. Não treina pesos nem aplica automaticamente novas regras.",
+    "sentinel": "/sentinel gate {JSON} avalia entradas estáticas. Com Sentinel armado ou em Autonomous, chamadas de ferramentas do chat passam pelo mesmo risco antes da execução e pedem aprovação quando necessário. Não constituem uma sandbox nem monitorizam execução fora do chat.",
+    "autonomous": "Combina políticas e usa Plan → Execute → Verify em trabalho de projeto. Cada gate exige provas; recursos e providers podem bloquear a execução.",
+}
 
 
 @dataclass
@@ -222,26 +270,26 @@ class TournamentEntry:
     id: str
     name: str
     approach_description: str
-    files: List[str] = field(default_factory=list)
-    scores: Dict[str, float] = field(default_factory=dict)
+    files: list[str] = field(default_factory=list)
+    scores: dict[str, float] = field(default_factory=dict)
     total_score: float = 0.0
     is_winner: bool = False
-    merged_from: Optional[str] = None
+    merged_from: str | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Configuration Cache
 # ═══════════════════════════════════════════════════════════════════════════
 
-_config_cache: Optional[Dict[str, Any]] = None
+_config_cache: dict[str, Any] | None = None
 
 
-def _load_config() -> Dict[str, Any]:
+def _load_config() -> dict[str, Any]:
     global _config_cache
     if _config_cache is not None:
         return _config_cache
     try:
-        with open(ADVANCED_MODES_YAML, "r", encoding="utf-8") as f:
+        with open(ADVANCED_MODES_YAML, encoding="utf-8") as f:
             _config_cache = yaml.safe_load(f) or {}
         logger.info(f"Loaded {len(_config_cache.get('modes', {}))} advanced modes from config")
         return _config_cache
@@ -260,27 +308,91 @@ def _invalidate_cache() -> None:
     _config_cache = None
 
 
-def get_advanced_modes() -> Dict[str, Any]:
+def get_advanced_modes() -> dict[str, Any]:
     """Return all advanced mode definitions."""
     return _load_config().get("modes", {})
 
 
-def get_advanced_mode(mode_id: str) -> Optional[Dict[str, Any]]:
+def get_advanced_mode(mode_id: str) -> dict[str, Any] | None:
     """Return a single advanced mode definition."""
     return _load_config().get("modes", {}).get(mode_id)
 
 
-def get_mode_groups() -> Dict[str, Any]:
+def get_advanced_mode_tool_allowlist(mode_id: str) -> tuple[str, ...] | None:
+    """Return a mode's tool contract; None is reserved for explicit ``all``."""
+    mode = get_advanced_mode(mode_id)
+    if not isinstance(mode, dict):
+        return ()
+    configured = mode.get("tools_enabled")
+    if not isinstance(configured, (list, tuple)):
+        return ()
+    names = tuple(
+        str(name).strip()
+        for name in configured
+        if isinstance(name, str) and name.strip()
+    )
+    if any(name.casefold() == "all" for name in names):
+        return None
+    return names
+
+
+def apply_advanced_mode_tool_allowlist(
+    context: dict[str, Any], mode_id: str
+) -> None:
+    """Intersect a mode's configured tools with existing runtime restrictions."""
+    allowed = get_advanced_mode_tool_allowlist(mode_id)
+    if allowed is None:
+        return
+    existing = context.get("_allowed_tools")
+    if existing is None:
+        context["_allowed_tools"] = allowed
+        return
+    if isinstance(existing, str):
+        existing_values = (existing,)
+    elif isinstance(existing, (list, tuple, set, frozenset)):
+        existing_values = existing
+    else:
+        existing_values = ()
+    existing_names = {
+        str(name).strip() for name in existing_values if isinstance(name, str) and name.strip()
+    }
+    context["_allowed_tools"] = tuple(name for name in allowed if name in existing_names)
+
+
+def get_advanced_mode_runtime_options(mode_id: str) -> dict[str, Any]:
+    """Return validated execution knobs consumed by the chat runtimes.
+
+    A configured zero iteration count means “use the runtime's bounded
+    default”; it never means an unbounded model/tool loop.
+    """
+    mode = get_advanced_mode(mode_id)
+    if not isinstance(mode, dict):
+        return {}
+    raw_max_iterations = mode.get("max_iterations", 0)
+    if (
+        isinstance(raw_max_iterations, bool)
+        or not isinstance(raw_max_iterations, int)
+        or raw_max_iterations < 0
+    ):
+        raise ValueError(f"Invalid max_iterations for Infinity mode {mode_id!r}")
+    return {
+        "max_iterations": raw_max_iterations,
+        "enable_thinking": mode.get("enable_thinking") is True,
+        "supports_subagents": mode.get("supports_subagents") is True,
+    }
+
+
+def get_mode_groups() -> dict[str, Any]:
     """Return the mode grouping configuration."""
     return _load_config().get("groups", {})
 
 
-def get_command_aliases() -> Dict[str, Any]:
+def get_command_aliases() -> dict[str, Any]:
     """Return command alias mappings."""
     return _load_config().get("commands", {})
 
 
-def resolve_command(command: str) -> Optional[Dict[str, Any]]:
+def resolve_command(command: str) -> dict[str, Any] | None:
     """Resolve a /command to its mode configuration."""
     commands = get_command_aliases()
     # Strip leading / and normalise
@@ -300,8 +412,8 @@ class ModeStateManager:
     """Manages persistent state for active mode sessions."""
 
     def __init__(self) -> None:
-        self._sessions: Dict[str, ModeSession] = {}
-        self._active_modes: Set[str] = set()
+        self._sessions: dict[str, ModeSession] = {}
+        self._active_modes: set[str] = set()
         self._load_sessions()
 
     def _session_path(self, mode_id: str, session_id: str) -> Path:
@@ -385,10 +497,17 @@ class ModeStateManager:
             "checkpoints": session.checkpoints,
             "decisions": session.decisions,
             "start_time": session.start_time,
-            "updated_time": datetime.now(timezone.utc).isoformat(),
+            "updated_time": datetime.now(UTC).isoformat(),
             "metrics": session.metrics,
         }
-        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        # Readers must see either the old complete snapshot or the new one.
+        # A process interrupted halfway through a JSON write used to leave a
+        # session unreadable after restart.
+        import uuid
+
+        temporary = path.with_name(f"{path.stem}.{uuid.uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        temporary.replace(path)
 
     def create_session(self, mode_id: str) -> ModeSession:
         """Create a new session for a mode."""
@@ -400,13 +519,13 @@ class ModeStateManager:
             state=ModeState.ACTIVE,
         )
         key = f"{mode_id}__{session_id}"
+        self._save_session(session)
         self._sessions[key] = session
         self._active_modes.add(mode_id)
-        self._save_session(session)
         logger.info(f"Created advanced mode session: {mode_id}/{session_id}")
         return session
 
-    def get_session(self, mode_id: str, session_id: Optional[str] = None) -> Optional[ModeSession]:
+    def get_session(self, mode_id: str, session_id: str | None = None) -> ModeSession | None:
         """Get an active session for a mode."""
         if session_id:
             return self._sessions.get(f"{mode_id}__{session_id}")
@@ -428,14 +547,11 @@ class ModeStateManager:
 
     def update_session(self, session: ModeSession) -> None:
         """Save session state to disk."""
-        session.updated_time = datetime.now(timezone.utc).isoformat()
+        session.updated_time = datetime.now(UTC).isoformat()
         key = f"{session.mode_id}__{session.session_id}"
         self._sessions[key] = session
-        if session.state in (ModeState.ACTIVE, ModeState.RUNNING):
-            self._active_modes.add(session.mode_id)
-        else:
-            self._active_modes.discard(session.mode_id)
         self._save_session(session)
+        self._recompute_active_modes()
 
     def _recompute_active_modes(self) -> None:
         """Rebuild the mode index from session state after a bulk change."""
@@ -449,11 +565,11 @@ class ModeStateManager:
         """Check if a mode is currently active."""
         return mode_id in self._active_modes
 
-    def list_active_modes(self) -> List[str]:
+    def list_active_modes(self) -> list[str]:
         """List all currently active mode IDs."""
         return list(self._active_modes)
 
-    def list_sessions(self, mode_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_sessions(self, mode_id: str | None = None) -> list[dict[str, Any]]:
         """List all sessions, optionally filtered by mode."""
         result = []
         for key, session in self._sessions.items():
@@ -477,8 +593,9 @@ class ModeStateManager:
         """Deactivate a mode and all its sessions."""
         changed = False
         for key, session in list(self._sessions.items()):
-            if key.startswith(f"{mode_id}__"):
+            if key.startswith(f"{mode_id}__") and session.state in (ModeState.ACTIVE, ModeState.RUNNING):
                 session.state = ModeState.INACTIVE
+                session.updated_time = datetime.now(UTC).isoformat()
                 self._save_session(session)
                 changed = True
         self._recompute_active_modes()
@@ -486,7 +603,7 @@ class ModeStateManager:
 
 
 # Global singleton
-_state_manager: Optional[ModeStateManager] = None
+_state_manager: ModeStateManager | None = None
 
 
 def get_state_manager() -> ModeStateManager:
@@ -505,7 +622,7 @@ def _make_node_id() -> str:
     return f"G-{uuid.uuid4().hex[:6]}"
 
 
-def create_goal_tree(description: str, parent_id: Optional[str] = None) -> Tuple[str, GoalNode]:
+def create_goal_tree(description: str, parent_id: str | None = None) -> tuple[str, GoalNode]:
     """Create a new goal node and return (id, node)."""
     gid = _make_node_id()
     node = GoalNode(
@@ -517,7 +634,7 @@ def create_goal_tree(description: str, parent_id: Optional[str] = None) -> Tuple
     return gid, node
 
 
-def add_goal_to_session(session: ModeSession, description: str, parent_id: Optional[str] = None) -> str:
+def add_goal_to_session(session: ModeSession, description: str, parent_id: str | None = None) -> str:
     """Add a goal node to a session's tree."""
     gid, node = create_goal_tree(description, parent_id)
     session.goal_tree[gid] = node
@@ -532,15 +649,15 @@ def update_goal_state(
     session: ModeSession,
     goal_id: str,
     state: GoalNodeState,
-    rejection_reason: Optional[str] = None,
-    quality_score: Optional[float] = None,
+    rejection_reason: str | None = None,
+    quality_score: float | None = None,
 ) -> bool:
     """Update the state of a goal node."""
     if goal_id not in session.goal_tree:
         return False
     node = session.goal_tree[goal_id]
     node.state = state
-    node.updated_at = datetime.now(timezone.utc).isoformat()
+    node.updated_at = datetime.now(UTC).isoformat()
     if rejection_reason:
         node.rejection_reason = rejection_reason
     if quality_score is not None:
@@ -555,12 +672,19 @@ def update_goal_state(
 def add_evidence(
     session: ModeSession,
     requirement: str,
-    implementation_files: List[str],
-    test_files: List[str],
-    evidence_paths: List[str],
+    implementation_files: list[str],
+    test_files: list[str],
+    evidence_paths: list[str],
     confidence: float = 0.85,
 ) -> str:
-    """Add an evidence entry to the evidence book."""
+    """Add an evidence entry without treating confidence as verification.
+
+    Evidence provenance can be recorded here, but only an independent check
+    can promote it to ``PROVEN``.  A model's confidence score is not such a
+    check.
+    """
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        raise ValueError("confidence must be a finite number between 0 and 1")
     import uuid
     eid = f"EV-{uuid.uuid4().hex[:6]}"
     session.evidence_book[eid] = {
@@ -569,9 +693,9 @@ def add_evidence(
         "implementation": implementation_files,
         "tests": test_files,
         "evidence": evidence_paths,
-        "status": EvidenceStatus.PROVEN.value if confidence >= 0.85 else EvidenceStatus.CONTESTED.value,
+        "status": EvidenceStatus.UNPROVEN.value,
         "confidence": confidence,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
     # Persist evidence to disk
     ev_file = EVIDENCE_DIR / f"{session.mode_id}__{session.session_id}__{eid}.json"
@@ -587,11 +711,11 @@ def record_trajectory_entry(
     session: ModeSession,
     event_type: str,
     description: str,
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     """Record a trajectory event."""
     entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "type": event_type,
         "description": description,
         "metadata": metadata or {},
@@ -615,7 +739,7 @@ def create_checkpoint(session: ModeSession) -> str:
         "id": cpid,
         "mode_id": session.mode_id,
         "session_id": session.session_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "state": session.state.value,
         "goal_tree_size": len(session.goal_tree),
         "trajectory_size": len(session.trajectory),
@@ -643,7 +767,7 @@ class AdvancedModeOrchestrator:
 
     def __init__(self) -> None:
         self.state_manager = get_state_manager()
-        self._mode_handlers: Dict[str, str] = {
+        self._mode_handlers: dict[str, str] = {
             # Maps mode_id to a strategy description
             "vibe-infinity": "autonomous_director",
             "advisor-infinity": "intelligent_governor",
@@ -658,17 +782,17 @@ class AdvancedModeOrchestrator:
             "autonomous": "full_autonomous",
         }
 
-    def activate_mode(self, mode_id: str) -> Dict[str, Any]:
+    def activate_mode(self, mode_id: str) -> dict[str, Any]:
         """Activate an advanced mode, returning session info."""
         mode_def = get_advanced_mode(mode_id)
         if not mode_def:
             return {"error": f"Unknown advanced mode: {mode_id}", "success": False}
 
         session = self.state_manager.get_or_create_session(mode_id)
-        session.state = ModeState.ACTIVE
-        self.state_manager.update_session(session)
-
-        record_trajectory_entry(session, "mode_activated", f"Mode {mode_id} activated")
+        # Repeated activation must not reset a running session or add duplicate
+        # activation events. The persistent mode is a policy switch.
+        if not any(item.get("type") == "mode_activated" for item in session.trajectory):
+            record_trajectory_entry(session, "mode_activated", f"Mode {mode_id} activated")
         # The trajectory append is intentionally separate from the session
         # snapshot, so persist once more after recording it.  Otherwise the
         # JSONL file and the status endpoint disagree after activation.
@@ -685,7 +809,7 @@ class AdvancedModeOrchestrator:
             "message": f"✨ **{mode_def.get('display_name', mode_id)}** ativado. {mode_def.get('description', '')}",
         }
 
-    def deactivate_mode(self, mode_id: str) -> Dict[str, Any]:
+    def deactivate_mode(self, mode_id: str) -> dict[str, Any]:
         """Deactivate an advanced mode."""
         self.state_manager.deactivate_mode(mode_id)
         return {
@@ -694,7 +818,7 @@ class AdvancedModeOrchestrator:
             "message": f"Modo **{mode_id}** desativado.",
         }
 
-    def get_mode_status(self, mode_id: str) -> Dict[str, Any]:
+    def get_mode_status(self, mode_id: str) -> dict[str, Any]:
         """Get the status of a mode and its sessions."""
         mode_def = get_advanced_mode(mode_id)
         sessions = self.state_manager.list_sessions(mode_id)
@@ -726,9 +850,15 @@ class AdvancedModeOrchestrator:
             "runtime_role": runtime["role"],
             "runtime_summary": runtime["summary"],
             "handler": self._mode_handlers.get(mode_id),
+            "execution_target": self.get_execution_target(mode_id),
+            "limitations": MODE_LIMITATIONS.get(mode_id, "Contrato de execução não disponível."),
+            "activity_evidence_status": "NOT_MEASURED",
+            "evidence_count": sum(s["evidence_count"] for s in sessions),
+            "intervention_count": sum(s["intervention_count"] for s in sessions),
+            "checkpoint_count": sum(s["checkpoint_count"] for s in sessions),
         }
 
-    def get_all_statuses(self) -> Dict[str, Any]:
+    def get_all_statuses(self) -> dict[str, Any]:
         """Get status of all advanced modes."""
         modes = get_advanced_modes()
         groups = get_mode_groups()
@@ -738,7 +868,7 @@ class AdvancedModeOrchestrator:
         return {
             "modes": result,
             "groups": groups,
-            "active_count": len(self.state_manager.list_active_modes()),
+            "active_count": sum(status["active"] for status in result.values()),
             "total_count": len(modes),
             # This is deliberately non-persistent: it is a read-only preview
             # of what the next request will receive from the armed profile.
@@ -746,7 +876,7 @@ class AdvancedModeOrchestrator:
             "execution_profile": self.build_active_execution_profile(),
         }
 
-    def prepare_mode_context(self, mode_id: str, user_request: str) -> Dict[str, Any]:
+    def prepare_mode_context(self, mode_id: str, user_request: str) -> dict[str, Any]:
         """Prepare the augmented system prompt and configuration for a mode.
 
         This is called by the chat pipeline to inject mode-specific
@@ -793,11 +923,11 @@ SESSION CONTEXT:
         }
 
     @staticmethod
-    def _render_mode_prompt(mode_def: Dict[str, Any]) -> str:
+    def _render_mode_prompt(mode_def: dict[str, Any]) -> str:
         """Render known catalog placeholders without interpreting literal JSON braces."""
         prompt = str(mode_def.get("system_prompt_addon", ""))
         config = mode_def.get("config", {}) or {}
-        replacements: Dict[str, Any] = {
+        replacements: dict[str, Any] = {
             key: value for key, value in config.items()
             if isinstance(key, str)
         }
@@ -824,7 +954,7 @@ SESSION CONTEXT:
             prompt = prompt.replace("{" + key + "}", rendered)
         return prompt
 
-    def build_active_execution_profile(self, user_request: str = "") -> Dict[str, Any]:
+    def build_active_execution_profile(self, user_request: str = "") -> dict[str, Any]:
         """Compose persistent modes into one bounded, inspectable execution profile.
 
         Active modes are policy switches, not independent workers.  A composite
@@ -832,7 +962,14 @@ SESSION CONTEXT:
         compact contract to the prompt.  This prevents eleven full prompts from
         fighting for control or overflowing the context window.
         """
-        active_ids = [mid for mid in self.state_manager.list_active_modes() if get_advanced_mode(mid)]
+        armed_ids = self.state_manager.list_active_modes()
+        unavailable_ids = [mid for mid in armed_ids if not get_advanced_mode(mid)]
+        if unavailable_ids:
+            raise RuntimeError(
+                "Armed Infinity mode configuration is unavailable: "
+                + ", ".join(sorted(unavailable_ids))
+            )
+        active_ids = list(armed_ids)
         active_ids.sort(key=lambda mid: (MODE_PRIORITY.index(mid) if mid in MODE_PRIORITY else 999, mid))
         if not active_ids:
             return {
@@ -890,7 +1027,7 @@ SESSION CONTEXT:
             "summary": f"{primary_mode} with {len(policy_ids)} policy mode(s).",
         }
 
-    def prepare_active_execution_profile(self, user_request: str = "") -> Dict[str, Any]:
+    def prepare_active_execution_profile(self, user_request: str = "") -> dict[str, Any]:
         """Build the active profile and persist one resumable request marker."""
         profile = self.build_active_execution_profile(user_request)
         primary_mode = profile.get("primary_mode")
@@ -920,11 +1057,108 @@ SESSION CONTEXT:
         })
         return profile
 
-    def get_preferred_agent(self, mode_id: str) -> Optional[str]:
+    def record_execution_outcome(
+        self,
+        *,
+        mode_id: str,
+        session_id: str,
+        goal_id: str,
+        run_id: str,
+        outcome: str,
+        error: str = "",
+        error_category: str = "",
+        verification: dict[str, Any] | None = None,
+    ) -> bool:
+        """Close the lifecycle record for one chat run, idempotently.
+
+        Transport completion means the assistant finished a response. It does
+        not verify the user's goal. Successful responses therefore remain in
+        review, and only a measured failing verification can reject the goal.
+        """
+        normalized = str(outcome or "").strip().lower()
+        allowed = {"completed", "failed", "blocked", "cancelled"}
+        if normalized not in allowed:
+            raise ValueError(f"unsupported execution outcome: {outcome!r}")
+        if not all(str(value or "").strip() for value in (mode_id, session_id, goal_id, run_id)):
+            return False
+
+        session = self.state_manager.get_session(mode_id, session_id)
+        if session is None or goal_id not in session.goal_tree:
+            return False
+
+        executions = session.metrics.setdefault("execution_outcomes", {})
+        if not isinstance(executions, dict):
+            executions = {}
+            session.metrics["execution_outcomes"] = executions
+        if run_id in executions:
+            return False
+
+        check = verification if isinstance(verification, dict) else {}
+        measured = check.get("ran") is True
+        check_passed = check.get("ok") is True
+        rejection_reason = ""
+        if normalized == "completed" and measured and not check_passed:
+            state = GoalNodeState.REJECTED
+            rejection_reason = str(check.get("summary") or "A verificação executada falhou")[:600]
+        elif normalized == "completed":
+            state = GoalNodeState.IN_REVIEW
+        else:
+            state = {
+                "failed": GoalNodeState.FAILED,
+                "blocked": GoalNodeState.BLOCKED,
+                "cancelled": GoalNodeState.CANCELLED,
+            }[normalized]
+
+        update_goal_state(
+            session,
+            goal_id,
+            state,
+            rejection_reason=rejection_reason or None,
+        )
+        summary = {
+            "run_id": run_id,
+            "outcome": normalized,
+            "error_category": str(error_category or "")[:80],
+            "error": str(error or "")[:600],
+            "verification": {
+                "ran": measured,
+                "ok": check_passed if measured else None,
+                "summary": str(check.get("summary") or "")[:600],
+                "command": str(check.get("command") or "")[:300],
+            },
+        }
+        executions[run_id] = summary
+        # Bound the small idempotency index while retaining recent recovery
+        # history in the append-only trajectory.
+        while len(executions) > 200:
+            executions.pop(next(iter(executions)))
+
+        description = {
+            "completed": "Resposta concluída; objetivo aguarda revisão independente.",
+            "failed": "Execução falhou antes de concluir o pedido.",
+            "blocked": "Execução bloqueada por uma dependência operacional.",
+            "cancelled": "Execução cancelada antes de concluir o pedido.",
+        }[normalized]
+        if rejection_reason:
+            description = f"Verificação executada reprovou o objetivo: {rejection_reason}"
+        record_trajectory_entry(
+            session,
+            f"execution_{normalized}",
+            description,
+            {
+                "goal_id": goal_id,
+                "goal_state": state.value,
+                **summary,
+            },
+        )
+        self.state_manager.update_session(session)
+        return True
+
+    def get_preferred_agent(self, mode_id: str) -> str | None:
         """Return the safe existing agent selected by an explicit command."""
         return MODE_PREFERRED_AGENTS.get(mode_id)
 
-    def get_execution_target(self, mode_id: str) -> Dict[str, Optional[str]]:
+    def get_execution_target(self, mode_id: str) -> dict[str, str | None]:
         """Return the concrete executor selected by an explicit mode command.
 
         The catalog contains policy contracts as well as executable
@@ -934,6 +1168,15 @@ SESSION CONTEXT:
         """
         if mode_id not in get_advanced_modes():
             return {"kind": "unknown", "agent": None}
+        if mode_id == "vibe-infinity":
+            try:
+                from backend.orchestrator.infinity import vibe_lane_enabled
+
+                if vibe_lane_enabled():
+                    return {"kind": "vibe", "agent": "CODER"}
+            except Exception:
+                logger.debug("Infinity Vibe lane unavailable; using autonomous execution", exc_info=True)
+            return {"kind": "autonomous", "agent": None}
         if mode_id in COMPOSITE_MODES:
             return {"kind": "autonomous", "agent": None}
         if mode_id == "swarm-foundry":
@@ -943,13 +1186,13 @@ SESSION CONTEXT:
     def _analyze_claim(
         self,
         claim: str,
-        evidence_summary: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        evidence_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Analyse a completion claim across multiple dimensions."""
         claim_lower = claim.lower()
-        findings: List[str] = []
-        missing_categories: List[str] = []
-        debate_questions: List[str] = []
+        findings: list[str] = []
+        missing_categories: list[str] = []
+        debate_questions: list[str] = []
 
         REQUIRED_EVIDENCE = [
             ("tests_passed", ["test", "spec", "coverage", "passing"]),
@@ -976,15 +1219,16 @@ SESSION CONTEXT:
         ]
 
         # Check evidence categories
-        for category, indicators in REQUIRED_EVIDENCE:
-            category_present = False
-            if evidence_summary and category in evidence_summary:
-                category_present = bool(evidence_summary[category])
+        for category, _indicators in REQUIRED_EVIDENCE:
+            category_value = (evidence_summary or {}).get(category)
+            category_present = category_value is True or (
+                isinstance(category_value, dict)
+                and category_value.get("status") in ("PASS", "VERIFIED")
+                and bool(category_value.get("source"))
+            )
             if not category_present:
-                found_in_claim = any(ind in claim_lower for ind in indicators)
-                if not found_in_claim:
-                    missing_categories.append(category)
-                    findings.append(f"Missing evidence category: {category}")
+                missing_categories.append(category)
+                findings.append(f"Missing evidence category: {category}")
 
         # Check for vague claims
         for pattern in VAGUE_PATTERNS:
@@ -1002,7 +1246,7 @@ SESSION CONTEXT:
             findings.append("No verification method mentioned — how was this validated?")
 
         # Count evidence provided
-        evidence_count = len(evidence_summary) if evidence_summary else 0
+        evidence_count = len(REQUIRED_EVIDENCE) - len(missing_categories)
         if evidence_count < 3:
             findings.append(f"Only {evidence_count} evidence categories provided (minimum: 3)")
 
@@ -1032,7 +1276,9 @@ SESSION CONTEXT:
             "debate_questions": debate_questions,
             "evidence_count": evidence_count,
             "verdict": "BLOCKED" if intervention == InterventionLevel.COMPLETION_BLOCK else "PENDING",
-            "confidence": max(0, min(100, (evidence_count / 5) * 100 - len(findings) * 10)),
+            "confidence": None,
+            "evidence_status": "UNVERIFIED",
+            "review_kind": "static_claim_check",
         }
 
     def record_completion_attempt(
@@ -1040,13 +1286,13 @@ SESSION CONTEXT:
         mode_id: str,
         session_id: str,
         claim: str,
-        evidence_summary: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        evidence_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Record a completion attempt. For advisor-infinity mode, this triggers
         the full debate protocol with multi-dimensional claim analysis."""
         session = self.state_manager.get_session(mode_id, session_id)
         if not session:
-            return {"blocked": False, "error": "Session not found"}
+            return {"blocked": True, "error": "Session not found", "verdict": "BLOCKED"}
 
         record_trajectory_entry(session, "completion_claimed", claim, {
             "evidence": evidence_summary,
@@ -1061,7 +1307,7 @@ SESSION CONTEXT:
             intervention = {
                 "level": intervention_level,
                 "name": analysis["intervention_name"],
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "reason": "; ".join(analysis["findings"]) if analysis["findings"] else "No specific findings",
                 "missing_categories": analysis["missing_categories"],
                 "debate_questions": analysis["debate_questions"],
@@ -1082,6 +1328,8 @@ SESSION CONTEXT:
                 "debate_questions": analysis["debate_questions"],
                 "confidence": analysis["confidence"],
                 "verdict": analysis["verdict"],
+                "evidence_status": analysis["evidence_status"],
+                "review_kind": analysis["review_kind"],
                 "total_interventions": len(session.interventions),
             }
 
@@ -1090,12 +1338,12 @@ SESSION CONTEXT:
 
     def evaluate_tournament(
         self,
-        entries: List[TournamentEntry],
-        criteria_weights: Optional[Dict[str, float]] = None,
-    ) -> Dict[str, Any]:
+        entries: list[TournamentEntry],
+        criteria_weights: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
         """Evaluate tournament entries and select the winner."""
         if not entries:
-            return {"winner": None, "entries": []}
+            return {"winner": None, "entries": [], "status": "NO_ENTRIES"}
 
         default_weights = {
             "security": 25,
@@ -1106,32 +1354,50 @@ SESSION CONTEXT:
             "test_coverage": 10,
             "dependency_count": 5,
         }
-        weights = criteria_weights or default_weights
-
-        # Normalize scores per criterion
-        for criterion in weights:
-            scores = [e.scores.get(criterion, 0) for e in entries]
-            max_score = max(scores) if scores else 1
-            if max_score > 0:
-                for e in entries:
-                    e.scores[criterion] = (e.scores.get(criterion, 0) / max_score) * 100
-
-        # Calculate total weighted score
+        weights = default_weights if criteria_weights is None else criteria_weights
+        if not weights or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value <= 0
+            for value in weights.values()
+        ):
+            raise ValueError("Weights must be finite positive numbers")
+        if len({e.id for e in entries}) != len(entries) or any(not e.id.strip() for e in entries):
+            raise ValueError("Entry IDs must be non-empty and unique")
+        for entry in entries:
+            if any(criterion not in entry.scores for criterion in weights):
+                raise ValueError(f"Missing criterion scores for entry '{entry.id}'")
+            if any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not 0 <= value <= 100
+                for value in entry.scores.values()
+            ):
+                raise ValueError("Scores must be finite numbers between 0 and 100")
+        # Scale before summing or multiplying: finite inputs such as 1e308
+        # must not overflow into an invalid JSON result.
+        largest_weight = max(weights.values())
+        scaled_weights = {criterion: value / largest_weight for criterion, value in weights.items()}
+        weight_sum = sum(scaled_weights.values())
         for e in entries:
-            total = 0.0
-            for criterion, weight in weights.items():
-                total += e.scores.get(criterion, 0) * (weight / 100)
-            e.total_score = round(total, 2)
+            e.total_score = round(
+                sum(e.scores[c] * (w / weight_sum) for c, w in scaled_weights.items()), 2
+            )
+            e.is_winner = False
 
         # Sort and pick winner
         entries.sort(key=lambda e: e.total_score, reverse=True)
-        if entries:
+        tied_ids = [entry.id for entry in entries if entry.total_score == entries[0].total_score]
+        has_winner = len(tied_ids) == 1 and len(entries) >= 2
+        if has_winner:
             entries[0].is_winner = True
 
         return {
-            "winner": entries[0].id if entries else None,
-            "winner_name": entries[0].name if entries else None,
-            "winner_score": entries[0].total_score if entries else 0,
+            "winner": entries[0].id if has_winner else None,
+            "winner_name": entries[0].name if has_winner else None,
+            "winner_score": entries[0].total_score if has_winner else None,
+            "status": "RANKED" if has_winner else "TIE" if len(entries) >= 2 else "INSUFFICIENT_ENTRIES",
+            "tied_entries": tied_ids if not has_winner else [],
+            "evaluation_scope": "submitted_scores",
+            "execution_evidence_status": "NOT_MEASURED",
             "entries": [
                 {
                     "id": e.id,
@@ -1148,13 +1414,18 @@ SESSION CONTEXT:
         self,
         action_description: str,
         risk_level: int = 0,
-        files_affected: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        files_affected: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Check if an action passes the sentinel security gate."""
         findings = []
 
+        if isinstance(risk_level, bool) or not isinstance(risk_level, int) or not 0 <= risk_level <= 4:
+            raise ValueError("Risk level must be an integer between 0 and 4")
+        if not action_description.strip():
+            raise ValueError("An action description is required")
+
         # Check risk level
-        if risk_level >= 3:
+        if risk_level >= 2:
             findings.append(f"⚠️ Risk Level {risk_level}: requires explicit approval")
 
         # Check dangerous patterns
@@ -1164,6 +1435,9 @@ SESSION CONTEXT:
             ("DROP TABLE", "Destructive database operation"),
             ("format(", "Disk format operation"),
             ("sudo ", "Privileged operation"),
+            ("remove-item", "Potentially destructive PowerShell operation"),
+            ("del /", "Potentially destructive Windows operation"),
+            ("format-volume", "Disk format operation"),
         ]
         for pattern, desc in dangerous_patterns:
             if pattern.lower() in action_description.lower():
@@ -1178,18 +1452,20 @@ SESSION CONTEXT:
                         findings.append(f"🔴 Production file affected: {f}")
                         break
 
-        gate_passed = len(findings) == 0 and risk_level < 3
+        gate_passed = len(findings) == 0 and risk_level <= 1
         return {
             "gate_passed": gate_passed,
             "risk_level": risk_level,
             "findings": findings,
-            "requires_approval": risk_level >= 3 or len(findings) > 0,
+            "requires_approval": risk_level >= 2 or len(findings) > 0,
             "auto_approve": risk_level <= 1 and len(findings) == 0,
+            "check_kind": "static_risk_check",
+            "execution_evidence_status": "NOT_MEASURED",
         }
 
 
 # Global orchestrator singleton
-_orchestrator: Optional[AdvancedModeOrchestrator] = None
+_orchestrator: AdvancedModeOrchestrator | None = None
 
 
 def get_orchestrator() -> AdvancedModeOrchestrator:

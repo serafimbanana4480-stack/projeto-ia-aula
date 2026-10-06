@@ -1,9 +1,7 @@
 """Integration tests for Neural Dashboard."""
 from __future__ import annotations
 
-import pytest
-
-from backend.orchestrator.neural_dashboard import NeuralDashboard, SystemMetric, AgentHealth
+from backend.orchestrator.neural_dashboard import AgentHealth, NeuralDashboard, SystemMetric
 from backend.orchestrator.nexus_core import NexusCore
 
 

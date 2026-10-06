@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Analytics routes for conversation intelligence, performance metrics and reporting.
 
 Provides endpoints for:
@@ -9,15 +7,17 @@ Provides endpoints for:
 - Usage statistics and reporting
 """
 
+from __future__ import annotations
+
 import time
-from datetime import datetime, timedelta, timezone
-from typing import Any
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Response, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
-from backend.core.disk_guard import DiskPressureError, require_disk_headroom
 
+from backend.core.disk_guard import DiskPressureError, require_disk_headroom
 
 router = APIRouter()
 
@@ -224,8 +224,8 @@ async def get_usage_summary() -> dict[str, Any]:
         "avg_messages_per_conversation": avg_messages_per_conversation,
         "avg_tokens_per_message": avg_tokens_per_message,
         "uptime_seconds": 0,
-        "period_start": datetime.fromtimestamp(NOW - 30 * DAY, tz=timezone.utc).isoformat(),
-        "period_end": datetime.fromtimestamp(NOW, tz=timezone.utc).isoformat(),
+        "period_start": datetime.fromtimestamp(NOW - 30 * DAY, tz=UTC).isoformat(),
+        "period_end": datetime.fromtimestamp(NOW, tz=UTC).isoformat(),
     }
 
 
@@ -309,13 +309,13 @@ async def generate_report(payload: dict, request: Request) -> dict[str, Any]:
         "status": "ready",
         "download_url": f"/api/analytics/reports/{report_id}/download?format={fmt}",
         "format": fmt,
-        "expires_at": datetime.fromtimestamp(NOW + 3600, tz=timezone.utc).isoformat(),
+        "expires_at": datetime.fromtimestamp(NOW + 3600, tz=UTC).isoformat(),
     }
 
 
 async def _build_report(report_id: str, report_type: str, fmt: str) -> None:
     """Build report in background and store to disk."""
-    import os, json
+    import json
 
     out_dir = Path("nexus-ide/reports")
     require_disk_headroom(out_dir.parent)
@@ -363,12 +363,18 @@ async def _fetch_json(path: str, params: dict) -> Any:
 
 
 def _build_pdf(data: dict, report_type: str, path: Path) -> None:
-    from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import cm
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_CENTER
+    from reportlab.platypus import (
+        HRFlowable,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
 
     doc = SimpleDocTemplate(str(path), pagesize=A4, leftMargin=2*cm, rightMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
     styles = getSampleStyleSheet()
@@ -378,7 +384,7 @@ def _build_pdf(data: dict, report_type: str, path: Path) -> None:
 
     story = [
         Paragraph("NEXUS OMEGA — Analytics Report", title_style),
-        Paragraph(f"Report Type: {report_type.replace('-', ' ').title()} — Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", subtitle_style),
+        Paragraph(f"Report Type: {report_type.replace('-', ' ').title()} — Generated {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}", subtitle_style),
         HRFlowable(width="100%", thickness=1, color=colors.HexColor("#7c3aed"), spaceAfter=20),
         Spacer(1, 0.3*cm),
     ]
@@ -448,8 +454,7 @@ def _build_pdf(data: dict, report_type: str, path: Path) -> None:
 
 def _build_excel(data: dict, report_type: str, path: Path) -> None:
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
     wb = Workbook()
 
@@ -476,7 +481,7 @@ def _build_excel(data: dict, report_type: str, path: Path) -> None:
     r += 1
     ws.cell(r, 2, f"Type: {report_type.replace('-', ' ').title()}").font = Font(size=10, color="94a3b8")
     r += 1
-    ws.cell(r, 2, f"Generated: {datetime.now(timezone.utc).isoformat()}").font = Font(size=10, color="94a3b8")
+    ws.cell(r, 2, f"Generated: {datetime.now(UTC).isoformat()}").font = Font(size=10, color="94a3b8")
     r += 2
 
     if report_type in ("perf-weekly", "perf-monthly"):
@@ -485,7 +490,8 @@ def _build_excel(data: dict, report_type: str, path: Path) -> None:
         r += 1
         headers = ["Metric", "Value"]
         for ci, h in enumerate(headers, 2):
-            c = ws.cell(r, ci, h); style_header(c, "7c3aed")
+            c = ws.cell(r, ci, h)
+            style_header(c, "7c3aed")
         r += 1
         for k, v in summary.items():
             ws.cell(r, 2, str(k).replace("_", " ").title()).font = Font(size=10, color="e2e8f0")
@@ -499,7 +505,8 @@ def _build_excel(data: dict, report_type: str, path: Path) -> None:
         r += 1
         ag_headers = ["Agent", "Calls", "Avg Latency (ms)", "Success Rate"]
         for ci, h in enumerate(ag_headers, 1):
-            c = ws.cell(r, ci, h); style_header(c, "06b6d4")
+            c = ws.cell(r, ci, h)
+            style_header(c, "06b6d4")
         r += 1
         for a in data.get("agents", []):
             for ci, val in enumerate([a["agent"], a["calls"], a["avg_latency_ms"], f"{a['success_rate']*100:.1f}%"], 1):
@@ -537,8 +544,8 @@ def _build_excel(data: dict, report_type: str, path: Path) -> None:
 @router.get("/analytics/reports/{report_id}/download")
 async def download_report(report_id: str, format: str = "pdf") -> Response:
     """Download a previously generated report as PDF or Excel."""
-    import os
     from pathlib import Path
+
     from fastapi.responses import FileResponse
 
     out_dir = Path("nexus-ide/reports")
@@ -549,9 +556,11 @@ async def download_report(report_id: str, format: str = "pdf") -> Response:
         path_pdf = out_dir / f"{report_id}.pdf"
         path_xlsx = out_dir / f"{report_id}.xlsx"
         if path_pdf.exists():
-            path = path_pdf; ext = "pdf"
+            path = path_pdf
+            ext = "pdf"
         elif path_xlsx.exists():
-            path = path_xlsx; ext = "xlsx"
+            path = path_xlsx
+            ext = "xlsx"
         else:
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Report not found")

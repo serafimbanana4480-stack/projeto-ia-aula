@@ -8,8 +8,8 @@ Now uses real data from EventBus, WorkflowTracker, and AgentPool.
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
@@ -402,7 +402,7 @@ async def performance_stream() -> StreamingResponse:
                     "db_latency": snapshot.avg_latency_ms,
                     "queue_latency": snapshot.avg_latency_ms * 0.5,
                     "bottleneck": None,
-                    "timestamp": datetime.now(timezone.utc).timestamp(),
+                    "timestamp": datetime.now(UTC).timestamp(),
                 },
             }
             yield f"data: {json.dumps(metric)}\n\n"
@@ -421,7 +421,6 @@ async def performance_stream() -> StreamingResponse:
 @router.get("/multi-user/stream")
 async def multi_user_stream(request: Request) -> StreamingResponse:
     """Stream multi-user updates via SSE from real ContextStore and EventBus."""
-    context_store = request.app.state.context
     event_bus = request.app.state.event_bus
     
     async def event_generator() -> AsyncIterator[str]:

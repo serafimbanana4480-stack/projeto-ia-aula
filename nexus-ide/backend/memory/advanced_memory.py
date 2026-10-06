@@ -12,9 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union, Tuple
-from datetime import datetime, timedelta
-import hashlib
+from typing import Any
 
 try:
     import redis.asyncio as redis
@@ -59,7 +57,7 @@ class MemoryFragment:
     fragment_id: str = field(default_factory=lambda: f"frag-{uuid.uuid4().hex[:12]}")
     memory_type: MemoryType = MemoryType.EPISODIC
     content: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
     # Temporal information
     created_at: float = field(default_factory=time.time)
@@ -73,23 +71,23 @@ class MemoryFragment:
     consolidation_strength: float = 0.0  # 0.0-1.0
     
     # Relationships
-    related_fragments: Set[str] = field(default_factory=set)
-    parent_fragment_id: Optional[str] = None
-    child_fragment_ids: Set[str] = field(default_factory=set)
+    related_fragments: set[str] = field(default_factory=set)
+    parent_fragment_id: str | None = None
+    child_fragment_ids: set[str] = field(default_factory=set)
     
     # Status and priority
     status: MemoryStatus = MemoryStatus.ACTIVE
     priority: MemoryPriority = MemoryPriority.NORMAL
     
     # Expiration and decay
-    expires_at: Optional[float] = None
+    expires_at: float | None = None
     decay_rate: float = 0.01  # Decay per day
     
     # Tags and categories
-    tags: Set[str] = field(default_factory=set)
-    categories: Set[str] = field(default_factory=set)
+    tags: set[str] = field(default_factory=set)
+    categories: set[str] = field(default_factory=set)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "fragment_id": self.fragment_id,
             "memory_type": self.memory_type.value,
@@ -114,7 +112,7 @@ class MemoryFragment:
         }
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "MemoryFragment":
+    def from_dict(cls, data: dict[str, Any]) -> MemoryFragment:
         """Create from dictionary."""
         fragment = cls(
             fragment_id=data["fragment_id"],
@@ -189,16 +187,16 @@ class MemoryEpisode:
     
     # Temporal context
     start_time: float = field(default_factory=time.time)
-    end_time: Optional[float] = None
-    duration: Optional[float] = None
+    end_time: float | None = None
+    duration: float | None = None
     
     # Spatial and contextual information
-    location: Optional[str] = None
-    participants: List[str] = field(default_factory=list)
-    context: Dict[str, Any] = field(default_factory=dict)
+    location: str | None = None
+    participants: list[str] = field(default_factory=list)
+    context: dict[str, Any] = field(default_factory=dict)
     
     # Memory fragments
-    fragment_ids: List[str] = field(default_factory=list)
+    fragment_ids: list[str] = field(default_factory=list)
     
     # Episode properties
     emotional_valence: float = 0.0  # -1.0 to 1.0
@@ -206,15 +204,15 @@ class MemoryEpisode:
     importance: float = 0.5  # 0.0 to 1.0
     
     # Relationships
-    related_episodes: Set[str] = field(default_factory=set)
-    parent_episode_id: Optional[str] = None
-    sub_episode_ids: Set[str] = field(default_factory=set)
+    related_episodes: set[str] = field(default_factory=set)
+    parent_episode_id: str | None = None
+    sub_episode_ids: set[str] = field(default_factory=set)
     
     # Status
     status: MemoryStatus = MemoryStatus.ACTIVE
-    tags: Set[str] = field(default_factory=set)
+    tags: set[str] = field(default_factory=set)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "episode_id": self.episode_id,
             "title": self.title,
@@ -245,12 +243,12 @@ class MemoryGraphNode:
     concept_type: str = "entity"  # entity, relation, attribute, event
     
     # Node properties
-    properties: Dict[str, Any] = field(default_factory=dict)
+    properties: dict[str, Any] = field(default_factory=dict)
     confidence: float = 0.5  # 0.0-1.0
     
     # Graph relationships
-    outgoing_edges: Dict[str, List[str]] = field(default_factory=dict)  # relation_type -> [target_node_ids]
-    incoming_edges: Dict[str, List[str]] = field(default_factory=dict)  # relation_type -> [source_node_ids]
+    outgoing_edges: dict[str, list[str]] = field(default_factory=dict)  # relation_type -> [target_node_ids]
+    incoming_edges: dict[str, list[str]] = field(default_factory=dict)  # relation_type -> [source_node_ids]
     
     # Temporal information
     created_at: float = field(default_factory=time.time)
@@ -260,7 +258,7 @@ class MemoryGraphNode:
     activation: float = 0.0
     importance: float = 0.5
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "node_id": self.node_id,
             "concept": self.concept,
@@ -285,7 +283,7 @@ class MemoryGraphEdge:
     relation_type: str = ""
     
     # Edge properties
-    properties: Dict[str, Any] = field(default_factory=dict)
+    properties: dict[str, Any] = field(default_factory=dict)
     weight: float = 1.0
     confidence: float = 0.5
     
@@ -293,7 +291,7 @@ class MemoryGraphEdge:
     created_at: float = field(default_factory=time.time)
     last_updated: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "edge_id": self.edge_id,
             "source_node_id": self.source_node_id,
@@ -312,16 +310,16 @@ class EpisodicMemory:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Memory storage
-        self.fragments: Dict[str, MemoryFragment] = {}
-        self.episodes: Dict[str, MemoryEpisode] = {}
+        self.fragments: dict[str, MemoryFragment] = {}
+        self.episodes: dict[str, MemoryEpisode] = {}
         
         # Indexes
-        self.tag_index: Dict[str, Set[str]] = {}
-        self.category_index: Dict[str, Set[str]] = {}
-        self.temporal_index: List[Tuple[float, str]] = []  # (timestamp, fragment_id)
+        self.tag_index: dict[str, set[str]] = {}
+        self.category_index: dict[str, set[str]] = {}
+        self.temporal_index: list[tuple[float, str]] = []  # (timestamp, fragment_id)
         
     async def connect(self) -> None:
         """Connect to Redis."""
@@ -424,11 +422,11 @@ class EpisodicMemory:
     async def retrieve_fragments(
         self,
         query: str,
-        memory_type: Optional[MemoryType] = None,
-        tags: Optional[Set[str]] = None,
+        memory_type: MemoryType | None = None,
+        tags: set[str] | None = None,
         limit: int = 10,
         min_activation: float = 0.1
-    ) -> List[MemoryFragment]:
+    ) -> list[MemoryFragment]:
         """Retrieve memory fragments based on query."""
         candidates = []
         
@@ -470,10 +468,10 @@ class EpisodicMemory:
     async def retrieve_episodes(
         self,
         query: str,
-        tags: Optional[Set[str]] = None,
-        time_range: Optional[Tuple[float, float]] = None,
+        tags: set[str] | None = None,
+        time_range: tuple[float, float] | None = None,
         limit: int = 10
-    ) -> List[MemoryEpisode]:
+    ) -> list[MemoryEpisode]:
         """Retrieve memory episodes."""
         candidates = list(self.episodes.values())
         
@@ -566,14 +564,14 @@ class ProceduralMemory:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Procedure storage
-        self.procedures: Dict[str, Dict[str, Any]] = {}
-        self.skill_levels: Dict[str, float] = {}
+        self.procedures: dict[str, dict[str, Any]] = {}
+        self.skill_levels: dict[str, float] = {}
         
         # Performance tracking
-        self.performance_history: Dict[str, List[Dict[str, Any]]] = {}
+        self.performance_history: dict[str, list[dict[str, Any]]] = {}
         
     async def connect(self) -> None:
         """Connect to Redis."""
@@ -608,8 +606,8 @@ class ProceduralMemory:
     async def store_procedure(
         self,
         procedure_id: str,
-        steps: List[Dict[str, Any]],
-        metadata: Optional[Dict[str, Any]] = None
+        steps: list[dict[str, Any]],
+        metadata: dict[str, Any] | None = None
     ) -> str:
         """Store procedural memory."""
         procedure = {
@@ -638,8 +636,8 @@ class ProceduralMemory:
         procedure_id: str,
         execution_time: float,
         success: bool,
-        errors: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
+        errors: list[str] | None = None
+    ) -> dict[str, Any]:
         """Record practice session for procedure."""
         if procedure_id not in self.procedures:
             raise ValueError(f"Procedure {procedure_id} not found")
@@ -713,7 +711,7 @@ class ProceduralMemory:
             
         self.skill_levels[procedure_id] = skill_level
         
-    def get_procedure_performance(self, procedure_id: str) -> Dict[str, Any]:
+    def get_procedure_performance(self, procedure_id: str) -> dict[str, Any]:
         """Get performance statistics for procedure."""
         if procedure_id not in self.procedures:
             return {}
@@ -736,15 +734,15 @@ class GraphMemory:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Graph storage
-        self.nodes: Dict[str, MemoryGraphNode] = {}
-        self.edges: Dict[str, MemoryGraphEdge] = {}
+        self.nodes: dict[str, MemoryGraphNode] = {}
+        self.edges: dict[str, MemoryGraphEdge] = {}
         
         # Indexes
-        self.concept_index: Dict[str, str] = {}  # concept -> node_id
-        self.relation_index: Dict[str, Set[str]] = {}  # relation_type -> edge_ids
+        self.concept_index: dict[str, str] = {}  # concept -> node_id
+        self.relation_index: dict[str, set[str]] = {}  # relation_type -> edge_ids
         
     async def connect(self) -> None:
         """Connect to Redis."""
@@ -799,7 +797,7 @@ class GraphMemory:
         self,
         concept: str,
         concept_type: str = "entity",
-        properties: Optional[Dict[str, Any]] = None,
+        properties: dict[str, Any] | None = None,
         confidence: float = 0.5
     ) -> str:
         """Add node to knowledge graph."""
@@ -830,7 +828,7 @@ class GraphMemory:
         source_concept: str,
         target_concept: str,
         relation_type: str,
-        properties: Optional[Dict[str, Any]] = None,
+        properties: dict[str, Any] | None = None,
         weight: float = 1.0,
         confidence: float = 0.5
     ) -> str:
@@ -887,10 +885,10 @@ class GraphMemory:
     async def find_related_concepts(
         self,
         concept: str,
-        relation_types: Optional[List[str]] = None,
+        relation_types: list[str] | None = None,
         max_depth: int = 2,
         limit: int = 20
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Find concepts related to given concept."""
         if concept not in self.concept_index:
             return []
@@ -899,7 +897,7 @@ class GraphMemory:
         visited = set()
         results = []
         
-        async def explore(node_id: str, depth: int, path: List[str]) -> None:
+        async def explore(node_id: str, depth: int, path: list[str]) -> None:
             if depth > max_depth or node_id in visited or len(results) >= limit:
                 return
                 
@@ -928,7 +926,7 @@ class GraphMemory:
         await explore(start_node_id, 0, [])
         return results[:limit]
         
-    async def get_concept_info(self, concept: str) -> Optional[Dict[str, Any]]:
+    async def get_concept_info(self, concept: str) -> dict[str, Any] | None:
         """Get detailed information about a concept."""
         if concept not in self.concept_index:
             return None
@@ -972,8 +970,8 @@ class AdvancedMemorySystem:
         self.graph_memory = GraphMemory(redis_url)
         
         # Consolidation and maintenance
-        self.consolidation_task: Optional[asyncio.Task] = None
-        self.maintenance_task: Optional[asyncio.Task] = None
+        self.consolidation_task: asyncio.Task | None = None
+        self.maintenance_task: asyncio.Task | None = None
         
     async def initialize(self) -> None:
         """Initialize all memory systems."""
@@ -1039,7 +1037,7 @@ class AdvancedMemorySystem:
                 logger.error("Maintenance loop error: %s", exc)
                 await asyncio.sleep(3600)
                 
-    def get_memory_stats(self) -> Dict[str, Any]:
+    def get_memory_stats(self) -> dict[str, Any]:
         """Get comprehensive memory statistics."""
         return {
             "episodic": {
@@ -1062,4 +1060,4 @@ class AdvancedMemorySystem:
 
 
 # Global memory system instance
-advanced_memory: Optional[AdvancedMemorySystem] = None
+advanced_memory: AdvancedMemorySystem | None = None

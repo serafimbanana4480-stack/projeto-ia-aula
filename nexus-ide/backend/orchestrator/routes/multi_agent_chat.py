@@ -15,17 +15,14 @@ Events streamed:
 
 import json
 import logging
-import random
-from datetime import datetime, timezone
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-
 from backend.models.api import StreamEvent
-from backend.orchestrator.router import fast_route
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -209,7 +206,7 @@ async def multi_agent_chat_stream(request: Request) -> StreamingResponse:
                     "turn": event.payload.get("turn", 0),
                     "total_turns": event.payload.get("total_turns", 0),
                     "task_type": event.payload.get("task_type", "unknown"),
-                    "timestamp": event.timestamp.isoformat() if hasattr(event, 'timestamp') else datetime.now(timezone.utc).isoformat(),
+                    "timestamp": event.timestamp.isoformat() if hasattr(event, 'timestamp') else datetime.now(UTC).isoformat(),
                 }
                 yield f"data: {json.dumps(sse_data)}\n\n"
         else:

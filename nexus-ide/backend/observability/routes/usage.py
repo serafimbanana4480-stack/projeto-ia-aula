@@ -12,13 +12,14 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from backend.middleware.auth import require_auth
 from backend.persistence.db import get_message_statistics
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 def _get_current_tracker():

@@ -20,7 +20,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+from backend.observability.optional_deps import optional_module
+
+# numpy is an optional extra (``uv sync --extra analytics``); see
+# backend/observability/optional_deps.py. Every use below is inside a method, so
+# the module imports fine without numpy and only vector maths raises.
+np = optional_module("numpy", extra="analytics", owner=__name__)
 
 logger = logging.getLogger(__name__)
 

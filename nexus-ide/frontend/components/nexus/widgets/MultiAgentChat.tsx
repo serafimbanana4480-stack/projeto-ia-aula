@@ -3,16 +3,25 @@
 import React, { useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  MessageSquare, Send, Bot, ArrowRight,
-  CheckCircle2, XCircle, Clock, AlertCircle,
-  ChevronDown, Paperclip, Hash, AtSign,
+  MessageSquare, Bot, ArrowRight,
+  CheckCircle2, XCircle, AlertCircle,
+  Hash,
 } from "lucide-react";
 import { useAgentStore, type AgentMessage } from "../../../stores/useAgentStore";
-import type { StoreApi } from "zustand";
 
 function formatTime(ts: number) {
-  return new Date(ts).toLocaleTimeString("pt-PT", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return Number.isFinite(ts)
+    ? new Date(ts).toLocaleTimeString("pt-PT", { hour: "2-digit", minute: "2-digit" })
+    : "Hora indisponível";
 }
+
+const MESSAGE_TYPE_LABELS: Record<string, string> = {
+  message: "mensagem",
+  delegation: "delegação",
+  result: "resultado",
+  error: "erro",
+  help_request: "pedido de ajuda",
+};
 
 function MessageBubble({ msg, agents }: { msg: AgentMessage; agents: Record<string, { name: string; color: string; role: string }> }) {
   const sender = agents[msg.fromAgent];
@@ -79,7 +88,7 @@ function MessageBubble({ msg, agents }: { msg: AgentMessage; agents: Record<stri
             msg.type === "help_request" ? "bg-pink-500/15 border-pink-500/40 text-pink-300" :
             "bg-slate-700/50 border-slate-600/60 text-slate-400"
           }`}>
-            {msg.type.replace("_", " ")}
+            {MESSAGE_TYPE_LABELS[msg.type] ?? "mensagem"}
           </span>
         </div>
       </div>
@@ -97,32 +106,31 @@ export default function MultiAgentChat() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
-  const recentMessages = messages.slice(-50).reverse();
+  const recentMessages = messages
+    .filter((message) => message && typeof message.id === "string" && typeof message.content === "string")
+    .slice(-50)
+    .reverse();
 
   return (
-    <div className="h-full flex flex-col">
+    <section className="flex h-full min-h-0 flex-col" aria-label="Mensagens entre agentes">
       {/* Header */}
-      <div className="px-4 py-3 border-b border-slate-800/60 flex items-center justify-between">
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/70 px-4 py-3">
         <div className="flex items-center gap-2">
           <MessageSquare size={13} className="text-cyan-400" />
-          <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Agent Communication Matrix</span>
-          <span className="flex items-center gap-1 text-[10px] text-slate-500">
-            <Hash size={10} />{messages.length} messages
+          <h2 className="text-xs font-semibold text-slate-100">Mensagens entre agentes</h2>
+          <span className="flex items-center gap-1 text-[10px] text-slate-500" aria-label={`${messages.length} mensagens`}>
+            <Hash size={10} />{messages.length}
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-          <span className="text-[10px] text-cyan-400 font-semibold">Real-time</span>
-        </div>
-      </div>
+      </header>
 
       {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         {recentMessages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-48 text-slate-500">
+          <div className="flex h-full min-h-[180px] flex-col items-center justify-center px-5 text-center text-slate-500">
             <MessageSquare size={28} className="mb-3 opacity-25" />
-            <p className="text-sm font-medium">No messages yet</p>
-            <p className="text-[11px] mt-1 text-slate-600">Agent conversations will appear here</p>
+            <p className="text-xs font-medium">Ainda não há mensagens registadas.</p>
+            <p className="mt-1 max-w-xs text-[10px] leading-relaxed text-slate-600">As mensagens surgem aqui quando forem recebidas pelo sistema.</p>
           </div>
         ) : (
           <div className="divide-y divide-slate-800/40">
@@ -135,6 +143,6 @@ export default function MultiAgentChat() {
           </div>
         )}
       </div>
-    </div>
+    </section>
   );
 }

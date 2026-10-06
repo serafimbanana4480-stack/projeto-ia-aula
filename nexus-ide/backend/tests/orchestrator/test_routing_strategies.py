@@ -7,8 +7,8 @@ import pytest
 from backend.models.api import RoutingDecision
 from backend.orchestrator.routing_strategies import (
     FALLBACK_DECISION,
-    LLMRoutingStrategy,
     KeywordRoutingStrategy,
+    LLMRoutingStrategy,
     RecordingStrategy,
     parse_routing_decision,
 )

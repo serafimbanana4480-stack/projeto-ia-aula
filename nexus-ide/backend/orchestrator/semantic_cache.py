@@ -1,4 +1,4 @@
-"""Semantic Cache System - Advanced caching with embedding similarity.
+﻿"""Semantic Cache System - Advanced caching with embedding similarity.
 
 Provides intelligent caching based on semantic similarity rather than exact matches,
 dramatically improving cache hit rates for AI responses while maintaining accuracy.
@@ -6,17 +6,26 @@ dramatically improving cache hit rates for AI responses while maintaining accura
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
-import json
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
 from collections import OrderedDict
-import numpy as np
+from dataclasses import dataclass
+from typing import Any
 
+from backend.observability.optional_deps import optional_module
 from backend.tools.ollama_client import OllamaClient
-from backend.config.settings import get_model_config
+
+# numpy is an optional extra (``uv sync --extra analytics``); see
+# backend/observability/optional_deps.py. The cosine-similarity maths is the only
+# consumer, so importing this module without numpy stays cheap and succeeds.
+np = optional_module("numpy", extra="analytics", owner=__name__)
+
+#: What ``np.ndarray`` used to say in the annotations below -- see the note in
+#: backend/quantum/quantum_computing.py. The extra is not installed by default,
+#: so a type checker cannot resolve the real alias.
+type Array = Any
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +34,7 @@ logger = logging.getLogger(__name__)
 class CacheEntry:
     """A cached response with metadata."""
     query_hash: str
-    query_embedding: np.ndarray
+    query_embedding: Array
     response: str
     model_key: str
     created_at: float
@@ -99,16 +108,16 @@ class SemanticCache:
         
         # Cache storage
         self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
-        self._embedding_cache: Dict[str, np.ndarray] = {}
+        self._embedding_cache: dict[str, Array] = {}
         
         # Statistics
         self._stats = CacheStats()
         
         # Clustering for better organization
-        self._semantic_clusters: Dict[str, List[str]] = {}
+        self._semantic_clusters: dict[str, list[str]] = {}
         
         # Background tasks
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self._cleanup_task: asyncio.Task | None = None
         self._running = False
         
         # Lock for thread safety
@@ -128,13 +137,11 @@ class SemanticCache:
         self._running = False
         if self._cleanup_task:
             self._cleanup_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
         logger.info("Semantic Cache stopped")
     
-    async def get(self, query: str, model_key: str) -> Optional[str]:
+    async def get(self, query: str, model_key: str) -> str | None:
         """Get cached response for a query using semantic similarity."""
         async with self._lock:
             self._stats.total_queries += 1
@@ -181,7 +188,7 @@ class SemanticCache:
             self._stats.misses += 1
             return None
     
-    async def put(self, query: str, response: str, model_key: str, *, ttl: Optional[float] = None) -> None:
+    async def put(self, query: str, response: str, model_key: str, *, ttl: float | None = None) -> None:
         """Store a response in the cache."""
         async with self._lock:
             query_hash = self._hash_query(query, model_key)
@@ -228,7 +235,7 @@ class SemanticCache:
             self._embedding_cache.clear()
             logger.info("Cache cleared")
     
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Get cache statistics."""
         stats = {
             "total_entries": len(self._cache),
@@ -248,7 +255,7 @@ class SemanticCache:
         
         return stats
     
-    async def _get_embedding(self, text: str) -> np.ndarray:
+    async def _get_embedding(self, text: str) -> Array:
         """Get embedding for text, using cache if available."""
         # Check embedding cache first
         text_hash = hashlib.md5(text.encode()).hexdigest()
@@ -280,7 +287,7 @@ class SemanticCache:
         content = f"{model_key}:{query}"
         return hashlib.sha256(content.encode()).hexdigest()
     
-    async def _find_semantic_match(self, query_embedding: np.ndarray, model_key: str) -> Optional[Tuple[str, CacheEntry]]:
+    async def _find_semantic_match(self, query_embedding: Array, model_key: str) -> tuple[str, CacheEntry] | None:
         """Find the best semantic match for a query embedding."""
         best_match = None
         best_similarity = 0.0
@@ -304,7 +311,7 @@ class SemanticCache:
         
         return best_match
     
-    def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
+    def _cosine_similarity(self, a: Array, b: Array) -> float:
         """Calculate cosine similarity between two embeddings."""
         dot_product = np.dot(a, b)
         norm_a = np.linalg.norm(a)
@@ -337,7 +344,7 @@ class SemanticCache:
                     del self._cache[oldest_key]
                     self._stats.evictions += 1
     
-    async def _update_clusters(self, query_hash: str, query_embedding: np.ndarray) -> None:
+    async def _update_clusters(self, query_hash: str, query_embedding: Array) -> None:
         """Update semantic clusters for better organization."""
         # Find the best existing cluster
         best_cluster = None
@@ -424,7 +431,7 @@ class SemanticCache:
 
 
 # Global semantic cache instance
-_semantic_cache: Optional[SemanticCache] = None
+_semantic_cache: SemanticCache | None = None
 
 
 async def get_semantic_cache() -> SemanticCache:

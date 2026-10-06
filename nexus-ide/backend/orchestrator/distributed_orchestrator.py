@@ -6,15 +6,13 @@ instances with message queues, load balancing, and distributed state management.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import socket
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
-from collections import defaultdict
 from enum import Enum
-import socket
+from typing import Any
 
 from backend.tools.ollama_client import OllamaClient
 
@@ -60,11 +58,11 @@ class OrchestrationNode:
     host: str
     port: int
     status: NodeStatus
-    capabilities: Set[str]
+    capabilities: set[str]
     current_load: int = 0
     max_load: int = 10
     last_heartbeat: float = field(default_factory=time.time)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self) -> None:
         self.node_id = self.node_id or self._generate_node_id()
@@ -91,16 +89,16 @@ class DistributedTask:
     """A task that can be distributed across nodes."""
     task_id: str
     task_type: str
-    payload: Dict[str, Any]
+    payload: dict[str, Any]
     priority: int = 0
-    required_capabilities: Set[str] = field(default_factory=set)
-    assigned_node_id: Optional[str] = None
+    required_capabilities: set[str] = field(default_factory=set)
+    assigned_node_id: str | None = None
     status: TaskStatus = TaskStatus.PENDING
     created_at: float = field(default_factory=time.time)
-    assigned_at: Optional[float] = None
-    completed_at: Optional[float] = None
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
+    assigned_at: float | None = None
+    completed_at: float | None = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
     retry_count: int = 0
     max_retries: int = 3
 
@@ -111,8 +109,8 @@ class DistributedMessage:
     message_id: str
     message_type: MessageType
     sender_id: str
-    recipient_id: Optional[str]  # None for broadcast
-    payload: Dict[str, Any]
+    recipient_id: str | None  # None for broadcast
+    payload: dict[str, Any]
     timestamp: float = field(default_factory=time.time)
     
     def __post_init__(self) -> None:
@@ -160,8 +158,8 @@ class DistributedOrchestrator:
         )
         
         # Distributed state
-        self._nodes: Dict[str, OrchestrationNode] = {}
-        self._tasks: Dict[str, DistributedTask] = {}
+        self._nodes: dict[str, OrchestrationNode] = {}
+        self._tasks: dict[str, DistributedTask] = {}
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._task_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         
@@ -169,10 +167,10 @@ class DistributedOrchestrator:
         self._load_balancer = LoadBalancer(self._nodes)
         
         # Background tasks
-        self._heartbeat_task: Optional[asyncio.Task] = None
-        self._task_processor_task: Optional[asyncio.Task] = None
-        self._health_monitor_task: Optional[asyncio.Task] = None
-        self._message_processor_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: asyncio.Task | None = None
+        self._task_processor_task: asyncio.Task | None = None
+        self._health_monitor_task: asyncio.Task | None = None
+        self._message_processor_task: asyncio.Task | None = None
         self._running = False
         
         # Lock for thread safety
@@ -237,9 +235,9 @@ class DistributedOrchestrator:
     async def submit_task(
         self,
         task_type: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         priority: int = 0,
-        required_capabilities: Optional[Set[str]] = None
+        required_capabilities: set[str] | None = None
     ) -> str:
         """Submit a task for distributed execution."""
         task = DistributedTask(
@@ -258,7 +256,7 @@ class DistributedOrchestrator:
         logger.debug("Submitted task %s of type %s", task.task_id, task_type)
         return task.task_id
     
-    async def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
+    async def get_task_status(self, task_id: str) -> dict[str, Any] | None:
         """Get the status of a task."""
         async with self._lock:
             if task_id not in self._tasks:
@@ -277,7 +275,7 @@ class DistributedOrchestrator:
                 "retry_count": task.retry_count,
             }
     
-    async def get_cluster_status(self) -> Dict[str, Any]:
+    async def get_cluster_status(self) -> dict[str, Any]:
         """Get the status of the entire cluster."""
         async with self._lock:
             active_nodes = sum(1 for node in self._nodes.values() if node.is_available)
@@ -418,7 +416,7 @@ class DistributedOrchestrator:
                 logger.error("Message processor loop error: %s", e)
                 await asyncio.sleep(1.0)
     
-    async def _find_suitable_node(self, task: DistributedTask) -> Optional[OrchestrationNode]:
+    async def _find_suitable_node(self, task: DistributedTask) -> OrchestrationNode | None:
         """Find a suitable node for the task."""
         suitable_nodes = [
             node for node in self._nodes.values()
@@ -474,7 +472,7 @@ class DistributedOrchestrator:
             logger.error("Local task execution failed: %s", e)
             await self._fail_task(task, str(e))
     
-    async def _execute_agent_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_agent_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Execute an agent task."""
         # This would integrate with the existing agent system
         # For now, return a mock result
@@ -485,7 +483,7 @@ class DistributedOrchestrator:
             "tokens_used": 500
         }
     
-    async def _execute_model_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_model_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Execute a model management task."""
         # This would integrate with the model pool system
         # For now, return a mock result
@@ -495,7 +493,7 @@ class DistributedOrchestrator:
             "result": "Model operation completed successfully"
         }
     
-    async def _complete_task(self, task: DistributedTask, result: Dict[str, Any]) -> None:
+    async def _complete_task(self, task: DistributedTask, result: dict[str, Any]) -> None:
         """Mark a task as completed."""
         async with self._lock:
             task.status = TaskStatus.COMPLETED
@@ -669,7 +667,7 @@ class DistributedOrchestrator:
         # Implement load balancing logic
         pass
     
-    async def _broadcast_message(self, message_type: MessageType, payload: Dict[str, Any]) -> None:
+    async def _broadcast_message(self, message_type: MessageType, payload: dict[str, Any]) -> None:
         """Broadcast a message to all nodes."""
         message = DistributedMessage(
             message_id="",
@@ -686,9 +684,9 @@ class DistributedOrchestrator:
         # For now, we just log it
         logger.debug("Broadcast message: %s", message_type.value)
     
-    async def _send_message_to_node(self, node_id: str, message_type: MessageType, payload: Dict[str, Any]) -> None:
+    async def _send_message_to_node(self, node_id: str, message_type: MessageType, payload: dict[str, Any]) -> None:
         """Send a message to a specific node."""
-        message = DistributedMessage(
+        DistributedMessage(
             message_id="",
             message_type=message_type,
             sender_id=self.local_node.node_id,
@@ -700,7 +698,7 @@ class DistributedOrchestrator:
         # For now, we just log it
         logger.debug("Sent message to node %s: %s", node_id, message_type.value)
     
-    def _node_to_dict(self, node: OrchestrationNode) -> Dict[str, Any]:
+    def _node_to_dict(self, node: OrchestrationNode) -> dict[str, Any]:
         """Convert node to dictionary."""
         return {
             "node_id": node.node_id,
@@ -713,7 +711,7 @@ class DistributedOrchestrator:
             "metadata": node.metadata
         }
     
-    def _dict_to_node(self, data: Dict[str, Any]) -> OrchestrationNode:
+    def _dict_to_node(self, data: dict[str, Any]) -> OrchestrationNode:
         """Convert dictionary to node."""
         return OrchestrationNode(
             node_id=data["node_id"],
@@ -726,7 +724,7 @@ class DistributedOrchestrator:
             metadata=data.get("metadata", {})
         )
     
-    def _task_to_dict(self, task: DistributedTask) -> Dict[str, Any]:
+    def _task_to_dict(self, task: DistributedTask) -> dict[str, Any]:
         """Convert task to dictionary."""
         return {
             "task_id": task.task_id,
@@ -745,7 +743,7 @@ class DistributedOrchestrator:
             "max_retries": task.max_retries
         }
     
-    def _dict_to_task(self, data: Dict[str, Any]) -> DistributedTask:
+    def _dict_to_task(self, data: dict[str, Any]) -> DistributedTask:
         """Convert dictionary to task."""
         return DistributedTask(
             task_id=data["task_id"],
@@ -768,10 +766,10 @@ class DistributedOrchestrator:
 class LoadBalancer:
     """Load balancer for distributing tasks across nodes."""
     
-    def __init__(self, nodes: Dict[str, OrchestrationNode]) -> None:
+    def __init__(self, nodes: dict[str, OrchestrationNode]) -> None:
         self._nodes = nodes
     
-    def select_node(self, suitable_nodes: List[OrchestrationNode]) -> OrchestrationNode:
+    def select_node(self, suitable_nodes: list[OrchestrationNode]) -> OrchestrationNode:
         """Select the best node for a task using load balancing algorithm."""
         if not suitable_nodes:
             raise ValueError("No suitable nodes available")
@@ -784,7 +782,7 @@ class LoadBalancer:
 
 
 # Global distributed orchestrator instance
-_distributed_orchestrator: Optional[DistributedOrchestrator] = None
+_distributed_orchestrator: DistributedOrchestrator | None = None
 
 
 def get_distributed_orchestrator(

@@ -12,19 +12,19 @@ This system provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import psutil
-import time
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Callable
-from dataclasses import dataclass, field
-from enum import Enum
-import uuid
 import statistics
-import json
-from collections import deque, defaultdict
+import uuid
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any
 
-from backend.observability.event_system import EventBus, Event, EventType, EventPriority
+import psutil
+
+from backend.observability.event_system import Event, EventBus, EventPriority, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +62,9 @@ class PerformanceMetric:
     value: float = 0.0
     timestamp: datetime = field(default_factory=datetime.now)
     source: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "metric_id": self.metric_id,
@@ -87,9 +87,9 @@ class PerformanceAlert:
     current_value: float = 0.0
     timestamp: datetime = field(default_factory=datetime.now)
     resolved: bool = False
-    resolved_at: Optional[datetime] = None
+    resolved_at: datetime | None = None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "alert_id": self.alert_id,
@@ -116,9 +116,9 @@ class OptimizationRecommendation:
     priority: str = "medium"  # low, medium, high, critical
     created_at: datetime = field(default_factory=datetime.now)
     implemented: bool = False
-    implemented_at: Optional[datetime] = None
+    implemented_at: datetime | None = None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "recommendation_id": self.recommendation_id,
@@ -139,14 +139,14 @@ class PerformanceEngine:
     
     def __init__(self, event_bus: EventBus):
         self.event_bus = event_bus
-        self.metrics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
-        self.alerts: List[PerformanceAlert] = []
-        self.recommendations: List[OptimizationRecommendation] = []
+        self.metrics: dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+        self.alerts: list[PerformanceAlert] = []
+        self.recommendations: list[OptimizationRecommendation] = []
         
         # Monitoring
         self._running = False
-        self._monitor_task: Optional[asyncio.Task] = None
-        self._optimization_task: Optional[asyncio.Task] = None
+        self._monitor_task: asyncio.Task | None = None
+        self._optimization_task: asyncio.Task | None = None
         
         # Thresholds
         self.thresholds = {
@@ -170,7 +170,7 @@ class PerformanceEngine:
         }
         
         # Performance history
-        self.performance_history: Dict[str, List[float]] = defaultdict(list)
+        self.performance_history: dict[str, list[float]] = defaultdict(list)
         
         # Optimization handlers
         self.optimization_handlers = {
@@ -196,25 +196,21 @@ class PerformanceEngine:
         
         if self._monitor_task:
             self._monitor_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._monitor_task
-            except asyncio.CancelledError:
-                pass
             self._monitor_task = None
         
         if self._optimization_task:
             self._optimization_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._optimization_task
-            except asyncio.CancelledError:
-                pass
             self._optimization_task = None
         
         logger.info("PerformanceEngine stopped")
     
     async def collect_metric(self, metric_type: PerformanceMetricType, 
                            value: float, source: str = "",
-                           metadata: Dict[str, Any] = None) -> None:
+                           metadata: dict[str, Any] = None) -> None:
         """Collect a performance metric."""
         metric = PerformanceMetric(
             metric_type=metric_type,
@@ -256,8 +252,8 @@ class PerformanceEngine:
             except Exception as e:
                 logger.error(f"Failed to emit metric event: {e}")
     
-    async def get_metrics(self, metric_type: Optional[PerformanceMetricType] = None,
-                         limit: int = 100) -> List[PerformanceMetric]:
+    async def get_metrics(self, metric_type: PerformanceMetricType | None = None,
+                         limit: int = 100) -> list[PerformanceMetric]:
         """Get performance metrics."""
         if metric_type:
             metrics_list = list(self.metrics[metric_type.value])
@@ -270,9 +266,9 @@ class PerformanceEngine:
         metrics_list.sort(key=lambda m: m.timestamp, reverse=True)
         return metrics_list[:limit]
     
-    async def get_alerts(self, severity: Optional[str] = None,
-                        resolved: Optional[bool] = None,
-                        limit: int = 100) -> List[PerformanceAlert]:
+    async def get_alerts(self, severity: str | None = None,
+                        resolved: bool | None = None,
+                        limit: int = 100) -> list[PerformanceAlert]:
         """Get performance alerts."""
         alerts = self.alerts
         
@@ -286,9 +282,9 @@ class PerformanceEngine:
         alerts.sort(key=lambda a: a.timestamp, reverse=True)
         return alerts[:limit]
     
-    async def get_recommendations(self, implemented: Optional[bool] = None,
-                                 priority: Optional[str] = None,
-                                 limit: int = 100) -> List[OptimizationRecommendation]:
+    async def get_recommendations(self, implemented: bool | None = None,
+                                 priority: str | None = None,
+                                 limit: int = 100) -> list[OptimizationRecommendation]:
         """Get optimization recommendations."""
         recommendations = self.recommendations
         
@@ -306,7 +302,7 @@ class PerformanceEngine:
         
         return recommendations[:limit]
     
-    async def get_performance_stats(self) -> Dict[str, Any]:
+    async def get_performance_stats(self) -> dict[str, Any]:
         """Get performance statistics."""
         # Update statistics
         self.stats["active_alerts"] = len([a for a in self.alerts if not a.resolved])
@@ -339,7 +335,7 @@ class PerformanceEngine:
             "optimization_types": [t.value for t in OptimizationType]
         }
     
-    async def implement_recommendation(self, recommendation_id: str) -> Dict[str, Any]:
+    async def implement_recommendation(self, recommendation_id: str) -> dict[str, Any]:
         """Implement an optimization recommendation."""
         recommendation = next((r for r in self.recommendations if r.recommendation_id == recommendation_id), None)
         
@@ -608,7 +604,7 @@ class PerformanceEngine:
         # For now, just log that auto-optimization is running
         logger.debug("Auto-optimization check completed")
     
-    async def _optimize_cache(self, recommendation: OptimizationRecommendation) -> Dict[str, Any]:
+    async def _optimize_cache(self, recommendation: OptimizationRecommendation) -> dict[str, Any]:
         """Optimize cache performance."""
         # Simulate cache optimization
         await asyncio.sleep(1)
@@ -620,7 +616,7 @@ class PerformanceEngine:
             "implementation_time": "2 minutes"
         }
     
-    async def _optimize_memory(self, recommendation: OptimizationRecommendation) -> Dict[str, Any]:
+    async def _optimize_memory(self, recommendation: OptimizationRecommendation) -> dict[str, Any]:
         """Optimize memory usage."""
         # Simulate memory optimization
         await asyncio.sleep(1)
@@ -632,7 +628,7 @@ class PerformanceEngine:
             "implementation_time": "1 minute"
         }
     
-    async def _optimize_cpu(self, recommendation: OptimizationRecommendation) -> Dict[str, Any]:
+    async def _optimize_cpu(self, recommendation: OptimizationRecommendation) -> dict[str, Any]:
         """Optimize CPU usage."""
         # Simulate CPU optimization
         await asyncio.sleep(1)
@@ -644,7 +640,7 @@ class PerformanceEngine:
             "implementation_time": "3 minutes"
         }
     
-    async def _optimize_load_balancing(self, recommendation: OptimizationRecommendation) -> Dict[str, Any]:
+    async def _optimize_load_balancing(self, recommendation: OptimizationRecommendation) -> dict[str, Any]:
         """Optimize load balancing."""
         # Simulate load balancing optimization
         await asyncio.sleep(1)
@@ -658,7 +654,7 @@ class PerformanceEngine:
 
 
 # Global performance engine instance
-_performance_engine: Optional[PerformanceEngine] = None
+_performance_engine: PerformanceEngine | None = None
 
 
 async def get_performance_engine(event_bus: EventBus) -> PerformanceEngine:

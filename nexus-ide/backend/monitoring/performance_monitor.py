@@ -10,13 +10,12 @@ import json
 import logging
 import time
 import uuid
-import psutil
-import threading
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union, Callable
-from datetime import datetime, timedelta
-from collections import defaultdict, deque
+from typing import Any
+
+import psutil
 
 try:
     import redis.asyncio as redis
@@ -68,8 +67,8 @@ class PerformanceMetric:
     unit: str = ""
     
     # Context
-    labels: Dict[str, str] = field(default_factory=dict)
-    tags: Set[str] = field(default_factory=set)
+    labels: dict[str, str] = field(default_factory=dict)
+    tags: set[str] = field(default_factory=set)
     
     # Timestamps
     timestamp: float = field(default_factory=time.time)
@@ -78,7 +77,7 @@ class PerformanceMetric:
     quality_score: float = 0.0  # 0.0-1.0
     confidence: float = 0.0  # 0.0-1.0
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "metric_id": self.metric_id,
             "metric_type": self.metric_type.value,
@@ -102,8 +101,8 @@ class PerformanceProfile:
     
     # Timing data
     start_time: float = field(default_factory=time.time)
-    end_time: Optional[float] = None
-    duration: Optional[float] = None
+    end_time: float | None = None
+    duration: float | None = None
     
     # Resource usage
     cpu_usage: float = 0.0
@@ -114,17 +113,17 @@ class PerformanceProfile:
     network_io_recv: int = 0
     
     # Performance metrics
-    metrics: List[PerformanceMetric] = field(default_factory=list)
+    metrics: list[PerformanceMetric] = field(default_factory=list)
     
     # Context
-    context: Dict[str, Any] = field(default_factory=dict)
-    parameters: Dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
+    parameters: dict[str, Any] = field(default_factory=dict)
     
     # Quality assessment
     performance_score: float = 0.0  # 0.0-1.0
     efficiency_score: float = 0.0  # 0.0-1.0
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "profile_id": self.profile_id,
             "component": self.component,
@@ -160,17 +159,17 @@ class PerformanceIssue:
     
     # Detection data
     detected_at: float = field(default_factory=time.time)
-    metrics: List[PerformanceMetric] = field(default_factory=list)
+    metrics: list[PerformanceMetric] = field(default_factory=list)
     
     # Impact assessment
     impact_score: float = 0.0  # 0.0-1.0
-    affected_components: List[str] = field(default_factory=list)
+    affected_components: list[str] = field(default_factory=list)
     
     # Status
     status: str = "open"  # open, investigating, resolved
-    resolved_at: Optional[float] = None
+    resolved_at: float | None = None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "issue_id": self.issue_id,
             "title": self.title,
@@ -205,19 +204,19 @@ class OptimizationRecommendation:
     risk_level: str = "low"  # low, medium, high
     
     # Implementation details
-    steps: List[str] = field(default_factory=list)
-    code_examples: List[str] = field(default_factory=list)
-    configuration_changes: Dict[str, Any] = field(default_factory=dict)
+    steps: list[str] = field(default_factory=list)
+    code_examples: list[str] = field(default_factory=list)
+    configuration_changes: dict[str, Any] = field(default_factory=dict)
     
     # Context
-    related_issues: List[str] = field(default_factory=list)
-    supporting_metrics: List[PerformanceMetric] = field(default_factory=list)
+    related_issues: list[str] = field(default_factory=list)
+    supporting_metrics: list[PerformanceMetric] = field(default_factory=list)
     
     # Status
     status: str = "pending"  # pending, implemented, verified
     created_at: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "recommendation_id": self.recommendation_id,
             "title": self.title,
@@ -243,14 +242,14 @@ class PerformanceProfiler:
     
     def __init__(self, component_name: str):
         self.component_name = component_name
-        self.active_profiles: Dict[str, PerformanceProfile] = {}
-        self.profile_history: List[PerformanceProfile] = []
+        self.active_profiles: dict[str, PerformanceProfile] = {}
+        self.profile_history: list[PerformanceProfile] = []
         
     def start_profile(
         self,
         operation: str,
-        context: Optional[Dict[str, Any]] = None,
-        parameters: Optional[Dict[str, Any]] = None
+        context: dict[str, Any] | None = None,
+        parameters: dict[str, Any] | None = None
     ) -> str:
         """Start a new performance profile."""
         profile = PerformanceProfile(
@@ -280,7 +279,7 @@ class PerformanceProfiler:
         
         return profile.profile_id
         
-    def end_profile(self, profile_id: str) -> Optional[PerformanceProfile]:
+    def end_profile(self, profile_id: str) -> PerformanceProfile | None:
         """End a performance profile and calculate metrics."""
         if profile_id not in self.active_profiles:
             return None
@@ -381,7 +380,7 @@ class PerformanceProfiler:
             
         return work_factor * resource_factor
         
-    def get_profile_statistics(self, operation: Optional[str] = None) -> Dict[str, Any]:
+    def get_profile_statistics(self, operation: str | None = None) -> dict[str, Any]:
         """Get profile statistics."""
         profiles = self.profile_history
         
@@ -410,26 +409,26 @@ class PerformanceMonitor:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Profilers
-        self.profilers: Dict[str, PerformanceProfiler] = {}
+        self.profilers: dict[str, PerformanceProfiler] = {}
         
         # Metrics storage
-        self.metrics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
-        self.metric_aggregates: Dict[str, Dict[str, float]] = {}
+        self.metrics: dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+        self.metric_aggregates: dict[str, dict[str, float]] = {}
         
         # Issues and recommendations
-        self.issues: List[PerformanceIssue] = []
-        self.recommendations: List[OptimizationRecommendation] = []
+        self.issues: list[PerformanceIssue] = []
+        self.recommendations: list[OptimizationRecommendation] = []
         
         # Monitoring configuration
-        self.monitoring_rules: List[Dict[str, Any]] = []
-        self.thresholds: Dict[str, Dict[str, float]] = {}
+        self.monitoring_rules: list[dict[str, Any]] = []
+        self.thresholds: dict[str, dict[str, float]] = {}
         
         # Background tasks
-        self.monitoring_task: Optional[asyncio.Task] = None
-        self.analysis_task: Optional[asyncio.Task] = None
+        self.monitoring_task: asyncio.Task | None = None
+        self.analysis_task: asyncio.Task | None = None
         
     async def initialize(self) -> None:
         """Initialize the performance monitor."""
@@ -561,8 +560,8 @@ class PerformanceMonitor:
         component: str,
         value: float,
         unit: str = "",
-        labels: Optional[Dict[str, str]] = None,
-        tags: Optional[Set[str]] = None
+        labels: dict[str, str] | None = None,
+        tags: set[str] | None = None
     ) -> None:
         """Record a performance metric."""
         metric = PerformanceMetric(
@@ -593,7 +592,7 @@ class PerformanceMonitor:
                 if self._evaluate_rule(rule, metric):
                     await self._create_issue(rule, metric)
                     
-    def _evaluate_rule(self, rule: Dict[str, Any], metric: PerformanceMetric) -> bool:
+    def _evaluate_rule(self, rule: dict[str, Any], metric: PerformanceMetric) -> bool:
         """Evaluate monitoring rule."""
         operator = rule["operator"]
         threshold = rule["threshold"]
@@ -609,7 +608,7 @@ class PerformanceMonitor:
         else:
             return False
             
-    async def _create_issue(self, rule: Dict[str, Any], metric: PerformanceMetric) -> None:
+    async def _create_issue(self, rule: dict[str, Any], metric: PerformanceMetric) -> None:
         """Create performance issue."""
         issue = PerformanceIssue(
             title=f"{rule['name']} in {metric.component}",
@@ -633,7 +632,7 @@ class PerformanceMonitor:
         
         logger.warning("Performance issue detected: %s", issue.title)
         
-    def _calculate_impact_score(self, rule: Dict[str, Any], metric: PerformanceMetric) -> float:
+    def _calculate_impact_score(self, rule: dict[str, Any], metric: PerformanceMetric) -> float:
         """Calculate impact score for issue."""
         base_score = 0.5
         
@@ -904,7 +903,7 @@ class PerformanceMonitor:
         if insights:
             logger.info("Generated %d performance insights", len(insights))
             
-    def get_performance_summary(self) -> Dict[str, Any]:
+    def get_performance_summary(self) -> dict[str, Any]:
         """Get comprehensive performance summary."""
         return {
             "metrics_summary": {
@@ -953,7 +952,7 @@ class PerformanceMonitor:
                 
         return max(0.0, health_score)
         
-    def get_component_performance(self, component: str) -> Dict[str, Any]:
+    def get_component_performance(self, component: str) -> dict[str, Any]:
         """Get performance data for specific component."""
         profiler = self.profilers.get(component)
         stats = profiler.get_profile_statistics() if profiler else {}
@@ -980,4 +979,4 @@ class PerformanceMonitor:
 
 
 # Global performance monitor instance
-performance_monitor: Optional[PerformanceMonitor] = None
+performance_monitor: PerformanceMonitor | None = None

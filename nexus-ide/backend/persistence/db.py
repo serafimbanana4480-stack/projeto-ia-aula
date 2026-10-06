@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -53,7 +54,10 @@ def monitor_query_performance(func: Callable) -> Callable:
     return wrapper
 
 
-DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "nexus.db"
+DB_PATH = Path(
+    os.environ.get("NEXUS_DB_PATH")
+    or Path(__file__).resolve().parent.parent.parent / "data" / "nexus.db"
+).expanduser().resolve()
 SCHEMA_PATH = Path(__file__).resolve().parent / "schemas.sql"
 
 # Connection pool settings
@@ -305,6 +309,21 @@ def _ensure_message_cost_column() -> None:
         raise RuntimeError("Messages schema readiness failed") from exc
 
 
+def _ensure_message_run_link_column() -> None:
+    """Add the nullable run link before schemas.sql creates its index."""
+    try:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            if columns and "run_id" not in columns:
+                conn.execute("ALTER TABLE messages ADD COLUMN run_id TEXT")
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Failed to ensure messages.run_id column")
+        raise RuntimeError("Messages run-link schema readiness failed") from exc
+
+
 def _ensure_current_schema() -> None:
     """Create any tables added since an existing database was first made."""
     try:
@@ -318,6 +337,7 @@ def _ensure_current_schema() -> None:
 
 
 _SESSION_COMPAT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("user_id", "TEXT"),
     ("project_id", "TEXT"),
     ("title", "TEXT"),
     ("mode", "TEXT"),
@@ -415,6 +435,7 @@ def init_db(run_migrations: bool = True) -> None:
         _ensure_execution_envelope_schema()
         _ensure_session_compatibility_schema()
         _ensure_message_cost_column()
+        _ensure_message_run_link_column()
         _ensure_current_schema()
         _ensure_execution_envelope_schema()
         _ensure_git_commits_table()
@@ -437,8 +458,9 @@ def _seed_default_user() -> None:
     ``NEXUS_DEFAULT_PASSWORD`` environment variables, falling back to
     ``admin@nexus-ide.com`` / ``admin123`` in development.
     """
-    import bcrypt
     import os
+
+    import bcrypt
     try:
         with sqlite3.connect(str(DB_PATH)) as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
@@ -549,9 +571,64 @@ def _seed_default_rbac() -> None:
         logger.warning("Failed to seed default RBAC: %s", exc)
 
 
+# Alembic is deliberately not a hard dependency (it is absent from
+# nexus-ide/pyproject.toml and uv.lock), so a `uv sync --frozen` environment has
+# no `alembic`/`sqlalchemy`. That environment must still be able to run the test
+# suite and start the app: persistence/schemas.sql remains the primary schema
+# authority and Alembic is only a stamp/migration convenience. A missing
+# Alembic is therefore a WARNING, while every other Alembic failure still
+# raises -- silently ignoring a migration that genuinely failed to apply is
+# worse than not starting.
+ALEMBIC_UNAVAILABLE_MESSAGE = (
+    "Alembic is not installed; schema stamp/migrations skipped. "
+    "Install 'alembic' and 'sqlalchemy' (see nexus-ide/pyproject.toml) "
+    "to enable migrations."
+)
+
+
+def _alembic_available() -> bool:
+    """Return whether Alembic is installed, letting a broken install raise.
+
+    Absence and breakage are two different facts and are decided two different
+    ways:
+
+    * ``importlib.util.find_spec`` answers *is it installed?* without executing
+      any of it.  Only a genuine absence returns ``False`` (a WARNING, and the
+      app starts on ``persistence/schemas.sql``).
+    * a **present** install is then actually imported.  A version-mismatched
+      Alembic raises ``ImportError`` from that import
+      (``cannot import name 'Encoding' from 'sqlalchemy'``), and ``ImportError``
+      is exactly what a broken install looks like, so it must never be folded
+      into the "not installed" answer: warning there would start the app on a
+      stale schema, which the note above calls out as worse than not starting.
+
+    Any exception raised here propagates.  Both callers invoke this function
+    inside their migration ``try`` block, so the caller sees the documented
+    ``RuntimeError("Database migration ...")`` with the real import failure
+    chained as ``__cause__`` rather than a bare ``ImportError``.
+    """
+    import importlib
+    import importlib.util
+
+    if importlib.util.find_spec("alembic") is None:
+        return False
+
+    # Present: prove it actually imports instead of guessing from its presence.
+    importlib.import_module("alembic")
+    importlib.import_module("alembic.config")
+    importlib.import_module("alembic.command")
+    return True
+
+
 def _stamp_alembic() -> None:
     """Stamp a fresh database with the current Alembic head."""
     try:
+        # Inside the try on purpose: a present-but-unimportable Alembic must
+        # surface as the same documented RuntimeError as a failed stamp, not as
+        # a raw ImportError leaking past this function's contract.
+        if not _alembic_available():
+            logger.warning(ALEMBIC_UNAVAILABLE_MESSAGE)
+            return
         from alembic import command
         from alembic.config import Config
 
@@ -571,16 +648,22 @@ def _stamp_alembic() -> None:
 
 def _run_alembic_migrations() -> None:
     """Run pending Alembic migrations on an existing tracked database."""
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        tracked = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='alembic_version'"
+        ).fetchone()
+    if tracked is None:
+        # Pre-Alembic databases are repaired by the compatibility schema
+        # path; replaying the initial migration would be unsafe.
+        logger.info("Untracked database repaired without Alembic replay")
+        return
+
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:
-            tracked = conn.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type='table' AND name='alembic_version'"
-            ).fetchone()
-        if tracked is None:
-            # Pre-Alembic databases are repaired by the compatibility schema
-            # path; replaying the initial migration would be unsafe.
-            logger.info("Untracked database repaired without Alembic replay")
+        # Same contract as _stamp_alembic: absence warns, breakage raises the
+        # documented RuntimeError.
+        if not _alembic_available():
+            logger.warning(ALEMBIC_UNAVAILABLE_MESSAGE)
             return
 
         from alembic import command
@@ -733,12 +816,13 @@ def create_session(
     title: str = "Nova sessão",
     mode: str = "auto",
     session_id: str | None = None,
+    user_id: str | None = None,
 ) -> dict:
     sid = session_id or _new_id()
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO sessions (id, project_id, title, mode) VALUES (?, ?, ?, ?)",
-            (sid, project_id, title, mode),
+            "INSERT INTO sessions (id, user_id, project_id, title, mode) VALUES (?, ?, ?, ?, ?)",
+            (sid, user_id, project_id, title, mode),
         )
         row = conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
     return dict(row) if row else None
@@ -751,19 +835,54 @@ def get_session(session_id: str) -> dict | None:
         return dict(row) if row else None
 
 
-@monitor_query_performance
-def list_sessions(project_id: str | None = None, limit: int = 50) -> list[dict]:
+def get_session_for_user(session_id: str, user_id: str) -> dict | None:
+    """Return a session only when it is owned by the authenticated user."""
+    if not session_id or not user_id:
+        return None
     with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM sessions WHERE id = ? AND user_id = ?",
+            (session_id, user_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+@monitor_query_performance
+def list_sessions(
+    project_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    user_id: str | None = None,
+) -> list[dict]:
+    with get_db() as conn:
+        clauses: list[str] = []
+        params: list[Any] = []
         if project_id:
-            rows = conn.execute(
-                "SELECT * FROM sessions WHERE project_id = ? ORDER BY last_active_at DESC LIMIT ?",
-                (project_id, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM sessions ORDER BY last_active_at DESC LIMIT ?", (limit,)
-            ).fetchall()
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.extend((limit, offset))
+        rows = conn.execute(
+            "SELECT * FROM sessions" + where
+            + " ORDER BY last_active_at DESC, id DESC LIMIT ? OFFSET ?",
+            params,
+        ).fetchall()
         return [dict(r) for r in rows]
+
+
+def session_belongs_to_user(session_id: str, user_id: str) -> bool:
+    """Check session ownership without returning private session contents."""
+    if not session_id or not user_id:
+        return False
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sessions WHERE id = ? AND user_id = ? LIMIT 1",
+            (session_id, user_id),
+        ).fetchone()
+    return row is not None
 
 
 def touch_session(session_id: str) -> None:
@@ -790,7 +909,11 @@ def _invalidate_session_cache(session_id: str | None = None) -> None:
 
 
 def update_session(
-    session_id: str, *, title: str | None = None, mode: str | None = None
+    session_id: str,
+    *,
+    title: str | None = None,
+    mode: str | None = None,
+    user_id: str | None = None,
 ) -> dict | None:
     """Update mutable fields on a session. Returns the updated row."""
     fields: list[str] = []
@@ -802,24 +925,37 @@ def update_session(
         fields.append("mode = ?")
         values.append(mode)
     if not fields:
-        return get_session(session_id)
+        row = get_session(session_id)
+        if user_id is not None and (row is None or row.get("user_id") != user_id):
+            return None
+        return row
     fields.append("last_active_at = ?")
     values.append(_now_iso())
     values.append(session_id)
+    owner_filter = " AND user_id = ?" if user_id is not None else ""
+    if user_id is not None:
+        values.append(user_id)
     with get_db() as conn:
         conn.execute(
-            f"UPDATE sessions SET {', '.join(fields)} WHERE id = ?",
+            f"UPDATE sessions SET {', '.join(fields)} WHERE id = ?{owner_filter}",
             values,
         )
-        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        select_sql = "SELECT * FROM sessions WHERE id = ?" + owner_filter
+        select_params: tuple[Any, ...] = (session_id, user_id) if user_id is not None else (session_id,)
+        row = conn.execute(select_sql, select_params).fetchone()
     _invalidate_session_cache(session_id)
     return dict(row) if row else None
 
 
-def delete_session(session_id: str) -> bool:
+def delete_session(session_id: str, *, user_id: str | None = None) -> bool:
     """Delete a session and all its messages. Returns True if the session existed."""
     with get_db() as conn:
-        cursor = conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        owner_filter = " AND user_id = ?" if user_id is not None else ""
+        params: tuple[Any, ...] = (session_id, user_id) if user_id is not None else (session_id,)
+        cursor = conn.execute(
+            "DELETE FROM sessions WHERE id = ?" + owner_filter,
+            params,
+        )
     deleted = cursor.rowcount > 0
     if deleted:
         _invalidate_session_cache(session_id)
@@ -836,7 +972,56 @@ def get_session_message_count(session_id: str) -> int:
     return int(row["cnt"]) if row else 0
 
 
-def list_sessions_with_counts(project_id: str | None = None, limit: int = 100) -> list[dict]:
+def count_sessions(project_id: str | None = None, *, user_id: str | None = None) -> int:
+    """Count sessions without loading the complete history into the API."""
+    with get_db() as conn:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM sessions" + where,
+            params,
+        ).fetchone()
+    return int(row["cnt"]) if row else 0
+
+
+def _decorate_session_rows(sessions: list[dict]) -> list[dict]:
+    now = datetime.now(UTC)
+    for session in sessions:
+        try:
+            session["message_count"] = get_session_message_count(session["id"])
+        except Exception:
+            session["message_count"] = 0
+        try:
+            last = session.get("last_active_at")
+            if last:
+                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                age = now - last_dt
+                if age < timedelta(minutes=5):
+                    session["status"] = "active"
+                elif age < timedelta(hours=24):
+                    session["status"] = "idle"
+                else:
+                    session["status"] = "closed"
+            else:
+                session["status"] = "closed"
+        except Exception:
+            session["status"] = "closed"
+    return sessions
+
+
+def list_sessions_with_counts(
+    project_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    user_id: str | None = None,
+) -> list[dict]:
     """Same as ``list_sessions`` but with a ``message_count`` and ``status`` column attached.
 
     ``status`` is derived from ``last_active_at``:
@@ -844,29 +1029,110 @@ def list_sessions_with_counts(project_id: str | None = None, limit: int = 100) -
       * ``idle``    — last activity 5 min to 24 h ago
       * ``closed``  — last activity more than 24 h ago
     """
-    sessions = list_sessions(project_id=project_id, limit=limit)
-    now = datetime.now(UTC)
-    for s in sessions:
-        try:
-            s["message_count"] = get_session_message_count(s["id"])
-        except Exception:
-            s["message_count"] = 0
-        try:
-            last = s.get("last_active_at")
-            if last:
-                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
-                age = now - last_dt
-                if age < timedelta(minutes=5):
-                    s["status"] = "active"
-                elif age < timedelta(hours=24):
-                    s["status"] = "idle"
-                else:
-                    s["status"] = "closed"
-            else:
-                s["status"] = "closed"
-        except Exception:
-            s["status"] = "closed"
-    return sessions
+    sessions = list_sessions(
+        project_id=project_id, limit=limit, offset=offset, user_id=user_id
+    )
+    return _decorate_session_rows(sessions)
+
+
+@monitor_query_performance
+def search_sessions(
+    query: str,
+    *,
+    project_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    user_id: str | None = None,
+) -> tuple[list[dict], int]:
+    """Search session titles, modes, and persisted message text.
+
+    Message text currently uses SQLite's built-in LIKE so this remains
+    compatible with existing databases and needs no schema migration. The
+    result includes a short snippet and the kind of match for the UI.
+    """
+    needle = query.strip()[:200]
+    if not needle:
+        return [], 0
+    escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped.lower()}%"
+    project_filter = " AND s.project_id = ?" if project_id else ""
+    user_filter = " AND s.user_id = ?" if user_id is not None else ""
+    base_sql = f"""
+        FROM sessions s
+        WHERE (
+            lower(COALESCE(s.title, '')) LIKE ? ESCAPE '\\'
+            OR lower(COALESCE(s.mode, '')) LIKE ? ESCAPE '\\'
+            OR EXISTS (
+                SELECT 1 FROM messages mm
+                WHERE mm.session_id = s.id
+                  AND lower(mm.content) LIKE ? ESCAPE '\\'
+            )
+        ){project_filter}{user_filter}
+    """
+    with get_db() as conn:
+        count_params: tuple[Any, ...] = (pattern, pattern, pattern)
+        if project_id:
+            count_params += (project_id,)
+        if user_id is not None:
+            count_params += (user_id,)
+        total_row = conn.execute(
+            f"SELECT COUNT(*) AS cnt {base_sql}", count_params
+        ).fetchone()
+        total = int(total_row["cnt"]) if total_row else 0
+
+        params: tuple[Any, ...] = (
+            pattern,
+            pattern,
+            pattern,
+            needle.lower(),
+            pattern,
+            pattern,
+            pattern,
+            pattern,
+        )
+        if project_id:
+            params += (project_id,)
+        if user_id is not None:
+            params += (user_id,)
+        params += (limit, offset)
+        rows = conn.execute(
+            f"""
+            SELECT s.*,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM messages mm
+                        WHERE mm.session_id = s.id
+                          AND lower(mm.content) LIKE ? ESCAPE '\\'
+                    ) THEN 'message'
+                    WHEN lower(COALESCE(s.title, '')) LIKE ? ESCAPE '\\' THEN 'title'
+                    ELSE 'mode'
+                END AS match_type,
+                (
+                    SELECT m.id FROM messages m
+                    WHERE m.session_id = s.id
+                      AND lower(m.content) LIKE ? ESCAPE '\\'
+                    ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
+                ) AS match_message_id,
+                (
+                    SELECT substr(
+                        m.content,
+                        max(instr(lower(m.content), ?) - 60, 1),
+                        180
+                    ) FROM messages m
+                    WHERE m.session_id = s.id
+                      AND lower(m.content) LIKE ? ESCAPE '\\'
+                    ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
+                ) AS snippet
+            {base_sql}
+            ORDER BY s.last_active_at DESC, s.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            params,
+        ).fetchall()
+        # Keep the visible list's count/status fields consistent with the
+        # normal session endpoint without exposing the matching message body.
+        sessions = _decorate_session_rows([dict(row) for row in rows])
+    return sessions, total
 
 
 # ───── MESSAGES ─────────────────────────────────────────────────────────
@@ -884,14 +1150,15 @@ def add_message(
     tokens_out: int = 0,
     cost_usd: float = 0.0,
     latency_ms: int = 0,
+    run_id: str | None = None,
 ) -> dict:
     mid = _new_id()
     with get_db() as conn:
         conn.execute(
             """INSERT INTO messages
                (id, session_id, role, content, tier_used, model_used, tools_used_json,
-                tokens_in, tokens_out, cost_usd, latency_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                tokens_in, tokens_out, cost_usd, latency_ms, run_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 mid,
                 session_id,
@@ -904,6 +1171,7 @@ def add_message(
                 tokens_out,
                 cost_usd,
                 latency_ms,
+                run_id,
             ),
         )
         conn.execute(
@@ -922,28 +1190,98 @@ def add_message(
 def get_messages(session_id: str, limit: int = 200) -> list[dict]:
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC LIMIT ?",
-            (session_id, limit),
+            """SELECT * FROM messages
+                WHERE session_id = ?
+                  AND id IN (
+                      SELECT id FROM messages
+                       WHERE session_id = ?
+                       ORDER BY created_at DESC, rowid DESC
+                       LIMIT ?
+                  )
+                ORDER BY created_at ASC, rowid ASC""",
+            (session_id, session_id, limit),
         ).fetchall()
-        messages: list[dict] = []
-        for raw_row in rows:
-            row = dict(raw_row)
-            if (
-                messages
-                and row.get("role") == messages[-1].get("role")
-                and row.get("content") == messages[-1].get("content")
-            ):
-                # Older chat runs persisted the user turn once when execution
-                # started and again when it completed.  Keep one logical turn
-                # without destructively rewriting the user's SQLite history.
-                first = messages[-1]
-                merged = {**first, **row}
-                merged["id"] = first.get("id")
-                merged["created_at"] = first.get("created_at")
-                messages[-1] = merged
-                continue
-            messages.append(row)
-        return messages
+        return _collapse_legacy_duplicate_messages([dict(row) for row in rows])
+
+
+def _collapse_legacy_duplicate_messages(rows: list[dict]) -> list[dict]:
+    """Collapse legacy duplicate user writes without changing stored data."""
+    messages: list[dict] = []
+    for row in rows:
+        row.pop("_rowid", None)
+        if (
+            messages
+            and row.get("role") == "user"
+            and row.get("role") == messages[-1].get("role")
+            and row.get("content") == messages[-1].get("content")
+            and row.get("run_id") == messages[-1].get("run_id")
+        ):
+            # Older chat runs persisted the user turn once when execution
+            # started and again when it completed. Keep one logical turn
+            # without destructively rewriting the user's SQLite history.
+            first = messages[-1]
+            merged = {**first, **row}
+            merged["id"] = first.get("id")
+            merged["created_at"] = first.get("created_at")
+            messages[-1] = merged
+            continue
+        messages.append(row)
+    return messages
+
+
+@monitor_query_performance
+def get_messages_page(
+    session_id: str,
+    *,
+    limit: int = 100,
+    before_id: str | None = None,
+) -> tuple[list[dict], bool, str | None]:
+    """Fetch one newest-first cursor page, returned in chronological order.
+
+    ``before_id`` is an opaque message id from the prior page. The stable
+    cursor resolves its timestamp and SQLite rowid so messages that share a
+    timestamp cannot be skipped or repeated.
+    """
+    bounded_limit = max(1, min(int(limit), 500))
+    with get_db() as conn:
+        cursor_row: sqlite3.Row | None = None
+        if before_id:
+            cursor_row = conn.execute(
+                "SELECT created_at, rowid AS _rowid FROM messages "
+                "WHERE session_id = ? AND id = ?",
+                (session_id, before_id),
+            ).fetchone()
+            if cursor_row is None:
+                raise ValueError("Message cursor does not belong to this session")
+
+        if cursor_row is None:
+            rows = conn.execute(
+                "SELECT *, rowid AS _rowid FROM messages WHERE session_id = ? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (session_id, bounded_limit + 1),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT *, rowid AS _rowid FROM messages "
+                "WHERE session_id = ? AND (created_at < ? "
+                "OR (created_at = ? AND rowid < ?)) "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (
+                    session_id,
+                    cursor_row["created_at"],
+                    cursor_row["created_at"],
+                    cursor_row["_rowid"],
+                    bounded_limit + 1,
+                ),
+            ).fetchall()
+
+    has_more = len(rows) > bounded_limit
+    page_rows = rows[:bounded_limit]
+    next_cursor = str(page_rows[-1]["id"]) if has_more and page_rows else None
+    messages = _collapse_legacy_duplicate_messages(
+        [dict(row) for row in reversed(page_rows)]
+    )
+    return messages, has_more, next_cursor
 
 
 def _session_run_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -1009,8 +1347,8 @@ def upsert_session_run(
                 phase = excluded.phase,
                 prompt = CASE WHEN excluded.prompt <> '' THEN excluded.prompt ELSE session_runs.prompt END,
                 partial_output = excluded.partial_output,
-                checkpoint_json = excluded.checkpoint_json,
-                usage_json = excluded.usage_json,
+                checkpoint_json = CASE WHEN ? THEN excluded.checkpoint_json ELSE session_runs.checkpoint_json END,
+                usage_json = CASE WHEN ? THEN excluded.usage_json ELSE session_runs.usage_json END,
                 error = excluded.error,
                 goal_id = COALESCE(excluded.goal_id, session_runs.goal_id),
                 mission_id = COALESCE(excluded.mission_id, session_runs.mission_id),
@@ -1049,6 +1387,8 @@ def upsert_session_run(
                 now,
                 now,
                 finished_at,
+                checkpoint is not None,
+                usage is not None,
             ),
         )
         row = conn.execute("SELECT * FROM session_runs WHERE id = ?", (run_id,)).fetchone()
@@ -1063,12 +1403,17 @@ def get_session_run(run_id: str) -> dict[str, Any] | None:
     return _session_run_row(row)
 
 
-def list_session_runs(session_id: str, limit: int = 20) -> list[dict[str, Any]]:
-    """List recent runs for the session, newest first."""
+def list_session_runs(
+    session_id: str,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """List recent runs for the session, newest first, from a bounded page."""
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT * FROM session_runs WHERE session_id = ? ORDER BY updated_at DESC LIMIT ?",
-            (session_id, max(1, min(limit, 100))),
+            "SELECT * FROM session_runs WHERE session_id = ? "
+            "ORDER BY updated_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            (session_id, max(1, min(limit, 101)), max(0, int(offset))),
         ).fetchall()
         return [_session_run_row(row) for row in rows if row is not None]
 

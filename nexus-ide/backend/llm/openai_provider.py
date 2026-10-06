@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from backend.runtime.reasoning import REASONING_SINK_OPTION, deliver_reasoning
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,13 +65,20 @@ class OpenAIProvider:
         api_key: str | None = None,
         *,
         api_prefix: str = "/v1",
+        read_timeout: float = 120.0,
+        send_stream_options: bool = True,
     ) -> None:
         self._base_url = _normalize_api_root(base_url)
         self._api_key = api_key
         self._api_prefix = "/" + api_prefix.strip("/") if api_prefix.strip("/") else ""
+        self._read_timeout = float(read_timeout)
+        self._send_stream_options = bool(send_stream_options)
         self._client = self._new_client()
         # Internal — set after each successful chat_complete / chat_stream
         self._last_usage: dict[str, int] = {}
+        # Kept separately from the content stream so orchestration can tell a
+        # normal stop from a provider-side output-token truncation.
+        self.last_finish_reason = ""
 
     def _api_path(self, path: str) -> str:
         suffix = path.lstrip("/")
@@ -89,8 +98,12 @@ class OpenAIProvider:
             },
             # Free OpenRouter routes can spend time in a queue before the
             # first token. A short read timeout is indistinguishable from a
-            # broken network in the UI.
-            timeout=httpx.Timeout(connect=15.0, read=120.0, write=20.0, pool=20.0),
+            # broken network in the UI. Local servers (LM Studio) may need a
+            # much longer window: the model is cold-loaded from disk on the
+            # first prompt after startup.
+            timeout=httpx.Timeout(
+                connect=15.0, read=self._read_timeout, write=20.0, pool=20.0
+            ),
             verify=_system_verify_context(),
         )
 
@@ -110,13 +123,39 @@ class OpenAIProvider:
         return dict(self._last_usage)
 
     def _extract_usage(self, data: dict[str, Any]) -> dict[str, int]:
-        """Extract token counts from an OpenAI-compatible response body."""
+        """Extract token counts from an OpenAI-compatible response body.
+
+        ``completion_tokens_details.reasoning_tokens`` is read too: it is the
+        only honest source for how much of the budget a reasoning model spent
+        thinking, and it is what makes the session panel stop reporting 0.
+        """
         usage = data.get("usage", {})
-        return {
+        if not isinstance(usage, dict):
+            usage = {}
+        details = usage.get("completion_tokens_details")
+        reasoning = 0
+        if isinstance(details, dict):
+            for key in ("reasoning_tokens", "reasoning", "thoughts_tokens"):
+                value = details.get(key)
+                if isinstance(value, int | float) and value > 0:
+                    reasoning = int(value)
+                    break
+        if not reasoning:
+            for key in ("reasoning_tokens", "thinking_tokens"):
+                value = usage.get(key)
+                if isinstance(value, int | float) and value > 0:
+                    reasoning = int(value)
+                    break
+        extracted = {
             "input_tokens": usage.get("prompt_tokens", 0) or 0,
             "output_tokens": usage.get("completion_tokens", 0) or 0,
             "total_tokens": usage.get("total_tokens", 0) or 0,
         }
+        if reasoning:
+            # Only present when the provider actually reported it, so a
+            # non-reasoning run keeps the historical dictionary shape.
+            extracted["reasoning_tokens"] = reasoning
+        return extracted
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -148,8 +187,11 @@ class OpenAIProvider:
             # unless it is asked to. Without this the session panel showed
             # "ENTRADA 0 / SAÍDA 0" forever while 380 tools had run (audit
             # 2026-08-16, P9d) and no cost or context-pressure signal existed.
-            "stream_options": {"include_usage": True},
+            # Some stricter OpenAI-compatible servers reject the parameter, so
+            # subclasses may opt out and retry without it.
         }
+        if self._send_stream_options:
+            payload["stream_options"] = {"include_usage": True}
         if options:
             for key in (
                 "temperature",
@@ -170,6 +212,7 @@ class OpenAIProvider:
                     payload[key] = options[key]
 
         self._last_usage = {}
+        self.last_finish_reason = ""
         emitted_text = False
         # Accumulate streamed native tool-call fragments keyed by their index.
         # OpenAI streams ``function.name`` once and ``function.arguments`` in
@@ -195,14 +238,28 @@ class OpenAIProvider:
                         if not choices or not isinstance(choices[0], dict):
                             usage = data.get("usage")
                             if usage:
-                                self._last_usage = self._extract_usage(data)
+                                self._last_usage.update(self._extract_usage(data))
                             continue
-                        delta = choices[0].get("delta", {})
-                        content = delta.get("content", "")
+                        finish_reason = choices[0].get("finish_reason")
+                        if finish_reason:
+                            self.last_finish_reason = str(finish_reason).strip().lower()
+                        # ``delta.reasoning_content`` (DeepSeek R1, o-series) and
+                        # ``delta.reasoning`` are the model's own approach text.
+                        # It is routed to the caller's reasoning sink and NEVER
+                        # yielded: mixing it into the answer stream is how a
+                        # private transcript ends up in a user-visible reply.
+                        # The OpenAI Responses API streams summaries as their own
+                        # frame, which the shared parser also understands.
+                        parsed = deliver_reasoning(
+                            (options or {}).get(REASONING_SINK_OPTION), "openai", data
+                        )
+                        if parsed.usage:
+                            self._last_usage.update(parsed.usage)
+                        content = parsed.content
                         if content:
                             emitted_text = True
                             yield content
-                        for frag in delta.get("tool_calls") or ():
+                        for frag in parsed.tool_calls:
                             if not isinstance(frag, dict):
                                 continue
                             idx = frag.get("index", 0) or 0
@@ -216,7 +273,7 @@ class OpenAIProvider:
                         # include it on the final chunk.
                         usage = data.get("usage")
                         if usage:
-                            self._last_usage = self._extract_usage(data)
+                            self._last_usage.update(self._extract_usage(data))
                     except (json.JSONDecodeError, IndexError, TypeError):
                         continue
 
@@ -259,6 +316,7 @@ class OpenAIProvider:
     ) -> str:
         """Non-streaming chat completion."""
         self._ensure_open()
+        self.last_finish_reason = ""
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -278,6 +336,9 @@ class OpenAIProvider:
 
         data = resp.json()
         self._last_usage = self._extract_usage(data)
+        finish_reason = data["choices"][0].get("finish_reason")
+        if finish_reason:
+            self.last_finish_reason = str(finish_reason).strip().lower()
         message = data["choices"][0]["message"]
         content = message.get("content") or ""
         # Fold any native tool calls back into the ``<tool_call>`` wrapper so the

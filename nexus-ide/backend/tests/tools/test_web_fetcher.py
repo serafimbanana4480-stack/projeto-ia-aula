@@ -123,7 +123,12 @@ class TestFetchAndSummarize:
             assert result["title"] == "Cached"
 
     @pytest.mark.asyncio
-    async def test_jina_success(self, tmp_path: pytest.TempPathFactory) -> None:
+    async def test_jina_success(
+        self,
+        tmp_path: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NEXUS_ENABLE_REMOTE_WEB_READER", "true")
         with patch(
             "backend.tools.web_fetcher.CACHE_DB_PATH",
             tmp_path / "test_web_cache.db",
@@ -140,6 +145,45 @@ class TestFetchAndSummarize:
                 assert result["status"] == "fetched_via_jina"
                 assert result["title"] == "Jina Title"
                 assert "Hello world" in result["summary"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_url_is_rejected_before_cache_lookup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache_get = MagicMock(side_effect=AssertionError("cache must not be consulted"))
+        monkeypatch.setattr("backend.tools.web_fetcher._cache_get", cache_get)
+
+        result = await fetch_and_summarize("http://127.0.0.1/private")
+
+        assert result["status"] == "error"
+        assert result["links"] == []
+        cache_get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_remote_reader_is_disabled_by_default(
+        self,
+        tmp_path: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("NEXUS_ENABLE_REMOTE_WEB_READER", raising=False)
+        with (
+            patch(
+                "backend.tools.web_fetcher.CACHE_DB_PATH",
+                tmp_path / "test_web_cache.db",
+            ),
+            patch("backend.tools.web_fetcher._request_with_retry", new_callable=AsyncMock) as request,
+        ):
+            request.return_value.text = (
+                "<html><head><title>Direct</title></head>"
+                "<body><main><p>Direct content</p></main></body></html>"
+            )
+
+            result = await fetch_and_summarize("https://example.com/path")
+
+        assert result["status"] == "fetched_direct"
+        request.assert_awaited_once()
+        assert "r.jina.ai" not in request.await_args.args[2]
 
     @pytest.mark.asyncio
     async def test_direct_fetch_fallback(self, tmp_path: pytest.TempPathFactory) -> None:

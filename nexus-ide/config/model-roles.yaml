@@ -1,0 +1,21 @@
+# NEXUS IDE — Model Roles (Infinity v3)
+#
+# Port of oh-my-pi modelRoles. Each role resolves to a concrete model via:
+#   override > NEXUS_MODEL_ROLES env JSON > this file > builtin role→tier.
+# Selectors: "@other-role" alias chain, a tier name from models.yaml
+# (micro/fast/coder/reasoning/deep/...), or a concrete provider model id.
+# Optional ":thinking-level" suffix (off|minimal|low|medium|high|xhigh).
+#
+# All tiers currently resolve to the free OpenRouter pool, so these defaults
+# are honest no-ops until concrete ids are configured.
+
+roles:
+  default: "@task"
+  smol: fast
+  tiny: micro
+  slow: deep
+  plan: "@slow"
+  designer: medium
+  task: coder
+  advisor: "@slow"
+  vision: vision

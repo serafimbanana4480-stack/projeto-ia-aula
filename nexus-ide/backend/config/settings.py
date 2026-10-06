@@ -134,6 +134,22 @@ class Settings(BaseSettings):
     ollama_dashboard_host: str = Field(default="http://localhost:11434")
     nexus_enable_ollama: bool = Field(default=False, validation_alias="NEXUS_ENABLE_OLLAMA")
 
+    # LM Studio (local OpenAI-compatible server on port 1234). Zero-cost like
+    # Ollama, so the free-only policy treats it as an eligible local provider.
+    lmstudio_host: str = Field(default="http://localhost:1234/v1")
+    lmstudio_api_key: str = Field(default="")
+    lmstudio_default_model: str = Field(default="lfm2.5-2.6b-heretic-abliterated")
+    lmstudio_fast_model: str = Field(default="lfm2.5-2.6b-heretic-abliterated")
+    lmstudio_coder_model: str = Field(default="lfm2.5-2.6b-heretic-abliterated")
+    lmstudio_read_timeout: float = Field(default=600.0)
+
+    # Primary runtime: per-signal provider timeout in seconds (0 = off). Bounds
+    # a wedged or cold-loading small local model instead of hanging the turn.
+    # The process env var takes precedence (tests monkeypatch it directly).
+    nexus_primary_signal_timeout: float = Field(
+        default=0.0, validation_alias="NEXUS_PRIMARY_SIGNAL_TIMEOUT", ge=0
+    )
+
     # Cloud API keys (used when llm_provider != "local")
     openai_api_key: str = Field(default="")
     deepseek_api_key: str = Field(default="")

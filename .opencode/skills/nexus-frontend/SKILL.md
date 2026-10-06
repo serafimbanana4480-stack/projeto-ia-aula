@@ -1,6 +1,11 @@
 ---
 name: nexus-frontend
 description: Trabalhar no frontend Next.js/React 19 do NEXUS IDE em nexus-ide/frontend (ChatPanel, stores Zustand, vitest, Playwright, type-check). Use quando o pedido envolve UI, chat, dashboards, componentes, hooks, stores ou testes frontend.
+version: 1.0.0
+status: active
+priority: 70
+triggers: [NEXUS frontend, Next.js frontend, React UI, Vitest frontend, dashboard component]
+tags: [nexus, frontend, react, nextjs]
 ---
 
 # Frontend NEXUS IDE

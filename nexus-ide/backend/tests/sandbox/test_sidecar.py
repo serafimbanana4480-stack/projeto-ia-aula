@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from backend.sandbox.sidecar import (
     PostgresConnection,
     RedisConnection,
@@ -28,11 +26,11 @@ class TestSidecarManager:
             user="postgres",
             password="test",
         )
-        assert "postgresql://postgres:test@nexus-pg-abc123:5432/test" == conn.connection_string
+        assert conn.connection_string == "postgresql://postgres:test@nexus-pg-abc123:5432/test"
 
     def test_redis_connection_string(self) -> None:
         conn = RedisConnection(host="nexus-redis-abc123", port=6379)
-        assert "redis://nexus-redis-abc123:6379/0" == conn.connection_string
+        assert conn.connection_string == "redis://nexus-redis-abc123:6379/0"
 
     def test_stop_all_removes_labeled_containers(self) -> None:
         manager = SidecarManager()

@@ -1,6 +1,6 @@
 "use client";
 
-import { create, type StoreApi } from "zustand";
+import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import { apiUrl, authHeaders } from "../lib/api";
 
@@ -56,6 +56,8 @@ export interface Agent {
   status: AgentStatus | string;
   currentTask?: string;
   task?: string;
+  tokensUsed?: number;
+  tokenBudget?: number;
   memoryUsed: number;
   memory?: number;
   tools: AgentTool[];
@@ -67,7 +69,7 @@ export interface Agent {
   contextWindow: number;
   contextUsed: number;
   subTaskQueue: string[];
-  healthStatus: "healthy" | "degraded" | "critical";
+  healthStatus: "healthy" | "degraded" | "critical" | "unknown";
   reasoningHistory: ReasoningStep[];
   lastSeen: number;
   uptime: number;
@@ -85,15 +87,51 @@ export interface Agent {
 
 interface AgentStore {
   agents: Record<string, Agent>;
+  /**
+   * Per-agent live reasoning steps, keyed by agent id.
+   *
+   * READ by two live components, WRITTEN by nothing in production:
+   *   - `components/nexus/widgets/LiveReasoningStream.tsx` (dynamically
+   *     imported by `app/nexus/page.tsx`)
+   *   - `app/nexus/agents/[agentId]/page.tsx` ("Live Chain of Thought")
+   * so both permanently render their empty state.
+   *
+   * NOT WIRED ON PURPOSE (audit 2026-09-26). The obvious candidate producer is
+   * the chat lane's reasoning text (`StreamEvent` frames of type `thinking`,
+   * folded by `lib/foldRun.ts` into `ChatMessage.thinking`). Wiring it here
+   * would be dishonest rather than merely unfinished, for two reasons:
+   *
+   *  1. `ChatMessage.thinking` is one coalesced blob per assistant turn. It is
+   *     not a per-agent step list, and splitting it would require a
+   *     segmentation heuristic that invents the boundaries it claims to show.
+   *  2. the id spaces do not match. `activeStream` is keyed by the agent ids
+   *     from `GET /api/agents/instances` (the nexus agent registry), while the
+   *     chat stream's `StreamEvent.agent` is a free-form label from the
+   *     orchestrator. Mapping one to the other would misattribute reasoning to
+   *     whichever agent happened to share a name.
+   *
+   * To wire it honestly, one of these has to be true first:
+   *   (a) the backend emits an ordered, per-agent reasoning step stream that
+   *       carries the nexus agent id — the same shape
+   *       `backend/runtime/events.py` already uses for `(run_id, seq)`; or
+   *   (b) `GET /api/agents/instances` starts returning the live run's steps,
+   *       so `fetchAgents` can populate this map.
+   *
+   * Until then `addReasoningStep` / `clearReasoning` are covered by
+   * `tests/stores/useAgentStore.test.ts` but have no production caller.
+   */
   activeStream: Record<string, ReasoningStep[]>;
   messages: AgentMessage[];
   isLoading: boolean;
+  hasFetchedAgents: boolean;
   error: string | null;
 
   setAgent: (agent: Agent) => void;
   updateAgent: (id: string, patch: Partial<Agent>) => void;
   removeAgent: (id: string) => void;
+  /** See the `activeStream` doc comment: no production caller yet. */
   addReasoningStep: (agentId: string, step: ReasoningStep) => void;
+  /** See the `activeStream` doc comment: no production caller yet. */
   clearReasoning: (agentId: string) => void;
   addMessage: (msg: AgentMessage) => void;
   setAgents: (agents: Agent[]) => void;
@@ -108,21 +146,164 @@ const AGENT_COLORS: Record<string, string> = {
   DOCUMENTER: "#ec4899", OPTIMIZER: "#f97316",
 };
 
-export function mapApiAgent(apiAgent: any): Agent {
-  const role = (apiAgent.name || apiAgent.role || "UNKNOWN").toUpperCase();
+/**
+ * Loose shape of the agent objects the backend emits.
+ *
+ * The API has drifted over time (camelCase and snake_case in the same
+ * payload, and `/api/agents/instances` is still `any[]` at the fetch site),
+ * so every field is optional and read defensively. Typing it — rather than
+ * taking `any` — is what makes a *misspelled* field a compile error instead
+ * of a silent `undefined` that `?? 0` would swallow.
+ */
+interface ApiAgentLike {
+  id?: string;
+  instance_id?: string;
+  agentId?: string;
+  agent_id?: string;
+  name?: string;
+  agent_type?: string;
+  role?: string;
+  specialization?: string;
+  model?: string;
+  provider?: string;
+  status?: string;
+  currentTask?: string;
+  current_task?: string;
+  task?: string;
+  objective?: string;
+  tokensUsed?: number;
+  tokens_used?: number;
+  tokenBudget?: number;
+  token_budget?: number;
+  memoryUsed?: number;
+  memory?: number;
+  tools?: Array<{ name?: string; description?: string; status?: string }>;
+  costAccumulated?: number;
+  speed?: number;
+  tokensPerSecond?: number;
+  reasoningDepth?: number;
+  accuracy?: number;
+  contextWindow?: number;
+  contextUsed?: number;
+  subTaskQueue?: string[];
+  healthStatus?: string;
+  health_status?: string;
+  reasoningHistory?: Array<Partial<ReasoningStep> & { id?: string }>;
+  lastSeen?: number;
+  start_time?: number;
+  uptime?: number;
+  totalTasks?: number;
+  successfulTasks?: number;
+  failedTasks?: number;
+  avgLatencyMs?: number;
+  chainOfThought?: string;
+  autonomyLevel?: number;
+  connections?: string[];
+  cpu?: number;
+  confidence?: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function firstFiniteNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+const TOOL_STATUSES: readonly string[] = ["available", "running", "error"];
+const REASONING_STEP_TYPES: readonly string[] = [
+  "thought",
+  "plan",
+  "reflection",
+  "criticism",
+  "tool_use",
+  "memory_lookup",
+  "validation",
+];
+
+/**
+ * Tool status is a closed union on `AgentTool` but an open string on the wire.
+ * The old `any` parameter passed it straight through, so a backend that grew a
+ * fourth status wrote a value the type system had already ruled out, and every
+ * consumer's `status === "running"` check silently went false. Unknown tools
+ * are kept (so the operator can see them) but are reported as `"error"`, which
+ * is the honest reading of a tool we cannot vouch for.
+ */
+function toAgentTools(tools: ApiAgentLike["tools"]): AgentTool[] {
+  if (!Array.isArray(tools)) return [];
+  const mapped: AgentTool[] = [];
+  for (const tool of tools) {
+    if (!tool || typeof tool.name !== "string" || !tool.name) continue;
+    mapped.push({
+      name: tool.name,
+      description: typeof tool.description === "string" ? tool.description : "",
+      status: TOOL_STATUSES.includes(tool.status ?? "")
+        ? (tool.status as AgentTool["status"])
+        : "error",
+    });
+  }
+  return mapped;
+}
+
+/** Drops reasoning entries the UI cannot render (no id, or an unknown type). */
+function toReasoningHistory(
+  steps: ApiAgentLike["reasoningHistory"],
+): ReasoningStep[] {
+  if (!Array.isArray(steps)) return [];
+  const mapped: ReasoningStep[] = [];
+  for (const [index, step] of steps.entries()) {
+    if (!step || typeof step.content !== "string") continue;
+    mapped.push({
+      id: typeof step.id === "string" && step.id ? step.id : `step-${index}`,
+      type: REASONING_STEP_TYPES.includes(step.type ?? "")
+        ? (step.type as ReasoningStep["type"])
+        : "thought",
+      content: step.content,
+      timestamp: typeof step.timestamp === "number" ? step.timestamp : 0,
+      tokens: step.tokens,
+      confidence: step.confidence,
+      citations: Array.isArray(step.citations) ? step.citations : undefined,
+    });
+  }
+  return mapped;
+}
+
+export function mapApiAgent(apiAgent: ApiAgentLike): Agent {
+  const sourceName = firstString(apiAgent.name, apiAgent.agent_type, apiAgent.role);
+  const role = firstString(apiAgent.role, apiAgent.agent_type, apiAgent.name, "UNKNOWN").toUpperCase();
+  const id = firstString(apiAgent.id, apiAgent.instance_id, apiAgent.agentId, apiAgent.agent_id, sourceName.toLowerCase());
+  const status = firstString(apiAgent.status).toLowerCase() || "unknown";
+  const healthStatus = firstString(apiAgent.healthStatus, apiAgent.health_status).toLowerCase();
+  const tokensUsed = firstFiniteNumber(apiAgent.tokens_used, apiAgent.tokensUsed);
+  const tokenBudget = firstFiniteNumber(apiAgent.token_budget, apiAgent.tokenBudget);
   return {
-    id: apiAgent.id || apiAgent.name?.toLowerCase() || "unknown",
-    name: apiAgent.name || "Unknown Agent",
-    role: role,
-    specialization: apiAgent.specialization || `${role} Agent`,
-    model: apiAgent.model || "local",
-    provider: apiAgent.provider || "Ollama",
-    status: (apiAgent.status || "idle") as AgentStatus,
-    currentTask: apiAgent.currentTask || undefined,
-    task: apiAgent.task || undefined,
+    // Leave absent identity fields empty so malformed records can be filtered;
+    // a synthetic shared ID/name would collapse unrelated instances.
+    id,
+    name: sourceName,
+    role,
+    specialization: apiAgent.specialization || "—",
+    model: apiAgent.model || "—",
+    provider: apiAgent.provider || "—",
+    status: status as AgentStatus,
+    currentTask: firstString(apiAgent.currentTask, apiAgent.current_task, apiAgent.objective, apiAgent.task) || undefined,
+    task: firstString(apiAgent.task, apiAgent.objective) || undefined,
+    tokensUsed,
+    tokenBudget,
     memoryUsed: apiAgent.memoryUsed ?? 0,
     memory: apiAgent.memory ?? 0,
-    tools: apiAgent.tools ?? [],
+    tools: toAgentTools(apiAgent.tools),
     costAccumulated: apiAgent.costAccumulated ?? 0,
     speed: apiAgent.speed ?? 0,
     tokensPerSecond: apiAgent.tokensPerSecond ?? 0,
@@ -131,8 +312,10 @@ export function mapApiAgent(apiAgent: any): Agent {
     contextWindow: apiAgent.contextWindow ?? 0,
     contextUsed: apiAgent.contextUsed ?? 0,
     subTaskQueue: apiAgent.subTaskQueue ?? [],
-    healthStatus: (apiAgent.healthStatus || "healthy") as Agent["healthStatus"],
-    reasoningHistory: apiAgent.reasoningHistory ?? [],
+    healthStatus: ["healthy", "degraded", "critical"].includes(healthStatus || "")
+      ? healthStatus as Agent["healthStatus"]
+      : "unknown",
+    reasoningHistory: toReasoningHistory(apiAgent.reasoningHistory),
     lastSeen: apiAgent.lastSeen ?? Date.now(),
     uptime: apiAgent.uptime ?? 0,
     totalTasks: apiAgent.totalTasks ?? 0,
@@ -154,6 +337,7 @@ export const useAgentStore = create<AgentStore>()(
     activeStream: {},
     messages: [],
     isLoading: false,
+    hasFetchedAgents: false,
     error: null,
 
     setAgent: (agent) =>
@@ -203,12 +387,21 @@ export const useAgentStore = create<AgentStore>()(
           headers: authHeaders(),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        const agentList: any[] = data.agents ?? [];
-        const mapped = agentList.map(mapApiAgent);
+        const data: unknown = await res.json();
+        if (!isRecord(data) || !Array.isArray(data.agents)) {
+          throw new Error("A API devolveu uma resposta de agentes inválida.");
+        }
+        const agentList = data.agents.filter(isRecord) as ApiAgentLike[];
+      const mapped = agentList
+        .map(mapApiAgent)
+        .filter((agent) => Boolean(agent.id.trim()) && Boolean(agent.name.trim()));
+        if (agentList.length > 0 && mapped.length === 0) {
+          throw new Error("A API devolveu agentes sem identificação.");
+        }
         set({
           agents: Object.fromEntries(mapped.map((a) => [a.id, a])),
           isLoading: false,
+          hasFetchedAgents: true,
         });
       } catch (err) {
         set({

@@ -4,7 +4,6 @@ Shared types used across sandbox modules to avoid circular imports.
 """
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 
 
 class RiskLevel(str, Enum):

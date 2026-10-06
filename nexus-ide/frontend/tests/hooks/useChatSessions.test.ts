@@ -1,6 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { act } from "@testing-library/react";
-import { useChatSessionsStore, type ChatSession } from "../../hooks/useChatSessions";
+import {
+  searchChatSessions,
+  useChatSessionsStore,
+  type ChatSession,
+} from "../../hooks/useChatSessions";
 
 const { mockAuthenticatedFetch } = vi.hoisted(() => ({
   mockAuthenticatedFetch: vi.fn(),
@@ -33,6 +37,11 @@ describe("useChatSessionsStore", () => {
         sessions: [],
         currentId: null,
         loading: false,
+        initialized: false,
+        total: 0,
+        nextOffset: 0,
+        loadingMore: false,
+        hasMore: false,
         error: null,
       });
     });
@@ -49,6 +58,14 @@ describe("useChatSessionsStore", () => {
 
   it("starts not loading", () => {
     expect(useChatSessionsStore.getState().loading).toBe(false);
+  });
+
+  it("does not treat the default sentinel as a session", () => {
+    act(() => {
+      useChatSessionsStore.getState().setCurrentId("default");
+    });
+    expect(useChatSessionsStore.getState().currentId).toBeNull();
+    expect(localStorage.getItem("nexus.chat.currentSession")).toBeNull();
   });
 
   it("starts with null error", () => {
@@ -106,7 +123,181 @@ describe("useChatSessionsStore", () => {
 
     expect(useChatSessionsStore.getState().sessions).toHaveLength(2);
     expect(useChatSessionsStore.getState().loading).toBe(false);
+    expect(useChatSessionsStore.getState().initialized).toBe(true);
     expect(useChatSessionsStore.getState().error).toBeNull();
+  });
+
+  it("loads the next session page without adding duplicates", async () => {
+    const first = [makeSession({ id: "s1" }), makeSession({ id: "s2" })];
+    const next = [makeSession({ id: "s2" }), makeSession({ id: "s3" })];
+    act(() => {
+      useChatSessionsStore.setState({
+        sessions: first,
+        initialized: true,
+        total: 3,
+        nextOffset: 2,
+        hasMore: true,
+      });
+    });
+    mockAuthenticatedFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ sessions: next, total: 3, offset: 2 }),
+    });
+
+    await act(async () => {
+      await useChatSessionsStore.getState().loadMore();
+    });
+
+    expect(useChatSessionsStore.getState().sessions.map((session) => session.id)).toEqual([
+      "s1",
+      "s2",
+      "s3",
+    ]);
+    expect(useChatSessionsStore.getState().nextOffset).toBe(4);
+    expect(useChatSessionsStore.getState().hasMore).toBe(false);
+    expect(String(mockAuthenticatedFetch.mock.calls[0][0])).toContain("offset=2");
+  });
+
+  it("finishes an in-flight page before refreshing and keeps the cursor advanced", async () => {
+    let resolvePage: ((value: unknown) => void) | undefined;
+    const pageResponse = new Promise((resolve) => {
+      resolvePage = resolve;
+    });
+    act(() => {
+      useChatSessionsStore.setState({
+        sessions: [makeSession({ id: "s1" }), makeSession({ id: "s2" })],
+        initialized: true,
+        total: 4,
+        nextOffset: 2,
+        hasMore: true,
+      });
+    });
+    mockAuthenticatedFetch
+      .mockReturnValueOnce(pageResponse)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          sessions: [makeSession({ id: "s1" }), makeSession({ id: "s2" })],
+          total: 4,
+          offset: 0,
+        }),
+      });
+
+    let loadingPage: Promise<void> | undefined;
+    let refreshing: Promise<void> | undefined;
+    act(() => {
+      loadingPage = useChatSessionsStore.getState().loadMore();
+      refreshing = useChatSessionsStore.getState().refresh();
+    });
+    expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolvePage?.({
+        ok: true,
+        json: async () => ({
+          sessions: [makeSession({ id: "s3" }), makeSession({ id: "s4" })],
+          total: 4,
+          offset: 2,
+        }),
+      });
+      await Promise.all([loadingPage, refreshing]);
+    });
+
+    expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(2);
+    expect(useChatSessionsStore.getState().sessions.map((session) => session.id)).toEqual([
+      "s1",
+      "s2",
+      "s3",
+      "s4",
+    ]);
+    expect(useChatSessionsStore.getState().nextOffset).toBe(4);
+    expect(useChatSessionsStore.getState().hasMore).toBe(false);
+  });
+
+  it("searches persisted sessions and returns the source match label", async () => {
+    mockAuthenticatedFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        sessions: [
+          {
+            ...makeSession({ id: "s-message" }),
+            match_type: "message",
+            match_message_id: "m1",
+            snippet: "found in persisted message",
+          },
+        ],
+        count: 1,
+        total: 1,
+        offset: 0,
+        limit: 50,
+      }),
+    });
+
+    const result = await searchChatSessions("finding_%", 50, 0);
+    const url = new URL(String(mockAuthenticatedFetch.mock.calls[0][0]));
+    expect(url.pathname).toBe("/api/sessions/search");
+    expect(url.searchParams.get("q")).toBe("finding_%");
+    expect(result.sessions[0]).toMatchObject({
+      id: "s-message",
+      match_type: "message",
+      snippet: "found in persisted message",
+    });
+  });
+
+  it("restores a saved session only when the server returns that session", async () => {
+    localStorage.setItem("nexus.chat.currentSession", "s2");
+    mockAuthenticatedFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ sessions: [makeSession(), makeSession({ id: "s2" })] }),
+    });
+
+    await act(async () => {
+      await useChatSessionsStore.getState().refresh();
+    });
+
+    expect(useChatSessionsStore.getState().currentId).toBe("s2");
+  });
+
+  it("chooses a real session instead of a stale saved id", async () => {
+    localStorage.setItem("nexus.chat.currentSession", "deleted-session");
+    mockAuthenticatedFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ sessions: [makeSession()] }),
+    });
+
+    await act(async () => {
+      await useChatSessionsStore.getState().refresh();
+    });
+
+    expect(useChatSessionsStore.getState().currentId).toBe("s1");
+  });
+
+  it("ensures one session after an empty list and coalesces simultaneous callers", async () => {
+    mockAuthenticatedFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ sessions: [] }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          id: "new-session",
+          title: "Nova sessão",
+          mode: "auto",
+          project_id: null,
+          created_at: "t1",
+          last_active_at: "t1",
+        }),
+      });
+
+    let ids: Array<string | null> = [];
+    await act(async () => {
+      ids = await Promise.all([
+        useChatSessionsStore.getState().ensureCurrentSession(),
+        useChatSessionsStore.getState().ensureCurrentSession(),
+      ]);
+    });
+
+    expect(ids).toEqual(["new-session", "new-session"]);
+    expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(2);
+    expect(useChatSessionsStore.getState().currentId).toBe("new-session");
   });
 
   it("refresh handles HTTP error", async () => {
@@ -163,7 +354,7 @@ describe("useChatSessionsStore", () => {
     expect(body.mode).toBe("deep");
   });
 
-  it("create returns local fallback on HTTP error", async () => {
+  it("does not invent a local session when creation fails", async () => {
     const mockResponse: Response = {
       ok: false, status: 500,
       text: async () => "error",
@@ -175,10 +366,26 @@ describe("useChatSessionsStore", () => {
       result = await useChatSessionsStore.getState().create("New Session");
     });
 
-    // On error, create returns a local fallback session (not null)
-    expect(result).not.toBeNull();
-    expect(result!.title).toBe("New Session");
+    expect(result).toBeNull();
+    expect(useChatSessionsStore.getState().currentId).toBeNull();
+    expect(localStorage.getItem("nexus.chat.currentSession")).toBeNull();
     expect(useChatSessionsStore.getState().error).toBeDefined();
+  });
+
+  it("leaves the session unset when initial recovery and creation both fail", async () => {
+    mockAuthenticatedFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ sessions: [] }) })
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => "offline" });
+
+    let result: string | null = "default";
+    await act(async () => {
+      result = await useChatSessionsStore.getState().ensureCurrentSession();
+    });
+
+    expect(result).toBeNull();
+    expect(useChatSessionsStore.getState().currentId).toBeNull();
+    expect(localStorage.getItem("nexus.chat.currentSession")).toBeNull();
+    expect(useChatSessionsStore.getState().error).toContain("503");
   });
 
   it("rename updates session title", async () => {

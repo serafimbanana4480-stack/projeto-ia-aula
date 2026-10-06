@@ -3,11 +3,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from backend.sandbox.provisioner import (
-    ProvisionConfig,
-    ProvisionResult,
     StackProvisioner,
 )
 

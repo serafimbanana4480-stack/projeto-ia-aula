@@ -1,14 +1,15 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import * as api from "../../lib/api";
+import { authenticatedFetch } from "../../lib/auth";
 
 // Mock the auth module to provide deterministic test headers
 vi.mock("../../lib/auth", () => ({
   authHeaders: () => ({ Authorization: "Bearer mock-token" }),
-  authenticatedFetch: (input: RequestInfo | URL, init: RequestInit = {}) =>
+  authenticatedFetch: vi.fn((input: RequestInfo | URL, init: RequestInit = {}) =>
     fetch(input, {
       ...init,
       headers: { Authorization: "Bearer mock-token", ...(init.headers as Record<string, string> | undefined) },
-    }),
+    })),
   clearAuth: vi.fn(),
   getAccessToken: () => "mock-token",
 }));
@@ -57,6 +58,8 @@ describe("lib/api.ts Client Suite", () => {
         "strong",
         undefined,
         "chat_request_1",
+        "openrouter",
+        true,
       );
       // Verify the fetch was called with the right URL, method, and headers,
       // and that the body contains all expected fields. The exact key order in
@@ -80,6 +83,8 @@ describe("lib/api.ts Client Suite", () => {
         session_id: "session123",
         mode: "agent",
         model: "modelX",
+        model_is_concrete: true,
+        provider: "openrouter",
         project_path: "/proj",
         thinking_strength: "strong",
       });
@@ -106,14 +111,102 @@ describe("lib/api.ts Client Suite", () => {
       });
     });
 
-    it("getSessionHistory retrieves and resolves session messages", async () => {
-      mockResponse(200, { messages: [{ message: "ok" }] });
+    it("getSessionHistory retrieves durable messages with their run link", async () => {
+      mockResponse(200, {
+        messages: [
+          {
+            id: "message-1",
+            role: "assistant",
+            content: "ok",
+            created_at: "2026-09-27T10:00:00Z",
+            run_id: "run-1",
+          },
+        ],
+      });
       const messages = await api.getSessionHistory("sess1");
       expect(global.fetch).toHaveBeenCalledWith(
-        "http://localhost:8000/api/sessions/sess1/history",
+        "http://localhost:8000/api/sessions/sess1/messages?limit=500",
         expect.any(Object)
       );
-      expect(messages).toHaveLength(1);
+      expect(messages).toEqual([
+        expect.objectContaining({
+          id: "message-1",
+          content: "ok",
+          timestamp: "2026-09-27T10:00:00Z",
+          runId: "run-1",
+        }),
+      ]);
+    });
+
+    it("requests an explicitly bounded run history limit", async () => {
+      const runs = Array.from({ length: 25 }, (_, index) => ({
+        id: `run-${index + 1}`,
+        session_id: "sess 1",
+        status: "completed",
+      }));
+      mockResponse(200, { runs });
+
+      const result = await api.getSessionRuns("sess 1", 1000);
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        "http://localhost:8000/api/sessions/sess%201/runs?limit=100",
+        expect.any(Object),
+      );
+      expect(result).toHaveLength(25);
+      expect(result.at(-1)?.id).toBe("run-25");
+    });
+
+    it("loads a run history offset page and preserves its continuation metadata", async () => {
+      mockResponse(200, { runs: [{ id: "run-101", session_id: "sess 1", status: "completed" }], has_more: true, next_offset: 101 });
+      const controller = new AbortController();
+
+      const page = await api.getSessionRunsPage("sess 1", 100, 100, controller.signal);
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        "http://localhost:8000/api/sessions/sess%201/runs?limit=100&offset=100",
+        expect.objectContaining({ signal: controller.signal }),
+      );
+      expect(page).toEqual({
+        runs: [{ id: "run-101", session_id: "sess 1", status: "completed" }],
+        has_more: true,
+        next_offset: 101,
+      });
+    });
+
+    it("loads a cursor history page and preserves run_id/seq replay identity", async () => {
+      mockResponse(200, {
+        count: 2,
+        has_more: true,
+        next_cursor: "message-older",
+        messages: [
+          {
+            id: "message-3",
+            role: "assistant",
+            content: "continua",
+            created_at: "2026-09-27T10:00:02Z",
+            run_id: "run-existing",
+            seq: 7,
+          },
+        ],
+      });
+
+      const page = await api.getSessionHistoryPage("sess 1", 100, "message-older");
+      expect(global.fetch).toHaveBeenCalledWith(
+        "http://localhost:8000/api/sessions/sess%201/messages?limit=100&before_id=message-older",
+        expect.any(Object),
+      );
+      expect(page).toMatchObject({
+        count: 2,
+        has_more: true,
+        next_cursor: "message-older",
+        messages: [
+          {
+            id: "message-3",
+            runId: "run-existing",
+            seq: 7,
+          },
+        ],
+      });
     });
 
     it("preserves the planning envelope and continues a blocked fallback explicitly", async () => {
@@ -136,6 +229,80 @@ describe("lib/api.ts Client Suite", () => {
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({ session_id: "session-plan" }),
+        }),
+      );
+    });
+
+    it("creates chat plans behind an approval gate and can persist the transcript", async () => {
+      mockResponse(200, {
+        status: "ready",
+        source: "planner",
+        error: null,
+        plan: { plan_id: "plan-1", steps: [] },
+        deterministic_proposal: null,
+      });
+
+      await api.createPlan("Auditar o projecto", "session-plan", "", false, true);
+
+      expect(global.fetch).toHaveBeenLastCalledWith(
+        "http://localhost:8000/api/plan/create",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            objective: "Auditar o projecto",
+            session_id: "session-plan",
+            context: "",
+            auto_approve: false,
+            persist_conversation: true,
+          }),
+        }),
+      );
+    });
+  });
+
+  describe("Search API", () => {
+    it("uses the refresh-capable authenticated client for web results", async () => {
+      mockResponse(200, { query: "motorcycle", hits: [], count: 0 });
+
+      await api.webSearch({ query: "motorcycle", limit: 10 });
+
+      expect(authenticatedFetch).toHaveBeenCalledWith(
+        "http://localhost:8000/api/web_search",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ query: "motorcycle", limit: 10 }),
+        }),
+      );
+    });
+
+    it("requests image results from the authenticated no-store endpoint", async () => {
+      mockResponse(200, {
+        query: "motorcycle",
+        hits: [],
+        count: 0,
+        configured: false,
+      });
+
+      expect(await api.webImageSearch({ query: "motorcycle", limit: 24 })).toEqual({
+        query: "motorcycle",
+        hits: [],
+        count: 0,
+        configured: false,
+      });
+      expect(authenticatedFetch).toHaveBeenCalledWith(
+        "http://localhost:8000/api/web_search/images",
+        expect.objectContaining({
+          method: "POST",
+          cache: "no-store",
+          body: JSON.stringify({ query: "motorcycle", limit: 24 }),
+        }),
+      );
+      expect(global.fetch).toHaveBeenCalledWith(
+        "http://localhost:8000/api/web_search/images",
+        expect.objectContaining({
+          method: "POST",
+          cache: "no-store",
+          body: JSON.stringify({ query: "motorcycle", limit: 24 }),
         }),
       );
     });
@@ -257,21 +424,45 @@ describe("lib/api.ts Client Suite", () => {
 
   describe("New Core API Endpoints", () => {
     it("Agents Instances endpoints", async () => {
-      mockResponse(200, { id: "a1" });
-      await api.getAgentInstance("a1");
+      const runningInstance = {
+        instance_id: "a1",
+        agent_type: "CODER",
+        status: "running",
+        mission_id: "session-1",
+        tokens_used: 0,
+      };
+      mockResponse(200, runningInstance);
+      const instance = await api.getAgentInstance("a1");
+      expect(instance).toMatchObject({ id: "a1", name: "CODER", agent_type: "CODER", status: "running" });
       expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/agents/instances/a1", expect.any(Object));
 
-      mockResponse(200, {});
-      await api.pauseAgentInstance("a1");
+      mockResponse(200, { success: true, action: "pause", instance: { ...runningInstance, status: "paused" } });
+      const paused = await api.pauseAgentInstance("a1");
+      expect(paused).toMatchObject({ success: true, action: "pause", instance: { id: "a1", status: "paused" } });
       expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/agents/instances/a1/pause", expect.objectContaining({ method: "POST" }));
 
-      mockResponse(200, {});
+      mockResponse(200, { success: true, action: "resume", instance: { ...runningInstance, status: "running" } });
       await api.resumeAgentInstance("a1");
       expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/agents/instances/a1/resume", expect.objectContaining({ method: "POST" }));
 
-      mockResponse(200, {});
+      mockResponse(200, { success: true, action: "abort", instance: { ...runningInstance, status: "aborted" } });
       await api.abortAgentInstance("a1");
       expect(global.fetch).toHaveBeenCalledWith("http://localhost:8000/api/agents/instances/a1/abort", expect.objectContaining({ method: "POST" }));
+    });
+
+    it("normaliza payloads de lifecycle e missão sem preencher métricas ausentes", async () => {
+      mockResponse(200, {
+        agents: [
+          { instance_id: "i-1", agent_type: "ARCHITECT", status: "running", mission_id: "s-1" },
+          { id: "task-2", type: "RESEARCHER", status: "pending", objective: "Pesquisar" },
+          { status: "unknown" },
+        ],
+      });
+      const agents = await api.getAgentInstances({ sessionId: "s-1", includeTerminal: true });
+      expect(agents).toHaveLength(2);
+      expect(agents[0]).toMatchObject({ id: "i-1", name: "ARCHITECT", status: "running" });
+      expect(agents[0].tokens_used).toBeUndefined();
+      expect(agents[1]).toMatchObject({ id: "task-2", name: "RESEARCHER", agent_type: "RESEARCHER", status: "pending" });
     });
 
     it("Dashboard endpoints", async () => {

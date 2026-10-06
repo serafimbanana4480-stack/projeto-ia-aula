@@ -193,3 +193,65 @@ frontend/test-results/
 
 # Logs arquivados (2026-08-24)
 nexus-ide/archive/logs-execucao/
+
+# ---------------------------------------------------------------
+# 2026-09-26 - test/CI infrastructure
+# ---------------------------------------------------------------
+
+# pytest --basetemp root. backend/tests/conftest.py assigns a per-process
+# subdirectory here (basetemp-<pid>) so concurrent runs cannot race on the
+# directory wipe, which used to surface as ~65 PermissionError collection
+# errors. Machine-local scratch: safe to delete at any time.
+#   Remove-Item -Recurse -Force .cache
+.cache/
+
+# The 46 legacy `.pytest_tmp_*` sibling dirs (~4.5 GB) predate this change and
+# are already matched by `.pytest_tmp*/` above. They are NOT removed by any
+# tooling here; deleting them needs an explicit human decision, because the
+# volume is at 0% free.
+.pytest_tmp*/
+
+# Playwright emits `playwright-report/` (hyphen). The existing rule said
+# `playwright_report/` (underscore), which never matched, so a generated HTML
+# report was committable. Keep the old line harmlessly for history.
+playwright-report/
+playwright_report/
+frontend/playwright-report/
+test-results/
+frontend/test-results/
+frontend/blob-report/
+frontend/.playwright-mcp/
+
+# `tsc --noEmit` output captured by hand. 0 bytes and machine-local.
+tsc_out.txt
+frontend/tsc_out.txt
+frontend/*.tsbuildinfo
+
+# Next.js regenerates this on every `next dev` / `next build`, and its own
+# scaffold gitignores it. It is written into BOTH .next/ and .next-dev/ here,
+# so tracking one tree makes the other's ambient types authoritative by accident.
+next-env.d.ts
+frontend/next-env.d.ts
+
+# One-off machine-specific codemods. `fix_jsx.py` hardcoded an absolute
+# C:/Users/rodri/... path and rewrote a source file in place; it is now in
+# archive/codemods/ and neutralised (AGENTS.md rule 1: nothing is deleted).
+# Matched loosely on purpose -- `fix_jsx2.py`, `fix_jsx_v2.py` and
+# `apply_fix_jsx.py` are all the same mistake.
+*fix_jsx*.py
+frontend/*fix_jsx*.py
+*codemod*.py
+frontend/*codemod*.py
+# ...except the archived, neutralised copy, which is deliberately tracked: it is
+# the preserved history (AGENTS.md rule 1) and it raises on import, so it cannot
+# mutate anything. The negation must name the FILE, not the directory --
+# `!archive/codemods/` would match only the directory and the file would stay
+# ignored via `*fix_jsx*.py`.
+!archive/codemods/fix_jsx.py
+
+# Coverage / security reports produced by CI
+coverage.xml
+coverage.json
+coverage-cobertura.xml
+bandit-report.json
+.safety-profile

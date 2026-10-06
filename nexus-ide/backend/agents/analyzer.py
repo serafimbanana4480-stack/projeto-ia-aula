@@ -22,6 +22,7 @@ class AnalyzerAgent(AgentBase):
     supported_actions = {
         AgentAction.READ_FILE,
         AgentAction.READ_FILE_ABSOLUTE,
+        AgentAction.LIST_DIR,
         AgentAction.SEARCH_CODEBASE,
         AgentAction.SEARCH_SYMBOLS,
         AgentAction.INDEX_SYMBOLS,

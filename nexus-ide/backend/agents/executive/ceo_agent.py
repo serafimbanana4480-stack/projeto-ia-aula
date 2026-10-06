@@ -1,19 +1,26 @@
 """CEOAgent — strategic executive agent for the NEXUS AI Company."""
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
-from backend.agents.executive.strategic_memory import StrategicMemory
-from backend.agents.executive.goal_hierarchy import GoalHierarchy, GoalPriority
-from backend.agents.executive.resource_allocator import ResourceAllocator
-from backend.agents.executive.priority_manager import PriorityManager, PriorityLevel
-from backend.agents.executive.vision_aligner import VisionAligner
 from backend.agents.event_protocol import encode_event
+from backend.agents.executive.goal_hierarchy import GoalHierarchy, GoalPriority
+from backend.agents.executive.priority_manager import PriorityManager
+from backend.agents.executive.resource_allocator import ResourceAllocator
+from backend.agents.executive.strategic_memory import StrategicMemory
+from backend.agents.executive.vision_aligner import VisionAligner
 
 logger = logging.getLogger(__name__)
+
+#: Executive prompts live next to the agents, not in config/prompts/.
+#: ``AgentBase.system_prompt()`` reads ``config/prompts/<name>.md``, so without
+#: this override ``CEOAgent().system_prompt()`` raised FileNotFoundError on the
+#: very first prompt (audit P1-6).  Same resolution as ``CTOAgent``.
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 
 class CEOAgent(AgentBase):
@@ -46,6 +53,13 @@ class CEOAgent(AgentBase):
         self._allocator = resource_allocator or ResourceAllocator()
         self._priorities = priority_manager or PriorityManager()
         self._vision = vision_aligner or VisionAligner(vision=self._memory.vision)
+
+    def system_prompt(self) -> str:
+        """Load the CEO system prompt from the local executive prompts directory."""
+        prompt_path = PROMPTS_DIR / f"{self.prompt_file}.md"
+        if not prompt_path.exists():
+            raise FileNotFoundError(f"Prompt not found: {prompt_path}")
+        return prompt_path.read_text(encoding="utf-8")
 
     # ── Core Agent Interface ──────────────────────────────────────────
 

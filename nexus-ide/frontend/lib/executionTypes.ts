@@ -538,6 +538,17 @@ export function normalizeStreamEvent(event: StreamEvent | Record<string, unknown
  * 8. Monotonic merge — older envelopes never overwrite newer ones
  * ──────────────────────────────────────────────────────────────────────── */
 
+/** True when a context carries no information at all. */
+function isEmptyContext(context: ExecutionContext): boolean {
+  return (
+    context.session_id === "" &&
+    context.run_id === "" &&
+    context.correlation_id === "" &&
+    context.mission_id === null &&
+    context.project_path === null
+  );
+}
+
 /**
  * Return ``next`` only when it carries a strictly higher version than
  * ``prev`` — otherwise return ``prev`` untouched. The store calls this for
@@ -553,26 +564,24 @@ export function mergeEnvelopeMonotonic(
     return prev;
   }
 
-  // Carry forward the heavier nested objects when the new envelope omits
-  // them — REST polls often return a thin update.
   return {
     ...prev,
     ...next,
-    context: next.context ?? prev.context,
+    // `normalizeExecutionEnvelope` always materialises a `context` object, so
+    // `next.context ?? prev.context` could never fall back: a thin REST poll
+    // produced `context: { session_id: "", run_id: "", … }` and the carry-forward
+    // silently did nothing, blanking the run/session the UI was showing. An
+    // all-blank context is what "omitted" actually looks like on the wire.
+    context: isEmptyContext(next.context) ? prev.context : next.context,
     provider_health: next.provider_health ?? prev.provider_health,
     evidence: next.evidence.length > 0 ? next.evidence : prev.evidence,
-    files_changed:
-      next.files_changed.length >= prev.files_changed.length
-        ? Array.from(new Set([...prev.files_changed, ...next.files_changed]))
-        : prev.files_changed,
-    commands_run:
-      next.commands_run.length >= prev.commands_run.length
-        ? Array.from(new Set([...prev.commands_run, ...next.commands_run]))
-        : prev.commands_run,
-    failed_tasks:
-      next.failed_tasks.length >= prev.failed_tasks.length
-        ? Array.from(new Set([...prev.failed_tasks, ...next.failed_tasks]))
-        : prev.failed_tasks,
+    // Union, not "longer list wins". The old comparison kept `prev` whenever
+    // `next` was shorter, which threw away entries the UI had never seen: a
+    // poll reporting only the newest change lost every older one. These lists
+    // are the run's history, so they only ever grow.
+    files_changed: Array.from(new Set([...prev.files_changed, ...next.files_changed])),
+    commands_run: Array.from(new Set([...prev.commands_run, ...next.commands_run])),
+    failed_tasks: Array.from(new Set([...prev.failed_tasks, ...next.failed_tasks])),
     mission: next.mission ?? prev.mission,
   };
 }

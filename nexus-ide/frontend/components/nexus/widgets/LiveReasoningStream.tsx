@@ -1,23 +1,22 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Brain, Lightbulb, Search, CheckCircle, AlertTriangle,
-  Clock, ChevronDown, ChevronRight, Filter, Zap, BookOpen,
-  MessageSquare, ArrowRight, RefreshCw, Copy, CheckCheck,
+  Brain, Lightbulb, CheckCircle, AlertTriangle,
+  ChevronDown, ChevronRight, Zap, BookOpen,
+  RefreshCw,
 } from "lucide-react";
 import { useAgentStore, type ReasoningStep } from "../../../stores/useAgentStore";
-import type { StoreApi } from "zustand";
 
 const TYPE_CONFIG: Record<string, { icon: React.ElementType; color: string; label: string }> = {
-  thought: { icon: Brain, color: "#a78bfa", label: "Thought" },
-  plan: { icon: Lightbulb, color: "#f59e0b", label: "Plan" },
-  reflection: { icon: RefreshCw, color: "#06b6d4", label: "Reflection" },
-  criticism: { icon: AlertTriangle, color: "#ef4444", label: "Criticism" },
-  tool_use: { icon: Zap, color: "#10b981", label: "Tool Use" },
-  memory_lookup: { icon: BookOpen, color: "#22d3ee", label: "Memory" },
-  validation: { icon: CheckCircle, color: "#34d399", label: "Validation" },
+  thought: { icon: Brain, color: "#a78bfa", label: "Pensamento" },
+  plan: { icon: Lightbulb, color: "#f59e0b", label: "Plano" },
+  reflection: { icon: RefreshCw, color: "#06b6d4", label: "Revisão" },
+  criticism: { icon: AlertTriangle, color: "#ef4444", label: "Crítica" },
+  tool_use: { icon: Zap, color: "#10b981", label: "Ferramenta" },
+  memory_lookup: { icon: BookOpen, color: "#22d3ee", label: "Memória" },
+  validation: { icon: CheckCircle, color: "#34d399", label: "Validação" },
 };
 
 function ReasoningEntry({ step, agentName, agentColor }: { step: ReasoningStep; agentName: string; agentColor: string }) {
@@ -48,9 +47,14 @@ function ReasoningEntry({ step, agentName, agentColor }: { step: ReasoningStep; 
         <div className="flex-1 min-w-0 text-left">
           <div className="flex items-center gap-2 mb-1">
             <span className="text-[10px] font-bold uppercase" style={{ color: config.color }}>{config.label}</span>
-            <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-400 border border-slate-700/60 font-mono">{agentName}</span>
-            {step.confidence && (
-              <span className="text-[9px] text-slate-500">{step.confidence < 0.5 ? "⚠ low conf" : "✓"}</span>
+            <span
+              className="text-[9px] px-1.5 py-0.5 rounded font-mono"
+              style={{ background: `${agentColor}20`, color: agentColor, border: `1px solid ${agentColor}40` }}
+            >
+              {agentName}
+            </span>
+            {typeof step.confidence === "number" && (
+              <span className="text-[9px] text-slate-500">{step.confidence < 0.5 ? "⚠ confiança baixa" : "✓"}</span>
             )}
           </div>
           <p className={`text-xs leading-relaxed ${expanded ? "text-slate-100" : "text-slate-300"} line-clamp-2`}>
@@ -67,9 +71,9 @@ function ReasoningEntry({ step, agentName, agentColor }: { step: ReasoningStep; 
                 className="mt-2 space-y-1.5 overflow-hidden"
               >
                 <div className="flex items-center gap-4 text-[10px] text-slate-500">
-                  {step.tokens && <span>Tokens: <span className="text-slate-300 font-mono">{step.tokens}</span></span>}
-                  {step.confidence && <span>Confidence: <span className="text-slate-300 font-mono">{(step.confidence * 100).toFixed(1)}%</span></span>}
-                  <span>{new Date(step.timestamp).toLocaleTimeString()}</span>
+                  {typeof step.tokens === "number" && <span>Tokens: <span className="font-mono text-slate-300">{step.tokens}</span></span>}
+                  {typeof step.confidence === "number" && <span>Confiança: <span className="font-mono text-slate-300">{(step.confidence * 100).toFixed(1)}%</span></span>}
+                  <span>{Number.isFinite(step.timestamp) ? new Date(step.timestamp).toLocaleTimeString("pt-PT") : "Hora indisponível"}</span>
                 </div>
                 {step.citations && step.citations.length > 0 && (
                   <div className="flex flex-wrap gap-1">
@@ -102,7 +106,9 @@ export default function LiveReasoningStream() {
 
   // Collect all steps across agents
   const allSteps = Object.entries(activeStream).flatMap(([agentId, steps]) =>
-    steps.map(s => ({ ...s, agentId }))
+    (Array.isArray(steps) ? steps : [])
+      .filter((step) => step && typeof step.content === "string" && Number.isFinite(step.timestamp))
+      .map((step) => ({ ...step, agentId }))
   ).sort((a, b) => b.timestamp - a.timestamp).slice(0, 50);
 
   const filteredSteps = allSteps.filter(s => {
@@ -112,56 +118,50 @@ export default function LiveReasoningStream() {
   });
 
   return (
-    <div className="h-full flex flex-col">
+    <section className="flex h-full min-h-0 flex-col" aria-label="Eventos dos agentes">
       {/* Header with filters */}
-      <div className="px-4 py-3 border-b border-slate-800/60 space-y-2">
+      <div className="space-y-2 border-b border-slate-800/70 px-4 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Brain size={13} className="text-violet-400" />
-            <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Live Reasoning Stream</span>
-            <motion.span
-              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-violet-500/20 border border-violet-500/40 text-violet-300"
-              animate={{ opacity: [1, 0.6, 1] }}
-              transition={{ duration: 1.5, repeat: Infinity }}
-            >
-              <span className="w-1 h-1 rounded-full bg-violet-400 animate-pulse" />
-              LIVE
-            </motion.span>
+            <h2 className="text-xs font-semibold text-slate-100">Eventos dos agentes</h2>
           </div>
-          <span className="text-[10px] text-slate-500">{filteredSteps.length} events</span>
+          <span className="text-[10px] text-slate-500">{filteredSteps.length} eventos</span>
         </div>
 
-        <div className="flex items-center gap-2">
+        {allSteps.length > 0 && <div className="flex flex-wrap items-center gap-2">
           <select
+            aria-label="Filtrar por agente"
             value={selectedAgent}
             onChange={e => setSelectedAgent(e.target.value)}
             className="flex-1 bg-slate-900/80 border border-slate-700/60 rounded-lg px-2 py-1.5 text-[11px] text-slate-300 outline-none focus:border-violet-500/50"
           >
-            <option value="all">All Agents</option>
+            <option value="all">Todos os agentes</option>
             {agentList.map((a: { id: string; name: string }) => (
               <option key={a.id} value={a.id}>{a.name}</option>
             ))}
           </select>
           <select
+            aria-label="Filtrar por tipo de evento"
             value={filterType}
             onChange={e => setFilterType(e.target.value)}
             className="flex-1 bg-slate-900/80 border border-slate-700/60 rounded-lg px-2 py-1.5 text-[11px] text-slate-300 outline-none focus:border-violet-500/50"
           >
-            <option value="all">All Types</option>
+            <option value="all">Todos os tipos</option>
             {Object.entries(TYPE_CONFIG).map(([key, cfg]) => (
               <option key={key} value={key}>{cfg.label}</option>
             ))}
           </select>
-        </div>
+        </div>}
       </div>
 
       {/* Stream */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         {filteredSteps.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-40 text-slate-500">
             <Brain size={24} className="mb-2 opacity-30" />
-            <p className="text-xs">Waiting for reasoning events...</p>
-            <p className="text-[10px] mt-1">Agent activity will appear here in real-time</p>
+            <p className="text-xs">{allSteps.length > 0 ? "Sem eventos para estes filtros." : "Ainda não chegaram eventos a este painel."}</p>
+            <p className="mt-1 max-w-[220px] text-center text-[10px] leading-relaxed text-slate-600">Quando houver atividade ligada aos agentes, aparece aqui.</p>
           </div>
         ) : (
           <AnimatePresence mode="popLayout">
@@ -179,6 +179,6 @@ export default function LiveReasoningStream() {
           </AnimatePresence>
         )}
       </div>
-    </div>
+    </section>
   );
 }

@@ -1,5 +1,5 @@
 """Tests for documentation generators."""
-from backend.pipeline.architecture import ArchitecturalDecision, DecisionRecorder
+from backend.pipeline.architecture import DecisionRecorder
 from backend.pipeline.documentation import CommentGenerator, ReadmeGenerator
 
 

@@ -11,13 +11,13 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import json
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Callable
-from dataclasses import dataclass, field
-from enum import Enum
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any
 
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
@@ -65,14 +65,14 @@ class InterventionPoint:
     name: str
     description: str
     workflow_stage: str
-    trigger_conditions: List[Dict[str, Any]]
+    trigger_conditions: list[dict[str, Any]]
     intervention_level: InterventionLevel
     required_human_role: str
     timeout_minutes: int
-    escalation_policy: Dict[str, Any]
-    context_requirements: List[str]
-    decision_criteria: List[str]
-    fallback_procedure: Dict[str, Any]
+    escalation_policy: dict[str, Any]
+    context_requirements: list[str]
+    decision_criteria: list[str]
+    fallback_procedure: dict[str, Any]
 
 
 @dataclass
@@ -82,19 +82,19 @@ class InterventionRequest:
     point_id: str
     trigger: InterventionTrigger
     level: InterventionLevel
-    context: Dict[str, Any]
-    ai_decision: Dict[str, Any]
+    context: dict[str, Any]
+    ai_decision: dict[str, Any]
     human_input_required: str
     urgency_score: float
-    risk_assessment: Dict[str, Any]
+    risk_assessment: dict[str, Any]
     created_at: datetime
     deadline: datetime
     status: InterventionStatus = InterventionStatus.PENDING
-    assigned_human: Optional[str] = None
-    human_response: Optional[str] = None
-    resolution_action: Optional[str] = None
+    assigned_human: str | None = None
+    human_response: str | None = None
+    resolution_action: str | None = None
     escalation_count: int = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -106,8 +106,8 @@ class InterventionResponse:
     decision: str
     reasoning: str
     confidence: float
-    conditions: List[str] = field(default_factory=list)
-    follow_up_actions: List[str] = field(default_factory=list)
+    conditions: list[str] = field(default_factory=list)
+    follow_up_actions: list[str] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -128,7 +128,7 @@ class InterventionDetector:
             InterventionTrigger.SYSTEM_ANOMALY: self._check_anomaly
         }
     
-    async def detect_intervention_needed(self, context: Dict[str, Any]) -> List[Tuple[InterventionTrigger, float]]:
+    async def detect_intervention_needed(self, context: dict[str, Any]) -> list[tuple[InterventionTrigger, float]]:
         """Detect if intervention is needed based on context."""
         
         interventions = []
@@ -146,7 +146,7 @@ class InterventionDetector:
         
         return interventions
     
-    async def _check_uncertainty(self, context: Dict[str, Any]) -> float:
+    async def _check_uncertainty(self, context: dict[str, Any]) -> float:
         """Check for high uncertainty."""
         uncertainty_score = context.get("uncertainty_score", 0.0)
         confidence_score = context.get("confidence_score", 1.0)
@@ -157,7 +157,7 @@ class InterventionDetector:
         
         return 0.0
     
-    async def _check_risk(self, context: Dict[str, Any]) -> float:
+    async def _check_risk(self, context: dict[str, Any]) -> float:
         """Check for high risk."""
         risk_assessment = context.get("risk_assessment", {})
         overall_risk = risk_assessment.get("overall_risk", 0.0)
@@ -168,7 +168,7 @@ class InterventionDetector:
         
         return 0.0
     
-    async def _check_ethical(self, context: Dict[str, Any]) -> float:
+    async def _check_ethical(self, context: dict[str, Any]) -> float:
         """Check for ethical concerns."""
         ethical_flags = context.get("ethical_flags", [])
         ethical_score = context.get("ethical_score", 1.0)
@@ -179,7 +179,7 @@ class InterventionDetector:
         
         return 0.0
     
-    async def _check_security(self, context: Dict[str, Any]) -> float:
+    async def _check_security(self, context: dict[str, Any]) -> float:
         """Check for security violations."""
         security_flags = context.get("security_flags", [])
         security_score = context.get("security_score", 1.0)
@@ -190,7 +190,7 @@ class InterventionDetector:
         
         return 0.0
     
-    async def _check_compliance(self, context: Dict[str, Any]) -> float:
+    async def _check_compliance(self, context: dict[str, Any]) -> float:
         """Check for compliance issues."""
         compliance_flags = context.get("compliance_flags", [])
         compliance_score = context.get("compliance_score", 1.0)
@@ -201,7 +201,7 @@ class InterventionDetector:
         
         return 0.0
     
-    async def _check_performance(self, context: Dict[str, Any]) -> float:
+    async def _check_performance(self, context: dict[str, Any]) -> float:
         """Check for performance degradation."""
         performance_metrics = context.get("performance_metrics", {})
         response_time = performance_metrics.get("response_time", 0.0)
@@ -213,7 +213,7 @@ class InterventionDetector:
         
         return 0.0
     
-    async def _check_resources(self, context: Dict[str, Any]) -> float:
+    async def _check_resources(self, context: dict[str, Any]) -> float:
         """Check for resource exhaustion."""
         resource_usage = context.get("resource_usage", {})
         cpu_usage = resource_usage.get("cpu", 0.0)
@@ -225,7 +225,7 @@ class InterventionDetector:
         
         return 0.0
     
-    async def _check_complexity(self, context: Dict[str, Any]) -> float:
+    async def _check_complexity(self, context: dict[str, Any]) -> float:
         """Check for decision complexity."""
         complexity_score = context.get("complexity_score", 0.0)
         decision_factors = context.get("decision_factors", [])
@@ -236,7 +236,7 @@ class InterventionDetector:
         
         return 0.0
     
-    async def _check_anomaly(self, context: Dict[str, Any]) -> float:
+    async def _check_anomaly(self, context: dict[str, Any]) -> float:
         """Check for system anomalies."""
         anomaly_score = context.get("anomaly_score", 0.0)
         anomaly_flags = context.get("anomaly_flags", [])
@@ -254,11 +254,11 @@ class InterventionManager:
     def __init__(self, event_bus: EventBus, approval_queue):
         self.event_bus = event_bus
         self.approval_queue = approval_queue
-        self.intervention_points: Dict[str, InterventionPoint] = {}
-        self.active_requests: Dict[str, InterventionRequest] = {}
-        self.request_history: List[InterventionRequest] = []
-        self.escalation_policies: Dict[str, Dict[str, Any]] = {}
-        self.human_experts: Dict[str, Dict[str, Any]] = {}
+        self.intervention_points: dict[str, InterventionPoint] = {}
+        self.active_requests: dict[str, InterventionRequest] = {}
+        self.request_history: list[InterventionRequest] = []
+        self.escalation_policies: dict[str, dict[str, Any]] = {}
+        self.human_experts: dict[str, dict[str, Any]] = {}
         
         # Initialize default intervention points
         self._initialize_default_points()
@@ -347,7 +347,7 @@ class InterventionManager:
             }
         )
     
-    async def request_intervention(self, context: Dict[str, Any]) -> List[str]:
+    async def request_intervention(self, context: dict[str, Any]) -> list[str]:
         """Request human intervention based on context."""
         
         detector = InterventionDetector(self.event_bus)
@@ -368,7 +368,7 @@ class InterventionManager:
     async def _create_intervention_request(self, point: InterventionPoint, 
                                          trigger: InterventionTrigger, 
                                          urgency_score: float, 
-                                         context: Dict[str, Any]) -> str:
+                                         context: dict[str, Any]) -> str:
         """Create an intervention request."""
         
         request_id = str(uuid.uuid4())
@@ -488,7 +488,7 @@ class InterventionManager:
         
         return True
     
-    async def get_active_interventions(self, human_id: str = None) -> List[InterventionRequest]:
+    async def get_active_interventions(self, human_id: str = None) -> list[InterventionRequest]:
         """Get active intervention requests."""
         
         requests = list(self.active_requests.values())
@@ -502,7 +502,7 @@ class InterventionManager:
         
         return requests
     
-    async def get_intervention_stats(self) -> Dict[str, Any]:
+    async def get_intervention_stats(self) -> dict[str, Any]:
         """Get intervention statistics."""
         
         stats = {
@@ -527,7 +527,7 @@ class InterventionManager:
         
         return stats
     
-    def _find_matching_point(self, trigger: InterventionTrigger, context: Dict[str, Any]) -> Optional[InterventionPoint]:
+    def _find_matching_point(self, trigger: InterventionTrigger, context: dict[str, Any]) -> InterventionPoint | None:
         """Find matching intervention point for trigger."""
         
         for point in self.intervention_points.values():
@@ -650,9 +650,7 @@ class InterventionManager:
         
         if self._monitoring_task:
             self._monitoring_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._monitoring_task
-            except asyncio.CancelledError:
-                pass
         
         logger.info("Intervention manager shutdown completed")

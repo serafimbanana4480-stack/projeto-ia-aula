@@ -75,12 +75,35 @@ describe("event ordering", () => {
     const buffer = new RunEventBuffer();
     [1, 2, 5].forEach((seq) => buffer.push(event(seq)));
     expect(buffer.missingSeqs()).toEqual([3, 4]);
+    expect(buffer.hasMissingSeqs()).toBe(true);
+    expect(buffer.firstMissingSeq()).toBe(3);
   });
 
   it("reports no gaps for a complete timeline", () => {
     const buffer = new RunEventBuffer();
     [1, 2, 3].forEach((seq) => buffer.push(event(seq)));
     expect(buffer.missingSeqs()).toEqual([]);
+    expect(buffer.hasMissingSeqs()).toBe(false);
+    expect(buffer.firstMissingSeq()).toBeNull();
+  });
+
+  it("detects the first gap without scanning a large missing range", () => {
+    const buffer = new RunEventBuffer();
+    buffer.push(event(1_000_000));
+
+    expect(buffer.firstMissingSeq()).toBe(1);
+    expect(buffer.hasMissingSeqs()).toBe(true);
+  });
+
+  it("advances the contiguous frontier when a replay fills gaps", () => {
+    const buffer = new RunEventBuffer();
+    [1, 2, 5].forEach((seq) => buffer.push(event(seq)));
+    expect(buffer.firstMissingSeq()).toBe(3);
+
+    [3, 4].forEach((seq) => buffer.push(event(seq)));
+
+    expect(buffer.hasMissingSeqs()).toBe(false);
+    expect(buffer.firstMissingSeq()).toBeNull();
   });
 
   it("resets cleanly between runs so stale state cannot leak", () => {
@@ -232,14 +255,40 @@ describe("event ordering", () => {
       expect((result[0] as any).progress).toBe(0.8);
     });
 
-    it("separates events from different runs", () => {
+    it("keeps separate runs and orders each run without dropping later turns", () => {
       const events: RuntimeEventLike[] = [
-        makeEvent("token", 1, "e1", "run-1"),
-        makeEvent("token", 2, "e2", "run-2"),
-        makeEvent("token", 3, "e3", "run-1"),
+        makeEvent("token", 2, "same-event-id", "run-1"),
+        makeEvent("token", 1, "first-run-first", "run-1"),
+        makeEvent("token", 2, "same-event-id", "run-2"),
+        makeEvent("token", 1, "second-run-first", "run-2"),
+        makeEvent("token", 2, "same-event-id", "run-1"),
       ];
       const result = dedupeAndOrder(events);
-      expect(result).toHaveLength(2);
+      expect(result).toHaveLength(4);
+      expect(result.map((item) => `${item.run_id}:${item.seq}`)).toEqual([
+        "run-1:1",
+        "run-1:2",
+        "run-2:1",
+        "run-2:2",
+      ]);
+    });
+
+    it("keeps an unsequenced local error between the runs where it occurred", () => {
+      const localError: RuntimeEventLike = {
+        type: "error",
+        content: "falha local no pedido anterior",
+      };
+      const result = dedupeAndOrder([
+        makeEvent("token", 2, "first-run-second", "run-1"),
+        makeEvent("token", 1, "first-run-first", "run-1"),
+        localError,
+        makeEvent("token", 1, "second-run-first", "run-2"),
+      ]);
+
+      expect(result).toHaveLength(4);
+      expect(result.map((item) => item.type)).toEqual(["token", "token", "error", "token"]);
+      expect(result[2]).toBe(localError);
+      expect(result[3].run_id).toBe("run-2");
     });
 
     it("deduplicates by event_id in batch", () => {

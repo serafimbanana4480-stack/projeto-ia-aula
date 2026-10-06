@@ -23,6 +23,11 @@ import httpx
 from bs4 import BeautifulSoup
 
 from backend.tools.registry import ToolSpec, register_tool
+from backend.tools.safe_http import (
+    PublicAddressHTTPTransport,
+    normalize_public_http_url,
+    remote_reader_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -202,9 +207,17 @@ def _extract_text_bs4(html: str, base_url: str) -> tuple[str, str, list[str]]:
 
 async def _fetch_via_jina(url: str) -> dict[str, Any] | None:
     """Try fetching via Jina AI Reader API."""
+    if not remote_reader_enabled():
+        return None
+    url = normalize_public_http_url(url)
     jina_url = f"https://r.jina.ai/{url}"
     try:
-        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=FETCH_TIMEOUT,
+            follow_redirects=False,
+            trust_env=False,
+            transport=PublicAddressHTTPTransport(),
+        ) as client:
             response = await _request_with_retry(client, "GET", jina_url)
             text = response.text
             lines = text.splitlines()
@@ -249,7 +262,19 @@ async def fetch_and_summarize(url: str) -> dict[str, Any]:
     Returns:
         dict with keys: ``url``, ``title``, ``summary``, ``links``, ``status``.
     """
-    # Check cache first
+    try:
+        url = normalize_public_http_url(url)
+    except ValueError as exc:
+        return {
+            "url": str(url)[:2000],
+            "title": "",
+            "summary": f"Error fetching URL: {exc}",
+            "links": [],
+            "status": "error",
+        }
+
+    # Validate before consulting the cache so a cached response cannot make an
+    # unsupported scheme, local IP, or credential-bearing URL appear fetchable.
     cached = _cache_get(url)
     if cached:
         cached["status"] = "cache_hit"
@@ -263,7 +288,12 @@ async def fetch_and_summarize(url: str) -> dict[str, Any]:
 
     # Fallback to direct fetch + BeautifulSoup
     try:
-        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=FETCH_TIMEOUT,
+            follow_redirects=True,
+            trust_env=False,
+            transport=PublicAddressHTTPTransport(),
+        ) as client:
             response = await _request_with_retry(
                 client,
                 "GET",

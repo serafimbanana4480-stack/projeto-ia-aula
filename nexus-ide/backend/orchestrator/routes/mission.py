@@ -19,9 +19,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from backend.middleware.auth import require_auth
 from backend.config.settings import ProjectContextError, resolve_mission_project
 from backend.core.disk_guard import DiskPressureError
+from backend.middleware.auth import require_auth
 from backend.orchestrator.mission_control import (
     MISSIONS_DIR,
     REPORTS_DIR,

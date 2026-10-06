@@ -9,13 +9,14 @@ so the cycle trigger here lives at ``/run-cycle``.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 
-from backend.middleware.auth import require_auth
-from backend.orchestrator.autonomous_improvement_orchestrator import get_autonomous_improvement_orchestrator
 from backend.config.settings import get_autonomous_improvement_config
+from backend.middleware.auth import require_auth
+from backend.orchestrator.autonomous_improvement_orchestrator import (
+    get_autonomous_improvement_orchestrator,
+)
 
 logger = logging.getLogger(__name__)
 
