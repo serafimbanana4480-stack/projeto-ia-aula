@@ -1,19 +1,20 @@
 """Test fixtures using mocks for isolated testing."""
 from __future__ import annotations
 
-import pytest
 import sys
 from pathlib import Path
+
+import pytest
 
 # Add mocks directory to path
 mocks_dir = Path(__file__).parent
 sys.path.insert(0, str(mocks_dir))
 
-from mock_redis import MockRedisBackend
-from mock_qdrant import MockQdrantBackend
 from mock_event_bus import MockEventBus
-from mock_registry import MockAgentRegistry
 from mock_llm import MockLLMClient
+from mock_qdrant import MockQdrantBackend
+from mock_redis import MockRedisBackend
+from mock_registry import MockAgentRegistry
 
 
 @pytest.fixture

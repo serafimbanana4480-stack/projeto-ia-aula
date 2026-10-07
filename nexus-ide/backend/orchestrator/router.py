@@ -27,6 +27,7 @@ from typing import Any
 
 from backend.cache_backends import NullCacheBackend, TTLCacheBackend
 from backend.config.settings import get_model_config, load_prompt
+from backend.llm.factory import create_llm_client
 from backend.models.api import AgentName, RoutingDecision
 from backend.orchestrator.router_engine import (
     DEFAULT_CACHE_TTL,
@@ -85,7 +86,7 @@ def _get_default_router() -> Router:
         _default_router = Router(
             strategies=[
                 KeywordRoutingStrategy(),
-                LLMRoutingStrategy(llm_client=None),
+                LLMRoutingStrategy(llm_client=create_llm_client()),
             ],
             cache=TTLCacheBackend(),
         )
@@ -226,7 +227,7 @@ async def route_with_model(query: str, client: Any) -> RoutingDecision:
     router = _get_default_router()
     cache_key = _query_hash(query)
     cached = await router.cache.get(cache_key)
-    if cached is not None:
+    if isinstance(cached, RoutingDecision):
         logger.debug("Routing decision cache hit for query hash: %s", cache_key[:8])
         return cached
 

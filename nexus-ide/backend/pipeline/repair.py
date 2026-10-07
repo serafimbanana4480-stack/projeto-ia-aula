@@ -5,13 +5,12 @@ re-submits to sandbox, and escalates on max attempts.
 """
 from __future__ import annotations
 
-import difflib
 import json
 import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -49,7 +48,7 @@ class FailureReport:
     source_path: str = ""
     source_context: str = ""  # Relevant lines ±20
     test_name: str = ""
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,7 +72,7 @@ class RepairAttempt:
     state: RepairState
     patch: str = ""
     test_results: TestSuiteReport = field(default_factory=TestSuiteReport)
-    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     completed_at: str = ""
     notes: str = ""
 
@@ -88,7 +87,7 @@ class RepairTicket:
     failures: list[FailureReport] = field(default_factory=list)
     attempts: list[RepairAttempt] = field(default_factory=list)
     max_attempts: int = 5
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     resolved_at: str = ""
     escalation_reason: str = ""
 
@@ -261,7 +260,6 @@ Generate a unified diff patch to fix this failure."""
             patched_lines = original_lines.copy()
 
             # Track line offsets
-            offset = 0
             i = 0
             while i < len(lines):
                 line = lines[i]
@@ -271,7 +269,7 @@ Generate a unified diff patch to fix this failure."""
                     if match:
                         old_start = int(match.group(1)) - 1  # 0-based
                         new_start = int(match.group(2)) - 1
-                        offset = new_start - old_start
+                        new_start - old_start
 
                         # Collect hunk lines
                         hunk_remove: list[str] = []
@@ -355,7 +353,7 @@ class RepairLoop:
 
         if not ticket.failures:
             ticket.state = RepairState.RESOLVED
-            ticket.resolved_at = datetime.now(timezone.utc).isoformat()
+            ticket.resolved_at = datetime.now(UTC).isoformat()
             return ticket
 
         logger.info("Repair loop starting for %d failures", len(ticket.failures))
@@ -393,11 +391,11 @@ class RepairLoop:
             attempt.state = RepairState.TESTING
             new_report = self.test_runner.run(project_path)
             attempt.test_results = new_report
-            attempt.completed_at = datetime.now(timezone.utc).isoformat()
+            attempt.completed_at = datetime.now(UTC).isoformat()
 
             if not new_report.failures():
                 ticket.state = RepairState.RESOLVED
-                ticket.resolved_at = datetime.now(timezone.utc).isoformat()
+                ticket.resolved_at = datetime.now(UTC).isoformat()
                 attempt.notes += "All tests passing after repair.\n"
                 logger.info("Repair loop resolved after %d attempts", ticket.current_attempt)
                 return ticket

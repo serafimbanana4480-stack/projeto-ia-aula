@@ -140,7 +140,7 @@ class ModelValidator:
             return result
         
         # Check each model
-        for model_key, model_cfg in models_config.items():
+        for _model_key, model_cfg in models_config.items():
             model_id = model_cfg.get("id", "")
             fallback_id = model_cfg.get("fallback_id")
             

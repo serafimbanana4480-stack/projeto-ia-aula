@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +56,13 @@ class ResourceAllocator:
             return True
         return False
 
-    def update_load(self, agent_id: str, load: float) -> Optional[AgentResource]:
+    def update_load(self, agent_id: str, load: float) -> AgentResource | None:
         agent = self._agents.get(agent_id)
         if agent:
             agent.current_load = max(0.0, min(agent.max_capacity, load))
         return agent
 
-    def update_health(self, agent_id: str, status: str) -> Optional[AgentResource]:
+    def update_health(self, agent_id: str, status: str) -> AgentResource | None:
         agent = self._agents.get(agent_id)
         if agent:
             agent.health_status = status
@@ -72,7 +72,7 @@ class ResourceAllocator:
         self,
         required_capabilities: list[str],
         min_capacity: float = 0.3,
-    ) -> Optional[AgentResource]:
+    ) -> AgentResource | None:
         """Find the best agent for a task based on capabilities and load."""
         candidates: list[tuple[float, AgentResource]] = []
 

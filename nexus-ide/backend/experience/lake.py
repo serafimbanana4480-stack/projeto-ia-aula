@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -47,9 +49,13 @@ def _connect(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def _utcnow_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
 # ── Schema ───────────────────────────────────────────────────────────────────
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
 -- Main traces table: one row per task execution
@@ -98,6 +104,7 @@ CREATE TABLE IF NOT EXISTS traces (
     workflow_version   TEXT,
     version_tags_json  TEXT,
     tags_json          TEXT,
+    content_hash       TEXT,
     raw_json           TEXT
 );
 
@@ -122,8 +129,96 @@ CREATE TABLE IF NOT EXISTS trajectory_entries (
     FOREIGN KEY (task_id) REFERENCES traces(task_id) ON DELETE CASCADE
 );
 
+-- Failure classification index (one row per failed task)
+CREATE TABLE IF NOT EXISTS failure_categories (
+    task_id          TEXT PRIMARY KEY,
+    failure_category TEXT NOT NULL,
+    classified_at    TEXT NOT NULL
+);
+
+-- Cold archive: TTL-purged traces keep the exact live schema plus the
+-- archive stamp columns, so archived records remain fully queryable.
+CREATE TABLE IF NOT EXISTS traces_archive (
+    task_id            TEXT PRIMARY KEY,
+    timestamp          TEXT NOT NULL,
+    prompt             TEXT NOT NULL,
+    task_type          TEXT NOT NULL,
+    difficulty         REAL DEFAULT 0.5,
+    category           TEXT,
+    session_id         TEXT,
+
+    model_name         TEXT,
+    model_version      TEXT,
+    temperature        REAL DEFAULT 0,
+    context_size       INTEGER DEFAULT 0,
+    tier               TEXT,
+
+    agents_json        TEXT,
+    trajectory_json    TEXT,
+    memory_retrieved_json TEXT,
+    files_modified_json TEXT,
+    commands_executed_json TEXT,
+    tests_executed_json TEXT,
+
+    result_success     INTEGER,
+    result_score       REAL DEFAULT 0,
+    result_error       TEXT,
+    result_output      TEXT,
+
+    latency_ms         INTEGER DEFAULT 0,
+    tokens_input       INTEGER DEFAULT 0,
+    tokens_output      INTEGER DEFAULT 0,
+    tool_calls         INTEGER DEFAULT 0,
+    retries            INTEGER DEFAULT 0,
+    cost_usd           REAL DEFAULT 0,
+    eval_correctness   REAL DEFAULT 0,
+    eval_efficiency    REAL DEFAULT 0,
+    eval_quality       REAL DEFAULT 0,
+    eval_regression    INTEGER DEFAULT 0,
+
+    parent_trace_id    TEXT,
+    experiment_id      TEXT,
+    component_kind     TEXT,
+    component_version  TEXT,
+    workflow_version   TEXT,
+    version_tags_json  TEXT,
+    tags_json          TEXT,
+    content_hash       TEXT,
+    raw_json           TEXT,
+
+    archived_at        TEXT NOT NULL,
+    ttl_days           INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS trajectory_entries_archive (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    agent        TEXT,
+    action       TEXT,
+    tool         TEXT,
+    observation  TEXT,
+    duration_ms  INTEGER DEFAULT 0,
+    tokens_used  INTEGER DEFAULT 0,
+    success      INTEGER DEFAULT 1,
+    error        TEXT,
+
+    archived_at  TEXT NOT NULL,
+    ttl_days     INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS failure_categories_archive (
+    task_id          TEXT PRIMARY KEY,
+    failure_category TEXT NOT NULL,
+    classified_at    TEXT NOT NULL,
+
+    archived_at      TEXT NOT NULL,
+    ttl_days         INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_traces_task_type ON traces(task_type);
 CREATE INDEX IF NOT EXISTS idx_traces_success    ON traces(result_success);
+CREATE INDEX IF NOT EXISTS idx_traces_success_ts ON traces(result_success, timestamp);
 CREATE INDEX IF NOT EXISTS idx_traces_timestamp  ON traces(timestamp);
 CREATE INDEX IF NOT EXISTS idx_traces_category   ON traces(category);
 CREATE INDEX IF NOT EXISTS idx_traces_model      ON traces(model_name);
@@ -133,6 +228,10 @@ CREATE INDEX IF NOT EXISTS idx_traces_tags       ON traces(tags_json);
 CREATE INDEX IF NOT EXISTS idx_traj_task         ON trajectory_entries(task_id);
 CREATE INDEX IF NOT EXISTS idx_traj_tool         ON trajectory_entries(tool);
 CREATE INDEX IF NOT EXISTS idx_traj_success      ON trajectory_entries(success);
+CREATE INDEX IF NOT EXISTS idx_fc_cat            ON failure_categories(failure_category);
+CREATE INDEX IF NOT EXISTS idx_fc_task           ON failure_categories(task_id);
+CREATE INDEX IF NOT EXISTS idx_arch_traces_ts    ON traces_archive(timestamp);
+CREATE INDEX IF NOT EXISTS idx_arch_traj_task    ON trajectory_entries_archive(task_id);
 
 -- Metadata table
 CREATE TABLE IF NOT EXISTS trace_lake_meta (
@@ -140,6 +239,41 @@ CREATE TABLE IF NOT EXISTS trace_lake_meta (
     value TEXT NOT NULL
 );
 """
+
+
+# ── Failure classification ───────────────────────────────────────────────────
+
+_FAILURE_CLASSIFIERS: tuple[tuple[str, str], ...] = (
+    # (category, regex) — first match wins; order matters.
+    ("timeout", r"\btime(?:d)?[- _]?out\b|\bdeadline\b|\btimed out\b"),
+    (
+        "dependency_problem",
+        r"no module named|modulenotfounderror|importerror|import error|"
+        r"missing dependency|version conflict|incompatible",
+    ),
+    (
+        "incorrect_code",
+        r"syntaxerror|typeerror|attributeerror|nameerror|valueerror|"
+        r"indexerror|keyerror|indentationerror|zerodivisionerror|"
+        r"assertionerror|runtime error|exception|traceback|"
+        r"undefined variable|undefined name|invalid syntax",
+    ),
+)
+
+
+def classify_failure_text(error: str | None) -> str:
+    """Classify a raw failure message into a coarse category string.
+
+    Categories used by the lake's ``failure_categories`` index:
+    ``incorrect_code``, ``dependency_problem``, ``timeout`` and ``unknown``.
+    """
+    if not error:
+        return "unknown"
+    text = error.lower()
+    for category, pattern in _FAILURE_CLASSIFIERS:
+        if re.search(pattern, text):
+            return category
+    return "unknown"
 
 
 class TraceLake:
@@ -175,21 +309,82 @@ class TraceLake:
             conn.close()
 
     def _init_schema(self) -> None:
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist; migrate legacy DBs."""
         with self._tx() as conn:
+            self._migrate_legacy_schema(conn)
             conn.executescript(_SCHEMA_SQL)
+            # content-hash index lives outside _SCHEMA_SQL so the legacy
+            # schema (which drops the column via regex in tests) stays valid.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_traces_content_hash ON traces(content_hash)"
+            )
             conn.execute(
                 "INSERT OR IGNORE INTO trace_lake_meta(key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
             )
 
+    @staticmethod
+    def _migrate_legacy_schema(conn: sqlite3.Connection) -> None:
+        """Add + backfill ``content_hash`` when opening a pre-dedup database."""
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='traces'"
+        ).fetchone()
+        if table is None:
+            return
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(traces)")}
+        if "content_hash" in columns:
+            return
+        conn.execute("ALTER TABLE traces ADD COLUMN content_hash TEXT")
+        rows = conn.execute(
+            "SELECT task_id, raw_json FROM traces WHERE raw_json IS NOT NULL"
+        ).fetchall()
+        backfilled = 0
+        for row in rows:
+            try:
+                trace = ExperienceTrace.model_validate_json(row["raw_json"])
+            except Exception:  # noqa: BLE001 - corrupt legacy rows are skipped
+                continue
+            conn.execute(
+                "UPDATE traces SET content_hash = ? WHERE task_id = ?",
+                (trace.compute_content_hash(), row["task_id"]),
+            )
+            backfilled += 1
+        logger.info("Legacy trace lake migrated; %d hashes backfilled", backfilled)
+
     # ── Storage ──
 
-    def store_trace(self, trace: ExperienceTrace) -> str:
+    def store_trace(self, trace: ExperienceTrace, *, dedupe: bool = True) -> str:
         """Persist an :class:`ExperienceTrace` to the lake.
+
+        With ``dedupe`` enabled (default) an identical replay of the same
+        task (same content hash) is skipped instead of rewritten.
 
         Returns the ``task_id`` of the stored trace.
         """
+        result = self.store_trace_with_stats(trace, dedupe=dedupe)
+        return result["task_id"]
+
+    def store_trace_with_stats(
+        self, trace: ExperienceTrace, *, dedupe: bool = True
+    ) -> dict[str, Any]:
+        """Store a trace and report what happened.
+
+        Returns ``{"task_id", "stored", "duplicate"}`` — ``duplicate`` marks
+        writes skipped by content-hash dedup.
+        """
+        content_hash = trace.compute_content_hash()
+
+        if dedupe:
+            with self._tx() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM traces WHERE task_id = ? AND content_hash = ?",
+                    (trace.task_id, content_hash),
+                ).fetchone()
+            if row:
+                self._bump_ingest_stats(duplicates=1)
+                logger.debug("Duplicate trace %s skipped", trace.task_id)
+                return {"task_id": trace.task_id, "stored": False, "duplicate": True}
+
         d = trace.to_dict()
         traj = d.get("trajectory", [])
 
@@ -205,7 +400,7 @@ class TraceLake:
                     latency_ms, tokens_input, tokens_output, tool_calls, retries, cost_usd,
                     eval_correctness, eval_efficiency, eval_quality, eval_regression,
                     parent_trace_id, experiment_id, component_kind, component_version,
-                    workflow_version, version_tags_json, tags_json, raw_json
+                    workflow_version, version_tags_json, tags_json, content_hash, raw_json
                 ) VALUES (
                     :task_id, :timestamp, :prompt, :task_type, :difficulty, :category,
                     :session_id, :model_name, :model_version, :temperature, :context_size, :tier,
@@ -215,7 +410,7 @@ class TraceLake:
                     :latency_ms, :tokens_input, :tokens_output, :tool_calls, :retries, :cost_usd,
                     :eval_correctness, :eval_efficiency, :eval_quality, :eval_regression,
                     :parent_trace_id, :experiment_id, :component_kind, :component_version,
-                    :workflow_version, :version_tags_json, :tags_json, :raw_json
+                    :workflow_version, :version_tags_json, :tags_json, :content_hash, :raw_json
                 )
                 """,
                 {
@@ -258,6 +453,7 @@ class TraceLake:
                     "workflow_version": trace.workflow_version,
                     "version_tags_json": json.dumps(trace.version_tags),
                     "tags_json": json.dumps(trace.tags),
+                    "content_hash": content_hash,
                     "raw_json": json.dumps(d),
                 },
             )
@@ -284,6 +480,21 @@ class TraceLake:
                     ),
                 )
 
+            # Failure classification index (only for failed tasks)
+            if not trace.result.success:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO failure_categories
+                        (task_id, failure_category, classified_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        trace.task_id,
+                        classify_failure_text(trace.result.error or trace.result.output),
+                        _utcnow_iso(),
+                    ),
+                )
+
         # Update FTS index
         with self._tx() as conn:
             conn.execute(
@@ -292,8 +503,50 @@ class TraceLake:
             )
             conn.execute("INSERT INTO traces_fts(traces_fts) VALUES('rebuild')")
 
+        self._bump_ingest_stats(writes=1)
         logger.debug("Stored trace %s (%s) in trace lake", trace.task_id, trace.task_type)
-        return trace.task_id
+        return {"task_id": trace.task_id, "stored": True, "duplicate": False}
+
+    def _bump_ingest_stats(self, writes: int = 0, duplicates: int = 0) -> None:
+        """Accumulate ingest counters in ``trace_lake_meta``."""
+        if not writes and not duplicates:
+            return
+        with self._tx() as conn:
+            for key, delta in (("writes_total", writes), ("duplicates_skipped", duplicates)):
+                if not delta:
+                    continue
+                row = conn.execute(
+                    "SELECT value FROM trace_lake_meta WHERE key = ?", (key,)
+                ).fetchone()
+                try:
+                    current = int(row["value"]) if row and row["value"] else 0
+                except (ValueError, TypeError):
+                    current = 0
+                conn.execute(
+                    """
+                    INSERT INTO trace_lake_meta(key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (key, str(current + delta)),
+                )
+
+    def get_ingest_stats(self) -> dict[str, Any]:
+        """Return ingest counters (``writes_total`` / ``duplicates_skipped``)."""
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT key, value FROM trace_lake_meta "
+                "WHERE key IN ('writes_total', 'duplicates_skipped')"
+            ).fetchall()
+        stats = {row["key"]: row["value"] for row in rows}
+        try:
+            writes = int(stats.get("writes_total") or 0)
+        except (ValueError, TypeError):
+            writes = 0
+        try:
+            duplicates = int(stats.get("duplicates_skipped") or 0)
+        except (ValueError, TypeError):
+            duplicates = 0
+        return {"writes_total": writes, "duplicates_skipped": duplicates}
 
     def get_trace(self, task_id: str) -> ExperienceTrace | None:
         """Retrieve a single trace by task_id."""
@@ -585,11 +838,148 @@ class TraceLake:
             row = conn.execute("SELECT COUNT(*) AS n FROM traces").fetchone()
         return row["n"] if row else 0
 
+    # ── Retention / TTL cold archive ────────────────────────────────────────────
+
+    def purge_expired(self, ttl_days: int) -> dict[str, Any]:
+        """Move traces older than ``ttl_days`` into the cold archive.
+
+        Nothing is deleted: expired traces, their trajectory entries and
+        their failure classifications are relocated to the ``*_archive``
+        tables with an archive stamp, then removed from the live tables.
+        """
+        if ttl_days < 0:
+            raise ValueError("ttl_days must be >= 0")
+
+        cutoff = (datetime.now(UTC) - timedelta(days=ttl_days)).isoformat()
+        archived_at = _utcnow_iso()
+        report: dict[str, Any] = {
+            "archived_traces": 0,
+            "archived_trajectory_entries": 0,
+            "archived_failure_classifications": 0,
+            "ttl_days": ttl_days,
+        }
+
+        with self._tx() as conn:
+            old_ids = [
+                row["task_id"]
+                for row in conn.execute(
+                    "SELECT task_id FROM traces WHERE timestamp < ?", (cutoff,)
+                )
+            ]
+            if not old_ids:
+                return report
+            placeholders = ",".join("?" for _ in old_ids)
+
+            cur = conn.execute(
+                f"INSERT INTO traces_archive SELECT *, ?, ? FROM traces "
+                f"WHERE task_id IN ({placeholders})",
+                [archived_at, ttl_days, *old_ids],
+            )
+            report["archived_traces"] = cur.rowcount
+
+            cur = conn.execute(
+                f"INSERT INTO trajectory_entries_archive SELECT *, ?, ? "
+                f"FROM trajectory_entries WHERE task_id IN ({placeholders})",
+                [archived_at, ttl_days, *old_ids],
+            )
+            report["archived_trajectory_entries"] = cur.rowcount
+
+            cur = conn.execute(
+                f"INSERT INTO failure_categories_archive SELECT *, ?, ? "
+                f"FROM failure_categories WHERE task_id IN ({placeholders})",
+                [archived_at, ttl_days, *old_ids],
+            )
+            report["archived_failure_classifications"] = cur.rowcount
+
+            conn.execute(
+                f"DELETE FROM trajectory_entries WHERE task_id IN ({placeholders})",
+                old_ids,
+            )
+            conn.execute(
+                f"DELETE FROM failure_categories WHERE task_id IN ({placeholders})",
+                old_ids,
+            )
+            conn.execute(
+                f"DELETE FROM traces WHERE task_id IN ({placeholders})", old_ids
+            )
+            conn.execute("INSERT INTO traces_fts(traces_fts) VALUES('rebuild')")
+
+        logger.info(
+            "Purged %d expired traces to archive (ttl_days=%d)",
+            report["archived_traces"],
+            ttl_days,
+        )
+        return report
+
+    def archived_trace_count(self) -> int:
+        """Return the number of traces currently in the cold archive."""
+        with self._tx() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM traces_archive").fetchone()
+        return row["n"] if row else 0
+
+    def list_archived(self, limit: int = 1000) -> list[dict[str, Any]]:
+        """List archived trace rows (oldest archive stamp first)."""
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT * FROM traces_archive ORDER BY archived_at ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Failure-category queries ────────────────────────────────────────────────
+
+    def top_failures(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Aggregate failure categories by frequency (most frequent first)."""
+        with self._tx() as conn:
+            rows = conn.execute(
+                """
+                SELECT failure_category, COUNT(*) AS failure_count,
+                       MAX(classified_at) AS last_seen
+                FROM failure_categories
+                GROUP BY failure_category
+                ORDER BY failure_count DESC, failure_category ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                entry = dict(row)
+                tasks = conn.execute(
+                    "SELECT task_id FROM failure_categories WHERE failure_category = ? "
+                    "ORDER BY classified_at ASC LIMIT 10",
+                    (row["failure_category"],),
+                ).fetchall()
+                entry["sample_task_ids"] = [t["task_id"] for t in tasks]
+                out.append(entry)
+        return out
+
+    def query_by_failure_category(
+        self, category: str, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return failed traces indexed under a failure category."""
+        with self._tx() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.task_id, t.timestamp, t.task_type, t.category,
+                       t.result_success, t.result_score, t.result_error,
+                       t.result_output, fc.failure_category, fc.classified_at
+                FROM failure_categories fc
+                JOIN traces t ON t.task_id = fc.task_id
+                WHERE fc.failure_category = ?
+                ORDER BY fc.classified_at ASC
+                LIMIT ?
+                """,
+                (category, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def clear(self) -> int:
         """Delete all traces (for testing). Returns count deleted."""
         with self._tx() as conn:
             conn.execute("DELETE FROM traces")
             conn.execute("DELETE FROM trajectory_entries")
+            conn.execute("DELETE FROM failure_categories")
             conn.execute("INSERT INTO traces_fts(traces_fts) VALUES('rebuild')")
             conn.execute("DELETE FROM trace_lake_meta WHERE key = 'schema_version'")
             conn.execute(

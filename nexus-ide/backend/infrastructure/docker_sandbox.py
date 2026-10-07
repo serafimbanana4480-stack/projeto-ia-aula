@@ -25,11 +25,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
+
+from docker.errors import APIError, DockerException, NotFound
+from docker.models.containers import Container
 
 import docker
-from docker.errors import DockerException, NotFound, APIError
-from docker.models.containers import Container
 
 logger = logging.getLogger(__name__)
 

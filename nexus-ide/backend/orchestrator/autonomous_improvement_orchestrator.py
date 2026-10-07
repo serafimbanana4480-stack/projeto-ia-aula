@@ -317,6 +317,9 @@ class AutonomousImprovementOrchestrator:
         result.wall_time_seconds = (result.completed_at - started_at).total_seconds()
         self._cycle_history.append(result)
         self._save_checkpoint(cycle_id, "completed", result, completed=True)
+        # Second write with the terminal fields (completed_at, wall_time) —
+        # the first persist happens inside _learn before the cycle ends.
+        self._persist_cycle(result)
         await self._emit("improvement.cycle.completed", cycle_id, result.__dict__)
         return result
 
@@ -330,13 +333,11 @@ class AutonomousImprovementOrchestrator:
         }
 
         if self.knowledge_base:
-            try:
+            with contextlib.suppress(Exception):
                 analysis["knowledge_base"] = {
                     "total_patterns": len(getattr(self.knowledge_base, "patterns", {})),
                     "total_signatures": len(getattr(self.knowledge_base, "signatures", {})),
                 }
-            except Exception:
-                pass
 
         return analysis
 
@@ -669,23 +670,25 @@ class AutonomousImprovementOrchestrator:
 
             data = self._load_cycle_history()
             data.setdefault("cycles", [])
-            data["cycles"].append(
-                {
-                    "cycle_id": result.cycle_id,
-                    "started_at": result.started_at.isoformat(),
-                    "completed_at": result.completed_at.isoformat() if result.completed_at else None,
-                    "generated": result.proposals_generated,
-                    "applied": result.proposals_applied,
-                    "verified": result.proposals_verified,
-                    "rejected": result.proposals_rejected,
-                    "failures_diagnosed": result.failures_diagnosed,
-                    "regressions_introduced": result.regressions_introduced,
-                    "skills_created": result.skills_created,
-                    "skills_evolved": result.skills_evolved,
-                    "wall_time_seconds": round(result.wall_time_seconds, 2),
-                    "error": result.error,
-                }
-            )
+            entry = {
+                "cycle_id": result.cycle_id,
+                "started_at": result.started_at.isoformat(),
+                "completed_at": result.completed_at.isoformat() if result.completed_at else None,
+                "generated": result.proposals_generated,
+                "applied": result.proposals_applied,
+                "verified": result.proposals_verified,
+                "rejected": result.proposals_rejected,
+                "failures_diagnosed": result.failures_diagnosed,
+                "regressions_introduced": result.regressions_introduced,
+                "skills_created": result.skills_created,
+                "skills_evolved": result.skills_evolved,
+                "wall_time_seconds": round(result.wall_time_seconds, 2),
+                "error": result.error,
+            }
+            # Upsert by cycle_id so the completion write replaces the
+            # in-progress record from _learn.
+            data["cycles"] = [c for c in data["cycles"] if c.get("cycle_id") != result.cycle_id]
+            data["cycles"].append(entry)
             data["cycles"] = data["cycles"][-keep_last:]
             self._cycle_history_path.parent.mkdir(parents=True, exist_ok=True)
             self._cycle_history_path.write_text(

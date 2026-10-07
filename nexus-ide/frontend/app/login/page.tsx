@@ -8,6 +8,8 @@ import {
   isAutoLoginEnabled,
 } from "../../lib/auth";
 
+const APP_PASSWORD = process.env.NEXT_PUBLIC_APP_PASSWORD ?? "5748";
+
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -16,11 +18,10 @@ export default function LoginPage() {
   const autoLoginActive = isAutoLoginEnabled();
   const autoLoginDisabled = process.env.NEXT_PUBLIC_AUTO_LOGIN === "false";
   const devEmail = process.env.NEXT_PUBLIC_DEV_EMAIL ?? "admin@nexus-ide.com";
-  const devPassword = process.env.NEXT_PUBLIC_DEV_PASSWORD ?? "admin123";
+  const devPassword = process.env.NEXT_PUBLIC_DEV_PASSWORD ?? APP_PASSWORD;
 
-  const [email, setEmail] = useState(autoLoginActive && !autoLoginDisabled ? devEmail : "");
-  const [password, setPassword] = useState(autoLoginActive && !autoLoginDisabled ? devPassword : "");
-  const [error, setError] = useState<string | null>(expired ? "Sessão expirada. Por favor faça login novamente." : null);
+  const [password, setPassword] = useState(autoLoginActive && !autoLoginDisabled ? devPassword : APP_PASSWORD);
+  const [error, setError] = useState<string | null>(expired ? "Sessão expirada. Por favor introduza a password novamente." : null);
   const [loading, setLoading] = useState(false);
   const [autoLoginAttempting, setAutoLoginAttempting] = useState(false);
   const autoLoginTried = useRef(false);
@@ -44,10 +45,10 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
     try {
-      await login({ email, password });
+      await login({ email: devEmail, password });
       router.replace("/");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao iniciar sessão");
+      setError(err instanceof Error ? err.message : "Password incorreta");
     } finally {
       setLoading(false);
     }
@@ -55,10 +56,10 @@ export default function LoginPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-[#0b0b14] px-4">
-      <div className="w-full max-w-md rounded-2xl border border-[#1e1e2d] bg-[#161622] p-8 shadow-2xl">
+      <div className="w-full max-w-sm rounded-2xl border border-[#1e1e2d] bg-[#161622] p-8 shadow-2xl">
         <div className="mb-6 text-center">
           <h1 className="text-2xl font-semibold text-white">NEXUS IDE</h1>
-          <p className="mt-2 text-sm text-[#9ca3af]">Inicie sessão para continuar</p>
+          <p className="mt-2 text-sm text-[#9ca3af">Introduza a password para continuar</p>
         </div>
 
         {autoLoginActive && !autoLoginDisabled && (
@@ -76,22 +77,6 @@ export default function LoginPage() {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label htmlFor="email" className="mb-1 block text-sm font-medium text-[#e8e8ed]">
-              Email
-            </label>
-            <input
-              id="email"
-              type="email"
-              autoComplete="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-lg border border-[#2a2a3c] bg-[#0f0f18] px-4 py-2.5 text-sm text-white placeholder-[#6b7280] outline-none transition focus:border-[#7c6afb] focus:ring-1 focus:ring-[#7c6afb]"
-              placeholder="admin@example.com"
-            />
-          </div>
-
-          <div>
             <label htmlFor="password" className="mb-1 block text-sm font-medium text-[#e8e8ed]">
               Password
             </label>
@@ -99,11 +84,12 @@ export default function LoginPage() {
               id="password"
               type="password"
               autoComplete="current-password"
+              autoFocus
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full rounded-lg border border-[#2a2a3c] bg-[#0f0f18] px-4 py-2.5 text-sm text-white placeholder-[#6b7280] outline-none transition focus:border-[#7c6afb] focus:ring-1 focus:ring-[#7c6afb]"
-              placeholder="••••••••"
+              placeholder="••••"
             />
           </div>
 
@@ -115,14 +101,10 @@ export default function LoginPage() {
             {loading || autoLoginAttempting ? (
               <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
             ) : (
-              "Iniciar sessão"
+              "Entrar"
             )}
           </button>
         </form>
-
-        <div className="mt-6 text-center text-xs text-[#6b7280]">
-          Primeira vez? Use a API <code className="rounded bg-[#0f0f18] px-1.5 py-0.5">POST /api/auth/register</code> para criar uma conta.
-        </div>
       </div>
     </div>
   );

@@ -134,6 +134,35 @@ def manager(tmp_path) -> SubagentManager:
 
 
 class TestSubagentManagerRunPhase:
+    async def test_external_phase_runner_does_not_start_a_second_lifecycle_execution(
+        self, tmp_path
+    ) -> None:
+        lifecycle = AgentLifecycleManager(registry=object(), llm_client=object())
+        internal_calls: list[str] = []
+        external_calls: list[str] = []
+
+        async def _execute_agent(_instance: Any) -> None:
+            internal_calls.append("lifecycle")
+
+        lifecycle._execute_agent = _execute_agent  # type: ignore[method-assign]
+        manager = SubagentManager(
+            lifecycle=lifecycle,
+            checkpoint_store=SubagentCheckpointStore(db_path=tmp_path / "external-runner.db"),
+        )
+
+        async def _external_runner() -> str:
+            external_calls.append("external")
+            return "single execution"
+
+        result = await manager.run_phase("BUILD", "run exactly once", fn=_external_runner)
+        await asyncio.sleep(0)
+
+        assert result.success is True
+        assert result.output == "single execution"
+        assert external_calls == ["external"]
+        assert internal_calls == []
+        assert lifecycle._tasks == {}
+
     async def test_successful_phase(self, manager: SubagentManager) -> None:
         async def _fn() -> str:
             return "research output"
@@ -151,6 +180,31 @@ class TestSubagentManagerRunPhase:
         result = await manager.run_phase("BUILD", "Write code", fn=_fn)
         assert result.success is False
         assert "boom" in (result.error or "")
+
+    async def test_failed_lifecycle_instance_is_not_reported_as_success(
+        self, manager: SubagentManager
+    ) -> None:
+        original_spawn = manager._lifecycle.spawn
+        instance_ids: list[str] = []
+
+        async def _spawn_then_fail(agent_type: str, objective: str, **kwargs: Any) -> str:
+            instance_id = await original_spawn(agent_type, objective, **kwargs)
+            instance_ids.append(instance_id)
+            await manager._lifecycle.fail(instance_id, error="provider disconnected")
+            return instance_id
+
+        manager._lifecycle.spawn = _spawn_then_fail  # type: ignore[method-assign]
+
+        result = await manager.run_phase("RESEARCH", "inspect provider state")
+
+        assert result.success is False
+        assert "provider disconnected" in (result.error or "")
+        status = manager._lifecycle.get_status(instance_ids[0])
+        assert status is not None
+        assert status.status == "failed"
+        checkpoint = manager._checkpoints.get_latest(result.subagent_id)
+        assert checkpoint is not None
+        assert checkpoint.completed is False
 
     async def test_timeout_phase(self, manager: SubagentManager, monkeypatch: pytest.MonkeyPatch) -> None:
         import backend.orchestrator.subagent_manager as sm_mod

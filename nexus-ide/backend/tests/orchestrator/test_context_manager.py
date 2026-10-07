@@ -33,6 +33,41 @@ class TestContextStoreHistory:
         history = await store.get_history("s1")
         assert [m.content for m in history] == ["2", "3", "4"]
 
+    async def test_default_history_keeps_more_than_twenty_messages(self) -> None:
+        store = ContextStore()
+        for i in range(30):
+            await store.append_message("s1", ChatMessage(role="user", content=str(i)))
+
+        history = await store.get_history("s1")
+
+        assert len(history) == 30
+        assert [message.content for message in history] == [str(i) for i in range(30)]
+
+    async def test_history_is_hard_capped_at_five_hundred_messages(self) -> None:
+        store = ContextStore(max_history=501)
+        for i in range(501):
+            await store.append_message("s1", ChatMessage(role="user", content=str(i)))
+
+        history = await store.get_history("s1")
+
+        assert len(history) == 500
+        assert history[0].content == "1"
+        assert history[-1].content == "500"
+
+    async def test_db_reload_restores_more_than_twenty_recent_messages(self) -> None:
+        session_id = "long-context-reload-session"
+        create_session(title="Long context reload", session_id=session_id)
+        for i in range(30):
+            add_message(session_id, "user", f"message-{i}")
+
+        store = ContextStore()
+        loaded = await store.reload_from_db(session_id)
+
+        assert loaded == 30
+        history = await store.get_history(session_id)
+        assert len(history) == 30
+        assert [message.content for message in history] == [f"message-{i}" for i in range(30)]
+
     def test_tool_transport_is_removed_from_legacy_assistant_history(self) -> None:
         content = (
             "A executar.\n"

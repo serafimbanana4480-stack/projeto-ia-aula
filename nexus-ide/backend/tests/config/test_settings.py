@@ -15,14 +15,19 @@ from backend.config.settings import (
 
 
 class TestSettingsDefaults:
-    def test_default_values(self) -> None:
+    def test_default_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify Settings has the expected local-provider fields.
 
-        NOTE: This test runs with the `mock_settings` autouse fixture which
-        overrides env vars (e.g. BACKEND_PORT=9999, LOG_LEVEL=DEBUG,
-        OLLAMA_HOST=http://test-ollama:11434). We therefore only check
-        types and well-formedness, not specific default values.
+        NOTE: This test isolates the environment by overriding provider-related
+        env vars so it does not depend on the caller's .env file. The code's
+        stated default for DEFAULT_PROVIDER is "openrouter" (see settings.py).
         """
+        # Isolate from any ambient .env that may override provider defaults
+        monkeypatch.setenv("DEFAULT_PROVIDER", "openrouter")
+        monkeypatch.setenv("FALLBACK_PROVIDER", "openrouter")
+        monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+        get_settings.cache_clear()
+
         s = Settings()
         # The current runtime uses OpenRouter as the primary cloud provider;
         # override via LLM_PROVIDER when a local Ollama-only profile is needed.

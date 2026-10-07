@@ -1,8 +1,9 @@
 """Tests for graceful degradation and escalation system."""
 import pytest
-from backend.orchestrator.degradation import DegradationManager, RetryPolicy, AgentType
-from backend.orchestrator.events import EventBus
+
 from backend.observability.workflow_tracker import WorkflowTracker
+from backend.orchestrator.degradation import AgentType, DegradationManager, RetryPolicy
+from backend.orchestrator.events import EventBus
 
 
 @pytest.fixture

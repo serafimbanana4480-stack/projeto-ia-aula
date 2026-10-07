@@ -1,163 +1,203 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { motion, AnimatePresence } from "framer-motion";
 import {
-  LayoutDashboard, Bot, GitBranch, Database, ListChecks,
-  BookOpen, Zap, Cpu, Network, Key, MonitorPlay, Eye,
-  GraduationCap, Activity, DollarSign, Shield, Terminal,
-  Settings, ChevronDown, ChevronRight, Layers, Globe,
-  Brain, Gauge, SlidersHorizontal, User,
+  Activity,
+  BookOpen,
+  Brain,
+  ChevronDown,
+  ChevronRight,
+  Cpu,
+  FileCode2,
+  LayoutDashboard,
+  ListChecks,
+  Menu,
+  Search,
+  Settings,
+  ShieldCheck,
+  Wrench,
+  X,
 } from "lucide-react";
+
+type KnownRoute =
+  | "/nexus"
+  | "/nexus/hitl"
+  | "/dashboard/tasks"
+  | "/documents"
+  | "/search"
+  | "/editor"
+  | "/tools"
+  | "/models"
+  | "/analytics"
+  | "/settings";
+
+type NavItem = {
+  label: string;
+  href: KnownRoute;
+  icon: React.ElementType;
+};
 
 type NavSection = {
   label: string;
   items: NavItem[];
 };
 
-type NavItem = {
-  label: string;
-  href: string;
-  icon: React.ElementType;
-  badge?: string | number;
-  children?: NavItem[];
-};
-
 const NAV_SECTIONS: NavSection[] = [
   {
-    label: "Overview",
+    label: "Visão geral",
     items: [
       { label: "Dashboard", href: "/nexus", icon: LayoutDashboard },
-      { label: "Agent Monitor", href: "/nexus/agents", icon: Bot },
-      { label: "Workflows", href: "/nexus/workflows", icon: GitBranch },
+      { label: "Tarefas", href: "/dashboard/tasks", icon: ListChecks },
+      { label: "Aprovações", href: "/nexus/hitl", icon: ShieldCheck },
     ],
   },
   {
-    label: "Intelligence",
+    label: "Trabalho",
     items: [
-      { label: "Task Orchestration", href: "/nexus/tasks", icon: ListChecks },
-      { label: "Memory System", href: "/nexus/memory", icon: Brain },
-      { label: "Knowledge Base", href: "/nexus/knowledge", icon: BookOpen },
-      { label: "RAG System", href: "/nexus/rag", icon: Database },
+      { label: "Documentos", href: "/documents", icon: BookOpen },
+      { label: "Pesquisa", href: "/search", icon: Search },
+      { label: "Editor", href: "/editor", icon: FileCode2 },
     ],
   },
   {
-    label: "Execution",
+    label: "Recursos",
     items: [
-      { label: "Tool Registry", href: "/nexus/tools", icon: Cpu },
-      { label: "Browser Sessions", href: "/nexus/browser", icon: MonitorPlay },
-      { label: "Code Executor", href: "/nexus/executor", icon: Terminal },
-      { label: "Vision System", href: "/nexus/vision", icon: Eye },
+      { label: "Ferramentas", href: "/tools", icon: Wrench },
+      { label: "Modelos", href: "/models", icon: Cpu },
+      { label: "Métricas", href: "/analytics", icon: Activity },
     ],
   },
   {
-    label: "Models",
+    label: "Conta",
     items: [
-      { label: "Model Hub", href: "/nexus/models", icon: Layers },
-      { label: "Vector DB", href: "/nexus/vector-db", icon: Network },
-      { label: "Training", href: "/nexus/training", icon: GraduationCap },
-    ],
-  },
-  {
-    label: "Operations",
-    items: [
-      { label: "Monitoring", href: "/nexus/monitoring", icon: Activity },
-      { label: "Cost Analytics", href: "/nexus/costs", icon: DollarSign },
-      { label: "Security", href: "/nexus/security", icon: Shield },
-      { label: "Automations", href: "/nexus/automations", icon: Zap },
-    ],
-  },
-  {
-    label: "System",
-    items: [
-      { label: "Settings", href: "/nexus/settings", icon: Settings },
-      { label: "API Control", href: "/nexus/api", icon: SlidersHorizontal },
-      { label: "Human in Loop", href: "/nexus/hitl", icon: User },
+      { label: "Definições", href: "/settings", icon: Settings },
     ],
   },
 ];
 
+function isActiveRoute(pathname: string, href: string): boolean {
+  if (href === "/nexus") return pathname === href;
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
 function NavGroup({ section }: { section: NavSection }) {
-  const [open, setOpen] = useState(true);
   const pathname = usePathname();
+  const activeInSection = section.items.some((item) => isActiveRoute(pathname, item.href));
+  const [open, setOpen] = useState(true);
+  const sectionId = `nexus-nav-${section.label.toLowerCase().replaceAll(" ", "-")}`;
+
+  useEffect(() => {
+    if (activeInSection) setOpen(true);
+  }, [activeInSection]);
 
   return (
-    <div className="mb-1">
+    <section className="mb-2">
       <button
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-3 py-1.5 text-[10px] uppercase tracking-widest text-slate-500 font-bold hover:text-slate-300 transition-colors"
+        type="button"
+        aria-expanded={open}
+        aria-controls={sectionId}
+        onClick={() => setOpen((value) => !value)}
+        className="flex min-h-8 w-full items-center justify-between rounded-md px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500 transition-colors hover:bg-white/[0.04] hover:text-slate-300"
       >
         {section.label}
-        {open ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+        {open ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />}
       </button>
-
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="overflow-hidden"
-          >
-            <div className="space-y-0.5 pt-1 pb-1">
-              {section.items.map(item => {
-                const active = pathname === item.href || pathname.startsWith(item.href + "/");
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href as any}
-                    className={`nexus-nav-item ${active ? "active" : ""}`}
-                  >
-                    <item.icon size={14} className={active ? "text-violet-400" : ""} />
-                    <span className="flex-1">{item.label}</span>
-                    {item.badge && (
-                      <span className="nexus-badge">{item.badge}</span>
-                    )}
-                  </Link>
-                );
-              })}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+      {open && (
+        <nav id={sectionId} aria-label={section.label} className="space-y-0.5 pt-1">
+          {section.items.map((item) => {
+            const active = isActiveRoute(pathname, item.href);
+            const Icon = item.icon;
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                aria-current={active ? "page" : undefined}
+                className={`flex min-h-9 items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors ${
+                  active
+                    ? "border border-violet-400/25 bg-violet-500/10 font-medium text-slate-100"
+                    : "border border-transparent text-slate-400 hover:bg-white/[0.05] hover:text-slate-100"
+                }`}
+              >
+                <Icon size={15} className={active ? "text-violet-300" : "text-slate-500"} aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+              </Link>
+            );
+          })}
+        </nav>
+      )}
+    </section>
   );
 }
 
 export default function NexusSidebar() {
+  const pathname = usePathname();
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  useEffect(() => setMobileOpen(false), [pathname]);
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileOpen]);
+
+  const hiddenOnMobile = !mobileOpen;
+
   return (
-    <aside className="w-60 shrink-0 flex flex-col border-r border-slate-700/50 bg-[#0a0a25]/95 backdrop-blur-2xl h-full shadow-[4px_0_24px_rgba(0,0,0,0.3)]">
-      {/* Logo */}
-      <div className="px-4 py-5 border-b border-slate-700/50 bg-gradient-to-b from-slate-800/20 to-transparent">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 to-cyan-500 flex items-center justify-center shrink-0 shadow-[0_0_15px_rgba(124,58,237,0.4)] border border-white/10">
-            <Brain size={18} className="text-white" />
-          </div>
-          <div>
-            <p className="text-[11px] uppercase tracking-[0.2em] text-cyan-300 font-black leading-none">Nexus Omega</p>
-            <p className="text-[10px] text-slate-400 font-bold mt-1 tracking-wider">COMMAND CENTER</p>
-          </div>
-        </div>
-      </div>
+    <>
+      <button
+        type="button"
+        aria-label={mobileOpen ? "Fechar menu" : "Abrir menu"}
+        aria-controls="nexus-secondary-navigation"
+        aria-expanded={mobileOpen}
+        onClick={() => setMobileOpen((open) => !open)}
+        className="fixed left-3 top-3 z-50 flex h-8 w-8 items-center justify-center rounded-lg border border-slate-700 bg-[#10102b] text-slate-200 shadow-md md:hidden"
+      >
+        {mobileOpen ? <X size={16} aria-hidden="true" /> : <Menu size={16} aria-hidden="true" />}
+      </button>
+      {mobileOpen && (
+        <div
+          aria-hidden="true"
+          onClick={() => setMobileOpen(false)}
+          className="fixed inset-0 z-30 bg-black/55 md:hidden"
+        />
+      )}
+      <aside
+        id="nexus-secondary-navigation"
+        aria-label="Navegação NEXUS"
+        aria-hidden={hiddenOnMobile || undefined}
+        inert={hiddenOnMobile}
+        className={`fixed inset-y-0 left-0 z-40 flex w-60 shrink-0 flex-col border-r border-slate-700/50 bg-[#0a0a25]/95 shadow-[4px_0_24px_rgba(0,0,0,0.3)] backdrop-blur-2xl transition-transform duration-200 md:relative md:translate-x-0 ${
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        } ${mobileOpen ? "pt-12 md:pt-0" : "pt-0"}`}
+      >
+        <Link
+          href="/nexus"
+          className="border-b border-slate-700/50 bg-gradient-to-b from-slate-800/20 to-transparent px-4 py-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-400"
+        >
+          <span className="flex items-center gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-gradient-to-br from-violet-600 to-cyan-500 shadow-[0_0_15px_rgba(124,58,237,0.25)]">
+              <Brain size={18} className="text-white" aria-hidden="true" />
+            </span>
+            <span>
+              <span className="block text-[11px] font-black uppercase leading-none tracking-[0.2em] text-cyan-300">NEXUS</span>
+              <span className="mt-1 block text-[10px] font-bold tracking-wider text-slate-400">Workspace</span>
+            </span>
+          </span>
+        </Link>
 
-      {/* Navigation */}
-      <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-3">
-        {NAV_SECTIONS.map(section => (
-          <NavGroup key={section.label} section={section} />
-        ))}
-      </nav>
+        <nav aria-label="Secções" className="flex-1 space-y-3 overflow-y-auto px-3 py-3">
+          {NAV_SECTIONS.map((section) => <NavGroup key={section.label} section={section} />)}
+        </nav>
 
-      {/* Footer */}
-      <div className="px-4 py-3 border-t border-slate-800/60">
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(16,185,129,0.8)]" />
-          <span className="text-[11px] text-slate-500">All systems operational</span>
-        </div>
-        <p className="text-[10px] text-slate-600 mt-1">v2.0 — Autonomous Mode</p>
-      </div>
-    </aside>
+        <footer className="border-t border-slate-800/60 px-4 py-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">NEXUS IDE</p>
+        </footer>
+      </aside>
+    </>
   );
 }

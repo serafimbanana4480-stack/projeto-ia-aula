@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
 
-import docker
 from docker.models.containers import Container
 from docker.models.networks import Network
+
+import docker
 
 logger = logging.getLogger(__name__)
 

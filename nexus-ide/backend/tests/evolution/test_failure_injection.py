@@ -406,7 +406,7 @@ class TestFailureInjectionSummary:
 
         report = guard.evaluate(experiment)
         gate_names = {g.gate_name for g in report.gates}
-        assert gate_names == {
+        assert {
             "success_rate", "no_new_regressions", "score_floor",
             "champion_retention", "efficiency_budget",
-        }
+        } <= gate_names

@@ -12,6 +12,12 @@ from typing import Any
 
 import httpx
 
+from backend.runtime.reasoning import (
+    REASONING_REQUEST_OPTION,
+    REASONING_SINK_OPTION,
+    deliver_reasoning,
+)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_LIMITS = httpx.Limits(
@@ -52,9 +58,13 @@ class ChatMessage:
     role: str
     content: str
     timestamp: str = ""
+    run_id: str | None = None
 
     def to_dict(self) -> dict[str, str]:
-        return {"role": self.role, "content": self.content, "timestamp": self.timestamp}
+        result = {"role": self.role, "content": self.content, "timestamp": self.timestamp}
+        if self.run_id:
+            result["run_id"] = self.run_id
+        return result
 
 
 class OllamaError(RuntimeError):
@@ -303,7 +313,18 @@ class OllamaClient:
         # providers.  Ollama expects ``num_predict``; forwarding the other
         # names inside its options object is unnecessary and can break strict
         # server versions.
-        excluded_options = {"max_tokens", "max_output_tokens"}
+        # ``max_tokens``/``max_output_tokens`` are OpenAI names and ``tools`` is
+        # not an Ollama option. ``_nexus_reasoning_sink`` and ``think`` are
+        # transport keys of this module, not Ollama options: the sink is a
+        # Python callable, and forwarding it inside ``payload["options"]`` made
+        # every json= encode raise "Object of type function is not JSON
+        # serializable", killing the whole Ollama turn.
+        excluded_options = {
+            "max_tokens",
+            "max_output_tokens",
+            REASONING_SINK_OPTION,
+            REASONING_REQUEST_OPTION,
+        }
         if getattr(self, "disable_tools", False):
             excluded_options.update({"tools", "tool_choice"})
         ollama_options = {
@@ -367,10 +388,28 @@ class OllamaClient:
         }
         # Qwen-derived local models can spend the entire output budget in the
         # Ollama ``message.thinking`` field, leaving ``message.content`` empty
-        # and making the chat appear broken. Keep thinking opt-in for these
-        # models; callers can still pass ``options={"think": True}``.
+        # and making the chat appear broken. Thinking therefore stays opt-in:
+        # the caller must have opened the reasoning channel (a
+        # ``_nexus_reasoning_sink`` in ``options``) or asked for it explicitly.
+        # When it IS enabled we keep a content floor so a thinking-only response
+        # cannot produce an empty answer (the failure this comment documents).
+        reasoning_sink = (options or {}).get(REASONING_SINK_OPTION)
+        wants_thinking = bool(
+            (options or {}).get(REASONING_REQUEST_OPTION) or reasoning_sink
+        )
         if "think" in (options or {}):
             payload["think"] = bool(options["think"])
+        elif wants_thinking:
+            payload["think"] = True
+            # Reserve room for the answer itself: reasoning must not be able to
+            # consume the whole output budget.
+            try:
+                requested = int(ollama_options.get("num_predict", 512))
+            except (TypeError, ValueError):
+                requested = 512
+            if requested > 0:
+                ollama_options["num_predict"] = requested
+                payload["options"] = ollama_options
         elif any(marker in resolved_model.lower() for marker in ("qwen", "ornith")):
             payload["think"] = False
         failures: list[str] = []
@@ -413,7 +452,15 @@ class OllamaClient:
                                 continue
                             if data.get("error"):
                                 raise OllamaError(f"Ollama stream error: {data['error']}")
-                            chunk = data.get("message", {}).get("content")
+                            # ``message.thinking`` is Ollama's reasoning channel.
+                            # It goes to the sink and never into the answer
+                            # stream. A thinking-only response therefore still
+                            # lands in the "completed without content" branch
+                            # below and is retried, which is exactly the
+                            # failure mode the ``think`` comment above
+                            # documents.
+                            parsed = deliver_reasoning(reasoning_sink, "ollama", data)
+                            chunk = parsed.content
                             if chunk:
                                 emitted_content = True
                                 yield chunk

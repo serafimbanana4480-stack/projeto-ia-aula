@@ -38,9 +38,23 @@ class SupervisorAgent(AgentBase):
 
         # Gather session statistics
         stats = self._gather_session_stats(request.session_id)
-        f"Session statistics:\n{json.dumps(stats, indent=2, default=str)}\n\nUser query: {request.query}"
+        stats_context = (
+            f"SESSION STATISTICS:\n{json.dumps(stats, indent=2, default=str)}\n\n"
+        )
+        logger.info("[SUPERVISOR] Session stats: %s", stats_context.strip())
+        enriched_request = AgentRequest(
+            session_id=request.session_id,
+            query=stats_context + f"User query: {request.query}",
+            client=request.client,
+            history=request.history,
+            context=request.context,
+            max_iterations=request.max_iterations,
+            enable_thinking=request.enable_thinking,
+            project_path=request.project_path,
+            autonomous=request.autonomous,
+        )
 
-        async for token in self._run_react_loop(request):
+        async for token in self._run_react_loop(enriched_request):
             yield token
 
     def _gather_session_stats(self, session_id: str) -> dict[str, Any]:

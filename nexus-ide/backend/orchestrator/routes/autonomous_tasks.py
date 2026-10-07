@@ -1,24 +1,22 @@
-from __future__ import annotations
-
 """Autonomous Tasks Routes - API endpoints for autonomous task management."""
 
+from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-
+from backend.middleware.auth import require_auth
 from backend.observability.event_system import get_event_bus
-from backend.tasks.autonomous_tasks import get_autonomous_task_manager, TaskType, TaskPriority
+from backend.tasks.autonomous_tasks import TaskPriority, TaskType, get_autonomous_task_manager
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 @router.get("/tasks")
-async def get_tasks() -> Dict[str, List[Dict]]:
+async def get_tasks() -> dict[str, list[dict]]:
     """Get all autonomous tasks."""
     try:
         event_bus = await get_event_bus()
@@ -34,11 +32,11 @@ async def get_tasks() -> Dict[str, List[Dict]]:
         
     except Exception as e:
         logger.error(f"Failed to get tasks: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/tasks/running")
-async def get_running_tasks() -> Dict[str, List[Dict]]:
+async def get_running_tasks() -> dict[str, list[dict]]:
     """Get currently running tasks."""
     try:
         event_bus = await get_event_bus()
@@ -54,11 +52,11 @@ async def get_running_tasks() -> Dict[str, List[Dict]]:
         
     except Exception as e:
         logger.error(f"Failed to get running tasks: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/tasks/completed")
-async def get_completed_tasks() -> Dict[str, List[Dict]]:
+async def get_completed_tasks() -> dict[str, list[dict]]:
     """Get completed tasks."""
     try:
         event_bus = await get_event_bus()
@@ -74,11 +72,11 @@ async def get_completed_tasks() -> Dict[str, List[Dict]]:
         
     except Exception as e:
         logger.error(f"Failed to get completed tasks: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/tasks/failed")
-async def get_failed_tasks() -> Dict[str, List[Dict]]:
+async def get_failed_tasks() -> dict[str, list[dict]]:
     """Get failed tasks."""
     try:
         event_bus = await get_event_bus()
@@ -94,11 +92,11 @@ async def get_failed_tasks() -> Dict[str, List[Dict]]:
         
     except Exception as e:
         logger.error(f"Failed to get failed tasks: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/tasks/{task_id}")
-async def get_task(task_id: str) -> Dict[str, Any]:
+async def get_task(task_id: str) -> dict[str, Any]:
     """Get specific task by ID."""
     try:
         event_bus = await get_event_bus()
@@ -114,7 +112,7 @@ async def get_task(task_id: str) -> Dict[str, Any]:
         raise
     except Exception as e:
         logger.error(f"Failed to get task {task_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/tasks")
@@ -123,12 +121,12 @@ async def create_task(
     task_type: str,
     priority: str = "normal",
     handler_name: str = "",
-    parameters: Optional[Dict] = None,
-    interval: Optional[int] = None,
+    parameters: dict | None = None,
+    interval: int | None = None,
     max_retries: int = 3,
     timeout: int = 300,
     request: Request = None,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Create a new autonomous task."""
     try:
         event_bus = await get_event_bus()
@@ -167,11 +165,11 @@ async def create_task(
         raise
     except Exception as e:
         logger.error(f"Failed to create task: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/tasks/{task_id}/cancel")
-async def cancel_task(task_id: str, request: Request) -> Dict[str, str]:
+async def cancel_task(task_id: str, request: Request) -> dict[str, str]:
     """Cancel a task."""
     try:
         event_bus = await get_event_bus()
@@ -187,11 +185,11 @@ async def cancel_task(task_id: str, request: Request) -> Dict[str, str]:
         raise
     except Exception as e:
         logger.error(f"Failed to cancel task {task_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/tasks/types")
-async def get_task_types() -> Dict[str, List[str]]:
+async def get_task_types() -> dict[str, list[str]]:
     """Get available task types."""
     return {
         "task_types": [t.value for t in TaskType],
@@ -210,7 +208,7 @@ async def get_task_types() -> Dict[str, List[str]]:
 
 
 @router.get("/tasks/priorities")
-async def get_task_priorities() -> Dict[str, List[str]]:
+async def get_task_priorities() -> dict[str, list[str]]:
     """Get available task priorities."""
     return {
         "priorities": [p.value for p in TaskPriority],
@@ -225,7 +223,7 @@ async def get_task_priorities() -> Dict[str, List[str]]:
 
 
 @router.get("/tasks/stats")
-async def get_task_stats() -> Dict[str, Any]:
+async def get_task_stats() -> dict[str, Any]:
     """Get task manager statistics."""
     try:
         event_bus = await get_event_bus()
@@ -235,4 +233,4 @@ async def get_task_stats() -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Failed to get task stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

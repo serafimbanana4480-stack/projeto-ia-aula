@@ -1,7 +1,8 @@
 """UIUXAgent — UI/UX design and review specialist."""
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
 

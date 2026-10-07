@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from backend.agents.base import AgentAction, AgentBase, AgentRequest
-from backend.orchestrator.routes.chat import _is_complex_task, _is_fast_chat_turn
+from backend.orchestrator.routes.chat import (
+    _is_complex_task,
+    _is_fast_chat_turn,
+    _reclassify_no_project_content_request,
+)
+from backend.runtime.triage import RequestClass, triage_request
 from backend.tools.task_spawner import spawn_task
 
 
@@ -19,6 +24,46 @@ def test_actionable_multi_phase_request_is_not_fast() -> None:
     query = "analisa o projeto, corrige os erros e executa os testes"
     assert _is_fast_chat_turn(query) is False
     assert _is_complex_task(query) is True
+
+
+def test_long_form_content_without_a_project_stays_in_the_conversation_lane() -> None:
+    message = (
+        "Escreve um guia detalhado em cinco secções sobre como diagnosticar um chat "
+        "com streaming. Em cada secção explica uma falha comum e testes observáveis. "
+        "Fecha com uma checklist e não uses ferramentas."
+    )
+    decision = triage_request(message, requested_mode="auto", has_project=False)
+    assert decision.request_class is RequestClass.PLANNED
+
+    routed = _reclassify_no_project_content_request(
+        decision,
+        message=message,
+        requested_mode="auto",
+        project_path="",
+    )
+
+    assert routed.request_class is RequestClass.CONVERSATIONAL
+    assert routed.max_iterations == 1
+    assert "long_form_content_no_project" in routed.signals
+
+
+def test_explicit_plan_and_project_work_do_not_use_content_chat_override() -> None:
+    message = "Escreve um guia detalhado sobre como diagnosticar erros e testes observáveis."
+    explicit = triage_request("/plan " + message, requested_mode="auto", has_project=False)
+    assert _reclassify_no_project_content_request(
+        explicit,
+        message="/plan " + message,
+        requested_mode="auto",
+        project_path="",
+    ) is explicit
+
+    project_decision = triage_request(message, requested_mode="auto", has_project=True)
+    assert _reclassify_no_project_content_request(
+        project_decision,
+        message=message,
+        requested_mode="auto",
+        project_path="C:\\project",
+    ) is project_decision
 
 
 def test_spawn_task_receives_principal_context() -> None:

@@ -3,10 +3,7 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
-import pytest
-
 from backend.pipeline.critic_agent import CriticAgent, PatchEvaluation, RegressionTester
-from backend.pipeline.critic_agent import RegressionTester as RT
 from backend.pipeline.test_generator import CoverageReport as Cov
 from backend.pipeline.test_generator import TestResult as TR
 from backend.pipeline.test_generator import TestSuiteReport as TSR

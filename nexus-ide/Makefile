@@ -128,6 +128,7 @@ clean:
 	rm -rf frontend/.next frontend/node_modules backend/__pycache__ backend/.pytest_cache backend/.ruff_cache
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name .mypy_cache -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name ".pytest_tmp*" -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
 
 # ─── Database ───────────────────────────────────────────────────────────
 # Schema is managed by backend/persistence/schemas.sql + init_db().

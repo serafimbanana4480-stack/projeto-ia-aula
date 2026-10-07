@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
+from datetime import datetime
 from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
+from backend.agents.reflection_system import ReflectionSystem, ReflectionType
+from backend.knowledge.memory import MemoryStore
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
 from backend.observability.workflow_tracker import WorkflowTracker
@@ -18,9 +20,6 @@ from backend.orchestrator.agent_pool import AgentPool
 from backend.orchestrator.allocator import AgentAllocator
 from backend.orchestrator.decomposer import GoalDecomposer, StoryPriority, UserStory
 from backend.tools.ollama_client import OllamaClient
-from backend.agents.reflection_system import ReflectionSystem, ReflectionType
-from backend.knowledge.memory import MemoryStore
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -376,7 +375,7 @@ class SupremeOrchestrator:
                     timeout=5.0,
                 )
                 return self._registry[preferred_agent]
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Preferred agent %s busy, trying fallback", preferred_agent)
             except Exception as exc:
                 logger.warning("Failed to acquire %s: %s", preferred_agent, exc)
@@ -392,7 +391,7 @@ class SupremeOrchestrator:
                     )
                     logger.info("Using fallback agent %s for %s", agent_name, capability)
                     return self._registry[agent_name]
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning("Fallback agent %s busy, trying next", agent_name)
                 except Exception as exc:
                     logger.warning("Failed to acquire fallback %s: %s", agent_name, exc)
@@ -407,7 +406,7 @@ class SupremeOrchestrator:
                 )
                 logger.warning("Using last resort agent %s for %s", agent_name, capability)
                 return agent
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 continue
 
         return None
@@ -468,7 +467,7 @@ Please complete this task following the acceptance criteria."""
                 "agent": agent_name,
             }
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("Agent %s execution timed out after %s seconds for story %s", 
                         agent_name, self._agent_timeout, story.story_id)
             return {

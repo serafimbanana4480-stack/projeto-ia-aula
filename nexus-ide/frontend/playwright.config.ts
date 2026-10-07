@@ -24,7 +24,13 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npm run dev',
+    // pnpm, not npm. This is a pnpm-only project (packageManager:
+    // pnpm@11.17.0, pnpm-lock.yaml, AGENTS.md mandates pnpm), and `npm run dev`
+    // in a pnpm workspace resolves binaries and env differently -- it worked by
+    // accident locally and would not work under `pnpm exec playwright test`.
+    // Reachable now via `pnpm run test:e2e` (added to package.json); before
+    // that, no script existed and these 3 specs could not be run at all.
+    command: 'pnpm run dev',
     url: 'http://localhost:3000',
     reuseExistingServer: !process.env.CI,
     timeout: 120000,

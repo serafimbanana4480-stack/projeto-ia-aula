@@ -23,65 +23,8 @@ MODES_YAML = CONFIG_DIR / "modes.yaml"
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SECRET_KEY = "development-secret-key-change-in-production"
-_DEFAULT_JWT_SECRET = "development-jwt-secret-change-in-production"
 
 
-def _bootstrap_secrets() -> None:
-    """Auto-generate SECRET_KEY / JWT_SECRET on first startup if still at defaults.
-
-    Writes the generated values back to ``.env`` so they persist across restarts.
-    Does nothing if the values have already been overridden or if ``.env`` is
-    absent (the Settings class defaults will apply in that case).
-    """
-    import secrets
-
-    env_path = REPO_ROOT / ".env"
-    if not env_path.exists():
-        return
-
-    try:
-        content = env_path.read_text(encoding="utf-8")
-    except OSError:
-        return
-
-    new_secret_key: str | None = None
-    new_jwt_secret: str | None = None
-
-    for line in content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, _, value = stripped.partition("=")
-        key = key.strip()
-        value = value.strip().strip("\"'")
-        if key == "SECRET_KEY" and value == _DEFAULT_SECRET_KEY:
-            new_secret_key = secrets.token_urlsafe(48)
-        if key == "JWT_SECRET" and value == _DEFAULT_JWT_SECRET:
-            new_jwt_secret = secrets.token_urlsafe(48)
-
-    if new_secret_key is None and new_jwt_secret is None:
-        return
-
-    updated_lines: list[str] = []
-    for line in content.splitlines():
-        if line.startswith("SECRET_KEY=") and new_secret_key is not None:
-            updated_lines.append(f"SECRET_KEY={new_secret_key}")
-        elif line.startswith("JWT_SECRET=") and new_jwt_secret is not None:
-            updated_lines.append(f"JWT_SECRET={new_jwt_secret}")
-        else:
-            updated_lines.append(line)
-
-    try:
-        env_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
-        logger.info(
-            "Auto-generated SECRET_KEY and JWT_SECRET in .env (production must set explicit values)"
-        )
-    except OSError:
-        logger.warning("Could not write auto-generated secrets to .env", exc_info=True)
-
-
-_bootstrap_secrets()
 
 
 def _detect_device() -> str:
@@ -133,6 +76,22 @@ class Settings(BaseSettings):
     ollama_host: str = Field(default="http://localhost:11434")
     ollama_dashboard_host: str = Field(default="http://localhost:11434")
     nexus_enable_ollama: bool = Field(default=False, validation_alias="NEXUS_ENABLE_OLLAMA")
+
+    # LM Studio (local OpenAI-compatible server on port 1234). Zero-cost like
+    # Ollama, so the free-only policy treats it as an eligible local provider.
+    lmstudio_host: str = Field(default="http://localhost:1234/v1")
+    lmstudio_api_key: str = Field(default="")
+    lmstudio_default_model: str = Field(default="lfm2.5-2.6b-heretic-abliterated")
+    lmstudio_fast_model: str = Field(default="lfm2.5-2.6b-heretic-abliterated")
+    lmstudio_coder_model: str = Field(default="lfm2.5-2.6b-heretic-abliterated")
+    lmstudio_read_timeout: float = Field(default=600.0)
+
+    # Primary runtime: per-signal provider timeout in seconds (0 = off). Bounds
+    # a wedged or cold-loading small local model instead of hanging the turn.
+    # The process env var takes precedence (tests monkeypatch it directly).
+    nexus_primary_signal_timeout: float = Field(
+        default=0.0, validation_alias="NEXUS_PRIMARY_SIGNAL_TIMEOUT", ge=0
+    )
 
     # Cloud API keys (used when llm_provider != "local")
     openai_api_key: str = Field(default="")
@@ -197,7 +156,7 @@ class Settings(BaseSettings):
     enable_metrics: bool = Field(default=True)
 
     # Security
-    secret_key: str = Field(default="development-secret-key-change-in-production")
+    secret_key: str = Field(default="")
 
     # Content Security Policy
     #   csp_enabled: when false, the CSP header is omitted entirely (dev/debug).
@@ -209,7 +168,7 @@ class Settings(BaseSettings):
     allowed_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000")
 
     # JWT Authentication
-    jwt_secret: str = Field(default="development-jwt-secret-change-in-production")
+    jwt_secret: str = Field(default="")
     jwt_algorithm: str = Field(default="HS256")
     jwt_expiration_minutes: int = Field(default=30)
 
@@ -224,8 +183,9 @@ class Settings(BaseSettings):
     nexus_gc_interval_minutes: int = Field(default=60, description="Minutes between automatic garbage-collection runs")
 
     # Rate limiting
-    rate_limit_enabled: bool = Field(default=False)
-    rate_limit_requests_per_minute: int = Field(default=0)
+    rate_limit_enabled: bool = Field(default=True)
+    rate_limit_requests_per_minute: int = Field(default=60)
+    rate_limit_tokens_per_minute: int = Field(default=100000)
 
     @field_validator("environment")
     @classmethod
@@ -245,11 +205,51 @@ class Settings(BaseSettings):
             raise ValueError(f"log_level must be one of {allowed}, got: {v}")
         return v.upper()
 
+    @field_validator("secret_key")
+    @classmethod
+    def validate_secret_key(cls, v: str) -> str:
+        """Raise RuntimeError if SECRET_KEY is not set via environment variable."""
+        if not v:
+            raise RuntimeError(
+                "SECRET_KEY is not set. Set the SECRET_KEY environment variable "
+                "before starting the application."
+            )
+        return v
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def validate_jwt_secret(cls, v: str) -> str:
+        """Raise RuntimeError if JWT_SECRET is not set via environment variable."""
+        if not v:
+            raise RuntimeError(
+                "JWT_SECRET is not set. Set the JWT_SECRET environment variable "
+                "before starting the application."
+            )
+        return v
+
     @field_validator("local_llm_device", mode="before")
     @classmethod
     def _auto_detect_device(cls, v: Any) -> Any:
         if v == "auto" or v is None or v == "":
             return _detect_device()
+        return v
+
+    @field_validator("secret_key", mode="after")
+    @classmethod
+    def validate_secret_key_after(cls, v: str) -> str:
+        if not v:
+            raise RuntimeError(
+                "SECRET_KEY is not set. Set the SECRET_KEY environment variable."
+            )
+        return v
+
+    @field_validator("jwt_secret", mode="after")
+    @classmethod
+    def validate_jwt_secret_after(cls, v: str) -> str:
+        if not v:
+            raise RuntimeError(
+                "JWT_SECRET is not set. Set the JWT_SECRET environment variable."
+            )
         return v
 
     def get_allowed_origins_list(self) -> list[str]:
@@ -519,31 +519,6 @@ def validate_configuration() -> list[str]:
 
     try:
         settings = get_settings()
-
-        if settings.environment == "production":
-            if settings.secret_key == _DEFAULT_SECRET_KEY:
-                errors.append(
-                    "SECRET_KEY is set to the development default. "
-                    "Set a strong random value in .env before starting in production. "
-                    "Example: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
-                )
-            if settings.jwt_secret == _DEFAULT_JWT_SECRET:
-                errors.append(
-                    "JWT_SECRET is set to the development default. "
-                    "Set a strong random value in .env before starting in production. "
-                    "Example: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
-                )
-        else:
-            if settings.secret_key == "development-secret-key-change-in-production":
-                warnings_list.append(
-                    "SECRET_KEY is set to default value. "
-                    "Change this before deploying to production."
-                )
-            if settings.jwt_secret == "development-jwt-secret-change-in-production":
-                warnings_list.append(
-                    "JWT_SECRET is set to default value. "
-                    "Change this before deploying to production."
-                )
 
         if not MODELS_YAML.exists():
             errors.append(f"Required config file not found: {MODELS_YAML}")

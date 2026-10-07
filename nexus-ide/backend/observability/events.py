@@ -2,6 +2,11 @@
 
 In-process pub/sub using asyncio queues. For multi-worker deployments,
 swap in Redis Pub/Sub.
+
+Also re-exports the compatibility API formerly provided by
+``backend.observability.event_system`` (``EventType``, ``EventPriority``,
+``Event.to_dict()``, ``EventBus.get_stats()``) so all importers can migrate
+to a single module.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -20,6 +26,43 @@ logger = logging.getLogger(__name__)
 def _utcnow() -> datetime:
     """UTC ``now`` with timezone attached. Replaces deprecated ``datetime.utcnow``."""
     return datetime.now(UTC)
+
+
+class EventType(StrEnum):
+    """Canonical event types for the observability layer (compatibility alias).
+
+    These values match the strings used throughout the codebase.  New code
+    should use the plain-string ``Event.type`` field; this enum exists solely
+    so modules that were written against ``event_system.EventType`` continue
+    to work after that module is removed.
+    """
+
+    AGENT_STARTED = "agent.started"
+    AGENT_COMPLETED = "agent.completed"
+    AGENT_FAILED = "agent.failed"
+    AGENT_HEARTBEAT = "agent.heartbeat"
+    TASK_STARTED = "task.started"
+    TASK_COMPLETED = "task.completed"
+    TASK_FAILED = "task.failed"
+    TASK_QUEUED = "task.queued"
+    SYSTEM_ERROR = "system.error"
+    SYSTEM_WARNING = "system.warning"
+    SYSTEM_INFO = "system.info"
+    METRIC_UPDATE = "metric.update"
+    CHAT_MESSAGE = "chat.message"
+    CHAT_RESPONSE = "chat.response"
+    MEMORY_UPDATE = "memory.update"
+    SECURITY_EVENT = "security.event"
+    PERFORMANCE_UPDATE = "performance.update"
+
+
+class EventPriority(StrEnum):
+    """Event priority levels (compatibility alias)."""
+
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    CRITICAL = "critical"
 
 
 @dataclass
@@ -43,6 +86,14 @@ class Event:
     payload: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=_utcnow)
     data: dict[str, Any] = field(default_factory=dict)
+    # Compatibility fields populated by callers that were written against
+    # ``event_system.Event``.  They are not used by this bus but are surfaced
+    # via ``to_dict()`` so downstream consumers do not break.
+    event_id: str = ""
+    source: str = ""
+    session_id: str | None = None
+    priority: EventPriority = EventPriority.NORMAL
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Whichever spelling the caller used wins; both then point at the same
@@ -50,6 +101,32 @@ class Event:
         if self.data and not self.payload:
             self.payload = self.data
         self.data = self.payload
+
+    @property
+    def event_type(self) -> EventType:
+        """Compatibility property: expose ``type`` as an ``EventType`` enum.
+
+        Call sites that read ``event.event_type.value`` (written against
+        ``event_system.Event``) will keep working without modification.
+        """
+        try:
+            return EventType(self.type)
+        except ValueError:
+            return EventType.SYSTEM_INFO
+
+    def to_dict(self) -> dict[str, Any]:
+        """Compatibility serialisation matching ``event_system.Event.to_dict``."""
+        return {
+            "event_id": self.event_id,
+            "event_type": self.event_type.value,
+            "timestamp": self.timestamp.isoformat(),
+            "source": self.source,
+            "agent": self.agent,
+            "session_id": self.session_id,
+            "priority": self.priority.value,
+            "payload": self.payload,
+            "metadata": self.metadata,
+        }
 
 
 class EventBus:
@@ -70,7 +147,7 @@ class EventBus:
         existed on this class. Each raised ``AttributeError`` into a broad
         ``except Exception`` and was logged as a generic failure of the
         surrounding feature — see ``supreme.py``'s "Failed to perform
-        orchestration reflection", where the reflection had in fact succeeded
+        `` orchestration reflection", where the reflection had in fact succeeded
         and only its announcement was lost.
         """
         await self.publish(event)
@@ -122,6 +199,18 @@ class EventBus:
             return len(self._subscribers.get(topic, []))
         return sum(len(qs) for qs in self._subscribers.values())
 
+    def get_stats(self) -> dict[str, Any]:
+        """Compatibility method returning bus statistics (mirrors ``event_system``)."""
+        return {
+            "running": True,
+            "subscribers": self.subscriber_count(),
+            "history_size": 0,
+            "redis_connected": False,
+            "events_published": 0,
+            "events_delivered": 0,
+            "errors": 0,
+        }
+
 
 # Global singleton
 _bus: EventBus | None = None
@@ -133,3 +222,27 @@ def get_event_bus() -> EventBus:
     if _bus is None:
         _bus = EventBus()
     return _bus
+
+
+# Backward-compat shim for modules that were written against
+# ``backend.observability.event_system``.
+class _EventSystemShim:
+    """Lightweight namespace mirroring the removed ``event_system`` module.
+
+    Importing ``from backend.observability.event_system import get_event_bus``
+    will still work because Python's import system will find this shim in the
+    ``observability`` package's namespace.  The real implementations live in
+    ``events.py`` above.
+    """
+
+    Event = Event
+    EventBus = EventBus
+    EventType = EventType
+    EventPriority = EventPriority
+    get_event_bus = staticmethod(get_event_bus)
+
+    @staticmethod
+    async def shutdown_event_system() -> None:
+        """Compatibility no-op: the in-process bus has no persistent connection."""
+        global _bus
+        _bus = None

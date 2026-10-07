@@ -16,6 +16,11 @@ import httpx
 
 from backend.config.settings import get_settings
 from backend.llm.openai_provider import _system_verify_context
+from backend.runtime.reasoning import (
+    REASONING_REQUEST_OPTION,
+    REASONING_SINK_OPTION,
+    deliver_reasoning,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,13 +96,63 @@ class AnthropicProvider:
         return normalized, system
 
     def _extract_usage_from_message(self, data: dict[str, Any]) -> dict[str, int]:
-        """Extract token counts from an Anthropic Messages API response."""
+        """Extract token counts from an Anthropic Messages API response.
+
+        Extended thinking is billed as output tokens; some gateways also report
+        it separately as ``thinking_tokens``. Both are surfaced so the session
+        panel can attribute tokens to the reasoning pass.
+        """
         usage = data.get("usage", {})
-        return {
+        if not isinstance(usage, dict):
+            usage = {}
+        reasoning = 0
+        for key in ("thinking_tokens", "reasoning_tokens"):
+            value = usage.get(key)
+            if isinstance(value, int | float) and value > 0:
+                reasoning = int(value)
+                break
+        usage_out = {
             "input_tokens": usage.get("input_tokens", 0) or 0,
             "output_tokens": usage.get("output_tokens", 0) or 0,
-            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+            "total_tokens": (usage.get("input_tokens", 0) or 0)
+            + (usage.get("output_tokens", 0) or 0),
         }
+        if reasoning:
+            # Additive only: a non-thinking turn keeps the historical shape.
+            usage_out["reasoning_tokens"] = reasoning
+        return usage_out
+
+    @staticmethod
+    def _thinking_payload(
+        payload: dict[str, Any], options: dict[str, Any] | None
+    ) -> bool:
+        """Add the extended-thinking block when the caller asked for reasoning.
+
+        Anthropic requires ``budget_tokens < max_tokens`` and rejects the whole
+        request otherwise, so the budget is derived from the *resolved*
+        ``max_tokens`` and the largest budget is never requested. Returns
+        ``True`` when the block was added.
+        """
+        if not isinstance(options, dict):
+            return False
+        if not options.get(REASONING_REQUEST_OPTION) and not options.get(
+            REASONING_SINK_OPTION
+        ):
+            return False
+        try:
+            max_tokens = int(payload.get("max_tokens") or 4096)
+        except (TypeError, ValueError):
+            max_tokens = 4096
+        # Anthropic needs headroom above the budget for the actual answer.
+        budget = min(2048, max(1024, max_tokens // 2))
+        if budget >= max_tokens:
+            return False
+        payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        # Extended thinking is incompatible with a non-default temperature.
+        payload.pop("temperature", None)
+        payload.pop("top_p", None)
+        payload.pop("top_k", None)
+        return True
 
     async def chat_stream(
         self,
@@ -126,6 +181,7 @@ class AnthropicProvider:
                 payload["max_tokens"] = options["max_tokens"]
             if "top_p" in options:
                 payload["top_p"] = options["top_p"]
+        self._thinking_payload(payload, options)
 
         async with self._client.stream("POST", "/v1/messages", json=payload) as resp:
             if resp.status_code != 200:
@@ -144,24 +200,33 @@ class AnthropicProvider:
                         event = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    # ``thinking_delta`` / ``signature_delta`` /
+                    # ``redacted_thinking`` are the extended-thinking channel.
+                    # They are parsed and routed to the caller's sink and are
+                    # NEVER yielded as answer text: the answer is whatever
+                    # ``text_delta`` carries.
+                    parsed = deliver_reasoning(
+                        (options or {}).get(REASONING_SINK_OPTION), "anthropic", event
+                    )
+                    if parsed.usage:
+                        self._last_usage.update(parsed.usage)
+                    if parsed.content:
+                        yield parsed.content
                     event_type = event.get("type")
-                    if event_type == "content_block_delta":
-                        delta = event.get("delta", {})
-                        text = delta.get("text", "")
-                        if text:
-                            yield text
-                    elif event_type == "message_delta":
+                    if event_type == "message_delta":
                         # End-of-stream — usage info is usually in message_start
                         # but some providers put it here.
                         usage = event.get("usage")
                         if usage:
-                            self._last_usage = {
-                                "input_tokens": usage.get("input_tokens", 0) or 0,
-                                "output_tokens": usage.get("output_tokens", 0) or 0,
-                            }
+                            self._last_usage.update(
+                                {
+                                    "input_tokens": usage.get("input_tokens", 0) or 0,
+                                    "output_tokens": usage.get("output_tokens", 0) or 0,
+                                }
+                            )
                     elif event_type == "message_start":
                         msg = event.get("message", {})
-                        self._last_usage = self._extract_usage_from_message(msg)
+                        self._last_usage.update(self._extract_usage_from_message(msg))
 
     async def chat_complete(
         self,
@@ -189,6 +254,7 @@ class AnthropicProvider:
                 payload["max_tokens"] = options["max_tokens"]
             if "top_p" in options:
                 payload["top_p"] = options["top_p"]
+        self._thinking_payload(payload, options)
 
         resp = await self._client.post("/v1/messages", json=payload)
         if resp.status_code != 200:
@@ -197,7 +263,19 @@ class AnthropicProvider:
         data = resp.json()
         self._last_usage = self._extract_usage_from_message(data)
         contents = data.get("content", [])
-        return "".join(block.get("text", "") for block in contents if block.get("type") == "text")
+        text_parts: list[str] = []
+        for block in contents:
+            if not isinstance(block, dict):
+                continue
+            # ``thinking``/``redacted_thinking`` blocks are the reasoning
+            # channel; a non-streaming call still has to route them somewhere
+            # bounded instead of returning them as the answer.
+            deliver_reasoning(
+                (options or {}).get(REASONING_SINK_OPTION), "anthropic", block
+            )
+            if block.get("type") == "text":
+                text_parts.append(str(block.get("text") or ""))
+        return "".join(text_parts)
 
     async def embed(
         self,

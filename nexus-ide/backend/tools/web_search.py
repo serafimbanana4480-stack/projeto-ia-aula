@@ -32,12 +32,15 @@ from bs4 import BeautifulSoup
 from backend.cache import cache_result
 from backend.config.settings import get_settings
 from backend.tools.registry import ToolSpec, register_tool
+from backend.tools.safe_http import PublicAddressHTTPTransport
+from backend.tools.search_errors import SearchProviderError, SearchProvidersUnavailable
 from backend.tools.web_fetcher import fetch_and_summarize
 
 logger = logging.getLogger(__name__)
 
 SEARCH_CACHE_TTL = 3600  # 1 hour
 FETCH_CACHE_TTL = 1800  # 30 minutes
+BRAVE_IMAGE_THUMBNAIL_HOST = "imgs.search.brave.com"
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -229,8 +232,7 @@ async def _search_brave(
     site_filter: str | None = None,
 ) -> list[SearchHit]:
     """Search via Brave Search API."""
-    settings = get_settings()
-    api_key = settings.brave_api_key
+    api_key = get_brave_api_key()
     if not api_key:
         return []
 
@@ -248,7 +250,12 @@ async def _search_brave(
     if site_filter:
         params["q"] = f"{query} site:{site_filter}"
 
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=15.0,
+        follow_redirects=False,
+        trust_env=False,
+        transport=PublicAddressHTTPTransport(),
+    ) as client:
         try:
             response = await _request_with_retry(client, "GET", url, headers=headers, params=params)
             data = response.json()
@@ -268,12 +275,192 @@ async def _search_brave(
             return hits
         except httpx.HTTPStatusError as exc:
             logger.error("Brave search HTTP error: %s", exc.response.status_code)
-            return []
+            raise SearchProviderError("brave") from exc
         except Exception as exc:
             logger.error("Brave search failed: %s", exc)
-            return []
+            raise SearchProviderError("brave") from exc
 
 
+def get_brave_api_key() -> str:
+    """Resolve Brave credentials from the encrypted runtime store or env."""
+    try:
+        # Settings entered through the UI are encrypted at rest. Read them via
+        # the canonical loader instead of handing the ciphertext to Brave.
+        from backend.orchestrator.routes.settings import _load_runtime_settings
+
+        runtime_settings = _load_runtime_settings()
+    except Exception as exc:  # noqa: BLE001 - search can still use its no-key fallback
+        logger.warning("Could not load runtime Brave credentials (%s)", type(exc).__name__)
+        runtime_settings = {}
+    configured = str(runtime_settings.get("brave_api_key", "") or "").strip()
+    if configured:
+        return configured
+    # Match the settings UI's runtime-override precedence. A stored key may
+    # replace an environment fallback; leaving the input empty preserves env.
+    return str(getattr(get_settings(), "brave_api_key", "") or "").strip()
+
+
+def _safe_url(value: Any, *, schemes: tuple[str, ...], host: str | None = None) -> str:
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip()
+    try:
+        parsed = urlparse(candidate)
+        hostname = parsed.hostname
+        # Accessing port also validates malformed bracket/port syntax.
+        _ = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() not in schemes
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return ""
+    if host is not None and hostname.lower() != host:
+        return ""
+    if host is not None and parsed.port not in (None, 443):
+        return ""
+    return candidate
+
+
+def normalize_brave_image_results(data: Any, limit: int = 24) -> list[dict[str, Any]]:
+    """Return safe, display-ready image hits; never keep raw provider payloads."""
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        return []
+    hits: list[dict[str, Any]] = []
+    for item in data["results"]:
+        if not isinstance(item, dict):
+            continue
+        thumbnail = item.get("thumbnail")
+        properties = item.get("properties")
+        meta_url = item.get("meta_url")
+        thumbnail = thumbnail if isinstance(thumbnail, dict) else {}
+        properties = properties if isinstance(properties, dict) else {}
+        meta_url = meta_url if isinstance(meta_url, dict) else {}
+        # Brave documents ``url`` as the originating page, while
+        # ``properties.url`` is the original image file. The UI links to the
+        # source page and renders only Brave's proxied thumbnail.
+        page_url = _safe_url(item.get("url"), schemes=("http", "https"))
+        thumbnail_url = _safe_url(
+            thumbnail.get("src"),
+            schemes=("https",),
+            host=BRAVE_IMAGE_THUMBNAIL_HOST,
+        )
+        if not page_url or not thumbnail_url:
+            continue
+        source = item.get("source") or meta_url.get("hostname") or ""
+        hits.append(
+            {
+                "title": str(item.get("title") or source or "Imagem")[:500],
+                "url": page_url,
+                "thumbnail_url": thumbnail_url,
+                "source": str(source)[:200],
+                "width": _positive_dimension(
+                    thumbnail.get("width") or properties.get("width")
+                ),
+                "height": _positive_dimension(
+                    thumbnail.get("height") or properties.get("height")
+                ),
+            }
+        )
+        if len(hits) >= max(1, min(int(limit), 50)):
+            break
+    return hits
+
+
+def _positive_dimension(value: Any) -> int | None:
+    try:
+        dimension = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return dimension if 0 < dimension <= 20_000 else None
+
+
+async def search_images(query: str, max_results: int = 24) -> dict[str, Any]:
+    """Search Brave Images without caching third-party results."""
+    normalized_query = query.strip()
+    if not normalized_query:
+        return {"query": "", "hits": [], "count": 0, "configured": bool(get_brave_api_key())}
+    api_key = get_brave_api_key()
+    if not api_key:
+        return {
+            "query": normalized_query,
+            "hits": [],
+            "count": 0,
+            "configured": False,
+            "error": "Pesquisa de imagens indisponível: falta configurar a chave Brave.",
+            "error_code": "not_configured",
+        }
+
+    url = "https://api.search.brave.com/res/v1/images/search"
+    headers = {
+        "X-Subscription-Token": api_key,
+        "Accept": "application/json",
+        "Cache-Control": "no-cache",
+    }
+    params = {
+        "q": normalized_query[:400],
+        "count": max(1, min(int(max_results), 50)),
+        "safesearch": "strict",
+    }
+    try:
+        # The Brave credential is sent in a custom header (not Authorization).
+        # HTTPX preserves custom headers across cross-origin redirects, so keep
+        # this fixed provider endpoint redirect-free to prevent token disclosure.
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            follow_redirects=False,
+            trust_env=False,
+            transport=PublicAddressHTTPTransport(),
+        ) as client:
+            response = await client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        message = (
+            "A chave Brave não foi aceite. Confirma a configuração."
+            if status in {401, 403}
+            else "O limite da pesquisa de imagens foi atingido. Tenta mais tarde."
+            if status == 429
+            else "O fornecedor de pesquisa de imagens não respondeu corretamente."
+        )
+        logger.warning("Brave image search failed with HTTP %s", status)
+        return {
+            "query": normalized_query,
+            "hits": [],
+            "count": 0,
+            "configured": True,
+            "error": message,
+            "error_code": (
+                "invalid_credentials"
+                if status in {401, 403}
+                else "rate_limited"
+                if status == 429
+                else "provider_error"
+            ),
+        }
+    except (httpx.RequestError, ValueError) as exc:
+        logger.warning("Brave image search request failed (%s)", type(exc).__name__)
+        return {
+            "query": normalized_query,
+            "hits": [],
+            "count": 0,
+            "configured": True,
+            "error": "Não foi possível ligar ao fornecedor de pesquisa de imagens.",
+            "error_code": "provider_unavailable",
+        }
+
+    hits = normalize_brave_image_results(payload, max_results)
+    return {
+        "query": normalized_query,
+        "hits": hits,
+        "count": len(hits),
+        "configured": True,
+        "provider": "brave",
+    }
 # ---------------------------------------------------------------------------
 # DuckDuckGo fallback
 # ---------------------------------------------------------------------------
@@ -300,7 +487,12 @@ async def _search_duckduckgo(
         ),
     }
 
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=15.0,
+        follow_redirects=True,
+        trust_env=False,
+        transport=PublicAddressHTTPTransport(),
+    ) as client:
         try:
             response = await _request_with_retry(client, "POST", url, data=data, headers=headers)
             soup = BeautifulSoup(response.text, "html.parser")
@@ -336,7 +528,41 @@ async def _search_duckduckgo(
             return hits
         except Exception as exc:
             logger.error("DuckDuckGo search failed: %s", exc)
-            return []
+            raise SearchProviderError("duckduckgo") from exc
+
+
+async def _search_with_fallback(
+    query: str,
+    max_results: int,
+    site_filter: str | None,
+) -> list[SearchHit]:
+    """Try Brave first, then DuckDuckGo, keeping provider failures distinct from no hits."""
+    failures: list[str] = []
+    try:
+        hits = await _search_brave(query, max_results=max_results, site_filter=site_filter)
+    except SearchProviderError as exc:
+        failures.append(exc.provider)
+        hits = []
+
+    if hits:
+        return hits
+
+    try:
+        fallback_hits = await _search_duckduckgo(
+            query,
+            max_results=max_results,
+            site_filter=site_filter,
+        )
+    except SearchProviderError as exc:
+        failures.append(exc.provider)
+        raise SearchProvidersUnavailable(failures) from exc
+
+    # A failed primary plus an empty fallback cannot safely be represented as
+    # a genuine no-results answer. Raising also keeps the cache decorator from
+    # storing that misleading empty response for its one-hour TTL.
+    if failures and not fallback_hits:
+        raise SearchProvidersUnavailable(failures)
+    return fallback_hits
 
 
 # ---------------------------------------------------------------------------
@@ -352,9 +578,7 @@ async def search_web(query: str, max_results: int = 10) -> dict[str, Any]:
     Results are ranked by a composite relevance score.
     """
     clean_query, site = _extract_site_filter(query)
-    hits = await _search_brave(clean_query, max_results=max_results, site_filter=site)
-    if not hits:
-        hits = await _search_duckduckgo(clean_query, max_results=max_results, site_filter=site)
+    hits = await _search_with_fallback(clean_query, max_results=max_results, site_filter=site)
     hits = _rank_hits(clean_query, hits)
     return {
         "query": query,
@@ -390,6 +614,40 @@ async def fetch_url(url: str) -> dict[str, Any]:
 # Search + fetch + synthesize
 # ---------------------------------------------------------------------------
 
+NO_RESULTS_ERROR = "No search provider returned hits for this query; no answer was synthesised."
+NO_EVIDENCE_ERROR = (
+    "Search returned hits but every page fetch failed; no answer was synthesised."
+)
+
+_EVIDENCE_TERM_RE = re.compile(r"\b\w{3,}\b")
+
+
+def _evidence_confidence(query: str, evidence: list[str], attempted: int) -> float:
+    """Return a confidence derived only from the pages that were actually read.
+
+    A search-hit score ranks *candidate* URLs. It says nothing about whether the
+    page exists, is readable, or says anything about the query, so it can never
+    justify a confidence value on its own -- reporting one would let the tool
+    claim high confidence while nothing at all had been retrieved. This function
+    therefore takes the text that came back from the pages, not the hits.
+
+    The value is a retrieval heuristic: the share of query terms the retrieved
+    pages cover, damped by the share of attempted pages that were readable. It
+    is not a measure of corroboration between sources, and it is ``0.0`` when
+    no evidence was retrieved because there is then nothing to be confident
+    about -- the caller is told separately via ``error_category``.
+    """
+    if not evidence:
+        return 0.0
+    q_words = set(_EVIDENCE_TERM_RE.findall(query.lower()))
+    coverages = [
+        (sum(1 for word in q_words if word in text.lower()) / len(q_words)) if q_words else 0.0
+        for text in evidence
+    ]
+    term_coverage = sum(coverages) / len(coverages)
+    retrieval_ratio = len(evidence) / attempted if attempted else 0.0
+    return round(min(1.0, 0.7 * term_coverage + 0.3 * retrieval_ratio), 2)
+
 
 @cache_result("search_answer:", ttl=SEARCH_CACHE_TTL)
 async def search_and_answer(query: str, max_results: int = 3) -> dict[str, Any]:
@@ -401,20 +659,32 @@ async def search_and_answer(query: str, max_results: int = 3) -> dict[str, Any]:
 
     Returns:
         dict with ``query``, ``sources``, ``answer``, ``confidence``.
+
+        ``answer`` is ``""`` -- never a prose shell with nothing under it -- and
+        ``error_category`` is set when nothing could be synthesised:
+        ``no_results`` (no provider returned hits) or ``no_evidence`` (hits
+        existed but every page fetch failed). ``confidence`` comes only from the
+        pages that were retrieved, so it is ``0.0`` in both failure shapes.
     """
     clean_query, site = _extract_site_filter(query)
 
     # 1. Search
-    hits = await _search_brave(clean_query, max_results=max_results * 2, site_filter=site)
-    if not hits:
-        hits = await _search_duckduckgo(clean_query, max_results=max_results * 2, site_filter=site)
+    hits = await _search_with_fallback(
+        clean_query,
+        max_results=max_results * 2,
+        site_filter=site,
+    )
 
     if not hits:
         return {
             "query": query,
             "sources": [],
-            "answer": "No search results found.",
+            "answer": "",
             "confidence": 0.0,
+            "error": NO_RESULTS_ERROR,
+            "error_category": "no_results",
+            "attempted_urls": [],
+            "fetch_failure_count": 0,
         }
 
     hits = _rank_hits(clean_query, hits)[:max_results]
@@ -424,23 +694,66 @@ async def search_and_answer(query: str, max_results: int = 3) -> dict[str, Any]:
     fetched_list = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
     fetched: list[dict[str, Any]] = []
+    evidence: list[str] = []
+    failed_urls: list[str] = []
     for hit, content in zip(hits, fetched_list, strict=False):
         if isinstance(content, Exception):
             logger.warning("Fetch failed for %s: %s", hit.url, content)
+            failed_urls.append(hit.url)
             continue
         if content.get("status") == "error":
+            failed_urls.append(hit.url)
             continue
+        page_title = content.get("title", "")
+        page_summary = content.get("summary", hit.snippet)
         fetched.append(
             {
                 "url": hit.url,
-                "title": content.get("title") or hit.title,
-                "summary": content.get("summary", hit.snippet),
+                "title": page_title or hit.title,
+                "summary": page_summary,
                 "snippet": hit.snippet,
             }
         )
+        # Only text that came back from the page itself counts as evidence; the
+        # search snippet fallback must not sneak back in as retrieved content.
+        page_text = f"{page_title} {page_summary}".strip()
+        if page_text:
+            evidence.append(page_text)
 
-    # 3. Synthesize answer
+    confidence = _evidence_confidence(query, evidence, attempted=len(hits))
+
+    # 3. No evidence retrieved: say so instead of emitting a heading over nothing.
+    if not evidence:
+        logger.warning(
+            "search_and_answer retrieved no evidence for %s (%d fetch failures)",
+            query,
+            len(failed_urls),
+        )
+        return {
+            "query": query,
+            "sources": [
+                {
+                    "url": h.url,
+                    "title": h.title,
+                    "snippet": h.snippet,
+                    "score": h.score,
+                }
+                for h in hits
+            ],
+            "answer": "",
+            "confidence": 0.0,
+            "error": NO_EVIDENCE_ERROR,
+            "error_category": "no_evidence",
+            "attempted_urls": [h.url for h in hits],
+            "fetch_failure_count": len(failed_urls),
+        }
+
+    # 4. Synthesize answer
     synthesis_parts = [f"## Answer for: {query}\n"]
+    synthesis_parts.append(
+        f"*Evidence confidence: {confidence:.0%} "
+        f"(from {len(fetched)} of {len(hits)} retrieved pages)*\n"
+    )
     for i, item in enumerate(fetched, 1):
         synthesis_parts.append(f"\n### Source {i}: [{item['title']}]({item['url']})\n")
         # Include both snippet and first part of summary
@@ -449,7 +762,6 @@ async def search_and_answer(query: str, max_results: int = 3) -> dict[str, Any]:
             synthesis_parts.append(f"\n{item['summary'][:800]}")
 
     answer = "\n".join(synthesis_parts)
-    confidence = round(sum(h.score for h in hits) / len(hits), 2) if hits else 0.0
 
     return {
         "query": query,

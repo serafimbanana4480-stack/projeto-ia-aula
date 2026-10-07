@@ -5,11 +5,9 @@ Provides endpoints for commits, tools, web search, etc.
 """
 
 import logging
-import time
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +78,6 @@ async def get_self_improvement_improvements(
     """Return self-improvement records."""
     # Try to get real data from MetaLearner
     try:
-        from backend.orchestrator.meta_learner import MetaLearner
         # Note: MetaLearner would need to be initialized in main.py and accessible
         # For now, we'll return empty list if not available
         # In production, this would query the MetaLearner for actual improvements
@@ -98,7 +95,6 @@ async def get_self_improvement_metrics(
     """Return metric improvements."""
     # Try to get real data from MetaLearner
     try:
-        from backend.orchestrator.meta_learner import MetaLearner
         # Note: MetaLearner would need to be initialized in main.py and accessible
         # For now, we'll return empty list if not available
         # In production, this would query the MetaLearner for actual metrics
@@ -117,7 +113,6 @@ async def get_self_improvement_learnings(
     """Return learned patterns."""
     # Try to get real data from MetaLearner
     try:
-        from backend.orchestrator.meta_learner import MetaLearner
         # Note: MetaLearner would need to be initialized in main.py and accessible
         # For now, we'll return empty list if not available
         # In production, this would query the MetaLearner for actual learnings
@@ -131,9 +126,8 @@ async def get_self_improvement_learnings(
 @router.get("/self-improvement/stream")
 async def self_improvement_stream():
     """Stream self-improvement updates via SSE."""
-    import json
     import asyncio
-    import time
+    import json
     
     async def event_generator():
         while True:
@@ -142,7 +136,6 @@ async def self_improvement_stream():
             
             # Try to get real events from MetaLearner
             try:
-                from backend.orchestrator.meta_learner import MetaLearner
                 # Note: MetaLearner would need to be initialized in main.py and accessible
                 # For now, we'll just send heartbeat
                 # In production, this would stream real events from MetaLearner

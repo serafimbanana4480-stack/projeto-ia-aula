@@ -1,8 +1,26 @@
 "use client";
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { Users, Brain, Sparkles, Loader2, CheckCircle2, XCircle, Clock, Send, Search, BookOpen, Hammer, Bug, ClipboardList, Lightbulb, FlaskConical, Activity, Gauge, Shield, AlertTriangle, MessageSquare, History, Layers, Wrench, Library, Database, GitBranch, GitPullRequest, ArrowRight, Siren, Book, Scissors, Play } from "lucide-react";
 import { authHeaders } from "../../lib/auth";
+import { sanitizeSwarmAnswer, swarmReasoningText } from "../../lib/swarmReasoning";
+
+/**
+ * Publishes the run's reasoning to the swarm page, which renders it in a
+ * `ThinkingBlock`.
+ *
+ * `app/swarm/page.tsx` listens for `nexus:swarm-thinking`; without this
+ * dispatch the block could only ever render null. A `CustomEvent` is used
+ * because `SwarmPanel` and the page are siblings with no shared owner, and
+ * the page is the only component that decides where the text is shown.
+ */
+function publishSwarmThinking(reasoning: string) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent<string>("nexus:swarm-thinking", { detail: reasoning }),
+  );
+}
 
 const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
   shield: Shield,
@@ -302,6 +320,9 @@ interface SkillSummary {
 }
 
 export default function SwarmPanel({ sessionId, onInsertIntoChat, projectPath = "" }: SwarmPanelProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const handoffPrompt = searchParams.get("prompt");
   const [mode, setLocalMode] = useState<OperationalMode>("architecture");
   const [strategy, setStrategy] = useState<SwarmStrategy>("adaptive");
   const [agents, setAgents] = useState<AgentRole[]>([]);
@@ -326,7 +347,26 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat, projectPath = 
   // One in-flight run at a time; abort it on unmount so the component never
   // calls setState after being torn down.
   const abortRef = useRef<AbortController | null>(null);
+  const appliedHandoffPromptRef = useRef<string | null>(null);
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  // The dashboard hands objectives over in the URL. Prefill the editor, then
+  // remove the query so a later visit to /swarm cannot restore stale text.
+  // This only fills the field; launching a run still requires an explicit click.
+  useEffect(() => {
+    if (!handoffPrompt?.trim()) {
+      appliedHandoffPromptRef.current = null;
+      return;
+    }
+    if (appliedHandoffPromptRef.current === handoffPrompt) return;
+
+    appliedHandoffPromptRef.current = handoffPrompt;
+    setObjective(handoffPrompt);
+    const remainingParams = new URLSearchParams(searchParams.toString());
+    remainingParams.delete("prompt");
+    const remainingQuery = remainingParams.toString();
+    router.replace(remainingQuery ? `/swarm?${remainingQuery}` : "/swarm", { scroll: false });
+  }, [handoffPrompt, router, searchParams]);
 
   const modeSpec = useMemo(
     () => modeCatalogue.find((m) => m.id === mode) ?? modeCatalogue[0] ?? FALLBACK_MODES[0],
@@ -437,6 +477,9 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat, projectPath = 
       setError(null);
       setResult(null);
       setActiveTab("answer");
+      // Clear the previous run's reasoning up front, otherwise the page keeps
+      // showing a stale trace next to a run that has not reported yet.
+      publishSwarmThinking("");
       try {
         const res = await fetch(url, {
           method: "POST",
@@ -452,8 +495,13 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat, projectPath = 
         setResult(data);
         if (data.error) setError(data.error);
         refreshHistory();
-        if (data.final_answer && onInsertIntoChat) {
-          onInsertIntoChat(`${header(data)}\n\n${data.final_answer}`);
+        publishSwarmThinking(swarmReasoningText(data));
+        // `final_answer` is sanitised, not printed raw: the new swarm lane
+        // does not strip `<thinking>` markup (only the legacy lane does), so
+        // the chat box must not inherit the transport tags.
+        const answer = sanitizeSwarmAnswer(data);
+        if (answer && onInsertIntoChat) {
+          onInsertIntoChat(`${header(data)}\n\n${answer}`);
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
@@ -570,10 +618,11 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat, projectPath = 
       <div className="min-h-0 flex-1 overflow-y-auto thin-scrollbar px-5 py-4">
         {/* Objective input */}
         <div className="mb-4">
-          <label className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
+          <label htmlFor="swarm-objective" className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
             <Lightbulb className="h-3 w-3" /> Objective
           </label>
           <textarea
+            id="swarm-objective"
             value={objective}
             onChange={(e) => setObjective(e.target.value)}
             placeholder="Describe what you want the swarm to do…"
@@ -741,7 +790,7 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat, projectPath = 
                   exit={{ opacity: 0, y: -8 }}
                   className="prose prose-sm prose-invert max-w-none whitespace-pre-wrap rounded-lg border border-nexus-border bg-nexus-card/40 p-3 text-xs leading-relaxed"
                 >
-                  {result.final_answer || "_(empty)_"}
+                  {sanitizeSwarmAnswer(result) || "_(empty)_"}
                 </motion.div>
               )}
 

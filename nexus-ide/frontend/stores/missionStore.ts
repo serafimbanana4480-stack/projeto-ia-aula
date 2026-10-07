@@ -15,6 +15,15 @@ import {
   mergeEnvelopeMonotonic,
   normalizeExecutionEnvelope,
 } from "../lib/executionTypes";
+// Type-only, so it is erased at compile time and cannot form an import cycle
+// with `lib/api`. The store previously declared its OWN `AgentInstance` with
+// required `id`/`name` and a 5-value status union, while `lib/api` returned the
+// normalized shape (`instance_id`→`id`, `agent_type`→`name`, plus `aborted`).
+// Two same-named types meant the compiler could not catch a tile reading a
+// field the backend never sends. One canonical type, imported, not redeclared.
+import type { AgentInstance } from "../lib/api";
+
+export type { AgentInstance };
 
 // Debounce helpers for high-frequency store updates
 let _busMsgTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -42,19 +51,6 @@ export interface Mission {
   phases: MissionPhase[];
   created_at: string;
   updated_at: string;
-}
-
-export interface AgentInstance {
-  id: string;
-  name: string;
-  status: "idle" | "running" | "paused" | "failed" | "completed";
-  current_task?: string;
-  cpu_percent?: number;
-  memory_mb?: number;
-  tokens_used: number;
-  mission_id?: string;
-  started_at?: string;
-  last_heartbeat?: string;
 }
 
 export interface BusMessage {

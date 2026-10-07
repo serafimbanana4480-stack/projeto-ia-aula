@@ -207,7 +207,7 @@ export default function HistoryPage() {
                   <span className="flex items-center justify-center gap-2"><span className="w-5 h-5 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" /> Loading...</span>
                 </td></tr>
               ) : conversations.length === 0 ? (
-                <tr><td colSpan={7} className="px-4 py-16 text-center text-slate-500">No conversations found</td></tr>
+                <tr><td colSpan={7} className="px-4 py-16 text-center text-slate-500">No conversation history yet. Start chatting to generate analytics data.</td></tr>
               ) : conversations.map(conv => (
                 <tr
                   key={conv.id}

@@ -523,6 +523,14 @@ async def run_skill(
     project_path, _ = resolve_project_path(body.project_path or "")
     orch = await get_orchestrator(request)
     await _ensure_indexed(project_path, body.index_project)
+
+    # Reset the circuit breaker so a failure streak in a prior skill
+    # run does not lock tools for this execution.
+    with contextlib.suppress(Exception):
+        from backend.tools.registry import reset_tool_failures
+
+        reset_tool_failures(body.session_id)
+
     req = SwarmRunRequest(
         objective=objective,
         session_id=body.session_id,

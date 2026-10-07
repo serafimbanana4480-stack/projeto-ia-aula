@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -34,7 +34,7 @@ class AgentProfile:
     tasks_failed: int = 0
     avg_duration_seconds: float = 0.0
     reputation_tier: AgentReputationTier = AgentReputationTier.NOVICE
-    last_active: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_active: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     @property
     def success_rate(self) -> float:
@@ -50,12 +50,12 @@ class AgentProfile:
                 (self.avg_duration_seconds * (self.tasks_completed - 1) + duration_seconds)
                 / self.tasks_completed
             )
-        self.last_active = datetime.now(timezone.utc).isoformat()
+        self.last_active = datetime.now(UTC).isoformat()
         self._recalc_tier()
 
     def record_failure(self) -> None:
         self.tasks_failed += 1
-        self.last_active = datetime.now(timezone.utc).isoformat()
+        self.last_active = datetime.now(UTC).isoformat()
         self._recalc_tier()
 
     def _recalc_tier(self) -> None:

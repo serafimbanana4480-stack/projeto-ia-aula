@@ -1,6 +1,6 @@
 "use client";
 
-import { create, type StoreApi } from "zustand";
+import { create } from "zustand";
 import { apiUrl } from "../lib/api";
 
 export interface SystemMetrics {
@@ -31,8 +31,15 @@ export interface SystemMetrics {
   timestamp?: number;
 }
 
+export type SystemMetricField = Exclude<keyof SystemMetrics, "timestamp">;
+export type MeasuredSystemMetrics = Partial<Record<SystemMetricField, true>>;
+
 interface SystemStore {
   metrics: SystemMetrics;
+  /** True when the latest successful response included at least one measured metric. */
+  hasTelemetry: boolean;
+  /** Fields present in the latest successful response; absent fields are not zero. */
+  measuredMetrics: MeasuredSystemMetrics;
   isLive: boolean;
   isLoading: boolean;
   error: string | null;
@@ -67,6 +74,18 @@ const DEFAULT_METRICS: SystemMetrics = {
   runningAgents: 0,
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finiteNumber(record: Record<string, unknown>, ...keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
 function deriveStatus(metrics: SystemMetrics): SystemStore["globalStatus"] {
   if (metrics.hallucinationAlerts > 2 || metrics.agentFailures > 1) return "degraded";
   if (metrics.apiErrorsPerMin > 5) return "incident";
@@ -75,6 +94,8 @@ function deriveStatus(metrics: SystemMetrics): SystemStore["globalStatus"] {
 
 export const useSystemStore = create<SystemStore>((set) => ({
   metrics: { ...DEFAULT_METRICS },
+  hasTelemetry: false,
+  measuredMetrics: {},
   isLive: false,
   isLoading: false,
   error: null,
@@ -83,7 +104,22 @@ export const useSystemStore = create<SystemStore>((set) => ({
   updateSystemMetrics: (patch) => {
     set((s) => {
       const newMetrics = { ...s.metrics, ...patch };
-      return { metrics: newMetrics, globalStatus: deriveStatus(newMetrics) };
+      const measuredMetrics = { ...s.measuredMetrics };
+      for (const [field, value] of Object.entries(patch)) {
+        if (
+          field !== "timestamp" &&
+          typeof value === "number" &&
+          Number.isFinite(value)
+        ) {
+          measuredMetrics[field as SystemMetricField] = true;
+        }
+      }
+      return {
+        metrics: newMetrics,
+        measuredMetrics,
+        hasTelemetry: Object.keys(measuredMetrics).length > 0,
+        globalStatus: deriveStatus(newMetrics),
+      };
     });
   },
 
@@ -92,36 +128,82 @@ export const useSystemStore = create<SystemStore>((set) => ({
     try {
       const res = await fetch(apiUrl("/api/metrics/current"));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const mapped: Partial<SystemMetrics> = {
-        cpuUsage: data.cpu_percent ?? data.cpuUsage ?? 0,
-        memoryUsage: data.ram_percent ?? data.memoryUsage ?? 0,
-        gpuUsage: data.gpu_usage ?? data.gpuUsage ?? 0,
-        diskUsage: data.disk_percent ?? data.diskUsage ?? 0,
-        networkIn: data.network_in ?? data.networkIn ?? 0,
-        networkOut: data.network_out ?? data.networkOut ?? 0,
-        activeConnections: data.active_connections ?? data.activeConnections ?? 0,
-        queueSize: data.queue_size ?? data.queueSize ?? 0,
-        vectorDbQueriesPerSec: data.vector_db_qps ?? data.vectorDbQueriesPerSec ?? 0,
-        embeddingThroughput: data.embedding_throughput ?? data.embeddingThroughput ?? 0,
-        cacheHitRate: data.cache_hit_rate ?? data.cacheHitRate ?? 0,
-        apiErrorsPerMin: data.api_errors_per_min ?? data.apiErrorsPerMin ?? 0,
-        hallucinationAlerts: data.hallucination_alerts ?? data.hallucinationAlerts ?? 0,
-        agentFailures: data.agent_failures ?? data.agentFailures ?? 0,
-        avgResponseTime: data.avg_latency_ms ?? data.avgResponseTime ?? 0,
-        requestsPerSec: data.requests_per_sec ?? data.requestsPerSec ?? 0,
-        totalTokensToday: data.total_tokens_today ?? data.totalTokensToday ?? 0,
-        costToday: data.cost_today ?? data.costToday ?? 0,
-        activeWorkflows: data.active_workflows ?? data.activeWorkflows ?? 0,
-        pendingTasks: data.pending_tasks ?? data.pendingTasks ?? 0,
-        runningAgents: data.running_agents ?? data.runningAgents ?? 0,
-        timestamp: data.timestamp ?? Date.now(),
+      const payload: unknown = await res.json();
+      if (!isRecord(payload)) {
+        set({
+          isLive: true,
+          isLoading: false,
+          hasTelemetry: false,
+          measuredMetrics: {},
+          error: "A API devolveu um formato de métricas inválido.",
+        });
+        return;
+      }
+
+      const mapped: Partial<SystemMetrics> = {};
+      const measuredMetrics: MeasuredSystemMetrics = {};
+      const mapNumber = (
+        field: SystemMetricField,
+        ...aliases: string[]
+      ) => {
+        const value = finiteNumber(payload, ...aliases);
+        if (value === undefined) return;
+        mapped[field] = value;
+        measuredMetrics[field] = true;
       };
-      set({
-        metrics: { ...DEFAULT_METRICS, ...mapped },
-        isLive: true,
-        isLoading: false,
-        globalStatus: deriveStatus({ ...DEFAULT_METRICS, ...mapped } as SystemMetrics),
+
+      // These aliases include the current /api/metrics/current contract as
+      // well as older camelCase/SSE fields. Missing fields remain unmeasured.
+      mapNumber("cpuUsage", "cpu_percent", "cpuUsage");
+      mapNumber("memoryUsage", "ram_percent", "memoryUsage");
+      mapNumber("gpuUsage", "gpu_usage", "gpuUsage");
+      mapNumber("diskUsage", "disk_percent", "diskUsage");
+      mapNumber("networkIn", "network_in", "networkIn");
+      mapNumber("networkOut", "network_out", "networkOut");
+      mapNumber("activeConnections", "active_connections", "activeConnections");
+      mapNumber("queueSize", "queue_depth", "queue_size", "queueSize");
+      mapNumber("vectorDbQueriesPerSec", "vector_db_qps", "vectorDbQueriesPerSec");
+      mapNumber("embeddingThroughput", "embedding_throughput", "embeddingThroughput");
+      mapNumber("cacheHitRate", "cache_hit_rate", "cacheHitRate");
+      mapNumber("apiErrorsPerMin", "api_errors_per_min", "apiErrorsPerMin");
+      mapNumber("hallucinationAlerts", "hallucination_alerts", "hallucinationAlerts");
+      mapNumber("agentFailures", "agent_failures", "agentFailures");
+      mapNumber("avgResponseTime", "avg_latency_ms", "avgResponseTime");
+      mapNumber("tokensPerSecond", "tokens_per_second", "tokensPerSecond");
+      mapNumber("requestsPerSec", "requests_per_sec", "requestsPerSec");
+      mapNumber("totalTokensToday", "total_tokens_today", "totalTokensToday");
+      mapNumber("costToday", "cost_today", "costToday");
+      mapNumber("activeWorkflows", "active_workflows", "activeWorkflows");
+      mapNumber("pendingTasks", "pending_tasks", "pendingTasks");
+      mapNumber("runningAgents", "running_agents", "runningAgents");
+      const timestamp = finiteNumber(payload, "timestamp");
+      mapped.timestamp = timestamp ?? Date.now();
+
+      if (Object.keys(measuredMetrics).length === 0) {
+        // A 2xx response proves the endpoint answered, not that it supplied
+        // telemetry. Keep the last values internally, but mark every field as
+        // unavailable so the UI cannot present stale/default zeros as current.
+        set({
+          isLive: true,
+          isLoading: false,
+          hasTelemetry: false,
+          measuredMetrics: {},
+          error: "A API respondeu sem dados de telemetria.",
+        });
+        return;
+      }
+
+      set((state) => {
+        const metrics = { ...state.metrics, ...mapped };
+        return {
+          metrics,
+          measuredMetrics,
+          hasTelemetry: true,
+          isLive: true,
+          isLoading: false,
+          error: null,
+          globalStatus: deriveStatus(metrics),
+        };
       });
     } catch (err) {
       set({

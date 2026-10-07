@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,10 +107,7 @@ def _eligibility(candidate: Any) -> ModelEligibility:
     provider = str(_value(candidate, "provider", "")).strip().lower()
     model_id = str(_value(candidate, "model_id", _value(candidate, "id", ""))).strip()
     caps = _value(candidate, "capabilities", ()) or ()
-    if isinstance(caps, str):
-        caps = (caps,)
-    else:
-        caps = tuple(str(item) for item in caps)
+    caps = (caps,) if isinstance(caps, str) else tuple(str(item) for item in caps)
     input_price = _value(candidate, "input_price_per_1m", None)
     output_price = _value(candidate, "output_price_per_1m", None)
     verified_prices = input_price == 0 and output_price == 0

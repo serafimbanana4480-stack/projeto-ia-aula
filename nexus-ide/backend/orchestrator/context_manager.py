@@ -15,6 +15,11 @@ from backend.tools.ollama_client import ChatMessage
 
 logger = logging.getLogger(__name__)
 
+# The chat history API exposes the latest 500 messages. Keep the in-memory
+# transcript aligned with that bound; the agent's model-specific token budget
+# remains responsible for choosing how much of this history reaches a model.
+MAX_HISTORY_MESSAGES = 500
+
 
 @dataclass
 class AgentScratchpad:
@@ -55,11 +60,11 @@ class ContextStore:
     three coroutines. The interface is intentionally small.
     """
 
-    def __init__(self, *, max_history: int = 20) -> None:
+    def __init__(self, *, max_history: int = MAX_HISTORY_MESSAGES) -> None:
         self._history: dict[str, list[ChatMessage]] = {}
         self._scratchpads: dict[tuple[str, str], AgentScratchpad] = {}
         self._lock = asyncio.Lock()
-        self._max_history = max_history
+        self._max_history = max(0, min(max_history, MAX_HISTORY_MESSAGES))
 
     async def active_session_count(self) -> int:
         """Return the number of sessions currently tracked in memory."""
@@ -126,7 +131,14 @@ class ContextStore:
                 role = row.get("role", "user")
                 content = sanitize_history_content(role, row.get("content", ""))
                 timestamp = row.get("created_at", "")
-                messages.append(ChatMessage(role=role, content=content, timestamp=timestamp))
+                messages.append(
+                    ChatMessage(
+                        role=role,
+                        content=content,
+                        timestamp=timestamp,
+                        run_id=row.get("run_id"),
+                    )
+                )
 
             self._history[session_id] = messages
             logger.info(

@@ -12,7 +12,6 @@ Provides project-specific quality gates and agent registry.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path

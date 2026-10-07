@@ -8,10 +8,11 @@ import { Badge, AnimatedNumber, EmptyState } from "../ui/Primitives";
 
 interface ModelInfo {
   id: string;
-  size_bytes: number;
+  size_bytes: number | null;
   size_gb?: number;
-  modified_at: string;
+  modified_at: string | null;
   details: Record<string, unknown>;
+  provider?: string;
   status: "available" | "loading" | "error";
 }
 
@@ -19,7 +20,7 @@ type SortField = "size_bytes" | "status" | "id";
 
 const STR = {
   title: "Comparação de Modelos",
-  subtitle: "Modelos LLM instalados localmente, por tamanho",
+  subtitle: "Modelos disponíveis no provider local selecionado",
   model: "Modelo",
   status: "Estado",
   size: "Tamanho",
@@ -34,7 +35,7 @@ const STR = {
   sortPrefix: "Ordenar por",
   count: "modelos",
   total: "total",
-  checkOllama: "Verifica se o Ollama está em execução",
+  checkProvider: "Seleciona Ollama ou LM Studio nas definições e confirma que o serviço está ativo",
 } as const;
 
 const COLUMN_LABELS: Record<SortField, string> = {
@@ -103,7 +104,9 @@ export default function ModelComparison() {
       if (typeof aVal === "string" && typeof bVal === "string") {
         return sortAsc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
       }
-      return sortAsc ? (aVal as number) - (bVal as number) : (bVal as number) - (aVal as number);
+      if (typeof aVal !== "number") return typeof bVal === "number" ? 1 : 0;
+      if (typeof bVal !== "number") return -1;
+      return sortAsc ? aVal - bVal : bVal - aVal;
     });
   }, [models, sortField, sortAsc]);
 
@@ -134,9 +137,16 @@ export default function ModelComparison() {
     return sortAsc ? "ascending" : "descending";
   };
 
-  const totalSize = useMemo(() => models.reduce((acc, m) => acc + m.size_bytes, 0), [models]);
+  const totalSize = useMemo(
+    () =>
+      models.every((model) => typeof model.size_bytes === "number")
+        ? models.reduce((total, model) => total + (model.size_bytes ?? 0), 0)
+        : null,
+    [models]
+  );
 
-  const formatSize = useCallback((bytes: number) => {
+  const formatSize = useCallback((bytes: number | null) => {
+    if (bytes === null) return "—";
     if (bytes < 1e9) return `${(bytes / 1e6).toFixed(0)} MB`;
     return `${(bytes / 1e9).toFixed(1)} GB`;
   }, []);
@@ -172,7 +182,7 @@ export default function ModelComparison() {
           subtitle={STR.subtitle}
           action={
             <div className="text-right text-[10px] text-nexus-faint">
-              <AnimatedNumber value={models.length} /> {STR.count} · {formatSize(totalSize)} {STR.total}
+              <AnimatedNumber value={models.length} /> {STR.count} · {totalSize === null ? "—" : formatSize(totalSize)} {STR.total}
             </div>
           }
         />
@@ -186,9 +196,9 @@ export default function ModelComparison() {
               <div className="nx-shimmer h-8 rounded-lg" />
             </div>
           ) : hasError && models.length === 0 ? (
-            <EmptyState icon={<Brain className="h-6 w-6" />} title={STR.error} hint={STR.checkOllama} />
+            <EmptyState icon={<Brain className="h-6 w-6" />} title={STR.error} hint={STR.checkProvider} />
           ) : models.length === 0 ? (
-            <EmptyState icon={<Brain className="h-6 w-6" />} title={STR.empty} hint={STR.checkOllama} />
+            <EmptyState icon={<Brain className="h-6 w-6" />} title={STR.empty} hint={STR.checkProvider} />
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[480px] text-xs sm:text-sm">

@@ -7,10 +7,8 @@ import pytest
 from backend.pipeline.generator import (
     ProjectFile,
     ProjectGenerator,
-    ProjectTemplate,
     TemplateRegistry,
 )
-from backend.orchestrator.decomposer import UserStory, StoryPriority
 
 
 class TestTemplateRegistry:

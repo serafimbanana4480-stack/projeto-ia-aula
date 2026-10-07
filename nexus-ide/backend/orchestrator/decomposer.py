@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from backend.config.settings import get_settings
@@ -18,7 +18,7 @@ from backend.tools.ollama_client import OllamaClient
 logger = logging.getLogger(__name__)
 
 
-class StoryPriority(str, Enum):
+class StoryPriority(StrEnum):
     CRITICAL = "critical"  # Blocks everything else
     HIGH = "high"  # Core functionality
     MEDIUM = "medium"  # Important but not blocking

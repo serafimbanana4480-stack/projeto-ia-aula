@@ -13,8 +13,7 @@ import uuid
 import zlib
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union
-from datetime import datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -59,16 +58,16 @@ class MessageEnvelope:
     message_type: MessageType = MessageType.REQUEST
     sender_id: str = ""
     recipient_id: str = ""
-    correlation_id: Optional[str] = None  # For request/response correlation
-    parent_message_id: Optional[str] = None  # For message threads
+    correlation_id: str | None = None  # For request/response correlation
+    parent_message_id: str | None = None  # For message threads
     priority: MessagePriority = MessagePriority.NORMAL
     timestamp: float = field(default_factory=time.time)
-    expires_at: Optional[float] = None
+    expires_at: float | None = None
     
     # Content
-    payload: Dict[str, Any] = field(default_factory=dict)
-    context: Optional[Dict[str, Any]] = None
-    attachments: List[str] = field(default_factory=list)  # File/memory references
+    payload: dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] | None = None
+    attachments: list[str] = field(default_factory=list)  # File/memory references
     
     # Protocol metadata
     version: str = "1.0"
@@ -76,9 +75,9 @@ class MessageEnvelope:
     encoding: str = "utf-8"
     
     # Routing metadata
-    routing_key: Optional[str] = None
-    topic: Optional[str] = None
-    tags: Set[str] = field(default_factory=set)
+    routing_key: str | None = None
+    topic: str | None = None
+    tags: set[str] = field(default_factory=set)
     
     # Delivery metadata
     delivery_attempts: int = 0
@@ -86,7 +85,7 @@ class MessageEnvelope:
     timeout: float = 30.0
     require_ack: bool = True
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "message_id": self.message_id,
@@ -114,7 +113,7 @@ class MessageEnvelope:
         }
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "MessageEnvelope":
+    def from_dict(cls, data: dict[str, Any]) -> MessageEnvelope:
         """Create from dictionary."""
         envelope = cls(
             message_id=data["message_id"],
@@ -163,11 +162,11 @@ class Acknowledgement:
     message_id: str
     status: str  # delivered, processed, failed, timeout
     timestamp: float = field(default_factory=time.time)
-    error: Optional[str] = None
-    processing_time: Optional[float] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
+    processing_time: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "message_id": self.message_id,
             "status": self.status,
@@ -182,7 +181,7 @@ class MessageValidator:
     """Message validation and schema enforcement."""
     
     def __init__(self):
-        self.schemas: Dict[str, Dict[str, Any]] = {
+        self.schemas: dict[str, dict[str, Any]] = {
             "1.0": {
                 "required_fields": ["message_id", "message_type", "sender_id", "timestamp"],
                 "message_types": [t.value for t in MessageType],
@@ -192,7 +191,7 @@ class MessageValidator:
             }
         }
         
-    def validate(self, envelope: MessageEnvelope) -> List[str]:
+    def validate(self, envelope: MessageEnvelope) -> list[str]:
         """Validate message envelope and return errors."""
         errors = []
         
@@ -257,13 +256,13 @@ class MessageProtocol:
     def __init__(self):
         self.validator = MessageValidator()
         self.compressor = MessageCompressor()
-        self.message_handlers: Dict[str, callable] = {}
-        self.subscribers: Dict[str, List[callable]] = {}
+        self.message_handlers: dict[str, callable] = {}
+        self.subscribers: dict[str, list[callable]] = {}
         
         # Message tracking
-        self.sent_messages: Dict[str, MessageEnvelope] = {}
-        self.received_messages: Dict[str, MessageEnvelope] = {}
-        self.acknowledgements: Dict[str, Acknowledgement] = {}
+        self.sent_messages: dict[str, MessageEnvelope] = {}
+        self.received_messages: dict[str, MessageEnvelope] = {}
+        self.acknowledgements: dict[str, Acknowledgement] = {}
         
     def register_handler(self, message_type: str, handler: callable) -> None:
         """Register handler for message type."""
@@ -353,7 +352,7 @@ class MessageProtocol:
             
     async def receive_message(
         self,
-        message_data: Union[str, Dict[str, Any]],
+        message_data: str | dict[str, Any],
         validate: bool = True,
     ) -> MessageEnvelope:
         """Receive and process incoming message."""
@@ -362,7 +361,7 @@ class MessageProtocol:
             try:
                 data = json.loads(message_data)
             except json.JSONDecodeError:
-                raise ValueError("Invalid JSON message data")
+                raise ValueError("Invalid JSON message data") from None
         else:
             data = message_data
             
@@ -390,7 +389,7 @@ class MessageProtocol:
         
         return envelope
         
-    def get_message_status(self, message_id: str) -> Dict[str, Any]:
+    def get_message_status(self, message_id: str) -> dict[str, Any]:
         """Get message status and metadata."""
         status = {
             "message_id": message_id,
@@ -416,7 +415,7 @@ class MessageProtocol:
             
         return status
         
-    def get_protocol_stats(self) -> Dict[str, Any]:
+    def get_protocol_stats(self) -> dict[str, Any]:
         """Get protocol statistics."""
         return {
             "sent_messages": len(self.sent_messages),
@@ -429,7 +428,7 @@ class MessageProtocol:
             "compression_stats": self._get_compression_stats(),
         }
         
-    def _get_compression_stats(self) -> Dict[str, Any]:
+    def _get_compression_stats(self) -> dict[str, Any]:
         """Get compression statistics."""
         compressed_count = sum(
             1 for msg in self.sent_messages.values()

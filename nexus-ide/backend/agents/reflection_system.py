@@ -10,13 +10,11 @@ This system provides agents with the ability to:
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
 from backend.knowledge.memory import MemoryStore
@@ -48,24 +46,24 @@ class ReflectionResult:
     agent_id: str
     reflection_type: ReflectionType
     timestamp: datetime
-    performance_analysis: Dict[str, Any]
-    self_critique: Dict[str, Any]
-    improvement_suggestions: List[str]
-    learning_insights: List[str]
+    performance_analysis: dict[str, Any]
+    self_critique: dict[str, Any]
+    improvement_suggestions: list[str]
+    learning_insights: list[str]
     confidence_score: float
-    action_items: List[str] = field(default_factory=list)
+    action_items: list[str] = field(default_factory=list)
 
 
 @dataclass
 class SelfCritiqueResult:
     """Result of self-critique analysis."""
-    strengths: List[str]
-    weaknesses: List[str]
-    opportunities: List[str]
-    threats: List[str]
+    strengths: list[str]
+    weaknesses: list[str]
+    opportunities: list[str]
+    threats: list[str]
     critique_level: CritiqueLevel
     overall_assessment: str
-    improvement_priority: List[str]
+    improvement_priority: list[str]
 
 
 @dataclass
@@ -73,7 +71,7 @@ class MetaCognitionInsight:
     """Meta-cognitive insight about thinking patterns."""
     thinking_pattern: str
     effectiveness_score: float
-    context_factors: List[str]
+    context_factors: list[str]
     improvement_suggestion: str
     confidence: float
 
@@ -87,12 +85,12 @@ class MetaCognitionEngine:
         self.thinking_patterns = {}
         self.effectiveness_history = {}
     
-    async def analyze_thinking_pattern(self, agent_id: str, task_result: Dict[str, Any]) -> List[MetaCognitionInsight]:
+    async def analyze_thinking_pattern(self, agent_id: str, task_result: dict[str, Any]) -> list[MetaCognitionInsight]:
         """Analyze the agent's thinking patterns during task execution."""
         insights = []
         
         # Extract thinking process from task result
-        thinking_process = task_result.get("thinking_process", [])
+        task_result.get("thinking_process", [])
         decision_points = task_result.get("decisions", [])
         outcomes = task_result.get("outcomes", [])
         
@@ -127,7 +125,7 @@ class MetaCognitionEngine:
         
         return insights
     
-    def _calculate_effectiveness(self, decision: Dict[str, Any], outcome: Dict[str, Any]) -> float:
+    def _calculate_effectiveness(self, decision: dict[str, Any], outcome: dict[str, Any]) -> float:
         """Calculate effectiveness score of a decision."""
         success_score = outcome.get("success_score", 0.0)
         efficiency_score = outcome.get("efficiency_score", 0.0)
@@ -145,7 +143,7 @@ class MetaCognitionEngine:
         else:
             return f"Continue using {pattern} pattern - it's working well"
     
-    def _calculate_confidence(self, decision: Dict[str, Any], outcome: Dict[str, Any]) -> float:
+    def _calculate_confidence(self, decision: dict[str, Any], outcome: dict[str, Any]) -> float:
         """Calculate confidence in the analysis."""
         data_completeness = decision.get("data_completeness", 0.5)
         outcome_clarity = outcome.get("clarity", 0.5)
@@ -160,7 +158,7 @@ class SelfCritiqueEngine:
         self.event_bus = event_bus
         self.critique_history = {}
     
-    async def critique_performance(self, agent_id: str, task_result: Dict[str, Any]) -> SelfCritiqueResult:
+    async def critique_performance(self, agent_id: str, task_result: dict[str, Any]) -> SelfCritiqueResult:
         """Perform self-critique of agent performance."""
         
         # Analyze performance metrics
@@ -254,8 +252,8 @@ class SelfCritiqueEngine:
         else:
             return "Performance requires immediate attention and significant improvements"
     
-    def _prioritize_improvements(self, strengths: List[str], weaknesses: List[str], 
-                                opportunities: List[str], threats: List[str]) -> List[str]:
+    def _prioritize_improvements(self, strengths: list[str], weaknesses: list[str],
+                                opportunities: list[str], threats: list[str]) -> list[str]:
         """Prioritize improvements based on SWOT analysis."""
         priorities = []
         
@@ -281,8 +279,8 @@ class SelfImprovementEngine:
         self.improvement_history = {}
     
     async def generate_improvement_plan(self, agent_id: str, 
-                                       meta_insights: List[MetaCognitionInsight],
-                                       critique_result: SelfCritiqueResult) -> Dict[str, Any]:
+                                       meta_insights: list[MetaCognitionInsight],
+                                       critique_result: SelfCritiqueResult) -> dict[str, Any]:
         """Generate comprehensive improvement plan based on reflection results."""
         
         # Analyze meta-cognitive insights
@@ -334,7 +332,7 @@ class SelfImprovementEngine:
         
         return improvement_plan
     
-    def _create_improvement_action(self, priority: str) -> Dict[str, Any]:
+    def _create_improvement_action(self, priority: str) -> dict[str, Any]:
         """Create specific improvement action from priority."""
         if "threat" in priority.lower():
             return {
@@ -361,7 +359,7 @@ class SelfImprovementEngine:
                 "timeline": "long_term"
             }
     
-    def _create_learning_objectives(self, critique_result: SelfCritiqueResult) -> List[str]:
+    def _create_learning_objectives(self, critique_result: SelfCritiqueResult) -> list[str]:
         """Create learning objectives based on critique results."""
         objectives = []
         
@@ -381,7 +379,7 @@ class SelfImprovementEngine:
         
         return objectives
     
-    def _create_implementation_timeline(self, actions: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    def _create_implementation_timeline(self, actions: list[dict[str, Any]]) -> dict[str, list[str]]:
         """Create implementation timeline for improvement actions."""
         timeline = {
             "immediate": [],
@@ -394,9 +392,9 @@ class SelfImprovementEngine:
         
         return timeline
     
-    def _calculate_expected_improvements(self, meta_insights: List[MetaCognitionInsight],
+    def _calculate_expected_improvements(self, meta_insights: list[MetaCognitionInsight],
                                        critique_result: SelfCritiqueResult,
-                                       actions: List[Dict[str, Any]]) -> Dict[str, float]:
+                                       actions: list[dict[str, Any]]) -> dict[str, float]:
         """Calculate expected improvements from implementing the plan."""
         # Base improvements from addressing weaknesses
         base_improvement = len(critique_result.weaknesses) * 0.1
@@ -414,7 +412,7 @@ class SelfImprovementEngine:
             "overall": min(1.0, base_improvement + pattern_improvement + learning_improvement)
         }
     
-    def _calculate_plan_confidence(self, meta_insights: List[MetaCognitionInsight],
+    def _calculate_plan_confidence(self, meta_insights: list[MetaCognitionInsight],
                                  critique_result: SelfCritiqueResult) -> float:
         """Calculate confidence in the improvement plan."""
         # Confidence based on data quality and clarity of insights
@@ -442,8 +440,8 @@ class ReflectionSystem:
         self.self_improvement = SelfImprovementEngine(memory_system, event_bus)
         self.reflection_history = {}
     
-    async def reflect_on_task(self, agent_id: str, task_result: Dict[str, Any],
-                            reflection_types: List[ReflectionType] = None) -> ReflectionResult:
+    async def reflect_on_task(self, agent_id: str, task_result: dict[str, Any],
+                            reflection_types: list[ReflectionType] = None) -> ReflectionResult:
         """Perform comprehensive reflection on task execution."""
         
         if reflection_types is None:
@@ -511,8 +509,8 @@ class ReflectionSystem:
         
         return result
     
-    def _extract_learning_insights(self, meta_insights: List[MetaCognitionInsight],
-                                 critique_result: SelfCritiqueResult) -> List[str]:
+    def _extract_learning_insights(self, meta_insights: list[MetaCognitionInsight],
+                                 critique_result: SelfCritiqueResult) -> list[str]:
         """Extract key learning insights from reflection results."""
         insights = []
         
@@ -529,9 +527,9 @@ class ReflectionSystem:
         
         return insights
     
-    def _generate_improvement_suggestions(self, meta_insights: List[MetaCognitionInsight],
+    def _generate_improvement_suggestions(self, meta_insights: list[MetaCognitionInsight],
                                         critique_result: SelfCritiqueResult,
-                                        improvement_plan: Dict[str, Any]) -> List[str]:
+                                        improvement_plan: dict[str, Any]) -> list[str]:
         """Generate specific improvement suggestions."""
         suggestions = []
         
@@ -549,9 +547,9 @@ class ReflectionSystem:
         
         return suggestions
     
-    def _calculate_overall_confidence(self, meta_insights: List[MetaCognitionInsight],
+    def _calculate_overall_confidence(self, meta_insights: list[MetaCognitionInsight],
                                     critique_result: SelfCritiqueResult,
-                                    improvement_plan: Dict[str, Any]) -> float:
+                                    improvement_plan: dict[str, Any]) -> float:
         """Calculate overall confidence in reflection results."""
         meta_confidence = sum(i.confidence for i in meta_insights) / len(meta_insights) if meta_insights else 0.5
         plan_confidence = improvement_plan["confidence_score"]
@@ -559,7 +557,7 @@ class ReflectionSystem:
         # Weight the confidences
         return (meta_confidence * 0.4 + plan_confidence * 0.6)
     
-    def _create_action_items(self, improvement_plan: Dict[str, Any]) -> List[str]:
+    def _create_action_items(self, improvement_plan: dict[str, Any]) -> list[str]:
         """Create actionable items from improvement plan."""
         action_items = []
         
@@ -577,7 +575,7 @@ class ReflectionSystem:
         
         return action_items
     
-    async def get_reflection_summary(self, agent_id: str) -> Dict[str, Any]:
+    async def get_reflection_summary(self, agent_id: str) -> dict[str, Any]:
         """Get summary of reflection history for an agent."""
         if agent_id not in self.reflection_history:
             return {"error": "No reflection history found for agent"}
@@ -595,7 +593,7 @@ class ReflectionSystem:
             "learning_insights": len(result.learning_insights)
         }
     
-    async def get_system_reflection_stats(self) -> Dict[str, Any]:
+    async def get_system_reflection_stats(self) -> dict[str, Any]:
         """Get system-wide reflection statistics."""
         total_reflections = len(self.reflection_history)
         if total_reflections == 0:
@@ -625,7 +623,7 @@ class ReflectionAgent(AgentBase):
         )
         self.reflection_system = reflection_system
     
-    async def process_request(self, request: AgentRequest) -> Dict[str, Any]:
+    async def process_request(self, request: AgentRequest) -> dict[str, Any]:
         """Process reflection request."""
         task_type = request.task.get("type")
         
@@ -638,7 +636,7 @@ class ReflectionAgent(AgentBase):
         else:
             return {"error": f"Unknown task type: {task_type}"}
     
-    async def _reflect_on_task(self, request: AgentRequest) -> Dict[str, Any]:
+    async def _reflect_on_task(self, request: AgentRequest) -> dict[str, Any]:
         """Handle reflection on task request."""
         agent_id = request.task.get("agent_id")
         task_result = request.task.get("task_result")
@@ -662,7 +660,7 @@ class ReflectionAgent(AgentBase):
             }
         }
     
-    async def _get_reflection_summary(self, request: AgentRequest) -> Dict[str, Any]:
+    async def _get_reflection_summary(self, request: AgentRequest) -> dict[str, Any]:
         """Handle get reflection summary request."""
         agent_id = request.task.get("agent_id")
         
@@ -672,7 +670,7 @@ class ReflectionAgent(AgentBase):
         summary = await self.reflection_system.get_reflection_summary(agent_id)
         return {"reflection_summary": summary}
     
-    async def _get_system_stats(self, request: AgentRequest) -> Dict[str, Any]:
+    async def _get_system_stats(self, request: AgentRequest) -> dict[str, Any]:
         """Handle get system stats request."""
         stats = await self.reflection_system.get_system_reflection_stats()
         return {"system_stats": stats}

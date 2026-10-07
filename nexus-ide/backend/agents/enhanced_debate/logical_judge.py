@@ -9,15 +9,15 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from nexus_ide.backend.tools.ollama_client import OllamaClient
 from nexus_ide.backend.config.settings import get_settings
+from nexus_ide.backend.tools.ollama_client import OllamaClient
 
-from .voting_system import Vote, VoteResult, DecisionType
-from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from .cache import Cache
-from .metrics import MetricsCollector, get_global_metrics_collector
+from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig
+from .metrics import get_global_metrics_collector
+from .voting_system import DecisionType, Vote, VoteResult
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +36,11 @@ class JudgeReasoning:
     decision: str
     reasoning: str
     confidence: float  # 0.0-1.0
-    key_factors: List[str] = field(default_factory=list)
-    alternative_considered: Optional[str] = None
+    key_factors: list[str] = field(default_factory=list)
+    alternative_considered: str | None = None
     timestamp: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "decision": self.decision,
             "reasoning": self.reasoning,
@@ -59,7 +59,7 @@ class ClarificationRequest:
     context: str
     timestamp: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "agent_id": self.agent_id,
             "question": self.question,
@@ -81,9 +81,9 @@ class LogicalJudge:
     
     def __init__(
         self,
-        ollama_client: Optional[OllamaClient] = None,
-        model: Optional[str] = None,
-        fallback_model: Optional[str] = None,
+        ollama_client: OllamaClient | None = None,
+        model: str | None = None,
+        fallback_model: str | None = None,
         temperature: float = 0.3,
         max_tokens: int = 2048
     ):
@@ -203,8 +203,8 @@ Remember: Your decisions will be implemented and their outcomes tracked for lear
     async def adjudicate(
         self,
         topic: str,
-        arguments: List[str],
-        votes: List[Vote],
+        arguments: list[str],
+        votes: list[Vote],
         vote_result: VoteResult,
         decision_type: DecisionType = DecisionType.DEFAULT
     ) -> JudgeReasoning:
@@ -282,8 +282,8 @@ Remember: Your decisions will be implemented and their outcomes tracked for lear
     def _build_adjudication_prompt(
         self,
         topic: str,
-        arguments: List[str],
-        votes: List[Vote],
+        arguments: list[str],
+        votes: list[Vote],
         vote_result: VoteResult,
         decision_type: DecisionType
     ) -> str:
@@ -513,7 +513,7 @@ Remember: Your decisions will be implemented and their outcomes tracked for lear
         
         return "\n".join(output)
     
-    def get_circuit_breaker_state(self) -> Dict[str, Any]:
+    def get_circuit_breaker_state(self) -> dict[str, Any]:
         """Get circuit breaker state and statistics.
         
         Returns:

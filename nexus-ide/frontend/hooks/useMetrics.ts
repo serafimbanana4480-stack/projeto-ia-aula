@@ -9,6 +9,7 @@ export interface MetricsSnapshot {
   ram_used_bytes: number;
 }
 
+// TODO: legacy hook under evaluation; do not remove until confirmed unused by all clients.
 // Subscribes to the system metrics SSE stream and returns the most recent snapshot.
 // TODO: back by zustand store so multiple components share one connection.
 export function useMetrics() {

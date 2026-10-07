@@ -8,7 +8,6 @@ from __future__ import annotations
 import difflib
 import logging
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -104,13 +103,12 @@ class MergeAgent:
         theirs_lines = theirs.splitlines(keepends=True)
 
         # Use difflib to find differences
-        ours_diff = list(difflib.unified_diff(base_lines, ours_lines, lineterm=""))
-        theirs_diff = list(difflib.unified_diff(base_lines, theirs_lines, lineterm=""))
+        list(difflib.unified_diff(base_lines, ours_lines, lineterm=""))
+        list(difflib.unified_diff(base_lines, theirs_lines, lineterm=""))
 
         # Simple heuristic: if changes are on completely different lines, combine
         # For production, this would use a proper 3-way merge algorithm
         merged_lines = base_lines.copy()
-        conflicts = 0
 
         # Try to apply both diffs
         try:
@@ -126,7 +124,6 @@ class MergeAgent:
                 "note": "Smart merge succeeded",
             }
         except ValueError:
-            conflicts = 1
             return self._mark_conflicts(ours, theirs, file_path)
 
     def _apply_diff(self, base: list[str], target: list[str]) -> list[str]:

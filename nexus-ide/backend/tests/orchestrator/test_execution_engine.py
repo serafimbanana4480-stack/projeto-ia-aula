@@ -1,5 +1,7 @@
 import asyncio
+
 import pytest
+
 from backend.orchestrator.autonomous_execution_engine import (
     AutonomousExecutionEngine,
     ExecutionTask,
@@ -108,7 +110,7 @@ def test_list_and_cancel():
         return 1
 
     t1 = engine.submit_task("t1", handler)
-    t2 = engine.submit_task("t2", handler)
+    engine.submit_task("t2", handler)
 
     pending = engine.list_tasks(TaskStatus.PENDING)
     assert len(pending) == 2

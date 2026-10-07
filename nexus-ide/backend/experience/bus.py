@@ -73,6 +73,7 @@ class ExperienceBus:
         component_kind: ComponentKind | None = None,
         component_version: str | None = None,
         workflow_version: str | None = None,
+        version_tags: dict[str, str] | None = None,
         tags: list[str] | None = None,
     ) -> ExperienceTrace:
         """Begin collecting a new trace and track it as *active*."""
@@ -89,6 +90,7 @@ class ExperienceBus:
             component_kind=component_kind,
             component_version=component_version,
             workflow_version=workflow_version,
+            version_tags=version_tags or {},
             tags=tags or [],
         )
         self._active[trace.task_id] = trace

@@ -234,17 +234,42 @@ class SandboxExecutor:
                     risk_level=RiskLevel.CRITICAL,
                 )
         elif language == "bash":
-            is_safe, reason = ws._validate_shell_command(code)
-            if not is_safe:
-                return SandboxResult(
-                    execution_id=execution_id,
-                    stdout="",
-                    stderr=f"Shell blocked: {reason}",
-                    exit_code=1,
-                    timed_out=False,
-                    duration_ms=0,
-                    risk_level=RiskLevel.CRITICAL,
-                )
+            # ``_validate_shell_command`` is the gate for a *single* command
+            # that is about to be handed to ``subprocess.Popen(..., shell=True)``,
+            # where a newline really is a command separator.  Here the script is
+            # never passed through a shell string: the Docker path writes it to
+            # ``code.sh`` and runs ``bash /workspace/code.sh``, and the fallback
+            # path runs ``bash -c <script>`` / ``powershell -Command <script>``
+            # with the whole script as ONE argv element and no ``shell=True``
+            # (see ``_execute_docker`` / ``_execute_subprocess``).  A line break
+            # in that position is script structure, not an injected separator, so
+            # validating the whole blob as one command rejected every multi-line
+            # script.  Validate each LINE on its own instead: every line still
+            # goes through the same allowlist, so a dangerous single line such as
+            # ``rm -rf /`` is refused exactly as before.
+            #
+            # The per-line cost is that shell *syntax* is not modelled: ``;``,
+            # ``&&``, redirections and heredoc operators are refused inside a
+            # line, and keywords such as ``for``/``then``/``done`` are not in the
+            # shell allowlist, so a control-flow construct is still rejected.  A
+            # multi-line script made of allowlisted commands is accepted again.
+            for line_number, line in enumerate(re.split(r"[\n\r\x0b\x0c]", code), start=1):
+                if not line.strip():
+                    continue
+                is_safe, reason = ws._validate_shell_command(line)
+                if not is_safe:
+                    logger.warning(
+                        "Blocked bash line %d for session %s: %s", line_number, session_id, reason
+                    )
+                    return SandboxResult(
+                        execution_id=execution_id,
+                        stdout="",
+                        stderr=f"Shell blocked (line {line_number}): {reason}",
+                        exit_code=1,
+                        timed_out=False,
+                        duration_ms=0,
+                        risk_level=RiskLevel.CRITICAL,
+                    )
 
         docker_ok = await self.check_docker()
 

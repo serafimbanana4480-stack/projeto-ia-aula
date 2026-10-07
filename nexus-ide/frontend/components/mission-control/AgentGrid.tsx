@@ -8,7 +8,6 @@ import {
   XOctagon,
   Cpu,
   MemoryStick,
-  Activity,
   Bot,
   ChevronDown,
   ChevronUp,
@@ -20,6 +19,13 @@ const statusConfig: Record<
   AgentInstance["status"],
   { label: string; border: string; bg: string; dot: string; text: string }
 > = {
+  pending: {
+    label: "Pendente",
+    border: "border-slate-500/30",
+    bg: "bg-slate-500/5",
+    dot: "bg-slate-400",
+    text: "text-slate-400",
+  },
   running: {
     label: "Em execução",
     border: "border-green-500/30",
@@ -55,6 +61,13 @@ const statusConfig: Record<
     dot: "bg-blue-400",
     text: "text-blue-400",
   },
+  aborted: {
+    label: "Parado",
+    border: "border-slate-500/30",
+    bg: "bg-slate-500/5",
+    dot: "bg-slate-400",
+    text: "text-slate-400",
+  },
 };
 
 const AgentTile = React.memo(function AgentTile({ agent }: { agent: AgentInstance }) {
@@ -66,7 +79,7 @@ const AgentTile = React.memo(function AgentTile({ agent }: { agent: AgentInstanc
     setActing(true);
     try {
       await interveneAgent(agent.id, action);
-      useMissionStore.getState().updateAgentStatus(agent.id, action === "abort" ? "failed" : action === "pause" ? "paused" : "running");
+      useMissionStore.getState().updateAgentStatus(agent.id, action === "abort" ? "aborted" : action === "pause" ? "paused" : "running");
     } catch {
       /* ignore */
     } finally {
@@ -117,10 +130,6 @@ const AgentTile = React.memo(function AgentTile({ agent }: { agent: AgentInstanc
             {agent.memory_mb.toFixed(0)} MB
           </span>
         )}
-        <span className="flex items-center gap-1">
-          <Activity className="h-3 w-3" />
-          {agent.tokens_used.toLocaleString()}
-        </span>
       </div>
 
       <AnimatePresence>

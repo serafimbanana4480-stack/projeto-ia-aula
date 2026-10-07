@@ -1,8 +1,6 @@
 """Tests for WorkflowTracker."""
 import json
 
-import pytest
-
 from backend.observability.workflow_tracker import WorkflowTracker
 
 
@@ -69,8 +67,8 @@ class TestWorkflowTracker:
 
         tracker.log_message(wf.workflow_id, "a1", "a2", "conflict", "disagree")
 
-        s1 = tracker.add_step(wf.workflow_id, "same", "coder")
-        s2 = tracker.add_step(wf.workflow_id, "same", "coder")
+        tracker.add_step(wf.workflow_id, "same", "coder")
+        tracker.add_step(wf.workflow_id, "same", "coder")
 
         conflicts = tracker.detect_conflicts(wf.workflow_id)
         assert len(conflicts) == 2  # 1 conflict message + 1 duplicate work
@@ -85,7 +83,7 @@ class TestWorkflowTracker:
     def test_list_workflows(self) -> None:
         tracker = WorkflowTracker()
         wf1 = tracker.create_workflow("story-1", "A")
-        wf2 = tracker.create_workflow("story-2", "B")
+        tracker.create_workflow("story-2", "B")
         tracker.complete_workflow(wf1.workflow_id)
 
         all_wfs = tracker.list_workflows()

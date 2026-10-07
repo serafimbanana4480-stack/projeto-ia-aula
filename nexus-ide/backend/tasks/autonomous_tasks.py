@@ -11,15 +11,24 @@ This system provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 import time
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Set, Callable
-from dataclasses import dataclass, field
-from enum import Enum
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any
 
-from backend.observability.event_system import EventBus, Event, EventType, EventPriority
+from backend.observability.event_system import Event, EventBus, EventPriority, EventType
+from backend.persistence.db import (
+    delete_scheduled_task,
+    load_scheduled_tasks,
+    save_scheduled_task,
+    update_scheduled_task_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,35 +75,36 @@ class Task:
     task_type: TaskType = TaskType.MONITORING
     priority: TaskPriority = TaskPriority.NORMAL
     status: TaskStatus = TaskStatus.PENDING
-    
+
     # Scheduling
-    scheduled_at: Optional[datetime] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    
+    scheduled_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
     # Execution
-    handler: Optional[Callable] = None
-    parameters: Dict[str, Any] = field(default_factory=dict)
-    dependencies: Set[str] = field(default_factory=set)
-    
+    handler: Callable | None = None
+    parameters: dict[str, Any] = field(default_factory=dict)
+    dependencies: set[str] = field(default_factory=set)
+
     # Configuration
     retry_count: int = 0
     max_retries: int = 3
     timeout: int = 300  # seconds
-    interval: Optional[int] = None  # For recurring tasks
+    interval: int | None = None  # For recurring tasks
     auto_retry: bool = True
-    
+
     # Results
-    result: Optional[Any] = None
-    error: Optional[str] = None
+    result: Any | None = None
+    error: str | None = None
     execution_time: float = 0.0
-    
+
     # Metadata
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    def to_dict(self) -> Dict[str, Any]:
+    metadata: dict[str, Any] = field(default_factory=dict)
+    source: str = "custom"
+
+    def to_dict(self) -> dict[str, Any]:
         """Convert task to dictionary."""
         return {
             "task_id": self.task_id,
@@ -118,27 +128,28 @@ class Task:
             "execution_time": self.execution_time,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
-            "metadata": self.metadata
+            "metadata": self.metadata,
+            "source": self.source,
         }
 
 
 class TaskScheduler:
     """Schedules and manages autonomous tasks."""
-    
+
     def __init__(self, event_bus: EventBus):
         self.event_bus = event_bus
-        self.tasks: Dict[str, Task] = {}
-        self.task_queue: List[Task] = []
-        self.running_tasks: Dict[str, Task] = {}
-        self.completed_tasks: List[Task] = []
-        self.failed_tasks: List[Task] = []
-        
+        self.tasks: dict[str, Task] = {}
+        self.task_queue: list[Task] = []
+        self.running_tasks: dict[str, Task] = {}
+        self.completed_tasks: list[Task] = []
+        self.failed_tasks: list[Task] = []
+
         # Scheduling
         self._running = False
-        self._scheduler_task: Optional[asyncio.Task] = None
+        self._scheduler_task: asyncio.Task | None = None
         self._max_concurrent = 10
         self._cleanup_interval = 300  # 5 minutes
-        
+
         # Statistics
         self.stats = {
             "total_tasks": 0,
@@ -148,121 +159,211 @@ class TaskScheduler:
             "scheduled_tasks": 0,
             "average_execution_time": 0.0
         }
-    
+
     async def start(self) -> None:
         """Start the task scheduler."""
         if self._running:
             return
-        
+
         self._running = True
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("TaskScheduler started")
-    
+
+        # Restore persisted custom tasks from database
+        await self._load_persistent_tasks()
+
+    async def _load_persistent_tasks(self) -> None:
+        """Load custom persistent tasks from the database on startup."""
+        try:
+            tasks_data = load_scheduled_tasks(source="custom")
+        except Exception as e:
+            logger.warning("Failed to load persistent tasks: %s", e)
+            return
+        for data in tasks_data:
+            try:
+                task = Task(
+                    task_id=data["id"],
+                    name=data["name"],
+                    task_type=TaskType(data.get("task_type", "monitoring")),
+                    priority=TaskPriority(data.get("priority", "normal")),
+                    status=TaskStatus(data.get("status", "pending")),
+                    handler=None,  # callables cannot be deserialized
+                    parameters=json.loads(data["parameters_json"])
+                    if isinstance(data.get("parameters_json"), str)
+                    else data.get("parameters_json", {}),
+                    dependencies=set(
+                        json.loads(data["dependencies_json"])
+                        if isinstance(data.get("dependencies_json"), str)
+                        else data.get("dependencies_json", [])
+                    ),
+                    retry_count=data.get("retry_count", 0),
+                    max_retries=data.get("max_retries", 3),
+                    timeout=data.get("timeout", 300),
+                    interval=data.get("interval"),
+                    auto_retry=bool(data.get("auto_retry", True)),
+                    result=json.loads(data["result_json"])
+                    if isinstance(data.get("result_json"), str)
+                    else data.get("result_json"),
+                    error=data.get("error"),
+                    execution_time=data.get("execution_time", 0.0),
+                    metadata=json.loads(data["metadata_json"])
+                    if isinstance(data.get("metadata_json"), str)
+                    else data.get("metadata_json", {}),
+                    source=data.get("source", "custom"),
+                )
+                for attr, key in [
+                    ("scheduled_at", "scheduled_at"),
+                    ("started_at", "started_at"),
+                    ("completed_at", "completed_at"),
+                ]:
+                    val = data.get(key)
+                    if val:
+                        with contextlib.suppress(Exception):
+                            setattr(
+                                task,
+                                attr,
+                                datetime.fromisoformat(val.replace("Z", "+00:00")),
+                            )
+                self.tasks[task.task_id] = task
+                if task.status in (
+                    TaskStatus.PENDING,
+                    TaskStatus.SCHEDULED,
+                    TaskStatus.WAITING,
+                ):
+                    self.task_queue.append(task)
+                    self.stats["total_tasks"] += 1
+                    self.stats["scheduled_tasks"] += 1
+                logger.info(
+                    "Loaded persistent task: %s (%s)", task.name, task.task_id
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to load task %s: %s",
+                    data.get("id", "unknown"),
+                    e,
+                )
+        if tasks_data:
+            logger.info(
+                "Loaded %d persistent task(s) from database", len(tasks_data)
+            )
+
     async def stop(self) -> None:
         """Stop the task scheduler."""
         self._running = False
-        
+
         if self._scheduler_task:
             self._scheduler_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._scheduler_task
-            except asyncio.CancelledError:
-                pass
             self._scheduler_task = None
-        
+
         # Cancel running tasks
         for task in list(self.running_tasks.values()):
             await self.cancel_task(task.task_id)
-        
+
         logger.info("TaskScheduler stopped")
-    
+
     async def schedule_task(self, task: Task) -> str:
         """Schedule a new autonomous task."""
         # Validate task
         if not task.name:
             raise ValueError("Task name is required")
-        
+
         if not task.handler:
             raise ValueError("Task handler is required")
-        
+
         # Add to tasks
         self.tasks[task.task_id] = task
         self.task_queue.append(task)
         self.stats["total_tasks"] += 1
         self.stats["scheduled_tasks"] += 1
-        
+
         # Update status
         task.status = TaskStatus.SCHEDULED
         task.updated_at = datetime.now()
-        
+
         # Sort queue by priority
         self.task_queue.sort(key=lambda t: (
             self._get_priority_value(t.priority),
             t.scheduled_at or datetime.now()
         ))
-        
+
         # Emit scheduling event
         await self._emit_task_event("task_scheduled", task)
-        
+
         logger.info(f"Task scheduled: {task.name} ({task.task_id})")
+
+        # Persist to database
+        try:
+            save_scheduled_task(task.to_dict())
+        except Exception as e:
+            logger.warning("Failed to persist task %s: %s", task.task_id, e)
+
         return task.task_id
-    
+
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a task."""
         if task_id not in self.tasks:
             return False
-        
+
         task = self.tasks[task_id]
-        
+
         if task.status in [TaskStatus.RUNNING, TaskStatus.RETRYING]:
             # Cancel running task
             if task_id in self.running_tasks:
                 del self.running_tasks[task_id]
                 self.stats["running_tasks"] -= 1
-        
+
         task.status = TaskStatus.CANCELLED
         task.updated_at = datetime.now()
-        
+
         # Remove from queue if pending
         if task in self.task_queue:
             self.task_queue.remove(task)
-        
+
         # Add to completed tasks
         self.completed_tasks.append(task)
-        
+
         # Emit cancellation event
         await self._emit_task_event("task_cancelled", task)
-        
+
         logger.info(f"Task cancelled: {task.name} ({task_id})")
+
+        # Remove from database
+        try:
+            delete_scheduled_task(task_id)
+        except Exception as e:
+            logger.warning("Failed to delete task %s from DB: %s", task_id, e)
+
         return True
-    
-    async def get_task(self, task_id: str) -> Optional[Task]:
+
+    async def get_task(self, task_id: str) -> Task | None:
         """Get task by ID."""
         return self.tasks.get(task_id)
-    
-    async def get_tasks(self, status: Optional[TaskStatus] = None, 
-                     task_type: Optional[TaskType] = None,
-                     limit: int = 100) -> List[Task]:
+
+    async def get_tasks(self, status: TaskStatus | None = None,
+                     task_type: TaskType | None = None,
+                     limit: int = 100) -> list[Task]:
         """Get tasks with optional filtering."""
         tasks = list(self.tasks.values())
-        
+
         # Apply filters
         if status:
             tasks = [t for t in tasks if t.status == status]
         if task_type:
             tasks = [t for t in tasks if t.task_type == task_type]
-        
+
         # Sort and limit
         tasks.sort(key=lambda t: t.updated_at, reverse=True)
         return tasks[:limit]
-    
-    async def get_stats(self) -> Dict[str, Any]:
+
+    async def get_stats(self) -> dict[str, Any]:
         """Get scheduler statistics."""
         # Calculate average execution time
         if self.stats["completed_tasks"] > 0:
             total_time = sum(t.execution_time for t in self.completed_tasks)
             self.stats["average_execution_time"] = total_time / self.stats["completed_tasks"]
-        
+
         return {
             "running": self._running,
             "max_concurrent": self._max_concurrent,
@@ -277,80 +378,88 @@ class TaskScheduler:
                 for priority in TaskPriority
             }
         }
-    
+
     async def _scheduler_loop(self) -> None:
         """Main scheduler loop."""
         while self._running:
             try:
                 # Check for pending tasks
                 await self._process_pending_tasks()
-                
+
                 # Check for scheduled tasks
                 await self._process_scheduled_tasks()
-                
+
                 # Cleanup old completed tasks
                 await self._cleanup_completed_tasks()
-                
+
                 # Sleep for scheduler interval
                 await asyncio.sleep(1)
-                
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in scheduler loop: {e}")
                 await asyncio.sleep(5)
-    
+
     async def _process_pending_tasks(self) -> None:
         """Process pending tasks in the queue."""
-        while (self.task_queue and 
+        while (self.task_queue and
                len(self.running_tasks) < self._max_concurrent and
                self._running):
-            
+
             task = self.task_queue.pop(0)
-            
+
             # Check dependencies
             if not await self._check_dependencies(task):
                 # Put back in queue
                 self.task_queue.append(task)
                 break
-            
+
             # Start task execution
             asyncio.create_task(self._execute_task(task))
-    
+
     async def _process_scheduled_tasks(self) -> None:
         """Process scheduled tasks."""
         current_time = datetime.now()
-        
+
         for task in self.tasks.values():
             if (task.status == TaskStatus.SCHEDULED and
                 task.scheduled_at and
                 task.scheduled_at <= current_time):
-                
+
                 # Move to queue
                 if task not in self.task_queue:
                     self.task_queue.append(task)
                     task.status = TaskStatus.PENDING
                     task.updated_at = current_time
-                    
+
                     # Sort queue
                     self.task_queue.sort(key=lambda t: (
                         self._get_priority_value(t.priority),
                         t.scheduled_at or current_time
                     ))
-    
+
     async def _execute_task(self, task: Task) -> None:
         """Execute a task."""
+        # Reset the circuit breaker so a failure streak in a prior task
+        # does not lock tools for this task execution.
+        session_id = task.parameters.get("session_id")
+        with contextlib.suppress(Exception):
+            from backend.tools.registry import reset_tool_failures
+
+            reset_tool_failures(session_id)
+
         task.status = TaskStatus.RUNNING
         task.started_at = datetime.now()
         task.updated_at = datetime.now()
         self.running_tasks[task.task_id] = task
         self.stats["running_tasks"] += 1
-        
+
         # Emit execution start event
         await self._emit_task_event("task_started", task)
-        
+
         start_time = time.time()
-        
+
         try:
             # Execute task with timeout
             if task.timeout:
@@ -360,48 +469,59 @@ class TaskScheduler:
                 )
             else:
                 result = await task.handler(**task.parameters)
-            
+
             # Task completed successfully
             task.result = result
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now()
             task.execution_time = time.time() - start_time
             task.updated_at = datetime.now()
-            
+
             self.stats["completed_tasks"] += 1
-            
+
             # Move to completed tasks
             self.completed_tasks.append(task)
-            
+
             # Emit completion event
             await self._emit_task_event("task_completed", task)
-            
+
             logger.info(f"Task completed: {task.name} ({task.task_id}) in {task.execution_time:.2f}s")
-            
+
+            # Persist completion to database
+            try:
+                update_scheduled_task_status(
+                    task.task_id,
+                    "completed",
+                    completed_at=task.completed_at.isoformat() if task.completed_at else None,
+                    execution_time=task.execution_time,
+                )
+            except Exception as e:
+                logger.warning("Failed to update task %s in DB: %s", task.task_id, e)
+
             # Schedule recurring task if applicable
             if task.interval and task.status == TaskStatus.COMPLETED:
                 await self._schedule_recurring_task(task)
-            
-        except asyncio.TimeoutError:
+
+        except TimeoutError:
             # Task timed out
             task.status = TaskStatus.FAILED
             task.error = "Task execution timeout"
             task.completed_at = datetime.now()
             task.execution_time = time.time() - start_time
             task.updated_at = datetime.now()
-            
+
             self.stats["failed_tasks"] += 1
             self.failed_tasks.append(task)
-            
+
             # Emit timeout event
             await self._emit_task_event("task_timeout", task)
-            
+
             # Auto-retry if enabled
             if task.auto_retry and task.retry_count < task.max_retries:
                 await self._retry_task(task)
-            
+
             logger.error(f"Task timed out: {task.name} ({task.task_id})")
-            
+
         except Exception as e:
             # Task failed
             task.status = TaskStatus.FAILED
@@ -409,25 +529,36 @@ class TaskScheduler:
             task.completed_at = datetime.now()
             task.execution_time = time.time() - start_time
             task.updated_at = datetime.now()
-            
+
             self.stats["failed_tasks"] += 1
             self.failed_tasks.append(task)
-            
+
             # Emit failure event
             await self._emit_task_event("task_failed", task)
-            
+
             # Auto-retry if enabled
             if task.auto_retry and task.retry_count < task.max_retries:
                 await self._retry_task(task)
-            
+
             logger.error(f"Task failed: {task.name} ({task.task_id}): {e}")
-        
+
+            # Persist failure to database
+            try:
+                update_scheduled_task_status(
+                    task.task_id,
+                    "failed",
+                    error=task.error,
+                    completed_at=task.completed_at.isoformat() if task.completed_at else None,
+                )
+            except Exception as e:
+                logger.warning("Failed to update task %s in DB: %s", task.task_id, e)
+
         finally:
             # Remove from running tasks
             if task.task_id in self.running_tasks:
                 del self.running_tasks[task.task_id]
                 self.stats["running_tasks"] -= 1
-    
+
     async def _check_dependencies(self, task: Task) -> bool:
         """Check if task dependencies are satisfied."""
         for dep_id in task.dependencies:
@@ -435,46 +566,46 @@ class TaskScheduler:
             if not dep_task:
                 logger.error(f"Dependency not found: {dep_id}")
                 return False
-            
+
             if dep_task.status not in [TaskStatus.COMPLETED]:
                 logger.info(f"Dependency not ready: {dep_id} (status: {dep_task.status.value})")
                 return False
-        
+
         return True
-    
+
     async def _retry_task(self, task: Task) -> None:
         """Retry a failed task."""
         task.retry_count += 1
         task.status = TaskStatus.RETRYING
         task.updated_at = datetime.now()
-        
+
         # Add delay for retry
         delay = min(300, 60 * (2 ** task.retry_count))  # Exponential backoff
         await asyncio.sleep(delay)
-        
+
         # Reset for retry
         task.started_at = None
         task.completed_at = None
         task.result = None
         task.error = None
         task.execution_time = 0.0
-        
+
         # Add back to queue
         self.task_queue.append(task)
-        
+
         # Emit retry event
         await self._emit_task_event("task_retry", task)
-        
+
         logger.info(f"Task retry scheduled: {task.name} ({task.task_id}) - attempt {task.retry_count}")
-    
+
     async def _schedule_recurring_task(self, task: Task) -> None:
         """Schedule a recurring task."""
         if not task.interval:
             return
-        
+
         # Calculate next execution time
         next_time = datetime.now() + timedelta(seconds=task.interval)
-        
+
         # Create new task instance
         new_task = Task(
             name=task.name,
@@ -489,34 +620,34 @@ class TaskScheduler:
             auto_retry=task.auto_retry,
             metadata=task.metadata
         )
-        
+
         # Schedule for next execution
         new_task.scheduled_at = next_time
         await self.schedule_task(new_task)
-        
+
         logger.info(f"Recurring task scheduled: {task.name} ({task.task_id}) at {next_time}")
-    
+
     async def _cleanup_completed_tasks(self) -> None:
         """Clean up old completed tasks."""
         cutoff_time = datetime.now() - timedelta(hours=24)
-        
+
         # Remove old completed tasks
         old_tasks = [t for t in self.completed_tasks if t.completed_at and t.completed_at < cutoff_time]
         for task in old_tasks:
             del self.tasks[task.task_id]
-        
+
         self.completed_tasks = [t for t in self.completed_tasks if t not in old_tasks]
-        
+
         # Remove old failed tasks
         old_tasks = [t for t in self.failed_tasks if t.completed_at and t.completed_at < cutoff_time]
         for task in old_tasks:
             del self.tasks[task.task_id]
-        
+
         self.failed_tasks = [t for t in self.failed_tasks if t not in old_tasks]
-        
+
         if old_tasks:
             logger.info(f"Cleaned up {len(old_tasks)} old tasks")
-    
+
     def _get_priority_value(self, priority: TaskPriority) -> int:
         """Get numeric value for priority."""
         priority_values = {
@@ -527,12 +658,12 @@ class TaskScheduler:
             TaskPriority.URGENT: 5
         }
         return priority_values.get(priority, 2)
-    
+
     async def _emit_task_event(self, event_type: str, task: Task) -> None:
         """Emit task-related event."""
         if not self.event_bus:
             return
-        
+
         try:
             event = Event(
                 event_type=EventType.TASK_STARTED if event_type == "task_started" else EventType.TASK_COMPLETED,
@@ -547,22 +678,22 @@ class TaskScheduler:
                     "timestamp": datetime.now().isoformat()
                 }
             )
-            
+
             await self.event_bus.publish(event)
-            
+
         except Exception as e:
             logger.error(f"Failed to emit task event: {e}")
 
 
 class AutonomousTaskManager:
     """Manages autonomous task execution and self-improvement."""
-    
+
     def __init__(self, event_bus: EventBus):
         self.event_bus = event_bus
         self.scheduler = TaskScheduler(event_bus)
         self._running = False
-        self._self_improvement_task: Optional[Task] = None
-        
+        self._self_improvement_task: Task | None = None
+
         # Built-in task handlers
         self.task_handlers = {
             "auto_optimization": self._auto_optimization_handler,
@@ -572,31 +703,31 @@ class AutonomousTaskManager:
             "learning_update": self._learning_update_handler,
             "system_cleanup": self._system_cleanup_handler
         }
-    
+
     async def start(self) -> None:
         """Start the autonomous task manager."""
         if self._running:
             return
-        
+
         self._running = True
-        
+
         # Start scheduler
         await self.scheduler.start()
-        
+
         # Schedule built-in tasks
         await self._schedule_builtin_tasks()
-        
+
         logger.info("AutonomousTaskManager started")
-    
+
     async def stop(self) -> None:
         """Stop the autonomous task manager."""
         self._running = False
         await self.scheduler.stop()
         logger.info("AutonomousTaskManager stopped")
-    
+
     async def _schedule_builtin_tasks(self) -> None:
         """Schedule built-in autonomous tasks."""
-        
+
         # Health monitoring task
         await self.scheduler.schedule_task(Task(
             name="System Health Monitoring",
@@ -604,9 +735,10 @@ class AutonomousTaskManager:
             priority=TaskPriority.HIGH,
             handler=self.task_handlers["health_monitoring"],
             interval=60,  # Every minute
-            parameters={"detailed": False}
+            parameters={"detailed": False},
+            source="builtin",
         ))
-        
+
         # Performance monitoring task
         await self.scheduler.schedule_task(Task(
             name="Performance Monitoring",
@@ -614,9 +746,10 @@ class AutonomousTaskManager:
             priority=TaskPriority.NORMAL,
             handler=self.task_handlers["performance_tuning"],
             interval=300,  # Every 5 minutes
-            parameters={"collect_metrics": True}
+            parameters={"collect_metrics": True},
+            source="builtin",
         ))
-        
+
         # Auto-optimization task
         await self.scheduler.schedule_task(Task(
             name="System Auto-Optimization",
@@ -624,9 +757,10 @@ class AutonomousTaskManager:
             priority=TaskPriority.NORMAL,
             handler=self.task_handlers["auto_optimization"],
             interval=1800,  # Every 30 minutes
-            parameters={"aggressive": False}
+            parameters={"aggressive": False},
+            source="builtin",
         ))
-        
+
         # System cleanup task
         await self.scheduler.schedule_task(Task(
             name="System Cleanup",
@@ -634,19 +768,20 @@ class AutonomousTaskManager:
             priority=TaskPriority.LOW,
             handler=self.task_handlers["system_cleanup"],
             interval=3600,  # Every hour
-            parameters={"deep_clean": False}
+            parameters={"deep_clean": False},
+            source="builtin",
         ))
-        
+
         logger.info("Built-in autonomous tasks scheduled")
-    
-    async def create_custom_task(self, name: str, task_type: TaskType, 
-                           handler: Callable, parameters: Dict[str, Any] = None,
+
+    async def create_custom_task(self, name: str, task_type: TaskType,
+                           handler: Callable, parameters: dict[str, Any] = None,
                            priority: TaskPriority = TaskPriority.NORMAL,
-                           interval: Optional[int] = None,
+                           interval: int | None = None,
                            max_retries: int = 3,
                            timeout: int = 300) -> str:
         """Create and schedule a custom autonomous task."""
-        
+
         task = Task(
             name=name,
             task_type=task_type,
@@ -658,14 +793,14 @@ class AutonomousTaskManager:
             interval=interval,
             auto_retry=True
         )
-        
+
         return await self.scheduler.schedule_task(task)
-    
-    async def _auto_optimization_handler(self, **kwargs) -> Dict[str, Any]:
+
+    async def _auto_optimization_handler(self, **kwargs) -> dict[str, Any]:
         """Handler for auto-optimization tasks."""
         # Simulate optimization analysis
         await asyncio.sleep(2)
-        
+
         return {
             "optimizations_applied": 3,
             "performance_improvement": 15.5,
@@ -676,14 +811,14 @@ class AutonomousTaskManager:
             ],
             "optimization_time": datetime.now().isoformat()
         }
-    
-    async def _health_monitoring_handler(self, **kwargs) -> Dict[str, Any]:
+
+    async def _health_monitoring_handler(self, **kwargs) -> dict[str, Any]:
         """Handler for health monitoring tasks."""
         detailed = kwargs.get("detailed", False)
-        
+
         # Simulate health checks
         await asyncio.sleep(1)
-        
+
         health_status = {
             "overall": "healthy",
             "components": {
@@ -699,7 +834,7 @@ class AutonomousTaskManager:
             },
             "timestamp": datetime.now().isoformat()
         }
-        
+
         if detailed:
             health_status["detailed_checks"] = {
                 "event_bus_events_per_second": 15.2,
@@ -708,16 +843,16 @@ class AutonomousTaskManager:
                 "task_queue_size": 2,
                 "error_rate": 0.01
             }
-        
+
         return health_status
-    
-    async def _performance_tuning_handler(self, **kwargs) -> Dict[str, Any]:
+
+    async def _performance_tuning_handler(self, **kwargs) -> dict[str, Any]:
         """Handler for performance tuning tasks."""
         collect_metrics = kwargs.get("collect_metrics", False)
-        
+
         # Simulate performance analysis
         await asyncio.sleep(3)
-        
+
         if collect_metrics:
             # Simulate metrics collection
             metrics = {
@@ -733,7 +868,7 @@ class AutonomousTaskManager:
                 "error_rate": 0.03,
                 "resource_utilization": 0.78
             }
-        
+
         return {
             "tuning_applied": True,
             "performance_improvement": 8.3,
@@ -745,11 +880,11 @@ class AutonomousTaskManager:
             ],
             "tuning_time": datetime.now().isoformat()
         }
-    
-    async def _error_recovery_handler(self, **kwargs) -> Dict[str, Any]:
+
+    async def _error_recovery_handler(self, **kwargs) -> dict[str, Any]:
         """Handler for error recovery tasks."""
         await asyncio.sleep(2)
-        
+
         return {
             "errors_detected": 2,
             "errors_recovered": 2,
@@ -760,11 +895,11 @@ class AutonomousTaskManager:
             ],
             "recovery_time": datetime.now().isoformat()
         }
-    
-    async def _learning_update_handler(self, **kwargs) -> Dict[str, Any]:
+
+    async def _learning_update_handler(self, **kwargs) -> dict[str, Any]:
         """Handler for learning update tasks."""
         await asyncio.sleep(4)
-        
+
         return {
             "models_updated": 5,
             "accuracy_improvement": 3.2,
@@ -772,14 +907,14 @@ class AutonomousTaskManager:
             "knowledge_base_size": 15420,
             "learning_time": datetime.now().isoformat()
         }
-    
-    async def _system_cleanup_handler(self, **kwargs) -> Dict[str, Any]:
+
+    async def _system_cleanup_handler(self, **kwargs) -> dict[str, Any]:
         """Handler for system cleanup tasks."""
         deep_clean = kwargs.get("deep_clean", False)
-        
+
         # Simulate cleanup process
         await asyncio.sleep(5 if deep_clean else 2)
-        
+
         return {
             "cleanup_completed": True,
             "files_cleaned": 150 if deep_clean else 50,
@@ -788,11 +923,11 @@ class AutonomousTaskManager:
             "memory_freed": 256 if deep_clean else 128,
             "cleanup_time": datetime.now().isoformat()
         }
-    
-    async def get_task_manager_stats(self) -> Dict[str, Any]:
+
+    async def get_task_manager_stats(self) -> dict[str, Any]:
         """Get task manager statistics."""
         scheduler_stats = await self.scheduler.get_stats()
-        
+
         return {
             "task_manager": {
                 "running": self._running,
@@ -805,7 +940,7 @@ class AutonomousTaskManager:
 
 
 # Global task manager instance
-_task_manager: Optional[AutonomousTaskManager] = None
+_task_manager: AutonomousTaskManager | None = None
 
 
 async def get_autonomous_task_manager(event_bus: EventBus) -> AutonomousTaskManager:

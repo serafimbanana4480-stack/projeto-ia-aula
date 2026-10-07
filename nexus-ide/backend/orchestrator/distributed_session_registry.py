@@ -11,8 +11,8 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
 from enum import Enum
+from typing import Any
 
 try:
     import redis.asyncio as redis
@@ -44,16 +44,16 @@ class SessionContext:
     state: SessionState = SessionState.ACTIVE
     
     # Session data
-    context: Dict[str, Any] = field(default_factory=dict)
-    history: List[Dict[str, Any]] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
+    history: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
     # Concurrency control
     version: int = 0
-    lock_token: Optional[str] = None
-    lock_expiry: Optional[float] = None
+    lock_token: str | None = None
+    lock_expiry: float | None = None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "user_id": self.user_id,
@@ -71,7 +71,7 @@ class SessionContext:
         }
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "SessionContext":
+    def from_dict(cls, data: dict[str, Any]) -> SessionContext:
         return cls(
             session_id=data["session_id"],
             user_id=data["user_id"],
@@ -106,8 +106,8 @@ class DistributedSessionRegistry:
         self.session_ttl = session_ttl
         self.lock_ttl = lock_ttl
         self.cleanup_interval = cleanup_interval
-        self._redis: Optional[redis.Redis] = None
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self._redis: redis.Redis | None = None
+        self._cleanup_task: asyncio.Task | None = None
         
     async def connect(self) -> None:
         """Connect to Redis and start cleanup task."""
@@ -187,8 +187,8 @@ class DistributedSessionRegistry:
         self,
         user_id: str,
         workspace_id: str,
-        initial_context: Optional[Dict[str, Any]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        initial_context: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> SessionContext:
         """Create a new session with distributed ID."""
         session_id = str(uuid.uuid4())
@@ -215,7 +215,7 @@ class DistributedSessionRegistry:
         
         await self._redis.setex(key, self.session_ttl, data)
         
-    async def get_session(self, session_id: str) -> Optional[SessionContext]:
+    async def get_session(self, session_id: str) -> SessionContext | None:
         """Get session by ID."""
         if not self._redis:
             raise RuntimeError("Session Registry not connected")
@@ -236,9 +236,9 @@ class DistributedSessionRegistry:
     async def update_session(
         self,
         session_id: str,
-        context_update: Optional[Dict[str, Any]] = None,
-        metadata_update: Optional[Dict[str, Any]] = None,
-        state_update: Optional[SessionState] = None,
+        context_update: dict[str, Any] | None = None,
+        metadata_update: dict[str, Any] | None = None,
+        state_update: SessionState | None = None,
     ) -> bool:
         """Update session with optimistic concurrency control."""
         session = await self.get_session(session_id)
@@ -277,7 +277,7 @@ class DistributedSessionRegistry:
         self,
         session_id: str,
         lock_token: str,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> bool:
         """Acquire distributed lock on session."""
         if not self._redis:
@@ -355,7 +355,7 @@ class DistributedSessionRegistry:
         self,
         session_id: str,
         event_type: str,
-        data: Dict[str, Any],
+        data: dict[str, Any],
     ) -> None:
         """Add event to session history."""
         session = await self.get_session(session_id)
@@ -376,7 +376,7 @@ class DistributedSessionRegistry:
             
         await self._save_session(session)
         
-    async def get_user_sessions(self, user_id: str) -> List[SessionContext]:
+    async def get_user_sessions(self, user_id: str) -> list[SessionContext]:
         """Get all sessions for a user."""
         if not self._redis:
             raise RuntimeError("Session Registry not connected")
@@ -399,7 +399,7 @@ class DistributedSessionRegistry:
                     
         return sorted(user_sessions, key=lambda s: s.last_activity, reverse=True)
         
-    async def get_workspace_sessions(self, workspace_id: str) -> List[SessionContext]:
+    async def get_workspace_sessions(self, workspace_id: str) -> list[SessionContext]:
         """Get all sessions for a workspace."""
         if not self._redis:
             raise RuntimeError("Session Registry not connected")
@@ -443,7 +443,7 @@ class DistributedSessionRegistry:
         logger.info("Archived session %s", session_id)
         return True
         
-    async def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self) -> dict[str, Any]:
         """Get registry statistics."""
         if not self._redis:
             return {"connected": False}
@@ -516,8 +516,8 @@ class SessionRegistry:
         self,
         user_id: str,
         workspace_id: str,
-        initial_context: Optional[Dict[str, Any]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        initial_context: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> SessionContext:
         await self._ensure_connected()
         if self._distributed_registry:
@@ -534,7 +534,7 @@ class SessionRegistry:
                 metadata=metadata or {},
             )
             
-    async def get_session(self, session_id: str) -> Optional[SessionContext]:
+    async def get_session(self, session_id: str) -> SessionContext | None:
         await self._ensure_connected()
         if self._distributed_registry:
             return await self._distributed_registry.get_session(session_id)
@@ -545,9 +545,9 @@ class SessionRegistry:
     async def update_session(
         self,
         session_id: str,
-        context_update: Optional[Dict[str, Any]] = None,
-        metadata_update: Optional[Dict[str, Any]] = None,
-        state_update: Optional[SessionState] = None,
+        context_update: dict[str, Any] | None = None,
+        metadata_update: dict[str, Any] | None = None,
+        state_update: SessionState | None = None,
     ) -> bool:
         await self._ensure_connected()
         if self._distributed_registry:

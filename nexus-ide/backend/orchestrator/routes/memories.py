@@ -80,6 +80,7 @@ async def search_memories(
 
     results = await store.search(
         req.query,
+        user_id=str(_user.get("user_id") or ""),
         session_id=req.session_id or None,
         project_id=req.project_id or None,
         memory_type=mem_type,
@@ -123,6 +124,7 @@ async def create_memory(
 
     memory = await store.store(
         content=req.content,
+        user_id=str(_user.get("user_id") or ""),
         memory_type=mem_type,
         session_id=req.session_id,
         project_id=req.project_id,
@@ -158,7 +160,9 @@ async def list_memories(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid memory_type") from None
 
-    all_memories = await store.list_all(limit=max(limit, 1000))
+    all_memories = await store.list_all(
+        limit=max(limit, 1000), user_id=str(_user.get("user_id") or "")
+    )
     filtered = [
         m
         for m in all_memories
@@ -196,7 +200,7 @@ async def delete_memory(
 ) -> dict[str, Any]:
     """Delete a memory by ID."""
     store = get_memory_store()
-    deleted = await store.delete(memory_id)
+    deleted = await store.delete(memory_id, user_id=str(_user.get("user_id") or ""))
     if not deleted:
         raise HTTPException(status_code=404, detail="Memory not found")
     return {"deleted": True, "memory_id": memory_id}
@@ -208,4 +212,4 @@ async def memory_stats(
 ) -> dict[str, Any]:
     """Return statistics about the semantic memory store."""
     store = get_memory_store()
-    return store.stats()
+    return store.stats(user_id=str(_user.get("user_id") or ""))

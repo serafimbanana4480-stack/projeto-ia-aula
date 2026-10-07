@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 
 class IntegrationStatus(str, Enum):
@@ -69,13 +69,13 @@ class IntegrationPlanner:
         })
         return True
 
-    def update_status(self, plan_id: str, status: IntegrationStatus) -> Optional[IntegrationPlan]:
+    def update_status(self, plan_id: str, status: IntegrationStatus) -> IntegrationPlan | None:
         plan = self._plans.get(plan_id)
         if plan:
             plan.status = status
         return plan
 
-    def get_plan(self, plan_id: str) -> Optional[IntegrationPlan]:
+    def get_plan(self, plan_id: str) -> IntegrationPlan | None:
         return self._plans.get(plan_id)
 
     def list_plans(self, status: IntegrationStatus | None = None) -> list[IntegrationPlan]:

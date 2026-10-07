@@ -1,5 +1,5 @@
-import { describe, expect, it, beforeEach, vi } from "vitest";
-import { renderHook, act } from "@testing-library/react";
+import { describe, expect, it, beforeEach } from "vitest";
+import { act } from "@testing-library/react";
 import { useRealTimeStore } from "../../stores/realTimeStore";
 import type { StreamEvent } from "../../lib/types";
 

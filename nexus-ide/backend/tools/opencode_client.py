@@ -21,8 +21,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -200,10 +201,7 @@ class OpenCodeClient:
                     if not line:
                         continue
                     # Handle SSE format: "data: {...}"
-                    if line.startswith("data: "):
-                        data_str = line[6:]
-                    else:
-                        data_str = line
+                    data_str = line[6:] if line.startswith("data: ") else line
 
                     if data_str.strip() == "[DONE]":
                         return
@@ -229,11 +227,11 @@ class OpenCodeClient:
         except httpx.ConnectError as e:
             raise OpenCodeConnectionError(
                 f"Cannot connect to OpenCode API at {self._api_url}: {e}"
-            )
+            ) from e
         except httpx.TimeoutException as e:
             raise OpenCodeTransientError(
                 f"Timeout in OpenCode request: {e}"
-            )
+            ) from e
 
     async def chat_complete(
         self,
@@ -297,9 +295,9 @@ class OpenCodeClient:
         except httpx.ConnectError as e:
             raise OpenCodeConnectionError(
                 f"Cannot connect to OpenCode API at {self._api_url}: {e}"
-            )
+            ) from e
         except httpx.TimeoutException as e:
-            raise OpenCodeTransientError(f"Timeout connecting to OpenCode API: {e}")
+            raise OpenCodeTransientError(f"Timeout connecting to OpenCode API: {e}") from e
 
     async def check_model_available(self, model_id: str) -> bool:
         """Check if a specific model is available on the OpenCode API.
@@ -411,11 +409,11 @@ class OpenCodeClient:
         except httpx.ConnectError as e:
             raise OpenCodeConnectionError(
                 f"Cannot connect to OpenCode API at {self._api_url}: {e}"
-            )
+            ) from e
         except httpx.TimeoutException as e:
             raise OpenCodeTransientError(
                 f"Timeout in OpenCode embedding request: {e}"
-            )
+            ) from e
 
 
 def _parse_chunk(line: str) -> dict[str, Any] | None:

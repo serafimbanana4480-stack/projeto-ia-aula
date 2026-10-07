@@ -11,12 +11,15 @@ Provides endpoints for:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field, StrictInt, StrictStr
 
+from backend.core.disk_guard import disk_pressure_status
 from backend.middleware.auth import require_auth
 from backend.orchestrator.advanced_modes import (
+    REPO_ROOT,
     AdvancedModeOrchestrator,
     get_advanced_mode,
     get_command_aliases,
@@ -29,6 +32,44 @@ from backend.orchestrator.advanced_modes import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+NonEmptyText = Annotated[StrictStr, Field(min_length=1, max_length=100_000)]
+Score = Annotated[float, Field(strict=True, ge=0, le=100, allow_inf_nan=False)]
+Weight = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
+
+
+class ModeContextRequest(BaseModel):
+    request: NonEmptyText
+
+
+class CompletionReviewRequest(BaseModel):
+    session_id: Annotated[StrictStr, Field(min_length=1, max_length=128)]
+    claim: NonEmptyText
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class SentinelCheckRequest(BaseModel):
+    action: NonEmptyText
+    risk_level: Annotated[StrictInt, Field(ge=0, le=4)] = 0
+    files: list[StrictStr] = Field(default_factory=list, max_length=1000)
+
+
+class TournamentEntryRequest(BaseModel):
+    id: Annotated[StrictStr, Field(min_length=1, max_length=128)]
+    name: Annotated[StrictStr, Field(min_length=1, max_length=256)]
+    description: StrictStr = ""
+    files: list[StrictStr] = Field(default_factory=list)
+    scores: dict[str, Score] = Field(default_factory=dict)
+
+
+class TournamentRequest(BaseModel):
+    entries: list[TournamentEntryRequest] = Field(default_factory=list, max_length=100)
+    weights: dict[str, Weight] | None = None
+
+
+def _require_mode(mode_id: str) -> None:
+    if not get_advanced_mode(mode_id):
+        raise HTTPException(status_code=404, detail=f"Advanced mode '{mode_id}' not found")
 
 
 def _get_orch() -> AdvancedModeOrchestrator:
@@ -100,6 +141,13 @@ async def advanced_modes_health(
             "runtime_role": status.get("runtime_role", "unknown"),
             "runtime_summary": status.get("runtime_summary", ""),
             "handler": status.get("handler"),
+            "available": status.get("available", False),
+            "execution_target": status.get("execution_target"),
+            "limitations": status.get("limitations", ""),
+            "activity_evidence_status": status.get("activity_evidence_status", "NOT_MEASURED"),
+            "evidence_count": status.get("evidence_count", 0),
+            "intervention_count": status.get("intervention_count", 0),
+            "checkpoint_count": status.get("checkpoint_count", 0),
         }
 
     return {
@@ -114,6 +162,9 @@ async def advanced_modes_health(
         "modes": mode_summaries,
         "groups": all_statuses.get("groups", {}),
         "execution_profile": all_statuses.get("execution_profile", {}),
+        "catalog_evidence_scope": "configuration_and_persisted_sessions",
+        "activity_evidence_status": "NOT_MEASURED",
+        "disk_guard": disk_pressure_status(REPO_ROOT),
     }
 
 
@@ -170,6 +221,7 @@ async def list_advanced_mode_sessions(
     _user: dict = Depends(require_auth),
 ) -> dict:
     """List all sessions for a specific advanced mode."""
+    _require_mode(mode_id)
     mgr = get_state_manager()
     sessions = mgr.list_sessions(mode_id)
     return {
@@ -185,6 +237,7 @@ async def get_advanced_mode_session(
     _user: dict = Depends(require_auth),
 ) -> dict:
     """Get detailed information about a specific session."""
+    _require_mode(mode_id)
     mgr = get_state_manager()
     session = mgr.get_session(mode_id, session_id)
     if not session:
@@ -212,6 +265,10 @@ async def get_advanced_mode_session(
         "evidence_count": len(session.evidence_book),
         "trajectory_count": len(session.trajectory),
         "checkpoint_count": len(session.checkpoints),
+        "evidence_book": session.evidence_book,
+        "trajectory": session.trajectory[-50:],
+        "quality_gates": session.quality_gates,
+        "checkpoints": session.checkpoints,
     }
 
 
@@ -255,7 +312,7 @@ async def resolve_chat_command(
 @router.post("/advanced-modes/{mode_id}/context")
 async def prepare_advanced_mode_context(
     mode_id: str,
-    body: dict,
+    body: ModeContextRequest,
     _user: dict = Depends(require_auth),
 ) -> dict:
     """Prepare the augmented context for a mode execution.
@@ -263,7 +320,8 @@ async def prepare_advanced_mode_context(
     Called by the chat pipeline before routing a request to inject
     mode-specific prompts, constraints, and session state.
     """
-    user_request = body.get("request", "")
+    _require_mode(mode_id)
+    user_request = body.request.strip()
     if not user_request:
         raise HTTPException(status_code=400, detail="Missing 'request' field")
 
@@ -278,20 +336,22 @@ async def prepare_advanced_mode_context(
 
 @router.post("/advanced-modes/advisor-infinity/review")
 async def advisor_review_completion(
-    body: dict,
+    body: CompletionReviewRequest,
     _user: dict = Depends(require_auth),
 ) -> dict:
     """Submit a completion claim for Advisor Infinity review."""
     mode_id = "advisor-infinity"
-    session_id = body.get("session_id", "")
-    claim = body.get("claim", "")
-    evidence = body.get("evidence", {})
+    session_id = body.session_id
+    claim = body.claim.strip()
+    evidence = body.evidence
 
     if not claim:
         raise HTTPException(status_code=400, detail="Missing 'claim' field")
 
     orch = _get_orch()
     result = orch.record_completion_attempt(mode_id, session_id, claim, evidence)
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
     return result
 
 
@@ -301,16 +361,19 @@ async def advisor_review_completion(
 
 @router.post("/advanced-modes/sentinel/check")
 async def sentinel_check_action(
-    body: dict,
+    body: SentinelCheckRequest,
     _user: dict = Depends(require_auth),
 ) -> dict:
     """Check an action against the Sentinel security gate."""
     orch = _get_orch()
-    result = orch.check_security_gate(
-        action_description=body.get("action", ""),
-        risk_level=body.get("risk_level", 0),
-        files_affected=body.get("files", []),
-    )
+    try:
+        result = orch.check_security_gate(
+            action_description=body.action,
+            risk_level=body.risk_level,
+            files_affected=body.files,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return result
 
 
@@ -320,26 +383,26 @@ async def sentinel_check_action(
 
 @router.post("/advanced-modes/multiverse/evaluate")
 async def multiverse_evaluate(
-    body: dict,
+    body: TournamentRequest,
     _user: dict = Depends(require_auth),
 ) -> dict:
     """Evaluate tournament entries and select the winner."""
     from backend.orchestrator.advanced_modes import TournamentEntry
 
-    entries_data = body.get("entries", [])
-    criteria_weights = body.get("weights")
-
     entries = []
-    for e in entries_data:
+    for e in body.entries:
         entry = TournamentEntry(
-            id=e.get("id", ""),
-            name=e.get("name", ""),
-            approach_description=e.get("description", ""),
-            files=e.get("files", []),
-            scores=e.get("scores", {}),
+            id=e.id,
+            name=e.name,
+            approach_description=e.description,
+            files=e.files,
+            scores=e.scores,
         )
         entries.append(entry)
 
     orch = _get_orch()
-    result = orch.evaluate_tournament(entries, criteria_weights)
+    try:
+        result = orch.evaluate_tournament(entries, body.weights)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return result

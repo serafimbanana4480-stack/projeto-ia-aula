@@ -4,6 +4,11 @@ Provides three notification channels:
 - ``send_webhook`` — POST a JSON payload to a webhook URL (Slack/Discord/Teams compatible)
 - ``send_email_notification`` — send a simple email via SMTP (requires email config)
 - ``show_desktop_notification`` — show a native desktop notification (cross-platform via plyer)
+
+``send_webhook`` takes a model-supplied URL, so it carries an SSRF barrier: the
+URL is normalised with :func:`backend.tools.safe_http.normalize_public_http_url`
+and dispatched over a :class:`~backend.tools.safe_http.PublicAddressHTTPTransport`
+that re-checks every resolved address at connect time, for every redirect hop.
 """
 
 from __future__ import annotations
@@ -14,11 +19,30 @@ import smtplib
 from email.message import EmailMessage
 from typing import Any
 
-import aiohttp
+import httpx
 
 from backend.tools.registry import ToolSpec, register_tool
+from backend.tools.safe_http import PublicAddressHTTPTransport, normalize_public_http_url
 
 logger = logging.getLogger(__name__)
+
+#: Only a short success/failure snippet of the webhook response is returned, so
+#: the read is bounded. An endpoint that streams indefinitely must not be able
+#: to exhaust this process's memory.
+_MAX_WEBHOOK_RESPONSE_BYTES = 64 * 1024
+
+#: Snippet length actually handed back to the caller (unchanged public contract).
+_WEBHOOK_SNIPPET_CHARS = 1000
+
+
+def _build_client(timeout: float) -> httpx.AsyncClient:
+    """Guarded HTTP client: every connect resolves the host and re-checks it."""
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout),
+        follow_redirects=True,
+        trust_env=False,
+        transport=PublicAddressHTTPTransport(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +60,11 @@ async def send_webhook(
     Compatible with Slack (incoming webhooks), Discord, MS Teams, and generic
     JSON endpoints. Auto-detects format from URL or content-type.
 
+    SSRF barrier: the URL must be an absolute http/https URL on the standard
+    port that resolves to a public IP address. Redirect hops are re-checked at
+    connect time, so a webhook host that redirects into loopback or the cloud
+    metadata address never gets a socket.
+
     Args:
         url: Webhook URL.
         payload: Optional dict payload (sent as JSON body).
@@ -45,13 +74,22 @@ async def send_webhook(
     """
     timeout = min(max(timeout, 1), 30)
 
+    # Screen the URL before anything else: no DNS, no socket, no payload work.
+    # ``normalize_public_http_url`` is what restricts the scheme to http/https,
+    # rejects credentials in the URL, rejects non-standard ports, rejects
+    # local/reserved hostnames, and rejects literal non-public IP addresses.
+    try:
+        target_url = normalize_public_http_url(url)
+    except ValueError as exc:
+        return {"error": f"Blocked webhook URL: {exc}", "url": str(url)[:2000]}
+
     # Build payload if message/title provided
     body: dict[str, Any]
     body = dict(payload) if payload is not None else {}
 
     if message is not None or title is not None:
         # Auto-format based on URL
-        url_lower = url.lower()
+        url_lower = target_url.lower()
         if "hooks.slack.com" in url_lower:
             body.setdefault("text", message or title or "")
         elif "discord.com/api/webhooks" in url_lower or "discordapp.com/api/webhooks" in url_lower:
@@ -75,22 +113,34 @@ async def send_webhook(
             if message:
                 body.setdefault("message", message)
 
-    timeout_obj = aiohttp.ClientTimeout(total=timeout)
     try:
-        async with aiohttp.ClientSession(timeout=timeout_obj) as session, session.post(url, json=body) as resp:
-            text = await resp.text()
-            return {
-                "status": resp.status,
-                "ok": 200 <= resp.status < 300,
-                "response": text[:1000],  # cap response size
-            }
+        async with _build_client(timeout) as client, client.stream(
+            "POST", target_url, json=body
+        ) as resp:
+            status = resp.status_code
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.aiter_bytes():
+                chunks.append(chunk)
+                total += len(chunk)
+                if total >= _MAX_WEBHOOK_RESPONSE_BYTES:
+                    break
+            text = b"".join(chunks).decode(errors="replace")
+    except httpx.TimeoutException:
+        return {"error": f"Webhook timeout after {timeout}s", "url": url}
+    except httpx.HTTPError as e:
+        return {"error": f"Webhook HTTP error: {e}", "url": url}
     except TimeoutError:
         return {"error": f"Webhook timeout after {timeout}s", "url": url}
-    except aiohttp.ClientError as e:
-        return {"error": f"Webhook HTTP error: {e}", "url": url}
     except Exception as e:  # noqa: BLE001
         logger.exception("webhook send failed")
         return {"error": str(e), "url": url}
+
+    return {
+        "status": status,
+        "ok": 200 <= status < 300,
+        "response": text[:_WEBHOOK_SNIPPET_CHARS],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -257,20 +307,41 @@ register_tool(
         description=(
             "Send a webhook notification. Auto-formats payload for Slack, Discord, "
             "MS Teams, or generic JSON endpoints. Provide either `payload` (dict) "
-            "or `message`+`title` for convenience."
+            "or `message`+`title` for convenience. The URL must be an absolute "
+            "http/https URL on the standard port resolving to a public IP address; "
+            "private, loopback and link-local targets (and redirect hops to them) "
+            "are refused."
         ),
         schema={
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "Webhook URL"},
+                "url": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "description": (
+                        "Webhook URL. Absolute http or https, standard port, public "
+                        "IP address only."
+                    ),
+                },
                 "payload": {"type": "object", "description": "JSON payload (dict)"},
                 "message": {"type": "string", "description": "Plain text message"},
                 "title": {"type": "string", "description": "Optional title"},
-                "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 10},
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout in seconds (1-30)",
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 30,
+                },
             },
             "required": ["url"],
         },
         handler=send_webhook,
+        # An outbound POST with a caller-supplied body and an attacker-chosen
+        # destination is not a low-risk read. "medium" is the truthful floor;
+        # raising it to "high" would additionally require human confirmation,
+        # which is a deliberate product decision (see registry._CONFIRMATION_TOOLS).
+        risk_level="medium",
     )
 )
 

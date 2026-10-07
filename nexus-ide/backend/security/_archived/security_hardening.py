@@ -4,25 +4,24 @@ Implements authentication, authorization, encryption, audit logging,
 vulnerability scanning, and security monitoring.
 """
 from __future__ import annotations
-from collections import defaultdict
 
 import asyncio
+import base64
 import json
 import logging
+import secrets
 import time
 import uuid
-import hashlib
-import hmac
-import secrets
-import jwt
-from datetime import datetime, timedelta
+from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union, Callable
+from typing import Any
+
+import jwt
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import base64
 
 try:
     import redis.asyncio as redis
@@ -72,22 +71,22 @@ class SecurityPolicy:
     description: str = ""
     
     # Policy rules
-    rules: List[Dict[str, Any]] = field(default_factory=list)
+    rules: list[dict[str, Any]] = field(default_factory=list)
     
     # Scope
-    components: List[str] = field(default_factory=list)
-    operations: List[str] = field(default_factory=list)
+    components: list[str] = field(default_factory=list)
+    operations: list[str] = field(default_factory=list)
     
     # Enforcement
     enforcement_level: str = "strict"  # strict, moderate, advisory
-    exceptions: List[str] = field(default_factory=list)
+    exceptions: list[str] = field(default_factory=list)
     
     # Metadata
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     version: str = "1.0"
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "policy_id": self.policy_id,
             "name": self.name,
@@ -117,16 +116,16 @@ class SecurityEvent:
     result: str = ""
     
     # Context
-    user_id: Optional[str] = None
-    session_id: Optional[str] = None
-    ip_address: Optional[str] = None
-    user_agent: Optional[str] = None
+    user_id: str | None = None
+    session_id: str | None = None
+    ip_address: str | None = None
+    user_agent: str | None = None
     
     # Metadata
     timestamp: float = field(default_factory=time.time)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,
             "event_type": self.event_type,
@@ -158,19 +157,19 @@ class Vulnerability:
     
     # Location
     component: str = ""
-    file_path: Optional[str] = None
-    line_number: Optional[int] = None
+    file_path: str | None = None
+    line_number: int | None = None
     
     # Detection
     detected_at: float = field(default_factory=time.time)
     scanner: str = ""
-    evidence: List[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
     
     # Status
     status: str = "open"  # open, investigating, fixed, verified
-    fixed_at: Optional[float] = None
+    fixed_at: float | None = None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "vulnerability_id": self.vulnerability_id,
             "title": self.title,
@@ -198,11 +197,11 @@ class SecurityToken:
     
     # Token data
     token: str = ""
-    refresh_token: Optional[str] = None
+    refresh_token: str | None = None
     
     # Permissions
-    permissions: List[str] = field(default_factory=list)
-    roles: List[str] = field(default_factory=list)
+    permissions: list[str] = field(default_factory=list)
+    roles: list[str] = field(default_factory=list)
     
     # Lifecycle
     issued_at: float = field(default_factory=time.time)
@@ -211,9 +210,9 @@ class SecurityToken:
     
     # Security
     is_revoked: bool = False
-    revoked_at: Optional[float] = None
+    revoked_at: float | None = None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "token_id": self.token_id,
             "user_id": self.user_id,
@@ -234,16 +233,16 @@ class AuthenticationManager:
     def __init__(self, redis_url: str = "redis://localhost:6379", jwt_secret: str = None):
         self.redis_url = redis_url
         self.jwt_secret = jwt_secret or secrets.token_urlsafe(32)
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Token storage
-        self.tokens: Dict[str, SecurityToken] = {}
+        self.tokens: dict[str, SecurityToken] = {}
         
         # User storage (in production, use proper database)
-        self.users: Dict[str, Dict[str, Any]] = {}
+        self.users: dict[str, dict[str, Any]] = {}
         
         # Rate limiting
-        self.login_attempts: Dict[str, List[float]] = defaultdict(list)
+        self.login_attempts: dict[str, list[float]] = defaultdict(list)
         
     async def initialize(self) -> None:
         """Initialize authentication manager."""
@@ -339,7 +338,7 @@ class AuthenticationManager:
         except:
             return False
             
-    async def authenticate(self, username: str, password: str, ip_address: str = "") -> Optional[SecurityToken]:
+    async def authenticate(self, username: str, password: str, ip_address: str = "") -> SecurityToken | None:
         """Authenticate user and create token."""
         # Check rate limiting
         if not await self._check_rate_limit(username, ip_address):
@@ -406,10 +405,7 @@ class AuthenticationManager:
         ip_attempts = [t for t in ip_attempts if current_time - t < 900]  # 15 minutes
         self.login_attempts[ip_key] = ip_attempts
         
-        if len(ip_attempts) >= 10:
-            return False
-            
-        return True
+        return not len(ip_attempts) >= 10
         
     async def _record_failed_attempt(self, username: str, ip_address: str) -> None:
         """Record failed login attempt."""
@@ -426,7 +422,7 @@ class AuthenticationManager:
             self.login_attempts[ip_key] = []
         self.login_attempts[ip_key].append(current_time)
         
-    async def verify_token(self, token: str) -> Optional[SecurityToken]:
+    async def verify_token(self, token: str) -> SecurityToken | None:
         """Verify JWT token."""
         try:
             # Decode JWT
@@ -492,7 +488,7 @@ class AuthenticationManager:
                 
         return False
         
-    def _get_role_permissions(self, role: str) -> List[str]:
+    def _get_role_permissions(self, role: str) -> list[str]:
         """Get permissions for role."""
         role_permissions = {
             "admin": ["*"],
@@ -507,11 +503,11 @@ class EncryptionManager:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Encryption keys
-        self.master_key: Optional[bytes] = None
-        self.data_keys: Dict[str, bytes] = {}
+        self.master_key: bytes | None = None
+        self.data_keys: dict[str, bytes] = {}
         
     async def initialize(self) -> None:
         """Initialize encryption manager."""
@@ -599,7 +595,7 @@ class EncryptionManager:
             return decrypted_data.decode()
             
         except Exception as exc:
-            raise SecurityException(f"Decryption failed: {exc}")
+            raise SecurityException(f"Decryption failed: {exc}") from exc
             
     async def encrypt_field(self, value: Any, key_id: str = "default") -> str:
         """Encrypt a field value."""
@@ -629,13 +625,13 @@ class AuditLogger:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Event storage
-        self.events: List[SecurityEvent] = []
+        self.events: list[SecurityEvent] = []
         
         # Event handlers
-        self.event_handlers: List[Callable] = []
+        self.event_handlers: list[Callable] = []
         
     async def initialize(self) -> None:
         """Initialize audit logger."""
@@ -680,11 +676,11 @@ class AuditLogger:
         target: str,
         action: str,
         result: str,
-        user_id: Optional[str] = None,
-        session_id: Optional[str] = None,
-        ip_address: Optional[str] = None,
-        user_agent: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        user_id: str | None = None,
+        session_id: str | None = None,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+        metadata: dict[str, Any] | None = None
     ) -> str:
         """Log security event."""
         event = SecurityEvent(
@@ -728,13 +724,13 @@ class AuditLogger:
                 
     def get_events(
         self,
-        event_type: Optional[str] = None,
-        severity: Optional[ThreatLevel] = None,
-        user_id: Optional[str] = None,
-        start_time: Optional[float] = None,
-        end_time: Optional[float] = None,
+        event_type: str | None = None,
+        severity: ThreatLevel | None = None,
+        user_id: str | None = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
         limit: int = 100
-    ) -> List[SecurityEvent]:
+    ) -> list[SecurityEvent]:
         """Get filtered events."""
         events = self.events
         
@@ -754,7 +750,7 @@ class AuditLogger:
         events.sort(key=lambda e: e.timestamp, reverse=True)
         return events[:limit]
         
-    def get_security_summary(self) -> Dict[str, Any]:
+    def get_security_summary(self) -> dict[str, Any]:
         """Get security summary."""
         total_events = len(self.events)
         
@@ -787,13 +783,13 @@ class VulnerabilityScanner:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Vulnerability storage
-        self.vulnerabilities: List[Vulnerability] = []
+        self.vulnerabilities: list[Vulnerability] = []
         
         # Scanning rules
-        self.scanning_rules: List[Dict[str, Any]] = []
+        self.scanning_rules: list[dict[str, Any]] = []
         
     async def initialize(self) -> None:
         """Initialize vulnerability scanner."""
@@ -862,7 +858,7 @@ class VulnerabilityScanner:
             }
         ]
         
-    async def scan_code(self, code: str, file_path: str, component: str) -> List[Vulnerability]:
+    async def scan_code(self, code: str, file_path: str, component: str) -> list[Vulnerability]:
         """Scan code for vulnerabilities."""
         vulnerabilities = []
         lines = code.split('\n')
@@ -897,12 +893,12 @@ class VulnerabilityScanner:
         
     def get_vulnerabilities(
         self,
-        vulnerability_type: Optional[VulnerabilityType] = None,
-        severity: Optional[ThreatLevel] = None,
-        component: Optional[str] = None,
-        status: Optional[str] = None,
+        vulnerability_type: VulnerabilityType | None = None,
+        severity: ThreatLevel | None = None,
+        component: str | None = None,
+        status: str | None = None,
         limit: int = 100
-    ) -> List[Vulnerability]:
+    ) -> list[Vulnerability]:
         """Get filtered vulnerabilities."""
         vulns = self.vulnerabilities
         
@@ -922,7 +918,7 @@ class VulnerabilityScanner:
         
         return vulns[:limit]
         
-    def get_vulnerability_summary(self) -> Dict[str, Any]:
+    def get_vulnerability_summary(self) -> dict[str, Any]:
         """Get vulnerability summary."""
         total_vulns = len(self.vulnerabilities)
         
@@ -966,10 +962,10 @@ class SecurityHardeningSystem:
         self.vulnerability_scanner = VulnerabilityScanner(redis_url)
         
         # Security policies
-        self.policies: List[SecurityPolicy] = []
+        self.policies: list[SecurityPolicy] = []
         
         # Background tasks
-        self.monitoring_task: Optional[asyncio.Task] = None
+        self.monitoring_task: asyncio.Task | None = None
         
     async def initialize(self) -> None:
         """Initialize security system."""
@@ -1120,7 +1116,7 @@ class SecurityHardeningSystem:
             result="checked"
         )
         
-    def get_security_status(self) -> Dict[str, Any]:
+    def get_security_status(self) -> dict[str, Any]:
         """Get comprehensive security status."""
         return {
             "authentication": {
@@ -1146,4 +1142,4 @@ class SecurityException(Exception):
 
 
 # Global security system instance
-security_system: Optional[SecurityHardeningSystem] = None
+security_system: SecurityHardeningSystem | None = None

@@ -1,17 +1,14 @@
-from __future__ import annotations
-
 """Security Routes - API endpoints for security monitoring and auditing."""
 
+from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Depends, Request
-from fastapi.responses import JSONResponse
-
+from fastapi import APIRouter, HTTPException, Request
 
 from backend.observability.event_system import get_event_bus
-from backend.security.security_auditor import get_security_auditor, SecurityLevel, SecurityEventType
+from backend.security.security_auditor import SecurityEventType, SecurityLevel, get_security_auditor
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -19,11 +16,11 @@ router = APIRouter()
 
 @router.get("/security/events")
 async def get_security_events(
-    level: Optional[str] = None,
-    event_type: Optional[str] = None,
-    status: Optional[str] = None,
+    level: str | None = None,
+    event_type: str | None = None,
+    status: str | None = None,
     limit: int = 100
-) -> Dict[str, List[Dict]]:
+) -> dict[str, list[dict]]:
     """Get security events with optional filtering."""
     try:
         event_bus = await get_event_bus()
@@ -35,14 +32,14 @@ async def get_security_events(
             try:
                 level_enum = SecurityLevel(level)
             except ValueError:
-                raise HTTPException(status_code=400, detail=f"Invalid security level: {level}")
+                raise HTTPException(status_code=400, detail=f"Invalid security level: {level}") from None
         
         event_type_enum = None
         if event_type:
             try:
                 event_type_enum = SecurityEventType(event_type)
             except ValueError:
-                raise HTTPException(status_code=400, detail=f"Invalid event type: {event_type}")
+                raise HTTPException(status_code=400, detail=f"Invalid event type: {event_type}") from None
         
         # Get events
         events = await security_auditor.get_security_events(
@@ -61,11 +58,11 @@ async def get_security_events(
         raise
     except Exception as e:
         logger.error(f"Failed to get security events: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/security/events/recent")
-async def get_recent_security_events(hours: int = 24) -> Dict[str, List[Dict]]:
+async def get_recent_security_events(hours: int = 24) -> dict[str, list[dict]]:
     """Get recent security events."""
     try:
         event_bus = await get_event_bus()
@@ -90,11 +87,11 @@ async def get_recent_security_events(hours: int = 24) -> Dict[str, List[Dict]]:
         
     except Exception as e:
         logger.error(f"Failed to get recent security events: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/security/events/high-risk")
-async def get_high_risk_events() -> Dict[str, List[Dict]]:
+async def get_high_risk_events() -> dict[str, list[dict]]:
     """Get high-risk security events."""
     try:
         event_bus = await get_event_bus()
@@ -131,11 +128,11 @@ async def get_high_risk_events() -> Dict[str, List[Dict]]:
         
     except Exception as e:
         logger.error(f"Failed to get high-risk events: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/security/stats")
-async def get_security_stats() -> Dict[str, Any]:
+async def get_security_stats() -> dict[str, Any]:
     """Get security statistics."""
     try:
         event_bus = await get_event_bus()
@@ -145,11 +142,11 @@ async def get_security_stats() -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Failed to get security stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/security/blocked-ips")
-async def get_blocked_ips() -> Dict[str, List[str]]:
+async def get_blocked_ips() -> dict[str, list[str]]:
     """Get list of blocked IPs."""
     try:
         event_bus = await get_event_bus()
@@ -162,11 +159,11 @@ async def get_blocked_ips() -> Dict[str, List[str]]:
         
     except Exception as e:
         logger.error(f"Failed to get blocked IPs: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/security/blocked-ips/{ip_address}/remove")
-async def unblock_ip(ip_address: str, request: Request) -> Dict[str, str]:
+async def unblock_ip(ip_address: str, request: Request) -> dict[str, str]:
     """Remove an IP from blocked list."""
     try:
         event_bus = await get_event_bus()
@@ -183,11 +180,11 @@ async def unblock_ip(ip_address: str, request: Request) -> Dict[str, str]:
         raise
     except Exception as e:
         logger.error(f"Failed to unblock IP {ip_address}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/security/suspicious-users")
-async def get_suspicious_users() -> Dict[str, List[str]]:
+async def get_suspicious_users() -> dict[str, list[str]]:
     """Get list of suspicious users."""
     try:
         event_bus = await get_event_bus()
@@ -200,11 +197,11 @@ async def get_suspicious_users() -> Dict[str, List[str]]:
         
     except Exception as e:
         logger.error(f"Failed to get suspicious users: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/security/suspicious-users/{user_id}/remove")
-async def unflag_user(user_id: str, request: Request) -> Dict[str, str]:
+async def unflag_user(user_id: str, request: Request) -> dict[str, str]:
     """Remove a user from suspicious list."""
     try:
         event_bus = await get_event_bus()
@@ -221,11 +218,11 @@ async def unflag_user(user_id: str, request: Request) -> Dict[str, str]:
         raise
     except Exception as e:
         logger.error(f"Failed to unflag user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/security/event-types")
-async def get_security_event_types() -> Dict[str, List[str]]:
+async def get_security_event_types() -> dict[str, list[str]]:
     """Get available security event types."""
     return {
         "event_types": [t.value for t in SecurityEventType],
@@ -252,10 +249,10 @@ async def get_security_event_types() -> Dict[str, List[str]]:
 
 
 @router.get("/security/levels")
-async def get_security_levels() -> Dict[str, List[str]]:
+async def get_security_levels() -> dict[str, list[str]]:
     """Get available security levels."""
     return {
-        "levels": [l.value for l in SecurityLevel],
+        "levels": [level.value for level in SecurityLevel],
         "descriptions": {
             "low": "Low risk - informational events",
             "medium": "Medium risk - requires attention",
@@ -274,7 +271,7 @@ async def get_security_levels() -> Dict[str, List[str]]:
 
 
 @router.post("/security/audit-request")
-async def audit_request(request_data: Dict[str, Any], request: Request) -> Dict[str, Any]:
+async def audit_request(request_data: dict[str, Any], request: Request) -> dict[str, Any]:
     """Manually audit a request for security threats."""
     try:
         event_bus = await get_event_bus()
@@ -297,11 +294,11 @@ async def audit_request(request_data: Dict[str, Any], request: Request) -> Dict[
         
     except Exception as e:
         logger.error(f"Failed to audit request: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/security/audit-authentication")
-async def audit_authentication(auth_data: Dict[str, Any], request: Request) -> Dict[str, Any]:
+async def audit_authentication(auth_data: dict[str, Any], request: Request) -> dict[str, Any]:
     """Manually audit an authentication event."""
     try:
         event_bus = await get_event_bus()
@@ -324,11 +321,11 @@ async def audit_authentication(auth_data: Dict[str, Any], request: Request) -> D
         
     except Exception as e:
         logger.error(f"Failed to audit authentication: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/security/dashboard")
-async def get_security_dashboard() -> Dict[str, Any]:
+async def get_security_dashboard() -> dict[str, Any]:
     """Get security dashboard data."""
     try:
         event_bus = await get_event_bus()
@@ -369,4 +366,4 @@ async def get_security_dashboard() -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Failed to get security dashboard: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

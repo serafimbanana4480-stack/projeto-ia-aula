@@ -1,13 +1,39 @@
 import { useEffect, useState, useRef } from 'react';
 import { getAccessToken } from '../lib/auth';
 
-export function useSSE<T>(url: string | null, options: any = {}) {
+/**
+ * Cap on the retained frame history. Matches `MAX_EVENTS` in
+ * `stores/realTimeStore.ts`; without it a dashboard left open overnight on a
+ * chatty stream grew this array without limit.
+ */
+const MAX_HISTORY = 200;
+
+/**
+ * Options for `useSSE`.
+ *
+ * This used to be `options: any = {}` and was then never read — the `any`
+ * silenced the compiler on a parameter that did nothing, and
+ * `useRealTimeStream` dutifully forwarded a whole `UseRealTimeStreamOptions`
+ * object (`maxRetries`, `maxBackoffMs`, `initialBackoffMs`) into a hook that
+ * ignored every field. Callers reasonably believed those knobs were wired.
+ *
+ * They are still not wired, so the honest thing is to stop advertising them:
+ * the second parameter is gone and the only supported call is
+ * `useSSE<T>(url)`. Reintroduce it with a real interface when a knob is
+ * actually implemented — reconnect backoff is the obvious first candidate.
+ */
+export function useSSE<T>(url: string | null) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('disconnected');
   const abortControllerRef = useRef<AbortController | null>(null);
-  const dataHistoryRef = useRef<T[]>([]);
+  // State, not a ref. The history used to be a `useRef` array that was pushed
+  // to in place and then returned straight from render: the array identity
+  // never changed, so every consumer's `useEffect([events])` stopped firing
+  // after the first frame. `useRealTimeStream` therefore fed exactly one event
+  // to `realTimeStore` and then silently dropped the rest of the stream.
+  const [events, setEvents] = useState<T[]>([]);
   const [reconnectNonce, setReconnectNonce] = useState(0);
 
   useEffect(() => {
@@ -37,6 +63,9 @@ export function useSSE<T>(url: string | null, options: any = {}) {
         setIsConnected(true);
         setConnectionStatus('connected');
         setError(null);
+        // A new connection starts a new history: a reconnect must not replay
+        // the previous stream's frames as if they were fresh.
+        setEvents([]);
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -58,7 +87,11 @@ export function useSSE<T>(url: string | null, options: any = {}) {
             try {
               const parsedData = JSON.parse(payload) as T;
               setData(parsedData);
-              dataHistoryRef.current.push(parsedData);
+              setEvents((current) =>
+                current.length >= MAX_HISTORY
+                  ? [...current.slice(current.length - MAX_HISTORY + 1), parsedData]
+                  : [...current, parsedData],
+              );
             } catch (parseError) {
               console.error('Failed to parse SSE data:', parseError);
               setError(parseError as Error);
@@ -94,13 +127,13 @@ export function useSSE<T>(url: string | null, options: any = {}) {
     setIsConnected(false);
   };
 
-  return { 
-    data, 
-    events: dataHistoryRef.current,
-    error, 
-    isConnected, 
+  return {
+    data,
+    events,
+    error,
+    isConnected,
     connectionStatus,
     manualReconnect,
-    disconnect 
+    disconnect
   };
 }

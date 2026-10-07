@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+
 import pytest
 
 from backend.orchestrator.autonomous_execution_engine import (

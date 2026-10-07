@@ -19,7 +19,8 @@ import {
   Siren,
 } from "lucide-react";
 
-import { authHeaders, apiUrl } from "../../lib/api";
+import { apiUrl } from "../../lib/api";
+import { authenticatedFetch } from "../../lib/auth";
 import { EMPTY, formatRelativeTime } from "../../lib/format";
 import { Surface, SurfaceHeader } from "../ui/Surface";
 import { CardEmpty, CardStat } from "../ui/Card";
@@ -45,6 +46,9 @@ interface AdvisorStatus {
   color: string;
   active: boolean;
   session_count: number;
+  total_session_count?: number;
+  intervention_count?: number;
+  evidence_count?: number;
   sessions: AdvisorSession[];
   available: boolean;
 }
@@ -66,22 +70,26 @@ export default function AdvisorWidget() {
   const [status, setStatus] = useState<AdvisorStatus | null>(null);
   const [unauthorized, setUnauthorized] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(apiUrl("/api/advanced-modes/advisor-infinity"), {
-        headers: authHeaders(),
+      const res = await authenticatedFetch(apiUrl("/api/advanced-modes/advisor-infinity"), {
+        signal: AbortSignal.timeout(8000),
       });
       if (res.status === 401) {
         setUnauthorized(true);
+        setHasLoaded(true);
         return;
       }
       if (!res.ok) throw new Error(`advisor HTTP ${res.status}`);
       setStatus((await res.json()) as AdvisorStatus);
       setUnauthorized(false);
       setFailed(false);
+      setHasLoaded(true);
     } catch {
       setFailed(true);
+      setHasLoaded(true);
     }
   }, []);
 
@@ -92,9 +100,9 @@ export default function AdvisorWidget() {
   }, [load]);
 
   const sessions = status?.sessions ?? [];
-  const totalInterventions = sessions.reduce((sum, s) => sum + s.intervention_count, 0);
-  const totalEvidence = sessions.reduce((sum, s) => sum + s.evidence_count, 0);
-  const totalGoals = sessions.reduce((sum, s) => sum + s.goal_count, 0);
+  const totalInterventions = status?.intervention_count ?? sessions.reduce((sum, s) => sum + s.intervention_count, 0);
+  const totalEvidence = status?.evidence_count ?? sessions.reduce((sum, s) => sum + s.evidence_count, 0);
+  const freshStatus = status && !failed && !unauthorized;
 
   return (
     <Surface elevation={1} padding="lg" className="flex flex-col">
@@ -102,9 +110,9 @@ export default function AdvisorWidget() {
         icon={<ShieldCheck className="h-4 w-4" />}
         tone={status?.active ? "warning" : "neutral"}
         title="Advisor Infinity"
-        subtitle="Governador que revê claims de conclusão e bloqueia trabalho incompleto"
+        subtitle="Revisão de claims e histórico de intervenções registadas"
         action={
-          status ? (
+          freshStatus ? (
             <span
               className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider shadow-rim ${
                 status.active
@@ -114,10 +122,10 @@ export default function AdvisorWidget() {
             >
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
-                  status.active ? "bg-amber-400 animate-pulse-subtle" : "bg-nexus-faint"
+                  status.active ? "bg-amber-400" : "bg-nexus-faint"
                 }`}
               />
-              {status.active ? "Ativo" : "Inativo"}
+              {status.active ? "Configurado" : "Desativado"}
             </span>
           ) : undefined
         }
@@ -126,18 +134,18 @@ export default function AdvisorWidget() {
       <div className="mt-4 grid grid-cols-3 gap-2.5">
         <CardStat
           label="Sessões"
-          value={status ? status.session_count : EMPTY}
-          hint="Sessões advisor registadas"
+          value={freshStatus ? status.total_session_count ?? status.session_count : EMPTY}
+          hint="Sessões persistidas; não mede atividade em curso"
         />
         <CardStat
           label="Intervenções"
-          value={status ? totalInterventions : EMPTY}
-          hint="Vezes que o advisor interveio"
+          value={freshStatus ? totalInterventions : EMPTY}
+          hint="Intervenções registadas no histórico"
         />
         <CardStat
           label="Evidência"
-          value={status ? totalEvidence : EMPTY}
-          hint="Itens de evidência verificados"
+          value={freshStatus ? totalEvidence : EMPTY}
+          hint="Itens registados; a contagem não comprova validação"
         />
       </div>
 
@@ -146,7 +154,11 @@ export default function AdvisorWidget() {
           Sessões recentes
         </div>
 
-        {unauthorized ? (
+        {!hasLoaded ? (
+          <div role="status" aria-live="polite" className="rounded-lg border border-nexus-border/40 bg-nexus-bg/35 px-3 py-3 text-xs text-nexus-muted">
+            A carregar estado do advisor…
+          </div>
+        ) : unauthorized ? (
           <CardEmpty icon={<ShieldCheck className="h-3.5 w-3.5" />}>
             Autenticação necessária para ver o estado do advisor.
           </CardEmpty>

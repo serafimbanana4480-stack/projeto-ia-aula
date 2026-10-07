@@ -4,23 +4,22 @@ Implements unit tests, integration tests, performance tests, security tests,
 and end-to-end testing with automated test discovery and execution.
 """
 from __future__ import annotations
-import traceback
 
 import asyncio
+import importlib
+import inspect
 import json
 import logging
-import time
-import uuid
-import unittest
-import pytest
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union, Callable
-from datetime import datetime
-import inspect
-import importlib
 import sys
+import time
+import traceback
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 try:
     import redis.asyncio as redis
@@ -72,7 +71,7 @@ class TestCase:
     # Test classification
     test_type: TestType = TestType.UNIT
     priority: Priority = Priority.MEDIUM
-    tags: Set[str] = field(default_factory=set)
+    tags: set[str] = field(default_factory=set)
     
     # Test location
     module: str = ""
@@ -82,23 +81,23 @@ class TestCase:
     line_number: int = 0
     
     # Test function
-    test_function: Optional[Callable] = None
-    setup_function: Optional[Callable] = None
-    teardown_function: Optional[Callable] = None
+    test_function: Callable | None = None
+    setup_function: Callable | None = None
+    teardown_function: Callable | None = None
     
     # Test parameters
-    parameters: Dict[str, Any] = field(default_factory=dict)
-    fixtures: List[str] = field(default_factory=list)
+    parameters: dict[str, Any] = field(default_factory=dict)
+    fixtures: list[str] = field(default_factory=list)
     
     # Dependencies
-    dependencies: List[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
     
     # Execution metadata
     timeout: float = 30.0
     retries: int = 0
     flaky: bool = False
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "test_id": self.test_id,
             "name": self.name,
@@ -129,7 +128,7 @@ class TestResult:
     # Execution details
     status: TestStatus = TestStatus.PENDING
     started_at: float = field(default_factory=time.time)
-    completed_at: Optional[float] = None
+    completed_at: float | None = None
     duration: float = 0.0
     
     # Results
@@ -147,13 +146,13 @@ class TestResult:
     # Metrics
     assertions: int = 0
     coverage: float = 0.0  # 0.0-1.0
-    performance_metrics: Dict[str, float] = field(default_factory=dict)
+    performance_metrics: dict[str, float] = field(default_factory=dict)
     
     # Environment
     python_version: str = ""
     platform: str = ""
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "result_id": self.result_id,
             "test_id": self.test_id,
@@ -186,10 +185,10 @@ class TestSuite:
     
     # Suite classification
     test_type: TestType = TestType.UNIT
-    tags: Set[str] = field(default_factory=set)
+    tags: set[str] = field(default_factory=set)
     
     # Test cases
-    test_cases: List[TestCase] = field(default_factory=list)
+    test_cases: list[TestCase] = field(default_factory=list)
     
     # Suite configuration
     parallel: bool = False
@@ -197,9 +196,9 @@ class TestSuite:
     timeout: float = 300.0
     
     # Dependencies
-    dependencies: List[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "suite_id": self.suite_id,
             "name": self.name,
@@ -223,7 +222,7 @@ class TestReport:
     
     # Execution summary
     started_at: float = field(default_factory=time.time)
-    completed_at: Optional[float] = None
+    completed_at: float | None = None
     total_duration: float = 0.0
     
     # Test statistics
@@ -239,17 +238,17 @@ class TestReport:
     function_coverage: float = 0.0
     
     # Performance
-    slowest_tests: List[Dict[str, Any]] = field(default_factory=list)
-    performance_summary: Dict[str, float] = field(default_factory=dict)
+    slowest_tests: list[dict[str, Any]] = field(default_factory=list)
+    performance_summary: dict[str, float] = field(default_factory=dict)
     
     # Results
-    test_results: List[TestResult] = field(default_factory=list)
-    suite_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    test_results: list[TestResult] = field(default_factory=list)
+    suite_results: dict[str, dict[str, Any]] = field(default_factory=dict)
     
     # Environment
-    environment: Dict[str, Any] = field(default_factory=dict)
+    environment: dict[str, Any] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "report_id": self.report_id,
             "name": self.name,
@@ -277,10 +276,10 @@ class TestDiscovery:
     """Automated test discovery system."""
     
     def __init__(self):
-        self.discovered_tests: List[TestCase] = []
-        self.test_suites: Dict[str, TestSuite] = {}
+        self.discovered_tests: list[TestCase] = []
+        self.test_suites: dict[str, TestSuite] = {}
         
-    def discover_tests(self, test_paths: List[str]) -> List[TestCase]:
+    def discover_tests(self, test_paths: list[str]) -> list[TestCase]:
         """Discover tests from given paths."""
         discovered_tests = []
         
@@ -296,7 +295,7 @@ class TestDiscovery:
         self.discovered_tests = discovered_tests
         return discovered_tests
         
-    def _discover_tests_from_file(self, file_path: Path) -> List[TestCase]:
+    def _discover_tests_from_file(self, file_path: Path) -> list[TestCase]:
         """Discover tests from a Python file."""
         tests = []
         
@@ -322,7 +321,7 @@ class TestDiscovery:
             
         return tests
         
-    def _discover_tests_from_directory(self, dir_path: Path) -> List[TestCase]:
+    def _discover_tests_from_directory(self, dir_path: Path) -> list[TestCase]:
         """Discover tests from a directory."""
         tests = []
         
@@ -334,7 +333,7 @@ class TestDiscovery:
                 
         return tests
         
-    def _discover_tests_from_class(self, test_class: type, file_path: str) -> List[TestCase]:
+    def _discover_tests_from_class(self, test_class: type, file_path: str) -> list[TestCase]:
         """Discover tests from a test class."""
         tests = []
         
@@ -412,7 +411,7 @@ class TestDiscovery:
         else:
             return Priority.MEDIUM
             
-    def _extract_tags(self, func: Callable) -> Set[str]:
+    def _extract_tags(self, func: Callable) -> set[str]:
         """Extract tags from function attributes."""
         tags = set()
         
@@ -433,7 +432,7 @@ class TestDiscovery:
         """Check if test is marked as flaky."""
         return getattr(func, 'flaky', False)
         
-    def create_test_suites(self) -> Dict[str, TestSuite]:
+    def create_test_suites(self) -> dict[str, TestSuite]:
         """Create test suites from discovered tests."""
         suites = {}
         
@@ -476,14 +475,14 @@ class TestExecutor:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Execution state
-        self.current_results: List[TestResult] = []
-        self.execution_stats: Dict[str, Any] = {}
+        self.current_results: list[TestResult] = []
+        self.execution_stats: dict[str, Any] = {}
         
         # Fixtures
-        self.fixtures: Dict[str, Any] = {}
+        self.fixtures: dict[str, Any] = {}
         
     async def initialize(self) -> None:
         """Initialize test executor."""
@@ -536,7 +535,7 @@ class TestExecutor:
             result.assertion_message = str(exc)
             result.traceback = traceback.format_exc()
             
-        except Exception as exc:
+        except Exception:
             result.status = TestStatus.ERROR
             result.error = True
             result.traceback = traceback.format_exc()
@@ -579,8 +578,8 @@ class TestExecutor:
                 test_case.test_function(**fixtures),
                 timeout=test_case.timeout
             )
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Test timed out after {test_case.timeout} seconds")
+        except TimeoutError:
+            raise TimeoutError(f"Test timed out after {test_case.timeout} seconds") from None
             
     async def _execute_sync_test(self, test_case: TestCase, result: TestResult) -> None:
         """Execute sync test function."""
@@ -597,10 +596,10 @@ class TestExecutor:
                 loop.run_in_executor(None, lambda: test_case.test_function(**fixtures)),
                 timeout=test_case.timeout
             )
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Test timed out after {test_case.timeout} seconds")
+        except TimeoutError:
+            raise TimeoutError(f"Test timed out after {test_case.timeout} seconds") from None
             
-    async def execute_suite(self, test_suite: TestSuite) -> Dict[str, Any]:
+    async def execute_suite(self, test_suite: TestSuite) -> dict[str, Any]:
         """Execute a test suite."""
         suite_results = {
             "suite_id": test_suite.suite_id,
@@ -654,7 +653,7 @@ class TestExecutor:
         async with semaphore:
             return await self.execute_test(test_case)
             
-    def _calculate_suite_summary(self, test_results: List[TestResult]) -> Dict[str, Any]:
+    def _calculate_suite_summary(self, test_results: list[TestResult]) -> dict[str, Any]:
         """Calculate suite summary statistics."""
         total = len(test_results)
         passed = len([r for r in test_results if r.passed])
@@ -682,10 +681,10 @@ class TestReporter:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Report storage
-        self.reports: List[TestReport] = {}
+        self.reports: list[TestReport] = {}
         
     async def initialize(self) -> None:
         """Initialize test reporter."""
@@ -699,7 +698,7 @@ class TestReporter:
         if self._redis:
             await self._redis.close()
             
-    async def generate_report(self, suite_results: List[Dict[str, Any]], name: str = "") -> TestReport:
+    async def generate_report(self, suite_results: list[dict[str, Any]], name: str = "") -> TestReport:
         """Generate comprehensive test report."""
         report = TestReport(
             name=name or f"Test Report {datetime.now().isoformat()}",
@@ -927,9 +926,9 @@ class TestingFramework:
         self.reporter = TestReporter(redis_url)
         
         # Configuration
-        self.test_paths: List[str] = []
-        self.test_patterns: List[str] = []
-        self.exclude_patterns: List[str] = []
+        self.test_paths: list[str] = []
+        self.test_patterns: list[str] = []
+        self.exclude_patterns: list[str] = []
         
     async def initialize(self) -> None:
         """Initialize testing framework."""
@@ -947,15 +946,15 @@ class TestingFramework:
         
     async def run_tests(
         self,
-        test_paths: Optional[List[str]] = None,
-        test_types: Optional[List[TestType]] = None,
-        tags: Optional[List[str]] = None,
+        test_paths: list[str] | None = None,
+        test_types: list[TestType] | None = None,
+        tags: list[str] | None = None,
         parallel: bool = True
     ) -> TestReport:
         """Run tests with specified filters."""
         # Discover tests
         paths = test_paths or self.test_paths or ["tests/"]
-        discovered_tests = self.discovery.discover_tests(paths)
+        self.discovery.discover_tests(paths)
         
         # Create test suites
         test_suites = self.discovery.create_test_suites()
@@ -1000,7 +999,7 @@ class TestingFramework:
         """Run integration tests specifically."""
         return await self.run_tests(test_types=[TestType.INTEGRATION])
         
-    def get_framework_stats(self) -> Dict[str, Any]:
+    def get_framework_stats(self) -> dict[str, Any]:
         """Get framework statistics."""
         return {
             "discovered_tests": len(self.discovery.discovered_tests),
@@ -1011,4 +1010,4 @@ class TestingFramework:
 
 
 # Global testing framework instance
-testing_framework: Optional[TestingFramework] = None
+testing_framework: TestingFramework | None = None

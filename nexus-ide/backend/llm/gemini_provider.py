@@ -25,6 +25,7 @@ import httpx
 
 from backend.config.settings import get_settings
 from backend.llm.openai_provider import _system_verify_context
+from backend.runtime.reasoning import REASONING_SINK_OPTION, deliver_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -140,13 +141,24 @@ class GeminiProvider:
         raise last_exc or RuntimeError("Gemini request failed after retries")
 
     def _extract_usage_from_gemini(self, data: dict[str, Any]) -> dict[str, int]:
-        """Extract token counts from a Gemini generateContent response."""
+        """Extract token counts from a Gemini generateContent response.
+
+        ``thoughtsTokenCount`` is the model's reasoning spend. It is only added
+        to the result when the provider actually reported it, so a run without
+        reasoning keeps exactly the dictionary shape callers already expect.
+        """
         usage_meta = data.get("usageMetadata", {})
-        return {
+        if not isinstance(usage_meta, dict):
+            usage_meta = {}
+        usage = {
             "input_tokens": usage_meta.get("promptTokenCount", 0) or 0,
             "output_tokens": usage_meta.get("candidatesTokenCount", 0) or 0,
             "total_tokens": usage_meta.get("totalTokenCount", 0) or 0,
         }
+        thoughts = usage_meta.get("thoughtsTokenCount", 0) or 0
+        if thoughts:
+            usage["reasoning_tokens"] = int(thoughts)
+        return usage
 
     async def chat_stream(
         self,
@@ -175,6 +187,7 @@ class GeminiProvider:
         max_retries = 3
         last_exc: Exception | None = None
         emitted_text = False
+        emitted_thinking = False
         for attempt in range(1, max_retries + 1):
             try:
                 async with self._client.stream("POST", url, json=payload, params=params) as resp:
@@ -220,28 +233,35 @@ class GeminiProvider:
                                 continue
                             usage_gemini = chunk.get("usageMetadata", {})
                             if usage_gemini:
-                                self._last_usage = {
-                                    "input_tokens": usage_gemini.get("promptTokenCount", 0) or 0,
-                                    "output_tokens": (
-                                        usage_gemini.get("candidatesTokenCount", 0) or 0
-                                    ),
-                                    "total_tokens": usage_gemini.get("totalTokenCount", 0) or 0,
-                                }
+                                self._last_usage.update(
+                                    self._extract_usage_from_gemini(chunk)
+                                )
                             candidates = chunk.get("candidates", [])
                             if not candidates:
                                 continue
-                            parts = candidates[0].get("content", {}).get("parts", [])
-                            for part in parts:
-                                text_piece = part.get("text", "")
-                                if text_piece:
-                                    emitted_text = True
-                                    yield text_piece
+                            # Gemini marks a thinking part with ``thought: true``
+                            # and carries its answer in the remaining parts. The
+                            # shared parser splits the two so a thought summary
+                            # can never be concatenated into the answer.
+                            parsed = deliver_reasoning(
+                                (options or {}).get(REASONING_SINK_OPTION), "gemini", chunk
+                            )
+                            if parsed.reasoning:
+                                emitted_thinking = True
+                            text_piece = parsed.content
+                            if text_piece:
+                                emitted_text = True
+                                yield text_piece
 
                     if emitted_text:
                         return
                     # A successful HTTP status with no parsed content used to
                     # look like a successful blank assistant response.  Treat
                     # it as a provider failure so the caller can fail over.
+                    if emitted_thinking:
+                        raise RuntimeError(
+                            "Gemini stream completed with reasoning but no text content"
+                        )
                     raise RuntimeError("Gemini stream completed without text content")
             except (httpx.NetworkError, httpx.TimeoutException) as exc:
                 # Retrying after emitting any token duplicates the user-visible
@@ -287,9 +307,10 @@ class GeminiProvider:
         candidates = data.get("candidates", [])
         if not candidates:
             raise RuntimeError(f"Gemini returned no candidates. Response: {data}")
-        content = candidates[0].get("content", {})
-        parts = content.get("parts", [])
-        return "".join(p.get("text", "") for p in parts)
+        parsed = deliver_reasoning(
+            (options or {}).get(REASONING_SINK_OPTION), "gemini", data
+        )
+        return parsed.content
 
     @staticmethod
     def _generation_config(options: dict[str, Any] | None) -> dict[str, Any]:

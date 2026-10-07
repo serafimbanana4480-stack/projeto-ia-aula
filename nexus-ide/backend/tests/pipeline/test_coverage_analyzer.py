@@ -1,13 +1,11 @@
 """Tests for coverage_analyzer.py components."""
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
 
 from backend.pipeline.coverage_analyzer import CoverageAnalyzer, CoverageGap, EdgeCaseGenerator
-from backend.pipeline.coverage_analyzer import EdgeCase as EC
 
 
 class TestCoverageAnalyzer:

@@ -6,17 +6,17 @@ enabling cross-session context linking and intelligent query expansion.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import defaultdict
+from dataclasses import dataclass, field
 from enum import Enum
-import hashlib
+from typing import Any
 
 from backend.tools.ollama_client import OllamaClient
-from backend.config.settings import get_model_config
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +65,8 @@ class Entity:
     name: str
     entity_type: EntityType
     description: str
-    embedding: Optional[List[float]] = None
-    properties: Dict[str, Any] = field(default_factory=dict)
+    embedding: list[float] | None = None
+    properties: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     last_accessed: float = field(default_factory=time.time)
     access_count: int = 0
@@ -88,7 +88,7 @@ class Relationship:
     source_entity_id: str
     target_entity_id: str
     relation_type: RelationType
-    properties: Dict[str, Any] = field(default_factory=dict)
+    properties: dict[str, Any] = field(default_factory=dict)
     confidence: float = 1.0
     created_at: float = field(default_factory=time.time)
     
@@ -106,8 +106,8 @@ class GraphStats:
     """Statistics about the knowledge graph."""
     total_entities: int = 0
     total_relationships: int = 0
-    entities_by_type: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
-    relationships_by_type: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    entities_by_type: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    relationships_by_type: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     avg_connections_per_entity: float = 0.0
     graph_density: float = 0.0
 
@@ -141,16 +141,16 @@ class KnowledgeGraph:
         self.auto_merge = auto_merge
         
         # Graph storage
-        self._entities: Dict[str, Entity] = {}
-        self._relationships: Dict[str, Relationship] = {}
-        self._entity_index: Dict[str, Set[str]] = defaultdict(set)  # Name/keyword to entity IDs
-        self._type_index: Dict[EntityType, Set[str]] = defaultdict(set)
+        self._entities: dict[str, Entity] = {}
+        self._relationships: dict[str, Relationship] = {}
+        self._entity_index: dict[str, set[str]] = defaultdict(set)  # Name/keyword to entity IDs
+        self._type_index: dict[EntityType, set[str]] = defaultdict(set)
         
         # Statistics
         self._stats = GraphStats()
         
         # Background tasks
-        self._maintenance_task: Optional[asyncio.Task] = None
+        self._maintenance_task: asyncio.Task | None = None
         self._running = False
         
         # Lock for thread safety
@@ -171,13 +171,11 @@ class KnowledgeGraph:
         self._running = False
         if self._maintenance_task:
             self._maintenance_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._maintenance_task
-            except asyncio.CancelledError:
-                pass
         logger.info("Knowledge Graph stopped")
     
-    async def add_context(self, text: str, session_id: str, context_type: str = "general") -> List[str]:
+    async def add_context(self, text: str, session_id: str, context_type: str = "general") -> list[str]:
         """Extract entities and relationships from text and add to graph."""
         async with self._lock:
             # Extract entities and relationships
@@ -203,9 +201,9 @@ class KnowledgeGraph:
     async def query_entities(
         self,
         query: str,
-        entity_types: Optional[List[EntityType]] = None,
+        entity_types: list[EntityType] | None = None,
         limit: int = 10
-    ) -> List[Entity]:
+    ) -> list[Entity]:
         """Search for entities matching the query."""
         async with self._lock:
             # Generate query embedding
@@ -229,9 +227,9 @@ class KnowledgeGraph:
     async def get_related_entities(
         self,
         entity_id: str,
-        relation_types: Optional[List[RelationType]] = None,
+        relation_types: list[RelationType] | None = None,
         max_depth: int = 2
-    ) -> List[Tuple[Entity, Relationship, int]]:
+    ) -> list[tuple[Entity, Relationship, int]]:
         """Get entities related to the given entity."""
         async with self._lock:
             if entity_id not in self._entities:
@@ -324,7 +322,7 @@ class KnowledgeGraph:
             
             return context
     
-    async def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self) -> dict[str, Any]:
         """Get knowledge graph statistics."""
         async with self._lock:
             self._update_stats()
@@ -344,7 +342,7 @@ class KnowledgeGraph:
         text: str,
         session_id: str,
         context_type: str
-    ) -> Tuple[List[Entity], List[Relationship]]:
+    ) -> tuple[list[Entity], list[Relationship]]:
         """Extract entities and relationships from text using AI."""
         prompt = f"""Extract entities and relationships from the following text.
 
@@ -461,7 +459,7 @@ Focus on the most important entities and clear relationships."""
         self._relationships[relationship.id] = relationship
         return relationship.id
     
-    def _find_similar_entities(self, entity: Entity) -> List[str]:
+    def _find_similar_entities(self, entity: Entity) -> list[str]:
         """Find existing entities similar to the given entity."""
         if not entity.embedding:
             return []
@@ -477,7 +475,7 @@ Focus on the most important entities and clear relationships."""
         
         return similar_ids
     
-    async def _get_embedding(self, text: str) -> List[float]:
+    async def _get_embedding(self, text: str) -> list[float]:
         """Get embedding for text."""
         try:
             response = await self.ollama.embeddings(
@@ -490,7 +488,7 @@ Focus on the most important entities and clear relationships."""
             # Return zero embedding as fallback
             return [0.0] * 384  # Common embedding size
     
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
+    def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
         """Calculate cosine similarity between two embeddings."""
         import numpy as np
         
@@ -588,7 +586,7 @@ Focus on the most important entities and clear relationships."""
             total_connections = sum(len([
                 rel for rel in self._relationships.values()
                 if rel.source_entity_id == entity_id or rel.target_entity_id == entity_id
-            ]) for entity_id in self._entities.keys())
+            ]) for entity_id in self._entities)
             self._stats.avg_connections_per_entity = total_connections / self._stats.total_entities
         
         # Graph density (actual connections / possible connections)
@@ -618,7 +616,7 @@ Focus on the most important entities and clear relationships."""
 
 
 # Global knowledge graph instance
-_knowledge_graph: Optional[KnowledgeGraph] = None
+_knowledge_graph: KnowledgeGraph | None = None
 
 
 async def get_knowledge_graph() -> KnowledgeGraph:

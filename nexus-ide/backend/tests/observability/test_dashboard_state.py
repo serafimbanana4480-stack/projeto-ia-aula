@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from backend.observability.dashboard_state import AgentStatus, DashboardState, SystemHealth
+from backend.observability.dashboard_state import AgentStatus, DashboardState
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
 

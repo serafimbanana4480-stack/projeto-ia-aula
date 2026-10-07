@@ -12,8 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
-from datetime import datetime, timedelta
+from typing import Any
 
 try:
     import redis.asyncio as redis
@@ -45,10 +44,10 @@ class ConsensusNode:
     node_id: str
     term: int = 0
     state: ConsensusState = ConsensusState.FOLLOWER
-    voted_for: Optional[str] = None
-    votes_received: Set[str] = field(default_factory=set)
+    voted_for: str | None = None
+    votes_received: set[str] = field(default_factory=set)
     last_heartbeat: float = field(default_factory=time.time)
-    leader_id: Optional[str] = None
+    leader_id: str | None = None
     
     def is_leader(self) -> bool:
         return self.state == ConsensusState.LEADER
@@ -66,7 +65,7 @@ class DistributedLock:
     acquired_at: float = field(default_factory=time.time)
     expires_at: float = field(default_factory=lambda: time.time() + 30.0)
     auto_renew: bool = True
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
     def is_expired(self) -> bool:
         return time.time() > self.expires_at
@@ -110,10 +109,10 @@ class ConsensusManager:
         self.heartbeat_interval = heartbeat_interval
         self.cluster_size = cluster_size
         
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         self._node: ConsensusNode = ConsensusNode(node_id=node_id)
-        self._election_task: Optional[asyncio.Task] = None
-        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._election_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
         
     def _has_majority(self, vote_count: int) -> bool:
         """Check if vote count constitutes a majority.
@@ -255,7 +254,7 @@ class ConsensusManager:
         """Check if this node is the current leader."""
         return self._node.is_leader()
         
-    def get_leader(self) -> Optional[str]:
+    def get_leader(self) -> str | None:
         """Get current leader ID."""
         return self._node.leader_id
 
@@ -265,8 +264,8 @@ class DistributedLockManager:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
-        self._lock_renewal_tasks: Dict[str, asyncio.Task] = {}
+        self._redis: redis.Redis | None = None
+        self._lock_renewal_tasks: dict[str, asyncio.Task] = {}
         
     async def connect(self) -> None:
         """Connect to Redis."""
@@ -289,8 +288,8 @@ class DistributedLockManager:
         lock_type: LockType = LockType.TASK,
         timeout: float = 30.0,
         auto_renew: bool = True,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Optional[DistributedLock]:
+        metadata: dict[str, Any] | None = None,
+    ) -> DistributedLock | None:
         """Acquire distributed lock."""
         if not self._redis:
             raise RuntimeError("Lock manager not connected")
@@ -402,7 +401,7 @@ class DistributedLockManager:
                 logger.error("Error renewing lock %s: %s", lock.lock_id, exc)
                 await asyncio.sleep(1.0)
                 
-    async def get_lock_info(self, resource_id: str) -> Optional[Dict[str, Any]]:
+    async def get_lock_info(self, resource_id: str) -> dict[str, Any] | None:
         """Get information about a lock."""
         if not self._redis:
             return None
@@ -420,8 +419,8 @@ class TaskLeaseManager:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
-        self._lease_heartbeat_tasks: Dict[str, asyncio.Task] = {}
+        self._redis: redis.Redis | None = None
+        self._lease_heartbeat_tasks: dict[str, asyncio.Task] = {}
         
     async def connect(self) -> None:
         """Connect to Redis."""
@@ -539,7 +538,7 @@ class TaskLeaseManager:
                 logger.error("Error in lease heartbeat %s: %s", lease.lease_id, exc)
                 await asyncio.sleep(1.0)
                 
-    async def get_lease_info(self, task_id: str) -> Optional[Dict[str, Any]]:
+    async def get_lease_info(self, task_id: str) -> dict[str, Any] | None:
         """Get information about a task lease."""
         if not self._redis:
             return None
@@ -558,8 +557,8 @@ class CoordinationChannel:
     def __init__(self, channel_id: str, redis_url: str = "redis://localhost:6379"):
         self.channel_id = channel_id
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
-        self.subscribers: Set[str] = set()
+        self._redis: redis.Redis | None = None
+        self.subscribers: set[str] = set()
         self.message_queue: asyncio.Queue = asyncio.Queue()
         
     async def connect(self) -> None:
@@ -603,7 +602,7 @@ class CoordinationChannel:
         """Unsubscribe from coordination channel."""
         self.subscribers.discard(subscriber_id)
         
-    async def publish(self, message: Dict[str, Any]) -> None:
+    async def publish(self, message: dict[str, Any]) -> None:
         """Publish message to coordination channel."""
         if not self._redis:
             raise RuntimeError("Channel not connected")
@@ -613,14 +612,14 @@ class CoordinationChannel:
             json.dumps(message)
         )
         
-    async def receive(self, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    async def receive(self, timeout: float | None = None) -> dict[str, Any] | None:
         """Receive message from coordination channel."""
         try:
             return await asyncio.wait_for(
                 self.message_queue.get(),
                 timeout=timeout
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
 
 
@@ -631,7 +630,7 @@ class SynchronizationBarrier:
         self.barrier_id = barrier_id
         self.expected_count = expected_count
         self.timeout = timeout
-        self._arrived: Set[str] = set()
+        self._arrived: set[str] = set()
         self._condition = asyncio.Condition()
         self._completed = False
         
@@ -654,7 +653,7 @@ class SynchronizationBarrier:
                         self._condition.wait(),
                         timeout=self.timeout - (time.time() - start_time)
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
                     
             if len(self._arrived) >= self.expected_count:
@@ -679,7 +678,7 @@ class DistributedSemaphore:
         self.semaphore_id = semaphore_id
         self.permits = permits
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         self._lock_key = f"semaphore:{semaphore_id}:lock"
         
     async def connect(self) -> None:
@@ -772,6 +771,6 @@ class DistributedSemaphore:
 
 
 # Global coordination instances
-consensus_manager: Optional[ConsensusManager] = None
-lock_manager: Optional[DistributedLockManager] = None
-lease_manager: Optional[TaskLeaseManager] = None
+consensus_manager: ConsensusManager | None = None
+lock_manager: DistributedLockManager | None = None
+lease_manager: TaskLeaseManager | None = None

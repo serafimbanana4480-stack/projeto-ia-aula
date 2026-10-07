@@ -145,8 +145,9 @@ class SwarmRecoveryStrategies:
 
     async def _escalate_to_meta_analyzer(self, context: RecoveryContext, params: dict[str, Any]) -> RecoveryResult:
         try:
-            from backend.core.agent_bus import get_agent_bus, BusMessage
             import uuid
+
+            from backend.core.agent_bus import BusMessage, get_agent_bus
             bus = get_agent_bus()
             await bus.publish(
                 "auto_correction.status",

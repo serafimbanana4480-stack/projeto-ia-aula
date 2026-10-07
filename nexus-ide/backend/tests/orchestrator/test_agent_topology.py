@@ -1,8 +1,8 @@
-import pytest
+
 from backend.orchestrator.agent_topology import (
-    AgentTopology,
-    AgentNode,
     AgentEdge,
+    AgentNode,
+    AgentTopology,
 )
 
 

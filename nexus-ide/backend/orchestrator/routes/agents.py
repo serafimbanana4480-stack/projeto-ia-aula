@@ -31,7 +31,7 @@ async def list_instances(
     request: Request,
     session_id: str | None = None,
     include_terminal: bool = False,
-    _user: dict = Depends(require_auth),
+    _user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Return background agents, optionally scoped to one chat session."""
     lifecycle = _get_lifecycle(request)
@@ -49,7 +49,7 @@ async def list_instances(
 
 @router.get("/agents/instances/{instance_id}")
 async def get_instance(
-    instance_id: str, request: Request, _user: dict = Depends(require_auth)
+    instance_id: str, request: Request, _user: dict[str, Any] = Depends(require_auth)
 ) -> dict[str, Any]:
     """Return the full status of a single agent instance."""
     lifecycle = _get_lifecycle(request)
@@ -63,7 +63,7 @@ async def get_instance(
 
 @router.post("/agents/instances/{instance_id}/pause")
 async def pause_instance(
-    instance_id: str, request: Request, _user: dict = Depends(require_auth)
+    instance_id: str, request: Request, _user: dict[str, Any] = Depends(require_auth)
 ) -> dict[str, Any]:
     """Pause a running agent instance."""
     lifecycle = _get_lifecycle(request)
@@ -78,7 +78,7 @@ async def pause_instance(
 
 @router.post("/agents/instances/{instance_id}/resume")
 async def resume_instance(
-    instance_id: str, request: Request, _user: dict = Depends(require_auth)
+    instance_id: str, request: Request, _user: dict[str, Any] = Depends(require_auth)
 ) -> dict[str, Any]:
     """Resume a paused agent instance."""
     lifecycle = _get_lifecycle(request)
@@ -93,7 +93,10 @@ async def resume_instance(
 
 @router.post("/agents/instances/{instance_id}/abort")
 async def abort_instance(
-    instance_id: str, request: Request, reason: str = "", _user: dict = Depends(require_auth)
+    instance_id: str,
+    request: Request,
+    reason: str = "",
+    _user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Abort a running or paused agent instance."""
     lifecycle = _get_lifecycle(request)

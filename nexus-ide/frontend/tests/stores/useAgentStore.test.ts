@@ -25,6 +25,7 @@ describe("useAgentStore", () => {
         activeStream: {},
         messages: [],
         isLoading: false,
+        hasFetchedAgents: false,
         error: null,
       });
     });
@@ -200,6 +201,10 @@ describe("useAgentStore", () => {
 });
 
 describe("mapApiAgent", () => {
+  beforeEach(() => {
+    useAgentStore.setState({ agents: {}, isLoading: false, hasFetchedAgents: false, error: null });
+  });
+
   it("maps API agent with all fields", () => {
     const apiAgent = {
       id: "a1", name: "Coder", role: "Coder", specialization: "Code",
@@ -219,25 +224,28 @@ describe("mapApiAgent", () => {
     expect(result.color).toBe("#10b981");
   });
 
-  it("uses role for role when name is absent", () => {
+  it("uses the provided role as its display name when name is absent", () => {
     const result = mapApiAgent({ role: "architect" });
     expect(result.role).toBe("ARCHITECT");
-    expect(result.name).toBe("Unknown Agent");
+    expect(result.name).toBe("architect");
   });
 
-  it("defaults to UNKNOWN when no name or role", () => {
+  it("keeps identity empty and status unknown when the payload has no identity or status", () => {
     const result = mapApiAgent({});
     expect(result.role).toBe("UNKNOWN");
+    expect(result.id).toBe("");
+    expect(result.name).toBe("");
+    expect(result.status).toBe("unknown");
   });
 
-  it("uses default model when not provided", () => {
+  it("marks a missing model as unavailable", () => {
     const result = mapApiAgent({ name: "test" });
-    expect(result.model).toBe("local");
+    expect(result.model).toBe("—");
   });
 
-  it("uses default provider when not provided", () => {
+  it("marks a missing provider as unavailable", () => {
     const result = mapApiAgent({ name: "test" });
-    expect(result.provider).toBe("Ollama");
+    expect(result.provider).toBe("—");
   });
 
   it("assigns color based on known role", () => {
@@ -265,5 +273,76 @@ describe("mapApiAgent", () => {
   it("falls back to name-based id when no id", () => {
     const result = mapApiAgent({ name: "TestAgent" });
     expect(result.id).toBe("testagent");
+  });
+
+  it("maps the actual agent lifecycle API contract", () => {
+    const result = mapApiAgent({
+      instance_id: "inst-9b12",
+      agent_type: "CODER",
+      status: "running",
+      objective: "Corrigir os testes do chat",
+      tokens_used: 128,
+      token_budget: 2_000,
+    });
+
+    expect(result.id).toBe("inst-9b12");
+    expect(result.name).toBe("CODER");
+    expect(result.role).toBe("CODER");
+    expect(result.status).toBe("running");
+    expect(result.currentTask).toBe("Corrigir os testes do chat");
+    expect(result.tokensUsed).toBe(128);
+    expect(result.tokenBudget).toBe(2_000);
+    expect(result.model).toBe("—");
+    expect(result.provider).toBe("—");
+  });
+
+  it("does not invent an active status or task when optional fields are absent", () => {
+    const result = mapApiAgent({
+      instance_id: "inst-partial",
+      agent_type: "RESEARCHER",
+    });
+
+    expect(result.status).toBe("unknown");
+    expect(result.currentTask).toBeUndefined();
+    expect(result.tokensUsed).toBeUndefined();
+    expect(result.tokenBudget).toBeUndefined();
+  });
+
+  it("uses the instance ID and agent type returned by the API instead of a shared fallback", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        agents: [
+          { instance_id: "inst-coder", agent_type: "CODER", status: "running", objective: "Implementar" },
+          { instance_id: "inst-researcher", agent_type: "RESEARCHER", status: "paused" },
+          {},
+        ],
+        count: 3,
+        stats: {},
+      }),
+    });
+
+    await act(async () => {
+      await useAgentStore.getState().fetchAgents();
+    });
+
+    const state = useAgentStore.getState();
+    expect(Object.keys(state.agents).sort()).toEqual(["inst-coder", "inst-researcher"]);
+    expect(state.agents["inst-coder"].name).toBe("CODER");
+    expect(state.agents["inst-coder"].status).toBe("running");
+    expect(state.agents["inst-coder"].currentTask).toBe("Implementar");
+    expect(state.agents["inst-researcher"].status).toBe("paused");
+    expect(state.hasFetchedAgents).toBe(true);
+  });
+
+  it("rejects a malformed agents envelope instead of reporting an empty list", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+
+    await act(async () => {
+      await useAgentStore.getState().fetchAgents();
+    });
+
+    expect(useAgentStore.getState().hasFetchedAgents).toBe(false);
+    expect(useAgentStore.getState().error).toMatch(/resposta de agentes inválida/i);
   });
 });

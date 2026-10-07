@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from backend.agents.base import AgentBase, AgentAction, AgentRequest
+from backend.agents.base import AgentAction, AgentBase
 
 logger = logging.getLogger(__name__)
 

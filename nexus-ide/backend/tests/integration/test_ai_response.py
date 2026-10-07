@@ -1,15 +1,14 @@
 """End-to-end tests for AI agent responses."""
 from __future__ import annotations
 
-import asyncio
 import pytest
 
-from backend.agents.frontend.uiux_agent import UIUXAgent
-from backend.agents.frontend.component_agent import ComponentAgent
-from backend.agents.frontend.state_manager_agent import StateManagerAgent
 from backend.agents.ai_team.ml_engineer_agent import MLEngineerAgent
 from backend.agents.ai_team.prompt_engineer_agent import PromptEngineerAgent
 from backend.agents.base import AgentRequest
+from backend.agents.frontend.component_agent import ComponentAgent
+from backend.agents.frontend.state_manager_agent import StateManagerAgent
+from backend.agents.frontend.uiux_agent import UIUXAgent
 from backend.config.settings import get_settings
 from backend.tools.ollama_client import OllamaClient
 

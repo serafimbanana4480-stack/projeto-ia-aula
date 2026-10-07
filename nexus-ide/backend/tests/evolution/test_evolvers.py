@@ -1,11 +1,13 @@
 """Tests for the evolvers (FASE 4)."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
 
 from backend.evolution.evolvers import (
+    MAX_PROMPT_CHARS,
     Candidate,
     CodeEvolver,
     MemoryEvolver,
@@ -13,7 +15,9 @@ from backend.evolution.evolvers import (
     PromptEvolver,
     SkillEvolver,
     ToolEvolver,
+    UnknownComponentError,
     WorkflowEvolver,
+    candidate_validation_errors,
     get_all_evolvers,
     get_evolver,
 )
@@ -75,6 +79,27 @@ class TestSkillEvolver:
         for c in candidates:
             assert c.component_kind == "skill"
 
+    def test_emits_structured_skill_payload(self, temp_registry: ChampionRegistry) -> None:
+        """SkillEvolver must emit concrete skill_name/description/rules payloads."""
+        champ = temp_registry.register_champion("skill", "v1", {"retrieval_k": 5})
+        evolver = SkillEvolver(temp_registry)
+        priorities = [_make_priority(FailureCategory.MEMORY_RETRIEVAL_ERROR)]
+        candidates = evolver.generate(champ, priorities, n_candidates=2)
+        assert candidates
+        for c in candidates:
+            payload = c.config["skill_payload"]
+            assert isinstance(payload["skill_name"], str) and payload["skill_name"]
+            assert isinstance(payload["description"], str) and len(payload["description"]) > 10
+            assert isinstance(payload["rules"], list) and payload["rules"]
+            assert all(isinstance(r, str) and r.strip() for r in payload["rules"])
+
+    def test_skill_payload_params_match_mutation(self, temp_registry: ChampionRegistry) -> None:
+        champ = temp_registry.register_champion("skill", "v1", {"retrieval_k": 5})
+        evolver = SkillEvolver(temp_registry)
+        priorities = [_make_priority(FailureCategory.MEMORY_RETRIEVAL_ERROR)]
+        candidates = evolver.generate(champ, priorities, n_candidates=1)
+        assert candidates[0].config["retrieval_k"] == 15
+
 
 class TestWorkflowEvolver:
     def test_generates_workflow_changes(self, temp_registry: ChampionRegistry) -> None:
@@ -133,8 +158,29 @@ class TestEvolverFactory:
         assert isinstance(evolver, PromptEvolver)
 
     def test_get_evolver_unknown(self, temp_registry: ChampionRegistry) -> None:
+        """Non-strict mode (default): unknown kinds return None."""
         evolver = get_evolver("nonexistent", temp_registry)
         assert evolver is None
+
+    def test_get_evolver_unknown_strict_raises_with_valid_keys(
+        self, temp_registry: ChampionRegistry
+    ) -> None:
+        """Strict mode raises a clear error listing every valid component kind."""
+        with pytest.raises(UnknownComponentError) as excinfo:
+            get_evolver("planner", temp_registry, strict=True)
+        message = str(excinfo.value)
+        assert "planner" in message
+        for kind in ("prompt", "skill", "workflow", "tool", "memory", "coder", "model"):
+            assert kind in message
+
+    def test_unknown_component_error_is_value_error(self, temp_registry: ChampionRegistry) -> None:
+        with pytest.raises(ValueError):
+            get_evolver("bogus", temp_registry, strict=True)
+
+    def test_get_evolver_seed_passthrough(self, temp_registry: ChampionRegistry) -> None:
+        evolver = get_evolver("prompt", temp_registry, seed=42)
+        assert evolver is not None
+        assert evolver.seed == 42
 
     def test_get_all_evolvers(self, temp_registry: ChampionRegistry) -> None:
         evolvers = get_all_evolvers(temp_registry)
@@ -146,6 +192,145 @@ class TestEvolverFactory:
         assert "tool" in kinds
         assert "memory" in kinds
         assert "model" in kinds
+
+
+class TestDeterministicSeed:
+    def test_same_seed_same_rng_sequence(self, temp_registry: ChampionRegistry) -> None:
+        e1 = PromptEvolver(temp_registry, seed=123)
+        e2 = PromptEvolver(temp_registry, seed=123)
+        draws = [e1._rng.random() for _ in range(5)]
+        assert draws == [e2._rng.random() for _ in range(5)]
+
+    def test_different_seed_different_sequence(self, temp_registry: ChampionRegistry) -> None:
+        e1 = PromptEvolver(temp_registry, seed=1)
+        e2 = PromptEvolver(temp_registry, seed=2)
+        assert e1._rng.random() != e2._rng.random()
+
+    def test_generation_is_deterministic(self, temp_registry: ChampionRegistry) -> None:
+        champ = temp_registry.register_champion("prompt", "v1", {"prompt_text": "Base"})
+        priorities = [_make_priority(FailureCategory.HALLUCINATED_API)]
+        runs = [
+            [c.config["mutation_hash"] for c in PromptEvolver(temp_registry).generate(champ, priorities)]
+            for _ in range(2)
+        ]
+        assert runs[0] == runs[1]
+
+
+class TestCandidateValidation:
+    def _candidate(self, config: dict) -> Candidate:
+        return Candidate(
+            component_kind="prompt",
+            config=config,
+            changelog="test",
+            rationale="test",
+            mutation_type="unit",
+            targets=[],
+        )
+
+    def test_valid_candidate_passes(self) -> None:
+        errors = candidate_validation_errors(self._candidate({
+            "prompt_text": "A valid prompt.",
+            "default_temperature": 0.7,
+        }))
+        assert errors == []
+
+    @pytest.mark.parametrize("bad_prompt", ["", "   ", None, 42])
+    def test_empty_or_non_string_prompt_rejected(self, bad_prompt: object) -> None:
+        errors = candidate_validation_errors(self._candidate({"prompt_text": bad_prompt}))
+        assert any("prompt_text" in e for e in errors)
+
+    def test_oversized_prompt_rejected(self) -> None:
+        errors = candidate_validation_errors(
+            self._candidate({"prompt_text": "x" * (MAX_PROMPT_CHARS + 1)})
+        )
+        assert any("max" in e for e in errors)
+
+    def test_max_length_prompt_accepted(self) -> None:
+        errors = candidate_validation_errors(self._candidate({"prompt_text": "x" * MAX_PROMPT_CHARS}))
+        assert errors == []
+
+    @pytest.mark.parametrize("temp", [-0.1, 2.1, 99])
+    def test_temperature_out_of_range_rejected(self, temp: float) -> None:
+        errors = candidate_validation_errors(self._candidate({"default_temperature": temp}))
+        assert any("outside" in e for e in errors)
+
+    @pytest.mark.parametrize("temp", [0, 2, 1.5])
+    def test_boundary_temperatures_accepted(self, temp: float) -> None:
+        errors = candidate_validation_errors(self._candidate({"temperature": temp}))
+        assert not any("temperature" in e for e in errors)
+
+    def test_non_numeric_temperature_rejected(self) -> None:
+        errors = candidate_validation_errors(self._candidate({"temperature": "hot"}))
+        assert any("numeric" in e for e in errors)
+
+    def test_non_dict_config_rejected(self) -> None:
+        errors = candidate_validation_errors(self._candidate(config=None))  # type: ignore[arg-type]
+        assert errors
+
+
+class TestValidationRejectionPaths:
+    def test_oversized_champion_prompt_yields_no_candidates(
+        self,
+        temp_registry: ChampionRegistry,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Candidates built on an oversized base prompt are rejected, not crashed."""
+        huge = "x" * (MAX_PROMPT_CHARS + 10)
+        champ = temp_registry.register_champion("prompt", "v1", {"prompt_text": huge})
+        evolver = PromptEvolver(temp_registry)
+        with caplog.at_level(logging.WARNING, logger="backend.evolution.evolvers"):
+            candidates = evolver.generate(champ, [], n_candidates=2)
+        assert candidates == []
+        assert any("Rejected" in r.message and "prompt_text" in r.getMessage() for r in caplog.records)
+
+    def test_invalid_inherited_temperature_rejected(
+        self,
+        temp_registry: ChampionRegistry,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An out-of-range temperature copied from the champion invalidates candidates."""
+        champ = temp_registry.register_champion(
+            "memory", "v1", {"retrieval_k": 5, "default_temperature": 3.5}
+        )
+        evolver = MemoryEvolver(temp_registry)
+        priorities = [_make_priority(FailureCategory.MEMORY_RETRIEVAL_ERROR)]
+        with caplog.at_level(logging.WARNING, logger="backend.evolution.evolvers"):
+            candidates = evolver.generate(champ, priorities, n_candidates=2)
+        assert candidates == []
+        assert any("outside [0.0, 2.0]" in r.getMessage() for r in caplog.records)
+
+    def test_valid_mutation_still_emitted_alongside_invalid(
+        self, temp_registry: ChampionRegistry
+    ) -> None:
+        """Only the offending candidate is dropped; valid ones survive filtering."""
+        champ = temp_registry.register_champion("model", "v1", {"default_model": "gpt-4o"})
+        evolver = ModelEvolver(temp_registry)
+        priorities = [_make_priority(FailureCategory.HALLUCINATED_API)]
+        candidates = evolver.generate(champ, priorities, n_candidates=1)
+        assert len(candidates) == 1
+        assert 0.0 <= candidates[0].config["default_temperature"] <= 2.0
+
+
+class TestNeverCrash:
+    def test_crashing_mutate_returns_empty_list(
+        self, temp_registry: ChampionRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A broken mutation hook must not propagate; generate() returns []."""
+
+        def boom(*args: object, **kwargs: object) -> list[Candidate]:
+            raise RuntimeError("mutation exploded")
+
+        monkeypatch.setattr(PromptEvolver, "_mutate", boom)
+        champ = temp_registry.register_champion("prompt", "v1", {"prompt_text": "Base"})
+        candidates = PromptEvolver(temp_registry).generate(champ, [], n_candidates=2)
+        assert candidates == []
+
+    def test_unhandled_category_yields_no_candidates(self, temp_registry: ChampionRegistry) -> None:
+        """Categories without mutations simply produce no workflow candidates."""
+        champ = temp_registry.register_champion("workflow", "v1", {"workflow_steps": ["a"]})
+        evolver = WorkflowEvolver(temp_registry)
+        candidates = evolver.generate(champ, [_make_priority(FailureCategory.REGRESSION)], n_candidates=2)
+        assert candidates == []
 
 
 class TestCandidate:

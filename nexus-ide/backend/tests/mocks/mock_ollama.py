@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 

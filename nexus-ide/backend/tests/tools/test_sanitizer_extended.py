@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 
 from backend.tools.sanitizer import (
+    INJECTION_PATTERNS,
     InjectionResult,
     detect_injection,
     wrap_external_content,
-    INJECTION_PATTERNS,
 )
 
 

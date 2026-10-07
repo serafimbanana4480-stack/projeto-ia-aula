@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy docker-specific lightweight requirements (NO PyTorch/CUDA)
 COPY docker/backend/requirements-docker.txt /app/requirements-docker.txt
-RUN pip install --upgrade pip && pip install -r /app/requirements-docker.txt
+RUN pip install --upgrade pip && pip install -r /app/requirements-docker.txt && pip install mcp
 
 COPY backend /app/backend
 COPY config  /app/config

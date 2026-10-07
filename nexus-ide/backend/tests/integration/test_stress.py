@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+
 import pytest
 
 from backend.orchestrator.agent_communication_bus import AgentCommunicationBus, AgentMessage
+from backend.orchestrator.agent_topology import AgentEdge, AgentNode, AgentTopology
 from backend.orchestrator.autonomous_execution_engine import AutonomousExecutionEngine
-from backend.orchestrator.agent_topology import AgentTopology, AgentNode, AgentEdge
-from backend.orchestrator.neural_dashboard import NeuralDashboard, SystemMetric, AgentHealth
 from backend.orchestrator.debate_visualizer import DebateVisualizer, Stance
+from backend.orchestrator.neural_dashboard import AgentHealth, NeuralDashboard, SystemMetric
 
 
 class TestStressCommunicationBus:
@@ -31,7 +32,7 @@ class TestStressCommunicationBus:
         def handler(m):
             received_count[0] += 1
 
-        for i in range(100):
+        for _i in range(100):
             bus.subscribe_broadcast(handler)
 
         bus.send(AgentMessage(

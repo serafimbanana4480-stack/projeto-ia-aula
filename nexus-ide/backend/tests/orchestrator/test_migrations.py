@@ -122,6 +122,10 @@ def test_stamped_head_repairs_missing_message_cost_column(tmp_path, monkeypatch)
             )
             """
         )
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, created_at) "
+            "VALUES ('legacy-message', 'legacy-session', 'assistant', 'preserve me', '2026-01-01')"
+        )
         conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
         conn.execute("INSERT INTO alembic_version (version_num) VALUES ('006_execution_envelope')")
         conn.commit()
@@ -139,4 +143,9 @@ def test_stamped_head_repairs_missing_message_cost_column(tmp_path, monkeypatch)
 
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        row = conn.execute(
+            "SELECT content, run_id FROM messages WHERE id = 'legacy-message'"
+        ).fetchone()
     assert "cost_usd" in columns
+    assert "run_id" in columns
+    assert row == ("preserve me", None)

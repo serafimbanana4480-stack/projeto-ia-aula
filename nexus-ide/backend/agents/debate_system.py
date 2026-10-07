@@ -12,11 +12,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union, Tuple
-from datetime import datetime
+from typing import Any
 
-from ..orchestrator.communication_protocol import MessageProtocol, MessageEnvelope, MessageType
-from ..agents.base import AgentBase, AgentRequest
+from ..orchestrator.communication_protocol import MessageProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +60,7 @@ class Argument:
     # Argument structure
     premise: str = ""
     conclusion: str = ""
-    evidence: List[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
     reasoning: str = ""
     
     # Quality metrics
@@ -72,16 +70,16 @@ class Argument:
     validity: float = 0.5  # 0.0-1.0
     
     # Relationships
-    parent_argument_id: Optional[str] = None
-    rebuttal_argument_ids: List[str] = field(default_factory=list)
-    supporting_argument_ids: List[str] = field(default_factory=list)
+    parent_argument_id: str | None = None
+    rebuttal_argument_ids: list[str] = field(default_factory=list)
+    supporting_argument_ids: list[str] = field(default_factory=list)
     
     # Metadata
     timestamp: float = field(default_factory=time.time)
     round_number: int = 1
-    tags: Set[str] = field(default_factory=set)
+    tags: set[str] = field(default_factory=set)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "argument_id": self.argument_id,
             "debate_id": self.debate_id,
@@ -111,12 +109,12 @@ class Debate:
     """Structured debate session."""
     debate_id: str = field(default_factory=lambda: f"debate-{uuid.uuid4().hex[:12]}")
     topic: str = ""
-    context: Dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
     
     # Participants
     proposer_id: str = ""
-    critic_ids: List[str] = field(default_factory=list)
-    supporter_ids: List[str] = field(default_factory=list)
+    critic_ids: list[str] = field(default_factory=list)
+    supporter_ids: list[str] = field(default_factory=list)
     moderator_id: str = ""
     synthesizer_id: str = ""
     
@@ -127,8 +125,8 @@ class Debate:
     time_limit_per_round: float = 300.0  # 5 minutes
     
     # Arguments
-    arguments: List[Argument] = field(default_factory=list)
-    argument_graph: Dict[str, List[str]] = field(default_factory=dict)
+    arguments: list[Argument] = field(default_factory=list)
+    argument_graph: dict[str, list[str]] = field(default_factory=dict)
     
     # Results
     consensus_reached: bool = False
@@ -138,10 +136,10 @@ class Debate:
     
     # Metadata
     created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    completed_at: Optional[float] = None
+    started_at: float | None = None
+    completed_at: float | None = None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "debate_id": self.debate_id,
             "topic": self.topic,
@@ -182,16 +180,16 @@ class CritiqueResult:
     consistency: float = 0.0  # 0.0-1.0
     
     # Specific issues
-    logical_fallacies: List[str] = field(default_factory=list)
-    factual_errors: List[str] = field(default_factory=list)
-    ambiguities: List[str] = field(default_factory=list)
-    missing_information: List[str] = field(default_factory=list)
-    inconsistencies: List[str] = field(default_factory=list)
+    logical_fallacies: list[str] = field(default_factory=list)
+    factual_errors: list[str] = field(default_factory=list)
+    ambiguities: list[str] = field(default_factory=list)
+    missing_information: list[str] = field(default_factory=list)
+    inconsistencies: list[str] = field(default_factory=list)
     
     # Recommendations
-    improvements: List[str] = field(default_factory=list)
-    alternative_approaches: List[str] = field(default_factory=list)
-    supporting_evidence: List[str] = field(default_factory=list)
+    improvements: list[str] = field(default_factory=list)
+    alternative_approaches: list[str] = field(default_factory=list)
+    supporting_evidence: list[str] = field(default_factory=list)
     
     # Overall assessment
     overall_score: float = 0.0  # 0.0-1.0
@@ -202,7 +200,7 @@ class CritiqueResult:
     timestamp: float = field(default_factory=time.time)
     critic_id: str = ""
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "critique_id": self.critique_id,
             "target_content": self.target_content,
@@ -241,8 +239,8 @@ class DebateAgent:
         self,
         debate: Debate,
         round_number: int,
-        previous_arguments: List[Argument]
-    ) -> List[Argument]:
+        previous_arguments: list[Argument]
+    ) -> list[Argument]:
         """Participate in a debate round."""
         logger.info("Agent %s participating in debate %s round %d", 
                    self.agent_id, debate.debate_id, round_number)
@@ -265,8 +263,8 @@ class DebateAgent:
         self,
         debate: Debate,
         round_number: int,
-        previous_arguments: List[Argument]
-    ) -> List[Argument]:
+        previous_arguments: list[Argument]
+    ) -> list[Argument]:
         """Generate proposal arguments."""
         prompt = f"""You are a PROPOSER in a structured debate about: {debate.topic}
 
@@ -323,8 +321,8 @@ Return ONLY the JSON array."""
         self,
         debate: Debate,
         round_number: int,
-        previous_arguments: List[Argument]
-    ) -> List[Argument]:
+        previous_arguments: list[Argument]
+    ) -> list[Argument]:
         """Generate critique arguments."""
         prompt = f"""You are a CRITIC in a structured debate about: {debate.topic}
 
@@ -382,8 +380,8 @@ Return ONLY the JSON array."""
         self,
         debate: Debate,
         round_number: int,
-        previous_arguments: List[Argument]
-    ) -> List[Argument]:
+        previous_arguments: list[Argument]
+    ) -> list[Argument]:
         """Generate supporting arguments."""
         prompt = f"""You are a SUPPORTER in a structured debate about: {debate.topic}
 
@@ -441,8 +439,8 @@ Return ONLY the JSON array."""
         self,
         debate: Debate,
         round_number: int,
-        previous_arguments: List[Argument]
-    ) -> List[Argument]:
+        previous_arguments: list[Argument]
+    ) -> list[Argument]:
         """Moderate debate and provide guidance."""
         prompt = f"""You are a MODERATOR in a structured debate about: {debate.topic}
 
@@ -502,8 +500,8 @@ Return ONLY the JSON array."""
         self,
         debate: Debate,
         round_number: int,
-        previous_arguments: List[Argument]
-    ) -> List[Argument]:
+        previous_arguments: list[Argument]
+    ) -> list[Argument]:
         """Synthesize debate results."""
         prompt = f"""You are a SYNTHESIZER in a structured debate about: {debate.topic}
 
@@ -559,7 +557,7 @@ Return ONLY the JSON array."""
             logger.error("Failed to synthesize debate: %s", exc)
             return []
             
-    def _format_arguments(self, arguments: List[Argument]) -> str:
+    def _format_arguments(self, arguments: list[Argument]) -> str:
         """Format arguments for display."""
         if not arguments:
             return "No previous arguments"
@@ -575,7 +573,7 @@ Return ONLY the JSON array."""
         response: str,
         debate_id: str,
         round_number: int
-    ) -> List[Argument]:
+    ) -> list[Argument]:
         """Parse arguments from model response."""
         try:
             # Extract JSON from response
@@ -628,7 +626,7 @@ class CriticAgent:
         self,
         content: str,
         critique_type: str = "general",
-        context: Optional[Dict[str, Any]] = None
+        context: dict[str, Any] | None = None
     ) -> CritiqueResult:
         """Perform comprehensive critique of content."""
         logger.info("Critic agent %s analyzing content", self.agent_id)
@@ -766,12 +764,12 @@ class DebateSystem:
         self.protocol = MessageProtocol()
         
         # Active debates
-        self.active_debates: Dict[str, Debate] = {}
-        self.debate_agents: Dict[str, DebateAgent] = {}
+        self.active_debates: dict[str, Debate] = {}
+        self.debate_agents: dict[str, DebateAgent] = {}
         
         # Debate history
-        self.debate_history: List[Debate] = []
-        self.critique_history: List[CritiqueResult] = []
+        self.debate_history: list[Debate] = []
+        self.critique_history: list[CritiqueResult] = []
         
         # Statistics
         self.total_debates = 0
@@ -781,7 +779,7 @@ class DebateSystem:
     async def create_debate(
         self,
         topic: str,
-        context: Dict[str, Any],
+        context: dict[str, Any],
         max_rounds: int = 3,
         time_limit_per_round: float = 300.0
     ) -> Debate:
@@ -976,7 +974,7 @@ class DebateSystem:
         self,
         content: str,
         critique_type: str = "general",
-        context: Optional[Dict[str, Any]] = None
+        context: dict[str, Any] | None = None
     ) -> CritiqueResult:
         """Perform content critique."""
         critic_id = f"critic-{uuid.uuid4().hex[:8]}"
@@ -989,7 +987,7 @@ class DebateSystem:
         
         return result
         
-    def get_debate_stats(self) -> Dict[str, Any]:
+    def get_debate_stats(self) -> dict[str, Any]:
         """Get debate system statistics."""
         return {
             "total_debates": self.total_debates,
@@ -1010,7 +1008,7 @@ class DebateSystem:
         self,
         limit: int = 50,
         min_quality: float = 0.0
-    ) -> List[Debate]:
+    ) -> list[Debate]:
         """Get debate history with filters."""
         filtered = [
             debate for debate in self.debate_history
@@ -1025,4 +1023,4 @@ class DebateSystem:
 
 
 # Global debate system instance
-debate_system: Optional[DebateSystem] = None
+debate_system: DebateSystem | None = None

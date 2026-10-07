@@ -5,7 +5,7 @@ import pytest
 
 from backend.agents.backend.api_agent import APIAgent, APIReviewResult
 from backend.agents.backend.database_agent import DatabaseAgent, SchemaSuggestion
-from backend.agents.backend.infrastructure_agent import InfrastructureAgent, DeploymentStack
+from backend.agents.backend.infrastructure_agent import DeploymentStack, InfrastructureAgent
 from backend.agents.backend.team_lead import BackendTeamLead
 
 

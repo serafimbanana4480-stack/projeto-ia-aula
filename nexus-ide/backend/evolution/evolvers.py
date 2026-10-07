@@ -3,6 +3,14 @@
 Each evolver takes a champion version + failure analysis and produces
 candidate versions that address the top-prioritised failure categories.
 
+Every ``generate()`` call is wrapped by :class:`BaseEvolver`, which:
+
+    * validates each produced candidate (:func:`candidate_validation_errors`)
+      and drops invalid ones, logging the rejection reason;
+    * never lets generation errors escape (a crashing evolver yields ``[]``);
+    * supports an optional deterministic ``seed`` so any stochastic mutation
+      is reproducible across runs.
+
 Evolvers:
     PromptEvolver      — mutates system prompt text
     SkillEvolver       — evolves skill definitions and usage
@@ -18,6 +26,7 @@ import copy
 import hashlib
 import json
 import logging
+import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,13 +52,69 @@ class Candidate:
     targets: list[str]  # failure category names this addresses
 
 
+# ── Candidate validation ──────────────────────────────────────────────────────
+
+MAX_PROMPT_CHARS = 8000
+MIN_TEMPERATURE = 0.0
+MAX_TEMPERATURE = 2.0
+
+
+def candidate_validation_errors(candidate: Candidate) -> list[str]:
+    """Return a list of validation problems for a candidate (empty = valid).
+
+    Rules:
+        * ``prompt_text`` (when present) must be a non-empty string of at most
+          ``MAX_PROMPT_CHARS`` characters.
+        * ``temperature`` / ``default_temperature`` (when present) must be a
+          real number within ``[MIN_TEMPERATURE, MAX_TEMPERATURE]``.
+        * ``config`` must be a JSON-serialisable dict.
+    """
+    errors: list[str] = []
+    config = candidate.config
+    if not isinstance(config, dict):
+        return [f"config must be a dict, got {type(config).__name__}"]
+
+    if "prompt_text" in config:
+        prompt_text = config["prompt_text"]
+        if not isinstance(prompt_text, str) or not prompt_text.strip():
+            errors.append("prompt_text must be a non-empty string")
+        elif len(prompt_text) > MAX_PROMPT_CHARS:
+            errors.append(
+                f"prompt_text has {len(prompt_text)} chars (max {MAX_PROMPT_CHARS})"
+            )
+
+    for temp_key in ("temperature", "default_temperature"):
+        if temp_key in config:
+            temp = config[temp_key]
+            if isinstance(temp, bool) or not isinstance(temp, int | float):
+                errors.append(f"{temp_key} must be numeric, got {type(temp).__name__}")
+            elif not MIN_TEMPERATURE <= float(temp) <= MAX_TEMPERATURE:
+                errors.append(
+                    f"{temp_key}={temp} outside [{MIN_TEMPERATURE}, {MAX_TEMPERATURE}]"
+                )
+
+    try:
+        json.dumps(config)
+    except (TypeError, ValueError) as exc:
+        errors.append(f"config is not JSON-serialisable: {exc}")
+
+    return errors
+
+
 class BaseEvolver:
-    """Base class for all evolvers."""
+    """Base class for all evolvers.
+
+    Subclasses implement :meth:`_mutate`; the public :meth:`generate` wraps it
+    with candidate validation, crash-safety (never raises), and deterministic
+    seeding.
+    """
 
     component_kind: str = ""
 
-    def __init__(self, registry: ChampionRegistry) -> None:
+    def __init__(self, registry: ChampionRegistry, seed: int | None = None) -> None:
         self._registry = registry
+        self.seed = seed
+        self._rng = random.Random(seed)
 
     def generate(
         self,
@@ -57,17 +122,47 @@ class BaseEvolver:
         failure_priorities: list[FailurePriority],
         n_candidates: int = 3,
     ) -> list[Candidate]:
-        """Generate candidate mutations.
+        """Generate *validated* candidate mutations.
 
-        Args:
-            champion: The current champion version to mutate.
-            failure_priorities: Prioritised failure categories from FailureMiner.
-            n_candidates: How many candidates to generate.
-
-        Returns:
-            List of Candidate objects.
+        Wraps :meth:`_mutate`: invalid candidates are dropped with the reason
+        logged, and any unexpected exception is caught and logged instead of
+        propagating. Always returns a list.
         """
+        try:
+            raw = list(self._mutate(champion, failure_priorities, n_candidates))
+        except Exception:
+            logger.exception(
+                "Evolver %s crashed while generating candidates; skipping",
+                type(self).__name__,
+            )
+            return []
+        return self._filter_valid(raw)
+
+    def _mutate(
+        self,
+        champion: ComponentVersion,
+        failure_priorities: list[FailurePriority],
+        n_candidates: int = 3,
+    ) -> list[Candidate]:
+        """Produce raw candidate mutations (implemented by subclasses)."""
         raise NotImplementedError
+
+    def _filter_valid(self, candidates: list[Candidate]) -> list[Candidate]:
+        """Drop invalid candidates, logging each rejection reason."""
+        valid: list[Candidate] = []
+        for cand in candidates:
+            problems = candidate_validation_errors(cand)
+            if problems:
+                logger.warning(
+                    "Rejected %s candidate %r targeting %s: %s",
+                    type(self).__name__,
+                    cand.mutation_type,
+                    ",".join(cand.targets) or "(none)",
+                    "; ".join(problems),
+                )
+                continue
+            valid.append(cand)
+        return valid
 
     def _next_version(self) -> str:
         return self._registry.next_version(self.component_kind)
@@ -80,6 +175,9 @@ class BaseEvolver:
 
 class PromptEvolver(BaseEvolver):
     """Mutates system prompt text to address specific failure categories.
+
+    What it mutates: appends constraint/instruction blocks to
+    ``config["prompt_text"]`` (all other champion config keys are preserved).
 
     Strategies:
         - Add anti-hallucination constraints when HALLUCINATED_API is common
@@ -127,12 +225,13 @@ class PromptEvolver(BaseEvolver):
         ],
     }
 
-    def generate(
+    def _mutate(
         self,
         champion: ComponentVersion,
         failure_priorities: list[FailurePriority],
         n_candidates: int = 3,
     ) -> list[Candidate]:
+        """Append category-specific constraints to the champion prompt text."""
         if not failure_priorities:
             return self._generate_generic(champion, n_candidates)
 
@@ -197,6 +296,11 @@ class PromptEvolver(BaseEvolver):
 class SkillEvolver(BaseEvolver):
     """Evolves skill definitions and usage policies.
 
+    What it mutates: merges mutation params into the champion config and adds
+    a structured ``config["skill_payload"]`` with a concrete ``skill_name``,
+    ``description`` and an explicit ``rules`` list, so downstream skill
+    registration receives actionable definitions instead of vague blobs.
+
     Strategies:
         - Increase retrieval k for MEMORY_RETRIEVAL_ERROR
         - Add new skill triggers for HALLUCINATED_API
@@ -208,27 +312,76 @@ class SkillEvolver(BaseEvolver):
 
     _SKILL_MUTATIONS: dict[FailureCategory, list[dict[str, Any]]] = {
         FailureCategory.MEMORY_RETRIEVAL_ERROR: [
-            {"mutation": "increase_k", "params": {"retrieval_k": 15}},
-            {"mutation": "add_rerank", "params": {"rerank_threshold": 0.7}},
+            {
+                "mutation": "increase_k",
+                "params": {"retrieval_k": 15},
+                "description": "Deepen memory retrieval when relevant context is missed.",
+                "rules": [
+                    "Retrieve up to 15 candidates from memory before ranking.",
+                    "If fewer than 3 results score above 0.5, widen the query and retry once.",
+                ],
+            },
+            {
+                "mutation": "add_rerank",
+                "params": {"rerank_threshold": 0.7},
+                "description": "Re-rank retrieved memories to surface the most relevant hits.",
+                "rules": [
+                    "Re-rank all retrieval candidates; keep only those scoring >= 0.7.",
+                    "Fall back to unranked top-k if the re-ranker errors or times out.",
+                ],
+            },
         ],
         FailureCategory.TOO_MANY_CALLS: [
-            {"mutation": "batch_calls", "params": {"batch_size": 4}},
-            {"mutation": "cache_results", "params": {"cache_ttl": 300}},
+            {
+                "mutation": "batch_calls",
+                "params": {"batch_size": 4},
+                "description": "Batch independent tool calls to cut round-trips.",
+                "rules": [
+                    "Group up to 4 independent tool calls per message.",
+                    "Never batch calls whose arguments depend on earlier results.",
+                ],
+            },
+            {
+                "mutation": "cache_results",
+                "params": {"cache_ttl": 300},
+                "description": "Cache tool/read results to avoid redundant work.",
+                "rules": [
+                    "Cache identical read/grep/glob results for 300 seconds.",
+                    "Invalidate cached entries whenever a write touches the same path.",
+                ],
+            },
         ],
         FailureCategory.TOOL_SELECTION_ERROR: [
-            {"mutation": "add_tool_validator", "params": {"validate_args": True}},
+            {
+                "mutation": "add_tool_validator",
+                "params": {"validate_args": True},
+                "description": "Validate tool arguments before invocation.",
+                "rules": [
+                    "Check every tool call against its declared required parameters.",
+                    "On validation failure, fix the arguments instead of calling blind.",
+                ],
+            },
         ],
         FailureCategory.INFINITE_LOOP: [
-            {"mutation": "optimize_loop", "params": {"max_iterations": 10}},
+            {
+                "mutation": "optimize_loop",
+                "params": {"max_iterations": 10},
+                "description": "Cap retry loops so agents cannot spin forever.",
+                "rules": [
+                    "Stop after 10 iterations on the same sub-goal.",
+                    "On hitting the cap, escalate with a summary of attempted steps.",
+                ],
+            },
         ],
     }
 
-    def generate(
+    def _mutate(
         self,
         champion: ComponentVersion,
         failure_priorities: list[FailurePriority],
         n_candidates: int = 3,
     ) -> list[Candidate]:
+        """Merge mutation params and attach a structured skill payload."""
         candidates: list[Candidate] = []
         seen_mutations: set[str] = set()
 
@@ -241,13 +394,26 @@ class SkillEvolver(BaseEvolver):
 
                 new_config = copy.deepcopy(champion.config)
                 new_config.update(mut["params"])
+                new_config["skill_payload"] = {
+                    "skill_name": mut["mutation"],
+                    "description": mut["description"],
+                    "rules": list(mut["rules"]),
+                }
                 new_config["mutation_hash"] = self._hash_config(new_config)
 
+                rules_summary = "; ".join(mut["rules"][:2])
                 candidates.append(Candidate(
                     component_kind=self.component_kind,
                     config=new_config,
-                    changelog=f"Skill mutation: {mut['mutation']} for {priority.category.value}",
-                    rationale=f"Addresses {priority.category.value} (priority {priority.priority_score:.3f})",
+                    changelog=(
+                        f"Skill mutation: {mut['mutation']} for {priority.category.value} "
+                        f"({len(mut['rules'])} rules)"
+                    ),
+                    rationale=(
+                        f"Addresses {priority.category.value} "
+                        f"(priority {priority.priority_score:.3f}). "
+                        f"Skill '{mut['mutation']}': {mut['description']} Rules: {rules_summary}"
+                    ),
                     mutation_type=mut["mutation"],
                     targets=[priority.category.value],
                 ))
@@ -261,6 +427,10 @@ class SkillEvolver(BaseEvolver):
 
 class WorkflowEvolver(BaseEvolver):
     """Changes agent workflow ordering and step structure.
+
+    What it mutates: appends steps to ``config["workflow_steps"]`` (or
+    reorders the first two steps in the generic fallback) and records the
+    applied mutation under ``config["mutation_type"]``.
 
     Strategies:
         - Reorder steps for BAD_PLANNING
@@ -293,12 +463,13 @@ class WorkflowEvolver(BaseEvolver):
         },
     }
 
-    def generate(
+    def _mutate(
         self,
         champion: ComponentVersion,
         failure_priorities: list[FailurePriority],
         n_candidates: int = 3,
     ) -> list[Candidate]:
+        """Append category-specific steps to the champion workflow."""
         candidates: list[Candidate] = []
 
         for priority in failure_priorities[:n_candidates]:
@@ -347,6 +518,10 @@ class WorkflowEvolver(BaseEvolver):
 class ToolEvolver(BaseEvolver):
     """Evolves tool selection and usage policies.
 
+    What it mutates: merges tool policy params into the champion config
+    (``validate_tool_args``, batching flags, ``tool_timeout_sec``,
+    ``retry_attempts``); generic fallback raises ``timeout_sec``.
+
     Strategies:
         - Add validation for tool args (TOOL_SELECTION_ERROR)
         - Increase batch size for tool calls (TOO_MANY_CALLS)
@@ -370,12 +545,13 @@ class ToolEvolver(BaseEvolver):
         },
     }
 
-    def generate(
+    def _mutate(
         self,
         champion: ComponentVersion,
         failure_priorities: list[FailurePriority],
         n_candidates: int = 3,
     ) -> list[Candidate]:
+        """Merge category-specific tool policy params into the champion config."""
         candidates: list[Candidate] = []
 
         for priority in failure_priorities[:n_candidates]:
@@ -417,7 +593,11 @@ class ToolEvolver(BaseEvolver):
 
 
 class MemoryEvolver(BaseEvolver):
-    """Tuned memory retrieval parameters.
+    """Tunes memory retrieval parameters.
+
+    What it mutates: ``config["retrieval_k"]`` and
+    ``config["confidence_threshold"]`` (raised/lowered relative to the
+    champion values, bounded to sane minimums).
 
     Strategies:
         - Increase retrieval k for MEMORY_RETRIEVAL_ERROR
@@ -427,12 +607,13 @@ class MemoryEvolver(BaseEvolver):
 
     component_kind = "memory"
 
-    def generate(
+    def _mutate(
         self,
         champion: ComponentVersion,
         failure_priorities: list[FailurePriority],
         n_candidates: int = 3,
     ) -> list[Candidate]:
+        """Tune retrieval_k / confidence_threshold relative to the champion."""
         candidates: list[Candidate] = []
         memory_priorities = [p for p in failure_priorities if p.category == FailureCategory.MEMORY_RETRIEVAL_ERROR]
         # Memory-specific mutations
@@ -478,6 +659,11 @@ class MemoryEvolver(BaseEvolver):
 class CodeEvolver(BaseEvolver):
     """Evolves code generation configuration (budgets, constraints).
 
+    What it mutates: code-gen policy flags and budgets in the champion config
+    (``review_iterations``, ``self_check``, ``test_driven``,
+    ``max_iterations``, dependency checks); generic fallback reduces
+    ``max_lines_per_file``.
+
     Strategies:
         - Increase review budget for INCORRECT_CODE
         - Add test-first approach for TEST_MISUNDERSTANDING
@@ -505,12 +691,13 @@ class CodeEvolver(BaseEvolver):
         },
     }
 
-    def generate(
+    def _mutate(
         self,
         champion: ComponentVersion,
         failure_priorities: list[FailurePriority],
         n_candidates: int = 3,
     ) -> list[Candidate]:
+        """Merge category-specific code-gen policy params into the config."""
         candidates: list[Candidate] = []
 
         for priority in failure_priorities[:n_candidates]:
@@ -554,6 +741,11 @@ class CodeEvolver(BaseEvolver):
 class ModelEvolver(BaseEvolver):
     """Evolves model selection assignments per task category.
 
+    What it mutates: ``config["default_model"]``, ``config["default_tier"]``
+    and ``config["default_temperature"]`` (temperatures are always kept
+    within ``[MIN_TEMPERATURE, MAX_TEMPERATURE]``); generic fallback upgrades
+    the tier one step.
+
     Strategies:
         - Swap to more capable model for ERROR categories
         - Adjust temperature per task type
@@ -579,12 +771,13 @@ class ModelEvolver(BaseEvolver):
         FailureCategory.TIMEOUT: {"model": "fast", "temperature": 0.1},
     }
 
-    def generate(
+    def _mutate(
         self,
         champion: ComponentVersion,
         failure_priorities: list[FailurePriority],
         n_candidates: int = 3,
     ) -> list[Candidate]:
+        """Swap default_model / default_tier / default_temperature per category."""
         candidates: list[Candidate] = []
         seen_configs: set[str] = set()
 
@@ -650,14 +843,54 @@ _EVOLVERS: dict[str, type[BaseEvolver]] = {
 }
 
 
-def get_evolver(component_kind: str, registry: ChampionRegistry) -> BaseEvolver | None:
-    """Factory: get the appropriate evolver for a component kind."""
+def valid_component_kinds() -> list[str]:
+    """Return the component kinds that have an evolver."""
+    return sorted(_EVOLVERS)
+
+
+class UnknownComponentError(ValueError):
+    """Raised when requesting an evolver for an unknown component kind."""
+
+    def __init__(self, component_kind: str) -> None:
+        self.component_kind = component_kind
+        super().__init__(
+            f"Unknown evolver component kind {component_kind!r}. "
+            f"Valid kinds: {', '.join(valid_component_kinds())}"
+        )
+
+
+def get_evolver(
+    component_kind: str,
+    registry: ChampionRegistry,
+    seed: int | None = None,
+    *,
+    strict: bool = False,
+) -> BaseEvolver | None:
+    """Factory: get the appropriate evolver for a component kind.
+
+    Args:
+        component_kind: One of :func:`valid_component_kinds`.
+        registry: Champion registry shared by evolvers.
+        seed: Optional deterministic seed forwarded to the evolver.
+        strict: When True, raise :class:`UnknownComponentError` (with the
+            list of valid kinds) instead of returning None for unknown kinds.
+
+    Returns:
+        The evolver instance, or None when unknown and ``strict`` is False.
+    """
     evolver_cls = _EVOLVERS.get(component_kind)
     if evolver_cls is None:
+        if strict:
+            raise UnknownComponentError(component_kind)
+        logger.warning(
+            "No evolver registered for component kind %r (valid: %s)",
+            component_kind,
+            ", ".join(valid_component_kinds()),
+        )
         return None
-    return evolver_cls(registry)
+    return evolver_cls(registry, seed=seed)
 
 
-def get_all_evolvers(registry: ChampionRegistry) -> list[BaseEvolver]:
-    """Get all evolvers."""
-    return [cls(registry) for cls in _EVOLVERS.values()]
+def get_all_evolvers(registry: ChampionRegistry, seed: int | None = None) -> list[BaseEvolver]:
+    """Get all evolvers, sharing the same optional deterministic seed."""
+    return [cls(registry, seed=seed) for cls in _EVOLVERS.values()]

@@ -6,14 +6,16 @@ visualization data, and interactive monitoring interface.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union, Callable
-from datetime import datetime
+from typing import Any
+
 import websockets
 from websockets.server import WebSocketServerProtocol
 
@@ -59,18 +61,18 @@ class Metric:
     metric_id: str = field(default_factory=lambda: f"metric-{uuid.uuid4().hex[:12]}")
     name: str = ""
     metric_type: MetricType = MetricType.GAUGE
-    value: Union[int, float] = 0.0
-    labels: Dict[str, str] = field(default_factory=dict)
+    value: int | float = 0.0
+    labels: dict[str, str] = field(default_factory=dict)
     
     # Timestamps
     timestamp: float = field(default_factory=time.time)
-    interval: Optional[float] = None  # For rates
+    interval: float | None = None  # For rates
     
     # Additional data
     unit: str = ""
     description: str = ""
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "metric_id": self.metric_id,
             "name": self.name,
@@ -95,21 +97,21 @@ class Alert:
     # Context
     source: str = ""
     component: str = ""
-    metric_name: Optional[str] = None
+    metric_name: str | None = None
     
     # Timestamps
     created_at: float = field(default_factory=time.time)
-    acknowledged_at: Optional[float] = None
-    resolved_at: Optional[float] = None
+    acknowledged_at: float | None = None
+    resolved_at: float | None = None
     
     # Status
     is_acknowledged: bool = False
     is_resolved: bool = False
     
     # Metadata
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "alert_id": self.alert_id,
             "title": self.title,
@@ -147,12 +149,12 @@ class AgentStatus:
     
     # Timestamps
     last_heartbeat: float = field(default_factory=time.time)
-    last_task_completed: Optional[float] = None
+    last_task_completed: float | None = None
     
     # Capabilities
-    capabilities: List[str] = field(default_factory=list)
+    capabilities: list[str] = field(default_factory=list)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "agent_id": self.agent_id,
             "name": self.name,
@@ -175,10 +177,10 @@ class DashboardEvent:
     """Dashboard event for WebSocket transmission."""
     event_id: str = field(default_factory=lambda: f"event-{uuid.uuid4().hex[:12]}")
     event_type: DashboardEventType = DashboardEventType.METRIC_UPDATE
-    data: Dict[str, Any] = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,
             "event_type": self.event_type.value,
@@ -192,14 +194,14 @@ class MetricsCollector:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Metrics storage
-        self.metrics: Dict[str, List[Metric]] = {}
-        self.metric_definitions: Dict[str, Dict[str, Any]] = {}
+        self.metrics: dict[str, list[Metric]] = {}
+        self.metric_definitions: dict[str, dict[str, Any]] = {}
         
         # Alert rules
-        self.alert_rules: List[Dict[str, Any]] = []
+        self.alert_rules: list[dict[str, Any]] = []
         
     async def connect(self) -> None:
         """Connect to Redis."""
@@ -244,9 +246,9 @@ class MetricsCollector:
     async def record_metric(
         self,
         name: str,
-        value: Union[int, float],
+        value: int | float,
         metric_type: MetricType = MetricType.GAUGE,
-        labels: Optional[Dict[str, str]] = None,
+        labels: dict[str, str] | None = None,
         unit: str = "",
         description: str = ""
     ) -> None:
@@ -280,11 +282,10 @@ class MetricsCollector:
     async def _check_alert_rules(self, metric: Metric) -> None:
         """Check if metric triggers any alert rules."""
         for rule in self.alert_rules:
-            if rule["metric_name"] == metric.name:
-                if self._evaluate_rule(rule, metric):
-                    await self._trigger_alert(rule, metric)
+            if rule["metric_name"] == metric.name and self._evaluate_rule(rule, metric):
+                await self._trigger_alert(rule, metric)
                     
-    def _evaluate_rule(self, rule: Dict[str, Any], metric: Metric) -> bool:
+    def _evaluate_rule(self, rule: dict[str, Any], metric: Metric) -> bool:
         """Evaluate alert rule against metric."""
         operator = rule["operator"]
         threshold = rule["threshold"]
@@ -302,7 +303,7 @@ class MetricsCollector:
         else:
             return False
             
-    async def _trigger_alert(self, rule: Dict[str, Any], metric: Metric) -> None:
+    async def _trigger_alert(self, rule: dict[str, Any], metric: Metric) -> None:
         """Trigger alert for rule."""
         # This would integrate with alert system
         logger.warning("Alert triggered: %s - %s %s %s", 
@@ -311,10 +312,10 @@ class MetricsCollector:
     def get_metric_history(
         self,
         name: str,
-        start_time: Optional[float] = None,
-        end_time: Optional[float] = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
         limit: int = 100
-    ) -> List[Metric]:
+    ) -> list[Metric]:
         """Get metric history."""
         if name not in self.metrics:
             return []
@@ -336,7 +337,7 @@ class MetricsCollector:
         metrics.sort(key=lambda m: m.timestamp, reverse=True)
         return metrics[:limit]
         
-    def get_metric_summary(self, name: str) -> Dict[str, Any]:
+    def get_metric_summary(self, name: str) -> dict[str, Any]:
         """Get metric summary statistics."""
         if name not in self.metrics or not self.metrics[name]:
             return {}
@@ -358,14 +359,14 @@ class AlertManager:
     
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         
         # Alert storage
-        self.active_alerts: Dict[str, Alert] = {}
-        self.alert_history: List[Alert] = []
+        self.active_alerts: dict[str, Alert] = {}
+        self.alert_history: list[Alert] = []
         
         # Alert handlers
-        self.alert_handlers: List[Callable] = []
+        self.alert_handlers: list[Callable] = []
         
     async def connect(self) -> None:
         """Connect to Redis."""
@@ -409,8 +410,8 @@ class AlertManager:
         level: AlertLevel = AlertLevel.INFO,
         source: str = "",
         component: str = "",
-        metric_name: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        metric_name: str | None = None,
+        metadata: dict[str, Any] | None = None
     ) -> str:
         """Create a new alert."""
         alert = Alert(
@@ -483,7 +484,7 @@ class AlertManager:
             except Exception as exc:
                 logger.error("Alert handler error: %s", exc)
                 
-    def get_active_alerts(self, level: Optional[AlertLevel] = None) -> List[Alert]:
+    def get_active_alerts(self, level: AlertLevel | None = None) -> list[Alert]:
         """Get active alerts."""
         alerts = list(self.active_alerts.values())
         
@@ -494,7 +495,7 @@ class AlertManager:
         alerts.sort(key=lambda a: a.created_at, reverse=True)
         return alerts
         
-    def get_alert_statistics(self) -> Dict[str, Any]:
+    def get_alert_statistics(self) -> dict[str, Any]:
         """Get alert statistics."""
         active_by_level = {}
         for alert in self.active_alerts.values():
@@ -523,14 +524,14 @@ class RealtimeDashboard:
         self.alert_manager = AlertManager(redis_url)
         
         # WebSocket connections
-        self.connections: Set[WebSocketServerProtocol] = set()
+        self.connections: set[WebSocketServerProtocol] = set()
         
         # Agent status tracking
-        self.agent_statuses: Dict[str, AgentStatus] = {}
+        self.agent_statuses: dict[str, AgentStatus] = {}
         
         # Background tasks
-        self.server_task: Optional[asyncio.Task] = None
-        self.update_task: Optional[asyncio.Task] = None
+        self.server_task: asyncio.Task | None = None
+        self.update_task: asyncio.Task | None = None
         
     async def start(self) -> None:
         """Start the dashboard server."""
@@ -633,7 +634,7 @@ class RealtimeDashboard:
         except Exception as exc:
             logger.error("Message handling error: %s", exc)
             
-    async def _handle_get_metrics(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+    async def _handle_get_metrics(self, websocket: WebSocketServerProtocol, data: dict[str, Any]) -> None:
         """Handle get metrics request."""
         metric_name = data.get("metric_name")
         start_time = data.get("start_time")
@@ -652,7 +653,7 @@ class RealtimeDashboard:
             }
         }))
         
-    async def _handle_acknowledge_alert(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+    async def _handle_acknowledge_alert(self, websocket: WebSocketServerProtocol, data: dict[str, Any]) -> None:
         """Handle acknowledge alert request."""
         alert_id = data.get("alert_id")
         success = await self.alert_manager.acknowledge_alert(alert_id)
@@ -665,7 +666,7 @@ class RealtimeDashboard:
             }
         }))
         
-    async def _handle_resolve_alert(self, websocket: WebSocketServerProtocol, data: Dict[str, Any]) -> None:
+    async def _handle_resolve_alert(self, websocket: WebSocketServerProtocol, data: dict[str, Any]) -> None:
         """Handle resolve alert request."""
         alert_id = data.get("alert_id")
         success = await self.alert_manager.resolve_alert(alert_id)
@@ -746,7 +747,7 @@ class RealtimeDashboard:
         """Update agent statuses."""
         current_time = time.time()
         
-        for agent_id, status in list(self.agent_statuses.items()):
+        for _agent_id, status in list(self.agent_statuses.items()):
             # Check if agent is stale
             if current_time - status.last_heartbeat > 60:  # 1 minute timeout
                 status.status = "offline"
@@ -787,7 +788,7 @@ class RealtimeDashboard:
         # Remove disconnected connections
         self.connections -= disconnected
         
-    async def _get_system_overview(self) -> Dict[str, Any]:
+    async def _get_system_overview(self) -> dict[str, Any]:
         """Get system overview data."""
         return {
             "system_info": {
@@ -818,10 +819,8 @@ class RealtimeDashboard:
             
             message = json.dumps(event.to_dict())
             for connection in self.connections:
-                try:
+                with contextlib.suppress(Exception):
                     await connection.send(message)
-                except Exception:
-                    pass
                     
     async def create_alert(
         self,
@@ -830,7 +829,7 @@ class RealtimeDashboard:
         level: AlertLevel = AlertLevel.INFO,
         source: str = "",
         component: str = "",
-        metric_name: Optional[str] = None
+        metric_name: str | None = None
     ) -> str:
         """Create and broadcast alert."""
         alert_id = await self.alert_manager.create_alert(
@@ -848,14 +847,12 @@ class RealtimeDashboard:
                 
                 message = json.dumps(event.to_dict())
                 for connection in self.connections:
-                    try:
+                    with contextlib.suppress(Exception):
                         await connection.send(message)
-                    except Exception:
-                        pass
                         
         return alert_id
         
-    def get_dashboard_stats(self) -> Dict[str, Any]:
+    def get_dashboard_stats(self) -> dict[str, Any]:
         """Get dashboard statistics."""
         return {
             "active_connections": len(self.connections),
@@ -867,4 +864,4 @@ class RealtimeDashboard:
 
 
 # Global dashboard instance
-realtime_dashboard: Optional[RealtimeDashboard] = None
+realtime_dashboard: RealtimeDashboard | None = None

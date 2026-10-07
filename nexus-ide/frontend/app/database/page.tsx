@@ -15,8 +15,10 @@ import {
 import { getDbStats } from "../../lib/api";
 
 interface TableCounts {
-  users: number;
-  projects: number;
+  // users and projects carry no owner column, so the backend cannot scope them
+  // per tenant and returns null rather than another user's total.
+  users: number | null;
+  projects: number | null;
   sessions: number;
   messages: number;
   tool_executions: number;
@@ -196,7 +198,10 @@ export default function DatabasePage() {
                     </span>
                   </div>
                   <div className="mt-2 text-2xl font-bold">
-                    {card.count.toLocaleString()}
+                    {/* Tables with no owner column cannot be scoped per tenant,
+                        so the API reports them as null. A dash is honest; 0
+                        would be a claim about other people's data. */}
+                    {typeof card.count === "number" ? card.count.toLocaleString() : "—"}
                   </div>
                 </motion.div>
               ))}

@@ -7,13 +7,11 @@ from __future__ import annotations
 
 import logging
 import time
-import yaml
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .voting_system import Vote, DecisionType
-from .logical_judge import JudgeReasoning
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +33,13 @@ class TaskResult:
     success: bool
     completion_time: float
     expected_time: float
-    quality_metrics: Dict[str, float]
-    resource_usage: Dict[str, float]
-    stakeholder_feedback: Optional[float] = None
-    error_message: Optional[str] = None
+    quality_metrics: dict[str, float]
+    resource_usage: dict[str, float]
+    stakeholder_feedback: float | None = None
+    error_message: str | None = None
     timestamp: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "decision_id": self.decision_id,
@@ -66,10 +64,10 @@ class DecisionScore:
     quality_score: float
     resource_efficiency: float
     stakeholder_satisfaction: float
-    metric_weights: Dict[str, float]
+    metric_weights: dict[str, float]
     timestamp: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "decision_id": self.decision_id,
             "overall_score": self.overall_score,
@@ -98,9 +96,9 @@ class DecisionEvaluator:
     
     def __init__(
         self,
-        metric_weights: Optional[Dict[str, float]] = None,
+        metric_weights: dict[str, float] | None = None,
         resource_efficiency_threshold: float = 0.6,
-        config_path: Optional[str] = None
+        config_path: str | None = None
     ):
         """Initialize decision evaluator.
         
@@ -149,7 +147,7 @@ class DecisionEvaluator:
     def _load_config(self, config_path: str) -> None:
         """Load evaluation settings from YAML config file."""
         try:
-            with open(config_path, 'r') as f:
+            with open(config_path) as f:
                 config = yaml.safe_load(f)
             
             if 'resource_efficiency_threshold' in config:
@@ -315,7 +313,7 @@ class DecisionEvaluator:
     async def calculate_success_metrics(
         self,
         task_result: TaskResult
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Calculate success metrics for a task result.
         
         Args:
@@ -344,7 +342,7 @@ class DecisionEvaluator:
     
     def update_metric_weights(
         self,
-        new_weights: Dict[str, float]
+        new_weights: dict[str, float]
     ) -> None:
         """Update metric weights.
         
@@ -370,7 +368,7 @@ class DecisionEvaluator:
         
         logger.info(f"Updated metric weights: {self.metric_weights}")
     
-    def get_metric_weights(self) -> Dict[str, float]:
+    def get_metric_weights(self) -> dict[str, float]:
         """Get current metric weights.
         
         Returns:
@@ -391,8 +389,8 @@ class DecisionEvaluator:
     
     async def batch_evaluate(
         self,
-        results: List[tuple[str, TaskResult]]
-    ) -> List[DecisionScore]:
+        results: list[tuple[str, TaskResult]]
+    ) -> list[DecisionScore]:
         """Evaluate multiple decisions in batch.
         
         Args:
@@ -413,8 +411,8 @@ class DecisionEvaluator:
     
     async def get_evaluation_summary(
         self,
-        scores: List[DecisionScore]
-    ) -> Dict[str, Any]:
+        scores: list[DecisionScore]
+    ) -> dict[str, Any]:
         """Get summary statistics for a set of evaluations.
         
         Args:

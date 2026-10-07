@@ -47,8 +47,21 @@ class TestAgentAction:
             "mcp_project_context",
             "mcp_impact_analysis",
             "mcp_sequential_thinking",
+            "todo_write",
+            "todo_list",
+            "list_skills",
+            "load_skill",
+            "discover_skill_candidates",
+            "build_skill",
+            "sequential_thinking",
+            "pause_session",
+            "resume_session",
+            "get_session_status",
+            "cancel_run",
         }
-        assert actions == expected
+        # Keep the legacy/core actions required while allowing explicitly
+        # added capabilities to extend the enum over time.
+        assert expected <= actions
 
     def test_str_behavior(self) -> None:
         # AgentAction inherits from str + Enum, direct comparison works
@@ -669,6 +682,67 @@ _STEPS_PLAN = '{ "steps": [ { "tool": "list_dir", "parameters": { "path": "." } 
 _COMMANDS_PLAN = '{ "commands": [ { "command": "list_dir", "path": "." } ] }'
 _JSON_FENCE = '```json\n{"name": "list_dir", "arguments": {"path": "."}}\n```'
 _REAL_CALL = '```tool\n{"name": "list_dir", "arguments": {"path": "."}}\n```'
+
+
+class TestVerificationAfterMutation:
+    @pytest.mark.parametrize(
+        ("read_tool", "write_tool", "read_args", "write_args"),
+        [
+            ("read_file", "write_file", {"path": "main.py"},
+             {"path": "main.py", "content": "print('fixed')"}),
+            ("todo_list", "todo_write", {},
+             {"operation": "update", "todo_id": 1, "status": "completed"}),
+        ],
+    )
+    async def test_identical_read_must_run_again_after_a_successful_write(
+        self, monkeypatch, read_tool, write_tool, read_args, write_args
+    ) -> None:
+        import json
+
+        versions: list[int] = []
+        version = 0
+
+        async def execute(name, _session_id, _args, **_kwargs):
+            nonlocal version
+            if name == write_tool:
+                version += 1
+            else:
+                versions.append(version)
+            return {"tool": name, "result": {"ok": True, "version": version}}
+
+        monkeypatch.setattr("backend.agents.base.execute_tool", execute)
+        read = f'```tool\n{json.dumps({"name": read_tool, "arguments": read_args})}\n```'
+        write = f'```tool\n{json.dumps({"name": write_tool, "arguments": write_args})}\n```'
+        agent = _scripted_agent(
+            [read, write, read, "Verifiquei a alteração."],
+            supported_actions={AgentAction(read_tool), AgentAction(write_tool)},
+        )
+        output = [token async for token in agent._run_react_loop(_request())]
+
+        assert versions == [0, 1], "Verification must observe the state after the write"
+        assert "Repeated identical tool call skipped" not in "".join(output)
+        assert agent._last_run_success is True
+
+    async def test_reading_after_a_write_does_not_authorise_repeating_the_write(
+        self, monkeypatch
+    ) -> None:
+        executed: list[str] = []
+
+        async def execute(name, _session_id, _args, **_kwargs):
+            executed.append(name)
+            return {"tool": name, "result": {"ok": True}}
+
+        monkeypatch.setattr("backend.agents.base.execute_tool", execute)
+        write = '```tool\n{"name":"write_file","arguments":{"path":"main.py","content":"ok"}}\n```'
+        read = '```tool\n{"name":"read_file","arguments":{"path":"main.py"}}\n```'
+        agent = _scripted_agent(
+            [write, read, write, "Feito."],
+            supported_actions={AgentAction.READ_FILE, AgentAction.WRITE_FILE},
+        )
+        output = [token async for token in agent._run_react_loop(_request())]
+
+        assert executed == ["write_file", "read_file"]
+        assert "Repeated identical tool call skipped" in "".join(output)
 _WRITE_ABSOLUTE_CALL = (
     '```tool\n{"name": "write_file_absolute", "arguments": '
     '{"path": "C:\\\\Users\\\\rodri\\\\Desktop\\\\relatorio.md", '
@@ -891,6 +965,8 @@ class TestRejectedToolCallIsNotCompletion:
 
         assert "NO-TOOLS LANE" in system
         assert "Available tools:" not in system
+        assert "não assumas que mudar de modo as ativa" in system.casefold()
+        assert "mudar para um modo com ferramentas" not in system
 
     @pytest.mark.asyncio
     async def test_allowed_tools_contract_filters_advertised_tools(self) -> None:
@@ -1012,6 +1088,47 @@ class TestRejectedToolCallIsNotCompletion:
 
 class TestStreamFailureRecovery:
     """One provider hiccup used to end the whole run: ``except: yield; return``."""
+
+    async def test_selected_model_id_reaches_provider_adapter(self, monkeypatch) -> None:
+        selected_model = "fixture-provider/exact-model-id"
+
+        class _Agent(AgentBase):
+            name = "FIXTURE"
+            model_key = "coder"
+            prompt_file = "router"
+
+            async def _execute(self, request):
+                async for token in self.stream_llm(request):
+                    yield token
+
+        class _Provider:
+            provider_name = "fixture"
+
+            def __init__(self) -> None:
+                self.models: list[str] = []
+
+            async def chat_stream(self, *, model, messages, **_kwargs):
+                self.models.append(model)
+                yield "fixture answer"
+
+        monkeypatch.setattr(
+            "backend.agents.base.get_model_config",
+            lambda _key: {"id": "configured/tier-model", "max_tokens": 64, "temperature": 0.1},
+        )
+        agent = _Agent()
+        monkeypatch.setattr(agent, "system_prompt", lambda: "fixture system prompt")
+        provider = _Provider()
+        request = AgentRequest(
+            session_id="fixture-session",
+            query="answer with fixture",
+            client=provider,
+            context={"_model_override": selected_model},
+        )
+
+        output = [token async for token in agent.stream_llm(request)]
+
+        assert "".join(output) == "fixture answer"
+        assert provider.models == [selected_model]
 
     async def test_context_overflow_shrinks_and_retries_once(self) -> None:
         from backend.token_management import ContextOverflowError

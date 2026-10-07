@@ -5,10 +5,37 @@ import {
   sanitizeAssistantContent,
   summarizeApproachContent,
   agentActivity,
+  groupAdjacentFileReads,
 } from "../../lib/chatPresentation";
 import type { StreamEvent } from "../../lib/types";
 
 describe("chat presentation", () => {
+  it("agrega apenas leituras adjacentes com contagens reais e mantém eventos de atenção separados", () => {
+    const read = (id: string, count: number) => ({
+      id,
+      kind: "status" as const,
+      title: `li ${count} ficheiro(s)`,
+      status: "success" as const,
+      timestamp: id,
+      data: { kind: "file_read", count },
+    });
+    const error = {
+      id: "error",
+      kind: "status" as const,
+      title: "Leitura falhou",
+      status: "error" as const,
+      timestamp: "error",
+      data: { kind: "file_read", count: 2 },
+    };
+
+    const groups = groupAdjacentFileReads([read("a", 2), read("b", 3), error, read("c", 1)]);
+
+    expect(groups).toHaveLength(3);
+    expect(groups[0]).toMatchObject({ fileCount: 5, items: [{ id: "a" }, { id: "b" }] });
+    expect(groups[1].items).toEqual([error]);
+    expect(groups[2]).toMatchObject({ fileCount: 1, items: [{ id: "c" }] });
+  });
+
   it("removes closed and truncated tool markup from assistant text", () => {
     const content = [
       "Vou verificar o projeto.",
@@ -87,6 +114,20 @@ describe("chat presentation", () => {
       detail: "Atualizar a experiência do chat",
       status: "running",
     });
+  });
+
+  it("keeps runtime status updates neutral and recognizes validation starts", () => {
+    const status = activityFromProgress(
+      { type: "progress", content: "Sem alteração", data: { kind: "status_update" }, timestamp: "t1" },
+      0,
+    );
+    const validation = activityFromProgress(
+      { type: "progress", content: "A verificar", data: { kind: "test_started" }, timestamp: "t2" },
+      1,
+    );
+
+    expect(status.status).toBe("pending");
+    expect(validation).toMatchObject({ kind: "verification", status: "running", title: "Validação iniciada" });
   });
 
   it("turns structured mission events into compact activity cards", () => {
@@ -268,6 +309,26 @@ describe("chat presentation", () => {
   });
 
   describe("activityFromProgress coverage", () => {
+    it("preserva a lista raiz dos eventos PLAN_UPDATED para o plano do chat", () => {
+      const todos = [
+        { id: 1, content: "A tarefa concluída", status: "completed" },
+        { id: 2, content: "A tarefa pendente", status: "pending" },
+      ];
+      const activity = activityFromProgress(
+        {
+          type: "progress",
+          content: "plano atualizado",
+          data: { kind: "plan_updated", event: "plan_updated", tool: "todo_write", todos },
+          timestamp: "2026-09-28T10:00:00Z",
+        },
+        0,
+      );
+
+      expect(activity.kind).toBe("plan");
+      expect(activity.detail).toBe("1 de 2 etapas concluídas");
+      expect(activity.data?.todos).toEqual(todos);
+    });
+
     it("uses EVENT_TITLES mapping for known events", () => {
       const event: StreamEvent = {
         type: "progress",
@@ -330,6 +391,20 @@ describe("chat presentation", () => {
       };
       const activity = agentActivity(event, 0, "running");
       expect(activity.title).toContain("recebeu trabalho delegado");
+    });
+
+    it("attributes delegated activity to the target agent", () => {
+      const event: StreamEvent = {
+        type: "agent_started",
+        agent: "NEXUS",
+        timestamp: "t",
+        data: { delegated: true, name: "CODER", task_id: "t1" },
+      };
+
+      const activity = agentActivity(event, 0, "running");
+
+      expect(activity.agent).toBe("CODER");
+      expect(activity.title).toContain("CODER recebeu trabalho delegado");
     });
 
     it("uses index for id when no task_id", () => {

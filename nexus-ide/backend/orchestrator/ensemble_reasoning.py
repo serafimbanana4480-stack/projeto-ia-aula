@@ -6,17 +6,15 @@ improving accuracy through diverse perspectives and voting mechanisms.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
-from backend.tools.ollama_client import OllamaClient, ChatMessage
-from backend.config.settings import get_model_config
+from backend.tools.ollama_client import OllamaClient
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +38,7 @@ class AgentResponse:
     reasoning: str
     execution_time_ms: float
     tokens_used: int
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -48,8 +46,8 @@ class EnsembleResult:
     """The result of ensemble reasoning."""
     final_response: str
     consensus_method: ConsensusMethod
-    participating_agents: List[str]
-    individual_responses: List[AgentResponse]
+    participating_agents: list[str]
+    individual_responses: list[AgentResponse]
     consensus_score: float
     conflict_detected: bool
     synthesis_reasoning: str
@@ -83,16 +81,16 @@ class EnsembleReasoner:
     def __init__(
         self,
         ollama_client: OllamaClient,
-        agent_registry: Dict[str, AgentBase],
-        config: Optional[EnsembleConfig] = None
+        agent_registry: dict[str, AgentBase],
+        config: EnsembleConfig | None = None
     ) -> None:
         self.ollama = ollama_client
         self.agent_registry = agent_registry
         self.config = config or EnsembleConfig()
         
         # Performance tracking
-        self._ensemble_history: List[EnsembleResult] = []
-        self._agent_performance: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        self._ensemble_history: list[EnsembleResult] = []
+        self._agent_performance: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         
         # Lock for thread safety
         self._lock = asyncio.Lock()
@@ -101,9 +99,9 @@ class EnsembleReasoner:
         self,
         query: str,
         session_id: str,
-        agent_candidates: Optional[List[str]] = None,
-        consensus_method: Optional[ConsensusMethod] = None,
-        context: Optional[Dict[str, Any]] = None
+        agent_candidates: list[str] | None = None,
+        consensus_method: ConsensusMethod | None = None,
+        context: dict[str, Any] | None = None
     ) -> EnsembleResult:
         """Perform ensemble reasoning on a complex query."""
         start_time = time.time()
@@ -164,12 +162,12 @@ class EnsembleReasoner:
         
         return result
     
-    async def get_agent_performance(self, agent_name: str) -> Dict[str, float]:
+    async def get_agent_performance(self, agent_name: str) -> dict[str, float]:
         """Get performance metrics for a specific agent."""
         async with self._lock:
             return dict(self._agent_performance.get(agent_name, {}))
     
-    async def get_ensemble_stats(self) -> Dict[str, Any]:
+    async def get_ensemble_stats(self) -> dict[str, Any]:
         """Get ensemble reasoning statistics."""
         async with self._lock:
             if not self._ensemble_history:
@@ -196,8 +194,8 @@ class EnsembleReasoner:
     async def _select_agents(
         self,
         query: str,
-        agent_candidates: Optional[List[str]]
-    ) -> List[str]:
+        agent_candidates: list[str] | None
+    ) -> list[str]:
         """Select the best agents for this query."""
         if agent_candidates:
             # Use provided candidates
@@ -209,7 +207,7 @@ class EnsembleReasoner:
         # Limit to max_agents
         return available[:self.config.max_agents]
     
-    async def _select_agents_by_query_type(self, query: str) -> List[str]:
+    async def _select_agents_by_query_type(self, query: str) -> list[str]:
         """Select agents based on query characteristics."""
         query_lower = query.lower()
         selected = []
@@ -241,9 +239,9 @@ class EnsembleReasoner:
         self,
         query: str,
         session_id: str,
-        agent_names: List[str],
-        context: Optional[Dict[str, Any]]
-    ) -> List[AgentResponse]:
+        agent_names: list[str],
+        context: dict[str, Any] | None
+    ) -> list[AgentResponse]:
         """Execute multiple agents in parallel."""
         tasks = []
         
@@ -284,7 +282,7 @@ class EnsembleReasoner:
         agent_name: str,
         query: str,
         session_id: str,
-        context: Optional[Dict[str, Any]]
+        context: dict[str, Any] | None
     ) -> AgentResponse:
         """Execute a single agent and capture its response."""
         if agent_name not in self.agent_registry:
@@ -346,7 +344,7 @@ class EnsembleReasoner:
                 error=str(e)
             )
     
-    async def _detect_conflicts(self, responses: List[AgentResponse]) -> bool:
+    async def _detect_conflicts(self, responses: list[AgentResponse]) -> bool:
         """Detect if there are significant conflicts between responses."""
         if len(responses) < 2:
             return False
@@ -384,7 +382,7 @@ class EnsembleReasoner:
     
     async def _choose_consensus_method(
         self,
-        responses: List[AgentResponse],
+        responses: list[AgentResponse],
         conflict_detected: bool
     ) -> ConsensusMethod:
         """Choose the best consensus method based on responses."""
@@ -406,11 +404,11 @@ class EnsembleReasoner:
     
     async def _apply_consensus_method(
         self,
-        responses: List[AgentResponse],
+        responses: list[AgentResponse],
         method: ConsensusMethod,
         original_query: str,
-        context: Optional[Dict[str, Any]]
-    ) -> Tuple[str, float, str]:
+        context: dict[str, Any] | None
+    ) -> tuple[str, float, str]:
         """Apply the chosen consensus method."""
         if method == ConsensusMethod.MAJORITY_VOTE:
             return await self._majority_vote(responses)
@@ -426,7 +424,7 @@ class EnsembleReasoner:
             # Fallback to weighted vote
             return await self._weighted_vote(responses)
     
-    async def _majority_vote(self, responses: List[AgentResponse]) -> Tuple[str, float, str]:
+    async def _majority_vote(self, responses: list[AgentResponse]) -> tuple[str, float, str]:
         """Simple majority vote among responses."""
         # For simplicity, choose the response with highest confidence
         best_response = max(responses, key=lambda r: r.confidence)
@@ -435,7 +433,7 @@ class EnsembleReasoner:
         
         return best_response.response, consensus_score, reasoning
     
-    async def _weighted_vote(self, responses: List[AgentResponse]) -> Tuple[str, float, str]:
+    async def _weighted_vote(self, responses: list[AgentResponse]) -> tuple[str, float, str]:
         """Weighted vote based on confidence and agent performance."""
         # Calculate weights based on confidence and historical performance
         weights = []
@@ -454,7 +452,7 @@ class EnsembleReasoner:
         
         return best_response.response, consensus_score, reasoning
     
-    async def _best_response(self, responses: List[AgentResponse]) -> Tuple[str, float, str]:
+    async def _best_response(self, responses: list[AgentResponse]) -> tuple[str, float, str]:
         """Select the single best response."""
         best_response = max(responses, key=lambda r: r.confidence)
         consensus_score = best_response.confidence
@@ -464,10 +462,10 @@ class EnsembleReasoner:
     
     async def _synthesize_responses(
         self,
-        responses: List[AgentResponse],
+        responses: list[AgentResponse],
         original_query: str,
-        context: Optional[Dict[str, Any]]
-    ) -> Tuple[str, float, str]:
+        context: dict[str, Any] | None
+    ) -> tuple[str, float, str]:
         """Synthesize multiple responses into a single response."""
         prompt = f"""Synthesize the following responses into a single, comprehensive answer to the original query.
 
@@ -476,7 +474,7 @@ Original Query: {original_query}
 Responses from different agents:
 """
         
-        for i, response in enumerate(responses):
+        for _i, response in enumerate(responses):
             prompt += f"\nAgent {response.agent_name} (confidence: {response.confidence:.2f}):\n{response.response}\n"
         
         prompt += """
@@ -510,10 +508,10 @@ Synthesized response:"""
     
     async def _resolve_conflicts(
         self,
-        responses: List[AgentResponse],
+        responses: list[AgentResponse],
         original_query: str,
-        context: Optional[Dict[str, Any]]
-    ) -> Tuple[str, float, str]:
+        context: dict[str, Any] | None
+    ) -> tuple[str, float, str]:
         """Resolve conflicts between conflicting responses."""
         prompt = f"""The following agents provided conflicting responses to the same query. Please resolve the conflicts and provide the most accurate answer.
 
@@ -522,7 +520,7 @@ Original Query: {original_query}
 Conflicting Responses:
 """
         
-        for i, response in enumerate(responses):
+        for _i, response in enumerate(responses):
             prompt += f"\nAgent {response.agent_name} (confidence: {response.confidence:.2f}):\n{response.response}\n"
         
         prompt += """
@@ -575,8 +573,8 @@ Conflict resolution:"""
         self,
         query: str,
         session_id: str,
-        agents: List[str],
-        context: Optional[Dict[str, Any]]
+        agents: list[str],
+        context: dict[str, Any] | None
     ) -> EnsembleResult:
         """Fallback for single agent scenarios."""
         if not agents:
@@ -637,7 +635,7 @@ Conflict resolution:"""
         if len(self._ensemble_history) > 1000:
             self._ensemble_history = self._ensemble_history[-1000:]
     
-    async def _calculate_agent_participation(self, results: List[EnsembleResult]) -> Dict[str, float]:
+    async def _calculate_agent_participation(self, results: list[EnsembleResult]) -> dict[str, float]:
         """Calculate agent participation rates."""
         participation = defaultdict(int)
         total = len(results)
@@ -650,13 +648,13 @@ Conflict resolution:"""
 
 
 # Global ensemble reasoner instance
-_ensemble_reasoner: Optional[EnsembleReasoner] = None
+_ensemble_reasoner: EnsembleReasoner | None = None
 
 
 def get_ensemble_reasoner(
     ollama_client: OllamaClient,
-    agent_registry: Dict[str, AgentBase],
-    config: Optional[EnsembleConfig] = None
+    agent_registry: dict[str, AgentBase],
+    config: EnsembleConfig | None = None
 ) -> EnsembleReasoner:
     """Get the global ensemble reasoner instance."""
     global _ensemble_reasoner

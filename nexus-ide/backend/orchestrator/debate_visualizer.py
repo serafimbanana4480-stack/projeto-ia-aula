@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 
 class Stance(str, Enum):
@@ -34,7 +34,7 @@ class DebateRound:
     round_number: int
     arguments: list[DebateArgument] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
-    completed_at: Optional[float] = None
+    completed_at: float | None = None
 
     def add_argument(self, argument: DebateArgument) -> None:
         self.arguments.append(argument)
@@ -53,7 +53,7 @@ class DebateSession:
     participants: list[str] = field(default_factory=list)
     status: str = "active"  # active, completed, cancelled
     started_at: float = field(default_factory=time.time)
-    completed_at: Optional[float] = None
+    completed_at: float | None = None
 
     def add_round(self) -> DebateRound:
         round_obj = DebateRound(round_number=len(self.rounds) + 1)
@@ -93,7 +93,7 @@ class DebateVisualizer:
         self._sessions[session_id] = session
         return session
 
-    def get_session(self, session_id: str) -> Optional[DebateSession]:
+    def get_session(self, session_id: str) -> DebateSession | None:
         return self._sessions.get(session_id)
 
     def add_argument(
@@ -104,7 +104,7 @@ class DebateVisualizer:
         content: str,
         confidence: float = 0.5,
         evidence: list[dict[str, Any]] | None = None,
-    ) -> Optional[DebateArgument]:
+    ) -> DebateArgument | None:
         session = self._sessions.get(session_id)
         if not session:
             return None
@@ -136,7 +136,7 @@ class DebateVisualizer:
         session.complete()
         return True
 
-    def get_live_state(self, session_id: str) -> Optional[dict[str, Any]]:
+    def get_live_state(self, session_id: str) -> dict[str, Any] | None:
         session = self._sessions.get(session_id)
         if not session:
             return None

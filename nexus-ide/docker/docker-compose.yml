@@ -7,10 +7,9 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - LLM_PROVIDER=opencode_go
-      - OPENCODE_GO_BASE_URL=http://host.docker.internal:11434
-      - OPENCODE_GO_API_KEY=sk-local-proxy
-      - OPENCODE_GO_DEFAULT_MODEL=glm-5.2
+      - LLM_PROVIDER=ollama
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - OLLAMA_DEFAULT_MODEL=glm-5.2
       - LOCAL_LLM_DEVICE=cpu
       - ENVIRONMENT=development
       - DATABASE_URL=sqlite:///./data/nexus.db

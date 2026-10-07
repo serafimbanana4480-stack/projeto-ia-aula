@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -140,6 +140,17 @@ _CONFIRMATION_TOOLS = {
     "copy_file_absolute",
     "git_push",
     "git_operation",
+    # Commit execution. These write history without a human decision, so they
+    # are approval-gated here AND carry an explicit high risk_level: the gate
+    # must not depend on a single name list being maintained correctly.
+    "git_commit_safe",
+    "git_commit_all",
+    "approve_pending_commit",
+    "git_pull",
+    "git_init",
+    "git_clone",
+    # Writes a SKILL.md into the user's project.
+    "build_skill",
     "install_dependency",
     "execute_shell",
     "run_shell",
@@ -354,8 +365,17 @@ def _is_safe_autonomous_command(command: object) -> bool:
 
     Redirection, backticks and command substitution remain refused because
     their effect is not visible in the text we validate.
+
+    A line break is refused on the RAW command, before normalisation. Bare
+    ``str.split()`` folds ``\\n``, ``\\r``, ``\\x0b`` and ``\\x0c`` into spaces, so
+    ``"git status\\nwhoami"`` normalised to the single-line string
+    ``"git status whoami"`` and satisfied the ``git status`` prefix allowlist
+    while the text handed to the shell still contained a line break. The
+    payload never reaches the prefix allowlist or the segment splitter now.
     """
     if not isinstance(command, str):
+        return False
+    if any(char in command for char in ("\n", "\r", "\x0b", "\x0c")):
         return False
     normalized = " ".join(command.strip().lower().split())
     if not normalized:
@@ -376,16 +396,111 @@ def _is_safe_autonomous_command(command: object) -> bool:
     return all(_segment_is_safe(segment) for segment in segments)
 
 
-def _path_is_within_project(path: object, project_path: str) -> bool:
-    """Return whether an absolute target stays inside the selected project."""
+def _path_is_within_project(
+    path: object, project_path: str, *, relative_to_project: bool = False
+) -> bool:
+    """Return whether a target resolves inside the selected project."""
     if not isinstance(path, str) or not path.strip() or not project_path.strip():
         return False
     try:
-        target = os.path.normcase(os.path.realpath(os.path.abspath(path)))
-        root = os.path.normcase(os.path.realpath(os.path.abspath(project_path)))
+        root_path = os.path.realpath(os.path.abspath(project_path))
+        target_path = path.strip()
+        if not os.path.isabs(target_path):
+            drive, _tail = os.path.splitdrive(target_path)
+            if not relative_to_project or drive:
+                return False
+            target_path = os.path.join(root_path, target_path)
+        target = os.path.normcase(os.path.realpath(os.path.abspath(target_path)))
+        root = os.path.normcase(root_path)
         return os.path.commonpath((target, root)) == root
     except (OSError, ValueError):
         return False
+
+
+def _sentinel_paths_within_project(
+    args: dict[str, Any], project_path: str, *keys: str
+) -> bool:
+    """Check every supplied path argument against the selected project root."""
+    paths: list[str] = []
+    for key in keys:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            paths.append(value.strip())
+        elif isinstance(value, (list, tuple)):
+            paths.extend(
+                item.strip()
+                for item in value
+                if isinstance(item, str) and item.strip()
+            )
+    return bool(paths and project_path) and all(
+        _path_is_within_project(path, project_path, relative_to_project=True)
+        for path in paths
+    )
+
+
+_SENTINEL_PROJECT_READ_PATH_KEYS = {
+    "read_file": ("path",),
+    "read_multiple_files": ("paths",),
+    "list_dir": ("path",),
+    "search_in_files": ("root_path", "path"),
+    "get_file_info": ("path",),
+    "search_codebase": ("project_path",),
+    "search_symbols": ("project_path",),
+    "analyze_project": ("project_path", "path"),
+    "get_project_summary": ("project_path", "path"),
+    "list_project_files": ("project_path", "path"),
+    "mcp_project_context": ("project_path",),
+    "mcp_impact_analysis": ("project_path",),
+    "mcp_project_status": ("project_path",),
+}
+
+_SENTINEL_EXTERNAL_READ_TOOLS = frozenset(
+    {
+        "consult_agent",
+        "web_search",
+        "fetch_url",
+        "fetch_and_summarize",
+        "search_web_v2",
+        "fetch_content_v2",
+        "deep_research",
+        "search_github",
+        "search_docs",
+        "search_and_answer",
+        "mcp_call_readonly_tool",
+    }
+)
+
+_SENTINEL_LOCAL_READ_ONLY_TOOLS = frozenset(
+    {
+        "check_context_size",
+        "get_budget_report",
+        "list_tasks",
+        "scheduler_status",
+        "db_schema",
+        "db_tables",
+        "index_stats",
+        "get_commit_history",
+        "get_commit_statistics",
+        "search_knowledge",
+        "get_knowledge_memory",
+        "recall_context",
+        "mcp_list_tools",
+        "mcp_recommend_tools",
+        "mcp_sequential_thinking",
+        "get_user_profile",
+        "recall_user_memories",
+        "get_system_health",
+        "get_session_status",
+        "todo_list",
+        "list_skills",
+        "discover_skill_candidates",
+        "browser_extract_text",
+        "browser_get_links",
+        "tts_status",
+        "vision_status",
+        "sequential_thinking",
+    }
+)
 
 
 def autonomous_confirmation_required(
@@ -410,9 +525,17 @@ def autonomous_confirmation_required(
         # recoverable implementation step. Paths outside that boundary keep
         # the explicit approval gate.
         path = args.get("path") or args.get("file_path") or args.get("filename")
-        return not _path_is_within_project(path, project_path)
+        return not _path_is_within_project(
+            path,
+            project_path,
+            relative_to_project=spec.name in {"write_file", "create_file"},
+        )
     if spec.name in {"delete_file", "delete_file_absolute", "delete_directory", "delete_dir_absolute", "move_file", "move_file_absolute", "copy_file", "copy_file_absolute"}:
-        return not _path_is_within_project(args.get("path") or args.get("src") or args.get("destination"), project_path)
+        # Project scope does not make destructive operations reversible.
+        # Deletion and moves also violate the repository's explicit "nothing
+        # is deleted" rule; copies can overwrite a target, so they stay behind
+        # the same human confirmation gate.
+        return True
     if spec.name in {"execute_shell", "run_shell"}:
         return not _is_safe_autonomous_command(args.get("command"))
     return True
@@ -632,7 +755,7 @@ def get_tool_descriptions_for_llm(
             lines.append(f"## {current_cat.title()}")
             lines.append("")
         risk = f" [RISK: {tool.risk_level}]" if include_risk and tool.risk_level != "low" else ""
-        conf = " [requires confirmation]" if tool.requires_confirmation else ""
+        conf = " [requires confirmation]" if tool_requires_confirmation(tool) else ""
         lines.append(f"- `{tool.name}`{risk}{conf} — {tool.description}")
         if tool.when_to_use:
             lines.append(f"  - When: {tool.when_to_use}")
@@ -652,7 +775,7 @@ def get_tool_stats() -> dict[str, Any]:
     for t in tools:
         by_cat[t.category or "uncategorised"] = by_cat.get(t.category or "uncategorised", 0) + 1
         by_risk[t.risk_level] = by_risk.get(t.risk_level, 0) + 1
-        if t.requires_confirmation:
+        if tool_requires_confirmation(t):
             confirmation_count += 1
     return {
         "total": len(tools),
@@ -669,7 +792,14 @@ def set_tool_enabled(name: str, enabled: bool) -> None:
 
 
 def _handler_result_failed(result: Any) -> str | None:
-    """Return an error when a handler did not produce a successful result."""
+    """Return an error when a handler did not produce a successful result.
+
+    ``status == "error"`` is a failure signal in its own right: the fetch tools
+    (``web_fetcher``, ``web_search_v2``) return the error text in ``summary``
+    and leave every other key absent, so without this check a failed fetch was
+    scored as a success — logged ``success=True``, counted as one by the circuit
+    breaker, and handed to the model as ``ok: true``.
+    """
     if not isinstance(result, dict):
         return None
     if result.get("error"):
@@ -686,10 +816,14 @@ def _handler_result_failed(result: Any) -> str | None:
         return str(result.get("error") or "Delete operation failed")
     if result.get("moved") is False:
         return str(result.get("error") or "Move operation failed")
+    if str(result.get("status") or "").strip().lower() == "error":
+        return str(
+            result.get("summary") or result.get("message") or "Tool reported status=error"
+        )
     return None
 
 
-def _drop_unsupported_args(spec: "ToolSpec", args: dict) -> tuple[dict, dict]:
+def _drop_unsupported_args(spec: ToolSpec, args: dict) -> tuple[dict, dict]:
     """Split args into handler-supported and ignored arguments."""
     handler = getattr(spec, "handler", None)
     if handler is None or not isinstance(args, dict):
@@ -835,6 +969,298 @@ def _typed_tool_response(
     return payload
 
 
+def _sentinel_assessment(
+    name: str,
+    args: dict[str, Any],
+    spec: ToolSpec,
+    *,
+    project_path: str,
+) -> dict[str, Any]:
+    """Apply the Infinity Sentinel risk taxonomy to one concrete tool call."""
+    # Unknown tools must not inherit ToolSpec's low-risk default. Every tool
+    # needs an explicit classification before Sentinel can auto-approve it.
+    risk_by_label = {"low": 3, "medium": 2, "high": 3, "critical": 4}
+    risk_level = risk_by_label.get(str(spec.risk_level or "low").lower(), 3)
+
+    if name in {"write_file", "create_file", "append_file", "create_directory"}:
+        target = args.get("path") or args.get("file_path") or args.get("filename")
+        risk_level = (
+            1
+            if _path_is_within_project(
+                target, project_path, relative_to_project=True
+            )
+            else 3
+        )
+    elif name == "write_file_absolute":
+        target = args.get("path") or args.get("file_path")
+        risk_level = 1 if _path_is_within_project(target, project_path) else 3
+    elif name == "create_dir_absolute":
+        risk_level = (
+            1
+            if _path_is_within_project(args.get("path"), project_path)
+            else 3
+        )
+    elif name == "install_dependency":
+        risk_level = 2
+    elif name in {
+        "delete_file", "delete_file_absolute", "delete_directory", "delete_dir_absolute",
+        "move_file", "move_file_absolute", "copy_file", "copy_file_absolute",
+    }:
+        risk_level = 3
+    elif name == "git_push":
+        risk_level = 4
+    elif name == "git_operation":
+        command = str(args.get("command") or "").strip().lower()
+        if command.startswith("git "):
+            command = command[4:].lstrip()
+        parts = command.split(maxsplit=1)
+        operation = parts[0] if parts else ""
+        operation_args = parts[1].split() if len(parts) > 1 else []
+        read_only = operation in {
+            "status", "diff", "log", "show", "blame", "rev-parse"
+        }
+        if operation == "branch":
+            read_only = not operation_args or set(operation_args).issubset(
+                {"--list", "-l", "-a", "--all", "-r", "--remotes", "--show-current"}
+            )
+        elif operation == "tag":
+            read_only = not operation_args or set(operation_args).issubset(
+                {"--list", "-l"}
+            )
+        risk_level = 0 if read_only else 4 if operation == "push" else 3
+    elif name in {
+        "git_commit_all", "git_commit_safe", "git_pull", "git_clone",
+        "auto_commit_after_write", "approve_pending_commit", "reject_pending_commit",
+    }:
+        risk_level = 3
+    elif name == "git_init":
+        risk_level = 2
+    elif name == "api_request":
+        method = str(args.get("method") or "GET").strip().upper()
+        risk_level = 2 if method in {"GET", "HEAD", "OPTIONS"} else 3
+    elif name == "browser_navigate":
+        risk_level = 2
+    elif name in {"docker_run", "docker_compose_up"}:
+        risk_level = 3
+    elif name == "docker_compose_down":
+        risk_level = 4 if args.get("volumes") else 3
+    elif name in {"execute_shell", "run_shell"}:
+        cwd = args.get("cwd")
+        safe_cwd = bool(project_path) and (
+            not cwd
+            or _path_is_within_project(
+                cwd, project_path, relative_to_project=True
+            )
+        )
+        risk_level = (
+            1
+            if _is_safe_autonomous_command(args.get("command")) and safe_cwd
+            else 3
+        )
+    elif name in {
+        "execute_code",
+        "execute_python",
+        "execute_script",
+        "run_python_script",
+        "db_execute",
+        "send_webhook",
+        "send_email_notification",
+    }:
+        risk_level = 3
+    elif name in {"generate_project", "scaffold_project"}:
+        risk_level = 2
+    elif name in {
+        "read_file_absolute", "list_dir_absolute", "search_files_absolute",
+        "read_multiple_files_absolute", "get_file_info_absolute", "list_backups",
+        "discover_projects", "get_project_info", "git_status",
+    }:
+        path_keys = {
+            "search_files_absolute": ("root_path",),
+            "discover_projects": ("root_path",),
+            "get_project_info": ("path",),
+            "git_status": ("path",),
+            "read_multiple_files_absolute": ("paths",),
+        }.get(name, ("path",))
+        risk_level = (
+            0 if _sentinel_paths_within_project(args, project_path, *path_keys) else 3
+        )
+    elif name == "restore_backup":
+        risk_level = 3
+    elif name == "data_analysis":
+        risk_level = (
+            3
+            if args.get("code")
+            or (
+                args.get("data_path")
+                and not _path_is_within_project(
+                    args.get("data_path"), project_path, relative_to_project=True
+                )
+            )
+            else 0
+        )
+    elif name == "browser_click":
+        risk_level = 3
+    elif name == "browser_fill":
+        risk_level = 2
+    elif name in {"schedule_task", "spawn_task", "publish_bus_message"}:
+        risk_level = 3 if name != "publish_bus_message" else 2
+    elif name in {
+        "update_user_preferences", "remember_fact", "store_memory", "add_knowledge",
+        "resume_session",
+    }:
+        risk_level = 2
+    elif name == "todo_write":
+        risk_level = 1
+    elif name == "run_lint":
+        risk_level = (
+            1
+            if args.get("fix") and project_path
+            and _path_is_within_project(
+                args.get("path") or ".", project_path, relative_to_project=True
+            )
+            else 3 if args.get("fix") else 0
+        )
+    elif name == "format_code":
+        risk_level = (
+            0
+            if args.get("check")
+            else 1
+            if project_path
+            and _path_is_within_project(
+                args.get("path") or ".", project_path, relative_to_project=True
+            )
+            else 3
+        )
+    elif name == "generate_tests":
+        risk_level = (
+            1
+            if project_path
+            and _path_is_within_project(
+                args.get("file_path"), project_path, relative_to_project=True
+            )
+            else 3
+        )
+    elif name == "generate_module_doc":
+        source_in_project = _path_is_within_project(
+            args.get("file_path"), project_path, relative_to_project=True
+        )
+        output_path = args.get("output_path")
+        if output_path:
+            risk_level = (
+                1
+                if source_in_project
+                and _path_is_within_project(
+                    output_path, project_path, relative_to_project=True
+                )
+                else 3
+            )
+        else:
+            risk_level = 0 if source_in_project else 3
+    elif name == "report_generation":
+        output_path = args.get("output_path")
+        risk_level = (
+            1
+            if output_path
+            and project_path
+            and _path_is_within_project(
+                output_path, project_path, relative_to_project=True
+            )
+            else 3
+            if output_path
+            else 0
+        )
+    elif name == "cancel_task":
+        risk_level = 2
+    elif name == "run_tests":
+        test_path = args.get("test_path") or "."
+        risk_level = (
+            1
+            if project_path
+            and _path_is_within_project(
+                test_path, project_path, relative_to_project=True
+            )
+            else 3
+        )
+    elif name == "type_check":
+        risk_level = (
+            2
+            if project_path
+            and _path_is_within_project(
+                args.get("path") or ".", project_path, relative_to_project=True
+            )
+            else 3
+        )
+    elif name in {"index_codebase", "index_symbols"}:
+        index_path = args.get("project_path") or project_path
+        risk_level = (
+            1
+            if project_path
+            and _path_is_within_project(
+                index_path, project_path, relative_to_project=True
+            )
+            else 3
+        )
+    elif name in {"check_inbox", "search_emails", "summarize_inbox", "speak"}:
+        risk_level = 2
+    elif name in {
+        "show_desktop_notification",
+        "subscribe_bus_topic",
+        "browser_screenshot",
+        "browser_close",
+        "trim_context",
+    }:
+        risk_level = 1
+    elif name in _SENTINEL_PROJECT_READ_PATH_KEYS:
+        path_keys = _SENTINEL_PROJECT_READ_PATH_KEYS[name]
+        risk_level = (
+            0
+            if _sentinel_paths_within_project(args, project_path, *path_keys)
+            else 3
+        )
+    elif name in _SENTINEL_EXTERNAL_READ_TOOLS:
+        risk_level = 2
+    elif name in {"db_query", "db_execute"}:
+        risk_level = 2 if name == "db_query" else 3
+    elif name in {"mcp_call_tool", "mcp_builder", "build_skill"}:
+        risk_level = 3
+    elif name in {
+        "pause_session",
+        "resume_session",
+        "cancel_run",
+        "analyze_image",
+        "analyze_screenshot",
+        "compare_images",
+    }:
+        risk_level = 2
+    elif name in _SENTINEL_LOCAL_READ_ONLY_TOOLS:
+        risk_level = 0
+
+    if spec.requires_confirmation:
+        risk_level = max(risk_level, 2)
+
+    files_affected: list[str] = []
+    for key in ("path", "file_path", "filename", "src", "destination", "target"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            files_affected.append(value.strip())
+    for key in ("files", "paths"):
+        values = args.get(key)
+        if isinstance(values, (list, tuple)):
+            files_affected.extend(
+                value.strip()
+                for value in values
+                if isinstance(value, str) and value.strip()
+            )
+
+    from backend.orchestrator.advanced_modes import get_orchestrator
+
+    return get_orchestrator().check_security_gate(
+        action_description=f"{name} {args!r}",
+        risk_level=risk_level,
+        files_affected=files_affected,
+    )
+
+
 async def execute_tool(
     name: str,
     session_id: str | None,
@@ -842,8 +1268,12 @@ async def execute_tool(
     *,
     confirmed: bool = False,
     enforce_confirmation: bool = False,
+    retry_confirmation: bool = False,
+    confirmation_user_id: str = "",
     autonomous: bool = False,
     project_path: str = "",
+    sentinel_enforced: bool = False,
+    allowed_tools: Iterable[str] | None = None,
 ) -> dict:
     spec = get_tool(name)
     if not spec:
@@ -864,6 +1294,37 @@ async def execute_tool(
         return _typed_tool_response(
             name, ok=False, error=f"Tool '{name}' has no handler", error_category="tool"
         )
+    if sentinel_enforced and project_path and isinstance(args, dict):
+        # A tool argument cannot replace the project chosen by the request.
+        # Project-relative handlers receive this trusted root before both the
+        # Sentinel assessment and the handler call.
+        properties = spec.schema.get("properties", {})
+        if isinstance(properties, dict):
+            trusted_args: dict[str, Any] = {}
+            if "project_path" in properties:
+                trusted_args["project_path"] = project_path
+            if "cwd" in properties:
+                trusted_args["cwd"] = project_path
+            if trusted_args:
+                args = {**args, **trusted_args}
+    if name in {
+        "todo_write",
+        "todo_list",
+        "list_skills",
+        "load_skill",
+    } and isinstance(args, dict):
+        # Defense in depth: execute_tool's session_id comes from the caller's
+        # trusted request context; the model-controlled argument is never a
+        # storage selector. Fail closed when that context is missing.
+        trusted_session_id = str(session_id or "").strip()
+        if not trusted_session_id:
+            return _typed_tool_response(
+                name,
+                ok=False,
+                error="A trusted session context is required for this tool.",
+                error_category="invalid_session",
+            )
+        args = {**args, "session_id": trusted_session_id}
     arg_errors = validate_tool_args(spec, args)
     if arg_errors:
         return _typed_tool_response(
@@ -895,6 +1356,24 @@ async def execute_tool(
             circuit_open=True,
         )
 
+    sentinel_gate: dict[str, Any] | None = None
+    if sentinel_enforced:
+        try:
+            sentinel_gate = _sentinel_assessment(
+                name, args, spec, project_path=project_path
+            )
+        except Exception:
+            logger.exception("Sentinel could not assess tool call %s", name)
+            return _typed_tool_response(
+                name,
+                ok=False,
+                error="Sentinel could not verify this action; no tool was executed.",
+                error_category="sentinel_unavailable",
+            )
+    sentinel_requires_approval = bool(
+        sentinel_gate and sentinel_gate.get("requires_approval")
+    )
+
     # Confirmation gate BEFORE cache: a cached hit must never bypass the
     # user's explicit approval for confirmation-listed tools (e.g. fetch_url).
     needs_confirmation = (
@@ -902,15 +1381,23 @@ async def execute_tool(
         if autonomous
         else tool_requires_confirmation(spec)
     )
-    if enforce_confirmation and needs_confirmation and not confirmed and not args.get("confirm", False):
+    needs_confirmation = needs_confirmation or sentinel_requires_approval
+    # ``args`` came from the model and is never proof of user approval. Only
+    # the trusted ``confirmed`` flag set by the approval flow may open this
+    # gate; accepting ``{"confirm": true}`` here lets a model approve itself.
+    if (
+        (enforce_confirmation and needs_confirmation) or sentinel_requires_approval
+    ) and not confirmed:
         from backend.tools.confirmations import create_confirmation
 
         confirmation_id = await create_confirmation(
             session_id=session_id or "default",
             tool_name=name,
             args=args,
+            retry_enabled=retry_confirmation,
+            user_id=confirmation_user_id,
         )
-        return _typed_tool_response(
+        response = _typed_tool_response(
             name,
             ok=False,
             error=f"Confirmation required before executing '{name}'.",
@@ -918,8 +1405,32 @@ async def execute_tool(
             confirmation_required=True,
             confirmation_id=confirmation_id,
             tool_args=args,
-            risk_level=spec.risk_level,
+            risk_level=(
+                sentinel_gate.get("risk_level", spec.risk_level)
+                if sentinel_gate
+                else spec.risk_level
+            ),
             suggestion="Review the arguments and approve the operation to continue.",
+        )
+        if sentinel_gate:
+            response["sentinel_gate"] = sentinel_gate
+        return response
+
+    args, dropped_args = _drop_unsupported_args(spec, args)
+    dropped_names = list(dropped_args.get("dropped", []))
+    unsupported = [name for name in dropped_names if name != "confirm"]
+    if unsupported:
+        return _typed_tool_response(
+            name,
+            ok=False,
+            error=(
+                "Unsupported tool argument(s): "
+                + ", ".join(unsupported)
+                + ". Remove them and retry; no action was executed."
+            ),
+            error_category="invalid_args",
+            unsupported_arguments=unsupported,
+            valid_arguments=dropped_args.get("valid_arguments", []),
         )
 
     # Check cache for idempotent tools (only after confirmation is satisfied)
@@ -942,17 +1453,31 @@ async def execute_tool(
         except Exception:
             pass  # Cache is best-effort
 
-    args, dropped_args = _drop_unsupported_args(spec, args)
     timeout_seconds = (
         float(spec.timeout_seconds)
         if spec.timeout_seconds is not None
         else TOOL_TIMEOUT_SECONDS
     )
+    handler_args = args
+    if name in {"consult_agent", "spawn_task"}:
+        # These values are trusted server context, not model-controlled tool
+        # arguments. Delegated workers inherit the same boundaries as the caller.
+        handler_args = {
+            **args,
+            "sentinel_enforced": sentinel_enforced,
+            "allowed_tools": (
+                tuple(sorted({str(tool).strip() for tool in allowed_tools if str(tool).strip()}))
+                if allowed_tools is not None
+                else None
+            ),
+        }
+        if project_path:
+            handler_args["project_path"] = project_path
     start = time.time()
     try:
-        result = await asyncio.wait_for(spec.handler(**args), timeout=timeout_seconds)
-        if dropped_args and isinstance(result, dict):
-            result = {**result, "ignored_arguments": dropped_args}
+        result = await asyncio.wait_for(
+            spec.handler(**handler_args), timeout=timeout_seconds
+        )
         duration_ms = int((time.time() - start) * 1000)
         handler_error = _handler_result_failed(result)
         if handler_error:
@@ -982,6 +1507,8 @@ async def execute_tool(
         response = _typed_tool_response(
             name, ok=True, result=result, duration_ms=duration_ms
         )
+        if sentinel_gate:
+            response["sentinel_gate"] = sentinel_gate
         log_tool_execution(
             session_id=session_id,
             tool_name=name,

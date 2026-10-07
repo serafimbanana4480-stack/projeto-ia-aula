@@ -23,6 +23,8 @@ from backend.llm.free_policy import (
     FreeModelRequirement,
     ProviderUnavailableError,
 )
+from backend.llm.response_cache import get_response_cache
+
 logger = logging.getLogger(__name__)
 
 # 401/402/403 = credenciais/crédito: reintentar cedo só queima a cadeia
@@ -340,6 +342,7 @@ class MultiLLMManager:
         model: str,
         messages: list[dict[str, str]],
         output_text: str | None,
+        run_id: str = "",
     ) -> None:
         """Extract / estimate usage and record it in the tracker."""
         provider = self.providers.get(provider_name)
@@ -390,6 +393,7 @@ class MultiLLMManager:
                 model=model,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                run_id=run_id,
             )
             if (
                 governor.daily_budget_usd > 0
@@ -426,7 +430,7 @@ class MultiLLMManager:
         best, _ = min(candidates, key=score)
         return best
 
-    def _ensure_dispatch_allowed(self, name: str, model: str) -> None:
+    def _ensure_dispatch_allowed(self, name: str, model: str, run_id: str = "") -> None:
         provider = self.providers[name]
         if getattr(provider, "simulation", False):
             raise ProviderUnavailableError(
@@ -440,7 +444,7 @@ class MultiLLMManager:
         # $0 so this is a no-op unless a daily budget is configured.
         from backend.llm.cost_governor import get_cost_governor
 
-        get_cost_governor().check()
+        get_cost_governor().check(run_id=run_id)
         if not self.free_only:
             return
         validator = getattr(provider, "validate_model", None)
@@ -525,7 +529,7 @@ class MultiLLMManager:
         if not self.free_only:
             return model
         candidates = list(self.policy_candidates)
-        for name, provider in self.providers.items():
+        for _name, provider in self.providers.items():
             catalog = getattr(provider, "_catalog", None)
             if isinstance(catalog, dict):
                 catalog = catalog.get("models", catalog.get("data", []))
@@ -597,6 +601,7 @@ class MultiLLMManager:
         provider: str | None = None,
         **kwargs: Any,
     ) -> str:
+        run_id = kwargs.pop("run_id", None) or ""
         request_options = options or {}
         request_requirement = replace(
             self.requirement,
@@ -621,6 +626,16 @@ class MultiLLMManager:
                 provider=target,
                 model=model,
             )
+        # Response cache lookup BEFORE cost governor — a hit costs $0 and
+        # must never be blocked by a budget limit.
+        cache = get_response_cache()
+        cache_key = ""
+        if cache.enabled:
+            cache_key = cache.cache_key(target, model, messages, options, **kwargs)
+            cached = cache.get(cache_key)
+            if cached is not None:
+                logger.info("Response cache HIT for chat_complete")
+                return cached
         last_error: ProviderUnavailableError | None = None
         names_to_try = self._attempt_names(target)
         for name in names_to_try:
@@ -635,7 +650,7 @@ class MultiLLMManager:
                 )
                 continue
             try:
-                self._ensure_dispatch_allowed(name, model)
+                self._ensure_dispatch_allowed(name, model, run_id)
             except BudgetExceededError as exc:
                 # Orçamento esgotado: não vale a pena tentar os restantes
                 # providers pagos — todos falham pelo mesmo motivo.
@@ -664,8 +679,11 @@ class MultiLLMManager:
                 await breaker.record_success()
                 self._update_health(name, True, (time.time() - started) * 1000)
                 self._record_usage(
-                    provider_name=name, model=model, messages=messages, output_text=result
+                    provider_name=name, model=model, messages=messages,
+                    output_text=result, run_id=run_id,
                 )
+                if cache.enabled:
+                    cache.store(cache_key, result)
                 logger.info("Provider '%s' succeeded for chat_complete", name)
                 return result
             except asyncio.CancelledError:
@@ -704,6 +722,7 @@ class MultiLLMManager:
         provider: str | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
+        run_id = kwargs.pop("run_id", None) or ""
         request_options = options or {}
         request_requirement = replace(
             self.requirement,
@@ -726,6 +745,9 @@ class MultiLLMManager:
                 provider=target,
                 model=model,
             )
+        # Response cache: streaming is never cached (partial output cannot
+        # be replayed safely), but the budget check still needs run_id.
+        get_response_cache()
         last_error: ProviderUnavailableError | None = None
         for name in self._attempt_names(target):
             breaker = get_breaker(name)
@@ -739,7 +761,7 @@ class MultiLLMManager:
                 )
                 continue
             try:
-                self._ensure_dispatch_allowed(name, model)
+                self._ensure_dispatch_allowed(name, model, run_id)
             except BudgetExceededError as exc:
                 # Orçamento esgotado: não vale a pena tentar os restantes
                 # providers pagos — todos falham pelo mesmo motivo.
@@ -773,6 +795,7 @@ class MultiLLMManager:
                     model=model,
                     messages=messages,
                     output_text="".join(chunks),
+                    run_id=run_id,
                 )
                 return
             except asyncio.CancelledError:

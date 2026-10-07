@@ -28,6 +28,8 @@ async def spawn_task(
     session_id: str = "",
     project_path: str = "",
     autonomous: bool = True,
+    sentinel_enforced: bool = False,
+    allowed_tools: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Spawn a new task dynamically in the active orchestration run.
 
@@ -165,6 +167,12 @@ async def spawn_task(
                     "parent_context": context,
                     "depends_on": depends_on or [],
                     "autonomous": autonomous,
+                    "_sentinel_enforced": sentinel_enforced,
+                    **(
+                        {"_allowed_tools": tuple(allowed_tools)}
+                        if allowed_tools is not None
+                        else {}
+                    ),
                 },
                 mission_id=session_id,
                 parent_task_id=parent_id or "",

@@ -1,12 +1,13 @@
 """AITeamLead — coordinates AI/ML development tasks."""
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
-from backend.agents.base import AgentBase, AgentRequest
-from backend.agents.ai_team.ml_engineer_agent import MLEngineerAgent
 from backend.agents.ai_team.data_scientist_agent import DataScientistAgent
+from backend.agents.ai_team.ml_engineer_agent import MLEngineerAgent
 from backend.agents.ai_team.prompt_engineer_agent import PromptEngineerAgent
+from backend.agents.base import AgentBase, AgentRequest
 
 
 class AITeamLead(AgentBase):

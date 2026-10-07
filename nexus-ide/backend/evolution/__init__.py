@@ -41,6 +41,7 @@ from backend.evolution.registry import (
 from backend.evolution.regression_guard import GateReport, GateResult, RegressionGuard
 from backend.evolution.rollback import RollbackEvent, RollbackManager
 from backend.evolution.skill_discovery import SkillDiscovery
+from backend.evolution.skill_writer import SkillProposal, SkillWriter
 
 __all__ = [
     "Arena",
@@ -69,6 +70,8 @@ __all__ = [
     "RollbackManager",
     "SkillDiscovery",
     "SkillEvolver",
+    "SkillProposal",
+    "SkillWriter",
     "ToolEvolver",
     "WorkflowEvolver",
     "get_all_evolvers",

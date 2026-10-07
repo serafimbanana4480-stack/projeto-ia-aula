@@ -129,8 +129,8 @@ export function KpiCard({
           <Sparkline
             data={history}
             color={color}
-            width={emphasis ? 104 : 88}
-            height={emphasis ? 36 : 30}
+            width={emphasis ? 72 : 88}
+            height={emphasis ? 30 : 30}
             className="shrink-0"
           />
         ) : null}

@@ -1,8 +1,6 @@
 """Tests for Ecosystem — marketplace, voice, digital twin, auto-evolution, webhooks."""
 from __future__ import annotations
 
-import pytest
-
 from backend.pipeline.ecosystem import (
     AgentMarketplace,
     AgentPlugin,
@@ -12,7 +10,6 @@ from backend.pipeline.ecosystem import (
     VoiceAssistant,
     WebhookManager,
 )
-
 
 # ============================================================================
 # 12-01: Marketplace Tests

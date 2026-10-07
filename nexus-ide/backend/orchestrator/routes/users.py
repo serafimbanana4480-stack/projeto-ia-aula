@@ -1,19 +1,16 @@
-from __future__ import annotations
-
 """Users Routes - API endpoints for multi-user system."""
 
+from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Any
 from datetime import datetime
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Depends, Header, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
-
 from backend.observability.event_system import get_event_bus
-from backend.users.multi_user_system import get_multi_user_system, UserRole, UserStatus
+from backend.users.multi_user_system import UserRole, UserStatus, get_multi_user_system
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -41,7 +38,7 @@ class GroupCreateRequest(BaseModel):
     max_members: int = 100
 
 
-async def get_current_user(authorization: str = Header(None)) -> Dict[str, Any]:
+async def get_current_user(authorization: str = Header(None)) -> dict[str, Any]:
     """Get current user from authorization header."""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header required")
@@ -61,11 +58,11 @@ async def get_current_user(authorization: str = Header(None)) -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Authentication failed: {e}")
-        raise HTTPException(status_code=401, detail="Authentication failed")
+        raise HTTPException(status_code=401, detail="Authentication failed") from e
 
 
 @router.post("/users/register")
-async def register_user(user_data: UserCreateRequest, request: Request) -> Dict[str, str]:
+async def register_user(user_data: UserCreateRequest, request: Request) -> dict[str, str]:
     """Register a new user."""
     try:
         event_bus = await get_event_bus()
@@ -75,7 +72,7 @@ async def register_user(user_data: UserCreateRequest, request: Request) -> Dict[
         try:
             role_enum = UserRole(user_data.role)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid role: {user_data.role}")
+            raise HTTPException(status_code=400, detail=f"Invalid role: {user_data.role}") from None
         
         # Create user
         user_id = await user_system.create_user(
@@ -90,17 +87,17 @@ async def register_user(user_data: UserCreateRequest, request: Request) -> Dict[
         return {"user_id": user_id, "status": "created"}
         
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"Failed to register user: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/users/login")
 async def login_user(login_data: LoginRequest,
                     request: Request,
                     ip_address: str = "",
-                    user_agent: str = "") -> Dict[str, Any]:
+                    user_agent: str = "") -> dict[str, Any]:
     """Login user and create session."""
     try:
         event_bus = await get_event_bus()
@@ -129,11 +126,11 @@ async def login_user(login_data: LoginRequest,
         raise
     except Exception as e:
         logger.error(f"Failed to login user: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/users/logout")
-async def logout_user(session_id: str, request: Request) -> Dict[str, str]:
+async def logout_user(session_id: str, request: Request) -> dict[str, str]:
     """Logout user and terminate session."""
     try:
         event_bus = await get_event_bus()
@@ -149,22 +146,22 @@ async def logout_user(session_id: str, request: Request) -> Dict[str, str]:
         raise
     except Exception as e:
         logger.error(f"Failed to logout user: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/users/me")
-async def get_current_user_info(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+async def get_current_user_info(current_user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     """Get current user information."""
     return current_user
 
 
 @router.get("/users")
 async def get_users(
-    status: Optional[str] = None,
-    role: Optional[str] = None,
+    status: str | None = None,
+    role: str | None = None,
     limit: int = 100,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, List[Dict]]:
+    current_user: dict[str, Any] = Depends(get_current_user)
+) -> dict[str, list[dict]]:
     """Get users with optional filtering (admin only)."""
     try:
         # Check permissions
@@ -180,14 +177,14 @@ async def get_users(
             try:
                 status_enum = UserStatus(status)
             except ValueError:
-                raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+                raise HTTPException(status_code=400, detail=f"Invalid status: {status}") from None
         
         role_enum = None
         if role:
             try:
                 role_enum = UserRole(role)
             except ValueError:
-                raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
+                raise HTTPException(status_code=400, detail=f"Invalid role: {role}") from None
         
         # Get users
         users = await user_system.get_users(
@@ -205,14 +202,14 @@ async def get_users(
         raise
     except Exception as e:
         logger.error(f"Failed to get users: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/users/{user_id}")
 async def get_user(
     user_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, Any]:
+    current_user: dict[str, Any] = Depends(get_current_user)
+) -> dict[str, Any]:
     """Get user by ID."""
     try:
         event_bus = await get_event_bus()
@@ -232,15 +229,15 @@ async def get_user(
         raise
     except Exception as e:
         logger.error(f"Failed to get user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/groups")
 async def get_groups(
-    user_id: Optional[str] = None,
+    user_id: str | None = None,
     limit: int = 100,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, List[Dict]]:
+    current_user: dict[str, Any] = Depends(get_current_user)
+) -> dict[str, list[dict]]:
     """Get groups with optional filtering."""
     try:
         event_bus = await get_event_bus()
@@ -260,15 +257,15 @@ async def get_groups(
         
     except Exception as e:
         logger.error(f"Failed to get groups: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/groups")
 async def create_group(
     group_data: GroupCreateRequest,
     request: Request,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, str]:
+    current_user: dict[str, Any] = Depends(get_current_user)
+) -> dict[str, str]:
     """Create a new group."""
     try:
         event_bus = await get_event_bus()
@@ -286,18 +283,18 @@ async def create_group(
         return {"group_id": group_id, "status": "created"}
         
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"Failed to create group: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/groups/{group_id}/join")
 async def join_group(
     group_id: str,
     request: Request,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, str]:
+    current_user: dict[str, Any] = Depends(get_current_user)
+) -> dict[str, str]:
     """Join a group."""
     try:
         event_bus = await get_event_bus()
@@ -313,15 +310,15 @@ async def join_group(
         raise
     except Exception as e:
         logger.error(f"Failed to join group {group_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/groups/{group_id}/leave")
 async def leave_group(
     group_id: str,
     request: Request,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, str]:
+    current_user: dict[str, Any] = Depends(get_current_user)
+) -> dict[str, str]:
     """Leave a group."""
     try:
         event_bus = await get_event_bus()
@@ -337,16 +334,16 @@ async def leave_group(
         raise
     except Exception as e:
         logger.error(f"Failed to leave group {group_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/activities")
 async def get_activities(
-    user_id: Optional[str] = None,
-    action: Optional[str] = None,
+    user_id: str | None = None,
+    action: str | None = None,
     limit: int = 100,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, List[Dict]]:
+    current_user: dict[str, Any] = Depends(get_current_user)
+) -> dict[str, list[dict]]:
     """Get activity logs with optional filtering."""
     try:
         event_bus = await get_event_bus()
@@ -370,13 +367,13 @@ async def get_activities(
         
     except Exception as e:
         logger.error(f"Failed to get activities: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/users/stats")
 async def get_user_stats(
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, Any]:
+    current_user: dict[str, Any] = Depends(get_current_user)
+) -> dict[str, Any]:
     """Get user system statistics (admin only)."""
     try:
         # Check permissions
@@ -392,11 +389,11 @@ async def get_user_stats(
         raise
     except Exception as e:
         logger.error(f"Failed to get user stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/users/roles")
-async def get_user_roles() -> Dict[str, List[str]]:
+async def get_user_roles() -> dict[str, list[str]]:
     """Get available user roles."""
     return {
         "roles": [r.value for r in UserRole],
@@ -412,7 +409,7 @@ async def get_user_roles() -> Dict[str, List[str]]:
 
 
 @router.get("/users/statuses")
-async def get_user_statuses() -> Dict[str, List[str]]:
+async def get_user_statuses() -> dict[str, list[str]]:
     """Get available user statuses."""
     return {
         "statuses": [s.value for s in UserStatus],
@@ -429,7 +426,7 @@ async def get_user_statuses() -> Dict[str, List[str]]:
 async def validate_token(
     token: str,
     request: Request
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Validate a session token."""
     try:
         event_bus = await get_event_bus()
@@ -448,13 +445,13 @@ async def validate_token(
         raise
     except Exception as e:
         logger.error(f"Failed to validate token: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/users/dashboard")
 async def get_user_dashboard(
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, Any]:
+    current_user: dict[str, Any] = Depends(get_current_user)
+) -> dict[str, Any]:
     """Get user dashboard data."""
     try:
         event_bus = await get_event_bus()
@@ -490,4 +487,4 @@ async def get_user_dashboard(
         
     except Exception as e:
         logger.error(f"Failed to get user dashboard: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

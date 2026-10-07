@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.runtime.reasoning import REASONING_REQUEST_OPTION, REASONING_SINK_OPTION
+
 # Lazy imports for torch/transformers to avoid loading heavy frameworks at import time
 # and to work around Python 3.14 compatibility issues with some transformers versions.
 
@@ -757,12 +759,21 @@ class AirLLMProvider:
     def _inject_thinking_disable(
         self, model: str, options: dict[str, Any] | None
     ) -> dict[str, Any] | None:
-        """Auto-disable thinking mode for qwen models to prevent JSON routing failures."""
+        """Keep thinking off for qwen models unless the policy asks for it.
+
+        The original behaviour was unconditional: a qwen reasoning model could
+        never be used for what it is good at. It is now conditioned on the same
+        reasoning policy as every other adapter — when the caller has opened the
+        reasoning channel (a sink in ``options``), thinking stays on; otherwise
+        the JSON-routing guard that motivated this function is unchanged.
+        """
         if options is None:
             options = {}
-        if "qwen" in model.lower() and "thinking" not in options:
-            options = {**options, "thinking": False}
-        return options
+        if "qwen" not in model.lower() or "thinking" in options:
+            return options
+        if options.get(REASONING_SINK_OPTION) or options.get(REASONING_REQUEST_OPTION):
+            return options
+        return {**options, "thinking": False}
 
     def _extract_gen_params(self, options: dict[str, Any] | None) -> dict[str, Any]:
         """Extract generation parameters from options dict."""

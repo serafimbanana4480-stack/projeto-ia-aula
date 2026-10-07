@@ -11,6 +11,7 @@ import {
   isTokenValid,
   authHeaders,
 } from "../../lib/auth";
+import { webSearch } from "../../lib/api";
 
 const TOKEN_KEY = "nexus.access_token";
 const REFRESH_TOKEN_KEY = "nexus.refresh_token";
@@ -169,5 +170,53 @@ describe("lib/auth", () => {
       const headers = authHeaders();
       expect(headers.Authorization).toBe("Bearer my-token");
     });
+  });
+
+  it("refreshes auth and retries the web search request after a 401", async () => {
+    setAccessToken("expired-access-token");
+    setRefreshToken("refresh-token-1");
+    const user = {
+      id: "u1",
+      email: "test@test.com",
+      full_name: "Test User",
+      is_active: true,
+      created_at: "2025",
+    };
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: "expired" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "fresh-access-token",
+        refresh_token: "refresh-token-2",
+        token_type: "bearer",
+        user,
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        query: "capacete",
+        hits: [],
+        count: 0,
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+
+    await expect(webSearch({ query: "capacete" })).resolves.toEqual({
+      query: "capacete",
+      hits: [],
+      count: 0,
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(fetchSpy.mock.calls[0][0]).toBe("http://localhost:8000/api/web_search");
+    expect(new Headers(fetchSpy.mock.calls[0][1]?.headers).get("Authorization"))
+      .toBe("Bearer expired-access-token");
+    expect(fetchSpy.mock.calls[1][0]).toBe("http://localhost:8000/api/auth/refresh");
+    expect(fetchSpy.mock.calls[2][0]).toBe("http://localhost:8000/api/web_search");
+    expect(new Headers(fetchSpy.mock.calls[2][1]?.headers).get("Authorization"))
+      .toBe("Bearer fresh-access-token");
   });
 });

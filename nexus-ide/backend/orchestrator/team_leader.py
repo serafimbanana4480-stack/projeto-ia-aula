@@ -5,7 +5,6 @@ to other agents via the MessageBus.
 """
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -53,7 +52,7 @@ class TeamLeader(AgentBase):
         self,
         task_type: str,
         task_description: str,
-        registry: dict[str, "TeamLeader"],
+        registry: dict[str, TeamLeader],
         timeout: float | None = None,
     ) -> dict[str, Any]:
         """Delegate a subtask to another team leader.
@@ -67,7 +66,6 @@ class TeamLeader(AgentBase):
         Returns:
             Result dict with status and output.
         """
-        to = timeout or self.delegation_timeout
 
         # Find capable leader
         for name, leader in registry.items():

@@ -11,17 +11,16 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
-import logging
+import contextlib
 import json
-import pickle
-import hashlib
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Set
-from dataclasses import dataclass, field
-from enum import Enum
+import logging
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any
+
 import redis
-import numpy as np
 
 from backend.knowledge.memory import MemorySystem
 from backend.observability.event_bus import EventBus
@@ -54,18 +53,18 @@ class CrossSessionMemory:
     memory_id: str
     agent_id: str
     memory_type: MemoryType
-    content: Dict[str, Any]
-    context: Dict[str, Any]
-    session_ids: List[str]
+    content: dict[str, Any]
+    context: dict[str, Any]
+    session_ids: list[str]
     created_at: datetime
     last_accessed: datetime
     access_count: int
     importance_score: float
     retrieval_count: int
     status: MemoryStatus
-    tags: List[str] = field(default_factory=list)
-    related_memories: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
+    related_memories: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -76,9 +75,9 @@ class SessionLink:
     target_session_id: str
     link_type: str
     strength: float
-    shared_memories: List[str]
+    shared_memories: list[str]
     created_at: datetime
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -86,7 +85,7 @@ class MemoryConsolidation:
     """Represents a memory consolidation process."""
     consolidation_id: str
     agent_id: str
-    source_memories: List[str]
+    source_memories: list[str]
     consolidated_memory: str
     consolidation_type: str
     timestamp: datetime
@@ -103,17 +102,17 @@ class CrossSessionMemoryManager:
         self.redis_client = redis_client
         
         # Memory storage
-        self.cross_session_memories: Dict[str, CrossSessionMemory] = {}
-        self.session_links: Dict[str, SessionLink] = {}
-        self.consolidation_history: List[MemoryConsolidation] = []
+        self.cross_session_memories: dict[str, CrossSessionMemory] = {}
+        self.session_links: dict[str, SessionLink] = {}
+        self.consolidation_history: list[MemoryConsolidation] = []
         
         # Session tracking
-        self.active_sessions: Dict[str, Dict[str, Any]] = {}
-        self.session_memories: Dict[str, List[str]] = {}
+        self.active_sessions: dict[str, dict[str, Any]] = {}
+        self.session_memories: dict[str, list[str]] = {}
         
         # Memory optimization
-        self.memory_index: Dict[str, Set[str]] = {}  # Tag-based index
-        self.agent_memory_index: Dict[str, List[str]] = {}  # Agent-based index
+        self.memory_index: dict[str, set[str]] = {}  # Tag-based index
+        self.agent_memory_index: dict[str, list[str]] = {}  # Agent-based index
         
         # Configuration
         self.max_memory_per_agent = 10000
@@ -124,9 +123,9 @@ class CrossSessionMemoryManager:
         self._consolidation_task = asyncio.create_task(self._periodic_consolidation())
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
     
-    async def store_memory(self, agent_id: str, session_id: str, 
-                          memory_type: MemoryType, content: Dict[str, Any],
-                          context: Dict[str, Any] = None, 
+    async def store_memory(self, agent_id: str, session_id: str,
+                          memory_type: MemoryType, content: dict[str, Any],
+                          context: dict[str, Any] = None,
                           importance_score: float = 0.5) -> str:
         """Store a memory item across sessions."""
         
@@ -180,7 +179,7 @@ class CrossSessionMemoryManager:
         
         return memory_id
     
-    async def retrieve_memory(self, memory_id: str, session_id: str = None) -> Optional[CrossSessionMemory]:
+    async def retrieve_memory(self, memory_id: str, session_id: str = None) -> CrossSessionMemory | None:
         """Retrieve a memory item."""
         
         if memory_id not in self.cross_session_memories:
@@ -222,7 +221,7 @@ class CrossSessionMemoryManager:
     async def search_memories(self, agent_id: str, query: str, 
                             memory_type: MemoryType = None,
                             session_id: str = None,
-                            limit: int = 100) -> List[CrossSessionMemory]:
+                            limit: int = 100) -> list[CrossSessionMemory]:
         """Search for memories based on query."""
         
         results = []
@@ -264,7 +263,7 @@ class CrossSessionMemoryManager:
         return results[:limit]
     
     async def link_sessions(self, source_session_id: str, target_session_id: str,
-                          link_type: str, shared_memories: List[str] = None) -> str:
+                          link_type: str, shared_memories: list[str] = None) -> str:
         """Create a link between sessions."""
         
         link_id = str(uuid.uuid4())
@@ -318,7 +317,7 @@ class CrossSessionMemoryManager:
         
         return link_id
     
-    async def get_session_continuity(self, session_id: str) -> Dict[str, Any]:
+    async def get_session_continuity(self, session_id: str) -> dict[str, Any]:
         """Get session continuity information."""
         
         # Find linked sessions
@@ -361,7 +360,7 @@ class CrossSessionMemoryManager:
             "continuity_score": self._calculate_continuity_score(session_id)
         }
     
-    async def consolidate_memories(self, agent_id: str, memory_type: MemoryType = None) -> List[str]:
+    async def consolidate_memories(self, agent_id: str, memory_type: MemoryType = None) -> list[str]:
         """Consolidate memories for an agent."""
         
         # Get memories to consolidate
@@ -384,7 +383,7 @@ class CrossSessionMemoryManager:
         
         return consolidation_results
     
-    async def _create_consolidated_memory(self, memories: List[CrossSessionMemory]) -> str:
+    async def _create_consolidated_memory(self, memories: list[CrossSessionMemory]) -> str:
         """Create a consolidated memory from a group of similar memories."""
         
         if not memories:
@@ -462,7 +461,7 @@ class CrossSessionMemoryManager:
         
         return consolidated_memory_id
     
-    def _extract_tags(self, content: Dict[str, Any], context: Dict[str, Any]) -> List[str]:
+    def _extract_tags(self, content: dict[str, Any], context: dict[str, Any]) -> list[str]:
         """Extract tags from content and context."""
         
         tags = []
@@ -498,7 +497,7 @@ class CrossSessionMemoryManager:
             self.agent_memory_index[memory.agent_id] = []
         self.agent_memory_index[memory.agent_id].append(memory.memory_id)
     
-    def _group_memories_by_type(self, memories: List[Dict[str, Any]]) -> Dict[str, int]:
+    def _group_memories_by_type(self, memories: list[dict[str, Any]]) -> dict[str, int]:
         """Group memories by type."""
         
         type_counts = {}
@@ -533,7 +532,7 @@ class CrossSessionMemoryManager:
         # Combined score
         return (avg_strength * 0.7 + memory_factor * 0.3)
     
-    def _group_similar_memories(self, memories: List[CrossSessionMemory]) -> List[List[CrossSessionMemory]]:
+    def _group_similar_memories(self, memories: list[CrossSessionMemory]) -> list[list[CrossSessionMemory]]:
         """Group similar memories for consolidation."""
         
         groups = []
@@ -553,7 +552,7 @@ class CrossSessionMemoryManager:
         
         return groups
     
-    def _merge_memory_contents(self, memories: List[CrossSessionMemory]) -> Dict[str, Any]:
+    def _merge_memory_contents(self, memories: list[CrossSessionMemory]) -> dict[str, Any]:
         """Merge contents of similar memories."""
         
         merged = {}
@@ -620,7 +619,7 @@ class CrossSessionMemoryManager:
         except Exception as e:
             logger.error(f"Failed to store memory in Redis: {e}")
     
-    async def _load_from_redis(self, memory_id: str) -> Optional[CrossSessionMemory]:
+    async def _load_from_redis(self, memory_id: str) -> CrossSessionMemory | None:
         """Load memory from Redis."""
         
         if not self.redis_client:
@@ -713,7 +712,7 @@ class CrossSessionMemoryManager:
                 logger.error(f"Error in periodic cleanup: {e}")
                 await asyncio.sleep(3600)
     
-    async def get_memory_statistics(self, agent_id: str = None) -> Dict[str, Any]:
+    async def get_memory_statistics(self, agent_id: str = None) -> dict[str, Any]:
         """Get memory statistics."""
         
         memories = list(self.cross_session_memories.values())
@@ -765,16 +764,12 @@ class CrossSessionMemoryManager:
         # Cancel background tasks
         if self._consolidation_task:
             self._consolidation_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._consolidation_task
-            except asyncio.CancelledError:
-                pass
         
         if self._cleanup_task:
             self._cleanup_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
         
         logger.info("Cross-session memory manager shutdown completed")

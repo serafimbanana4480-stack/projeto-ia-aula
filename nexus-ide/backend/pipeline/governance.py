@@ -15,10 +15,10 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +187,7 @@ class KillSwitch:
     def activate(self, reason: str = "Manual intervention") -> str:
         """Activate the kill-switch. Returns activation timestamp."""
         self._activated = True
-        self._activated_at = datetime.now(timezone.utc).isoformat()
+        self._activated_at = datetime.now(UTC).isoformat()
         self._reason = reason
         self._activation_count += 1
         logger.warning("KILL-SWITCH ACTIVATED: %s", reason)
@@ -270,7 +270,7 @@ class SnapshotStore:
                 kill_switch_active: bool = False,
                 metadata: dict[str, Any] | None = None) -> StateSnapshot:
         """Capture current system state as a snapshot."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         snapshot_id = f"snap-{now.strftime('%Y%m%d-%H%M%S')}"
 
         snapshot = StateSnapshot(
@@ -318,7 +318,7 @@ class SnapshotStore:
 
     def prune_old(self) -> int:
         """Remove snapshots older than RETENTION_DAYS."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.RETENTION_DAYS)
+        cutoff = datetime.now(UTC) - timedelta(days=self.RETENTION_DAYS)
         removed = 0
 
         for f in self._dir.glob("snap-*.json"):
@@ -467,7 +467,7 @@ class GovernanceCouncil:
             action_id=f"audit-{int(time.time() * 1000)}",
             action=action,
             agent_id=agent_id,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
 
         # Security audit
@@ -611,7 +611,7 @@ class ImmutableLedger:
             entry_type=entry_type,
             agent_id=agent_id,
             action=action,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             data=data or {},
             previous_hash=previous_hash,
         )
@@ -640,9 +640,8 @@ class ImmutableLedger:
                 return False, f"Hash mismatch at entry {i} ({entry.entry_id})"
 
             # Verify chain link
-            if i > 0:
-                if entry.previous_hash != self._entries[i - 1].hash:
-                    return False, f"Chain broken at entry {i} ({entry.entry_id})"
+            if i > 0 and entry.previous_hash != self._entries[i - 1].hash:
+                return False, f"Chain broken at entry {i} ({entry.entry_id})"
 
         return True, "Ledger integrity verified"
 

@@ -67,6 +67,68 @@ async def test_stream_error_payload_is_not_silently_discarded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_records_provider_finish_reason() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"choices":[{"delta":{"content":"partial"},'
+                b'"finish_reason":null}]}\n\n'
+                b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+        )
+
+    provider = OpenAIProvider("https://api.example.test/v1", api_key="test-key")
+    await provider.aclose()
+    provider._client = httpx.AsyncClient(
+        base_url="https://api.example.test",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        text = "".join(
+            [
+                token
+                async for token in provider.chat_stream(
+                    "model", [{"role": "user", "content": "hello"}]
+                )
+            ]
+        )
+        assert text == "partial"
+        assert provider.last_finish_reason == "length"
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_chat_complete_records_provider_finish_reason() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": "partial"}, "finish_reason": "length"}
+                ]
+            },
+        )
+
+    provider = OpenAIProvider("https://api.example.test/v1", api_key="test-key")
+    await provider.aclose()
+    provider._client = httpx.AsyncClient(
+        base_url="https://api.example.test",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await provider.chat_complete(
+            "model", [{"role": "user", "content": "hello"}]
+        )
+        assert result == "partial"
+        assert provider.last_finish_reason == "length"
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
 async def test_closed_transport_is_recreated_before_request() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(

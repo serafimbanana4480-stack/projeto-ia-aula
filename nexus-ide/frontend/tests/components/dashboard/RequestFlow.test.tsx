@@ -105,9 +105,8 @@ describe("RequestFlow", () => {
     expect(
       screen.getByLabelText("Taxa de sucesso: 80.0 por cento, aceitável"),
     ).toBeDefined();
-    // The agent name ``CODER`` is rendered both in the active-agents list
-    // and in the request flow node, so multiple elements match. Use
-    // ``getAllByText`` to assert the agent label is present at least once.
+    // The profile name ``CODER`` can appear in the flow diagram and in the
+    // recent response list, so multiple elements may match.
     await waitFor(() => {
       expect(screen.getAllByText("CODER").length).toBeGreaterThan(0);
     });

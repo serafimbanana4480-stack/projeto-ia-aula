@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from backend.knowledge.memory import Memory, MemoryType
 from backend.knowledge.redis_backend import RedisBackend
 

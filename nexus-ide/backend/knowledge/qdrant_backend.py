@@ -10,7 +10,7 @@ from typing import Any
 
 try:
     from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, VectorParams, PointStruct
+    from qdrant_client.models import Distance, PointStruct, VectorParams
     QDRANT_AVAILABLE = True
 except ImportError:
     QDRANT_AVAILABLE = False

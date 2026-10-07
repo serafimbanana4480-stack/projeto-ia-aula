@@ -6,8 +6,8 @@ models:
   # MICRO — perguntas triviais (1+1, classificação rápida, routing)
   # Usa um modelo cloud pequeno e barato (MiMo-V2.5) para latência mínima
   micro:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "minimax-m3"
+    fallback_id: "mimo-v2.5"
     thinking_mode: false
     max_tokens: 512
     context_window: 131072
@@ -18,8 +18,8 @@ models:
   # FAST — respostas rápidas, formatação leve, sumários
   # Usa o flash tier do DeepSeek (cheap + fast)
   fast:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "minimax-m2.7"
+    fallback_id: "mimo-v2.5"
     thinking_mode: false
     max_tokens: 2048
     context_window: 131072
@@ -30,8 +30,8 @@ models:
   # CODER — geração e análise de código
   # Usa o Kimi-K2.7-Code (modelo especializado em código)
   coder:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "kimi-k2.7-code"
+    fallback_id: "kimi-k2.6"
     thinking_mode: false
     max_tokens: 8192
     context_window: 131072
@@ -42,8 +42,8 @@ models:
   # REASONING — raciocínio multi-step com thinking
   # Usa o GLM-5.2 com thinking_mode (excelente para raciocínio)
   reasoning:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "glm-5.2"
+    fallback_id: "glm-5.1"
     thinking_mode: true
     max_tokens: 8192
     context_window: 131072
@@ -54,8 +54,8 @@ models:
   # DEEP — análises complexas, arquitetura
   # Usa o DeepSeek-V4-Pro (premium) para respostas da mais alta qualidade
   deep:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "deepseek-v4-pro"
+    fallback_id: "deepseek-v4-flash"
     thinking_mode: true
     max_tokens: 16384
     context_window: 131072
@@ -65,85 +65,111 @@ models:
 
   # Aliases retro-compatibilidade (legacy registry)
   q3b-4bit:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "qwen3.5-plus"
+    fallback_id: "qwen3.6-plus"
     thinking_mode: false
     max_tokens: 4096
     context_window: 131072
     temperature: 0.5
     use_cases: [simple_qa, formatting, summarization]
   coder3b-4bit:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "kimi-k2.5"
+    fallback_id: "kimi-k2.6"
     thinking_mode: false
     max_tokens: 4096
     context_window: 131072
     temperature: 0.2
     use_cases: [code_generation, refactor, debug]
   nano:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "minimax-m2.5"
+    fallback_id: "mimo-v2.5"
     thinking_mode: false
     max_tokens: 512
     context_window: 131072
     temperature: 0.1
     use_cases: [trivial_qa, routing, classification]
   small:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "qwen3.5-plus"
+    fallback_id: "qwen3.6-plus"
     thinking_mode: false
     max_tokens: 4096
     context_window: 131072
     temperature: 0.7
     use_cases: [simple_qa, formatting, summarization]
   medium:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "qwen3.7-plus"
+    fallback_id: "qwen3.6-plus"
     thinking_mode: false
     max_tokens: 8192
     context_window: 131072
     temperature: 0.3
     use_cases: [code_generation, planning, multi_step_reasoning]
   large:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "glm-5"
+    fallback_id: "glm-5.1"
     thinking_mode: true
     max_tokens: 8192
     context_window: 131072
     temperature: 0.7
     use_cases: [architecture, complex_analysis, large_codebases]
   expert:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "deepseek-v4-pro"
+    fallback_id: "deepseek-v4-flash"
     thinking_mode: true
     max_tokens: 16384
     context_window: 131072
     temperature: 0.3
     use_cases: [architecture, complex_analysis, large_codebases]
   vision:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "gemini-2.0-flash"
+    fallback_id: "gemini-1.5-flash"
     thinking_mode: false
     max_tokens: 2048
     context_window: 131072
     temperature: 0.7
     use_cases: [image_analysis, vision_tasks]
   embed:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "minimax-m2.5"
+    fallback_id: "mimo-v2.5"
     thinking_mode: false
     max_tokens: 512
     context_window: 131072
     temperature: 0.0
     use_cases: [embedding, retrieval]
   dashboard:
-    id: "openrouter/free"
-    fallback_id: "openrouter/free"
+    id: "qwen3.5-plus"
+    fallback_id: "qwen3.6-plus"
     thinking_mode: false
     max_tokens: 2048
     context_window: 131072
     temperature: 0.5
     use_cases: [dashboard_queries, monitoring]
+  # PRO — frontend / UI tier. Declared by ComponentAgent, UIUXAgent,
+  # StateManagerAgent, FrontendTeamLead and BackendTeamLead via
+  # ``model_key = "pro"``. Those agents are reachable through the team leads,
+  # and ``get_model_config`` raises KeyError for an undeclared key, so a missing
+  # entry here was a latent crash on the first real call. Points at the code
+  # tier's model because that is what generates TSX/TS.
+  pro:
+    id: "kimi-k2.7-code"
+    fallback_id: "kimi-k2.6"
+    thinking_mode: false
+    max_tokens: 8192
+    context_window: 131072
+    temperature: 0.4
+    use_cases: [code_generation, refactor, ui_components]
+  # OPUS — executive tier. Declared by CEOAgent and ChiefArchitectAgent via
+  # ``model_key = "opus"`` (same latent KeyError as PRO above). Executive work is
+  # strategy/architecture, so it maps to the reasoning-grade model and keeps the
+  # reasoning channel open.
+  opus:
+    id: "deepseek-v4-pro"
+    fallback_id: "deepseek-v4-flash"
+    thinking_mode: true
+    max_tokens: 16384
+    context_window: 131072
+    temperature: 0.3
+    use_cases: [strategy, architecture, complex_analysis]
 
 concurrency:
   NANO: 5
@@ -210,7 +236,7 @@ providers:
     requires_api_key: true
     primary: true
     default_models:
-      - "openrouter/free"
+      - "minimax-m3"
   # Optional: Ollama (local). Only enabled if NEXUS_ENABLE_OLLAMA=true.
   ollama:
     name: "Ollama (local)"
@@ -220,6 +246,21 @@ providers:
     default_models:
       - "qwen2.5:0.5b"
       - "qwen2.5:1.5b"
+  # Optional: LM Studio (local OpenAI-compatible server).
+  # Only enabled when LLM_PROVIDER=lmstudio or LMSTUDIO_HOST is set.
+  # default_models are real ids served by the local instance; override via
+  # LMSTUDIO_DEFAULT_MODEL / LMSTUDIO_FAST_MODEL / LMSTUDIO_CODER_MODEL.
+  lmstudio:
+    name: "LM Studio (local)"
+    base_url: "http://localhost:1234/v1"
+    requires_api_key: false
+    enabled_by_default: false
+    context_window: 16384
+    default_models:
+      - "lfm2.5-2.6b-heretic-abliterated"
+      - "huihui-lfm2.5-8b-a1b-abliterated"
+      - "deepseek/deepseek-r1-0528-qwen3-8b"
+      - "gemma-4-12b-coder-fable5-composer2.5-v1"
 
 # Token pricing per 1M tokens (USD)
 # pricing.model_id: {input_price_per_1m: float, output_price_per_1m: float}

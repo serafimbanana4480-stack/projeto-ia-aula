@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 import uuid
 from collections import deque
@@ -35,18 +36,48 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_active_run_streams: dict[str, RunEventStream] = {}
+
+
+def run_event_journal_path(run_id: str) -> Path | None:
+    """Return the repository-local journal path for a safe run id.
+
+    Run ids can arrive from authenticated replay URLs, so they must never be
+    used as path components before validation.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(run_id or "")):
+        return None
+    try:
+        root = Path(__file__).resolve().parents[3]
+        return root / "data" / "runs" / f"{run_id}.jsonl"
+    except (IndexError, OSError, ValueError):
+        return None
+
+
+def get_active_run_event_stream(run_id: str) -> RunEventStream | None:
+    """Return the live event stream for *run_id*, if this process owns it."""
+    stream = _active_run_streams.get(run_id)
+    return stream if stream is not None and not stream._closed else None
+
 
 class RuntimeEventType(StrEnum):
     """The stable event vocabulary the UI renders.
 
     Operational transparency, not chain-of-thought: every member describes
     something the agent *did*, is waiting on, or observed.
+
+    :attr:`THINKING` is the one member that carries model-authored text. Its
+    payload is the *operational approach* the agent is declaring — a bounded
+    label (see :mod:`backend.runtime.reasoning`), never a private transcript —
+    and it lives in the payload key ``text`` so the meaning of the payload is
+    unambiguous to every consumer.
     """
 
     RUN_STARTED = "run_started"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
     RUN_CANCELLED = "run_cancelled"
+    RUN_INTERRUPTED = "run_interrupted"
 
     MESSAGE_STARTED = "message_started"
     MESSAGE_DELTA = "message_delta"
@@ -54,6 +85,10 @@ class RuntimeEventType(StrEnum):
 
     STATUS_UPDATE = "status_update"
     PLAN_UPDATED = "plan_updated"
+
+    #: Bounded, public approach text for the on-screen reasoning panel.
+    #: Payload key: ``text``. See the class docstring for the privacy contract.
+    THINKING = "thinking"
 
     TOOL_STARTED = "tool_started"
     TOOL_PROGRESS = "tool_progress"
@@ -79,6 +114,11 @@ class RuntimeEventType(StrEnum):
     HEARTBEAT = "heartbeat"
     RECOVERY = "recovery"
     USER_STEERING = "user_steering"
+    ADVISOR_NOTE = "advisor_note"
+
+    # Infinity v3 (port do advisor/vibe do omp). Emitidos por observadores
+    # externos ao loop principal; o loop nunca os produz.
+    WORKER_UPDATE = "worker_update"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +153,13 @@ class RuntimeEvent:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> RuntimeEvent:
+        """Rebuild an event from its journal / SSE dictionary.
+
+        ``RuntimeEventType(raw["type"])`` raises ``ValueError`` for a value this
+        build does not know — which is exactly what happens when a journal
+        written by a newer (or older) build is replayed. Replay paths must use
+        :meth:`try_from_dict`, which skips instead of crashing.
+        """
         return cls(
             run_id=str(raw["run_id"]),
             seq=int(raw["seq"]),
@@ -123,6 +170,28 @@ class RuntimeEvent:
             task_id=str(raw.get("task_id", "")),
             payload=dict(raw.get("payload") or {}),
         )
+
+    @classmethod
+    def try_from_dict(cls, raw: Any) -> RuntimeEvent | None:
+        """Tolerant :meth:`from_dict` for every replay path.
+
+        Returns ``None`` for a line this build cannot interpret — an unknown
+        event type written by another build, a truncated JSON object, a missing
+        ordering key — and logs it. A single bad line must never be able to
+        abort a replay of an otherwise complete run.
+        """
+        if not isinstance(raw, dict):
+            logger.warning("Skipping non-object journal entry")
+            return None
+        try:
+            return cls.from_dict(raw)
+        except ValueError as exc:
+            # Unknown RuntimeEventType from a foreign build, or a non-numeric seq.
+            logger.warning("Skipping journal entry with unknown type: %s", exc)
+            return None
+        except (KeyError, TypeError) as exc:
+            logger.warning("Skipping malformed journal entry: %s", exc)
+            return None
 
 
 class RunEventStream:
@@ -152,6 +221,7 @@ class RunEventStream:
         self._journal_path = journal_path
         self._journal_queue: asyncio.Queue[RuntimeEvent | None] | None = None
         self._journal_task: asyncio.Task[None] | None = None
+        _active_run_streams[run_id] = self
 
     # -- emission ------------------------------------------------------
     @property
@@ -199,21 +269,47 @@ class RunEventStream:
         queue: asyncio.Queue[RuntimeEvent | None] = asyncio.Queue(
             maxsize=self._subscriber_queue_size
         )
-        backlog = [event for event in self._buffer if event.seq > after_seq]
         self._subscribers.append(queue)
+        # Subscribe before reading disk so events emitted after the snapshot
+        # are queued while older journal entries are being replayed. Disk is
+        # read synchronously on this event loop, so no emit can interleave in
+        # the short section below.
+        backlog_by_seq: dict[int, RuntimeEvent] = {}
+        if self._journal_path is not None and self._journal_path.is_file():
+            try:
+                backlog_by_seq.update(
+                    {
+                        event.seq: event
+                        for event in self.load_journal(self._journal_path)
+                        if event.run_id == self.run_id and event.seq > after_seq
+                    }
+                )
+            except OSError:
+                logger.exception("Could not replay journal for run %s", self.run_id)
+        # In-memory events win over an older copy in the durable journal.
+        backlog_by_seq.update(
+            {
+                event.seq: event
+                for event in self._buffer
+                if event.seq > after_seq
+            }
+        )
+        backlog = [backlog_by_seq[key] for key in sorted(backlog_by_seq)]
         highest = after_seq
         try:
             for event in backlog:
                 highest = event.seq
                 yield event
+            if self._closed:
+                return
             while True:
-                event = await queue.get()
-                if event is None:
+                queued_event = await queue.get()
+                if queued_event is None:
                     break
-                if event.seq <= highest:
+                if queued_event.seq <= highest:
                     continue  # already delivered from the backlog
-                highest = event.seq
-                yield event
+                highest = queued_event.seq
+                yield queued_event
         finally:
             with contextlib.suppress(ValueError):
                 self._subscribers.remove(queue)
@@ -258,6 +354,8 @@ class RunEventStream:
         if self._closed:
             return
         self._closed = True
+        if _active_run_streams.get(self.run_id) is self:
+            _active_run_streams.pop(self.run_id, None)
         for queue in list(self._subscribers):
             _offer(queue, None)
         if self._journal_queue is not None:
@@ -269,7 +367,12 @@ class RunEventStream:
 
     @staticmethod
     def load_journal(path: Path) -> list[RuntimeEvent]:
-        """Rebuild a run's timeline from disk after a backend restart."""
+        """Rebuild a run's timeline from disk after a backend restart.
+
+        A line this build cannot interpret is skipped, never raised on: a
+        journal written by another build (or truncated by a full disk) still
+        yields every event that *is* understood.
+        """
         if not path.is_file():
             return []
         events: list[RuntimeEvent] = []
@@ -279,9 +382,13 @@ class RunEventStream:
                 if not raw:
                     continue
                 try:
-                    events.append(RuntimeEvent.from_dict(json.loads(raw)))
-                except (ValueError, KeyError):
+                    decoded = json.loads(raw)
+                except (ValueError, TypeError):
                     logger.warning("Skipping malformed journal line in %s", path)
+                    continue
+                event = RuntimeEvent.try_from_dict(decoded)
+                if event is not None:
+                    events.append(event)
         events.sort(key=lambda event: event.order_key)
         return events
 
@@ -321,4 +428,6 @@ __all__ = [
     "RuntimeEvent",
     "RuntimeEventType",
     "dedupe_and_order",
+    "get_active_run_event_stream",
+    "run_event_journal_path",
 ]

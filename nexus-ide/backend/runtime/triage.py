@@ -179,6 +179,7 @@ _QUESTION_OPENER = _words(
 _SMALLTALK_RE = re.compile(
     r"^\s*(?:ol[áa]|oi|hey|hi|hello|bom\s+dia|boa\s+tarde|boa\s+noite|tudo\s+bem|"
     r"obrigad[oa]|thanks|thank\s+you|valeu|fixe|ok|okay|certo|perfeito|bo[am]\b|"
+    r"(?:t[áa]s|est[áa]s)(?:\s+por)?\s+a[ií]|"
     r"tchau|adeus|bye|good\s+(?:morning|afternoon|evening|night))"
     r"[\s!.,;:)?]*$",
     re.IGNORECASE,

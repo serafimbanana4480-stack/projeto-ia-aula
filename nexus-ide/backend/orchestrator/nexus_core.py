@@ -14,20 +14,20 @@ Wires together:
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
-from backend.orchestrator.agent_pool import AgentPool
-from backend.orchestrator.allocator import AgentAllocator
-from backend.orchestrator.smart_router import SmartRouter
-from backend.orchestrator.autonomous_execution_engine import AutonomousExecutionEngine
-from backend.orchestrator.agent_communication_bus import AgentCommunicationBus
-from backend.orchestrator.debate_visualizer import DebateVisualizer
-from backend.orchestrator.agent_topology import AgentTopology
-from backend.orchestrator.neural_dashboard import NeuralDashboard
-from backend.orchestrator.self_improvement_loop import SelfImprovementLoop
-from backend.orchestrator.supreme import SupremeOrchestrator
 from backend.infrastructure.docker_sandbox import DockerSandbox
 from backend.infrastructure.worktree_manager import WorktreeManager
+from backend.orchestrator.agent_communication_bus import AgentCommunicationBus
+from backend.orchestrator.agent_pool import AgentPool
+from backend.orchestrator.agent_topology import AgentTopology
+from backend.orchestrator.allocator import AgentAllocator
+from backend.orchestrator.autonomous_execution_engine import AutonomousExecutionEngine
+from backend.orchestrator.debate_visualizer import DebateVisualizer
+from backend.orchestrator.neural_dashboard import NeuralDashboard
+from backend.orchestrator.self_improvement_loop import SelfImprovementLoop
+from backend.orchestrator.smart_router import SmartRouter
+from backend.orchestrator.supreme import SupremeOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +55,8 @@ class NexusCore:
         self.self_improvement = SelfImprovementLoop()
 
         # Infrastructure
-        self.docker_sandbox: Optional[DockerSandbox] = None
-        self.worktree_manager: Optional[WorktreeManager] = None
+        self.docker_sandbox: DockerSandbox | None = None
+        self.worktree_manager: WorktreeManager | None = None
 
         logger.info("NexusCore initialized with all v3.0 subsystems")
 

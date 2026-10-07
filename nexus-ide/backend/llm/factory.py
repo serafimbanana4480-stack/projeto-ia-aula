@@ -7,7 +7,6 @@ environment variable or configuration.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import time
@@ -17,6 +16,7 @@ from typing import Any
 
 from backend.config.settings import get_settings
 from backend.llm.airllm_provider import AirLLMProvider
+from backend.llm.cost_governor import BudgetExceededError
 from backend.llm.dev_provider import DevProvider
 from backend.llm.free_policy import ProviderUnavailableError
 from backend.llm.multi_llm_manager import MultiLLMManager
@@ -240,6 +240,17 @@ class ResilientLLMProvider:
     Tries the primary first, then falls back through the chain.  The final
     fallback is always :class:`MockProvider` so the user sees a helpful
     message instead of a raw traceback.
+
+    Cost governance (audit P1-3): with ``MULTI_LLM_ENABLED=false`` — the
+    shipped default — this class *is* the application LLM client, and it
+    previously had no :class:`~backend.llm.cost_governor.CostGovernor` call at
+    all.  The daily cap, the per-run cap and the durable ``usage_ledger`` were
+    therefore bypassed on every real request.  Every dispatch now goes through
+    :meth:`_cost_check` (fail closed with
+    :class:`~backend.llm.cost_governor.BudgetExceededError`) and every completed
+    response through :meth:`_cost_record`, mirroring
+    ``multi_llm_manager._ensure_dispatch_allowed`` /
+    ``multi_llm_manager._record_usage``.
     """
 
     def __init__(self, primary: Any, fallbacks: list[Any], *, free_only: bool = False) -> None:
@@ -266,9 +277,109 @@ class ResilientLLMProvider:
             if hasattr(fb, "aclose"):
                 await fb.aclose()
 
+    # ------------------------------------------------------------------
+    # Cost governance (audit P1-3)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _run_id(kwargs: dict[str, Any]) -> str:
+        """Best-effort run id for budget accounting.
+
+        Callers pass it in different shapes; anything unknown degrades to the
+        daily cap only rather than failing the request.
+        """
+        for key in ("run_id", "mission_id", "session_id", "trace_id"):
+            value = kwargs.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        context = kwargs.get("context")
+        if isinstance(context, dict):
+            for key in ("run_id", "mission_id", "session_id"):
+                value = context.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
+    def _cost_check(self, kwargs: dict[str, Any]) -> None:
+        """Fail closed when the configured budget is exhausted.
+
+        A budget refusal is a *typed* error (``category="budget_exceeded"``)
+        that the route layer can map to 402/429.  It is deliberately **not**
+        swallowed by the fallback loop below: degrading to a cheaper model (or
+        to :class:`MockProvider`) after the operator said "stop spending" is
+        exactly the silent financial failure the audit flagged.
+        """
+        from backend.llm.cost_governor import get_cost_governor
+
+        get_cost_governor().check(run_id=self._run_id(kwargs) or None)
+
+    def _cost_record(
+        self,
+        provider: Any,
+        model: str,
+        messages: list[dict[str, str]],
+        output_text: str,
+        kwargs: dict[str, Any],
+    ) -> None:
+        """Record one completed call in the durable ledger.
+
+        Accounting failures must never break a chat in flight, so the whole body
+        is wrapped exactly like ``multi_llm_manager._record_usage``.
+        """
+        try:
+            from backend.llm.cost_governor import get_cost_governor
+            from backend.llm.multi_llm_manager import (
+                _compute_cost,
+                _estimate_tokens,
+                _extract_provider_usage,
+            )
+
+            usage = _extract_provider_usage(provider) or {}
+            input_tokens = int(usage.get("input_tokens", 0) or 0)
+            output_tokens = int(usage.get("output_tokens", 0) or 0)
+            if input_tokens <= 0:
+                input_tokens = _estimate_tokens(
+                    " ".join(str(m.get("content", "")) for m in messages)
+                )
+            if output_tokens <= 0 and output_text:
+                output_tokens = _estimate_tokens(output_text)
+
+            provider_name = str(
+                getattr(provider, "provider_name", "")
+                or getattr(provider, "name", "")
+                or provider.__class__.__name__
+            )
+            cost = _compute_cost(
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                provider=provider_name,
+                # In paid mode an unknown price must never count as $0.
+                conservative_unknown=not self.free_only,
+            )
+            governor = get_cost_governor()
+            governor.record(
+                cost_usd=cost,
+                provider=provider_name,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                run_id=self._run_id(kwargs),
+            )
+            if (
+                governor.daily_budget_usd > 0
+                and governor.today_spend() >= governor.daily_budget_usd
+            ):
+                logger.critical(
+                    "LLM daily budget reached during this call: %s",
+                    governor.snapshot(),
+                )
+        except Exception:  # pragma: no cover - accounting must not break chat
+            logger.exception("Cost governor recording failed")
+
     async def _try_providers(self, method: str, *args: Any, **kwargs: Any) -> Any:
         """Try providers without allowing simulation to claim real success."""
         failures: list[str] = []
+        self._cost_check(kwargs)
         for provider in [self.primary, *self.fallbacks]:
             if self.free_only and (
                 getattr(provider, "simulation", False)
@@ -279,11 +390,31 @@ class ResilientLLMProvider:
             ):
                 continue
             try:
+                provider_args = args
+                fallback_model = str(getattr(provider, "fallback_model", "") or "").strip()
+                if fallback_model and method == "chat_complete" and args:
+                    provider_args = (fallback_model, *args[1:])
                 validator = getattr(provider, "validate_model", None)
                 if self.free_only and callable(validator) and method in {"chat_complete", "embed"}:
-                    validation_model = args[1] if method == "embed" else args[0]
+                    validation_model = (
+                        provider_args[1] if method == "embed" else provider_args[0]
+                    )
                     validator(validation_model)
-                return await getattr(provider, method)(*args, **kwargs)
+                result = await getattr(provider, method)(*provider_args, **kwargs)
+                if method == "chat_complete" and isinstance(result, str):
+                    self.last_provider = provider
+                    self.last_provider_at = time.time()
+                    self._cost_record(
+                        provider,
+                        str(provider_args[0]) if provider_args else "",
+                        list(args[1]) if len(args) > 1 and isinstance(args[1], list) else [],
+                        result,
+                        kwargs,
+                    )
+                return result
+            except BudgetExceededError:
+                # Never spend past an exhausted budget by failing over.
+                raise
             except Exception as exc:
                 detail = " ".join(str(exc).split())[:360] or type(exc).__name__
                 failures.append(f"{provider.__class__.__name__}: {detail}")
@@ -306,6 +437,8 @@ class ResilientLLMProvider:
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         failures: list[str] = []
+        # Hard cap before any token is requested from a paid provider.
+        self._cost_check(kwargs)
         for provider in [self.primary, *self.fallbacks]:
             if self.free_only and (
                 getattr(provider, "simulation", False)
@@ -317,13 +450,19 @@ class ResilientLLMProvider:
                 continue
             emitted_output = False
             attempt_started = time.monotonic()
+            collected: list[str] = []
             try:
+                provider_model = str(getattr(provider, "fallback_model", "") or model).strip()
                 validator = getattr(provider, "validate_model", None)
                 if self.free_only and callable(validator):
-                    validator(str(getattr(provider, "fallback_model", "") or model))
-                async for token in provider.chat_stream(model, messages, **kwargs):
+                    validator(provider_model)
+                async for token in provider.chat_stream(provider_model, messages, **kwargs):
                     if token:
                         emitted_output = True
+                        # Bounded buffer for cost estimation only; never a sink
+                        # for the full completion.
+                        if len(collected) < 512:
+                            collected.append(token)
                     yield token
                 if not emitted_output:
                     raise RuntimeError(
@@ -334,8 +473,13 @@ class ResilientLLMProvider:
                 self.last_provider_latency_ms = round(
                     (time.monotonic() - attempt_started) * 1000.0, 2
                 )
+                self._cost_record(
+                    provider, provider_model, messages, "".join(collected), kwargs
+                )
                 return
             except asyncio.CancelledError:
+                raise
+            except BudgetExceededError:
                 raise
             except Exception as exc:
                 detail = " ".join(str(exc).split())[:360] or type(exc).__name__
@@ -382,6 +526,7 @@ class ResilientLLMProvider:
         to it; otherwise we call :meth:`chat_complete` once per message
         set through the resilient fallback chain.
         """
+        self._cost_check(kwargs)
         for provider in [self.primary, *self.fallbacks]:
             if self.free_only and (
                 getattr(provider, "simulation", False)
@@ -392,24 +537,35 @@ class ResilientLLMProvider:
             ):
                 continue
             try:
+                provider_model = str(getattr(provider, "fallback_model", "") or model or "")
                 validator = getattr(provider, "validate_model", None)
                 if self.free_only and callable(validator):
-                    validator(model or "")
+                    validator(provider_model)
                 if hasattr(provider, "batch_complete"):
-                    return await provider.batch_complete(
+                    result = await provider.batch_complete(
                         messages_list,
-                        model=model,
+                        model=provider_model,
                         options=options,
                         **kwargs,
                     )
-                return list(
-                    await asyncio.gather(
-                        *(
-                            provider.chat_complete(model or "", msgs, options=options, **kwargs)
-                            for msgs in messages_list
+                else:
+                    result = list(
+                        await asyncio.gather(
+                            *(
+                                provider.chat_complete(
+                                    provider_model, msgs, options=options, **kwargs
+                                )
+                                for msgs in messages_list
+                            )
                         )
                     )
+                joined = " ".join(str(item) for item in result[:20])
+                self._cost_record(
+                    provider, provider_model, messages_list[0] if messages_list else [], joined, kwargs
                 )
+                return result
+            except BudgetExceededError:
+                raise
             except Exception as exc:
                 logger.warning(
                     "Provider %s failed for batch_complete: %s",
@@ -536,6 +692,74 @@ def _build_fallback_chain(
             fallback.disable_tools = True
             fallback.direct_answer = True
             fallbacks.append(fallback)
+
+        # Allow either configured provider to fail over to the other while
+        # keeping free_only fail-closed for every remote request.
+        if primary_provider == "openrouter":
+            from backend.llm.lmstudio_provider import LMStudioProvider
+
+            lmstudio_host = _setting_value(
+                settings, overrides, "lmstudio_host", LMStudioProvider.DEFAULT_BASE_URL
+            )
+            lmstudio_model = str(
+                _setting_value(settings, overrides, "lmstudio_default_model", "") or ""
+            ).strip()
+            if lmstudio_host and lmstudio_model:
+                lmstudio_fallback = LMStudioProvider(
+                    base_url=lmstudio_host,
+                    api_key=_usable_api_key(
+                        _setting_value(settings, overrides, "lmstudio_api_key", "")
+                    )
+                    or None,
+                    default_model=lmstudio_model,
+                    fast_model=str(
+                        _setting_value(settings, overrides, "lmstudio_fast_model", "") or ""
+                    ),
+                    coder_model=str(
+                        _setting_value(settings, overrides, "lmstudio_coder_model", "") or ""
+                    ),
+                )
+                lmstudio_fallback.fallback_model = lmstudio_model
+                lmstudio_fallback._free_validated = True
+                fallbacks.append(lmstudio_fallback)
+
+        if primary_provider != "openrouter" and (
+            openrouter_api_key := _usable_api_key(
+                _setting_value(settings, overrides, "openrouter_api_key", "")
+            )
+        ):
+            from backend.llm.openrouter_provider import OpenRouterProvider
+
+            openrouter_catalog = overrides.get("policy_candidates")
+            if not isinstance(openrouter_catalog, list):
+                try:
+                    from backend.llm.model_catalog import load_validated_models
+
+                    openrouter_catalog = load_validated_models("openrouter")
+                except Exception:  # pragma: no cover - catalog is best effort
+                    logger.debug("Could not load validated OpenRouter fallback models", exc_info=True)
+                    openrouter_catalog = []
+
+            openrouter_fallback = OpenRouterProvider(
+                base_url=_setting_value(
+                    settings, overrides, "openrouter_base_url", "https://openrouter.ai/api"
+                ),
+                api_key=openrouter_api_key,
+                free_only=True,
+                catalog=openrouter_catalog,
+                validation_ttl_seconds=int(
+                    _setting_value(settings, overrides, "provider_validation_ttl_seconds", 600)
+                ),
+                max_latency_ms=int(
+                    _setting_value(settings, overrides, "max_provider_latency_ms", 30_000)
+                ),
+                local_embed_host=_setting_value(settings, overrides, "ollama_host", ""),
+            )
+            # The failed primary's model ID may not be an OpenRouter ID. Use a
+            # validated zero-cost model explicitly; validate_model enforces
+            # current zero-price and quota evidence before dispatch.
+            openrouter_fallback.fallback_model = "cohere/north-mini-code:free"
+            fallbacks.append(openrouter_fallback)
         return fallbacks
 
     if primary_provider is None and primary_is_local is not None:
@@ -778,6 +1002,39 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
         logger.info("Ollama provider registered")
 
     # ------------------------------------------------------------------
+    # OPTIONAL: Local LM Studio (OpenAI-compatible on localhost:1234).
+    # No API key is required and it is zero-cost like Ollama, so the
+    # free-only policy never blocks it. Registered when explicitly
+    # selected or when the model catalog already validated its models.
+    # ------------------------------------------------------------------
+    from backend.llm.lmstudio_provider import LMStudioProvider
+
+    lmstudio_validated = []
+    try:
+        from backend.llm.model_catalog import load_validated_models
+
+        lmstudio_validated = load_validated_models("lmstudio")
+    except Exception:  # noqa: BLE001 - catalog is best effort
+        logger.debug("Could not load validated LM Studio models", exc_info=True)
+    if preferred_provider == "lmstudio" or lmstudio_validated:
+        lmstudio_provider = LMStudioProvider(
+            base_url=_setting_value(settings, values, "lmstudio_host", "")
+            or LMStudioProvider.DEFAULT_BASE_URL,
+            api_key=_usable_api_key(_setting_value(settings, values, "lmstudio_api_key", ""))
+            or None,
+            default_model=str(_setting_value(settings, values, "lmstudio_default_model", "") or ""),
+            fast_model=str(_setting_value(settings, values, "lmstudio_fast_model", "") or ""),
+            coder_model=str(_setting_value(settings, values, "lmstudio_coder_model", "") or ""),
+        )
+        manager.register_provider(
+            "lmstudio", lmstudio_provider, priority=priority_for("lmstudio", 4)
+        )
+        logger.info(
+            "LM Studio provider registered with %d validated model(s)",
+            len(lmstudio_validated),
+        )
+
+    # ------------------------------------------------------------------
     # OPTIONAL: AirLLM experimental (only if explicitly enabled)
     # ------------------------------------------------------------------
     if not free_only and _as_bool(
@@ -924,7 +1181,7 @@ def create_llm_client(**overrides: Any) -> Any:
     """Create an LLM provider instance based on configuration.
 
     Reads ``llm_provider`` from settings (env var ``LLM_PROVIDER``).
-    Supported providers: ``ollama``/``local``, ``airllm``, ``openai``, ``deepseek``, ``kimi``, ``groq``, ``anthropic``, ``gemini``, ``openrouter``, ``opencode_go``, ``kilo``, ``dev``.
+    Supported providers: ``ollama``/``local``, ``airllm``, ``lmstudio``, ``openai``, ``deepseek``, ``kimi``, ``groq``, ``anthropic``, ``gemini``, ``openrouter``, ``opencode_go``, ``kilo``, ``dev``.
 
     If ``MULTI_LLM_ENABLED`` is true, returns a :class:`MultiLLMManager`
     configured with all available providers.
@@ -968,7 +1225,8 @@ def create_llm_client(**overrides: Any) -> Any:
 
     # "kilo" removed (audit 2026-08-24 B3): paid gateway is never
     # free-validated, so it must not bypass the fail-closed policy.
-    if free_only and provider not in {"local", "ollama", "openrouter", "dev"}:
+    # "lmstudio" is local (localhost:1234) and free like Ollama.
+    if free_only and provider not in {"local", "ollama", "openrouter", "dev", "lmstudio"}:
         raise ProviderUnavailableError(
             f"Configured provider '{provider}' is not validated free",
             category="eligibility",
@@ -1041,6 +1299,52 @@ def create_llm_client(**overrides: Any) -> Any:
             primary_provider="airllm",
         )
         return ResilientLLMProvider(primary, fallbacks, free_only=free_only)
+
+    if provider == "lmstudio":
+        from backend.llm.lmstudio_provider import LMStudioProvider
+
+        base_url = _setting_value(
+            settings, effective_overrides, "lmstudio_host", settings.lmstudio_host
+        )
+        api_key = _usable_api_key(
+            _setting_value(settings, effective_overrides, "lmstudio_api_key", "")
+        )
+        logger.info("Using LM Studio provider at %s with fallback chain", base_url)
+        lm_primary = LMStudioProvider(
+            base_url=base_url,
+            api_key=api_key or None,
+            default_model=str(
+                _setting_value(
+                    settings, effective_overrides, "lmstudio_default_model", ""
+                )
+                or ""
+            ),
+            fast_model=str(
+                _setting_value(settings, effective_overrides, "lmstudio_fast_model", "") or ""
+            ),
+            coder_model=str(
+                _setting_value(settings, effective_overrides, "lmstudio_coder_model", "") or ""
+            ),
+        )
+        # LM Studio is a local server: everything it serves is zero-cost. The
+        # discovered catalog (Model UI) is attached as candidates so the free
+        # policy can authorise the exact installed models without another
+        # network call — mirroring the Ollama branch.
+        lm_primary._free_validated = True
+        try:
+            from backend.llm.model_catalog import load_validated_models
+
+            cached_local_models = load_validated_models("lmstudio")
+            if cached_local_models:
+                lm_primary._free_candidates = [model.id for model in cached_local_models]
+        except Exception:  # noqa: BLE001 - live chat can still report the provider error
+            logger.debug("Could not load cached LM Studio model validation", exc_info=True)
+        fallbacks = _build_fallback_chain(
+            settings,
+            effective_overrides,
+            primary_provider="lmstudio",
+        )
+        return ResilientLLMProvider(lm_primary, fallbacks, free_only=free_only)
 
     if provider == "dev":
         if free_only:

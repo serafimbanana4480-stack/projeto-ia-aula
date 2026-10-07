@@ -2,13 +2,19 @@
   "name": "nexus-ide-frontend",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.17.0",
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
     "type-check": "tsc --noEmit",
-    "lint": "next lint",
-    "test": "vitest run"
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "vitest run",
+    "benchmark:chat-ui": "node scripts/benchmark-chat-ui.mjs",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "@monaco-editor/react": "4.6.0",
@@ -41,7 +47,7 @@
     "eslint": "9.13.0",
     "eslint-config-next": "15.0.0",
     "jsdom": "^25.0.0",
-    "postcss": "8.4.47",
+    "postcss": "8.5.18",
     "tailwindcss": "3.4.14",
     "typescript": "5.6.3",
     "vitest": "2.1.3"

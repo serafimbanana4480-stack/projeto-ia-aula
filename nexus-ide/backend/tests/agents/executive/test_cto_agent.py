@@ -5,29 +5,29 @@ import time
 
 import pytest
 
-from backend.agents.executive.technology_strategist import (
-    TechnologyStrategist,
-    StackScore,
-    CRITERIA,
-)
+from backend.agents.base import AgentRequest
 from backend.agents.executive.architecture_decision_maker import (
+    ADRStatus,
     ArchitectureDecisionMaker,
     ArchitectureDecisionRecord,
-    ADRStatus,
-)
-from backend.agents.executive.technical_roadmapper import (
-    TechnicalRoadmapper,
-    Milestone,
-    MilestoneStatus,
-)
-from backend.agents.executive.stack_selector import StackSelector, StackSelection
-from backend.agents.executive.technical_debt_manager import (
-    TechnicalDebtManager,
-    DebtItem,
-    Severity,
 )
 from backend.agents.executive.cto_agent import CTOAgent
-from backend.agents.base import AgentRequest
+from backend.agents.executive.stack_selector import StackSelection, StackSelector
+from backend.agents.executive.technical_debt_manager import (
+    DebtItem,
+    Severity,
+    TechnicalDebtManager,
+)
+from backend.agents.executive.technical_roadmapper import (
+    Milestone,
+    MilestoneStatus,
+    TechnicalRoadmapper,
+)
+from backend.agents.executive.technology_strategist import (
+    CRITERIA,
+    StackScore,
+    TechnologyStrategist,
+)
 from backend.tools.ollama_client import OllamaClient
 
 

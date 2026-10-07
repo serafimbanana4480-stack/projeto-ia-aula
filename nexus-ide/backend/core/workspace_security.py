@@ -745,11 +745,44 @@ _DANGEROUS_PIPE_TARGETS: set[str] = {
 # Shell-command validation helpers
 # ---------------------------------------------------------------------------
 
-_DISALLOWED_METACHARACTERS_BASE = (";", "&&", "||", "`", "$(", ">>", ">", "<")
+# A line break is a command separator for cmd.exe / sh just like ``;`` is, so an
+# embedded newline must never survive into ``Popen(..., shell=True)`` (which
+# receives the original string, not the shlex tokenisation).
+_LINE_BREAK_CHARS = ("\n", "\r", "\x0b", "\x0c")
+
+# ``&`` is backgrounding on POSIX and command chaining on cmd.exe, and nothing in
+# this allowlist legitimately needs a bare ``&`` as a shell *word*, so it is
+# blocked on every platform (it used to be Windows-only, which let
+# ``ls & whoami`` through on Linux/macOS).  ``&&`` is a separate, longer entry:
+# it is still matched first when both are present, so chaining is reported the
+# same way it always was.
+_DISALLOWED_METACHARACTERS_BASE = (
+    ";",
+    "&&",
+    "||",
+    "`",
+    "$(",
+    ">>",
+    ">",
+    "<",
+    "&",
+) + _LINE_BREAK_CHARS
 if sys.platform.startswith("win"):
-    _DISALLOWED_METACHARACTERS = _DISALLOWED_METACHARACTERS_BASE + ("&", "^")
+    # ``^`` is cmd.exe's escape character: it strips the meaning of the next
+    # character, so it can only ever be used to smuggle one past this list.
+    _DISALLOWED_METACHARACTERS = _DISALLOWED_METACHARACTERS_BASE + ("^",)
 else:
     _DISALLOWED_METACHARACTERS = _DISALLOWED_METACHARACTERS_BASE
+
+
+def _contains_line_break(command: str) -> bool:
+    """Return ``True`` if *command* embeds a line break anywhere.
+
+    Unlike the other metacharacters this inspects the raw string: a newline
+    inside quotes is still a separator for the real shell, so quoting is not a
+    way to smuggle one past the allowlist.
+    """
+    return any(br in command for br in _LINE_BREAK_CHARS)
 
 
 def _remove_quoted_parts(s: str) -> str:
@@ -771,18 +804,29 @@ def _has_unquoted_metacharacters(command: str) -> bool:
     return any(op in cleaned for op in _DISALLOWED_METACHARACTERS)
 
 
-def _split_on_pipes(command: str) -> list[str]:
-    """Split *command* on unquoted ``|`` characters."""
+def _split_on_separators(command: str) -> list[str]:
+    """Split *command* on unquoted ``|`` / ``&`` and on line breaks.
+
+    Line breaks split unconditionally (quoting cannot hide a separator from the
+    shell) so every resulting segment is validated on its own.  ``&`` splits
+    only when unquoted, exactly like ``|``, so a quoted ``&`` stays data while
+    a backgrounding/chaining ``&`` is broken into two independently validated
+    segments.
+    """
     segments: list[str] = []
     current: list[str] = []
     in_double = False
     in_single = False
     for ch in command:
+        if ch in _LINE_BREAK_CHARS:
+            segments.append("".join(current))
+            current = []
+            continue
         if ch == '"' and not in_single:
             in_double = not in_double
         elif ch == "'" and not in_double:
             in_single = not in_single
-        elif ch == "|" and not in_double and not in_single:
+        elif ch in "|&" and not in_double and not in_single:
             segments.append("".join(current))
             current = []
             continue
@@ -793,6 +837,15 @@ def _split_on_pipes(command: str) -> list[str]:
 
 def _validate_single_command(command: str) -> tuple[bool, str]:
     """Validate one shell segment (no pipes, no chaining)."""
+    # Defence in depth: this helper is the last gate before a segment is handed
+    # to the shell, so it must never accept a string that still carries a
+    # separator.  The git branch below returns early without inspecting the
+    # remaining tokens, which is exactly where an injected ``\n whoami`` would
+    # otherwise slip through.
+    unquoted = _remove_quoted_parts(command)
+    if _contains_line_break(command) or "|" in unquoted or "&" in unquoted:
+        return False, "Command separators (|, &, line breaks) are not allowed in a single command"
+
     try:
         tokens = shlex.split(command)
     except ValueError:
@@ -832,9 +885,9 @@ def _validate_single_command(command: str) -> tuple[bool, str]:
 def _validate_shell_command(command: str) -> tuple[bool, str]:
     """Validate a shell command against blacklist and whitelist.
 
-    Every segment produced by ``|`` is validated individually.  Commands
-    containing ``;``, ``&&``, ``||``, backticks, ``$()``, or redirections
-    are rejected outright.
+    Every segment produced by ``|`` or an unquoted ``&`` is validated
+    individually.  Commands containing ``;``, ``&&``, ``||``, ``&``, backticks,
+    ``$()``, redirections or an embedded line break are rejected outright.
     """
     if not command or not command.strip():
         return False, "Empty command"
@@ -852,12 +905,18 @@ def _validate_shell_command(command: str) -> tuple[bool, str]:
         if blocked_path.lower() in cmd_lower:
             return False, f"Access to system path '{blocked_path}' is blocked"
 
+    # Reject an embedded line break outright: cmd.exe / sh treat it as a command
+    # separator, so the original string that reaches Popen(shell=True) would run
+    # more than the segment we validated.
+    if _contains_line_break(cmd_str):
+        return False, "Embedded line breaks are not allowed in a command"
+
     # Reject shell metacharacters that allow command chaining / substitution
     if _has_unquoted_metacharacters(cmd_str):
-        return False, "Shell metacharacters (;, &&, ||, `, $(), >, <, >>) are not allowed"
+        return False, "Shell metacharacters (;, &, &&, ||, `, $(), >, <, >>) are not allowed"
 
-    # Split on pipes and validate every segment
-    segments = _split_on_pipes(cmd_str)
+    # Split on pipes, unquoted ampersands and line breaks, then validate every segment
+    segments = _split_on_separators(cmd_str)
     if not segments:
         return False, "Empty command"
 

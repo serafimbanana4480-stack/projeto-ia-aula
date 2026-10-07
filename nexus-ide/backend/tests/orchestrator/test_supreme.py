@@ -1,12 +1,12 @@
 """Tests for SupremeOrchestrator."""
-from unittest.mock import AsyncMock, MagicMock
 import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.orchestrator.supreme import SupremeOrchestrator
-from backend.orchestrator.decomposer import UserStory, StoryPriority
 from backend.agents.base import AgentRequest
+from backend.orchestrator.decomposer import StoryPriority, UserStory
+from backend.orchestrator.supreme import SupremeOrchestrator
 
 
 class TestSupremeOrchestrator:

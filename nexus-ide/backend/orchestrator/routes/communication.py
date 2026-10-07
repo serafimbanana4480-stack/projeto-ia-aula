@@ -1,11 +1,12 @@
+"""API routes for agent communication bus."""
+
 from __future__ import annotations
 
-"""API routes for agent communication bus."""
+import uuid
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-import uuid
-from typing import Any, Optional
-
 
 from backend.orchestrator.agent_communication_bus import (
     AgentCommunicationBus,
@@ -14,7 +15,7 @@ from backend.orchestrator.agent_communication_bus import (
 
 router = APIRouter(prefix="/api/communication", tags=["communication"])
 
-_bus: Optional[AgentCommunicationBus] = None
+_bus: AgentCommunicationBus | None = None
 
 
 def set_bus(bus: AgentCommunicationBus) -> None:
@@ -66,9 +67,9 @@ async def send_message(request: SendMessageRequest, http_request: Request) -> Me
 
 @router.get("/history")
 async def get_history(
-    sender: Optional[str] = None,
-    recipient: Optional[str] = None,
-    message_type: Optional[str] = None,
+    sender: str | None = None,
+    recipient: str | None = None,
+    message_type: str | None = None,
     limit: int = 100,
 ) -> list[MessageResponse]:
     if _bus is None:

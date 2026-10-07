@@ -6,30 +6,31 @@ performs comprehensive testing, and validates system functionality.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union, Callable
 from datetime import datetime
+from enum import Enum
+from typing import Any
 
-# Import all system components
-from ..orchestrator.supreme_orchestrator import SupremeOrchestrator
+from ..agents.debate_system import DebateSystem
+from ..agents.reflection_system import ReflectionSystem
+from ..dashboard.realtime_dashboard import RealtimeDashboard
+from ..deployment.deployment_automation import DeploymentAutomation
+from ..documentation.docs_generator import DocumentationGenerator
+from ..inference.parallel_engine import ParallelInferenceEngine
+from ..memory.advanced_memory import AdvancedMemorySystem
+from ..monitoring.performance_monitor import PerformanceMonitor
 from ..orchestrator.agent_pool import AgentPool
 from ..orchestrator.communication_protocol import MessageProtocol
 from ..orchestrator.coordination_mechanisms import ConsensusManager
-from ..agents.reflection_system import ReflectionSystem
-from ..agents.debate_system import DebateSystem
-from ..inference.parallel_engine import ParallelInferenceEngine
-from ..memory.advanced_memory import AdvancedMemorySystem
+
+# Import all system components
+from ..orchestrator.supreme_orchestrator import SupremeOrchestrator
 from ..processing.multimodal import MultiModalProcessor
-from ..dashboard.realtime_dashboard import RealtimeDashboard
-from ..monitoring.performance_monitor import PerformanceMonitor
 from ..testing.testing_framework import TestingFramework
-from ..documentation.docs_generator import DocumentationGenerator
-from ..deployment.deployment_automation import DeploymentAutomation
 
 logger = logging.getLogger(__name__)
 
@@ -70,31 +71,31 @@ class IntegrationTest:
     description: str = ""
     
     # Test configuration
-    components: List[ComponentType] = field(default_factory=list)
+    components: list[ComponentType] = field(default_factory=list)
     test_type: str = "integration"
     priority: str = "high"
     
     # Test execution
-    test_function: Optional[Callable] = None
-    setup_function: Optional[Callable] = None
-    teardown_function: Optional[Callable] = None
+    test_function: Callable | None = None
+    setup_function: Callable | None = None
+    teardown_function: Callable | None = None
     
     # Test parameters
-    parameters: Dict[str, Any] = field(default_factory=dict)
+    parameters: dict[str, Any] = field(default_factory=dict)
     timeout: float = 300.0
     
     # Results
     status: IntegrationStatus = IntegrationStatus.PENDING
     started_at: float = field(default_factory=time.time)
-    completed_at: Optional[float] = None
+    completed_at: float | None = None
     duration: float = 0.0
     
     # Output
-    result: Optional[Dict[str, Any]] = None
-    logs: List[str] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
+    result: dict[str, Any] | None = None
+    logs: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "test_id": self.test_id,
             "name": self.name,
@@ -121,7 +122,7 @@ class IntegrationReport:
     
     # Test execution
     started_at: float = field(default_factory=time.time)
-    completed_at: Optional[float] = None
+    completed_at: float | None = None
     total_duration: float = 0.0
     
     # Test statistics
@@ -131,21 +132,21 @@ class IntegrationReport:
     skipped_tests: int = 0
     
     # Component status
-    component_status: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    component_status: dict[str, dict[str, Any]] = field(default_factory=dict)
     
     # Test results
-    test_results: List[IntegrationTest] = field(default_factory=list)
+    test_results: list[IntegrationTest] = field(default_factory=list)
     
     # System metrics
-    system_metrics: Dict[str, Any] = field(default_factory=dict)
+    system_metrics: dict[str, Any] = field(default_factory=dict)
     
     # Issues found
-    issues: List[Dict[str, Any]] = field(default_factory=list)
+    issues: list[dict[str, Any]] = field(default_factory=list)
     
     # Recommendations
-    recommendations: List[str] = field(default_factory=list)
+    recommendations: list[str] = field(default_factory=list)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "report_id": self.report_id,
             "name": self.name,
@@ -169,11 +170,11 @@ class SystemIntegrator:
     """Main system integration coordinator."""
     
     def __init__(self):
-        self.components: Dict[ComponentType, Any] = {}
-        self.integration_tests: List[IntegrationTest] = []
-        self.system_metrics: Dict[str, Any] = {}
+        self.components: dict[ComponentType, Any] = {}
+        self.integration_tests: list[IntegrationTest] = []
+        self.system_metrics: dict[str, Any] = {}
         
-    async def initialize_all_components(self) -> Dict[str, Any]:
+    async def initialize_all_components(self) -> dict[str, Any]:
         """Initialize all system components."""
         logger.info("Initializing all NEXUS OMEGA components...")
         
@@ -308,7 +309,7 @@ class SystemIntegrator:
         logger.info("DeploymentAutomation initialized")
         return deployment
         
-    def create_integration_tests(self) -> List[IntegrationTest]:
+    def create_integration_tests(self) -> list[IntegrationTest]:
         """Create comprehensive integration tests."""
         tests = []
         
@@ -396,7 +397,7 @@ class SystemIntegrator:
         self.integration_tests = tests
         return tests
         
-    async def _test_core_integration(self, test: IntegrationTest) -> Dict[str, Any]:
+    async def _test_core_integration(self, test: IntegrationTest) -> dict[str, Any]:
         """Test core system integration."""
         logger.info("Running core integration test...")
         
@@ -430,7 +431,7 @@ class SystemIntegrator:
             test.result = {"status": "failed", "error": str(exc)}
             return test.result
             
-    async def _test_memory_inference_integration(self, test: IntegrationTest) -> Dict[str, Any]:
+    async def _test_memory_inference_integration(self, test: IntegrationTest) -> dict[str, Any]:
         """Test memory and inference integration."""
         logger.info("Running memory-inference integration test...")
         
@@ -458,7 +459,7 @@ class SystemIntegrator:
             test.result = {"status": "failed", "error": str(exc)}
             return test.result
             
-    async def _test_multimodal_integration(self, test: IntegrationTest) -> Dict[str, Any]:
+    async def _test_multimodal_integration(self, test: IntegrationTest) -> dict[str, Any]:
         """Test multi-modal processing integration."""
         logger.info("Running multi-modal integration test...")
         
@@ -479,7 +480,7 @@ class SystemIntegrator:
             test.result = {"status": "failed", "error": str(exc)}
             return test.result
             
-    async def _test_reflection_debate_integration(self, test: IntegrationTest) -> Dict[str, Any]:
+    async def _test_reflection_debate_integration(self, test: IntegrationTest) -> dict[str, Any]:
         """Test reflection and debate integration."""
         logger.info("Running reflection-debate integration test...")
         
@@ -503,7 +504,7 @@ class SystemIntegrator:
             test.result = {"status": "failed", "error": str(exc)}
             return test.result
             
-    async def _test_security_monitoring_integration(self, test: IntegrationTest) -> Dict[str, Any]:
+    async def _test_security_monitoring_integration(self, test: IntegrationTest) -> dict[str, Any]:
         """Test security and monitoring integration."""
         logger.info("Running security-monitoring integration test...")
         
@@ -527,7 +528,7 @@ class SystemIntegrator:
             test.result = {"status": "failed", "error": str(exc)}
             return test.result
             
-    async def _test_dashboard_integration(self, test: IntegrationTest) -> Dict[str, Any]:
+    async def _test_dashboard_integration(self, test: IntegrationTest) -> dict[str, Any]:
         """Test dashboard integration."""
         logger.info("Running dashboard integration test...")
         
@@ -547,7 +548,7 @@ class SystemIntegrator:
             test.result = {"status": "failed", "error": str(exc)}
             return test.result
             
-    async def _test_end_to_end_workflow(self, test: IntegrationTest) -> Dict[str, Any]:
+    async def _test_end_to_end_workflow(self, test: IntegrationTest) -> dict[str, Any]:
         """Test end-to-end workflow."""
         logger.info("Running end-to-end workflow test...")
         
@@ -567,12 +568,12 @@ class SystemIntegrator:
             test.result = {"status": "failed", "error": str(exc)}
             return test.result
             
-    async def _test_system_performance(self, test: IntegrationTest) -> Dict[str, Any]:
+    async def _test_system_performance(self, test: IntegrationTest) -> dict[str, Any]:
         """Test system performance."""
         logger.info("Running system performance test...")
         
         try:
-            monitoring = self.components.get(ComponentType.MONITORING)
+            self.components.get(ComponentType.MONITORING)
             
             test.logs.append("Testing system performance...")
             
@@ -599,7 +600,7 @@ class SystemIntegrator:
             test.result = {"status": "failed", "error": str(exc)}
             return test.result
             
-    async def _test_system_security(self, test: IntegrationTest) -> Dict[str, Any]:
+    async def _test_system_security(self, test: IntegrationTest) -> dict[str, Any]:
         """Test system security."""
         logger.info("Running system security test...")
         
@@ -651,7 +652,7 @@ class SystemIntegrator:
                 
                 report.test_results.append(test)
                 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 test.status = IntegrationStatus.FAILED
                 test.errors.append("Test timed out")
                 test.completed_at = time.time()
@@ -702,7 +703,7 @@ class SystemIntegrator:
         logger.info("Integration testing completed")
         return report
         
-    def _generate_recommendations(self, report: IntegrationReport) -> List[str]:
+    def _generate_recommendations(self, report: IntegrationReport) -> list[str]:
         """Generate recommendations based on test results."""
         recommendations = []
         
@@ -721,7 +722,7 @@ class SystemIntegrator:
             
         return recommendations
         
-    async def generate_system_report(self) -> Dict[str, Any]:
+    async def generate_system_report(self) -> dict[str, Any]:
         """Generate comprehensive system report."""
         logger.info("Generating comprehensive system report...")
         
@@ -730,7 +731,7 @@ class SystemIntegrator:
             "components": {
                 "total": len(self.components),
                 "initialized": len([c for c in self.components.values() if c]),
-                "component_types": [c.value for c in self.components.keys()]
+                "component_types": [c.value for c in self.components]
             },
             "capabilities": {
                 "agent_management": ComponentType.AGENT_POOL in self.components,
@@ -782,4 +783,4 @@ class SystemIntegrator:
 
 
 # Global system integrator instance
-system_integrator: Optional[SystemIntegrator] = None
+system_integrator: SystemIntegrator | None = None

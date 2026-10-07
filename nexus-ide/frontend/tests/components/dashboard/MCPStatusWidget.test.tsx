@@ -51,6 +51,11 @@ describe("MCPStatusWidget", () => {
     await waitFor(() => {
       expect(screen.getByText("Filesystem")).toBeDefined();
     });
+    expect(screen.getByText("Configuração e último teste — não é uma ligação em tempo real")).toBeDefined();
+    expect(screen.getByText("Configurados")).toBeDefined();
+    expect(screen.getByText("Último teste OK")).toBeDefined();
+    expect(screen.getByText("Ativo na config.")).toBeDefined();
+    expect(screen.getAllByText("Último teste: OK").length).toBeGreaterThan(0);
     expect(screen.getByText("Gerir conectores")).toBeDefined();
   });
 });

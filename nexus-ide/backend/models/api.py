@@ -10,8 +10,8 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from backend.orchestrator.execution_contracts import ExecutionMode
 
+from backend.orchestrator.execution_contracts import ExecutionMode
 
 AgentName = Literal[
     # The primary agent. One agent owns the turn and talks to the user;
@@ -19,6 +19,7 @@ AgentName = Literal[
     "NEXUS",
     "ROUTER",
     "PLANNER",
+    "ADVISOR",
     "ARCHITECT",
     "ARCHITECT_DESIGN",
     "ARCHITECT_COMPLEXITY",
@@ -75,6 +76,9 @@ EventType = Literal[
     "mission_decision",
     "mission_verification",
     "mission_completed",
+    # Infinity v3: live advisor notes and vibe worker session updates.
+    "advisor_note",
+    "worker_update",
 ]
 
 
@@ -97,8 +101,16 @@ class ChatRequest(BaseModel):
         description=(
             "Either a concrete provider model id ('anthropic/claude-sonnet-4', "
             "'qwen2.5:7b') or a router tier key ('coder', 'deep', 'reasoning'). "
-            "A concrete id is used verbatim; a tier is resolved via "
-            "config/models.yaml. Empty string or 'auto' means auto-route."
+            "Non-tier ids are used verbatim. A tier key is resolved via "
+            "config/models.yaml unless model_is_concrete is true. Empty string "
+            "or 'auto' means auto-route."
+        ),
+    )
+    model_is_concrete: bool = Field(
+        default=False,
+        description=(
+            "Disambiguates a concrete catalog model id that exactly matches a "
+            "router tier key. Set true only for a concrete model selection."
         ),
     )
     project_path: str = Field(

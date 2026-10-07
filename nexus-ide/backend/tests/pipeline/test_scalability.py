@@ -1,10 +1,6 @@
 """Tests for Scalability — multi-tenancy, budget, GPU, NOC."""
 from __future__ import annotations
 
-import time
-
-import pytest
-
 from backend.pipeline.scalability import (
     BudgetOptimizer,
     GPUScheduler,
@@ -12,10 +8,8 @@ from backend.pipeline.scalability import (
     ModelTier,
     NeuralOperationsCenter,
     TenantConfig,
-    TenantIsolationLevel,
     TenantManager,
 )
-
 
 # ============================================================================
 # 11-01: Multi-tenancy Tests

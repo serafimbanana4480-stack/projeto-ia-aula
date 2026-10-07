@@ -10,13 +10,13 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import time
-from datetime import datetime
-from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
 
-from backend.observability.event_system import EventBus, Event, EventType, EventPriority
+from backend.observability.event_system import Event, EventBus, EventPriority, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +40,9 @@ class MemoryDashboard:
     def __init__(self, event_bus: EventBus):
         self.event_bus = event_bus
         self.metrics = MemoryMetrics()
-        self.memory_systems: Dict[str, Any] = {}
+        self.memory_systems: dict[str, Any] = {}
         self._running = False
-        self._monitor_task: Optional[asyncio.Task] = None
+        self._monitor_task: asyncio.Task | None = None
         
     async def start(self) -> None:
         """Start memory dashboard monitoring."""
@@ -59,10 +59,8 @@ class MemoryDashboard:
         
         if self._monitor_task:
             self._monitor_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._monitor_task
-            except asyncio.CancelledError:
-                pass
             self._monitor_task = None
         
         logger.info("MemoryDashboard stopped")
@@ -77,7 +75,7 @@ class MemoryDashboard:
             "total_systems": self.metrics.total_memories
         })
     
-    async def update_memory_metrics(self, system_name: str, metrics: Dict[str, Any]) -> None:
+    async def update_memory_metrics(self, system_name: str, metrics: dict[str, Any]) -> None:
         """Update memory system metrics."""
         if system_name not in self.memory_systems:
             await self.register_memory_system(system_name, None)
@@ -129,7 +127,7 @@ class MemoryDashboard:
             "system_metrics": metrics
         })
     
-    async def get_memory_status(self) -> Dict[str, Any]:
+    async def get_memory_status(self) -> dict[str, Any]:
         """Get current memory system status."""
         return {
             "metrics": self.metrics.__dict__,
@@ -172,7 +170,7 @@ class MemoryDashboard:
                 logger.error(f"Error in memory monitoring: {e}")
                 await asyncio.sleep(5)
     
-    async def _emit_memory_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+    async def _emit_memory_event(self, event_type: str, payload: dict[str, Any]) -> None:
         """Emit memory-related event."""
         if not self.event_bus:
             return
@@ -199,7 +197,7 @@ class MemoryDashboard:
 
 
 # Global memory dashboard instance
-_memory_dashboard: Optional[MemoryDashboard] = None
+_memory_dashboard: MemoryDashboard | None = None
 
 
 async def get_memory_dashboard(event_bus: EventBus) -> MemoryDashboard:

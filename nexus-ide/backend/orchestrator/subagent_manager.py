@@ -62,6 +62,10 @@ RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
 )
 
 
+class _AgentLifecycleFailure(RuntimeError):
+    """A spawned lifecycle agent ended without a successful completion."""
+
+
 @dataclass
 class SubagentResult:
     subagent_id: str
@@ -266,6 +270,7 @@ class SubagentManager:
                 mission_id=mission_id,
                 token_budget=cfg.token_budget,
                 time_budget_seconds=int(cfg.timeout),
+                start_execution=fn is None,
             )
 
             try:
@@ -306,6 +311,20 @@ class SubagentManager:
                     attempt + 1,
                     attempts,
                 )
+            except _AgentLifecycleFailure as exc:
+                # The lifecycle callback already made this attempt terminal.
+                # Preserve its failure instead of treating an empty output as
+                # success or issuing a second terminal transition.
+                result.error = str(exc)
+                logger.warning(
+                    "Subagent lifecycle ended without success | phase=%s "
+                    "attempt=%d/%d error=%s",
+                    cfg.phase,
+                    attempt + 1,
+                    attempts,
+                    exc,
+                )
+                return instance_id
             except RETRYABLE_EXCEPTIONS as exc:
                 await self._lifecycle.fail(instance_id, error=str(exc))
                 result.error = str(exc)
@@ -341,9 +360,17 @@ class SubagentManager:
         while time.monotonic() < deadline:
             status = self._lifecycle.get_status(instance_id)
             if status is None:
-                return ""
+                raise _AgentLifecycleFailure(
+                    f"Agent instance {instance_id} disappeared before completion was confirmed"
+                )
             if status.is_terminal():
-                return status.context.get("output", "")
+                if status.status == "completed":
+                    return status.context.get("output", "")
+                detail = status.error_message or status.status
+                raise _AgentLifecycleFailure(
+                    f"Agent instance {instance_id} ended with status "
+                    f"'{status.status}': {detail}"
+                )
             await asyncio.sleep(0.05)
         raise TimeoutError(f"Agent instance {instance_id} did not complete within {timeout}s")
 

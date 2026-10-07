@@ -1,5 +1,6 @@
 """Tests for EventBus."""
 import asyncio
+import contextlib
 
 import pytest
 
@@ -28,7 +29,7 @@ class TestEventBus:
 
         try:
             await asyncio.wait_for(task, timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
 
         assert len(received) == 2
@@ -52,7 +53,7 @@ class TestEventBus:
         await bus.publish(Event(type="something.else"))
         try:
             await asyncio.wait_for(task, timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
 
         assert len(received) == 2
@@ -74,10 +75,8 @@ class TestEventBus:
         # Wait briefly then cancel
         await asyncio.sleep(0.2)
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
         assert len(received) == 0
 
@@ -95,10 +94,8 @@ class TestEventBus:
         assert await bus.subscriber_count("*") == 1
 
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
         await asyncio.sleep(0.05)
         assert await bus.subscriber_count("*") == 0

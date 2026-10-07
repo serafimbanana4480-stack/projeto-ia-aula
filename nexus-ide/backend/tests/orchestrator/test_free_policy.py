@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 
 from backend.llm.free_policy import FreeModelPolicy, FreeModelRequirement, ModelEligibility
+
+
 def _model(model_id: str, provider: str = "openrouter", **kwargs: object) -> dict[str, object]:
     return {
         "id": model_id,

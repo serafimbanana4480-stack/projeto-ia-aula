@@ -6,17 +6,17 @@ to improve decision quality over time through continuous learning.
 from __future__ import annotations
 
 import logging
+import statistics
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
-import statistics
+from typing import Any
 
-from .voting_system import Vote, DecisionType, WeightedVotingSystem
-from .evaluator import DecisionScore, TaskResult
 from .cache import Cache
-from .metrics import MetricsCollector, get_global_metrics_collector
+from .evaluator import DecisionScore, TaskResult
+from .metrics import get_global_metrics_collector
+from .voting_system import DecisionType, WeightedVotingSystem
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class DecisionPattern:
     successful_decisions: int
     last_updated: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "agent_id": self.agent_id,
             "decision_type": self.decision_type.value,
@@ -63,7 +63,7 @@ class AgentSpecialization:
     sample_size: int
     last_updated: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "agent_id": self.agent_id,
             "best_decision_type": self.best_decision_type.value,
@@ -84,7 +84,7 @@ class LearningResult:
     total_decisions_analyzed: int
     timestamp: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "patterns_updated": self.patterns_updated,
             "weights_adjusted": self.weights_adjusted,
@@ -137,8 +137,8 @@ class LearningLoop:
         self.stabilization_threshold = stabilization_threshold
         
         # Pattern tracking
-        self.decision_patterns: Dict[Tuple[str, DecisionType], DecisionPattern] = {}
-        self.agent_specializations: Dict[str, AgentSpecialization] = {}
+        self.decision_patterns: dict[tuple[str, DecisionType], DecisionPattern] = {}
+        self.agent_specializations: dict[str, AgentSpecialization] = {}
         
         # Cache for pattern analysis results
         self.cache = Cache(default_ttl=300.0, max_size=50)  # 5 minutes, 50 entries
@@ -148,7 +148,7 @@ class LearningLoop:
         self.metrics_collector.register_component("learning_loop")
         
         # History for trend analysis
-        self.weight_history: Dict[Tuple[str, DecisionType], List[float]] = defaultdict(list)
+        self.weight_history: dict[tuple[str, DecisionType], list[float]] = defaultdict(list)
         self.max_history_length = 10
         
         logger.info(
@@ -158,7 +158,7 @@ class LearningLoop:
     
     async def learn_from_outcomes(
         self,
-        outcomes: List[Tuple[str, DecisionScore, TaskResult]]
+        outcomes: list[tuple[str, DecisionScore, TaskResult]]
     ) -> LearningResult:
         """Learn from a batch of decision outcomes.
         
@@ -180,7 +180,7 @@ class LearningLoop:
             decision_type = self._extract_decision_type(task_result)
             
             # Update pattern
-            pattern = self._update_pattern(
+            self._update_pattern(
                 agent_id,
                 decision_type,
                 decision_score,
@@ -282,7 +282,7 @@ class LearningLoop:
         detected = 0
         
         # Group patterns by agent
-        agent_patterns: Dict[str, List[DecisionPattern]] = defaultdict(list)
+        agent_patterns: dict[str, list[DecisionPattern]] = defaultdict(list)
         for key, pattern in self.decision_patterns.items():
             agent_id, _ = key
             if pattern.total_decisions >= self.min_sample_size:
@@ -416,7 +416,7 @@ class LearningLoop:
         adjusted = 0
         
         # Group patterns by decision type
-        decision_type_patterns: Dict[DecisionType, List[Tuple[str, DecisionPattern]]] = defaultdict(list)
+        decision_type_patterns: dict[DecisionType, list[tuple[str, DecisionPattern]]] = defaultdict(list)
         for key, pattern in self.decision_patterns.items():
             agent_id, decision_type = key
             if pattern.total_decisions >= self.min_sample_size:
@@ -484,7 +484,7 @@ class LearningLoop:
         self,
         agent_id: str,
         decision_type: DecisionType
-    ) -> Optional[str]:
+    ) -> str | None:
         """Get trend for an agent's weight on a decision type.
         
         Returns:
@@ -516,15 +516,15 @@ class LearningLoop:
         else:
             return "stable"
     
-    def get_patterns(self) -> List[DecisionPattern]:
+    def get_patterns(self) -> list[DecisionPattern]:
         """Get all current decision patterns."""
         return list(self.decision_patterns.values())
     
-    def get_specializations(self) -> List[AgentSpecialization]:
+    def get_specializations(self) -> list[AgentSpecialization]:
         """Get all detected agent specializations."""
         return list(self.agent_specializations.values())
     
-    def get_agent_specialization(self, agent_id: str) -> Optional[AgentSpecialization]:
+    def get_agent_specialization(self, agent_id: str) -> AgentSpecialization | None:
         """Get specialization for a specific agent."""
         return self.agent_specializations.get(agent_id)
     
@@ -553,7 +553,7 @@ class LearningLoop:
         
         logger.info(f"Reset weight for {agent_id}/{decision_type} to {default_weight}")
     
-    def get_learning_statistics(self) -> Dict[str, Any]:
+    def get_learning_statistics(self) -> dict[str, Any]:
         """Get statistics about learning progress.
         
         Returns:

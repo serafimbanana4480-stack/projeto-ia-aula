@@ -4,14 +4,12 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-import pytest
-
-from backend.agents.executive.strategic_memory import StrategicMemory, StrategicDecision
-from backend.agents.executive.goal_hierarchy import GoalHierarchy, GoalStatus, GoalPriority
-from backend.agents.executive.resource_allocator import ResourceAllocator
-from backend.agents.executive.priority_manager import PriorityManager, PriorityLevel
-from backend.agents.executive.vision_aligner import VisionAligner
 from backend.agents.executive.ceo_agent import CEOAgent
+from backend.agents.executive.goal_hierarchy import GoalHierarchy, GoalPriority, GoalStatus
+from backend.agents.executive.priority_manager import PriorityLevel, PriorityManager
+from backend.agents.executive.resource_allocator import ResourceAllocator
+from backend.agents.executive.strategic_memory import StrategicDecision, StrategicMemory
+from backend.agents.executive.vision_aligner import VisionAligner
 
 
 class TestStrategicMemory:

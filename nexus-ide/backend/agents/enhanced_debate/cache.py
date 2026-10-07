@@ -8,8 +8,9 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class Cache:
         key_str = json.dumps(key_data, sort_keys=True, default=str)
         return hashlib.md5(key_str.encode()).hexdigest()
     
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         """Get value from cache.
         
         Args:
@@ -108,7 +109,7 @@ class Cache:
         self,
         key: str,
         value: Any,
-        ttl: Optional[float] = None
+        ttl: float | None = None
     ) -> None:
         """Set value in cache.
         
@@ -200,7 +201,7 @@ class Cache:
             "hit_rate": hit_rate,
         }
     
-    def cached(self, ttl: Optional[float] = None):
+    def cached(self, ttl: float | None = None):
         """Decorator for caching function results.
         
         Args:
@@ -233,7 +234,7 @@ class Cache:
 
 
 # Global cache instance
-_global_cache: Optional[Cache] = None
+_global_cache: Cache | None = None
 
 
 def get_global_cache() -> Cache:

@@ -38,11 +38,30 @@ _LOCK = threading.Lock()
 _RUNS: dict[str, _Entry] = {}
 #: A run older than this cannot still be steered by a human.
 _MAX_AGE_SECONDS = 6 * 60 * 60
+#: Opportunistic sweep throttle — the registry has no dedicated worker, so
+#: ``register_run`` sweeps stale entries at most this often (audit
+#: 2026-08-26: the previous backstop was never scheduled).
+_SWEEP_INTERVAL_SECONDS = 15 * 60
+_LAST_SWEEP = -_SWEEP_INTERVAL_SECONDS
+
+
+def _sweep_locked(now: float) -> int:
+    """Drop entries too old to belong to a live run. Caller holds _LOCK."""
+    cutoff = now - _MAX_AGE_SECONDS
+    stale = [run_id for run_id, entry in _RUNS.items() if entry.created_at < cutoff]
+    for run_id in stale:
+        _RUNS.pop(run_id, None)
+    return len(stale)
 
 
 def register_run(run_id: str, channel: SteeringChannel, *, session_id: str = "") -> None:
+    global _LAST_SWEEP
     with _LOCK:
-        _RUNS[run_id] = _Entry(channel, session_id, time.monotonic())
+        now = time.monotonic()
+        if now - _LAST_SWEEP >= _SWEEP_INTERVAL_SECONDS and _RUNS:
+            _LAST_SWEEP = now
+            _sweep_locked(now)
+        _RUNS[run_id] = _Entry(channel, session_id, now)
 
 
 def unregister_run(run_id: str) -> None:
@@ -67,9 +86,5 @@ def list_active_runs(session_id: str = "") -> list[str]:
 
 def sweep(now: float | None = None) -> int:
     """Drop entries too old to belong to a live run. Returns how many."""
-    cutoff = (now if now is not None else time.monotonic()) - _MAX_AGE_SECONDS
     with _LOCK:
-        stale = [run_id for run_id, entry in _RUNS.items() if entry.created_at < cutoff]
-        for run_id in stale:
-            _RUNS.pop(run_id, None)
-    return len(stale)
+        return _sweep_locked(now if now is not None else time.monotonic())

@@ -1,17 +1,18 @@
 """TechnicalDebtManager — tracks and manages technical debt."""
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
@@ -126,10 +127,8 @@ class TechnicalDebtManager:
         if not item:
             return None
         if severity is not None:
-            try:
+            with contextlib.suppress(ValueError):
                 item.severity = Severity(severity)
-            except ValueError:
-                pass
         if estimated_effort is not None:
             item.estimated_effort = estimated_effort
         if notes is not None:

@@ -116,16 +116,24 @@ export default function ToastHost() {
   return (
     <div
       role="region"
-      aria-label="Notifications"
+      aria-label="Notificações"
       className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-full max-w-sm flex-col gap-2"
     >
       <AnimatePresence initial={false}>
         {items.map((t) => {
           const c = COLORS[t.kind];
+          // `role="region"` on the container is silent: a toast that is never
+          // announced is a toast the user does not learn about. Errors and
+          // warnings interrupt (assertive); info and success do not
+          // (polite), which is the difference between "the run failed" and
+          // "the file was saved" in a screen reader's queue.
+          const urgent = t.kind === "error" || t.kind === "warning";
           return (
             <motion.div
               key={t.id}
               layout
+              role={urgent ? "alert" : "status"}
+              aria-live={urgent ? "assertive" : "polite"}
               initial={{ opacity: 0, y: 20, scale: 0.95 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, x: 40, scale: 0.95 }}

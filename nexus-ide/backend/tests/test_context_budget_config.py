@@ -84,7 +84,9 @@ class TestResolveOutputReserve:
     def test_tiny_window_still_leaves_input_room(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import backend.token_management as tm
 
-        monkeypatch.setattr(tm, "get_context_limit", lambda _t: 4_096)
+        # ``get_context_limit`` gained an optional ``model_id``; the double has to
+        # accept the same call shape. The assertion below is unchanged.
+        monkeypatch.setattr(tm, "get_context_limit", lambda _t, model_id=None: 4_096)
         assert tm.resolve_output_reserve("micro", 4_096) <= 4_096 - MIN_INPUT_TOKENS
 
 

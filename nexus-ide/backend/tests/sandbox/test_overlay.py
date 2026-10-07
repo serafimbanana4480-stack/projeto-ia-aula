@@ -6,9 +6,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
-from backend.sandbox.overlay import SnapshotResult, WorkspaceOverlay
+from backend.sandbox.overlay import WorkspaceOverlay
 
 
 class TestWorkspaceOverlay:

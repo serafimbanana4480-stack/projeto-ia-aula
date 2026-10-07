@@ -32,7 +32,7 @@ _DEFAULT_LOG_DIR = _NEXUS_ROOT / "logs" / "conversations"
 _MAX_SNIPPET = 500
 
 _lock = threading.Lock()
-_loggers: dict[str, "ConversationLogger"] = {}
+_loggers: dict[str, ConversationLogger] = {}
 
 
 def _snippet(value: Any, limit: int = _MAX_SNIPPET) -> Any:

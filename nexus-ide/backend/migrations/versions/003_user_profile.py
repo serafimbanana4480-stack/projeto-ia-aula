@@ -1,4 +1,11 @@
-"""Add user profile, routines and persistent memories tables
+"""Add user profile and routine tables.
+
+Creates user_profiles, user_routines and user_memories.
+
+Note (2026-09-26): the docstring previously read "Add user profile, routines and
+persistent memories tables", which is wrong. There is no `persistent_memories`
+table in this revision -- that table is created by 007_schemas_sql_parity,
+because it only ever existed in backend/persistence/schemas.sql.
 
 Revision ID: 003_user_profile
 Revises: 002_add_rbac

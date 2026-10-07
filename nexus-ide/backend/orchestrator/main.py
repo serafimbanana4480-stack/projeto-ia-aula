@@ -20,9 +20,12 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from backend.config.settings import get_settings
+from backend.core.build_info import NEXUS_VERSION as __version__
+from backend.llm.cost_governor import BudgetExceededError
 from backend.middleware.security import SecurityHeadersMiddleware
 
 try:
@@ -35,7 +38,7 @@ except ImportError:
 
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.middleware.auth import require_auth
+from backend.middleware.auth import get_current_user, require_auth
 from backend.observability.health import HealthChecker
 from backend.observability.routes.alerts import router as alerts_router
 from backend.observability.routes.costs import router as costs_router
@@ -61,6 +64,12 @@ try:
 except ImportError:
     _BROWSER_AVAILABLE = False
     browser_router = None
+from backend.core.disk_guard import (
+    DiskPressureError,
+    WorkerOwnershipGuard,
+    disk_pressure_status,
+    require_disk_headroom,
+)
 from backend.core.routes.improvement import router as improvement_router
 from backend.observability.routes.workflows import router as workflows_router
 from backend.orchestrator.chat_cancellation import chat_cancellation_middleware
@@ -80,6 +89,7 @@ from backend.orchestrator.routes.mcp import router as mcp_router
 from backend.orchestrator.routes.memories import router as memories_router
 from backend.orchestrator.routes.meta import router as meta_router
 from backend.orchestrator.routes.meta_analyzer import router as meta_analyzer_router
+from backend.orchestrator.routes.mission import router as mission_router
 from backend.orchestrator.routes.models_ui import router as models_ui_router
 from backend.orchestrator.routes.modes import router as modes_router
 from backend.orchestrator.routes.neural_dashboard import router as neural_dashboard_router
@@ -99,17 +109,14 @@ from backend.orchestrator.routes.settings import router as settings_router
 from backend.orchestrator.routes.skills import router as skills_router
 from backend.orchestrator.routes.system import router as system_router
 from backend.orchestrator.routes.tasks import router as tasks_router
+from backend.orchestrator.routes.autonomous_tasks import router as autonomous_tasks_router
 from backend.orchestrator.routes.terminal import router as terminal_router
 from backend.orchestrator.routes.wizard import router as wizard_router
+from backend.orchestrator.routes.analytics import router as analytics_router
 from backend.orchestrator.routes.workers import router as workers_router
 from backend.orchestrator.routes.workspace import router as workspace_router
+from backend.orchestrator.routes.workspace import router as workspace_router
 from backend.swarm.api.routes import router as swarm_router
-from backend.core.disk_guard import (
-    DiskPressureError,
-    WorkerOwnershipGuard,
-    disk_pressure_status,
-    require_disk_headroom,
-)
 
 _WORKER_OWNERSHIP = WorkerOwnershipGuard()
 
@@ -120,6 +127,35 @@ def _runtime_root() -> str:
 
 def _disk_pressure_payload() -> dict[str, Any]:
     return disk_pressure_status(_runtime_root())
+
+
+async def _require_auth_if_deep(
+    request: Request,
+    current_user: dict | None = Depends(get_current_user),
+) -> dict | None:
+    """Gate the ``?deep=true`` health form behind real authentication.
+
+    Plain liveness stays open (orchestrator probes cannot authenticate); the
+    deep form exposes internal topology, so it requires a valid token.  The flag
+    is read from the raw query string rather than declared as a parameter so the
+    dependency and the endpoint agree on the historical ``?deep=`` spelling.
+    Using ``get_current_user`` (not ``require_auth``) as the inner dependency
+    keeps "no credentials at all is not an error" true for the shallow path.
+    """
+    if not _is_deep_probe(request):
+        return None
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required for the deep health probe",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return current_user
+
+
+def _is_deep_probe(request: Request) -> bool:
+    """Whether ``?deep=`` asked for the internal-topology form."""
+    return request.query_params.get("deep", "").lower() in {"1", "true", "yes"}
 
 
 def _allow_degraded_startup() -> bool:
@@ -141,6 +177,31 @@ def _allow_degraded_startup() -> bool:
         return get_settings().environment == "development"
     except Exception:
         return False
+
+
+def _as_bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _background_service_enabled(name: str, *, master_off: bool | None = None) -> bool:
+    """Resolve one service's opt-in while honoring the global safety switch."""
+    if master_off is None:
+        master = os.environ.get("NEXUS_BACKGROUND_SERVICES", "").strip().lower()
+        master_off = master in {"0", "false", "no", "off"}
+    if master_off:
+        return False
+
+    raw = os.environ.get(f"NEXUS_ENABLE_{name}", "").strip().lower()
+    if raw:
+        return raw in {"1", "true", "yes", "on"}
+    return True
 
 
 def _claim_worker(name: str, owned: set[str]) -> bool:
@@ -198,6 +259,9 @@ async def _cleanup_failed_lifespan(app: FastAPI) -> None:
             await _safe_shutdown(name, getattr(service, method)())
     if "background_workers" in owned:
         await _stop_workers_safely(getattr(app.state, "worker_manager", None))
+    from backend.mcp.runtime import close_all_sessions
+
+    await _safe_shutdown("mcp_sessions", close_all_sessions())
     if getattr(app.state, "llm_client", None) is not None:
         from backend.orchestrator.llm_client_lifecycle import close_all_llm_clients
         await _safe_shutdown("llm_clients", close_all_llm_clients(app))
@@ -259,6 +323,7 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     owned_workers: set[str] = set()
     app.state.worker_ownership = owned_workers
     catalog_refresh_owned = False
+    _background_tasks: list[asyncio.Task[Any]] = []
 
     from backend.core.auto_correction import get_auto_correction_loop
     from backend.llm import create_llm_client
@@ -271,7 +336,12 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     from backend.orchestrator.registry import get_registry
     from backend.persistence import init_db
     from backend.persistence.db import recover_interrupted_runs
-    setup_logging(level="DEBUG", json_format=True, log_file="logs/backend.log")
+
+    # LOG_LEVEL used to be ignored here (hard-coded "DEBUG"), which on a
+    # long-running instance is what produced a 40 MB logs/backend.log per day.
+    # ``get_settings().log_level`` honours LOG_LEVEL from .env.
+    _log_level = str(getattr(get_settings(), "log_level", "") or "INFO")
+    setup_logging(level=_log_level, json_format=True, log_file="logs/backend.log")
     slog = get_structured_logger()
     app.state.structured_logger = slog
     slog.info("NEXUS IDE backend starting", agent="SYSTEM", source="startup")
@@ -325,12 +395,7 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     master_off = master in {"0", "false", "no", "off"}
 
     def _svc(name: str) -> bool:
-        if master_off:
-            return False
-        raw = os.environ.get(f"NEXUS_ENABLE_{name}", "").strip().lower()
-        if raw:
-            return raw in {"1", "true", "yes", "on"}
-        return True
+        return _background_service_enabled(name, master_off=master_off)
 
     enable_workers       = _svc("BACKGROUND_WORKERS")
     enable_dashboard     = _svc("DASHBOARD_AGENT")
@@ -343,6 +408,8 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     enable_ai_orchestrator = _svc("AI_ORCHESTRATOR")
     enable_auto_trigger  = _svc("AUTO_TRIGGER")
     enable_session_gc    = _svc("SESSION_GC")
+    enable_catalog_refresh = _svc("CATALOG_REFRESH")
+    enable_log_prune     = _svc("LOG_PRUNE")
 
     # ``NEXUS_ALLOW_DEGRADED_STARTUP`` only means that the HTTP service may
     # come up.  It must not silently turn a critical disk condition into
@@ -384,6 +451,8 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
         ("AI_ORCHESTRATOR", enable_ai_orchestrator),
         ("AUTO_TRIGGER", enable_auto_trigger),
         ("SESSION_GC", enable_session_gc),
+        ("CATALOG_REFRESH", enable_catalog_refresh),
+        ("LOG_PRUNE", enable_log_prune),
     ] if not on]
     if off:
         logger.info("Disabled background services: %s (default is ON; NEXUS_ENABLE_<NAME>=false disables)", ", ".join(off))
@@ -397,13 +466,15 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     from backend.llm.model_catalog import start_catalog_refresh_worker
 
     catalog_refresh_owned = False
-    if not autonomy_blocked_by_disk:
+    if enable_catalog_refresh and not autonomy_blocked_by_disk:
         catalog_refresh_owned = _claim_worker("catalog_refresh", owned_workers)
     if catalog_refresh_owned:
         await start_catalog_refresh_worker(app)
         logger.info("Catalog refresh worker started")
     elif autonomy_blocked_by_disk:
         logger.info("Catalog refresh worker disabled under critical disk pressure")
+    elif not enable_catalog_refresh:
+        logger.info("Catalog refresh worker disabled by background-service configuration")
 
     registry = get_registry(app)
     app.state.context = ContextStore()
@@ -673,9 +744,37 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
         )
 
     logger.info("NEXUS orchestrator ready (provider=%s)", settings.llm_provider)
+
+    # --- supervised background tasks owned by the lifespan ---------------
+    # prune_old_logs() existed but had no caller, so structured_logs grew
+    # without bound.  It runs as a supervised task with a shutdown hook.
+    if enable_log_prune:
+        from backend.observability.log_store import prune_logs_forever
+
+        prune_task = asyncio.create_task(prune_logs_forever())
+        _background_tasks.append(prune_task)
+    else:
+        logger.info("Structured-log pruning disabled by background-service configuration")
+
+    # ENABLE_TRACING / OTEL_EXPORTER_OTLP_ENDPOINT were configured and inert:
+    # setup_tracing() was never called from anywhere.
+    if _as_bool_env("ENABLE_TRACING", default=getattr(settings, "enable_tracing", False)):
+        try:
+            from backend.observability.tracing import setup_tracing
+
+            setup_tracing()
+        except Exception:  # pragma: no cover - tracing must never block startup
+            logger.exception("Tracing setup failed; continuing without tracing")
+    else:
+        logger.info("Tracing disabled (ENABLE_TRACING not set) — in-memory spans only")
+
     try:
         yield
     finally:
+        for task in _background_tasks:
+            await _cancel_owned_task(task)
+        _background_tasks.clear()
+
         if dashboard_owned:
             await _cancel_owned_task(monitor_task)
             await _cancel_owned_task(summary_task)
@@ -703,6 +802,9 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
             await _safe_shutdown("catalog_refresh", stop_catalog_refresh_worker())
         for name in tuple(owned_workers):
             _release_worker(name, owned_workers)
+        from backend.mcp.runtime import close_all_sessions
+
+        await _safe_shutdown("mcp_sessions", close_all_sessions())
         from backend.orchestrator.llm_client_lifecycle import close_all_llm_clients
         await _safe_shutdown("llm_clients", close_all_llm_clients(app))
 
@@ -717,7 +819,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
 
 
-app = FastAPI(title="NEXUS IDE Orchestrator", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="NEXUS IDE Orchestrator", version=__version__, lifespan=lifespan)
 
 app.add_middleware(SecurityHeadersMiddleware)
 
@@ -730,6 +832,45 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Nexus-Request-Id"],
     expose_headers=["X-Nexus-Request-Id"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting (audit P0-2)
+# ---------------------------------------------------------------------------
+# The limiter instance must be the *same* object the routes decorated with
+# ``@limiter.limit(...)`` captured at import time, and ``app.state.limiter`` is
+# what the middleware reads on every request.  ``attach_to_app`` also registers
+# the exception handler, without which a breach becomes a 500 instead of a 429.
+# slowapi's own SlowAPIMiddleware cannot be used: it resolves endpoints by
+# scanning ``app.routes`` for an object with ``.endpoint``, which FastAPI 0.140
+# no longer exposes for included routers, so it exempts every request.
+from backend.middleware.rate_limit import attach_to_app  # noqa: E402
+
+_rate_limiter = attach_to_app(app)
+
+
+@app.exception_handler(BudgetExceededError)
+async def _budget_exceeded_handler(
+    request: Request, exc: BudgetExceededError
+) -> JSONResponse:
+    """Turn an exhausted budget into a typed 402 instead of a 500.
+
+    ``ResilientLLMProvider`` raises this before any paid dispatch, so a request
+    that would breach ``NEXUS_DAILY_BUDGET_USD``/``NEXUS_PER_RUN_BUDGET_USD``
+    fails closed with a body the client can act on.
+    """
+    logger.warning("LLM budget refused a request: %s", exc)
+    return JSONResponse(
+        status_code=402,
+        content={
+            "error": "budget_exceeded",
+            "category": exc.category,
+            "scope": exc.scope,
+            "message": str(exc),
+            "spent_usd": round(exc.spent_usd, 6),
+            "limit_usd": round(exc.limit_usd, 6),
+        },
+    )
 
 
 @app.middleware("http")
@@ -750,6 +891,7 @@ app.include_router(costs_router, prefix="/api")
 app.include_router(health_router, prefix="/api")
 app.include_router(alerts_router, prefix="/api")
 app.include_router(usage_router, prefix="/api")
+app.include_router(analytics_router, prefix="/api")
 app.include_router(modes_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
 app.add_api_route("/api/me", get_profile, methods=["GET"], tags=["profile"])
@@ -788,6 +930,8 @@ app.include_router(neural_dashboard_router, prefix="/api")
 app.add_api_route("/api/agents/topology", agents_topology, methods=["GET"], tags=["agents"])
 app.include_router(omega_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
+app.include_router(autonomous_tasks_router, prefix="/api")
+app.include_router(mission_router, prefix="/api")
 app.include_router(knowledge_router, prefix="/api")
 app.include_router(errors_router, prefix="/api")
 app.include_router(workflows_router, prefix="/api")
@@ -802,12 +946,25 @@ app.add_api_websocket_route("/ws/missions/{mission_id}", _meta_ws)
 
 
 @app.get("/health")
-async def health(request: Request) -> dict[str, Any]:
-    # Keep the historical ``/health?deep=true`` probe working for local
-    # monitors and smoke tests. The dedicated ``/health/deep`` endpoint still
-    # enforces authentication; this compatibility form exposes only the same
-    # bounded component statuses needed by the local runtime dashboard.
-    if request.query_params.get("deep", "").lower() in {"1", "true", "yes"}:
+async def health(
+    request: Request,
+    _user: dict | None = Depends(_require_auth_if_deep),
+) -> dict[str, Any]:
+    """Liveness (and, when asked, readiness) probe.
+
+    Design decision, stated explicitly: **liveness is cheap and
+    unauthenticated.** ``GET /health`` without ``deep=true`` performs no
+    dependency I/O beyond one disk-pressure reading and returns
+    ``{"status": "ok", ...}``.  That is deliberate — container/orchestrator
+    probes cannot carry a bearer token, and a probe that needs credentials is a
+    probe that silently reports "unhealthy" during an auth outage.
+
+    ``?deep=true`` is **not** liveness: it returns internal topology (LLM
+    reachability, per-worker status, guardian/auto-correction state), so it is
+    gated behind the same ``require_auth`` as ``/health/deep``.  The historical
+    unauthenticated deep query is intentionally *no longer* served.
+    """
+    if _is_deep_probe(request):
         data = await HealthChecker(request.app.state).check_all()
         data["disk_pressure"] = _disk_pressure_payload()
         return data
@@ -825,6 +982,37 @@ async def health_deep(
     return data
 
 
+@app.get("/version", tags=["meta"])
+@app.get("/api/version", tags=["meta"])
+async def version() -> dict[str, Any]:
+    """Read-only build identity: version, git sha and cheap config flags.
+
+    Unauthenticated on purpose — it exposes no secret, and it is the only way
+    to answer "is this the fixed build?" from outside the host.
+    """
+    from backend.core.build_info import get_build_info
+
+    return get_build_info()
+
+
+@app.get("/metrics", response_class=PlainTextResponse, tags=["meta"])
+async def prometheus_metrics() -> PlainTextResponse:
+    """Prometheus text exposition for the ``prometheus_client`` registry.
+
+    ``config/prometheus.yml`` scrapes ``backend:8000`` with the default
+    ``metrics_path`` (``/metrics``), but the app previously only served JSON at
+    ``/api/metrics``.  Rather than change the scrape target, the standard
+    endpoint is served here so the existing config works unchanged.
+    Unauthenticated, as Prometheus has no auth story by default.
+    """
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+    return PlainTextResponse(
+        content=generate_latest().decode("utf-8", errors="replace"),
+        media_type=CONTENT_TYPE_LATEST,
+    )
+
+
 @app.get("/api/sessions/{session_id}/history")
 async def get_history(
     request: Request,
@@ -838,6 +1026,7 @@ async def get_history(
                 "role": m.role,
                 "content": m.content,
                 "timestamp": getattr(m, "timestamp", ""),
+                **({"run_id": m.run_id} if getattr(m, "run_id", None) else {}),
                 **({"agent": m.agent} if getattr(m, "agent", None) else {}),
                 **({"metrics": m.metrics} if getattr(m, "metrics", None) else {}),
             }

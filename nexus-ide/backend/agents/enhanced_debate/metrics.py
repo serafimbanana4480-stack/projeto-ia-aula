@@ -8,7 +8,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +26,10 @@ class Metric:
     name: str
     value: float
     metric_type: MetricType
-    labels: Dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert metric to dictionary."""
         return {
             "name": self.name,
@@ -44,14 +44,14 @@ class Metric:
 class ComponentMetrics:
     """Metrics for a specific component."""
     component_name: str
-    metrics: List[Metric] = field(default_factory=list)
+    metrics: list[Metric] = field(default_factory=list)
     
     def add_metric(
         self,
         name: str,
         value: float,
         metric_type: MetricType,
-        labels: Optional[Dict[str, str]] = None
+        labels: dict[str, str] | None = None
     ) -> None:
         """Add a metric to this component."""
         metric = Metric(
@@ -62,15 +62,14 @@ class ComponentMetrics:
         )
         self.metrics.append(metric)
     
-    def get_metric_value(self, name: str, labels: Optional[Dict[str, str]] = None) -> Optional[float]:
+    def get_metric_value(self, name: str, labels: dict[str, str] | None = None) -> float | None:
         """Get the latest value for a metric."""
         for metric in reversed(self.metrics):
-            if metric.name == name:
-                if labels is None or metric.labels == labels:
-                    return metric.value
+            if metric.name == name and (labels is None or metric.labels == labels):
+                return metric.value
         return None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert component metrics to dictionary."""
         return {
             "component_name": self.component_name,
@@ -92,7 +91,7 @@ class MetricsCollector:
     
     def __init__(self):
         """Initialize metrics collector."""
-        self.components: Dict[str, ComponentMetrics] = {}
+        self.components: dict[str, ComponentMetrics] = {}
         self.start_time = time.time()
         
         logger.info("MetricsCollector initialized")
@@ -120,7 +119,7 @@ class MetricsCollector:
         metric_name: str,
         value: float,
         metric_type: MetricType,
-        labels: Optional[Dict[str, str]] = None
+        labels: dict[str, str] | None = None
     ) -> None:
         """Record a metric for a component.
         
@@ -139,7 +138,7 @@ class MetricsCollector:
         component_name: str,
         metric_name: str,
         value: float = 1.0,
-        labels: Optional[Dict[str, str]] = None
+        labels: dict[str, str] | None = None
     ) -> None:
         """Increment a counter metric.
         
@@ -163,7 +162,7 @@ class MetricsCollector:
         component_name: str,
         metric_name: str,
         value: float,
-        labels: Optional[Dict[str, str]] = None
+        labels: dict[str, str] | None = None
     ) -> None:
         """Set a gauge metric.
         
@@ -185,8 +184,8 @@ class MetricsCollector:
         self,
         component_name: str,
         metric_name: str,
-        labels: Optional[Dict[str, str]] = None
-    ) -> Optional[float]:
+        labels: dict[str, str] | None = None
+    ) -> float | None:
         """Get the latest value for a metric.
         
         Args:
@@ -202,7 +201,7 @@ class MetricsCollector:
             return component.get_metric_value(metric_name, labels)
         return None
     
-    def get_component_metrics(self, component_name: str) -> Optional[ComponentMetrics]:
+    def get_component_metrics(self, component_name: str) -> ComponentMetrics | None:
         """Get all metrics for a component.
         
         Args:
@@ -213,7 +212,7 @@ class MetricsCollector:
         """
         return self.components.get(component_name)
     
-    def get_all_metrics(self) -> Dict[str, Dict[str, Any]]:
+    def get_all_metrics(self) -> dict[str, dict[str, Any]]:
         """Get all metrics from all components.
         
         Returns:
@@ -388,7 +387,7 @@ class MetricsCollector:
                 labels={"metric": metric_name},
             )
     
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Get a summary of all metrics.
         
         Returns:
@@ -406,7 +405,7 @@ class MetricsCollector:
 
 
 # Global metrics collector instance
-_global_metrics_collector: Optional[MetricsCollector] = None
+_global_metrics_collector: MetricsCollector | None = None
 
 
 def get_global_metrics_collector() -> MetricsCollector:

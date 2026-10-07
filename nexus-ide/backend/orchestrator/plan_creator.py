@@ -12,7 +12,8 @@ import json
 import logging
 import re
 import time
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from backend.config.settings import get_model_config, load_prompt
 from backend.orchestrator.dependency_graph import ExecutionPlan, TaskNode, TaskPriority

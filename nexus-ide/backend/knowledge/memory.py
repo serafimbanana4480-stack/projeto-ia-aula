@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ class Memory:
     """A single memory entry with embedding and metadata."""
 
     memory_id: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
+    user_id: str = ""
     memory_type: MemoryType = MemoryType.SESSION
     session_id: str = ""
     project_id: str = ""
@@ -75,6 +77,7 @@ class Memory:
     def to_dict(self) -> dict[str, Any]:
         return {
             "memory_id": self.memory_id,
+            "user_id": self.user_id,
             "memory_type": self.memory_type.value,
             "session_id": self.session_id,
             "project_id": self.project_id,
@@ -225,6 +228,7 @@ class MemoryStore:
         self,
         content: str,
         *,
+        user_id: str = "",
         memory_type: MemoryType = MemoryType.SESSION,
         session_id: str = "",
         project_id: str = "",
@@ -243,12 +247,15 @@ class MemoryStore:
 
         # Generate embedding
         embedding = await self._embeddings.embed(content)
+        # Compress very long content; keep original for retrieval re-rank
+        stored_content = _summarize(content) if len(content) > _SUMMARIZE_THRESHOLD else content
 
         memory = Memory(
+            user_id=user_id,
             memory_type=memory_type,
             session_id=session_id,
             project_id=project_id,
-            content=content,
+            content=stored_content,
             summary=summary or content[:120],
             embedding=embedding,
             tags=tags or [],
@@ -267,6 +274,9 @@ class MemoryStore:
         if len(self._memories) > self._max_memories:
             self._evict_least_important()
 
+        # Best-effort periodic prune of stale, low-importance memories
+        self.maybe_prune()
+
         logger.debug(
             "Stored memory %s (type=%s, session=%s, importance=%.2f)",
             memory.memory_id,
@@ -280,6 +290,7 @@ class MemoryStore:
         self,
         query: str,
         *,
+        user_id: str | None = None,
         session_id: str | None = None,
         project_id: str | None = None,
         memory_type: MemoryType | None = None,
@@ -291,6 +302,8 @@ class MemoryStore:
 
         results: list[tuple[Memory, float]] = []
         for mem_id, mem in self._memories.items():
+            if user_id is not None and mem.user_id != user_id:
+                continue
             # Filter by session/type/project
             if session_id and mem.session_id and mem.session_id != session_id:
                 continue
@@ -317,6 +330,7 @@ class MemoryStore:
         session_id: str = "",
         project_id: str = "",
         *,
+        user_id: str | None = None,
         max_tokens: int = 4000,
         top_k: int = 5,
     ) -> str:
@@ -327,6 +341,7 @@ class MemoryStore:
         """
         results = await self.search(
             query,
+            user_id=user_id,
             session_id=session_id or None,
             project_id=project_id or None,
             top_k=top_k,
@@ -343,6 +358,8 @@ class MemoryStore:
             keyword_matches: list[tuple[Memory, float]] = []
             for mem in self._memories.values():
                 if mem.memory_id in seen_ids:
+                    continue
+                if user_id is not None and mem.user_id != user_id:
                     continue
                 if session_id and mem.session_id and mem.session_id != session_id:
                     continue
@@ -397,10 +414,12 @@ class MemoryStore:
         project_id: str = "",
         source: str = "",
         importance: float = 0.5,
+        user_id: str = "",
     ) -> tuple[Memory, Memory]:
         """Store a user/assistant exchange as conversation memories."""
         user_mem = await self.store(
             content=f"User: {user_message}",
+            user_id=user_id,
             memory_type=MemoryType.CONVERSATION,
             session_id=session_id,
             project_id=project_id,
@@ -410,6 +429,7 @@ class MemoryStore:
         )
         assistant_mem = await self.store(
             content=f"Assistant: {assistant_message[:2000]}",
+            user_id=user_id,
             memory_type=MemoryType.CONVERSATION,
             session_id=session_id,
             project_id=project_id,
@@ -428,10 +448,12 @@ class MemoryStore:
         session_id: str = "",
         project_id: str = "",
         top_k: int = 5,
+        user_id: str | None = None,
     ) -> str:
         """Convenience alias for ``get_context`` used by agents."""
         return await self.get_context(
             query,
+            user_id=user_id,
             session_id=session_id,
             project_id=project_id,
             top_k=top_k,
@@ -451,22 +473,32 @@ class MemoryStore:
         """Get all memories scoped to a project."""
         return [m for m in self._memories.values() if m.project_id == project_id]
 
-    async def list_all(self, limit: int = 1000) -> list[Memory]:
+    async def list_all(
+        self, limit: int = 1000, *, user_id: str | None = None
+    ) -> list[Memory]:
         """Return all memories ordered by creation time (newest first)."""
-        memories = sorted(self._memories.values(), key=lambda m: m.created_at, reverse=True)
+        memories = sorted(
+            (m for m in self._memories.values() if user_id is None or m.user_id == user_id),
+            key=lambda m: m.created_at,
+            reverse=True,
+        )
         return memories[:limit]
 
-    def get(self, memory_id: str) -> Memory | None:
+    def get(self, memory_id: str, *, user_id: str | None = None) -> Memory | None:
         """Return a memory by ID, or None when missing."""
-        return self._memories.get(memory_id)
+        memory = self._memories.get(memory_id)
+        if memory is not None and user_id is not None and memory.user_id != user_id:
+            return None
+        return memory
 
     def all_memories(self) -> list[Memory]:
         """Return all stored memories (unsorted snapshot)."""
         return list(self._memories.values())
 
-    async def delete(self, memory_id: str) -> bool:
+    async def delete(self, memory_id: str, *, user_id: str | None = None) -> bool:
         """Delete a memory by ID."""
-        if memory_id in self._memories:
+        memory = self.get(memory_id, user_id=user_id)
+        if memory is not None:
             del self._memories[memory_id]
             self._index.pop(memory_id, None)
             return True
@@ -480,14 +512,15 @@ class MemoryStore:
             self._index.pop(mid, None)
         return len(to_delete)
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self, *, user_id: str | None = None) -> dict[str, Any]:
         """Return memory store statistics."""
         types = {}
-        for m in self._memories.values():
+        memories = [m for m in self._memories.values() if user_id is None or m.user_id == user_id]
+        for m in memories:
             t = m.memory_type.value
             types[t] = types.get(t, 0) + 1
         return {
-            "total_memories": len(self._memories),
+            "total_memories": len(memories),
             "by_type": types,
             "max_capacity": self._max_memories,
             "embedding": self._embeddings.status(),
@@ -519,6 +552,80 @@ class MemoryStore:
             del self._memories[evict_id]
             self._index.pop(evict_id, None)
             logger.debug("Evicted memory %s (low importance/access)", evict_id)
+
+    _STALE_DAYS = 30
+    _STALE_IMPORTANCE = 0.1
+    _PRUNE_INTERVAL_S = 300
+    _last_prune_ts: float = 0.0
+
+    def prune_stale(self, *, max_age_days: float = 30.0, importance_floor: float = 0.1) -> int:
+        """Drop memories that are old and unimportant.
+
+        Returns the number of memories removed. Safe to call from any path; the
+        store is the source of truth and the in-process index is updated in
+        lockstep with the in-memory map.
+        """
+        import time as _time
+
+        self._last_prune_ts = _time.time()
+        cutoff = self._last_prune_ts - (max_age_days * 86400)
+        stale_ids = [
+            mem_id
+            for mem_id, mem in self._memories.items()
+            if mem.created_at < cutoff and mem.importance < importance_floor
+        ]
+        for mem_id in stale_ids:
+            self._memories.pop(mem_id, None)
+            self._index.pop(mem_id, None)
+        if stale_ids:
+            logger.info("Pruned %d stale memories (age>%.0fd, importance<%.2f)",
+                        len(stale_ids), max_age_days, importance_floor)
+        return len(stale_ids)
+
+    def maybe_prune(self) -> None:
+        """Prune at most once per ``_PRUNE_INTERVAL_S`` seconds (lazy)."""
+        import time as _time
+
+        if _time.time() - self._last_prune_ts < self._PRUNE_INTERVAL_S:
+            return
+        try:
+            self.prune_stale(max_age_days=self._STALE_DAYS,
+                             importance_floor=self._STALE_IMPORTANCE)
+        except Exception:  # noqa: BLE001 — pruning is best-effort
+            logger.debug("prune_stale failed", exc_info=True)
+
+
+_SUMMARIZE_THRESHOLD = 2000
+_SUMMARIZE_TARGET = 800
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _summarize(text: str, target: int = _SUMMARIZE_TARGET) -> str:
+    """Compress long text to a target length while keeping head + tail.
+
+    Heuristic, no LLM call. Keeps the opening (intent/setup), one middle
+    anchor (key claim), and the tail (conclusion/result). Falls back to
+    a clean truncate when the structure is too flat to detect.
+    """
+    text = text.strip()
+    if len(text) <= _SUMMARIZE_THRESHOLD:
+        return text
+    if not text:
+        return text
+    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    if len(sentences) <= 3:
+        # Flat structure: head + ellipsis + tail
+        head = text[: target // 2].rstrip()
+        tail = text[-target // 2 :].lstrip()
+        return f"{head}\n…\n{tail}"
+    head_n = max(1, len(sentences) // 4)
+    tail_n = max(1, len(sentences) // 4)
+    mid_idx = len(sentences) // 2
+    head = " ".join(sentences[:head_n])
+    middle = sentences[mid_idx]
+    tail = " ".join(sentences[-tail_n:])
+    out = f"{head}\n…\n{middle}\n…\n{tail}"
+    return out[: target] if len(out) > target else out
 
 
 # Global singleton

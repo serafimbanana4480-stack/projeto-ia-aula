@@ -96,10 +96,12 @@ describe("usePolling", () => {
     const { unmount } = renderHook(() =>
       usePolling(fetcher, 1000, { immediate: false }),
     );
-    const { result: result2 } = renderHook(() =>
-      usePolling(fetcher, 1000, { immediate: false }),
-    );
     // Without refresh, no calls
+    expect(fetcher).not.toHaveBeenCalled();
+    // The interval must not fire on its own either: `immediate: false` means
+    // "wait for the interval", and 1s of fake time is not enough to prove the
+    // timer was armed, so nothing is asserted about the tick itself.
+    vi.advanceTimersByTime(999);
     expect(fetcher).not.toHaveBeenCalled();
     unmount();
   });

@@ -55,6 +55,8 @@ export class RunEventBuffer {
   private readonly seen = new Set<string>();
   private ordered: OrderedEvent[] = [];
   private legacy: RuntimeEventLike[] = [];
+  private readonly pendingSeqs = new Set<number>();
+  private contiguousSeq = 0;
   private highestSeq = 0;
   private runId: string | null = null;
 
@@ -103,6 +105,12 @@ export class RunEventBuffer {
     }
     this.ordered.splice(index, 0, event);
     this.highestSeq = Math.max(this.highestSeq, event.seq);
+    if (Number.isSafeInteger(event.seq) && event.seq > 0) {
+      this.pendingSeqs.add(event.seq);
+      while (this.pendingSeqs.delete(this.contiguousSeq + 1)) {
+        this.contiguousSeq += 1;
+      }
+    }
     return true;
   }
 
@@ -111,6 +119,8 @@ export class RunEventBuffer {
     this.seen.clear();
     this.ordered = [];
     this.legacy = [];
+    this.pendingSeqs.clear();
+    this.contiguousSeq = 0;
     this.highestSeq = 0;
     this.runId = runId ?? null;
   }
@@ -120,6 +130,16 @@ export class RunEventBuffer {
     return [...this.ordered, ...this.legacy];
   }
 
+  /** Whether the ordered journal has a missing sequence, checked in O(1). */
+  hasMissingSeqs(): boolean {
+    return this.contiguousSeq < this.highestSeq;
+  }
+
+  /** First missing sequence for replay; null means the journal is contiguous. */
+  firstMissingSeq(): number | null {
+    return this.hasMissingSeqs() ? this.contiguousSeq + 1 : null;
+  }
+
   /**
    * Sequence numbers that were never received.
    *
@@ -127,18 +147,50 @@ export class RunEventBuffer {
    * dropped connection) and should request a replay from `lastSeq`.
    */
   missingSeqs(): number[] {
-    const present = new Set(this.ordered.map((event) => event.seq));
     const gaps: number[] = [];
-    for (let seq = 1; seq <= this.highestSeq; seq += 1) {
-      if (!present.has(seq)) gaps.push(seq);
+    let expected = 1;
+    for (const event of this.ordered) {
+      if (!Number.isSafeInteger(event.seq) || event.seq < 1) continue;
+      while (expected < event.seq) gaps.push(expected++);
+      if (event.seq === expected) expected += 1;
     }
+    while (expected <= this.highestSeq) gaps.push(expected++);
     return gaps;
   }
 }
 
-/** One-shot ordering for an arbitrary batch (e.g. a history fetch). */
+/** One-shot ordering for an accumulated session batch, which can contain many runs. */
 export function dedupeAndOrder(events: RuntimeEventLike[]): RuntimeEventLike[] {
-  const buffer = new RunEventBuffer();
-  for (const event of events) buffer.push(event);
-  return buffer.events();
+  const orderedRuns = new Map<string, RunEventBuffer>();
+  const timeline: Array<
+    | { index: number; runId: string }
+    | { index: number; event: RuntimeEventLike }
+  > = [];
+
+  for (const [index, event] of events.entries()) {
+    if (!isOrderable(event)) {
+      timeline.push({ index, event });
+      continue;
+    }
+
+    let buffer = orderedRuns.get(event.run_id);
+    if (!buffer) {
+      buffer = new RunEventBuffer(event.run_id);
+      orderedRuns.set(event.run_id, buffer);
+      timeline.push({ index, runId: event.run_id });
+    }
+    buffer.push(event);
+  }
+
+  // Sequence numbers are comparable only inside a run. Keep each run's
+  // ordered batch at its first observed position so local events (for example,
+  // a request error without a run envelope) stay between the runs where they
+  // occurred instead of being pushed to the end of the whole session.
+  return timeline
+    .sort((left, right) => left.index - right.index)
+    .flatMap((entry) =>
+      "runId" in entry
+        ? orderedRuns.get(entry.runId)?.events() ?? []
+        : [entry.event],
+    );
 }

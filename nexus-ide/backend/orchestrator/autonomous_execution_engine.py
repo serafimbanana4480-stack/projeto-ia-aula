@@ -5,9 +5,10 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,12 @@ class ExecutionTask:
     kwargs: dict[str, Any] = field(default_factory=dict)
     status: TaskStatus = TaskStatus.PENDING
     created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    completed_at: Optional[float] = None
+    started_at: float | None = None
+    completed_at: float | None = None
     retry_count: int = 0
     max_retries: int = 3
     result: Any = None
-    error: Optional[str] = None
+    error: str | None = None
     timeout_seconds: float = 300.0
 
 
@@ -102,7 +103,7 @@ class AutonomousExecutionEngine:
                     logger.info("Task completed: %s", task.task_id)
                     return task
 
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     task.error = f"Timeout after {task.timeout_seconds}s"
                     logger.warning("Task timed out: %s", task.task_id)
                     task.retry_count += 1
@@ -153,7 +154,7 @@ class AutonomousExecutionEngine:
         )
         return [r if isinstance(r, ExecutionTask) else None for r in results]  # type: ignore
 
-    def get_task(self, task_id: str) -> Optional[ExecutionTask]:
+    def get_task(self, task_id: str) -> ExecutionTask | None:
         return self._tasks.get(task_id)
 
     def list_tasks(self, status: TaskStatus | None = None) -> list[ExecutionTask]:

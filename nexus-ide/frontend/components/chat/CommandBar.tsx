@@ -26,8 +26,6 @@ import {
   Search,
   Brain,
   Eye,
-  X,
-  Loader2,
 } from "lucide-react";
 import { useAdvancedModeStore } from "../../stores/advancedModeStore";
 
@@ -81,7 +79,6 @@ export default function CommandBar({ onSend, disabled = false }: CommandBarProps
     Array<{ cmd: string; label: string; description: string }>
   >([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [showCommandPalette, setShowCommandPalette] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const { commands, loadCommands, activeModeIds } = useAdvancedModeStore();
 
@@ -191,7 +188,7 @@ export default function CommandBar({ onSend, disabled = false }: CommandBarProps
               className="mb-2 flex flex-wrap items-center gap-1.5 overflow-hidden"
             >
               <span className="text-[10px] font-medium uppercase tracking-wider text-purple-400">
-                Infinity Active:
+                Modos activos:
               </span>
               {activeModeIds.map((id) => {
                 const Icon = COMMAND_ICONS[id] || Sparkles;

@@ -1,9 +1,8 @@
 """Tests for RepairAgent and RepairLoop."""
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
-
-from unittest.mock import MagicMock
 
 from backend.pipeline.repair import (
     FailureReport,
@@ -13,7 +12,9 @@ from backend.pipeline.repair import (
     RepairState,
     RepairTicket,
 )
-from backend.pipeline.test_generator import FailureType, TestResult as TR, TestSuiteReport as TSR
+from backend.pipeline.test_generator import FailureType
+from backend.pipeline.test_generator import TestResult as TR
+from backend.pipeline.test_generator import TestSuiteReport as TSR
 
 
 class TestFailureReport:

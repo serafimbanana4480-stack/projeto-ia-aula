@@ -1,17 +1,18 @@
-from __future__ import annotations
-
 """Performance Routes - API endpoints for performance monitoring and optimization."""
 
+from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
-
 
 from backend.observability.event_system import get_event_bus
-from backend.performance.performance_engine import get_performance_engine, PerformanceMetricType, OptimizationType
+from backend.performance.performance_engine import (
+    OptimizationType,
+    PerformanceMetricType,
+    get_performance_engine,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -19,9 +20,9 @@ router = APIRouter()
 
 @router.get("/performance/metrics")
 async def get_performance_metrics(
-    metric_type: Optional[str] = None,
+    metric_type: str | None = None,
     limit: int = 100
-) -> Dict[str, List[Dict]]:
+) -> dict[str, list[dict]]:
     """Get performance metrics with optional filtering."""
     try:
         event_bus = await get_event_bus()
@@ -33,7 +34,7 @@ async def get_performance_metrics(
             try:
                 metric_type_enum = PerformanceMetricType(metric_type)
             except ValueError:
-                raise HTTPException(status_code=400, detail=f"Invalid metric type: {metric_type}")
+                raise HTTPException(status_code=400, detail=f"Invalid metric type: {metric_type}") from None
         
         # Get metrics
         metrics = await performance_engine.get_metrics(
@@ -50,11 +51,11 @@ async def get_performance_metrics(
         raise
     except Exception as e:
         logger.error(f"Failed to get performance metrics: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/performance/metrics/latest")
-async def get_latest_metrics() -> Dict[str, Any]:
+async def get_latest_metrics() -> dict[str, Any]:
     """Get latest performance metrics for all types."""
     try:
         event_bus = await get_event_bus()
@@ -77,14 +78,14 @@ async def get_latest_metrics() -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Failed to get latest metrics: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/performance/metrics/history")
 async def get_metric_history(
     metric_type: str,
     hours: int = 24
-) -> Dict[str, List[Dict]]:
+) -> dict[str, list[dict]]:
     """Get historical metrics for a specific type."""
     try:
         event_bus = await get_event_bus()
@@ -94,7 +95,7 @@ async def get_metric_history(
         try:
             metric_type_enum = PerformanceMetricType(metric_type)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid metric type: {metric_type}")
+            raise HTTPException(status_code=400, detail=f"Invalid metric type: {metric_type}") from None
         
         # Get metrics with higher limit for history
         metrics = await performance_engine.get_metrics(
@@ -122,15 +123,15 @@ async def get_metric_history(
         raise
     except Exception as e:
         logger.error(f"Failed to get metric history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/performance/alerts")
 async def get_performance_alerts(
-    severity: Optional[str] = None,
-    resolved: Optional[bool] = None,
+    severity: str | None = None,
+    resolved: bool | None = None,
     limit: int = 100
-) -> Dict[str, List[Dict]]:
+) -> dict[str, list[dict]]:
     """Get performance alerts with optional filtering."""
     try:
         event_bus = await get_event_bus()
@@ -150,11 +151,11 @@ async def get_performance_alerts(
         
     except Exception as e:
         logger.error(f"Failed to get performance alerts: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/performance/alerts/active")
-async def get_active_alerts() -> Dict[str, List[Dict]]:
+async def get_active_alerts() -> dict[str, list[dict]]:
     """Get active (unresolved) performance alerts."""
     try:
         event_bus = await get_event_bus()
@@ -170,15 +171,15 @@ async def get_active_alerts() -> Dict[str, List[Dict]]:
         
     except Exception as e:
         logger.error(f"Failed to get active alerts: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/performance/recommendations")
 async def get_optimization_recommendations(
-    implemented: Optional[bool] = None,
-    priority: Optional[str] = None,
+    implemented: bool | None = None,
+    priority: str | None = None,
     limit: int = 100
-) -> Dict[str, List[Dict]]:
+) -> dict[str, list[dict]]:
     """Get optimization recommendations with optional filtering."""
     try:
         event_bus = await get_event_bus()
@@ -198,11 +199,11 @@ async def get_optimization_recommendations(
         
     except Exception as e:
         logger.error(f"Failed to get recommendations: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/performance/recommendations/{recommendation_id}/implement")
-async def implement_recommendation(recommendation_id: str, request: Request) -> Dict[str, Any]:
+async def implement_recommendation(recommendation_id: str, request: Request) -> dict[str, Any]:
     """Implement an optimization recommendation."""
     try:
         event_bus = await get_event_bus()
@@ -214,14 +215,14 @@ async def implement_recommendation(recommendation_id: str, request: Request) -> 
         return result
         
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"Failed to implement recommendation {recommendation_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/performance/stats")
-async def get_performance_stats() -> Dict[str, Any]:
+async def get_performance_stats() -> dict[str, Any]:
     """Get performance statistics."""
     try:
         event_bus = await get_event_bus()
@@ -231,11 +232,11 @@ async def get_performance_stats() -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Failed to get performance stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/performance/dashboard")
-async def get_performance_dashboard() -> Dict[str, Any]:
+async def get_performance_dashboard() -> dict[str, Any]:
     """Get performance dashboard data."""
     try:
         event_bus = await get_event_bus()
@@ -286,11 +287,11 @@ async def get_performance_dashboard() -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Failed to get performance dashboard: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/performance/metric-types")
-async def get_metric_types() -> Dict[str, List[str]]:
+async def get_metric_types() -> dict[str, list[str]]:
     """Get available performance metric types."""
     return {
         "metric_types": [t.value for t in PerformanceMetricType],
@@ -310,7 +311,7 @@ async def get_metric_types() -> Dict[str, List[str]]:
 
 
 @router.get("/performance/optimization-types")
-async def get_optimization_types() -> Dict[str, List[str]]:
+async def get_optimization_types() -> dict[str, list[str]]:
     """Get available optimization types."""
     return {
         "optimization_types": [t.value for t in OptimizationType],
@@ -331,9 +332,9 @@ async def add_metric(
     metric_type: str,
     value: float,
     source: str = "",
-    metadata: Optional[Dict] = None,
+    metadata: dict | None = None,
     request: Request = None,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Add a performance metric."""
     try:
         event_bus = await get_event_bus()
@@ -343,7 +344,7 @@ async def add_metric(
         try:
             metric_type_enum = PerformanceMetricType(metric_type)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid metric type: {metric_type}")
+            raise HTTPException(status_code=400, detail=f"Invalid metric type: {metric_type}") from None
         
         # Add metric
         await performance_engine.collect_metric(
@@ -359,15 +360,15 @@ async def add_metric(
         raise
     except Exception as e:
         logger.error(f"Failed to add metric: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/performance/optimize")
-async def trigger_optimization(request: Request) -> Dict[str, str]:
+async def trigger_optimization(request: Request) -> dict[str, str]:
     """Trigger manual optimization check."""
     try:
         event_bus = await get_event_bus()
-        performance_engine = await get_performance_engine(event_bus)
+        await get_performance_engine(event_bus)
         
         # This would trigger the optimization loop manually
         # For now, just return success
@@ -377,4 +378,4 @@ async def trigger_optimization(request: Request) -> Dict[str, str]:
         
     except Exception as e:
         logger.error(f"Failed to trigger optimization: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

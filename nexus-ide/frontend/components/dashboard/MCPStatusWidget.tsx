@@ -1,7 +1,6 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
-import Link from "next/link";
 import { Plug, RefreshCw, ArrowRight } from "lucide-react";
 import { getMCPConnectors, type MCPConnector, type MCPConnectorsSummary } from "../../lib/api";
 import { Surface, SurfaceHeader } from "../ui/Surface";
@@ -55,12 +54,12 @@ export default function MCPStatusWidget() {
   }, [fetchStatus]);
 
   return (
-    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-      <Surface elevation={2} padding="md">
+    <motion.div className="h-full" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+      <Surface elevation={1} padding="md" className="nx-dashboard-widget h-full">
         <SurfaceHeader
           icon={<Plug className="h-4 w-4" />}
           title="Conectores MCP"
-          subtitle="Servidores externos ligados ao NEXUS"
+          subtitle="Configuração e último teste — não é uma ligação em tempo real"
           action={
             <button
               type="button"
@@ -70,7 +69,7 @@ export default function MCPStatusWidget() {
               }}
               aria-label="Atualizar conectores MCP"
               title="Atualizar"
-              className="flex h-7 w-7 items-center justify-center rounded-lg text-nexus-faint transition-colors hover:bg-white/[0.06] hover:text-[var(--nx-accent-bright)]"
+              className="flex h-9 w-9 items-center justify-center rounded-lg border border-nexus-border/60 text-nexus-muted transition-colors hover:bg-nexus-card hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent"
             >
               <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
             </button>
@@ -106,30 +105,30 @@ export default function MCPStatusWidget() {
             />
           ) : (
             <>
-              <div className="nx-inset grid grid-cols-4 gap-1 rounded-lg p-2 text-center">
+              <div className="nx-inset grid grid-cols-2 gap-x-3 gap-y-4 rounded-xl p-4 text-center">
                 <div>
                   <div className={`font-mono text-lg font-bold tabular-nums ${TONE_TEXT.neutral}`}>
                     <AnimatedNumber value={summary.total} />
                   </div>
-                  <div className="text-[9px] uppercase tracking-wide text-nexus-faint">Total</div>
+                  <div className="mt-1 text-[11px] text-nexus-muted">Configurados</div>
                 </div>
                 <div>
                   <div className={`font-mono text-lg font-bold tabular-nums ${TONE_TEXT.success}`}>
                     <AnimatedNumber value={summary.healthy} />
                   </div>
-                  <div className="text-[9px] uppercase tracking-wide text-nexus-faint">Saudáveis</div>
+                  <div className="mt-1 text-[11px] text-nexus-muted">Último teste OK</div>
                 </div>
                 <div>
                   <div className={`font-mono text-lg font-bold tabular-nums ${TONE_TEXT.warning}`}>
                     <AnimatedNumber value={summary.warning} />
                   </div>
-                  <div className="text-[9px] uppercase tracking-wide text-nexus-faint">Avisos</div>
+                  <div className="mt-1 text-[11px] text-nexus-muted">Avisos</div>
                 </div>
                 <div>
                   <div className={`font-mono text-lg font-bold tabular-nums ${TONE_TEXT.danger}`}>
                     <AnimatedNumber value={summary.error} />
                   </div>
-                  <div className="text-[9px] uppercase tracking-wide text-nexus-faint">Erros</div>
+                  <div className="mt-1 text-[11px] text-nexus-muted">Erros</div>
                 </div>
               </div>
 
@@ -137,21 +136,27 @@ export default function MCPStatusWidget() {
                 {connectors.slice(0, 3).map((c) => (
                   <div
                     key={c.id}
-                    className="flex items-center justify-between gap-2 rounded-lg px-1.5 py-1 text-[11px]"
+                    className="flex min-h-14 flex-wrap items-center justify-between gap-2 rounded-xl border border-nexus-border/50 bg-nexus-card/30 px-3 py-2.5 text-xs"
                   >
                     <span className="truncate text-nexus-text" title={c.name}>
                       {c.name}
                     </span>
-                    <StatusDot
-                      tone={TEST_STATUS_TONE[c.last_test_status]}
-                      label={TEST_STATUS_LABEL[c.last_test_status]}
-                    />
+                    <div className="flex shrink-0 flex-col items-end gap-1 text-right text-[10px] text-nexus-muted">
+                      <span>{c.enabled ? "Ativo na config." : "Inativo na config."}</span>
+                      <span className="flex items-center gap-1">
+                        <StatusDot
+                          tone={TEST_STATUS_TONE[c.last_test_status]}
+                          label={`Último teste: ${TEST_STATUS_LABEL[c.last_test_status]}`}
+                        />
+                        Último teste: {TEST_STATUS_LABEL[c.last_test_status]}
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>
               <a
                 href="/mcp"
-                className="mt-3 flex items-center gap-1 text-[11px] font-medium text-[var(--nx-accent-bright)] hover:underline"
+                className="mt-4 flex min-h-10 items-center justify-center gap-2 rounded-lg border border-nexus-border/60 text-xs font-medium text-[var(--nx-accent-bright)] transition-colors hover:bg-nexus-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent"
               >
                 Gerir conectores <ArrowRight className="h-3 w-3" />
               </a>

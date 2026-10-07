@@ -185,6 +185,11 @@ async def store_memory(
     importance: float = 0.5,
     file_path: str = "",
     language: str = "",
+    project_path: str = "",
+    decision_key: str = "",
+    rationale: str = "",
+    impact: str = "",
+    project_goal: bool = False,
 ) -> dict[str, Any]:
     """Store a memory for future recall by agents.
 
@@ -199,6 +204,13 @@ async def store_memory(
         importance: Importance score 0.0-1.0 (affects retention).
         file_path: Optional related file path.
         language: Optional programming language.
+        project_path: Project root, injected by the agent runtime when available.
+        decision_key: Stable key for an important project decision. Supplying it
+            replaces the previous current record with that key while preserving
+            the old entry as superseded history.
+        rationale: Why the decision was made.
+        impact: Expected effect or trade-off of the decision.
+        project_goal: Set true only for an explicit, durable top-level project goal.
 
     Returns:
         Dict with the stored memory ID and metadata.
@@ -228,10 +240,41 @@ async def store_memory(
             language=language,
         )
 
+        decision_key = decision_key.strip()
+        decision_recorded = False
+        project_goal_recorded = False
+        if (decision_key or project_goal) and mem_type is MemoryType.PROJECT:
+            root = project_path or project_id
+            try:
+                from pathlib import Path
+
+                from backend.knowledge.project_continuity import ProjectContinuityStore
+
+                if root and Path(root).expanduser().is_dir():
+                    continuity = ProjectContinuityStore(root)
+                    if decision_key:
+                        continuity.record_decision(
+                            decision_key=decision_key,
+                            decision=content,
+                            rationale=rationale,
+                            impact=impact,
+                            session_id=session_id,
+                            source=source or "store_memory",
+                            evidence_paths=[file_path] if file_path else (),
+                        )
+                        decision_recorded = True
+                    if project_goal:
+                        continuity.record_explicit_goal(content)
+                        project_goal_recorded = True
+            except Exception:
+                logger.warning("Could not write project decision continuity", exc_info=True)
+
         return {
             "memory_id": memory.memory_id,
             "type": memory.memory_type.value,
             "stored": True,
+            "decision_recorded": decision_recorded,
+            "project_goal_recorded": project_goal_recorded,
         }
 
     except Exception as exc:
@@ -286,9 +329,12 @@ register_tool(
     ToolSpec(
         name="store_memory",
         description=(
-            "Store important information in memory for future recall. "
-            "Use this to save key insights, decisions, results, or documentation "
-            "that may be needed later in this session or in future sessions."
+            "Store concise information for future recall. For a durable project "
+            "decision, use memory_type='project', provide a stable decision_key, "
+            "and include its rationale and impact. Later decisions with the same "
+            "key supersede the old record. Set project_goal=true only for an explicit, "
+            "durable top-level goal. Save only evidence-based facts; decisions "
+            "and recalled notes remain historical context that must be checked against files."
         ),
         schema={
             "type": "object",
@@ -345,6 +391,31 @@ register_tool(
                     "type": "string",
                     "description": "Optional programming language",
                     "default": "",
+                },
+                "project_path": {
+                    "type": "string",
+                    "description": "Project root, normally supplied by the runtime",
+                    "default": "",
+                },
+                "decision_key": {
+                    "type": "string",
+                    "description": "Stable key for a durable project decision; omit for ordinary memory",
+                    "default": "",
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": "Reason for the decision",
+                    "default": "",
+                },
+                "impact": {
+                    "type": "string",
+                    "description": "Expected effect or trade-off",
+                    "default": "",
+                },
+                "project_goal": {
+                    "type": "boolean",
+                    "description": "True only when saving an explicit long-term project goal",
+                    "default": False,
                 },
             },
             "required": ["content"],

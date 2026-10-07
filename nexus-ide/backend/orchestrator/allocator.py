@@ -157,7 +157,7 @@ class AgentAllocator:
                         self._pool.acquire(score.agent_name),
                         timeout=timeout / len(scores),
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning("Agent %s busy, trying next", score.agent_name)
                     continue
 

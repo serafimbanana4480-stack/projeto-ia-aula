@@ -1,10 +1,8 @@
 """Tests for AI Team agents."""
 from __future__ import annotations
 
-import pytest
-
-from backend.agents.ai_team.ml_engineer_agent import MLEngineerAgent
 from backend.agents.ai_team.data_scientist_agent import DataScientistAgent
+from backend.agents.ai_team.ml_engineer_agent import MLEngineerAgent
 from backend.agents.ai_team.prompt_engineer_agent import PromptEngineerAgent
 from backend.agents.ai_team.team_lead import AITeamLead
 

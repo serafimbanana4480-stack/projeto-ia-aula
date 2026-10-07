@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +55,7 @@ class VisionAligner:
 
         vision_words = set(self._vision.lower().split())
         action_words = set(action_description.lower().split())
-        context_words = set(context.lower().split())
+        set(context.lower().split())
 
         # Calculate overlap
         overlap = len(action_words & vision_words)

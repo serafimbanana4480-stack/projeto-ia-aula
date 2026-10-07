@@ -12,9 +12,11 @@ Each evolution cycle:
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from backend.evolution.arena import Arena, BenchmarkRunner
@@ -33,6 +35,10 @@ from backend.evolution.regression_guard import RegressionGuard
 from backend.evolution.rollback import RollbackManager
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_JOURNAL_PATH = (
+    Path(__file__).resolve().parent.parent / "data" / "evolution_journal.jsonl"
+)
 
 
 # Components that can evolve and their default configs
@@ -108,6 +114,7 @@ class EvolutionConfig:
     auto_promote: bool = False
     allow_simulation: bool = False
     min_benchmark_tasks: int = 5
+    write_skill_proposals: bool = False
 
 
 @dataclass
@@ -126,6 +133,30 @@ class CycleLog:
     delta: float
     explanation: str
     timestamp: str
+
+
+def read_journal(path: str | Path) -> list[dict[str, Any]]:
+    """Read cycle-summary records from a journal file.
+
+    Corrupt/partial/blank lines are skipped (the journal is append-only and
+    a crash can leave a torn last line); non-dict JSON records are ignored.
+    """
+    journal = Path(path)
+    if not journal.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    with journal.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+    return records
 
 
 class EvolutionEngine:
@@ -150,6 +181,7 @@ class EvolutionEngine:
         guard: RegressionGuard | None = None,
         rollback: RollbackManager | None = None,
         config: EvolutionConfig | None = None,
+        journal_path: str | Path | None = None,
     ) -> None:
         self._registry = registry or ChampionRegistry()
         self._arena = arena or Arena(self._registry)
@@ -158,6 +190,89 @@ class EvolutionEngine:
         self._rollback = rollback or RollbackManager(self._registry)
         self.config = config or EvolutionConfig()
         self._cycle_count = 0
+        self.journal_path = Path(journal_path) if journal_path else DEFAULT_JOURNAL_PATH
+        self._last_cycle_summary: dict[str, Any] | None = None
+        self._cancelled = False
+
+    # ── Cancellation ──
+
+    def cancel(self) -> None:
+        """Request cancellation: the engine stops before the next phase."""
+        self._cancelled = True
+
+    def is_cancelled(self) -> bool:
+        """True once :meth:`cancel` was requested (sticky until reset)."""
+        return self._cancelled
+
+    def reset_cancel(self) -> None:
+        """Clear the cancellation flag so the engine can run again."""
+        self._cancelled = False
+
+    # ── Journal ──
+
+    def _append_journal(self, record: dict[str, Any]) -> None:
+        """Append one JSONL record; failures are logged, never raised."""
+        try:
+            self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.journal_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            logger.exception("Failed to append evolution journal record")
+
+    def last_cycle_summary(self) -> dict[str, Any] | None:
+        """Return the latest cycle-summary record (memory, then disk)."""
+        if self._last_cycle_summary is not None:
+            return self._last_cycle_summary
+        records = read_journal(self.journal_path)
+        return records[-1] if records else None
+
+    def _write_skill_proposal(
+        self,
+        component_kind: str,
+        version: str,
+        candidate: Any,
+        experiment: Experiment,
+    ) -> None:
+        """Render a promoted candidate as a proposed SKILL.md (best-effort)."""
+        try:
+            from backend.evolution.skill_writer import SkillProposal, SkillWriter
+
+            proposal = SkillProposal(
+                name=f"evolved-{component_kind}-{version}",
+                description=(
+                    candidate.changelog
+                    or f"Auto-evolved {component_kind} {version}."
+                ),
+                steps=[candidate.changelog] if candidate.changelog else [],
+                evidence=[
+                    f"experiment={experiment.experiment_id}",
+                    f"winner={experiment.winner}",
+                ],
+            )
+            SkillWriter().write_proposal(proposal)
+        except OSError:
+            logger.warning(
+                "Failed to write skill proposal for %s %s", component_kind, version
+            )
+
+    def _propose_discovered_skills(self, skills_dir: str | Path | None = None) -> list[Path]:
+        """Discover recurring action patterns and render them as SKILL.md proposals.
+
+        Best-effort: discovery/writing failures are logged and return ``[]``
+        so a broken discovery step can never kill an evolution cycle.
+        """
+        try:
+            from backend.evolution.skill_discovery import SkillDiscovery
+            from backend.evolution.skill_writer import SkillWriter
+
+            skills = SkillDiscovery().discover()
+            if not skills:
+                return []
+            writer = SkillWriter(base_dir=Path(skills_dir)) if skills_dir else SkillWriter()
+            return writer.write_proposals(skills)
+        except Exception:  # noqa: BLE001 - proposals are best-effort by design
+            logger.exception("Skill proposal discovery failed")
+            return []
 
     def bootstrap_defaults(self) -> list[str]:
         """Register initial champion versions for all default components.
@@ -211,6 +326,8 @@ class EvolutionEngine:
                 f"{result.experiments_run} experiments, "
                 f"{len(result.promoted)} promoted, {result.regressions} regressions"
             )
+            if self._cancelled:
+                break
 
         final = results[-1] if results else EvolutionResult(
             cycle=0, experiment_id=None, candidates_generated=0, experiments_run=0,
@@ -220,6 +337,9 @@ class EvolutionEngine:
         )
 
         self._check_rollbacks()
+
+        if cfg.write_skill_proposals:
+            self._propose_discovered_skills()
 
         return EvolutionResult(
             cycle=final.cycle,
@@ -237,6 +357,7 @@ class EvolutionEngine:
 
     def _run_cycle(self, cfg: EvolutionConfig, cycle_num: int) -> EvolutionResult:
         """Run a single evolution cycle."""
+        started_at = _utcnow_iso()
         priorities = self._failure_miner.analyze_failures()
         self._failure_miner.store_classifications(priorities)
 
@@ -245,15 +366,23 @@ class EvolutionEngine:
         promoted: list[str] = []
         rejected: list[str] = []
         regressions = 0
+        skipped_components: list[str] = []
+        verdicts: list[dict[str, Any]] = []
 
         if not priorities:
-            return EvolutionResult(
+            result = EvolutionResult(
                 cycle=cycle_num, experiment_id=None,
                 candidates_generated=0, experiments_run=0,
                 promoted=[], rejected=[], regressions=0,
                 success_rate_before=0.0, success_rate_after=0.0, delta=0.0,
                 explanation="No failures detected for evolution",
             )
+            self._journal_cycle(
+                cycle_num, started_at, len(priorities), cycle_candidates,
+                cycle_experiments, verdicts, promoted, rejected, regressions,
+                skipped_components, result.explanation,
+            )
+            return result
 
         top_failure = priorities[0]
         logger.info(
@@ -262,6 +391,9 @@ class EvolutionEngine:
         )
 
         for component_kind in cfg.components_to_evolve:
+            if self._cancelled:
+                break
+
             champion = self._registry.get_champion(component_kind)
             if champion is None:
                 default_config = DEFAULT_COMPONENT_CONFIGS.get(component_kind, {})
@@ -271,9 +403,18 @@ class EvolutionEngine:
                     config=default_config,
                 )
 
-            evolver = get_evolver(component_kind, self._registry)
+            try:
+                evolver = get_evolver(component_kind, self._registry)
+            except Exception:
+                logger.exception(
+                    "Evolver lookup for %s failed; skipping component", component_kind
+                )
+                skipped_components.append(component_kind)
+                continue
+
             if evolver is None:
                 logger.warning(f"No evolver for component {component_kind}, skipping")
+                skipped_components.append(component_kind)
                 continue
 
             relevant_priorities = self._filter_priorities_for_component(top_failure, component_kind)
@@ -284,13 +425,24 @@ class EvolutionEngine:
             if not relevant_priorities:
                 relevant_priorities = [top_failure]
 
-            candidates = evolver.generate(
-                champion=champion,
-                failure_priorities=relevant_priorities,
-                n_candidates=cfg.candidates_per_cycle,
-            )
+            try:
+                candidates = evolver.generate(
+                    champion=champion,
+                    failure_priorities=relevant_priorities,
+                    n_candidates=cfg.candidates_per_cycle,
+                )
+            except Exception:
+                logger.exception(
+                    "Evolver for %s failed; skipping component without orphans",
+                    component_kind,
+                )
+                skipped_components.append(component_kind)
+                continue
 
             for candidate in candidates:
+                if self._cancelled:
+                    break
+
                 cycle_candidates += 1
 
                 version = self._registry.next_version(component_kind)
@@ -312,6 +464,18 @@ class EvolutionEngine:
 
                 should_promote = self._guard.should_promote(experiment)
 
+                verdict = {
+                    "experiment_id": experiment.experiment_id,
+                    "component_kind": component_kind,
+                    "champion_version": experiment.champion_version,
+                    "challenger_version": version,
+                    "winner": experiment.winner,
+                    "status": experiment.status.value,
+                    "regression_detected": experiment.regression_detected,
+                    "outcome": "",
+                    "log": experiment.log,
+                }
+
                 if experiment.regression_detected:
                     regressions += 1
                     self._registry.reject(
@@ -319,6 +483,7 @@ class EvolutionEngine:
                         reason="Regression detected by guard",
                     )
                     rejected.append(challenger.id)
+                    verdict["outcome"] = "rejected"
                 elif should_promote:
                     self._registry.promote(
                         component_kind, version,
@@ -326,17 +491,27 @@ class EvolutionEngine:
                     )
                     promoted.append(challenger.id)
                     self._update_champion_metrics(component_kind, version, experiment)
+                    verdict["outcome"] = "promoted"
+                    if cfg.write_skill_proposals:
+                        self._write_skill_proposal(
+                            component_kind, version, candidate, experiment
+                        )
                 else:
                     self._registry.reject(
                         component_kind, version,
                         reason=f"Guardian rejected: {experiment.log}",
                     )
                     rejected.append(challenger.id)
+                    verdict["outcome"] = "rejected"
+                verdicts.append(verdict)
+
+                if self._cancelled:
+                    break
 
         success_rate_after = self._measure_success_rate()
         delta = success_rate_after - (priorities[0].frequency if priorities else 0)
 
-        return EvolutionResult(
+        result = EvolutionResult(
             cycle=cycle_num,
             experiment_id=None,
             candidates_generated=cycle_candidates,
@@ -351,6 +526,46 @@ class EvolutionEngine:
                 priorities, cycle_candidates, cycle_experiments, promoted, rejected, regressions
             ),
         )
+        self._journal_cycle(
+            cycle_num, started_at, len(priorities), cycle_candidates,
+            cycle_experiments, verdicts, promoted, rejected, regressions,
+            skipped_components, result.explanation,
+        )
+        return result
+
+    def _journal_cycle(
+        self,
+        cycle: int,
+        started_at: str,
+        failure_count: int,
+        candidates_generated: int,
+        experiments_run: int,
+        verdicts: list[dict[str, Any]],
+        promoted: list[str],
+        rejected: list[str],
+        regressions: int,
+        skipped_components: list[str],
+        explanation: str,
+    ) -> None:
+        """Write one cycle_summary line to the journal and cache it."""
+        record: dict[str, Any] = {
+            "type": "cycle_summary",
+            "cycle": cycle,
+            "failure_count": failure_count,
+            "candidates_generated": candidates_generated,
+            "experiments_run": experiments_run,
+            "experiment_verdicts": verdicts,
+            "promoted": promoted,
+            "rejected": rejected,
+            "regressions": regressions,
+            "cancelled": self._cancelled,
+            "skipped_components": skipped_components,
+            "started_at": started_at,
+            "timestamp": _utcnow_iso(),
+            "explanation": explanation,
+        }
+        self._append_journal(record)
+        self._last_cycle_summary = record
 
     def _filter_priorities_for_component(
         self,

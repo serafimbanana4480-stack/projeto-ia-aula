@@ -11,13 +11,13 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import json
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
-from enum import Enum
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Any
 
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
@@ -65,20 +65,20 @@ class ApprovalRequest:
     description: str
     requester_id: str
     requester_name: str
-    context: Dict[str, Any]
-    decision_data: Dict[str, Any]
-    consequences: List[str]
-    alternatives: List[Dict[str, Any]]
-    risk_assessment: Dict[str, Any]
-    compliance_requirements: List[str]
+    context: dict[str, Any]
+    decision_data: dict[str, Any]
+    consequences: list[str]
+    alternatives: list[dict[str, Any]]
+    risk_assessment: dict[str, Any]
+    compliance_requirements: list[str]
     created_at: datetime
-    expires_at: Optional[datetime]
+    expires_at: datetime | None
     status: ApprovalStatus = ApprovalStatus.PENDING
-    approved_by: Optional[str] = None
-    approved_at: Optional[datetime] = None
-    rejection_reason: Optional[str] = None
-    comments: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    rejection_reason: str | None = None
+    comments: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -89,9 +89,9 @@ class ApprovalDecision:
     decision_maker: str
     decision_time: datetime
     reasoning: str
-    conditions: List[str] = field(default_factory=list)
+    conditions: list[str] = field(default_factory=list)
     follow_up_required: bool = False
-    follow_up_actions: List[str] = field(default_factory=list)
+    follow_up_actions: list[str] = field(default_factory=list)
 
 
 class ApprovalQueue:
@@ -100,13 +100,13 @@ class ApprovalQueue:
     def __init__(self, event_bus: EventBus, max_queue_size: int = 1000):
         self.event_bus = event_bus
         self.max_queue_size = max_queue_size
-        self.pending_requests: Dict[str, ApprovalRequest] = {}
-        self.approved_requests: Dict[str, ApprovalRequest] = {}
-        self.rejected_requests: Dict[str, ApprovalRequest] = {}
-        self.expired_requests: Dict[str, ApprovalRequest] = {}
-        self.approval_history: List[ApprovalDecision] = []
-        self.approvers: Dict[str, Dict[str, Any]] = {}
-        self.approval_policies: Dict[ApprovalType, Dict[str, Any]] = {}
+        self.pending_requests: dict[str, ApprovalRequest] = {}
+        self.approved_requests: dict[str, ApprovalRequest] = {}
+        self.rejected_requests: dict[str, ApprovalRequest] = {}
+        self.expired_requests: dict[str, ApprovalRequest] = {}
+        self.approval_history: list[ApprovalDecision] = []
+        self.approvers: dict[str, dict[str, Any]] = {}
+        self.approval_policies: dict[ApprovalType, dict[str, Any]] = {}
         
         # Initialize default policies
         self._initialize_default_policies()
@@ -147,14 +147,14 @@ class ApprovalQueue:
             }
         }
     
-    async def submit_approval_request(self, request_data: Dict[str, Any]) -> str:
+    async def submit_approval_request(self, request_data: dict[str, Any]) -> str:
         """Submit a new approval request."""
         
         # Validate request data
         required_fields = ["request_type", "title", "description", "requester_id", "context", "decision_data"]
-        for field in required_fields:
-            if field not in request_data:
-                raise ValueError(f"Missing required field: {field}")
+        for field_name in required_fields:
+            if field_name not in request_data:
+                raise ValueError(f"Missing required field: {field_name}")
         
         # Create approval request
         request_id = str(uuid.uuid4())
@@ -217,7 +217,7 @@ class ApprovalQueue:
         return request_id
     
     async def approve_request(self, request_id: str, approver_id: str, 
-                            reasoning: str, conditions: List[str] = None) -> bool:
+                            reasoning: str, conditions: list[str] = None) -> bool:
         """Approve an approval request."""
         
         if request_id not in self.pending_requests:
@@ -307,7 +307,7 @@ class ApprovalQueue:
         return True
     
     async def get_pending_requests(self, approver_id: str = None, 
-                                 request_type: ApprovalType = None) -> List[ApprovalRequest]:
+                                 request_type: ApprovalType = None) -> list[ApprovalRequest]:
         """Get pending approval requests."""
         
         requests = list(self.pending_requests.values())
@@ -335,7 +335,7 @@ class ApprovalQueue:
         
         return requests
     
-    async def get_request_details(self, request_id: str) -> Optional[ApprovalRequest]:
+    async def get_request_details(self, request_id: str) -> ApprovalRequest | None:
         """Get details of a specific approval request."""
         
         # Check all request stores
@@ -348,7 +348,7 @@ class ApprovalQueue:
     
     async def get_approval_history(self, requester_id: str = None, 
                                  start_date: datetime = None, 
-                                 end_date: datetime = None) -> List[ApprovalDecision]:
+                                 end_date: datetime = None) -> list[ApprovalDecision]:
         """Get approval history."""
         
         history = self.approval_history.copy()
@@ -368,7 +368,7 @@ class ApprovalQueue:
         
         return history
     
-    async def get_queue_stats(self) -> Dict[str, Any]:
+    async def get_queue_stats(self) -> dict[str, Any]:
         """Get queue statistics."""
         
         stats = {
@@ -395,7 +395,7 @@ class ApprovalQueue:
         
         return stats
     
-    async def register_approver(self, approver_id: str, approver_info: Dict[str, Any]) -> None:
+    async def register_approver(self, approver_id: str, approver_info: dict[str, Any]) -> None:
         """Register a human approver."""
         
         self.approvers[approver_id] = {
@@ -553,7 +553,7 @@ class ApprovalQueue:
         
         return (len(self.approved_requests) / total_decisions) * 100
     
-    def _get_request_by_id(self, request_id: str) -> Optional[ApprovalRequest]:
+    def _get_request_by_id(self, request_id: str) -> ApprovalRequest | None:
         """Get request by ID from any store."""
         
         for store in [self.approved_requests, self.rejected_requests, self.expired_requests]:
@@ -567,9 +567,7 @@ class ApprovalQueue:
         
         if self._cleanup_task:
             self._cleanup_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
         
         logger.info("Approval queue shutdown completed")

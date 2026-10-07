@@ -8,7 +8,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -76,7 +75,7 @@ def _simple_code_search(query: str, root: str, k: int = 8) -> list[dict[str, Any
             rel_path = os.path.relpath(filepath, root)
             try:
                 with open(
-                    filepath, "r", encoding="utf-8", errors="ignore"
+                    filepath, encoding="utf-8", errors="ignore"
                 ) as f:
                     lines = f.readlines()
             except Exception:

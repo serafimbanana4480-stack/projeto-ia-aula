@@ -96,8 +96,7 @@ class TestC2SettingsInvalidateOrder:
     async def test_masked_secret_cannot_replace_environment_secret(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from backend.llm import factory
-        from backend.llm import model_catalog
+        from backend.llm import factory, model_catalog
         from backend.orchestrator.routes import settings as settings_route
 
         saved: dict[str, str] = {}

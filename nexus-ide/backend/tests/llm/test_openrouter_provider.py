@@ -57,3 +57,14 @@ async def test_interactive_slot_does_not_sleep_through_quota_cooldown(
         await provider._reserve_request_slot(max_wait_seconds=12.0)
 
     await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_provider_exposes_the_wrapped_finish_reason() -> None:
+    provider = OpenRouterProvider(api_key="test")
+    provider._client.last_finish_reason = "length"
+
+    try:
+        assert provider.last_finish_reason == "length"
+    finally:
+        await provider.aclose()

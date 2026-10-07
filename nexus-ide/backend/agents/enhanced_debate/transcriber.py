@@ -12,19 +12,18 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from nexus_ide.backend.orchestrator.knowledge_graph import (
-    KnowledgeGraph,
-    EntityType,
-    RelationType,
     Entity,
+    EntityType,
+    KnowledgeGraph,
     Relationship,
+    RelationType,
 )
 
-from .voting_system import Vote, VoteResult, DecisionType
 from .logical_judge import JudgeReasoning
+from .voting_system import DecisionType, Vote, VoteResult
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +44,17 @@ class DebateTranscript:
     decision_type: str = "default"
     
     # Participants
-    participants: List[str] = field(default_factory=list)
+    participants: list[str] = field(default_factory=list)
     
     # Arguments
-    arguments: List[Dict[str, Any]] = field(default_factory=list)
+    arguments: list[dict[str, Any]] = field(default_factory=list)
     
     # Voting
-    votes: List[Vote] = field(default_factory=list)
-    vote_result: Optional[VoteResult] = None
+    votes: list[Vote] = field(default_factory=list)
+    vote_result: VoteResult | None = None
     
     # Adjudication
-    judge_reasoning: Optional[JudgeReasoning] = None
+    judge_reasoning: JudgeReasoning | None = None
     
     # Final decision
     final_decision: str = ""
@@ -63,13 +62,13 @@ class DebateTranscript:
     # Status and metadata
     status: DebateStatus = DebateStatus.INITIATED
     created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    completed_at: Optional[float] = None
+    started_at: float | None = None
+    completed_at: float | None = None
     
     # Outcome (filled after implementation)
-    outcome: Optional[Dict[str, Any]] = None
+    outcome: dict[str, Any] | None = None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert transcript to dictionary."""
         return {
             "debate_id": self.debate_id,
@@ -103,8 +102,8 @@ class DebateTranscriber:
     
     def __init__(
         self,
-        knowledge_graph: Optional[KnowledgeGraph] = None,
-        db_path: Optional[str] = None
+        knowledge_graph: KnowledgeGraph | None = None,
+        db_path: str | None = None
     ):
         """Initialize debate transcriber.
         
@@ -115,7 +114,7 @@ class DebateTranscriber:
         self.kg = knowledge_graph
         
         # Local cache for transcripts (fallback)
-        self._local_transcripts: Dict[str, DebateTranscript] = {}
+        self._local_transcripts: dict[str, DebateTranscript] = {}
         
         # SQLite persistence
         self.db_path = db_path or "nexus_debates.db"
@@ -237,7 +236,7 @@ class DebateTranscriber:
         except Exception as e:
             logger.error(f"Failed to store in SQLite: {e}")
     
-    def _update_outcome_in_sqlite(self, debate_id: str, outcome: Dict[str, Any]) -> None:
+    def _update_outcome_in_sqlite(self, debate_id: str, outcome: dict[str, Any]) -> None:
         """Update outcome in SQLite database."""
         if not self._conn:
             return
@@ -412,9 +411,9 @@ class DebateTranscriber:
     async def query_past_debates(
         self,
         topic: str,
-        decision_type: Optional[str] = None,
+        decision_type: str | None = None,
         limit: int = 10
-    ) -> List[DebateTranscript]:
+    ) -> list[DebateTranscript]:
         """Query past debates on similar topics.
         
         Args:
@@ -433,9 +432,9 @@ class DebateTranscriber:
     async def _query_from_knowledge_graph(
         self,
         topic: str,
-        decision_type: Optional[str],
+        decision_type: str | None,
         limit: int
-    ) -> List[DebateTranscript]:
+    ) -> list[DebateTranscript]:
         """Query from Knowledge Graph using semantic search.
         
         Args:
@@ -500,9 +499,9 @@ class DebateTranscriber:
     def _query_locally(
         self,
         topic: str,
-        decision_type: Optional[str],
+        decision_type: str | None,
         limit: int
-    ) -> List[DebateTranscript]:
+    ) -> list[DebateTranscript]:
         """Query from local storage (including SQLite)."""
         results = []
         
@@ -520,7 +519,7 @@ class DebateTranscriber:
     async def get_debate_context(
         self,
         debate_id: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Get context for a specific debate.
         
         Args:
@@ -537,7 +536,7 @@ class DebateTranscriber:
     async def _get_context_from_kg(
         self,
         debate_id: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Get context from Knowledge Graph.
         
         Args:
@@ -601,7 +600,7 @@ class DebateTranscriber:
     def _get_context_locally(
         self,
         debate_id: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Get context from local storage (including SQLite)."""
         transcript = self._local_transcripts.get(debate_id)
         if transcript:
@@ -643,7 +642,7 @@ class DebateTranscriber:
     async def update_outcome(
         self,
         debate_id: str,
-        outcome: Dict[str, Any]
+        outcome: dict[str, Any]
     ) -> None:
         """Update outcome of a debate after implementation.
         
@@ -661,7 +660,7 @@ class DebateTranscriber:
     async def _update_outcome_in_kg(
         self,
         debate_id: str,
-        outcome: Dict[str, Any]
+        outcome: dict[str, Any]
     ) -> None:
         """Update outcome in Knowledge Graph.
         
@@ -723,7 +722,7 @@ class DebateTranscriber:
     def _update_outcome_locally(
         self,
         debate_id: str,
-        outcome: Dict[str, Any]
+        outcome: dict[str, Any]
     ) -> None:
         """Update outcome locally and in SQLite."""
         if debate_id in self._local_transcripts:
@@ -734,7 +733,7 @@ class DebateTranscriber:
         if self._conn:
             self._update_outcome_in_sqlite(debate_id, outcome)
     
-    async def get_debate_statistics(self) -> Dict[str, Any]:
+    async def get_debate_statistics(self) -> dict[str, Any]:
         """Get statistics about debates.
         
         Returns:
@@ -745,7 +744,7 @@ class DebateTranscriber:
         else:
             return self._get_statistics_locally()
     
-    async def _get_statistics_from_kg(self) -> Dict[str, Any]:
+    async def _get_statistics_from_kg(self) -> dict[str, Any]:
         """Get statistics from Knowledge Graph.
         
         Returns:
@@ -762,8 +761,8 @@ class DebateTranscriber:
             total = len(debate_entities)
             
             # Count by decision type
-            by_decision_type: Dict[str, int] = {}
-            by_status: Dict[str, int] = {}
+            by_decision_type: dict[str, int] = {}
+            by_status: dict[str, int] = {}
             total_duration = 0.0
             duration_count = 0
             
@@ -803,7 +802,7 @@ class DebateTranscriber:
             stats["storage"] = "local_fallback"
             return stats
     
-    def _get_statistics_locally(self) -> Dict[str, Any]:
+    def _get_statistics_locally(self) -> dict[str, Any]:
         """Get statistics from local storage (including SQLite)."""
         # If SQLite is available, get total count from there
         if self._conn:
@@ -816,8 +815,8 @@ class DebateTranscriber:
         else:
             total = len(self._local_transcripts)
         
-        by_decision_type: Dict[str, int] = {}
-        by_status: Dict[str, int] = {}
+        by_decision_type: dict[str, int] = {}
+        by_status: dict[str, int] = {}
         total_duration = 0.0
         duration_count = 0
         
@@ -849,7 +848,7 @@ class DebateTranscriber:
         self,
         topic: str,
         decision_type: str,
-        participants: List[str]
+        participants: list[str]
     ) -> DebateTranscript:
         """Create a new debate transcript.
         

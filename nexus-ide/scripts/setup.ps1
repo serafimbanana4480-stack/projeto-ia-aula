@@ -57,6 +57,16 @@ if (-not $SkipDocker) {
     Write-Host "`n⏭️  Skipping Docker (--SkipDocker)" -ForegroundColor Gray
 }
 
+# 2b. Clean up stale pytest tmp directories
+Write-Host "`n🧹 Cleaning stale .pytest_tmp* directories..." -ForegroundColor Cyan
+$staleDirs = Get-ChildItem -Path $RepoRoot -Filter ".pytest_tmp*" -Directory
+if ($staleDirs) {
+    Remove-Item -Path $staleDirs.FullName -Recurse -Force
+    Write-Host "   Removed $($staleDirs.Count) stale directories" -ForegroundColor Green
+} else {
+    Write-Host "   No stale directories found" -ForegroundColor Gray
+}
+
 # 3. Install Python dependencies
 Write-Host "`n📦 Installing Python dependencies..." -ForegroundColor Cyan
 if (Get-Command python -ErrorAction SilentlyContinue) {

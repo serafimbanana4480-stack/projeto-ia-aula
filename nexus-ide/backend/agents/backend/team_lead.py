@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
-from backend.agents.base import AgentBase, AgentRequest
 from backend.agents.backend.api_agent import APIAgent
 from backend.agents.backend.database_agent import DatabaseAgent
 from backend.agents.backend.infrastructure_agent import InfrastructureAgent
+from backend.agents.base import AgentBase, AgentRequest
 
 logger = logging.getLogger(__name__)
 

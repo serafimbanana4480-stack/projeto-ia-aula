@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -36,20 +35,49 @@ class ScriptedProvider:
 
     def __init__(self) -> None:
         self.prompts: list[list[dict[str, Any]]] = []
+        self.models: list[str] = []
         self.script: list[str] = []
+        self.responses_by_marker: dict[str, str] = {}
         self.calls = 0
+        self.finish_reason = "stop"
 
-    def load(self, answers: list[str]) -> None:
+    def load(self, answers: list[str], *, finish_reason: str = "stop") -> None:
         self.script = list(answers)
         self.prompts.clear()
+        self.models.clear()
+        self.responses_by_marker.clear()
         self.calls = 0
+        self.finish_reason = finish_reason
+
+    def load_by_marker(self, responses: dict[str, str]) -> None:
+        """Return stable answers by user marker during concurrent requests."""
+        self.load(list(responses.values()))
+        self.responses_by_marker = {
+            marker.casefold(): answer for marker, answer in responses.items()
+        }
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/chat/completions") or request.url.path == "/api/chat":
             body = json.loads(request.content or b"{}")
-            self.prompts.append(body.get("messages", []))
+            messages = body.get("messages", [])
+            self.prompts.append(messages)
+            self.models.append(str(body.get("model") or ""))
             index = min(self.calls, len(self.script) - 1) if self.script else 0
             answer = self.script[index] if self.script else "sem guião"
+            if self.responses_by_marker:
+                user_text = "\n".join(
+                    str(message.get("content") or "")
+                    for message in messages
+                    if message.get("role") == "user"
+                ).casefold()
+                answer = next(
+                    (
+                        response
+                        for marker, response in self.responses_by_marker.items()
+                        if marker in user_text
+                    ),
+                    answer,
+                )
             self.calls += 1
             if request.url.path == "/api/chat":
                 frames = [
@@ -57,7 +85,7 @@ class ScriptedProvider:
                     json.dumps(
                         {
                             "done": True,
-                            "done_reason": "stop",
+                            "done_reason": self.finish_reason,
                             "prompt_eval_count": 100,
                             "eval_count": 50,
                         }

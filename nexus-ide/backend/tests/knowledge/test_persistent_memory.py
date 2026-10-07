@@ -59,6 +59,22 @@ class TestPersistentMemoryStore:
         assert loaded[0][0].project_id == "proj_1"
 
     @pytest.mark.asyncio
+    async def test_user_scoped_memories_cannot_be_searched_or_deleted_by_another_user(
+        self, store: PersistentMemoryStore
+    ) -> None:
+        first = await store.store("private alpha memory", user_id="user-alpha")
+        second = await store.store("private beta memory", user_id="user-beta")
+
+        alpha_results = await store.search(
+            "private memory", user_id="user-alpha", top_k=10, min_similarity=0.0
+        )
+        assert {memory.memory_id for memory, _score in alpha_results} == {first.memory_id}
+        assert await store.list_all(user_id="user-alpha") == [first]
+        assert store.get(second.memory_id, user_id="user-alpha") is None
+        assert await store.delete(second.memory_id, user_id="user-alpha") is False
+        assert store.get(second.memory_id, user_id="user-beta") is not None
+
+    @pytest.mark.asyncio
     async def test_clear_session_deletes_from_db(self, store: PersistentMemoryStore) -> None:
         await store.store("Session note", session_id="s1")
         deleted = await store.clear_session("s1")

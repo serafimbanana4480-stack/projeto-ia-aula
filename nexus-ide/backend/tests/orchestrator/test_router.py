@@ -2,32 +2,23 @@
 
 from __future__ import annotations
 
-import pytest
-
 from backend.models.api import RoutingDecision
-from backend.orchestrator.router_engine import (
-    DEFAULT_CACHE_TTL,
-    Router,
-    _query_hash,
-)
 from backend.orchestrator.router import (
     _COMMON_QUERIES,
     _FALLBACK_DECISION,
+    _ROUTING_CACHE_MAX,
+    _ROUTING_CACHE_TTL,
+    FALLBACK_DECISION,
+    TTLCacheBackend,
     _get_default_router,
     _keyword_classify_cached,
     _parse_routing_decision,
-    _ROUTING_CACHE_MAX,
-    _ROUTING_CACHE_TTL,
-    _ROUTING_CACHE_TTL as _TTL_ALIAS,
     fast_route,
     route_with_model,
     warm_routing_cache,
-    FALLBACK_DECISION,
-    KeywordRoutingStrategy,
-    LLMRoutingStrategy,
-    NullCacheBackend,
-    TTLCacheBackend,
-    RoutingStrategy,
+)
+from backend.orchestrator.router_engine import (
+    DEFAULT_CACHE_TTL,
 )
 from backend.orchestrator.routing_strategies import FALLBACK_DECISION
 
@@ -156,7 +147,7 @@ class TestWarmRoutingCache:
     def test_common_queries_are_cached(self) -> None:
         # After warming, queries should be in cache
         warm_routing_cache()
-        router = _get_default_router()
+        _get_default_router()
         # These are sync-safe to call (warns if event loop is running)
         # Just verify the router has the queries in memory
         assert len(_COMMON_QUERIES) == 5

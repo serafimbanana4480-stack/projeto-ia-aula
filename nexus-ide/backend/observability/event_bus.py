@@ -6,12 +6,13 @@ and backpressure handling via ring buffers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
-from collections import deque
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Optional
+from typing import Any
 
 from .events import Event
 
@@ -25,7 +26,7 @@ class RedisConfig:
     host: str = "localhost"
     port: int = 6379
     db: int = 0
-    password: Optional[str] = None
+    password: str | None = None
     pubsub_channel: str = "nexus_events"
     max_connections: int = 10
     connection_timeout: int = 5
@@ -80,8 +81,8 @@ class EventPersistence:
     async def get_events(
         self,
         event_type: str,
-        start_time: Optional[float] = None,
-        end_time: Optional[float] = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
         limit: int = 100
     ) -> list[dict]:
         """Retrieve events within time range."""
@@ -124,8 +125,8 @@ class EventPersistence:
         self,
         event_type: str,
         callback: Callable,
-        start_time: Optional[float] = None,
-        end_time: Optional[float] = None
+        start_time: float | None = None,
+        end_time: float | None = None
     ) -> int:
         """Replay events to a callback function."""
         if not self.config.replay_enabled:
@@ -144,7 +145,7 @@ class EventPersistence:
         logger.info(f"Replayed {replayed_count} events for {event_type}")
         return replayed_count
 
-    async def clear_events(self, event_type: Optional[str] = None) -> int:
+    async def clear_events(self, event_type: str | None = None) -> int:
         """Clear persisted events."""
         try:
             if event_type:
@@ -191,8 +192,8 @@ class EventPersistence:
 class RedisPubSubBackend:
     def __init__(self, config: RedisConfig):
         self.config = config
-        self.redis_client: Optional[Any] = None
-        self.pubsub: Optional[Any] = None
+        self.redis_client: Any | None = None
+        self.pubsub: Any | None = None
         self.subscribers: dict[str, list[Callable]] = {}
         self._connected = False
 
@@ -308,28 +309,28 @@ class EventBus:
     def __init__(
         self,
         max_queue_size: int = 1000,
-        redis_config: Optional[RedisConfig] = None,
-        persistence_config: Optional[PersistenceConfig] = None,
+        redis_config: RedisConfig | None = None,
+        persistence_config: PersistenceConfig | None = None,
         use_redis: bool = True
     ) -> None:
         self._subscribers: dict[str, list[asyncio.Queue[Event]]] = {}
         self._max_queue_size = max_queue_size
         self._lock = asyncio.Lock()
         self.use_redis = use_redis
-        self.redis_backend: Optional[RedisPubSubBackend] = None
-        self.persistence: Optional[EventPersistence] = None
+        self.redis_backend: RedisPubSubBackend | None = None
+        self.persistence: EventPersistence | None = None
 
         if self.use_redis and redis_config:
             self.redis_backend = RedisPubSubBackend(redis_config)
 
         if persistence_config and persistence_config.enabled:
             self.persistence_config = persistence_config
-            self.persistence: Optional[EventPersistence] = None
+            self.persistence: EventPersistence | None = None
         else:
             self.persistence_config = None
             self.persistence = None
 
-        self._listen_task: Optional[asyncio.Task] = None
+        self._listen_task: asyncio.Task | None = None
 
     async def initialize(self) -> None:
         """Initialize the event bus (connect to Redis if configured)."""
@@ -350,10 +351,8 @@ class EventBus:
         """Shutdown the event bus."""
         if self._listen_task:
             self._listen_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._listen_task
-            except asyncio.CancelledError:
-                pass
 
         if self.redis_backend:
             await self.redis_backend.disconnect()
@@ -398,14 +397,10 @@ class EventBus:
                     for queue in list(queues):
                         if queue.full():
                             # Backpressure: drop oldest
-                            try:
+                            with contextlib.suppress(asyncio.QueueEmpty):
                                 queue.get_nowait()
-                            except asyncio.QueueEmpty:
-                                pass
-                        try:
+                        with contextlib.suppress(asyncio.QueueFull):
                             queue.put_nowait(event)
-                        except asyncio.QueueFull:
-                            pass
 
     async def subscribe(self, topic: str = "*") -> AsyncIterator[Event]:
         """Async generator yielding events matching `topic`.
@@ -450,8 +445,8 @@ class EventBus:
     async def replay_events(
         self,
         event_type: str,
-        start_time: Optional[float] = None,
-        end_time: Optional[float] = None
+        start_time: float | None = None,
+        end_time: float | None = None
     ) -> int:
         """Replay persisted events to current subscribers."""
         if not self.persistence:
@@ -477,8 +472,8 @@ class EventBus:
     async def get_event_history(
         self,
         event_type: str,
-        start_time: Optional[float] = None,
-        end_time: Optional[float] = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
         limit: int = 100
     ) -> list[dict]:
         """Get event history for debugging."""
@@ -491,7 +486,7 @@ class EventBus:
             )
         return []
 
-    async def clear_event_history(self, event_type: Optional[str] = None) -> int:
+    async def clear_event_history(self, event_type: str | None = None) -> int:
         """Clear event history."""
         if self.persistence:
             return await self.persistence.clear_events(event_type)
@@ -503,7 +498,7 @@ class EventBus:
             return await self.persistence.get_event_stats()
         return {}
 
-    async def stream_events(self, event_types: Optional[list[str]] = None) -> AsyncIterator[Event]:
+    async def stream_events(self, event_types: list[str] | None = None) -> AsyncIterator[Event]:
         """Stream events matching the given types.
 
         This is used by SSE endpoints to stream events to clients.

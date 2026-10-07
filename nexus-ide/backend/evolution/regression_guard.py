@@ -7,6 +7,7 @@ blocked and the challenger is rejected.
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -284,3 +285,63 @@ class RegressionGuard:
             return False
         report = self.evaluate(experiment)
         return report.overall_passed
+
+    def evaluate_candidate(
+        self,
+        experiment: Experiment,
+        candidate_config: dict[str, Any] | None = None,
+    ) -> GateReport:
+        """Evaluate all gates plus the forbidden-patterns content gate.
+
+        Runs the standard metric gates via :meth:`evaluate` and prepends a
+        ``forbidden_patterns`` gate that scans the candidate config for
+        destructive shell/SQL patterns (e.g. ``rm -rf``, ``drop table``).
+        A single dangerous pattern blocks promotion regardless of metrics.
+        """
+        report = self.evaluate(experiment)
+        if candidate_config:
+            forbidden = self._find_forbidden_patterns(candidate_config)
+            gate = GateResult(
+                gate_name="forbidden_patterns",
+                passed=not forbidden,
+                champion_value=0.0,
+                challenger_value=float(len(forbidden)),
+                threshold=0.0,
+                message=(
+                    f"Forbidden patterns found in candidate config: {', '.join(forbidden)}"
+                    if forbidden
+                    else "No forbidden patterns in candidate config"
+                ),
+            )
+            report.gates.insert(0, gate)
+            if forbidden:
+                report.overall_passed = False
+                report.explanation = (
+                    f"Failed gate: forbidden_patterns ({gate.message})"
+                )
+        return report
+
+    # Destructive patterns that must never ship inside a candidate config.
+    _FORBIDDEN_PATTERNS: tuple[str, ...] = (
+        "rm -rf",
+        "rm -fr",
+        "del /f /s /q",
+        "rmdir /s /q",
+        "format c:",
+        "rd /s /q",
+        "drop table",
+        "drop database",
+        "truncate table",
+        "mkfs",
+        "dd if=",
+        ":(){:|:&};:",
+        "shutdown -h",
+        "> /dev/sda",
+        "git push --force",
+        "chmod -r 777 /",
+    )
+
+    def _find_forbidden_patterns(self, candidate_config: dict[str, Any]) -> list[str]:
+        """Return forbidden patterns present (case-insensitive) in the config."""
+        blob = json.dumps(candidate_config, default=str).lower()
+        return [pattern for pattern in self._FORBIDDEN_PATTERNS if pattern in blob]

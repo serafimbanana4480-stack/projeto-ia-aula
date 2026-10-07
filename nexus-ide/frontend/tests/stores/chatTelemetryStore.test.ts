@@ -166,4 +166,28 @@ describe("chatTelemetryStore", () => {
     expect(state.startedAt).toBeNull();
     expect(state.completedAt).toBeNull();
   });
+
+  it("does not move completion time on repeated idle updates or leak timing to another session", () => {
+    vi.useFakeTimers();
+    try {
+      const store = useChatTelemetryStore.getState();
+      store.setStream("a", true, []);
+      vi.advanceTimersByTime(1000);
+      store.setStream("a", false, []);
+      const completed = useChatTelemetryStore.getState().completedAt;
+      vi.advanceTimersByTime(5000);
+      store.setStream("a", false, []);
+      expect(useChatTelemetryStore.getState().completedAt).toBe(completed);
+      store.setStream("b", false, []);
+      expect(useChatTelemetryStore.getState()).toMatchObject({ startedAt: null, completedAt: null, usage: null });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("ignores malformed usage and normalises negative or non-finite token values", () => {
+    const store = useChatTelemetryStore.getState();
+    store.setStream("a", false, [makeEvent({ data: { usage: [] } })]);
+    expect(useChatTelemetryStore.getState().usage).toBeNull();
+    store.setStream("a", false, [makeEvent({ data: { usage: { input_tokens: 42, output_tokens: -1, total_tokens: Infinity } } })]);
+    expect(useChatTelemetryStore.getState().usage).toMatchObject({ input_tokens: 42, output_tokens: 0, total_tokens: 42 });
+  });
 });

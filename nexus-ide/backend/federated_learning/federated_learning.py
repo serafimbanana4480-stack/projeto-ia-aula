@@ -1,4 +1,4 @@
-"""Federated Learning — Collaborative learning system for multi-agent environments.
+﻿"""Federated Learning â€” Collaborative learning system for multi-agent environments.
 
 This module provides:
 - Federated learning orchestration
@@ -12,21 +12,30 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import json
-import pickle
-import hashlib
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Union
-from dataclasses import dataclass, field
-from enum import Enum
-import uuid
-import numpy as np
-from collections import defaultdict
 import statistics
+import uuid
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any
 
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
+from backend.observability.optional_deps import optional_module
+
+# numpy is an optional extra (``uv sync --extra federated``), not a hard
+# dependency -- no aggregation code path is reachable from main.py. The stand-in
+# keeps this module importable and raises a guided error on the first array
+# operation, instead of a bare "No module named 'numpy'" at import time.
+np = optional_module("numpy", extra="federated", owner=__name__)
+
+#: What ``np.ndarray`` used to say in the annotation below -- see the note in
+#: backend/quantum/quantum_computing.py. The runtime ``isinstance`` checks still
+#: say ``np.ndarray``, because those genuinely need the class.
+type Array = Any
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +75,14 @@ class FederatedModel:
     name: str
     model_type: ModelType
     version: int
-    architecture: Dict[str, Any]
-    parameters: Dict[str, Any]
-    metadata: Dict[str, Any]
+    architecture: dict[str, Any]
+    parameters: dict[str, Any]
+    metadata: dict[str, Any]
     created_at: datetime
     updated_at: datetime
-    performance_metrics: Dict[str, float]
+    performance_metrics: dict[str, float]
     privacy_level: PrivacyLevel
-    participating_agents: List[str]
+    participating_agents: list[str]
     global_performance: float = 0.0
 
 
@@ -84,12 +93,12 @@ class LocalModelUpdate:
     agent_id: str
     model_id: str
     round_number: int
-    local_parameters: Dict[str, Any]
-    local_performance: Dict[str, float]
+    local_parameters: dict[str, Any]
+    local_performance: dict[str, float]
     training_samples: int
     update_timestamp: datetime
-    privacy_noise: Optional[Dict[str, Any]] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    privacy_noise: dict[str, Any] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -99,13 +108,13 @@ class FederatedRound:
     model_id: str
     round_number: int
     start_time: datetime
-    end_time: Optional[datetime]
-    participating_agents: List[str]
-    updates_received: List[str]
-    global_parameters: Dict[str, Any]
-    global_performance: Dict[str, float]
-    convergence_metrics: Dict[str, float]
-    privacy_metrics: Dict[str, float]
+    end_time: datetime | None
+    participating_agents: list[str]
+    updates_received: list[str]
+    global_parameters: dict[str, Any]
+    global_performance: dict[str, float]
+    convergence_metrics: dict[str, float]
+    privacy_metrics: dict[str, float]
     status: str
 
 
@@ -120,7 +129,7 @@ class LearningAggregation:
     convergence_threshold: float
     min_participants: int
     max_rounds: int
-    configuration: Dict[str, Any]
+    configuration: dict[str, Any]
 
 
 class FederatedLearningOrchestrator:
@@ -130,26 +139,26 @@ class FederatedLearningOrchestrator:
         self.event_bus = event_bus
         
         # Models and rounds
-        self.federated_models: Dict[str, FederatedModel] = {}
-        self.active_rounds: Dict[str, FederatedRound] = {}
-        self.round_history: List[FederatedRound] = []
+        self.federated_models: dict[str, FederatedModel] = {}
+        self.active_rounds: dict[str, FederatedRound] = {}
+        self.round_history: list[FederatedRound] = []
         
         # Local updates
-        self.local_updates: Dict[str, LocalModelUpdate] = {}
-        self.pending_updates: Dict[str, List[str]] = defaultdict(list)
+        self.local_updates: dict[str, LocalModelUpdate] = {}
+        self.pending_updates: dict[str, list[str]] = defaultdict(list)
         
         # Aggregation strategies
-        self.aggregation_strategies: Dict[str, LearningAggregation] = {}
+        self.aggregation_strategies: dict[str, LearningAggregation] = {}
         
         # Agent participation
-        self.agent_participation: Dict[str, Dict[str, Any]] = {}
-        self.agent_reputation: Dict[str, float] = {}
+        self.agent_participation: dict[str, dict[str, Any]] = {}
+        self.agent_reputation: dict[str, float] = {}
         
         # Privacy and security
-        self.privacy_configs: Dict[str, Dict[str, Any]] = {}
+        self.privacy_configs: dict[str, dict[str, Any]] = {}
         
         # Performance tracking
-        self.learning_metrics: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self.learning_metrics: dict[str, list[dict[str, Any]]] = defaultdict(list)
         
         # Initialize default aggregation strategies
         self._initialize_aggregation_strategies()
@@ -209,8 +218,8 @@ class FederatedLearningOrchestrator:
         }
     
     async def create_federated_model(self, name: str, model_type: ModelType,
-                                   architecture: Dict[str, Any],
-                                   initial_parameters: Dict[str, Any],
+                                   architecture: dict[str, Any],
+                                   initial_parameters: dict[str, Any],
                                    privacy_level: PrivacyLevel = PrivacyLevel.DIFFERENTIAL,
                                    aggregation_strategy: str = "fedavg") -> str:
         """Create a new federated learning model."""
@@ -259,7 +268,7 @@ class FederatedLearningOrchestrator:
         return model_id
     
     async def start_learning_round(self, model_id: str, 
-                                 participating_agents: List[str],
+                                 participating_agents: list[str],
                                  min_updates: int = None) -> str:
         """Start a new federated learning round."""
         
@@ -321,8 +330,8 @@ class FederatedLearningOrchestrator:
         return round_id
     
     async def submit_local_update(self, agent_id: str, round_id: str,
-                                local_parameters: Dict[str, Any],
-                                local_performance: Dict[str, Any],
+                                local_parameters: dict[str, Any],
+                                local_performance: dict[str, Any],
                                 training_samples: int) -> str:
         """Submit a local model update."""
         
@@ -492,8 +501,8 @@ class FederatedLearningOrchestrator:
         
         logger.info(f"Round aggregated: {round_id} (Round {round_info.round_number})")
     
-    async def _aggregate_parameters(self, updates: List[LocalModelUpdate],
-                                  strategy: LearningAggregation) -> Dict[str, Any]:
+    async def _aggregate_parameters(self, updates: list[LocalModelUpdate],
+                                  strategy: LearningAggregation) -> dict[str, Any]:
         """Aggregate parameters from local updates."""
         
         if strategy.aggregation_type == FederatedLearningType.FEDERATED_AVERAGING:
@@ -508,8 +517,8 @@ class FederatedLearningOrchestrator:
             # Default to FedAvg
             return await self._federated_averaging(updates, strategy)
     
-    async def _federated_averaging(self, updates: List[LocalModelUpdate],
-                                 strategy: LearningAggregation) -> Dict[str, Any]:
+    async def _federated_averaging(self, updates: list[LocalModelUpdate],
+                                 strategy: LearningAggregation) -> dict[str, Any]:
         """Federated averaging aggregation."""
         
         if not updates:
@@ -545,6 +554,14 @@ class FederatedLearningOrchestrator:
                     elif strategy.weighting_strategy == "performance_based":
                         accuracy = update.local_performance.get("accuracy", 0.5)
                         weights.append(accuracy)
+                    else:
+                        # FedAvg is about to weight by reputation and contribution
+                        # count anyway, so an unrecognised strategy (including the
+                        # shipped "adaptive" one) must still contribute exactly one
+                        # weight. Before this branch existed, "adaptive" appended a
+                        # value with no weight, `zip` truncated to zero pairs and
+                        # `np.sum([])` silently published an all-zero global model.
+                        weights.append(1.0)
             
             if values:
                 # Weighted average
@@ -553,7 +570,8 @@ class FederatedLearningOrchestrator:
                 
                 if isinstance(values[0], np.ndarray):
                     # Array parameters
-                    weighted_values = [w * v for w, v in zip(weights, values)]
+                    # One weight per value by construction (see the else branch above).
+                    weighted_values = [w * v for w, v in zip(weights, values, strict=True)]
                     aggregated_params[key] = np.sum(weighted_values, axis=0)
                 else:
                     # Scalar parameters
@@ -566,8 +584,8 @@ class FederatedLearningOrchestrator:
         
         return aggregated_params
     
-    async def _federated_proximal(self, updates: List[LocalModelUpdate],
-                               strategy: LearningAggregation) -> Dict[str, Any]:
+    async def _federated_proximal(self, updates: list[LocalModelUpdate],
+                               strategy: LearningAggregation) -> dict[str, Any]:
         """Federated proximal aggregation with regularization."""
         
         # Start with FedAvg
@@ -593,7 +611,7 @@ class FederatedLearningOrchestrator:
                 global_param = np.array(last_round.global_parameters[key])
                 local_param = np.array(fedavg_params[key])
                 
-                # Proximal update: θ_global = θ_local - lr * μ * (θ_local - θ_global)
+                # Proximal update: Î¸_global = Î¸_local - lr * Î¼ * (Î¸_local - Î¸_global)
                 proximal_term = learning_rate * mu * (local_param - global_param)
                 proximal_params[key] = (local_param - proximal_term).tolist()
             else:
@@ -601,8 +619,8 @@ class FederatedLearningOrchestrator:
         
         return proximal_params
     
-    async def _federated_ensemble(self, updates: List[LocalModelUpdate],
-                                strategy: LearningAggregation) -> Dict[str, Any]:
+    async def _federated_ensemble(self, updates: list[LocalModelUpdate],
+                                strategy: LearningAggregation) -> dict[str, Any]:
         """Federated ensemble aggregation."""
         
         if not updates:
@@ -623,7 +641,9 @@ class FederatedLearningOrchestrator:
         
         # Select top performers
         ensemble_size = strategy.configuration.get("ensemble_size", 5)
-        sorted_updates = sorted(zip(updates, performance_weights), 
+        # performance_weights has exactly one entry per update (built by a
+        # comprehension over the same list), so the pairing is exact.
+        sorted_updates = sorted(zip(updates, performance_weights, strict=True),
                               key=lambda x: x[1], reverse=True)
         selected_updates = sorted_updates[:ensemble_size]
         
@@ -651,8 +671,8 @@ class FederatedLearningOrchestrator:
         
         return ensemble_params
     
-    async def _adaptive_federated(self, updates: List[LocalModelUpdate],
-                               strategy: LearningAggregation) -> Dict[str, Any]:
+    async def _adaptive_federated(self, updates: list[LocalModelUpdate],
+                               strategy: LearningAggregation) -> dict[str, Any]:
         """Adaptive federated learning aggregation."""
         
         # Start with FedAvg
@@ -687,15 +707,17 @@ class FederatedLearningOrchestrator:
                     adaptive_weights = [1.0 / len(values)] * len(values)
                 
                 # Weighted average
+                # values and adaptive_weights are appended under the same
+                # `if key in update.local_parameters` guard, so they stay aligned.
                 if isinstance(values[0], np.ndarray):
-                    weighted_values = [w * np.array(v) for w, v in zip(adaptive_weights, values)]
+                    weighted_values = [w * np.array(v) for w, v in zip(adaptive_weights, values, strict=True)]
                     adaptive_params[key] = np.sum(weighted_values, axis=0).tolist()
                 else:
-                    adaptive_params[key] = sum(w * v for w, v in zip(adaptive_weights, values))
+                    adaptive_params[key] = sum(w * v for w, v in zip(adaptive_weights, values, strict=True))
         
         return adaptive_params
     
-    def _calculate_global_performance(self, updates: List[LocalModelUpdate]) -> Dict[str, float]:
+    def _calculate_global_performance(self, updates: list[LocalModelUpdate]) -> dict[str, float]:
         """Calculate global performance metrics."""
         
         if not updates:
@@ -727,7 +749,7 @@ class FederatedLearningOrchestrator:
         return metrics
     
     def _calculate_convergence_metrics(self, round_info: FederatedRound,
-                                     updates: List[LocalModelUpdate]) -> Dict[str, float]:
+                                     updates: list[LocalModelUpdate]) -> dict[str, float]:
         """Calculate convergence metrics."""
         
         metrics = {}
@@ -756,7 +778,7 @@ class FederatedLearningOrchestrator:
         return metrics
     
     def _calculate_privacy_metrics(self, round_info: FederatedRound,
-                                updates: List[LocalModelUpdate]) -> Dict[str, float]:
+                                updates: list[LocalModelUpdate]) -> dict[str, float]:
         """Calculate privacy protection metrics."""
         
         metrics = {}
@@ -783,7 +805,7 @@ class FederatedLearningOrchestrator:
         
         return metrics
     
-    async def _update_agent_reputation(self, updates: List[LocalModelUpdate]) -> None:
+    async def _update_agent_reputation(self, updates: list[LocalModelUpdate]) -> None:
         """Update agent reputation based on contribution quality."""
         
         for update in updates:
@@ -855,8 +877,8 @@ class FederatedLearningOrchestrator:
         
         logger.info(f"Federated learning finalized: {model_id}")
     
-    def _calculate_parameter_distance(self, params1: Dict[str, Any], 
-                                   params2: Dict[str, Any]) -> float:
+    def _calculate_parameter_distance(self, params1: dict[str, Any],
+                                   params2: dict[str, Any]) -> float:
         """Calculate distance between parameter sets."""
         
         all_keys = set(params1.keys()) | set(params2.keys())
@@ -876,7 +898,7 @@ class FederatedLearningOrchestrator:
         
         return statistics.mean(distances) if distances else 0.0
     
-    def _create_privacy_config(self, privacy_level: PrivacyLevel) -> Dict[str, Any]:
+    def _create_privacy_config(self, privacy_level: PrivacyLevel) -> dict[str, Any]:
         """Create privacy configuration for a model."""
         
         configs = {
@@ -914,8 +936,8 @@ class FederatedLearningOrchestrator:
         
         return configs.get(privacy_level, configs[PrivacyLevel.NONE])
     
-    async def _apply_privacy_to_parameters(self, parameters: Dict[str, Any],
-                                         privacy_config: Dict[str, Any]) -> Dict[str, Any]:
+    async def _apply_privacy_to_parameters(self, parameters: dict[str, Any],
+                                         privacy_config: dict[str, Any]) -> dict[str, Any]:
         """Apply privacy protection to parameters."""
         
         protected_params = parameters.copy()
@@ -958,7 +980,7 @@ class FederatedLearningOrchestrator:
         
         return protected_params
     
-    def _simple_encrypt(self, array: np.ndarray) -> np.ndarray:
+    def _simple_encrypt(self, array: Array) -> Array:
         """Simple encryption for demonstration (use proper encryption in production)."""
         # This is a placeholder - use proper homomorphic encryption in production
         key = np.random.random(array.shape)
@@ -1024,7 +1046,7 @@ class FederatedLearningOrchestrator:
                 logger.error(f"Error in round monitoring: {e}")
                 await asyncio.sleep(60)
     
-    async def get_federated_learning_stats(self) -> Dict[str, Any]:
+    async def get_federated_learning_stats(self) -> dict[str, Any]:
         """Get comprehensive federated learning statistics."""
         
         stats = {
@@ -1068,16 +1090,12 @@ class FederatedLearningOrchestrator:
         # Cancel background tasks
         if self._round_monitoring_task:
             self._round_monitoring_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._round_monitoring_task
-            except asyncio.CancelledError:
-                pass
         
         if self._privacy_protection_task:
             self._privacy_protection_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._privacy_protection_task
-            except asyncio.CancelledError:
-                pass
         
         logger.info("Federated learning orchestrator shutdown completed")

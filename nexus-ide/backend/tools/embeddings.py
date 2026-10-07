@@ -21,9 +21,11 @@ import hashlib
 import inspect
 import json
 import logging
-import re
 import math
 import os
+import re
+import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -59,6 +61,14 @@ INDEX_META_PATH = DATA_DIR / "embeddings_index_meta.json"
 _store: dict[str, tuple[list[float], CodeChunk]] = {}
 _store_lock: asyncio.Lock = asyncio.Lock()
 
+# Snapshot meta record ({model_name, dim, count}) persisted under _SNAPSHOT_META_KEY
+_SNAPSHOT_META_KEY = "_meta"
+_snapshot_meta: dict[str, Any] = {}
+
+# Robustness counters (reset per index run where noted)
+_stale_removed_last_index: int = 0
+_dim_mismatch_skipped: int = 0
+
 # FAISS index for fast ANN search (mirrors _store contents)
 _faiss_index: Any = None
 _faiss_dim: int = _EMBED_DIM
@@ -76,7 +86,7 @@ class CodeChunk:
     symbol_name: str = ""
     symbol_type: str = ""
     chunk_hash: str = ""
-    indexed_at: float = field(default_factory=lambda: float(os.times()[0]))
+    indexed_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -395,47 +405,124 @@ def _chunk_file(content: str, language: str) -> list[tuple[int, int, str, str, s
     ]
 
 
+def _dominant_dim(store: dict[str, tuple[list[float], CodeChunk]]) -> int:
+    """Most common non-empty vector length in the store (0 when all empty).
+
+    Used as the fallback reference dimension for legacy snapshots that
+    carry no ``_meta`` record.
+    """
+    counts = Counter(len(vec) for vec, _ in store.values() if vec)
+    if not counts:
+        return 0
+    return counts.most_common(1)[0][0]
+
+
 def _load_index_snapshot() -> dict[str, tuple[list[float], CodeChunk]]:
-    """Load the embedding index snapshot from disk if it exists."""
+    """Load the embedding index snapshot from disk if it exists.
+
+    Vectors whose dimension disagrees with the snapshot's reference
+    dimension (the ``_meta`` dim, or the dominant dimension for legacy
+    snapshots without meta) are discarded instead of letting the zip-based
+    cosine truncate them silently.
+    """
+    global _snapshot_meta, _dim_mismatch_skipped
     if not INDEX_SNAPSHOT_PATH.exists():
         return {}
 
     try:
         with INDEX_SNAPSHOT_PATH.open("r", encoding="utf-8") as f:
             raw = json.load(f)
-
-        store: dict[str, tuple[list[float], CodeChunk]] = {}
-        for chunk_id, item in raw.items():
-            if not isinstance(item, dict) or "embedding" not in item or "chunk" not in item:
-                continue
-            embedding = item["embedding"]
-            chunk = CodeChunk.from_dict(item["chunk"])
-            store[chunk_id] = (embedding, chunk)
-
-        logger.info("Loaded %d chunks from embedding snapshot", len(store))
-        _rebuild_faiss_index()
-        return store
     except Exception as exc:
         logger.warning("Failed to load embedding snapshot: %s", exc)
         return {}
 
+    if not isinstance(raw, dict):
+        return {}
 
-def _save_index_snapshot(store: dict[str, tuple[list[float], CodeChunk]]) -> None:
-    """Persist the embedding index snapshot to disk."""
+    meta = raw.get(_SNAPSHOT_META_KEY)
+    meta = dict(meta) if isinstance(meta, dict) else {}
+
+    reference_dim: int | None = None
+    if isinstance(meta.get("dim"), int):
+        reference_dim = meta["dim"]
+    else:
+        counts = Counter(
+            len(item.get("embedding") or [])
+            for item in raw.values()
+            if isinstance(item, dict) and item.get("embedding")
+        )
+        if counts:
+            reference_dim = counts.most_common(1)[0][0]
+
+    store: dict[str, tuple[list[float], CodeChunk]] = {}
+    skipped = 0
+    for chunk_id, item in raw.items():
+        if chunk_id == _SNAPSHOT_META_KEY:
+            continue
+        if not isinstance(item, dict) or "embedding" not in item or "chunk" not in item:
+            continue
+        embedding = item["embedding"]
+        if not isinstance(embedding, list):
+            embedding = list(embedding) if embedding else []
+        # Empty vectors (offline/no-provider chunks) are keyword-only and stay.
+        if reference_dim is not None and embedding and len(embedding) != reference_dim:
+            skipped += 1
+            logger.warning(
+                "Snapshot entry %r has dimension %d, expected %d — discarded "
+                "(dim mismatch)",
+                chunk_id,
+                len(embedding),
+                reference_dim,
+            )
+            continue
+        store[chunk_id] = (embedding, CodeChunk.from_dict(item["chunk"]))
+
+    _snapshot_meta = {
+        "model_name": meta.get("model_name", _EMBED_MODELS[0]),
+        "dim": reference_dim if reference_dim is not None else 0,
+        "count": len(store),
+    }
+    _dim_mismatch_skipped += skipped
+    logger.info("Loaded %d chunks from embedding snapshot", len(store))
+    _rebuild_faiss_index()
+    return store
+
+
+def _save_index_snapshot(
+    store: dict[str, tuple[list[float], CodeChunk]],
+    model: str | None = None,
+) -> None:
+    """Persist the embedding index snapshot atomically (``.tmp`` + replace).
+
+    A crash between the temp write and ``os.replace`` leaves the previous
+    published snapshot intact and, at worst, a ``*.tmp`` sibling that a
+    healthy save later clears.
+    """
+    global _snapshot_meta
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        snapshot: dict[str, dict[str, Any]] = {}
+        meta = {
+            "model_name": model or _snapshot_meta.get("model_name") or _EMBED_MODELS[0],
+            "dim": _dominant_dim(store),
+            "count": len(store),
+        }
+        _snapshot_meta = dict(meta)
+
+        snapshot: dict[str, dict[str, Any]] = {_SNAPSHOT_META_KEY: meta}
         for chunk_id, (embedding, chunk) in store.items():
             snapshot[chunk_id] = {
                 "embedding": embedding,
                 "chunk": chunk.to_dict(),
             }
-        with INDEX_SNAPSHOT_PATH.open("w", encoding="utf-8") as f:
+
+        tmp_path = INDEX_SNAPSHOT_PATH.with_name(INDEX_SNAPSHOT_PATH.name + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False)
+        os.replace(tmp_path, INDEX_SNAPSHOT_PATH)
 
         with INDEX_META_PATH.open("w", encoding="utf-8") as f:
             json.dump(
-                {"chunk_count": len(store), "format_version": 1},
+                {"chunk_count": len(store), "format_version": 2},
                 f,
                 ensure_ascii=False,
             )
@@ -472,7 +559,7 @@ async def index_codebase(
         exclude_dirs: Directory names to skip.
         force_reindex: If True, ignore the on-disk snapshot and rebuild.
     """
-    global _store
+    global _store, _stale_removed_last_index
 
     model = await _get_available_model()
     if model is None:
@@ -522,6 +609,8 @@ async def index_codebase(
     }
 
     async with _store_lock:
+        _stale_removed_last_index = 0
+
         if force_reindex or not _store:
             _store = {} if force_reindex else _load_index_snapshot()
 
@@ -641,7 +730,24 @@ async def index_codebase(
                 _store[cid] = (emb, cc)
                 chunk_count += 1
 
-        _save_index_snapshot(_store)
+        # Stale-file sweep: chunks whose backing file was deleted are purged
+        # even though the file is no longer part of this walk. Files that
+        # still exist on disk but were not visited are kept.
+        stale_file_chunks = [
+            chunk_id
+            for chunk_id, (_, chunk) in _store.items()
+            if not Path(chunk.file).exists()
+        ]
+        for stale_id in stale_file_chunks:
+            _store.pop(stale_id, None)
+        if stale_file_chunks:
+            _stale_removed_last_index += len(stale_file_chunks)
+            logger.info(
+                "Removed %d stale chunks whose files were deleted",
+                len(stale_file_chunks),
+            )
+
+        _save_index_snapshot(_store, model=model)
         _rebuild_faiss_index()
 
     logger.info("Indexed %d new/updated chunks from %s (total %d)", chunk_count, root, len(_store))
@@ -709,12 +815,27 @@ async def search_codebase(
     for _chunk_id, (embedding, chunk) in _store.items():
         if not _matches_project(chunk):
             continue
+        if not embedding:
+            # No vector available (offline/no-provider chunk): keyword-only,
+            # must not participate in cosine scoring.
+            continue
+        if len(embedding) != len(query_embedding):
+            # Foreign dimension: skipping beats letting the zip-based cosine
+            # truncate the longer vector silently.
+            _bump_dim_mismatch()
+            continue
         sim = _cosine_sim(query_embedding, embedding)
         chunk.score = sim
         scored.append((sim, chunk))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return [chunk for _, chunk in scored[:k]]
+
+
+def _bump_dim_mismatch() -> None:
+    """Increment the dimension-mismatch robustness counter."""
+    global _dim_mismatch_skipped
+    _dim_mismatch_skipped += 1
 
 
 def _keyword_search(
@@ -776,6 +897,9 @@ async def get_index_stats() -> dict[str, Any]:
             "by_language": languages,
             "by_symbol_type": symbol_types,
             "snapshot_path": str(INDEX_SNAPSHOT_PATH),
+            "stale_removed_last_index": _stale_removed_last_index,
+            "dim_mismatch_skipped": _dim_mismatch_skipped,
+            "model_name": _snapshot_meta.get("model_name", _EMBED_MODELS[0]),
             **faiss_stats,
         }
 

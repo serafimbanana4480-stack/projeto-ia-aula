@@ -11,13 +11,13 @@ This module provides comprehensive edge computing capabilities:
 
 from .edge_computing import (
     EdgeComputingOrchestrator,
-    EdgeNode,
-    EdgeTask,
     EdgeDeployment,
-    EdgeNodeType,
+    EdgeNode,
     EdgeNodeStatus,
+    EdgeNodeType,
+    EdgeTask,
+    LoadBalancingStrategy,
     TaskPriority,
-    LoadBalancingStrategy
 )
 
 __all__ = [

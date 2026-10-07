@@ -5,8 +5,7 @@ Provides endpoints for knowledge graph and memory systems.
 """
 
 import logging
-import time
-from typing import Any, AsyncIterator
+from typing import Any
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -61,7 +60,7 @@ async def get_knowledge_stats() -> dict:
     """
     # Try to get real stats from Qdrant
     try:
-        from backend.knowledge.qdrant_backend import QdrantBackend, QDRANT_AVAILABLE
+        from backend.knowledge.qdrant_backend import QDRANT_AVAILABLE, QdrantBackend
         
         if QDRANT_AVAILABLE:
             qdrant = QdrantBackend()
@@ -163,8 +162,8 @@ async def memory_stream():
     **Returns:**
         StreamingResponse with SSE events
     """
-    import json
     import asyncio
+    import json
     
     async def event_generator():
         while True:

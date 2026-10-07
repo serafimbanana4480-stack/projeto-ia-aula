@@ -5,13 +5,12 @@ Phase 12: Expansao e Ecosistema
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +42,7 @@ class AgentPlugin:
     status: AgentStatus = AgentStatus.PENDING
     downloads: int = 0
     rating: float = 0.0
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -98,9 +97,8 @@ class AgentMarketplace:
                         continue
 
                 # Tag filter
-                if tags:
-                    if not any(t in plugin.tags for t in tags):
-                        continue
+                if tags and not any(t in plugin.tags for t in tags):
+                    continue
 
                 # Capability filter
                 if capability and capability not in plugin.capabilities:
@@ -219,7 +217,7 @@ class SimulationScenario:
     actual_outcome: str = ""
     passed: bool | None = None
     duration_ms: float = 0.0
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class DigitalTwin:
@@ -313,7 +311,7 @@ class EvolutionProposal:
     status: str = "pending"  # pending, approved, rejected, applied, rolled_back
     approved_by: str = ""
     applied_at: str = ""
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class AutoEvolution:
@@ -330,7 +328,7 @@ class AutoEvolution:
         self._applied: list[EvolutionProposal] = []
         self._lock = threading.Lock()
         self._daily_count = 0
-        self._last_reset_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self._last_reset_day = datetime.now(UTC).strftime("%Y-%m-%d")
 
     def propose(self, target_file: str, description: str,
                 proposed_change: str, rationale: str,
@@ -385,7 +383,7 @@ class AutoEvolution:
             for p in self._proposals:
                 if p.proposal_id == proposal_id and p.status == "approved":
                     p.status = "applied"
-                    p.applied_at = datetime.now(timezone.utc).isoformat()
+                    p.applied_at = datetime.now(UTC).isoformat()
                     self._applied.append(p)
                     logger.info("Evolution applied: %s", proposal_id)
                     return p
@@ -421,7 +419,7 @@ class AutoEvolution:
             }
 
     def _reset_daily_count_if_needed(self) -> None:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         if today != self._last_reset_day:
             self._daily_count = 0
             self._last_reset_day = today
@@ -438,7 +436,7 @@ class WebhookConfig:
     active: bool = True
     retry_count: int = 3
     timeout_seconds: int = 10
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -499,7 +497,7 @@ class WebhookManager:
                 self._delivery_log.append({
                     "hook_id": hook_id,
                     "event": event_type,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                     "payload": payload,
                     "status": "delivered",
                 })

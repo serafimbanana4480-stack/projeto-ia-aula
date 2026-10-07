@@ -1,7 +1,6 @@
 """Tests for FineTuningPipeline — automatic SLM fine-tuning."""
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 
@@ -10,8 +9,8 @@ import pytest
 from backend.pipeline.fine_tuning import (
     DataFormatter,
     FineTuner,
-    FineTuningPipeline,
     FineTuneRun,
+    FineTuningPipeline,
     ModelEvaluator,
     ModelRegistry,
     TrainingDataCollector,

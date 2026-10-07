@@ -1,5 +1,9 @@
 import type { Config } from "tailwindcss";
 
+// Tailwind needs an explicit alpha slot to generate token colours with /opacity.
+const tokenColor = (token: string) =>
+  `color-mix(in srgb, var(${token}) calc(<alpha-value> * 100%), transparent)`;
+
 /**
  * NEXUS theme.
  *
@@ -11,33 +15,74 @@ import type { Config } from "tailwindcss";
  */
 const config: Config = {
   darkMode: "class",
+  // Tailwind only generates classes it finds in these globs. A class used
+  // exclusively in a tree that is missing here is silently dropped from the
+  // bundle: the element renders unstyled at runtime and NOTHING fails at build
+  // time, which is the worst possible failure mode for a utility framework.
+  //
+  // hooks/, lib/, stores/ and contexts/ were all missing, so any `nx-*` or
+  // `nexus-*` class first used inside a hook, a store, a zustand selector or a
+  // React context produced no CSS at all.
   content: [
     "./pages/**/*.{js,ts,jsx,tsx,mdx}",
     "./components/**/*.{js,ts,jsx,tsx,mdx}",
     "./app/**/*.{js,ts,jsx,tsx,mdx}",
+    "./hooks/**/*.{js,ts,jsx,tsx,mdx}",
+    "./lib/**/*.{js,ts,jsx,tsx,mdx}",
+    "./stores/**/*.{js,ts,jsx,tsx,mdx}",
+    "./contexts/**/*.{js,ts,jsx,tsx,mdx}",
+    "./types/**/*.{js,ts,jsx,tsx,mdx}",
+  ],
+  // Conversation-first classes (globals.css) têm de existir no bundle ANTES de
+  // serem adotadas nos .tsx — o JIT purgaria as regras de `@layer components`
+  // ainda não referenciadas. Lista explícita em vez de pattern para nunca
+  // vazar utilitários por acidente.
+  safelist: [
+    "nx-conversation",
+    "nx-prose",
+    "nx-assistant-title",
+    "nx-secondary",
+    "nx-nums",
+    "nx-timer",
+    "nx-composer",
+    "nx-flat",
+    "nx-card",
+    "nx-workline",
+    "nx-live-dot",
+    "nx-caret",
+    "nx-hover",
+    "nx-btn",
+    "nx-collapse",
+    "nx-msg-enter",
+    "nx-panel-enter",
+    "nexus-focus",
+    "nexus-chrome",
+    "density-standard",
+    "density-developer",
+    "density-minimal-only",
   ],
   theme: {
     extend: {
       colors: {
         nexus: {
-          bg: "var(--nx-bg)",
-          panel: "var(--nx-surface-1)",
-          card: "var(--nx-surface-2)",
-          elevated: "var(--nx-surface-3)",
-          border: "var(--nx-line)",
-          "border-strong": "var(--nx-line-strong)",
-          accent: "var(--nx-accent)",
-          "accent-bright": "var(--nx-accent-bright)",
-          "accent-deep": "var(--nx-accent-deep)",
-          accent2: "var(--nx-emerald)",
-          accent3: "var(--nx-amber)",
-          accent4: "var(--nx-rose)",
-          cyan: "var(--nx-cyan)",
-          muted: "var(--nx-text-dim)",
-          faint: "var(--nx-text-faint)",
-          text: "var(--nx-text)",
-          deep: "var(--nx-void)",
-          surface: "var(--nx-surface-2)",
+          bg: tokenColor("--nx-bg"),
+          panel: tokenColor("--nx-surface-1"),
+          card: tokenColor("--nx-surface-2"),
+          elevated: tokenColor("--nx-surface-3"),
+          border: tokenColor("--nx-line"),
+          "border-strong": tokenColor("--nx-line-strong"),
+          accent: tokenColor("--nx-accent"),
+          "accent-bright": tokenColor("--nx-accent-bright"),
+          "accent-deep": tokenColor("--nx-accent-deep"),
+          accent2: tokenColor("--nx-emerald"),
+          accent3: tokenColor("--nx-amber"),
+          accent4: tokenColor("--nx-rose"),
+          cyan: tokenColor("--nx-cyan"),
+          muted: tokenColor("--nx-text-dim"),
+          faint: tokenColor("--nx-text-faint"),
+          text: tokenColor("--nx-text"),
+          deep: tokenColor("--nx-void"),
+          surface: tokenColor("--nx-surface-2"),
         },
       },
       borderRadius: {

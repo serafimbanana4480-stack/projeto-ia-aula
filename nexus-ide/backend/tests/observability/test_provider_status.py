@@ -15,16 +15,17 @@ class OpenRouterProvider:
 
 
 @pytest.mark.asyncio
-async def test_direct_provider_is_reported_as_available() -> None:
+async def test_direct_provider_eligibility_is_not_reported_as_health() -> None:
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(llm_client=OpenRouterProvider()))
     )
 
     result = await get_providers_status(request, _user={"id": "test"})
 
-    assert result["providers"]["openrouter"]["healthy"] is True
+    assert result["providers"]["openrouter"]["healthy"] is None
     assert result["providers"]["openrouter"]["status"] == "unknown"
     assert result["providers"]["openrouter"]["health_basis"] == "eligibility_only"
+    assert result["providers"]["openrouter"]["runtime_observed"] is False
     assert "Unsupported LLM client" not in result.get("note", "")
 
 

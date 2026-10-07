@@ -13,17 +13,32 @@ agent runs through the standard ReAct loop.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from backend.agents.base import AgentBase, AgentRequest
-from backend.observability.advanced_logging import get_structured_logger
-from backend.tools.ollama_client import ChatMessage
 from backend.agents.event_protocol import split_stream
+from backend.observability.advanced_logging import get_structured_logger
+from backend.runtime.reasoning import strip_reasoning_markup
+from backend.tools.ollama_client import ChatMessage
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_thinking_markup(text: str) -> str:
+    """Remove ``<think>``-family tags from an aggregated answer.
+
+    ``AgentBase`` yields a thinking block as a raw token (not a control frame),
+    so ``split_stream`` cannot remove it. The tag itself is transport, never
+    content; the text inside it is kept, because the aggregation strategies
+    quote the agent's own words.
+    """
+    if "<" not in text:
+        return text
+    return strip_reasoning_markup(text)
 
 
 @dataclass
@@ -95,10 +110,8 @@ class SwarmOrchestrator:
         queue = self.event_queue
         if queue is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             queue.put_nowait(payload)
-        except Exception:
-            pass
 
     async def _publish(
         self,
@@ -867,7 +880,7 @@ class SwarmOrchestrator:
                 ),
                 timeout=timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._emit_live(
                 {
                     "type": "token",
@@ -937,6 +950,12 @@ class SwarmOrchestrator:
             # run (audit 2026-08-16, P11) and made a frames-only run count as
             # a success. Strip them; keep the text.
             output, _frames = split_stream("".join(parts))
+            # ``split_stream`` drops the control frames, but ``AgentBase`` also
+            # emits ``<thinking>…</thinking>`` as a *raw token*, and a raw token
+            # is not a control frame. The literal tags therefore survived into
+            # the swarm answer the user reads. Strip the markup (keeping the
+            # text) so the aggregation surface never shows protocol.
+            output = _strip_thinking_markup(output)
             output = output.strip()
             if not output:
                 # The agent produced only control frames — typically an error

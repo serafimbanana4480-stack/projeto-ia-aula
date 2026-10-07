@@ -12,8 +12,8 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from backend.mcp.store import mcp_store
 from backend.mcp.templates import list_templates
@@ -26,14 +26,22 @@ router = APIRouter(prefix="/mcp", tags=["mcp"])
 class CreateConnectorRequest(BaseModel):
     name: str
     template_id: str
-    params: dict[str, str] = {}
-    env: dict[str, str] = {}
+    params: dict[str, str] = Field(default_factory=dict)
+    env: dict[str, str] = Field(default_factory=dict)
 
 
 class UpdateConnectorRequest(BaseModel):
     name: str | None = None
     enabled: bool | None = None
     env: dict[str, str] | None = None
+    approved_readonly_tools: list[str] | None = None
+    approved_readonly_tools: list[str] | None = None
+
+
+class MCPBuildRequest(BaseModel):
+    description: str = Field(min_length=8, max_length=4_000)
+    base_url: str = Field(min_length=8, max_length=500)
+    auth_secret: str | None = Field(default=None, max_length=4_096)
 
 
 @router.get("/templates")
@@ -58,39 +66,55 @@ async def list_connectors(_user: dict = Depends(require_auth)) -> dict[str, Any]
 
 
 @router.get("/overview")
-async def get_overview(_user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def get_overview(
+    limit: int = 100,
+    connector_id: str = "",
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
     """Return the operational view used by the MCP Control Center.
 
-    Activity is intentionally sourced from persisted connector tests. When no
-    MCP calls have been observed, the response stays empty instead of showing
-    decorative/sample traffic.
+    Activity is sourced from append-only MCP lifecycle and tool-call events.
+    The endpoint never synthesizes health traffic when the runtime is idle.
     """
     connectors = mcp_store.list_connectors()
-    activity = []
-    for connector in connectors:
-        tested_at = connector.get("last_tested_at")
-        activity_at = connector.get("last_activity_at") or tested_at
-        if activity_at:
-            activity.append(
-                {
-                    "at": activity_at,
-                    "connector_id": connector["id"],
-                    "connector": connector["name"],
-                    "tool": connector.get("last_activity_tool") or "health_check",
-                    "kind": "tool_call" if connector.get("last_activity_tool") else "health_check",
-                    "status": connector.get("last_test_status", "untested"),
-                    "latency_ms": connector.get("latency_ms"),
-                    "detail": connector.get("last_test_detail", ""),
-                }
-            )
-    activity.sort(key=lambda item: item["at"], reverse=True)
+    activity = mcp_store.list_activity(limit=limit, connector_id=connector_id)
     return {
         "connectors": connectors,
         "summary": mcp_store.health(),
         "activity": activity[:30],
         "generated_at": time.time(),
-        "data_source": "NEXUS connector store + local ProjectMind source inspection",
+        "data_source": "NEXUS connector store + MCP handshake/tool-call observations",
     }
+
+
+@router.post("/builder/build")
+async def build_mcp(
+    req: MCPBuildRequest,
+    request: Request,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Generate, validate, and register a declarative REST MCP."""
+    from backend.mcp.builder import MCPBuilderError, build_from_description
+
+    try:
+        llm_client = getattr(request.app.state, "llm_client", None)
+        return await build_from_description(
+            description=req.description,
+            base_url=req.base_url,
+            llm_client=llm_client,
+            auth_secret=req.auth_secret,
+            activity_source="control_center",
+        )
+    except MCPBuilderError as exc:
+        status_code = {
+            "provider_unavailable": 503,
+            "generation_failed": 502,
+            "needs_configuration": 409,
+        }.get(exc.category, 422)
+        raise HTTPException(
+            status_code=status_code,
+            detail={"category": exc.category, "message": str(exc)},
+        ) from exc
 
 
 @router.post("/connectors")
@@ -125,6 +149,18 @@ async def update_connector(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    readonly_permissions = updates.pop("approved_readonly_tools", None)
+    if readonly_permissions is not None:
+        try:
+            mcp_store.set_approved_readonly_tools(connector_id, readonly_permissions)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    readonly_permissions = updates.pop("approved_readonly_tools", None)
+    if readonly_permissions is not None:
+        try:
+            mcp_store.set_approved_readonly_tools(connector_id, readonly_permissions)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Merge env instead of overwriting so a partial update doesn't wipe keys.
     if "env" in updates:
         connector = mcp_store.get_connector(connector_id)

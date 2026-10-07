@@ -5,10 +5,8 @@ and architectural decision recording.
 """
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +241,6 @@ class DecisionRecorder:
         related_files: list[str] | None = None,
     ) -> ArchitecturalDecision:
         """Record a new architectural decision."""
-        import uuid
         from datetime import datetime
 
         adr = ArchitecturalDecision(

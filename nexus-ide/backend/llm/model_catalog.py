@@ -27,18 +27,19 @@ opencode_go      ``GET {base}/models``
 anthropic        ``GET {base}/v1/models``   (needs ``x-api-key``)
 gemini           ``GET {base}/models?key=`` (key in query string)
 ollama           ``GET {base}/api/tags``    (no key)
+lmstudio         ``GET {base}/models``      (local, no key)
 ===============  ====================================================
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field, fields
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -53,7 +54,9 @@ HTTP_TIMEOUT = 15.0
 
 # Providers whose ``/models`` endpoint follows the OpenAI schema:
 # ``{"data": [{"id": ..., "created": ...}, ...]}`` with a bearer token.
-_OPENAI_COMPATIBLE = frozenset({"openai", "deepseek", "groq", "kimi", "opencode_go", "kilo"})
+_OPENAI_COMPATIBLE = frozenset(
+    {"openai", "deepseek", "groq", "kimi", "opencode_go", "kilo", "lmstudio"}
+)
 
 # Per-provider metadata: which settings attribute holds the key, the default
 # API root, and a human label. ``requires_key`` drives the Settings UI.
@@ -137,6 +140,14 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
         "default_base": "http://localhost:11434",
         "requires_key": False,
         "docs": "https://ollama.com",
+    },
+    "lmstudio": {
+        "label": "LM Studio (local)",
+        "key_setting": "lmstudio_api_key",
+        "base_setting": "lmstudio_host",
+        "default_base": "http://localhost:1234/v1",
+        "requires_key": False,
+        "docs": "https://lmstudio.ai",
     },
 }
 
@@ -362,11 +373,13 @@ def _finalise(info: ModelInfo) -> ModelInfo:
     # Unknown quota remains unknown; policy selection requires explicit True.
     # Missing prices remain unknown rather than being labelled paid.
     info.free = bool(
-        info.provider == "ollama"
+        info.provider in ("ollama", "lmstudio")
         or (info.input_price_per_1m == 0 and info.output_price_per_1m == 0)
     )
     if info.provider == "ollama" and not info.reason:
         info.reason = "verified installed Ollama model"
+    elif info.provider == "lmstudio" and not info.reason:
+        info.reason = "verified local LM Studio model (zero cost)"
     elif info.free and not info.reason:
         info.reason = "catalog confirmed zero input/output prices"
     elif not info.reason:
@@ -603,6 +616,12 @@ def _build_request(provider: str, api_key: str, base_url: str) -> tuple[str, dic
     if provider == "kilo":
         return f"{root}/models", {"Authorization": f"Bearer {api_key}"}, {}
 
+    if provider == "lmstudio":
+        # Local server: no Authorization header unless the user configured
+        # an optional key (empty ``Bearer`` headers confuse some builds).
+        url = root if root.endswith("/v1") else f"{root}/v1"
+        return f"{url}/models", {"Authorization": f"Bearer {api_key}"} if api_key else {}, {}
+
     # OpenAI-compatible: base URL already ends in /v1 for every spec default.
     url = root if root.endswith("/v1") else f"{root}/v1"
     return f"{url}/models", {"Authorization": f"Bearer {api_key}"}, {}
@@ -618,7 +637,15 @@ def _parse_payload(provider: str, payload: dict[str, Any]) -> list[ModelInfo]:
     if provider == "ollama":
         return _parse_ollama(payload)
     if provider in _OPENAI_COMPATIBLE:
-        return _parse_openai_compatible(payload, provider)
+        models = _parse_openai_compatible(payload, provider)
+        if provider == "lmstudio":
+            # LM Studio serves local weights: zero cost regardless of the
+            # (absent) pricing metadata in its model list.
+            for model in models:
+                model.free = True
+                model.pricing = "free"
+                model.reason = "verified local LM Studio model (zero cost)"
+        return models
     return []
 
 
@@ -662,6 +689,8 @@ def _explain_error(provider: str, exc: BaseException) -> str:
     if isinstance(exc, httpx.ConnectError):
         if provider == "ollama":
             return "Ollama não está a correr em localhost:11434."
+        if provider == "lmstudio":
+            return "LM Studio não está a correr em localhost:1234 (server precisa de estar ativo)."
         return "Não foi possível ligar ao provider."
     if isinstance(exc, httpx.TimeoutException):
         return f"Timeout após {HTTP_TIMEOUT:.0f}s."
@@ -1095,9 +1124,7 @@ async def stop_catalog_refresh_worker() -> None:
         _catalog_refresh_stop.set()
     if _catalog_refresh_task is not None:
         _catalog_refresh_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await _catalog_refresh_task
-        except asyncio.CancelledError:
-            pass
     _catalog_refresh_task = None
     _catalog_refresh_stop = None

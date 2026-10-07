@@ -1,6 +1,11 @@
 ---
 name: nexus-backend
 description: Trabalhar no backend FastAPI multi-agente do NEXUS IDE em nexus-ide/backend (PRIMARY loop, triage, runtime, swarm, pytest, ruff, mypy). Use quando o pedido envolve agentes, orquestrador, rotas de chat, LLM providers, tools, testes ou lint do backend Python.
+version: 1.0.0
+status: active
+priority: 70
+triggers: [NEXUS backend, FastAPI backend, backend runtime, pytest backend, backend tools]
+tags: [nexus, backend, python, pytest]
 ---
 
 # Backend NEXUS IDE

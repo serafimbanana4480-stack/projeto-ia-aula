@@ -6,7 +6,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ class StrategicDecision:
     chosen: str
     reasoning: str
     confidence: float
-    outcome: Optional[str] = None
+    outcome: str | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
 
 

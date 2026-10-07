@@ -1,14 +1,20 @@
 """Tests for TestGenerator and TestRunner."""
 from pathlib import Path
 
-import pytest
-
 from backend.pipeline.test_generator import (
     CoverageReport,
     FailureType,
+)
+from backend.pipeline.test_generator import (
     TestGenerator as TG,
+)
+from backend.pipeline.test_generator import (
     TestResult as TR,
+)
+from backend.pipeline.test_generator import (
     TestRunner as TRun,
+)
+from backend.pipeline.test_generator import (
     TestSuiteReport as TSR,
 )
 

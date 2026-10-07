@@ -1,12 +1,10 @@
 """Tests for Frontend Team agents."""
 from __future__ import annotations
 
-import pytest
-
-from backend.agents.frontend.uiux_agent import UIUXAgent
 from backend.agents.frontend.component_agent import ComponentAgent
 from backend.agents.frontend.state_manager_agent import StateManagerAgent
 from backend.agents.frontend.team_lead import FrontendTeamLead
+from backend.agents.frontend.uiux_agent import UIUXAgent
 
 
 class TestUIUXAgent:

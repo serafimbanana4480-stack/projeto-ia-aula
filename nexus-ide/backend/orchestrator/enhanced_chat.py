@@ -10,22 +10,22 @@ This system provides:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
-from typing import AsyncIterator, Dict, List, Optional, Any
-from datetime import datetime
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
 
+from backend.agents.base import AgentRequest
+from backend.metrics.realtime_metrics import get_metrics_collector
 from backend.models.api import ChatRequest, RoutingDecision, StreamEvent
-from backend.observability.event_system import EventBus, Event, EventType, EventPriority
+from backend.observability.event_system import Event, EventBus, EventPriority, EventType
 from backend.orchestrator.fallback import invoke_with_fallback
 from backend.orchestrator.registry import resolve
 from backend.orchestrator.router import fast_route, route_with_model
-from backend.agents.base import AgentRequest
 from backend.tools.ollama_client import ChatMessage, OllamaError
 from backend.tools.sanitizer import detect_injection
-from backend.metrics.realtime_metrics import get_metrics_collector
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +36,8 @@ class EnhancedChatSystem:
     def __init__(self, event_bus: EventBus, context: Any | None = None):
         self.event_bus = event_bus
         self.context = context
-        self.active_sessions: Dict[str, Dict[str, Any]] = {}
-        self.session_metrics: Dict[str, Dict[str, Any]] = {}
+        self.active_sessions: dict[str, dict[str, Any]] = {}
+        self.session_metrics: dict[str, dict[str, Any]] = {}
         
     async def process_chat_request(self, req: ChatRequest, ollama, registry) -> AsyncIterator[str]:
         """Process chat request with enhanced event emission."""
@@ -191,7 +191,7 @@ class EnhancedChatSystem:
         yield f"data: {json.dumps(StreamEvent(type='agent_started', agent=outcome.used_agent).model_dump_json())}\n\n"
         
         # Stream tokens and track metrics
-        parts: List[str] = []
+        parts: list[str] = []
         token_count = 0
         
         try:
@@ -238,8 +238,7 @@ class EnhancedChatSystem:
         
         # Persist exchange
         full = "".join(parts)
-        from datetime import timezone
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await context.append_message(session_id, ChatMessage(role="user", content=req.message, timestamp=now))
         await context.append_message(session_id, ChatMessage(role="assistant", content=full, timestamp=now))
         
@@ -262,7 +261,7 @@ class EnhancedChatSystem:
         yield f"data: {json.dumps(StreamEvent(type='agent_finished', agent=outcome.used_agent).model_dump_json())}\n\n"
         yield f"data: {json.dumps(StreamEvent(type='done').model_dump_json())}\n\n"
     
-    async def _emit_chat_event(self, session_id: str, event_type: str, payload: Dict[str, Any]) -> None:
+    async def _emit_chat_event(self, session_id: str, event_type: str, payload: dict[str, Any]) -> None:
         """Emit chat-related event."""
         if not self.event_bus:
             return
@@ -302,7 +301,7 @@ class EnhancedChatSystem:
         
         return decision
     
-    async def get_session_info(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def get_session_info(self, session_id: str) -> dict[str, Any] | None:
         """Get session information."""
         if session_id not in self.active_sessions:
             return None
@@ -312,7 +311,7 @@ class EnhancedChatSystem:
             "metrics": self.session_metrics.get(session_id, {})
         }
     
-    async def get_all_sessions(self) -> Dict[str, Dict[str, Any]]:
+    async def get_all_sessions(self) -> dict[str, dict[str, Any]]:
         """Get all active sessions."""
         result = {}
         for session_id, session_info in self.active_sessions.items():
@@ -345,7 +344,7 @@ class EnhancedChatSystem:
         
         return len(inactive_sessions)
     
-    async def get_system_stats(self) -> Dict[str, Any]:
+    async def get_system_stats(self) -> dict[str, Any]:
         """Get chat system statistics."""
         total_sessions = len(self.active_sessions)
         total_messages = sum(s["message_count"] for s in self.active_sessions.values())
@@ -368,7 +367,7 @@ class EnhancedChatSystem:
 
 
 # Global chat system instance
-_chat_system: Optional[EnhancedChatSystem] = None
+_chat_system: EnhancedChatSystem | None = None
 
 
 async def get_chat_system(event_bus: EventBus, context: Any | None = None) -> EnhancedChatSystem:

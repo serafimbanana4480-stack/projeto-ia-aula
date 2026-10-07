@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
-import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -313,7 +311,6 @@ class KnowledgeBase:
         perf = self._agent_perf[key]
         perf.total_runs += 1
         if perf.total_runs > 0:
-            prev_rate = perf.success_rate
             perf.success_rate = ((perf.success_rate * (perf.total_runs - 1)) + (1.0 if success else 0.0)) / perf.total_runs
             perf.avg_duration_seconds = ((perf.avg_duration_seconds * (perf.total_runs - 1)) + duration_seconds) / perf.total_runs
             if tokens_used > 0:
@@ -421,7 +418,7 @@ class SkillEvolutionEngine:
                     changes.append({"type": "deprecate", "skill_id": skill.id, "reason": "low_success"})
 
             similar_pairs = self._find_similar_skills(skills)
-            for skill_a, skill_b, score in similar_pairs:
+            for skill_a, skill_b, _score in similar_pairs:
                 merged = self._merge_skills(store, skill_a, skill_b)
                 if merged:
                     changes.append({"type": "merge", "skill_a": skill_a.id, "skill_b": skill_b.id, "merged_into": merged.id})
