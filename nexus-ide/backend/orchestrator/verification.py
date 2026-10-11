@@ -34,6 +34,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.orchestrator.dependency_graph import TaskNode, TaskPriority
+from backend.orchestrator.plan_validation import default_task_tools
 from backend.orchestrator.types import OrchestrationResult
 
 
@@ -424,6 +425,13 @@ def _create_verification_tasks(
             agent="DEBUGGER",
             priority=TaskPriority.HIGH,
             context=str(task_info.get("output", ""))[:2000],
+            # Explicit is better than inherited: ``PlanExecutor`` already falls
+            # back to ``default_task_tools`` for a task that declares nothing,
+            # but a verification task whose allowlist depends on a downstream
+            # default is one refactor away from running DEBUGGER with an empty
+            # toolset — which cannot execute the run/verification it exists to
+            # perform and closes its evidence gate without any evidence.
+            allowed_tools=default_task_tools("DEBUGGER"),
         )
         verify_task.input_data["origin"] = origin
         verify_steps.append(verify_task)
@@ -536,6 +544,10 @@ def _create_fix_tasks(
             agent="CODER",
             priority=TaskPriority.HIGH,
             context=str(issue.get("output", ""))[:2000],
+            # See ``_create_verification_tasks``: the fix task must be able to
+            # read, write and run verification, or the reported issue can never
+            # actually be fixed.
+            allowed_tools=default_task_tools("CODER"),
         )
         fix_task.input_data["origin"] = origin
         fix_steps.append(fix_task)
@@ -563,4 +575,8 @@ def _create_final_review_task(
         ),
         agent="ANALYZER",
         priority=TaskPriority.MEDIUM,
+        # See ``_create_verification_tasks``: the review is an inspection task
+        # and needs its read/inspect tools, otherwise it can only answer from
+        # prose and the run's final report proves nothing about the work.
+        allowed_tools=default_task_tools("ANALYZER"),
     )

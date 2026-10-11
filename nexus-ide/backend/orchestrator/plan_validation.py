@@ -8,6 +8,7 @@ when the model service is unavailable.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -165,6 +166,103 @@ def _registered_planning_tools(preferred: list[str], agent: str | None = None) -
         # guessed names here made the validator appear healthy while the
         # runtime had no trustworthy allowlist.
         return []
+
+
+# ---------------------------------------------------------------------------
+# Default task allowlists
+# ---------------------------------------------------------------------------
+#
+# Root cause of the "evidence gate" failure that stopped every autonomous plan
+# step (P0.1): a ``TaskNode`` defaults to ``allowed_tools=[]``, and every code
+# path that creates a task without spelling out its tools — ``verification.py``'s
+# Verify/Fix/Final Review factories, ``plan_executor.py``'s dynamic
+# ``spawn_task`` children, and anything else that builds a bare
+# ``TaskNode(agent=...)`` — therefore injected ``"_allowed_tools": []`` into the
+# request (``plan_executor.py`` ~line 602).
+#
+# ``AgentBase`` reads that key as the runtime contract
+# (``_runtime_allowed_tools``, base.py): an *empty* configured set is not
+# "no contract", it is "nothing is permitted". Every tool call was discarded
+# with ``Agent contract forbids tool`` (base.py ~2890-2905), so
+# ``_has_required_tool_evidence`` was False, ``_last_run_success`` became
+# False, and the executor failed the task with "Agent execution failed its
+# runtime/tool evidence gate". The agent had done nothing wrong: it was
+# forbidden to do anything at all.
+#
+# The allowlist must therefore be derived, never left implicit. The contract
+# below maps an agent to the tools it may lawfully use — its declared
+# capability set intersected with what this process can actually execute — and
+# is used by the executor as the fail-safe default for a task that declares
+# nothing.
+
+_DEFAULT_TASK_TOOLS_CACHE: dict[tuple[str, frozenset[str]], list[str]] = {}
+_DEFAULT_TASK_TOOLS_LOCK = threading.Lock()
+
+
+def _available_tool_names() -> frozenset[str]:
+    """Names of every enabled, available tool in the live registry."""
+    from backend.tools.registry import list_tools
+
+    return frozenset(str(spec.name) for spec in list_tools(enabled_only=True))
+
+
+def default_task_tools(agent: str) -> list[str]:
+    """Return the tools a task assigned to *agent* may use by default.
+
+    The allowlist is the agent's own capability contract
+    (``get_agent_capability(agent).allowed_tools``) intersected with the tools
+    that are enabled *and* available in this process. Both halves matter:
+    advertising a tool the agent may not call gets the call rejected by the
+    contract check, and advertising one that is not installed gets it rejected
+    by the registry — either way the agent burns iterations on a guaranteed
+    failure and the run's evidence gate closes without any real work being
+    done.
+
+    Deliberately conservative (returns ``[]`` for an unknown agent, or when the
+    registry cannot be read): a task whose agent has no executable capability
+    is a planning error that must surface as a contract rejection, not as a
+    silently widened allowlist. This helper therefore *enables* agents to work
+    without ever *weakening* the evidence gate that decides whether their
+    output counts.
+
+    The result is cached per ``(agent, available tool set)``; the registry
+    snapshot is part of the key, so a tool that becomes (un)available at
+    runtime can never be served from a stale entry.
+    """
+    normalized = str(agent or "").strip().upper()
+    if not normalized:
+        return []
+    try:
+        available = _available_tool_names()
+    except Exception:
+        # No registry means no trustworthy tool names — same fail-closed rule
+        # as ``_registered_planning_tools``.
+        return []
+    key = (normalized, available)
+    with _DEFAULT_TASK_TOOLS_LOCK:
+        cached = _DEFAULT_TASK_TOOLS_CACHE.get(key)
+    if cached is not None:
+        return list(cached)
+
+    try:
+        from backend.orchestrator.agent_capabilities import get_agent_capability
+
+        requested = [
+            str(tool).strip()
+            for tool in get_agent_capability(normalized).allowed_tools
+            if str(tool).strip()
+        ]
+    except Exception:
+        requested = []
+    tools = [tool for tool in requested if tool in available]
+
+    with _DEFAULT_TASK_TOOLS_LOCK:
+        if len(_DEFAULT_TASK_TOOLS_CACHE) > 64:
+            # Bounded: the snapshot in the key changes only when the operator
+            # changes tool availability, which is a rare, deliberate event.
+            _DEFAULT_TASK_TOOLS_CACHE.clear()
+        _DEFAULT_TASK_TOOLS_CACHE[key] = list(tools)
+    return list(tools)
 
 
 
@@ -395,5 +493,6 @@ __all__ = [
     "PlanningStatus",
     "PlanValidationResult",
     "build_deterministic_plan",
+    "default_task_tools",
     "validate_execution_plan",
 ]

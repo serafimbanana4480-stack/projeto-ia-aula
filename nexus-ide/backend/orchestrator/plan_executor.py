@@ -29,6 +29,7 @@ from backend.orchestrator.dependency_graph import (
     TaskStatus,
 )
 from backend.orchestrator.events import EventBus, EventEmitter, EventType, OrchestratorEvent
+from backend.orchestrator.plan_validation import default_task_tools
 from backend.tools.registry import reset_tool_failures
 
 logger = logging.getLogger(__name__)
@@ -364,6 +365,14 @@ class PlanExecutor:
                                 agent=child_agent,
                                 depends_on=[parent.task_id],
                                 max_retries=1,
+                                # A spawned task is built from the model's
+                                # request, which never carries an allowlist.
+                                # Inheriting the agent's capability contract
+                                # here is what keeps the child runnable —
+                                # without it the child would get
+                                # ``_allowed_tools: []`` and fail its evidence
+                                # gate before doing any work.
+                                allowed_tools=default_task_tools(child_agent),
                             )
                             graph.add_task(child)
                             spawned_signatures.add(signature)
@@ -548,10 +557,24 @@ class PlanExecutor:
         effective_model = task.model_key or (
             configured_model if isinstance(configured_model, str) else ""
         )
+        # An empty ``allowed_tools`` is NOT "the agent may use everything" —
+        # ``AgentBase`` reads the key as an explicit runtime contract, so an
+        # empty list means "nothing is permitted" and every tool call is dropped
+        # with ``Agent contract forbids tool``. The agent then produces no tool
+        # evidence, fails the evidence gate, and the task fails with "Agent
+        # execution failed its runtime/tool evidence gate" even though the agent
+        # did exactly what it was allowed to do.
+        #
+        # ``default_task_tools`` derives the agent's own capability contract, so
+        # a task that declares nothing still runs with a lawful allowlist while
+        # an explicitly declared one is honoured verbatim. The evidence gate in
+        # ``AgentBase`` is untouched: it still decides whether the agent's work
+        # counts, it just no longer runs against an empty toolset.
+        task_tools = list(task.allowed_tools) or default_task_tools(task.agent)
         contract_errors = validate_agent_contract(
             task.agent,
             effective_model,
-            task.allowed_tools,
+            task_tools,
         )
         if contract_errors:
             task.error_message = "Agent contract rejected: " + "; ".join(contract_errors)
@@ -599,7 +622,7 @@ class PlanExecutor:
                         "shared_memory": ctx.shared_memory,
                         "project_path": ctx.project_path,
                         "_enforce_agent_contract": True,
-                        "_allowed_tools": list(task.allowed_tools),
+                        "_allowed_tools": task_tools,
                         "model": effective_model,
                         "_tool_evidence_requirement": (
                             "verification"
