@@ -12,6 +12,8 @@ instrumentation of orchestrator calls.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -200,20 +202,45 @@ class ExperienceBus:
         # Fire-and-forget event bus publish
         if self._event_bus is not None:
             try:
-                self._event_bus.publish(
-                    "trace.recorded",
-                    {
-                        "task_id": trace.task_id,
-                        "task_type": trace.task_type,
-                        "success": trace.result.success,
-                        "score": trace.result.score,
-                    },
-                )
+                self._publish_trace_recorded(trace)
             except Exception:
                 logger.debug("Failed to publish trace event", exc_info=True)
 
         logger.debug("Trace %s persisted and published", trace.task_id)
         return task_id
+
+    def _publish_trace_recorded(self, trace: ExperienceTrace) -> None:
+        """Announce a recorded trace on the observability :class:`EventBus`.
+
+        ``backend.observability.events.EventBus.publish`` is ``async`` (it feeds
+        asyncio subscriber queues) and takes a single :class:`Event`, not a
+        ``(topic, payload)`` pair. Build the ``Event`` and schedule the publish
+        onto the running loop when there is one; the trace is already persisted
+        either way, so a missing/closed loop just drops the announcement.
+        """
+        from backend.observability.events import Event
+
+        publish = self._event_bus.publish(
+            Event(
+                type="trace.recorded",
+                payload={
+                    "task_id": trace.task_id,
+                    "task_type": trace.task_type,
+                    "success": trace.result.success,
+                    "score": trace.result.score,
+                },
+            )
+        )
+        try:
+            loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and not loop.is_closed():
+            loop.create_task(publish)
+        else:
+            # Never-awaited coroutine; close it so it does not warn on GC.
+            with contextlib.suppress(Exception):
+                publish.close()
 
     # ── Retrieval ──
 
