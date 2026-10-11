@@ -1,235 +1,270 @@
-"""Autonomous Tasks Routes - API endpoints for autonomous task management."""
+"""Routes for autonomous tasks management.
+
+The task manager is a lifespan-owned singleton exposed as
+``app.state.task_manager``. The lifespan starts the scheduler (subject to
+``NEXUS_TASKS_RESUME_PENDING`` and the background-services toggle); these routes
+only read/act on that instance. The previous per-handler event-bus construction
+and the duplicate ``get_autonomous_task_manager`` wiring are gone.
+
+Status/type filtering uses the task manager as the single source of truth: an
+unrecognised status string is a 400, and only real task states are returned.
+"""
 
 from __future__ import annotations
 
-import logging
+from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
 
-from backend.observability.event_system import get_event_bus
-from backend.tasks.autonomous_tasks import TaskPriority, TaskType, get_autonomous_task_manager
+from backend.middleware.auth import require_auth
+from backend.tasks.autonomous_tasks import TaskPriority, TaskType
 
-logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
+
+
+class TaskCreateRequest(BaseModel):
+    """Request body for POST /api/tasks."""
+
+    name: str
+    task_type: str = "monitoring"
+    priority: str = "normal"
+    handler_name: str
+    parameters: dict[str, Any] | None = None
+    interval: int | None = None
+    max_retries: int = Field(default=3, ge=0, le=100)
+    timeout: int = Field(default=300, gt=0, le=86400)
+    auto_retry: bool = True
+    scheduled_at: str | None = None
+
+
+async def _get_task_manager(request: Request) -> Any:
+    """Resolve the lifespan-owned task manager from application state.
+
+    Falls back to the process-wide singleton only when the lifespan has not
+    installed one (e.g. the scheduler is disabled or this runs outside it).
+    """
+    manager = getattr(request.app.state, "task_manager", None)
+    if manager is not None:
+        return manager
+
+    from backend.observability.event_system import get_event_bus
+    from backend.tasks.autonomous_tasks import get_autonomous_task_manager
+
+    manager = await get_autonomous_task_manager(await get_event_bus())
+    request.app.state.task_manager = manager
+    return manager
+
+
+def _coerce_task_type(value: str) -> TaskType:
+    try:
+        return TaskType(str(value).strip().lower())
+    except ValueError as exc:
+        available = [t.value for t in TaskType]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid task_type '{value}'. Available: {available}",
+        ) from exc
+
+
+def _coerce_priority(value: str) -> TaskPriority:
+    try:
+        return TaskPriority(str(value).strip().lower())
+    except ValueError as exc:
+        available = [p.value for p in TaskPriority]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid priority '{value}'. Available: {available}",
+        ) from exc
 
 
 @router.get("/tasks")
-async def get_tasks() -> dict[str, list[dict]]:
+async def list_tasks(
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
     """Get all autonomous tasks."""
-    try:
-        event_bus = await get_event_bus()
-        task_manager = await get_autonomous_task_manager(event_bus)
-        
-        # Get all tasks
-        tasks = await task_manager.get_tasks()
-        
-        return {
-            "tasks": [task.to_dict() for task in tasks],
-            "stats": await task_manager.get_task_manager_stats()
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get tasks: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    tasks = await task_manager.get_tasks()
+    return {
+        "tasks": [t.to_dict() for t in tasks],
+        "count": len(tasks),
+    }
 
 
 @router.get("/tasks/running")
-async def get_running_tasks() -> dict[str, list[dict]]:
-    """Get currently running tasks."""
-    try:
-        event_bus = await get_event_bus()
-        task_manager = await get_autonomous_task_manager(event_bus)
-        
-        # Get running tasks
-        tasks = await task_manager.get_tasks(status="running")
-        
-        return {
-            "tasks": [task.to_dict() for task in tasks],
-            "count": len(tasks)
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get running tasks: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+async def get_running_tasks(
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
+    """Get currently running autonomous tasks."""
+    tasks = await task_manager.get_tasks(status="running")
+    return {
+        "tasks": [t.to_dict() for t in tasks],
+        "count": len(tasks),
+    }
 
 
 @router.get("/tasks/completed")
-async def get_completed_tasks() -> dict[str, list[dict]]:
-    """Get completed tasks."""
-    try:
-        event_bus = await get_event_bus()
-        task_manager = await get_autonomous_task_manager(event_bus)
-        
-        # Get completed tasks
-        tasks = await task_manager.get_tasks(status="completed")
-        
-        return {
-            "tasks": [task.to_dict() for task in tasks],
-            "count": len(tasks)
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get completed tasks: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+async def get_completed_tasks(
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
+    """Get completed autonomous tasks."""
+    tasks = await task_manager.get_tasks(status="completed")
+    return {
+        "tasks": [t.to_dict() for t in tasks],
+        "count": len(tasks),
+    }
 
 
 @router.get("/tasks/failed")
-async def get_failed_tasks() -> dict[str, list[dict]]:
-    """Get failed tasks."""
-    try:
-        event_bus = await get_event_bus()
-        task_manager = await get_autonomous_task_manager(event_bus)
-        
-        # Get failed tasks
-        tasks = await task_manager.get_tasks(status="failed")
-        
-        return {
-            "tasks": [task.to_dict() for task in tasks],
-            "count": len(tasks)
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get failed tasks: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+async def get_failed_tasks(
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
+    """Get failed autonomous tasks."""
+    tasks = await task_manager.get_tasks(status="failed")
+    return {
+        "tasks": [t.to_dict() for t in tasks],
+        "count": len(tasks),
+    }
 
 
-@router.get("/tasks/{task_id}")
-async def get_task(task_id: str) -> dict[str, Any]:
-    """Get specific task by ID."""
-    try:
-        event_bus = await get_event_bus()
-        task_manager = await get_autonomous_task_manager(event_bus)
-        
-        task = await task_manager.get_task(task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-        
-        return task.to_dict()
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get task {task_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-
-@router.post("/tasks")
-async def create_task(
-    name: str,
-    task_type: str,
-    priority: str = "normal",
-    handler_name: str = "",
-    parameters: dict | None = None,
-    interval: int | None = None,
-    max_retries: int = 3,
-    timeout: int = 300,
-    request: Request = None,
-) -> dict[str, str]:
-    """Create a new autonomous task."""
-    try:
-        event_bus = await get_event_bus()
-        task_manager = await get_autonomous_task_manager(event_bus)
-        
-        # Convert string enums to enum values
-        task_type_enum = TaskType(task_type)
-        priority_enum = TaskPriority(priority)
-        
-        # Get handler function
-        task_handlers = task_manager.task_handlers
-        if handler_name not in task_handlers:
-            available_handlers = list(task_handlers.keys())
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid handler. Available: {available_handlers}"
-            )
-        
-        handler = task_handlers[handler_name]
-        
-        # Create task
-        task_id = await task_manager.create_custom_task(
-            name=name,
-            task_type=task_type_enum,
-            handler=handler,
-            parameters=parameters or {},
-            priority=priority_enum,
-            interval=interval,
-            max_retries=max_retries,
-            timeout=timeout
-        )
-        
-        return {"task_id": task_id, "status": "scheduled"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to create task: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-
-@router.post("/tasks/{task_id}/cancel")
-async def cancel_task(task_id: str, request: Request) -> dict[str, str]:
-    """Cancel a task."""
-    try:
-        event_bus = await get_event_bus()
-        task_manager = await get_autonomous_task_manager(event_bus)
-        
-        success = await task_manager.cancel_task(task_id)
-        if not success:
-            raise HTTPException(status_code=404, detail="Task not found or cannot be cancelled")
-        
-        return {"task_id": task_id, "status": "cancelled"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to cancel task {task_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+@router.get("/tasks/handlers")
+async def get_handlers(
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
+    """List the real handler names available in this build."""
+    handlers = task_manager.handlers
+    return {
+        "handlers": handlers.names(),
+        "primary": handlers.primary_names(),
+    }
 
 
 @router.get("/tasks/types")
-async def get_task_types() -> dict[str, list[str]]:
+async def get_task_types(
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
     """Get available task types."""
     return {
         "task_types": [t.value for t in TaskType],
-        "descriptions": {
-            "monitoring": "System monitoring and health checks",
-            "optimization": "Performance optimization",
-            "maintenance": "System maintenance and cleanup",
-            "analysis": "Data analysis and reporting",
-            "learning": "Model training and updates",
-            "cleanup": "Resource cleanup and maintenance",
-            "health_check": "System health verification",
-            "performance_tuning": "Performance optimization",
-            "error_recovery": "Error detection and recovery"
-        }
     }
 
 
 @router.get("/tasks/priorities")
-async def get_task_priorities() -> dict[str, list[str]]:
+async def get_priorities(
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
     """Get available task priorities."""
     return {
         "priorities": [p.value for p in TaskPriority],
-        "descriptions": {
-            "low": "Low priority - background tasks",
-            "normal": "Normal priority - regular tasks",
-            "high": "High priority - important tasks",
-            "critical": "Critical priority - urgent tasks",
-            "urgent": "Urgent priority - immediate tasks"
-        }
     }
 
 
 @router.get("/tasks/stats")
-async def get_task_stats() -> dict[str, Any]:
-    """Get task manager statistics."""
+async def get_task_stats(
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
+    """Get task statistics."""
+    return await task_manager.get_task_manager_stats()
+
+
+@router.get("/tasks/{task_id}")
+async def get_task(
+    task_id: str,
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
+    """Get a specific autonomous task by ID."""
+    task = await task_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {"task": task.to_dict()}
+
+
+@router.post("/tasks")
+async def create_task(
+    payload: TaskCreateRequest,
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
+    """Create a new autonomous task.
+
+    The handler must resolve to a real implementation in this build, otherwise
+    the handler list is returned as the 400 detail so the caller can retry.
+    """
+    handlers = task_manager.handlers
+    if not handlers.is_registered(payload.handler_name):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Invalid handler '{payload.handler_name}'. "
+                f"Available: {handlers.names()}"
+            ),
+        )
+
+    task_type = _coerce_task_type(payload.task_type)
+    priority = _coerce_priority(payload.priority)
+
+    scheduled_at = None
+    if payload.scheduled_at:
+        try:
+            scheduled_at = datetime.fromisoformat(str(payload.scheduled_at).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid scheduled_at (expected ISO 8601 timestamp)",
+            ) from exc
+
     try:
-        event_bus = await get_event_bus()
-        task_manager = await get_autonomous_task_manager(event_bus)
-        
-        return await task_manager.get_task_manager_stats()
-        
-    except Exception as e:
-        logger.error(f"Failed to get task stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        task_id = await task_manager.create_custom_task(
+            name=payload.name,
+            task_type=task_type,
+            handler_name=payload.handler_name,
+            parameters=payload.parameters or {},
+            priority=priority,
+            interval=payload.interval,
+            max_retries=payload.max_retries,
+            timeout=payload.timeout,
+            auto_retry=payload.auto_retry,
+            scheduled_at=scheduled_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    return {
+        "task_id": task_id,
+        "status": "scheduled",
+        "scheduled_for": scheduled_at.isoformat() if scheduled_at else None,
+    }
+
+
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(
+    task_id: str,
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
+    """Cancel an autonomous task (running or queued)."""
+    cancelled = await task_manager.cancel_task(task_id)
+    if not cancelled:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {"task_id": task_id, "status": "cancelled"}
+
+
+@router.post("/tasks/{task_id}/requeue")
+async def requeue_task(
+    task_id: str,
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict[str, Any]:
+    """Approve a quarantined/dormant/failed task for execution (operator gate)."""
+    result = await task_manager.requeue_task(task_id)
+    if result == "requeued":
+        return {"task_id": task_id, "status": "requeued"}
+    if result == "not_found":
+        raise HTTPException(status_code=404, detail="Task not found")
+    if result == "running":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task is running; cancel it first")
+    if result == "unregistered":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="handler not registered in this build",
+        )
+    raise HTTPException(status_code=500, detail="Unexpected requeue result")
