@@ -26,6 +26,10 @@ Every observable fact leaves through :class:`RunEventStream`, so the ordering
 guarantees proven in phase 2 (``(run_id, seq)`` total order, replay after a
 browser refresh) apply to the whole turn, not just to the parts that happen
 to go through the old event bus.
+
+Durability lives in :class:`RunLifecycle` (Fase 1b, at the bottom of this
+module): the loop itself stays provider/database/HTTP free, and every other
+lane talks to the durable run state through that one failure-tolerant seam.
 """
 
 from __future__ import annotations
@@ -33,9 +37,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import difflib
+import hashlib
+import json
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -50,6 +57,7 @@ from backend.runtime.reasoning import (
     reasoning_label_or_default,
     reasoning_visibility,
 )
+from backend.runtime.run_coordinator import RunState
 from backend.runtime.scheduler import RuntimeScheduler, RuntimeTask, RuntimeTaskStatus
 from backend.runtime.spawn_policy import SpawnPolicy, SpawnVerdict, SubagentProposal
 from backend.runtime.telemetry import BlockedOn, RunPhase, RunTelemetry
@@ -182,6 +190,7 @@ def _remove_repeated_markdown_sections(previous: str, continuation: str) -> str:
     return result
 
 __all__ = [
+    "SIDE_EFFECT_TOOLS",
     "AgentSignal",
     "AgentSignalKind",
     "Observation",
@@ -189,9 +198,17 @@ __all__ = [
     "PrimaryOutcome",
     "PrimaryPhase",
     "PrimaryTurn",
+    "RunLifecycle",
     "SteeringChannel",
     "VerificationRequest",
     "VerificationResult",
+    "find_run_for_identity",
+    "get_run_coordinator",
+    "is_side_effecting_tool",
+    "reset_run_coordinator",
+    "run_integration_enabled",
+    "side_effect_idempotency_key",
+    "side_effect_result_digest",
 ]
 
 
@@ -1566,3 +1583,623 @@ def _proposal_from_payload(payload: dict[str, Any]) -> SubagentProposal | None:
         context_ready=bool(payload.get("context_ready", True)),
         requires_deep_exploration=bool(payload.get("requires_deep_exploration", False)),
     )
+
+
+# ---------------------------------------------------------------------------
+# run lifecycle integration (Fase 1b — checkpoint / resume / idempotência)
+# ---------------------------------------------------------------------------
+# A NEXUS run is now a *durable* object owned by
+# :class:`backend.runtime.run_coordinator.RunCoordinator`: a goal, the
+# requirements it must satisfy, an explicit definition of done, a checkpoint at
+# every phase boundary and an idempotency ledger for side effects. This section
+# is the seam every execution lane uses to talk to that owner.
+#
+# Two rules are structural here, and both are load-bearing:
+#
+# 1. **The loop above stays free of persistence imports.** ``run_coordinator``
+#    and ``backend.persistence.db`` are imported lazily, inside the functions
+#    that need them, exactly like the experience bus above.
+# 2. **A coordinator failure degrades durability, never the run.** Every method
+#    of :class:`RunLifecycle` catches its own exceptions and logs them: a locked
+#    database, a missing table or an illegal transition is an operational
+#    finding, not a reason to lose the user's turn.
+#
+# Reuse (idempotency) is the third rule: :meth:`RunLifecycle.begin` returns the
+# run that is already in flight for the same session/query/idempotency key
+# instead of creating a second one, so a client retry cannot fork the durable
+# run state into two competing histories.
+
+#: Marker prefix recorded in ``RunRecord.memory_refs`` so an explicit
+#: ``Idempotency-Key`` can be resolved back to its run after a restart.
+_IDEMPOTENCY_MARKER = "idempotency:"
+
+#: Marker prefix for the mission a run belongs to. Runs created by the engine
+#: lane carry it; the primary lane has no mission.
+_MISSION_MARKER = "mission:"
+
+#: Tools whose execution changes the world outside the process (files, git,
+#: shell commands). Read/plan tools are deliberately absent: they have no
+#: side effect to guard or replay.
+SIDE_EFFECT_TOOLS = frozenset(
+    WRITE_TOOLS | COMMAND_TOOLS | {"git_commit", "git_push", "git_apply", "apply_patch"}
+)
+
+
+def run_integration_enabled() -> bool:
+    """Feature flag for the durable run lifecycle. Defaults to on."""
+    raw = os.environ.get("NEXUS_RUN_LIFECYCLE", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def is_side_effecting_tool(name: str) -> bool:
+    """Whether a tool's completion is a real-world side effect worth guarding."""
+    tool = str(name or "").strip()
+    return tool in SIDE_EFFECT_TOOLS or tool.startswith("git_")
+
+
+def side_effect_idempotency_key(
+    run_id: str, task_id: str, tool: str, args: dict[str, Any] | None = None
+) -> str:
+    """Stable key for one side effect of one run.
+
+    The key covers the *identity* of the action (run, task, tool, arguments) and
+    nothing about its outcome, so a replay of the same action produces the same
+    key and the ledger recognises it as already applied. Arguments are hashed
+    with ``sort_keys`` so a re-ordered dict cannot look like a different action.
+    """
+    try:
+        serialized = json.dumps(args or {}, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        serialized = repr(args)
+    digest = hashlib.sha256(
+        "\u0000".join([str(run_id), str(task_id or "-"), str(tool or "-"), serialized]).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:32]
+    return f"{tool or 'tool'}:{digest}"
+
+
+def side_effect_result_digest(result: Any) -> str:
+    """Short digest of what a tool actually returned, for the ledger row."""
+    try:
+        payload = json.dumps(result, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        payload = repr(result)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+_run_coordinator_lock = threading.Lock()
+_run_coordinator: Any = None
+_run_coordinator_path: str = ""
+
+
+def get_run_coordinator() -> Any:
+    """Return the process-wide coordinator, or ``None`` when unavailable.
+
+    The instance is keyed by the resolved database path: the test suite repoints
+    ``backend.persistence.db.DB_PATH`` per test, and a coordinator pinned to a
+    previous path would silently write into a database nobody reads.
+    """
+    global _run_coordinator, _run_coordinator_path
+    if not run_integration_enabled():
+        return None
+    from backend.persistence import db
+
+    target = str(db.DB_PATH)
+    with _run_coordinator_lock:
+        if _run_coordinator is not None and _run_coordinator_path == target:
+            return _run_coordinator
+        from backend.runtime.run_coordinator import RunCoordinator
+
+        coordinator = RunCoordinator()
+        _run_coordinator = coordinator
+        _run_coordinator_path = target
+        return coordinator
+
+
+def reset_run_coordinator() -> None:
+    """Forget the cached coordinator (test helper; safe when none exists)."""
+    global _run_coordinator, _run_coordinator_path
+    with _run_coordinator_lock:
+        _run_coordinator = None
+        _run_coordinator_path = ""
+
+
+def _run_budget() -> dict[str, Any]:
+    """Budget limits for a new run, read from the environment.
+
+    Only limits that are actually configured are sent: an empty budget means
+    "no limit" and the coordinator refuses unknown keys, so this never invents
+    one. ``NEXUS_RUN_MAX_*`` are the operator-facing run-level ceilings.
+    """
+    budget: dict[str, Any] = {}
+    int_limits = {
+        "NEXUS_RUN_MAX_TOKENS": "max_tokens",
+        "NEXUS_RUN_MAX_TOOL_CALLS": "max_tool_calls",
+        "NEXUS_RUN_MAX_RETRIES": "max_retries",
+        "NEXUS_RUN_MAX_SUBAGENTS": "max_subagents",
+        "NEXUS_RUN_MAX_PROVIDER_CALLS": "max_provider_calls",
+    }
+    float_limits = {
+        "NEXUS_RUN_MAX_COST_USD": "max_cost_usd",
+        "NEXUS_RUN_MAX_RUNTIME_SECONDS": "max_runtime_seconds",
+    }
+    for env_name, limit in int_limits.items():
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            continue
+        try:
+            budget[limit] = int(float(raw))
+        except ValueError:
+            logger.debug("Ignoring invalid run budget %s=%r", env_name, raw)
+    for env_name, limit in float_limits.items():
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            continue
+        try:
+            budget[limit] = float(raw)
+        except ValueError:
+            logger.debug("Ignoring invalid run budget %s=%r", env_name, raw)
+    return budget
+
+
+def _newest_resumable(coordinator: Any, **filters: Any) -> Any:
+    """Return the most recently updated resumable run matching ``filters``."""
+    try:
+        runs = coordinator.find_resumable_runs(**filters)
+    except Exception:
+        logger.debug("Could not list resumable runs", exc_info=True)
+        return None
+    return runs[0] if runs else None
+
+
+def find_run_for_identity(
+    *,
+    session_id: str = "",
+    goal: str = "",
+    idempotency_key: str = "",
+    mission_id: str = "",
+) -> Any:
+    """Return the durable run this request is a retry of, or ``None``.
+
+    Resolution order is deliberate: an explicit idempotency key is the strongest
+    signal a client gives us, then the mission association, then the weakest
+    (and most heuristic) ``session_id + goal`` pair. Only non-terminal runs
+    qualify — a finished run must never be resurrected by a later request.
+    """
+    if not (idempotency_key or mission_id or (session_id and goal)):
+        return None
+    coordinator = get_run_coordinator()
+    if coordinator is None:
+        return None
+
+    if idempotency_key:
+        marker = f"{_IDEMPOTENCY_MARKER}{idempotency_key}"
+        for record in coordinator.find_resumable_runs():
+            if marker in [str(item) for item in record.memory_refs]:
+                return record
+    if mission_id:
+        marker = f"{_MISSION_MARKER}{mission_id}"
+        for record in coordinator.find_resumable_runs():
+            if marker in [str(item) for item in record.memory_refs]:
+                return record
+    if session_id and goal:
+        try:
+            runs = coordinator.find_resumable_runs(session_id=session_id)
+        except Exception:
+            logger.debug("Could not list runs for session %s", session_id, exc_info=True)
+            return None
+        for record in runs:
+            if record.goal == goal:
+                return record
+    return None
+
+
+class RunLifecycle:
+    """Durable mirror of one unit of work. Every call is failure-tolerant.
+
+    One instance owns one ``run_state`` row for its whole life: it creates the
+    run (or adopts the one already in flight), drives it through
+    ``CREATED → PLANNING → RUNNING``, writes the phase-boundary checkpoints the
+    resume path restores from, records confirmed side effects in the
+    idempotency ledger, and closes the run only when the definition of done is
+    actually satisfied.
+
+    Constructing one never raises: when the coordinator is unavailable the
+    instance is created in a *disabled* state and every method becomes a
+    no-op, which is exactly the degradation this runtime promises.
+    """
+
+    def __init__(
+        self,
+        run_id: str,
+        *,
+        goal: str = "",
+        session_id: str = "",
+        user_id: str = "",
+        project_id: str = "",
+        mission_id: str = "",
+        idempotency_key: str = "",
+        record: Any = None,
+    ) -> None:
+        self.run_id = run_id
+        self.goal = goal
+        self.session_id = session_id
+        self.user_id = user_id
+        self.project_id = project_id
+        self.mission_id = mission_id
+        self.idempotency_key = idempotency_key
+        self._record = record
+        self._completed = False
+        self._closed = False
+
+    # ───── construction ─────────────────────────────────────────────────
+
+    @classmethod
+    def begin(
+        cls,
+        *,
+        goal: str,
+        session_id: str = "",
+        user_id: str = "",
+        project_id: str = "",
+        mission_id: str = "",
+        requirements: Any = None,
+        constraints: Any = None,
+        definition_of_done: Any = None,
+        budget: dict[str, Any] | None = None,
+        idempotency_key: str = "",
+        run_id: str = "",
+        reuse_existing: bool = True,
+    ) -> RunLifecycle | None:
+        """Create — or adopt — the durable run for this unit of work.
+
+        Returns ``None`` when the coordinator is unavailable or disabled: the
+        caller then simply runs without a durable mirror, which is the
+        documented degradation rather than a broken turn.
+        """
+        coordinator = get_run_coordinator()
+        if coordinator is None:
+            return None
+
+        existing = None
+        if run_id:
+            existing = cls._safe_get(coordinator, run_id)
+        elif reuse_existing:
+            existing = find_run_for_identity(
+                session_id=session_id,
+                goal=goal,
+                idempotency_key=idempotency_key,
+                mission_id=mission_id,
+            )
+
+        if existing is not None:
+            lifecycle = cls(
+                str(existing.run_id),
+                goal=goal or str(existing.goal),
+                session_id=session_id or str(existing.session_id),
+                user_id=user_id or str(existing.user_id),
+                project_id=project_id or str(existing.project_id),
+                mission_id=mission_id,
+                idempotency_key=idempotency_key,
+                record=existing,
+            )
+            lifecycle._mark_identity(coordinator)
+            lifecycle._move(RunState.RUNNING, reason="run in flight for this request")
+            logger.info(
+                "[RUN] reusing durable run %s (session=%s goal=%.80s)",
+                lifecycle.run_id,
+                lifecycle.session_id,
+                lifecycle.goal,
+            )
+            return lifecycle
+
+        try:
+            record = coordinator.create_run(
+                goal=goal,
+                requirements=list(requirements or []),
+                constraints=list(constraints or []),
+                definition_of_done=list(definition_of_done or []),
+                project_id=project_id,
+                user_id=user_id,
+                session_id=session_id,
+                budget=budget if budget is not None else _run_budget(),
+            )
+        except Exception:
+            logger.exception("Could not create the durable run for %.80s", goal)
+            return None
+        lifecycle = cls(
+            str(record.run_id),
+            goal=goal,
+            session_id=session_id,
+            user_id=user_id,
+            project_id=project_id,
+            mission_id=mission_id,
+            idempotency_key=idempotency_key,
+            record=record,
+        )
+        lifecycle._mark_identity(coordinator)
+        lifecycle._move(RunState.PLANNING, reason="run created")
+        lifecycle._move(RunState.RUNNING, reason="execution started")
+        logger.info(
+            "[RUN] created durable run %s (session=%s goal=%.80s)",
+            lifecycle.run_id,
+            lifecycle.session_id,
+            lifecycle.goal,
+        )
+        return lifecycle
+
+    @staticmethod
+    def _safe_get(coordinator: Any, run_id: str) -> Any:
+        try:
+            return coordinator.get_run(run_id)
+        except Exception:
+            logger.debug("Could not read run %s", run_id, exc_info=True)
+            return None
+
+    @property
+    def record(self) -> Any:
+        """The last known :class:`RunRecord`; ``None`` when never read."""
+        return self._record
+
+    @property
+    def enabled(self) -> bool:
+        """Always ``True``: an instance exists only when the coordinator does."""
+        return True
+
+    @property
+    def closed(self) -> bool:
+        """Whether this run already reached a terminal durable state."""
+        return self._closed
+
+    # ───── state machine ────────────────────────────────────────────────
+
+    def _move(self, state: Any, *, reason: str = "") -> None:
+        if self._closed:
+            return
+        coordinator = get_run_coordinator()
+        if coordinator is None:
+            return
+        try:
+            self._record = coordinator.transition(self.run_id, state, reason=reason)
+        except Exception as exc:
+            # An illegal move (for example RUNNING → RUNNING while adopting a
+            # run that is already executing) is a no-op, not a broken run.
+            logger.debug("Run %s did not transition to %s: %s", self.run_id, state, exc)
+
+    def _mark_identity(self, coordinator: Any) -> None:
+        """Persist the markers that make this run findable after a restart."""
+        markers: list[str] = []
+        if self.idempotency_key:
+            markers.append(f"{_IDEMPOTENCY_MARKER}{self.idempotency_key}")
+        if self.mission_id:
+            markers.append(f"{_MISSION_MARKER}{self.mission_id}")
+        if not markers:
+            return
+        try:
+            existing = [str(item) for item in (self._record.memory_refs if self._record else [])]
+            merged = list(dict.fromkeys([*existing, *markers]))
+            self._record = coordinator.update_progress(self.run_id, memory_refs=merged)
+        except Exception:
+            logger.debug("Could not record identity markers for run %s", self.run_id, exc_info=True)
+
+    # ───── progress / checkpoints ───────────────────────────────────────
+
+    def update_progress(
+        self,
+        *,
+        plan: dict[str, Any] | None = None,
+        current_task_id: str | None = None,
+        artifacts: Any = None,
+        changed_files: Any = None,
+        provider: dict[str, Any] | None = None,
+    ) -> None:
+        """Refresh the executable state of the run (heartbeat included)."""
+        coordinator = get_run_coordinator()
+        if coordinator is None:
+            return
+        try:
+            self._record = coordinator.update_progress(
+                self.run_id,
+                plan=plan,
+                current_task_id=current_task_id,
+                artifacts=artifacts,
+                changed_files=changed_files,
+                provider=provider,
+                # Every real step is also a liveness signal: the watchdog reads
+                # ``heartbeat_at`` from this, and a run that works must not look
+                # stalled while it works.
+                heartbeat=True,
+            )
+        except Exception:
+            logger.debug("Could not update progress for run %s", self.run_id, exc_info=True)
+
+    def heartbeat(self, **payload: Any) -> None:
+        """Liveness signal; recorded as a checkpoint so a resume sees it.
+
+        The caller's keys are nested under ``signal`` so they can never collide
+        with the mandatory ``phase`` argument of :meth:`checkpoint`.
+        """
+        self.checkpoint("heartbeat", signal=dict(payload))
+
+    def checkpoint(self, phase: str, **payload: Any) -> None:
+        """Record one phase boundary. The payload is what a resume restores."""
+        coordinator = get_run_coordinator()
+        if coordinator is None:
+            return
+        try:
+            coordinator.checkpoint(self.run_id, phase=phase, payload=dict(payload))
+        except Exception:
+            logger.debug("Could not checkpoint run %s (%s)", self.run_id, phase, exc_info=True)
+
+    def record_task_completed(
+        self,
+        task_id: str,
+        *,
+        name: str = "",
+        ok: bool = True,
+        changed_files: Any = None,
+        detail: Any = None,
+    ) -> None:
+        """One task/cycle finished: persist it as a resumable boundary."""
+        self.checkpoint(
+            "after_task",
+            task_id=str(task_id),
+            task_name=name,
+            ok=bool(ok),
+            changed_files=[str(item) for item in (changed_files or [])],
+            detail=detail,
+        )
+        self.update_progress(
+            current_task_id=str(task_id),
+            changed_files=changed_files if changed_files is not None else None,
+        )
+
+    # ───── side effects (idempotency ledger) ────────────────────────────
+
+    def side_effect_confirmed(self, *, tool: str, args: Any = None, task_id: str = "") -> bool:
+        """Whether this exact side effect was already applied by this run."""
+        coordinator = get_run_coordinator()
+        if coordinator is None:
+            return False
+        key = side_effect_idempotency_key(self.run_id, task_id, tool, args)
+        try:
+            return bool(coordinator.is_side_effect_confirmed(self.run_id, key))
+        except Exception:
+            logger.debug("Could not read the side-effect ledger for run %s", self.run_id, exc_info=True)
+            return False
+
+    def before_side_effect(
+        self, *, tool: str, args: Any = None, task_id: str = "", cycle: int = 0
+    ) -> bool:
+        """Checkpoint *before* a real-world action; ``True`` means replay.
+
+        The return value tells the caller whether this action was already
+        confirmed for this run, so a resumed run can report "already applied"
+        instead of silently doing it twice.
+        """
+        key = side_effect_idempotency_key(self.run_id, task_id, tool, args)
+        already = self.side_effect_confirmed(tool=tool, args=args, task_id=task_id)
+        self.checkpoint(
+            "before_side_effect",
+            tool=str(tool),
+            args=_jsonable(args),
+            idempotency_key=key,
+            replay=already,
+            task_id=str(task_id),
+            cycle=cycle,
+        )
+        if already:
+            logger.info(
+                "[RUN] side effect already confirmed for run %s (%s); treating as a replay",
+                self.run_id,
+                key,
+            )
+        return already
+
+    def after_side_effect(
+        self,
+        *,
+        tool: str,
+        args: Any = None,
+        task_id: str = "",
+        result: Any = None,
+        ok: bool = True,
+    ) -> None:
+        """Checkpoint *after* the action and record it in the ledger."""
+        key = side_effect_idempotency_key(self.run_id, task_id, tool, args)
+        self.checkpoint(
+            "after_side_effect",
+            tool=str(tool),
+            args=_jsonable(args),
+            idempotency_key=key,
+            ok=bool(ok),
+            result_digest=side_effect_result_digest(result),
+            task_id=str(task_id),
+        )
+        if not ok:
+            return
+        if self.side_effect_confirmed(tool=tool, args=args, task_id=task_id):
+            # Already recorded: the ledger is the first writer wins, so this is
+            # a replay and there is nothing new to claim.
+            return
+        coordinator = get_run_coordinator()
+        if coordinator is None:
+            return
+        try:
+            coordinator.record_side_effect(
+                self.run_id,
+                key,
+                kind=str(tool),
+                result_digest=side_effect_result_digest(result),
+            )
+        except Exception:
+            logger.warning(
+                "Could not record the side effect %s for run %s", key, self.run_id, exc_info=True
+            )
+
+    # ───── closing ──────────────────────────────────────────────────────
+
+    def finish(self, dod_results: Any = None, *, reason: str = "") -> bool:
+        """Close the run as ``COMPLETED`` — only with a satisfied definition.
+
+        Returns ``True`` when the run reached ``COMPLETED``. An unsatisfied
+        definition of done leaves the run exactly where it was (non-terminal,
+        therefore still listed as resumable) and returns ``False``: absence of
+        evidence is never allowed to look like success.
+        """
+        if self._closed or self._completed:
+            return self._completed
+        coordinator = get_run_coordinator()
+        if coordinator is None:
+            return False
+        from backend.runtime.run_coordinator import DoDNotSatisfied
+
+        try:
+            self._record = coordinator.complete(self.run_id, list(dod_results or []))
+            self._completed = True
+            self._closed = True
+            logger.info(
+                "[RUN] run %s completed with a satisfied definition of done", self.run_id
+            )
+            return True
+        except DoDNotSatisfied as exc:
+            logger.warning(
+                "[RUN] run %s NOT completed — definition of done unmet: %s",
+                self.run_id,
+                "; ".join(str(item.get("requirement", "?")) for item in exc.details) or "n/a",
+            )
+            return False
+        except Exception:
+            logger.exception("Could not complete run %s", self.run_id)
+            return False
+
+    def fail(self, reason: str = "") -> None:
+        """Mark the run ``FAILED`` with a human-readable reason."""
+        # The transition happens before the flag: ``_move`` refuses to act on a
+        # closed run, so closing first would make every failure a no-op.
+        self._move(RunState.FAILED, reason=reason[:400] or "run failed")
+        self._closed = True
+        logger.info("[RUN] run %s failed: %s", self.run_id, reason[:200])
+
+    def cancel(self, reason: str = "") -> None:
+        """Mark the run ``CANCELLED`` (user stop / client disconnect)."""
+        self._move(RunState.CANCELLED, reason=reason[:400] or "run cancelled")
+        self._closed = True
+        logger.info("[RUN] run %s cancelled: %s", self.run_id, reason[:200])
+
+    def pause(self, reason: str = "") -> None:
+        """Park the run so it can be resumed by an explicit request."""
+        self._move(RunState.PAUSED, reason=reason[:400] or "paused")
+
+
+def _jsonable(value: Any) -> Any:
+    """Best-effort JSON-safe copy, so a checkpoint payload can always be stored."""
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list | tuple | set):
+        return [_jsonable(item) for item in value]
+    return str(value)
+

@@ -59,6 +59,7 @@ from backend.orchestrator.verification import (
     _extract_verification_issues,
     _find_tasks_needing_verification,
 )
+from backend.runtime.primary import RunLifecycle
 from backend.tools.ollama_client import ChatMessage
 
 try:
@@ -163,6 +164,128 @@ class OrchestrationEngine:
         )
         self._retry_manager = retry_manager or RetryManager(base_delay=1.0, max_retries=max_retries)
         self._cancellation = cancellation_registry or CancellationRegistry()
+
+        # Durable run mirrors (Fase 1b), keyed by session. ``execute_autonomous``
+        # owns the one for its whole Plan → Execute → Verify → Review cycle so
+        # the per-wave ``execute_plan`` calls checkpoint into the *same* run
+        # instead of forking one run per wave.
+        self._run_lifecycles: dict[str, RunLifecycle] = {}
+        #: Reset tokens for the published run context, keyed by session, so the
+        #: budget hook's ``run_id`` can be taken back when the cycle ends.
+        self._run_context_tokens: dict[str, Any] = {}
+        #: Sessions whose durable run is owned by ``execute_autonomous`` for its
+        #: whole cycle, so the per-wave ``execute_plan`` calls must not close it.
+        self._autonomous_run_sessions: set[str] = set()
+
+    # ------------------------------------------------------------------
+    # Durable run lifecycle (Fase 1b — checkpoint/resume/idempotência)
+    # ------------------------------------------------------------------
+
+    def _run_lifecycle_for(
+        self,
+        *,
+        goal: str,
+        session_id: str,
+        mission_id: str = "",
+        project_path: str = ".",
+        plan: Any = None,
+        create: bool = True,
+    ) -> RunLifecycle | None:
+        """Return the durable run mirror for this session, creating one once.
+
+        Every coordinator failure degrades to ``None`` — the orchestration
+        itself is never what breaks because durability is unavailable.
+        """
+        if session_id and session_id in self._run_lifecycles:
+            return self._run_lifecycles[session_id]
+        if not create:
+            return None
+        steps = list(getattr(plan, "steps", []) or []) if plan is not None else []
+        lifecycle = RunLifecycle.begin(
+            goal=goal,
+            session_id=session_id,
+            project_id=str(project_path or "."),
+            mission_id=mission_id,
+            requirements=[str(getattr(step, "name", "") or "") for step in steps],
+            constraints=[str(getattr(step, "agent", "") or "") for step in steps],
+            definition_of_done=[f"step:{str(getattr(step, 'name', '') or '')}" for step in steps],
+        )
+        if lifecycle is not None and session_id:
+            self._run_lifecycles[session_id] = lifecycle
+            # Publish the run so the tool budget hook charges the tools this
+            # session executes (see ``backend/runtime/run_context.py``). The
+            # context variable is per-task, so a sibling session's tools are
+            # unaffected; the token below is reset when the cycle closes.
+            try:
+                from backend.runtime.run_context import set_current_run_id
+
+                self._run_context_tokens[session_id] = set_current_run_id(lifecycle.run_id)
+            except Exception:
+                logger.debug(
+                    "Could not publish the run context for session %s", session_id, exc_info=True
+                )
+        return lifecycle
+
+    def _forget_run_lifecycle(self, session_id: str) -> None:
+        """Drop the mirror once the whole cycle for this session is over."""
+        self._run_lifecycles.pop(session_id, None)
+        token = self._run_context_tokens.pop(session_id, None)
+        if token is None:
+            return
+        try:
+            from backend.runtime.run_context import reset_current_run_id
+
+            reset_current_run_id(token)
+        except Exception:
+            logger.debug("Could not clear the run context for %s", session_id, exc_info=True)
+
+    @staticmethod
+    def _plan_goal(plan: Any) -> str:
+        return (
+            str(getattr(plan, "description", "") or "").strip()
+            or str(getattr(plan, "title", "") or "").strip()
+            or str(getattr(plan, "plan_id", "") or "")
+        )
+
+    @staticmethod
+    def _dod_results_from_tasks(
+        result: Any,
+    ) -> list[dict[str, Any]]:
+        """Per-step definition-of-done verdicts from the executor's artifacts.
+
+        A task with no artifact, an artifact marked ``failed``/``incomplete`` or
+        an agent that declared the work unfinished is ``FAIL``/``UNKNOWN`` —
+        never ``PASS``. Absence of evidence is not evidence.
+        """
+        artifacts = dict(getattr(result, "task_results", {}) or {})
+        results: list[dict[str, Any]] = []
+        for task_id, artifact in artifacts.items():
+            name = ""
+            if isinstance(artifact, dict):
+                name = str(artifact.get("name") or "")
+            requirement = f"step:{name}"
+            verdict = "UNKNOWN"
+            evidence: dict[str, Any] = {"task_id": str(task_id)}
+            if isinstance(artifact, dict):
+                status = str(artifact.get("status") or "")
+                incomplete = bool(artifact.get("incomplete"))
+                output = str(artifact.get("output") or "")
+                evidence.update(
+                    {
+                        "agent": str(artifact.get("agent") or ""),
+                        "status": status,
+                        "output_chars": len(output),
+                    }
+                )
+                if status == "failed" or incomplete:
+                    verdict = "FAIL"
+                elif status == "completed":
+                    verdict = "PASS"
+            results.append(
+                {"requirement": requirement, "verdict": verdict, "evidence": evidence}
+            )
+        return results
+
 
     # ------------------------------------------------------------------
     # Public API
@@ -564,6 +687,7 @@ class OrchestrationEngine:
         *,
         auto_approve: bool = False,
         project_path: str = ".",
+        mission_id: str = "",
     ) -> OrchestrationResult:
         """Execute a ready plan; blocked planning never reaches the executor."""
         if isinstance(plan, PlanningResult):
@@ -610,6 +734,19 @@ class OrchestrationEngine:
         cancellation_event = self._cancellation.create(session_id)
         active_tasks: list[asyncio.Task[Any]] = []
         self._cancellation.register_tasks(session_id, active_tasks)
+        lifecycle = self._run_lifecycle_for(
+            goal=self._plan_goal(plan) or f"plano {plan.plan_id}",
+            session_id=session_id,
+            mission_id=mission_id,
+            project_path=project_path,
+            plan=plan,
+        )
+        # A wave executed on its own (a mission phase, an approved plan) owns
+        # its durable run; a wave inside ``execute_autonomous`` does not — that
+        # cycle closes the single run it created for all of its waves.
+        owns_lifecycle = (
+            lifecycle is not None and session_id not in self._autonomous_run_sessions
+        )
         try:
             result, _ctx = await self._plan_executor.execute(
                 plan,
@@ -621,6 +758,15 @@ class OrchestrationEngine:
             )
         except asyncio.CancelledError:
             self._state[session_id] = OrchestrationState.CANCELLED
+            if lifecycle is not None:
+                lifecycle.cancel(f"plan {plan.plan_id} cancelled")
+            raise
+        except Exception as exc:
+            # A wave that explodes is a failed durable run with a reason, not a
+            # silent disappearance from the recovery surface.
+            logger.exception("Plan execution failed for session %s", session_id)
+            if lifecycle is not None:
+                lifecycle.fail(f"{type(exc).__name__}: {exc}"[:400])
             raise
         else:
             if (
@@ -628,10 +774,63 @@ class OrchestrationEngine:
                 or self._state.get(session_id) == OrchestrationState.CANCELLED
             ):
                 result.state = OrchestrationState.CANCELLED
+            if lifecycle is not None:
+                self._checkpoint_executed_tasks(lifecycle, result, plan)
+                if result.state is OrchestrationState.CANCELLED:
+                    lifecycle.cancel(f"plan {plan.plan_id} cancelled")
+                elif result.state is OrchestrationState.FAILED:
+                    lifecycle.fail("; ".join(str(e) for e in result.errors)[:400] or "plan failed")
+                elif owns_lifecycle:
+                    dod_results = self._dod_results_from_tasks(result)
+                    if not dod_results:
+                        lifecycle.checkpoint(
+                            "before_verification",
+                            reason="no_task_evidence",
+                            plan_id=plan.plan_id,
+                        )
+                    else:
+                        lifecycle.finish(dod_results)
+                else:
+                    lifecycle.update_progress(provider={"lane": "planned", "plan_id": plan.plan_id})
             self._state[session_id] = result.state
             return result
         finally:
             self._cancellation.pop_tasks(session_id)
+            if owns_lifecycle:
+                self._forget_run_lifecycle(session_id)
+
+    @staticmethod
+    def _checkpoint_executed_tasks(
+        lifecycle: RunLifecycle, result: Any, plan: Any
+    ) -> None:
+        """One ``after_task`` checkpoint per finished task of this wave.
+
+        The plan executor exposes no per-task completion callback, so the
+        checkpoint is written from the aggregate it returns — which still gives
+        the resume path the exact boundary the run stopped at.
+        """
+        steps_by_name = {
+            str(getattr(step, "name", "") or ""): step
+            for step in (getattr(plan, "steps", []) or [])
+        }
+        for task_id, artifact in dict(getattr(result, "task_results", {}) or {}).items():
+            if not isinstance(artifact, dict):
+                continue
+            name = str(artifact.get("name") or task_id)
+            status = str(artifact.get("status") or "")
+            ok = status == "completed" and not artifact.get("incomplete")
+            lifecycle.record_task_completed(
+                str(task_id),
+                name=name,
+                ok=ok,
+                changed_files=[],
+                detail={
+                    "status": status,
+                    "agent": str(artifact.get("agent") or ""),
+                    "output_chars": len(str(artifact.get("output") or "")),
+                    "step_agent": str(getattr(steps_by_name.get(name), "agent", "") or ""),
+                },
+            )
 
 
     async def cancel(self, session_id: str) -> None:
@@ -676,6 +875,7 @@ class OrchestrationEngine:
         history: list[ChatMessage] | None = None,
         project_path: str = ".",
         max_verify_iterations: int = 3,
+        mission_id: str = "",
     ) -> OrchestrationResult:
         """Full autonomous cycle: Plan → Execute → Verify → Iterate.
 
@@ -687,7 +887,101 @@ class OrchestrationEngine:
         4. Iterates up to max_verify_iterations times
 
         Returns the final OrchestrationResult with all verification data.
+
+        The whole cycle is one durable run (Fase 1b): a plan checkpoint before
+        the first wave, a task checkpoint after every wave and a verified
+        definition of done before the run may reach ``COMPLETED``.
         """
+        self._autonomous_run_sessions.add(session_id)
+        try:
+            result = await self._run_autonomous_cycle(
+                objective,
+                session_id,
+                context=context,
+                history=history,
+                project_path=project_path,
+                max_verify_iterations=max_verify_iterations,
+                mission_id=mission_id,
+            )
+        except BaseException as exc:  # noqa: BLE001 - re-raised after closing
+            self._close_autonomous_run(
+                session_id, None, error=f"{type(exc).__name__}: {exc}"
+            )
+            raise
+        self._close_autonomous_run(session_id, result)
+        return result
+
+    def _close_autonomous_run(
+        self, session_id: str, result: Any = None, *, error: str = ""
+    ) -> None:
+        """Close the durable run of one autonomous cycle — with evidence.
+
+        ``COMPLETED`` is only reached through
+        :meth:`RunLifecycle.finish`, i.e. only when the definition of done the
+        plan declared is actually satisfied by the tasks that ran. Anything
+        else stays non-terminal and therefore resumable.
+        """
+        self._autonomous_run_sessions.discard(session_id)
+        lifecycle = self._run_lifecycles.pop(session_id, None)
+        # The published run context must go even when there is no lifecycle to
+        # close: an unaccounted tool call is worse than an untracked run.
+        token = self._run_context_tokens.pop(session_id, None)
+        if token is not None:
+            try:
+                from backend.runtime.run_context import reset_current_run_id
+
+                reset_current_run_id(token)
+            except Exception:
+                logger.debug("Could not clear the run context for %s", session_id, exc_info=True)
+        if lifecycle is None:
+            return
+        if error:
+            lifecycle.fail(error)
+            return
+        if result is None:
+            return
+        state = getattr(result, "state", None)
+        if state is OrchestrationState.CANCELLED:
+            lifecycle.cancel("autonomous cycle cancelled")
+            return
+        if state in (OrchestrationState.FAILED, OrchestrationState.PLANNING_BLOCKED):
+            lifecycle.fail(
+                "; ".join(str(item) for item in getattr(result, "errors", []) or [])[:400]
+                or "autonomous cycle failed"
+            )
+            return
+        dod_results = self._dod_results_from_tasks(result)
+        if not dod_results:
+            # No task artifact at all is the absence of evidence this whole
+            # mechanism exists to catch: the run does not become COMPLETED.
+            lifecycle.checkpoint(
+                "before_verification",
+                reason="no_task_evidence",
+                goal=lifecycle.goal,
+            )
+            logger.warning(
+                "[RUN] run %s has no task evidence; not marking it completed",
+                lifecycle.run_id,
+            )
+            return
+        if not lifecycle.finish(dod_results):
+            logger.warning(
+                "[RUN] autonomous run %s kept open: definition of done unmet",
+                lifecycle.run_id,
+            )
+
+    async def _run_autonomous_cycle(
+        self,
+        objective: str,
+        session_id: str,
+        *,
+        context: str = "",
+        history: list[ChatMessage] | None = None,
+        project_path: str = ".",
+        max_verify_iterations: int = 3,
+        mission_id: str = "",
+    ) -> OrchestrationResult:
+        """The Plan → Execute → Verify → Review loop itself."""
         require_disk_headroom(project_path)
 
         # Phase 1: PLAN (auto-approve — autonomous mode skips user approval)
@@ -739,6 +1033,23 @@ class OrchestrationEngine:
             fallback.approved = True
             self._plans[fallback.plan_id] = fallback
             self._session_plans[session_id] = fallback.plan_id
+            # The model plan publishes PLAN_CREATED (plan_creator.py) and the
+            # mission tracker consumes it to replace its broad pre-flight
+            # proposals with the executable task graph
+            # (``MissionTracker.sync_execution_plan``). The deterministic
+            # fallback used to reach ``execute_plan`` without ever emitting
+            # that event, so the live mission card kept counting the skipped
+            # wave contracts forever and reported 0/13 instead of the three
+            # tasks that actually ran. Mirror the model path's event exactly:
+            # same type, same payload shape (``plan.to_dict()``).
+            await self._events.publish(
+                OrchestratorEvent(
+                    event_type=EventType.PLAN_CREATED,
+                    source="ORCHESTRATOR",
+                    session_id=session_id,
+                    data=fallback.to_dict(),
+                )
+            )
             planning = PlanningResult(
                 status="ready",
                 plan=fallback,
@@ -747,6 +1058,25 @@ class OrchestrationEngine:
             )
             self._planning_results[session_id] = planning
         plan = planning.plan
+
+        # One durable run for the whole cycle: it adopts the run a previous
+        # crashed process left behind for this session (idempotency) instead of
+        # starting a second history for the same mission.
+        lifecycle = self._run_lifecycle_for(
+            goal=objective,
+            session_id=session_id,
+            mission_id=mission_id,
+            project_path=project_path,
+            plan=plan,
+        )
+        if lifecycle is not None:
+            lifecycle.checkpoint(
+                "after_planning",
+                plan_id=plan.plan_id,
+                steps=len(plan.steps),
+                source=str(planning.source),
+                mission_id=str(mission_id),
+            )
 
         await self._events.publish(
             OrchestratorEvent(
@@ -763,6 +1093,7 @@ class OrchestrationEngine:
             session_id,
             auto_approve=True,
             project_path=project_path,
+            mission_id=mission_id,
         )
         # A failed, cancelled, or blocked primary plan is terminal.
         if result.state in (

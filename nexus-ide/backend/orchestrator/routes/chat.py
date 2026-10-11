@@ -47,7 +47,7 @@ from backend.config.settings import (
     get_mode_config,
 )
 from backend.core.disk_guard import DiskPressureError
-from backend.llm.multi_llm_manager import MultiLLMManager
+from backend.llm.multi_llm_manager import MultiLLMManager, _compute_cost
 from backend.middleware.auth import require_auth
 from backend.models.api import AgentName, ChatRequest, RoutingDecision, StreamEvent
 from backend.observability.advanced_logging import get_structured_logger
@@ -2784,6 +2784,31 @@ async def chat(
     )
 
 
+_IDEMPOTENCY_HEADERS = ("Idempotency-Key", "X-Idempotency-Key", "X-Nexus-Idempotency-Key")
+
+
+def _request_idempotency_key(request: Request | None, req: ChatRequest) -> str:
+    """Identify a request so a client retry reuses the run already in flight.
+
+    An explicit ``Idempotency-Key`` (or one of its accepted spellings) wins: it
+    is the only signal that carries the client's own intent across a retry.
+    Without one, the fallback is the hash of ``session_id + message`` — the
+    same request text in the same conversation, which is what a retried POST
+    looks like when the client had no key to send. A *different* message never
+    collides, and a finished run is terminal, so this cannot resurrect old
+    work: it only stops one in-flight run from being duplicated.
+    """
+    if request is not None:
+        for header in _IDEMPOTENCY_HEADERS:
+            value = str(request.headers.get(header) or "").strip()
+            if value:
+                return f"h-{value[:200]}"
+    digest = hashlib.sha256(
+        f"{getattr(req, 'session_id', '') or ''}\n{getattr(req, 'message', '') or ''}".encode()
+    ).hexdigest()[:32]
+    return f"sq-{digest}"
+
+
 async def _select_pipeline(
     req: ChatRequest,
     llm_client,
@@ -2932,6 +2957,7 @@ async def _select_pipeline(
         decision=decision,
         event_bus=event_bus,
         request=request,
+        idempotency_key=_request_idempotency_key(request, req),
     )
     frames = 0
     try:
@@ -5253,6 +5279,13 @@ async def _run_pipeline(
         model_name=actual_model_name or None,
         finished=True,
     )
+    cost_usd = _compute_cost(
+        model=actual_model_name or "",
+        input_tokens=provider_input_tokens if provider_usage_measured else history_tokens,
+        output_tokens=provider_output_tokens if provider_usage_measured else output_tokens,
+        provider=actual_provider_name,
+        conservative_unknown=True,
+    )
     add_message(
         req.session_id,
         "assistant",
@@ -5261,6 +5294,7 @@ async def _run_pipeline(
         model_used=actual_model_name or str(outcome.used_agent),
         tokens_in=history_tokens,
         tokens_out=output_tokens,
+        cost_usd=cost_usd,
         latency_ms=latency_ms,
     )
 

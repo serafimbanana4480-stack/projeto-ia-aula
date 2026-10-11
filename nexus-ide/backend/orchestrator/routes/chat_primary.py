@@ -42,13 +42,18 @@ from backend.runtime.primary import (
     Observation,
     PrimaryLoop,
     PrimaryTurn,
+    RunLifecycle,
     SteeringChannel,
     VerificationRequest,
     VerificationResult,
+    is_side_effecting_tool,
+    run_integration_enabled,
 )
 from backend.runtime.reasoning import (
+    ReasoningVisibility,
     bound_reasoning_text,
     count_reasoning_tokens,
+    reasoning_visibility,
     visibility_for_strength,
 )
 from backend.runtime.spawn_policy import SpawnPolicy, SubagentProposal
@@ -66,12 +71,20 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "PRIMARY_AGENT_NAME",
+    "PRIMARY_DOD_ANSWER",
+    "PRIMARY_DOD_VERIFIED",
     "is_primary_enabled",
     "plan_turn",
     "run_primary_chat",
 ]
 
 PRIMARY_AGENT_NAME = "NEXUS"
+
+#: The primary lane's definition of done. Both entries are decidable for every
+#: turn — including a purely conversational one with no project — so the durable
+#: run can always be closed honestly instead of being left half-open.
+PRIMARY_DOD_ANSWER = "resposta entregue ao utilizador"
+PRIMARY_DOD_VERIFIED = "verificação sem falhas reportada"
 
 #: Files worth reading before the first model byte, in priority order. Small,
 #: bounded, and universally informative.
@@ -713,6 +726,232 @@ def _event_journal_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+# ---------------------------------------------------------------------------
+# durable run mirror (Fase 1b)
+# ---------------------------------------------------------------------------
+class SideEffectTracker:
+    """Durable mirror of the real-world actions one model cycle performs.
+
+    The transport sees the tool call *before* the agent executes it and the
+    result *after*. Both halves matter for idempotency: the
+    ``before_side_effect`` checkpoint and the ``after_side_effect`` ledger entry
+    must be keyed by the *arguments of the call*, because that is what makes a
+    replay recognisable. Keying the ledger entry by the tool's *output* instead
+    would make every replay look like a new action, which is exactly the
+    duplicate-write bug this ledger exists to prevent. The tracker therefore
+    remembers the pending call arguments until the matching result arrives.
+    """
+
+    def __init__(
+        self, lifecycle: RunLifecycle | None, run_id: str, cycle: int = 1
+    ) -> None:
+        self.lifecycle = lifecycle
+        self.run_id = run_id
+        self.cycle = cycle
+        self._pending: dict[str, list[Any]] = {}
+
+    @property
+    def active(self) -> bool:
+        """Whether there is a durable run to mirror into."""
+        return self.lifecycle is not None
+
+    @property
+    def task_id(self) -> str:
+        """The task the tool belongs to: the model cycle that requested it."""
+        return f"cycle-{self.cycle}"
+
+    def observe(self, signal: AgentSignal) -> None:
+        """Feed one tool signal into the ledger. Never raises."""
+        if not self.active or not is_side_effecting_tool(signal.tool_name):
+            return
+        try:
+            if signal.kind is AgentSignalKind.TOOL_CALL:
+                self._pending.setdefault(signal.tool_name, []).append(signal.payload)
+                self.lifecycle.before_side_effect(  # type: ignore[union-attr]
+                    tool=signal.tool_name,
+                    args=signal.payload,
+                    task_id=self.task_id,
+                    cycle=self.cycle,
+                )
+                return
+            queue = self._pending.get(signal.tool_name) or []
+            args = queue.pop(0) if queue else signal.payload
+            self.lifecycle.after_side_effect(  # type: ignore[union-attr]
+                tool=signal.tool_name,
+                args=args,
+                task_id=self.task_id,
+                result=signal.payload,
+                ok=signal.ok,
+            )
+        except Exception:  # noqa: BLE001 - the durable mirror never breaks the turn
+            logger.debug(
+                "Run lifecycle side-effect hook failed for %s", self.run_id, exc_info=True
+            )
+
+
+def _track_primary_run_event(lifecycle: RunLifecycle | None, event: RuntimeEvent) -> None:
+    """Turn the loop's own events into durable checkpoints.
+
+    ``after_task`` per completed model cycle, ``before_verification`` /
+    ``after_verification`` around the test phase and a heartbeat while the
+    provider is thinking: together they are what
+    :meth:`~backend.runtime.run_coordinator.RunCoordinator.restore` returns
+    after a crash, so a resumed run continues from real work instead of from
+    the beginning.
+    """
+    if lifecycle is None:
+        return
+    payload = event.payload or {}
+    try:
+        if event.type is RuntimeEventType.PLAN_UPDATED and isinstance(
+            payload.get("todos"), list
+        ):
+            lifecycle.update_progress(
+                plan={
+                    "todos": list(payload.get("todos") or []),
+                    "tool": str(payload.get("tool") or ""),
+                }
+            )
+        elif event.type is RuntimeEventType.MESSAGE_COMPLETED:
+            lifecycle.record_task_completed(
+                f"cycle-{int(payload.get('cycles') or 1)}",
+                name="model turn",
+            )
+        elif event.type is RuntimeEventType.TEST_STARTED:
+            lifecycle.checkpoint(
+                "before_verification",
+                cycle=int(payload.get("cycle") or 0),
+                changed_files=[str(item) for item in payload.get("changed_files") or []],
+            )
+        elif event.type is RuntimeEventType.TEST_RESULT:
+            lifecycle.checkpoint(
+                "after_verification",
+                cycle=int(payload.get("cycle") or 0),
+                ran=bool(payload.get("ran")),
+                ok=bool(payload.get("ok")),
+                summary=str(payload.get("summary") or ""),
+            )
+        elif event.type is RuntimeEventType.HEARTBEAT:
+            lifecycle.heartbeat(
+                phase=str(payload.get("phase") or ""),
+                blocked_on=str(payload.get("blocked_on") or ""),
+                waiting_seconds=payload.get("waiting_seconds"),
+            )
+    except Exception:  # noqa: BLE001 - the durable mirror never breaks the turn
+        logger.debug("Run lifecycle event hook failed", exc_info=True)
+
+
+def _primary_dod_results(loop: PrimaryLoop) -> list[dict[str, Any]]:
+    """Verdicts for the primary lane's definition of done, with evidence.
+
+    ``verification_sem_falhas`` is only ever ``PASS`` when the run's own
+    verifier did not report a failure: a red final verification is a failed run
+    and must not reach ``COMPLETED`` through this path.
+    """
+    verification = loop.outcome.verification
+    answer = (loop.outcome.answer or "").strip()
+    verification_ok = (not verification.ran) or bool(verification.ok)
+    return [
+        {
+            "requirement": PRIMARY_DOD_ANSWER,
+            "verdict": "PASS" if answer else "FAIL",
+            "evidence": {
+                "answer_chars": len(answer),
+                "cycles": loop.outcome.cycles,
+            },
+        },
+        {
+            "requirement": PRIMARY_DOD_VERIFIED,
+            "verdict": "PASS" if verification_ok else "FAIL",
+            "evidence": {
+                "ran": verification.ran,
+                "ok": verification.ok,
+                "summary": verification.summary,
+                "command": verification.command,
+            },
+        },
+    ]
+
+
+def _close_primary_run_lifecycle(
+    lifecycle: RunLifecycle | None,
+    loop: PrimaryLoop,
+    finish_reason: str = "",
+) -> None:
+    """Close the durable run with the same truth ``_persist`` records."""
+    if lifecycle is None:
+        return
+    if loop.outcome.stopped:
+        lifecycle.cancel(loop.outcome.error or "execution stopped at the user's request")
+    elif loop.outcome.failed or loop.outcome.interrupted:
+        lifecycle.fail(
+            loop.outcome.error
+            or (f"provider finish_reason={finish_reason}" if finish_reason else "run failed")
+        )
+    else:
+        lifecycle.finish(_primary_dod_results(loop))
+
+
+def _primary_run_user_id(session_id: str) -> str:
+    """Owner of the session, when it already exists (empty otherwise)."""
+    if not session_id:
+        return ""
+    try:
+        from backend.persistence.db import get_session
+
+        session = get_session(session_id) or {}
+        return str(session.get("user_id") or "")
+    except Exception:
+        return ""
+
+
+def _primary_run_budget() -> dict[str, Any]:
+    """Run-level ceilings from settings/env; ``{}`` means "no configured limit"."""
+    budget: dict[str, Any] = {}
+    try:
+        from backend.config.settings import get_settings
+
+        settings = get_settings()
+        per_run = float(
+            getattr(settings, "max_cost_per_run_usd", 0)
+            or getattr(settings, "per_run_budget_usd", 0)
+            or 0
+        )
+        if per_run > 0:
+            budget["max_cost_usd"] = per_run
+    except Exception:
+        logger.debug("No run budget available from settings", exc_info=True)
+    return budget
+
+
+
+def _publish_run_context(run_id: str) -> Any:
+    """Publish ``run_id`` so the tool budget hook can charge this turn's tools.
+
+    Returns the reset token (``None`` when publishing failed, which is
+    non-fatal: the run simply stays unaccounted instead of losing its turn).
+    """
+    try:
+        from backend.runtime.run_context import set_current_run_id
+
+        return set_current_run_id(run_id)
+    except Exception:
+        logger.debug("Could not publish the run context for %s", run_id, exc_info=True)
+        return None
+
+
+def _clear_run_context(token: Any) -> None:
+    """Restore the previous run context. Never raises."""
+    if token is None:
+        return
+    try:
+        from backend.runtime.run_context import reset_current_run_id
+
+        reset_current_run_id(token)
+    except Exception:
+        logger.debug("Could not clear the run context", exc_info=True)
+
+
 def _primary_journal_path(run_id: str) -> Path | None:
     """Per-run event journal on disk; ``None`` when journaling is off."""
     if not _event_journal_enabled():
@@ -734,12 +973,16 @@ def make_signal_stream(
     enable_thinking: bool = False,
     progress_provider: Callable[[], str] | None = None,
     continuity_store: Any = None,
+    run_lifecycle: RunLifecycle | None = None,
 ):
     """Build the ``(PrimaryTurn) -> AsyncIterator[AgentSignal]`` factory.
 
     ``progress_provider`` supplies the compact progress line that cycles >= 2
     receive so a multi-cycle run continues from real state instead of
-    rediscovering it.
+    rediscovering it. ``run_lifecycle`` is the durable run mirror: when present,
+    every tool call with a real-world side effect is bracketed by a
+    ``before_side_effect`` / ``after_side_effect`` checkpoint pair and recorded
+    in the idempotency ledger, so a replay is recognised instead of repeated.
     """
     from backend.agents.base import AgentRequest
     from backend.orchestrator.routes.chat import _IncrementalResponseParser
@@ -790,23 +1033,27 @@ def make_signal_stream(
                 except Exception:
                     logger.debug("Project continuity tool event failed", exc_info=True)
 
+            side_effects = SideEffectTracker(run_lifecycle, run_id, cycle=turn.cycle)
+
+            async def observe_signal(signal: AgentSignal) -> None:
+                """Synchronous-observability for one tool signal, then emit it."""
+                if signal.kind is AgentSignalKind.TOOL_CALL:
+                    await record_continuity(signal, "call")
+                elif signal.kind in (AgentSignalKind.TOOL_RESULT, AgentSignalKind.TOOL_ERROR):
+                    await record_continuity(signal, "result")
+                side_effects.observe(signal)
+
             try:
                 async for chunk in stream:
                     for event in parser.feed(chunk):
                         signal = stream_events_to_signals(event)
                         if signal is not None:
-                            if signal.kind is AgentSignalKind.TOOL_CALL:
-                                await record_continuity(signal, "call")
-                            elif signal.kind in (AgentSignalKind.TOOL_RESULT, AgentSignalKind.TOOL_ERROR):
-                                await record_continuity(signal, "result")
+                            await observe_signal(signal)
                             yield signal
                 for event in parser.flush():
                     signal = stream_events_to_signals(event)
                     if signal is not None:
-                        if signal.kind is AgentSignalKind.TOOL_CALL:
-                            await record_continuity(signal, "call")
-                        elif signal.kind in (AgentSignalKind.TOOL_RESULT, AgentSignalKind.TOOL_ERROR):
-                            await record_continuity(signal, "result")
+                        await observe_signal(signal)
                         yield signal
 
                 # Provider metadata is exposed only after the final stream
@@ -1051,6 +1298,8 @@ def runtime_event_to_stream_events(event: RuntimeEvent) -> list[StreamEvent]:
         # nothing at all rather than an empty frame the UI would still render.
         visible = bound_reasoning_text(str(payload.get("text") or ""))
         if not visible:
+            if reasoning_visibility() is ReasoningVisibility.OFF:
+                return []
             return _neutral_runtime_frame(event, agent, "reasoning_suppressed")
         return [
             StreamEvent(
@@ -1216,6 +1465,21 @@ def runtime_event_to_stream_events(event: RuntimeEvent) -> list[StreamEvent]:
         ]
     if kind is RuntimeEventType.RUN_INTERRUPTED:
         reason = str(payload.get("reason") or "a execução foi interrompida")
+        # A provider token-limit truncation is a *soft* interruption: the run is
+        # persisted as ``interrupted`` and the reason is surfaced to the user as
+        # a progress warning (the ``STATUS_UPDATE`` the loop emits first), never
+        # as a hard ``error`` frame the client would render as a failure. Any
+        # other interruption (a provider that just closed the connection, ...)
+        # keeps the error frame.
+        if reason == _TRUNCATION_NOTICE:
+            return [
+                StreamEvent(
+                    type="progress",
+                    agent=agent,  # type: ignore[arg-type]
+                    content=reason,
+                    data=_envelope(event, dict(payload)),
+                )
+            ]
         return [
             StreamEvent(
                 type="error",
@@ -1285,8 +1549,14 @@ async def run_primary_chat(
     decision: TriageDecision,
     event_bus: Any = None,
     request: Any | None = None,
+    idempotency_key: str = "",
 ) -> AsyncIterator[str]:
-    """Stream one turn through the primary runtime as SSE frames."""
+    """Stream one turn through the primary runtime as SSE frames.
+
+    ``idempotency_key`` identifies this request for the durable run state: a
+    client retry carrying the same key (or the same session + query) adopts the
+    run that is already in flight instead of creating a second one.
+    """
     from backend.orchestrator.registry import resolve
     from backend.runtime import steering_registry
 
@@ -1294,6 +1564,32 @@ async def run_primary_chat(
     session_id = (getattr(req, "session_id", "default") or "default").strip()
     project_path = (getattr(req, "project_path", "") or "").strip()
     has_project = bool(project_path)
+    # The durable run mirror is optional by contract: when the coordinator is
+    # unavailable it is ``None`` and every hook below becomes a no-op, so the
+    # user's turn is never the thing that breaks.
+    run_lifecycle: RunLifecycle | None = None
+    run_context_token: Any = None
+    if run_integration_enabled():
+        run_lifecycle = RunLifecycle.begin(
+            goal=str(getattr(req, "message", "") or ""),
+            session_id=session_id,
+            user_id=_primary_run_user_id(session_id),
+            project_id=project_path,
+            requirements=[
+                "responder ao pedido do utilizador",
+                f"triagem: {decision.request_class.value}",
+            ],
+            constraints=[],
+            definition_of_done=[PRIMARY_DOD_ANSWER, PRIMARY_DOD_VERIFIED],
+            budget=_primary_run_budget(),
+            idempotency_key=idempotency_key,
+        )
+    # Publishing the run id activates the tool budget hook in
+    # ``backend/tools/registry.py``: without it every tool call of this turn is
+    # unaccounted. It is a context variable, so it is per-task and cannot leak
+    # into a concurrent turn; the token is reset in the ``finally`` below.
+    if run_lifecycle is not None:
+        run_context_token = _publish_run_context(run_lifecycle.run_id)
     selected_client, provider_error = await _request_provider_client(req, llm_client)
     if provider_error is not None:
         yield _sse(
@@ -1490,6 +1786,7 @@ async def run_primary_chat(
         and has_project,
         progress_provider=lambda: _run_progress_summary(telemetry),
         continuity_store=continuity_store,
+        run_lifecycle=run_lifecycle,
     )
 
     async def verify(request: VerificationRequest) -> VerificationResult:
@@ -1657,6 +1954,7 @@ async def run_primary_chat(
                         reasoning_text=loop.reasoning_text,
                     )
                 yield _sse(frame)
+            _track_primary_run_event(run_lifecycle, event)
             advisor_cursor = max(advisor_cursor, event.seq)
             # Let the isolated reviewer consume the event just delivered. Its
             # note, if one is ready, is emitted before the next run event.
@@ -1706,6 +2004,9 @@ async def run_primary_chat(
             finish_reason=finish_reason,
         )
         await _persist(context, req, loop, session_id, continuity_store=continuity_store)
+        # Close the durable run with the same truth the session row records:
+        # COMPLETED only when the checklist above is actually satisfied.
+        _close_primary_run_lifecycle(run_lifecycle, loop, finish_reason)
         completion_event = loop.events.emit(
             RuntimeEventType.STATUS_UPDATE,
             agent_id=PRIMARY_AGENT_NAME,
@@ -1741,9 +2042,18 @@ async def run_primary_chat(
             await asyncio.shield(
                 _persist(context, req, loop, session_id, continuity_store=continuity_store)
             )
+        _close_primary_run_lifecycle(run_lifecycle, loop)
         raise
     finally:
         steering_registry.unregister_run(run_id)
+        # A crash between the loop and its normal close must not leave the
+        # durable run in ``RUNNING`` forever: it stays listed as resumable, and
+        # the run itself was already persisted by the paths above.
+        if run_lifecycle is not None and not run_lifecycle.closed:
+            _close_primary_run_lifecycle(
+                run_lifecycle, loop, provider_finish_reason(llm_client)
+            )
+        _clear_run_context(run_context_token)
         clear_spawn_policy(session_id)
         if advisor_runtime is not None:
             with contextlib.suppress(Exception):
