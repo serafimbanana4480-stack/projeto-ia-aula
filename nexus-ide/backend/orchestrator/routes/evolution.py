@@ -15,13 +15,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.evolution.engine import DEFAULT_COMPONENT_CONFIGS, EvolutionConfig, EvolutionEngine
+from backend.middleware.auth import require_auth
 
 logger = logging.getLogger(__name__)
-router = APIRouter(tags=["evolution"])
+router = APIRouter(tags=["evolution"], dependencies=[Depends(require_auth)])
 
 
 # ── Singleton engine ──────────────────────────────────────────────────────────

@@ -11,12 +11,14 @@ import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+
+from backend.middleware.auth import require_auth
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 @router.get("/thinking/stream")

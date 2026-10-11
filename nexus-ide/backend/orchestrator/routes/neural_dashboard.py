@@ -13,12 +13,15 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
-logger = logging.getLogger(__name__)
+from backend.middleware.auth import require_auth
 
-router = APIRouter()
+logger = logging.getLogger(__name__)
+# Neural-command-center SSE feeds (reasoning, tools, security, performance…).
+# Same rationale as the observability router: no anonymous consumer exists.
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 AGENT_TYPES = ["ROUTER", "ARCHITECT", "RESEARCHER", "CODER", "ANALYZER", "DEBUGGER", "DOCUMENTER", "OPTIMIZER"]
 REASONING_TEMPLATES = [
@@ -180,7 +183,7 @@ async def agents_connections_stream(request: Request) -> StreamingResponse:
                                     task_to_agents.setdefault(task_id, []).append(agent_id)
 
                     seen_pairs = set()
-                    for task_id, agents in task_to_agents.items():
+                    for _task_id, agents in task_to_agents.items():
                         for i in range(len(agents)):
                             for j in range(i + 1, len(agents)):
                                 pair = tuple(sorted((agents[i].upper(), agents[j].upper())))

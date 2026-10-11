@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from backend.middleware.auth import require_auth
 from backend.observability.workflow_tracker import WorkflowTracker
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 class WorkflowInfo(BaseModel):

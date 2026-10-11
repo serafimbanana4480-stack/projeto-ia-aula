@@ -14,7 +14,7 @@ from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from backend.config.settings import get_settings
-from backend.middleware.auth import get_current_user, require_auth
+from backend.middleware.auth import require_auth
 from backend.persistence.db import (
     create_email_account,
     delete_email_account,
@@ -89,7 +89,7 @@ def _account_to_config(account: dict) -> dict[str, Any]:
 @router.get("/email/accounts")
 async def get_accounts(
     request: Request,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_auth),
 ) -> list[dict[str, Any]]:
     """List email accounts for the current user."""
     user_id = user.get("user_id") if user else None
@@ -154,7 +154,7 @@ async def get_inbox(
     account_id: str = Query(...),
     limit: int = Query(20, ge=1, le=100),
     unread_only: bool = Query(False),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """Fetch inbox for a given account."""
     account = get_email_account_with_password(account_id)
@@ -183,7 +183,7 @@ async def search_email_endpoint(
     request: Request,
     q: str = Query(..., min_length=1),
     account_id: str = Query(...),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """Search emails by query."""
     account = get_email_account_with_password(account_id)
@@ -212,7 +212,7 @@ async def mark_email_read(
     request: Request,
     email_id: str,
     account_id: str = Query(...),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """Mark an email as read."""
     account = get_email_account_with_password(account_id)

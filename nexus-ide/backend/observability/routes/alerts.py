@@ -10,14 +10,15 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from backend.middleware.auth import require_auth
 from backend.observability.metrics_collector import get_metrics_collector
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 @dataclass

@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
 
 from backend.middleware.auth import require_auth
+from backend.middleware.deny_by_default import require_websocket_token
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +89,15 @@ async def recent_thoughts(
 
 
 @router.websocket("/agents/thinking/stream")
-async def stream_thoughts(ws: WebSocket) -> None:
-    """WebSocket stream of new thought events."""
+async def stream_thoughts(ws: WebSocket, user: dict = Depends(require_websocket_token)) -> None:
+    """WebSocket stream of new thought events.
+
+    Authenticated at the route level as well as at the middleware: the token
+    may arrive in ``?token=`` or in ``Sec-WebSocket-Protocol`` (a browser
+    ``WebSocket`` cannot set arbitrary headers), and a missing or invalid one
+    raises ``WebSocketException(4401)`` -- a close before ``accept()``, so no
+    event is ever sent to an anonymous subscriber.
+    """
     await ws.accept()
     q: asyncio.Queue = asyncio.Queue(maxsize=200)
     _ws_subscribers.add(q)

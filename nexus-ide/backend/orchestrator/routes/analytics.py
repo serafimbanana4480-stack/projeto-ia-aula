@@ -14,12 +14,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from backend.core.disk_guard import DiskPressureError, require_disk_headroom
+from backend.middleware.auth import require_auth
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 NOW = time.time()
 HOUR = 3600

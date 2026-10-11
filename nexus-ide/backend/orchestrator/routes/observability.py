@@ -20,7 +20,12 @@ from backend.orchestrator.registry import build_default_registry
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# The whole router is an internal observability surface (agent topology, event
+# feeds, memory/knowledge graphs, workflow timelines): there is no endpoint in
+# it that a probe or a browser should reach without a token.  Auth is therefore
+# a router-level dependency rather than twenty per-route ones, so a route added
+# here later is protected the day it is written.
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 def _get_event_bus(request: Request) -> EventBus:
@@ -101,7 +106,7 @@ async def agents_list(request: Request) -> list[dict[str, Any]]:
     return await agents_registry(request)
 
 
-@router.get("/agents/topology")
+@router.get("/agents/topology", dependencies=[Depends(require_auth)])
 async def agents_topology(request: Request) -> dict[str, Any]:
     """Return agent network topology nodes and links for graph visualization."""
     registry = _get_registry(request)

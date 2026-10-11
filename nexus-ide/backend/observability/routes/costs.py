@@ -11,12 +11,13 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.llm.cost_governor import get_cost_governor
+from backend.middleware.auth import require_auth
 from backend.persistence.db import DB_PATH
 
-router = APIRouter(prefix="/metrics", tags=["costs"])
+router = APIRouter(prefix="/metrics", tags=["costs"], dependencies=[Depends(require_auth)])
 
 
 def _connect() -> sqlite3.Connection:

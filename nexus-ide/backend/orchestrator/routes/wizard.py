@@ -12,7 +12,7 @@ from backend.middleware.auth import require_auth
 from backend.tools.advanced_templates import TEMPLATES, generate_project
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 # In-memory session store (in production, use Redis)
 _wizard_sessions: dict[str, dict[str, Any]] = {}

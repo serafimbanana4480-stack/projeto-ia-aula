@@ -7,13 +7,14 @@ Provides endpoints for knowledge graph and memory systems.
 import logging
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
+from backend.middleware.auth import require_auth
 
-router = APIRouter()
+logger = logging.getLogger(__name__)
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 class MemoryStats(BaseModel):

@@ -49,8 +49,20 @@ def _require_web_search_enabled() -> None:
 
 
 @router.get("/system/health")
-async def get_system_health(request: Request) -> dict[str, Any]:
-    """Return overall system health snapshot."""
+async def get_system_health(
+    request: Request,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Return overall system health snapshot.
+
+    Authenticated: the body reports internal service reachability (Ollama,
+    Redis, …).  The unauthenticated liveness equivalents are ``/health`` and
+    ``/api/health``; the deep equivalent is ``/api/deep``.  Note that the
+    identically-pathed alias in ``observability/routes/health.py`` is the one
+    that answers first for ``/api/system/health`` — this route keeps its own
+    guard so it cannot become the unguarded one if registration order ever
+    changes.
+    """
     import httpx
 
     from backend.config.settings import get_settings

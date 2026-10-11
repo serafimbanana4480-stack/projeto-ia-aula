@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.middleware.auth import create_access_token
 from backend.orchestrator.main import app
 from backend.orchestrator.routes import evolution as evolution_routes
 
@@ -52,7 +53,14 @@ def client(tmp_path: Path):
 
     # Patch the global engine
     evolution_routes._ENGINE = engine
-    yield TestClient(app)
+    # Every /api/evolution route is protected since audit P0.2: the router
+    # carries ``dependencies=[Depends(require_auth)]`` and the deny-by-default
+    # middleware refuses a credential-less request before it is routed.  The
+    # client therefore sends a real, signed token rather than a placeholder.
+    token = create_access_token(
+        {"sub": "test-evolution", "email": "evolution@test.local"}
+    )
+    yield TestClient(app, headers={"Authorization": f"Bearer {token}"})
     evolution_routes._ENGINE = None
 
 

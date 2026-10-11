@@ -139,6 +139,7 @@ class TestCostsEndpoints:
         from fastapi.testclient import TestClient
 
         from backend.llm.cost_governor import get_cost_governor  # noqa: F401 (reset no topo)
+        from backend.middleware.auth import require_auth
         from backend.observability.routes import costs as costs_mod
 
         db = tmp_path / "nexus.db"
@@ -150,6 +151,14 @@ class TestCostsEndpoints:
 
         monkeypatch.setattr(costs_mod, "DB_PATH", db)
         app = FastAPI()
+        # The costs router gained a router-level ``require_auth`` dependency in
+        # the P0.2 auth work, so this app -- which mounts only that router and
+        # not the deny-by-default middleware -- authenticates by overriding the
+        # dependency, the same way backend/tests/api does.
+        app.dependency_overrides[require_auth] = lambda: {
+            "user_id": "test-costs",
+            "email": "costs@test.local",
+        }
         app.include_router(costs_mod.router)
         yield TestClient(app)
         reset_cost_governor()

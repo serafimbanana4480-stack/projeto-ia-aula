@@ -16,10 +16,13 @@ def auth_headers() -> dict[str, str]:
 
 
 @pytest.fixture
-def client():
+def client(auth_headers: dict[str, str]):
     # Use TestClient without context manager to avoid event-loop
     # re-creation issues when the app singleton is shared across tests.
-    return TestClient(app)
+    # The wizard router is protected since audit P0.2 (router-level
+    # ``Depends(require_auth)`` plus the deny-by-default middleware), so the
+    # client authenticates instead of relying on the routes being open.
+    return TestClient(app, headers=auth_headers)
 
 
 def test_list_templates(client: TestClient):

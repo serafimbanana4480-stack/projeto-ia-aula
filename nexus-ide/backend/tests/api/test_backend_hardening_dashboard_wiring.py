@@ -55,13 +55,6 @@ from backend.orchestrator.main import app
 #: None of the two implementations is in this change's ownership, so they are
 #: recorded rather than fixed here.
 KNOWN_DUPLICATES: dict[str, tuple[str, str]] = {
-    # main.py:907 re-registers, with tags=["agents"], the endpoint the
-    # observability router already registered at line 894. Same function, so the
-    # duplicate is harmless at runtime; it does decide which `tags` OpenAPI emits.
-    "/api/agents/topology": (
-        "backend.orchestrator.routes.observability::agents_topology",
-        "main.py:907 add_api_route",
-    ),
     "/api/knowledge/stats": (
         "backend.orchestrator.routes.observability::knowledge_stats",
         "backend.orchestrator.routes.knowledge::get_knowledge_stats",
@@ -145,11 +138,11 @@ def test_no_new_path_is_registered_twice_for_the_same_method(
     """A duplicate (path, method) means one implementation is unreachable.
 
     This is the check that was missing when the deprecated dashboard router was
-    considered mountable: adding it would have produced a tenth duplicate, on
+    considered mountable: adding it would have produced another duplicate, on
     ``GET /api/dashboard/stream``, with no error anywhere.
 
     Asserted as set equality against :data:`KNOWN_DUPLICATES` rather than as
-    emptiness, because nine duplicates already exist and pretending otherwise
+    emptiness, because eight duplicates already exist and pretending otherwise
     would mean either a permanently red test or a silently weakened assertion.
     """
     owners: dict[tuple[str, str], list[str]] = {}

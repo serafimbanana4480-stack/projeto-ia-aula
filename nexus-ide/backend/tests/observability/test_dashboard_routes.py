@@ -6,11 +6,7 @@ from fastapi import HTTPException
 
 from backend.llm import model_catalog
 from backend.observability.routes import metrics as metrics_routes
-from backend.observability.routes.metrics import (
-    _validate_stream_auth,
-    get_models_status,
-    get_request_flow,
-)
+from backend.observability.routes.metrics import get_models_status, get_request_flow
 
 
 @pytest.mark.asyncio
@@ -132,10 +128,37 @@ def test_runtime_provider_override_wins_over_environment_setting(
 
 
 def test_dashboard_stream_requires_auth() -> None:
-    class DummyRequest:
-        headers: dict[str, str] = {}
+    """``/api/dashboard/stream`` is guarded by the shared ``require_auth`` dependency.
 
-    with pytest.raises(HTTPException) as exc:
-        _validate_stream_auth(DummyRequest(), None)  # type: ignore[arg-type]
+    This used to call a hand-rolled ``_validate_stream_auth`` helper at the top
+    of the handler.  The helper is gone: two token checks in one route is two
+    implementations to keep in step, and the hand-rolled one lacked the
+    ``WWW-Authenticate`` challenge the frontend's 401 handling expects.  The
+    route now depends on ``require_auth`` like every other protected route, and
+    the deny-by-default middleware refuses an anonymous request before the
+    handler is reached at all.
+    """
+    route = next(
+        route
+        for route in metrics_routes.router.routes
+        if getattr(route, "path", "") == "/dashboard/stream"
+    )
+    guards = {
+        getattr(dependency.call, "__name__", "")
+        for dependency in getattr(getattr(route, "dependant", None), "dependencies", None) or []
+    }
+    assert "require_auth" in guards, (
+        f"/dashboard/stream dependencies are {sorted(guards)}; require_auth was removed"
+    )
 
-    assert exc.value.status_code == 401
+
+def test_dashboard_stream_refuses_anonymous_requests() -> None:
+    """The behavioural half: no bearer token, no stream."""
+    from fastapi.testclient import TestClient
+
+    from backend.orchestrator.main import app
+
+    client = TestClient(app)
+    response = client.get("/api/dashboard/stream")
+    assert response.status_code == 401
+    assert response.headers.get("www-authenticate") == "Bearer"

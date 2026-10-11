@@ -95,20 +95,6 @@ async def _build_current_metrics_payload(request: Request) -> dict[str, Any]:
     }
 
 
-def _validate_stream_auth(request: Request, token: str | None = None) -> None:
-    """Authenticate SSE clients without accepting bearer tokens in URLs."""
-    # ``token`` remains an ignored compatibility argument for integrations
-    # that called this helper directly; query-string credentials are never
-    # accepted for the actual stream endpoint.
-    del token
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authentication required")
-    from backend.middleware.auth import decode_access_token
-
-    decode_access_token(auth_header.removeprefix("Bearer ").strip())
-
-
 @router.get("/metrics")
 async def get_metrics_index(request: Request, _user: dict = Depends(require_auth)) -> dict:
     """Return available metrics endpoints."""
@@ -131,13 +117,16 @@ async def get_current_metrics(request: Request, _user: dict = Depends(require_au
 @router.get("/dashboard/stream")
 async def dashboard_metrics_stream(
     request: Request,
+    _user: dict = Depends(require_auth),
 ) -> StreamingResponse:
     """Stream metrics snapshots over SSE for the dashboard.
 
-    Requires a valid JWT in the Authorization header. Bearer tokens in query
-    strings are deliberately rejected so URLs cannot become credential logs.
+    Requires a valid JWT in the Authorization header, enforced by the shared
+    ``require_auth`` dependency.  Bearer tokens in query strings are
+    deliberately rejected so URLs cannot become credential logs — ``HTTPBearer``
+    reads the header only, and the deny-by-default middleware refuses the
+    request before it gets here when no credential is present at all.
     """
-    _validate_stream_auth(request)
 
     async def event_stream() -> AsyncIterator[str]:
         while True:

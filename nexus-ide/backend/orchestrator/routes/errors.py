@@ -16,11 +16,13 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
+
+from backend.middleware.auth import require_auth
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/errors", tags=["errors"])
+router = APIRouter(prefix="/errors", tags=["errors"], dependencies=[Depends(require_auth)])
 
 
 # ---------------------------------------------------------------------------
