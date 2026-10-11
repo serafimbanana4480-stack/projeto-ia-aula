@@ -1,0 +1,188 @@
+name: Autonomy Soak (long autonomy + recovery)
+
+# ---------------------------------------------------------------------------
+# LONG TESTS for autonomous behaviour and recovery. NON-BLOCKING by design:
+# this workflow never gates a pull request (that is ci.yml's job) and is not a
+# required check. It exists because the interesting autonomy/recovery failures
+# are the ones that only appear after many turns, repeated runs or the whole
+# suite — exactly what a per-push pipeline cannot afford.
+#
+# Triggers:
+#   * schedule — Sundays 04:00 UTC, on the default branch. This run also
+#     executes the FULL backend suite (backend/tests, >50 min), which is the
+#     only place the complete suite is exercised.
+#   * workflow_dispatch — manual, with inputs (repeat count for the scripted
+#     mission smoke; optionally the full suite too).
+#
+# NO SECRETS, no API keys: every scenario here uses the scripted provider in
+# backend/tests/e2e_audit_harness.py or in-process mocks. Nothing in this file
+# may reference a real credential.
+#
+# REPO LAYOUT: identical mechanism to ci.yml — "Locate project root" exports
+# PROJECT_DIR ("." when nexus-ide is the repository root, "nexus-ide" when it
+# sits one level below it), and every command runs from "$PROJECT_DIR".
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      mission_iterations:
+        description: "How many times to repeat the scripted mission smoke"
+        required: false
+        default: "3"
+        type: string
+      run_full_suite:
+        description: "Also run the complete backend suite (>50 min). On the weekly schedule it always runs."
+        required: false
+        default: false
+        type: boolean
+
+# Never cancel a soak in flight: the point is to observe long runs to the end.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PROJECT_DIR: "."
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  autonomy-recovery-soak:
+    # THE job that runs the long autonomy and recovery tests. Each step is a
+    # separate scenario family so a failure names itself; the job timeout is
+    # deliberately generous (120 min) compared to ci.yml gates.
+    name: soak · autonomy + recovery + stress (scripted, no API keys)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      # RECOVERY: the 2026-08-01 incident — error followed by successful tool
+      # work must be treated as recovered and complete the run; an error with
+      # no later success must still fail it. (Same test as the fast
+      # recovery-smoke gate in ci.yml, repeated here under soak conditions.)
+      - name: Autonomous recovery integration
+        run: |
+          cd "$PROJECT_DIR"
+          uv run pytest backend/tests/orchestrator/test_autonomous_recovery_integration.py -q
+
+      # AUTONOMY: the autonomous execution cycle and the multi-agent
+      # collaboration layer end-to-end (scripted/mocked LLM, no provider).
+      - name: Autonomy cycle + collaboration layer e2e
+        run: |
+          cd "$PROJECT_DIR"
+          uv run pytest backend/tests/integration/test_autonomy_cycle.py backend/tests/integration/test_collaboration_layer_e2e.py -q
+
+      # STRESS: deterministic high-iteration fuzzing of triage, event
+      # ordering, tool registry/circuit breaker and the analyzer — offline
+      # and repeatable, the closest thing to a soak that does not need a model.
+      - name: Deterministic stress suite
+        run: |
+          cd "$PROJECT_DIR"
+          uv run pytest backend/tests/stress -q
+
+      # MISSION SMOKE x N: the 16 audit scenarios of the scripted harness,
+      # repeated. Known state at HEAD: 13/16 pass (see the mission-smoke job
+      # in ci.yml for the three open scenarios); repetitions here measure
+      # flakiness, so a failing iteration is reported as a warning and the
+      # JSON evidence is uploaded, never swallowed.
+      - name: Mission smoke x ${{ inputs.mission_iterations }}
+        run: |
+          cd "$PROJECT_DIR"
+          iterations="${{ inputs.mission_iterations }}"
+          for i in $(seq 1 "$iterations"); do
+            echo "=== mission smoke iteration $i/$iterations ==="
+            if ! uv run python -m backend.tests.e2e_audit_scenarios; then
+              echo "::warning::mission smoke iteration $i still failing (known 13/16 scenarios at HEAD) — see the uploaded e2e-audit-results artifact"
+            fi
+          done
+
+      - name: Upload mission smoke results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-mission-results
+          path: ${{ env.PROJECT_DIR }}/e2e_audit_results.json
+          if-no-files-found: warn
+
+  full-suite-soak:
+    # The complete backend suite (>50 min locally) — the only job in either
+    # workflow that runs it end to end. Weekly by default; opt-in when
+    # dispatching manually.
+    name: soak · full backend suite (>50 min)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' || inputs.run_full_suite }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      - name: Full backend suite
+        run: |
+          cd "$PROJECT_DIR"
+          uv run pytest backend/tests -q

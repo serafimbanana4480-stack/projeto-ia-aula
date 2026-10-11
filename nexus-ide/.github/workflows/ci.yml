@@ -1,31 +1,720 @@
-# THIS WORKFLOW NEVER RAN. IT IS NOT LOADED BY GITHUB ACTIONS.
+name: NEXUS IDE CI
+
+# ---------------------------------------------------------------------------
+# OPERATIONAL PIPELINE — replaces the 31-line "THIS WORKFLOW NEVER RAN" stub
+# that used to sit here. The relocation note that stub carried is preserved in
+# the "REPO LAYOUT" section below, because the root cause it described (a
+# workflow living below the git root, so GitHub never loaded it) is exactly
+# what this file now defends against.
 #
-# The git repository root is the PARENT of nexus-ide/, not nexus-ide/ itself.
-# GitHub Actions only discovers workflows in `<repo-root>/.github/workflows/`,
-# so this file has been inert: no job, no badge, no signal. The "backend job is
-# a no-op" symptom in the old file was the smaller half of the problem -- the
-# whole pipeline was dead.
+# REPO LAYOUT — works from BOTH layouts without edits:
 #
-# The working pipeline now lives at:
+#   * nexus-ide/ IS the repository root          -> PROJECT_DIR=.
+#   * nexus-ide/ is one level BELOW the repo root -> PROJECT_DIR=nexus-ide
+#     (this is the layout today: the git root is C:/Users/rodri/Desktop/nexus)
 #
-#     <repo-root>/.github/workflows/ci.yml
+# The "Locate project root" step decides at run time and exports PROJECT_DIR;
+# every backend command runs from "$PROJECT_DIR", which is why all paths below
+# are relative (`backend/tests/...`, `tools/ci/...`). To activate on GitHub you
+# can either make nexus-ide/ the repository root, or move this file (and
+# autonomy-soak.yml) into <repo-root>/.github/workflows/ — no path edits are
+# needed in either case, and in the second case you may additionally add
+# `paths:` filters at the repo root to skip unrelated changes.
 #
-# and fixes, among others:
-#   * runs every backend command from nexus-ide/ so `pythonpath = ["."]` and
-#     `packages = ["backend"]` resolve (the old `cd backend` broke every
-#     `backend.*` absolute import),
-#   * installs from pyproject.toml/uv.lock instead of the stale
-#     backend/requirements.txt, which pinned fastapi==0.115.0 against a >=0.140
-#     floor and missed 18 real dependencies,
-#   * runs mypy with the project's own config (strict = true) instead of
-#     overriding it with --ignore-missing-imports,
-#   * replaces the meaningless 5% coverage floor with a measured one, and
-#     replaces `ruff check` failing outright with a ratchet that only fails on
-#     regression,
-#   * makes codecov, bandit and safety actually run (they were `if: false`,
-#     `|| true` and `|| echo` respectively),
-#   * uses pnpm and pnpm-lock.yaml instead of npm and a package-lock.json that
-#     does not exist.
+# NO SECRETS anywhere in this file. The mission/recovery smoke jobs use the
+# scripted provider in backend/tests/e2e_audit_harness.py, which intercepts
+# httpx and never contacts a real model. Do not add API keys to this workflow.
 #
-# This stub is kept, not deleted, per AGENTS.md rule 1 (nothing is deleted;
-# history goes to archive/). Do not edit it -- edit the root workflow.
+# QUALITY GATES
+#   * tools/ci/check_quality_ratchet.py is THE gate for ruff+mypy: it fails
+#     only when findings GROW past tools/ci/quality_baseline.json (ruff 142,
+#     mypy 2052 accepted). Enforced in `typecheck-ratchet`. New errors = zero.
+#   * A bare `ruff check backend` cannot gate: the accepted backlog alone
+#     would make it permanently red (that is what the ratchet exists for), so
+#     `lint` reports the inventory instead.
+#   * `ruff format` is NOT adopted by this tree (541 of 913 files would be
+#     reformatted), so the format check runs advisory (continue-on-error) with
+#     the count printed. Flip it to blocking only after a dedicated
+#     `ruff format` migration lands.
+#   * alembic/sqlalchemy are intentionally absent from uv.lock: the test jobs
+#     therefore run against exactly the environment a clean install produces
+#     (exercising the degraded path in backend/persistence/db.py). Only the
+#     `schema-check` job installs them, right before the parity comparison.
+#
+# TIMING: the full backend suite takes >50 minutes and is deliberately NOT run
+# per push. This workflow shards it by directory; the weekly/manual soak of the
+# complete suite lives in autonomy-soak.yml.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# A new push to the same branch supersedes the previous run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # Overridden per run by "Locate project root" (see REPO LAYOUT above).
+  PROJECT_DIR: "."
+
+defaults:
+  run:
+    # bash exists on windows-latest too (Git for Windows), so one script
+    # syntax covers the whole matrix.
+    shell: bash
+
+jobs:
+  # ------------------------------------------------------------------
+  # FAST GATES — run before (and in parallel with) everything that is
+  # slow. Every test job below declares `needs: [lint, typecheck-ratchet]`
+  # so a regression in lint/types fails in minutes, not after 50.
+  # ------------------------------------------------------------------
+
+  lint:
+    name: lint (ruff · ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          # 3.12 matches [tool.mypy] python_version and requires-python.
+          python-version: "3.12"
+
+      # uv.lock is the source of truth (backend/requirements.txt is stale --
+      # it pinned fastapi==0.115.0 against a >=0.140 floor).
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      # Inventory only. The blocking gate for ruff findings is the ratchet in
+      # `typecheck-ratchet`; `|| true` because the accepted backlog (142
+      # findings, see tools/ci/quality_baseline.json) is expected, not new.
+      - name: Ruff check — findings inventory (blocking gate = typecheck-ratchet)
+        run: |
+          cd "$PROJECT_DIR"
+          uv run ruff --version
+          uv run ruff check backend --output-format concise --statistics || true
+
+      # Advisory: the tree is not ruff-format clean. Prints the count so the
+      # migration can be planned; does not block merges.
+      - name: Ruff format check (advisory — not adopted by this tree yet)
+        continue-on-error: true
+        run: |
+          cd "$PROJECT_DIR"
+          uv run ruff format --check backend tools
+
+  typecheck-ratchet:
+    name: typecheck-ratchet (mypy + ruff must not grow)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      # --all-extras: mypy must resolve the optional imports (numpy, ...)
+      # exactly like the environment the recorded baseline was measured in,
+      # otherwise unresolved-import errors would look like a regression.
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      # THE quality gate. Runs `ruff check backend` and strict `mypy` (project
+      # config: strict = true, packages = ["backend"], tests excluded) and
+      # fails with exit 1 if EITHER metric grows, per ruff code and per mypy
+      # file, against tools/ci/quality_baseline.json (ruff 142, mypy 2052).
+      # Shrinking is reported as IMPROVED and is not a failure.
+      # Single OS on purpose: per-file error counts are compared against a
+      # recorded baseline, and platform-specific narrowing can shift them.
+      - name: Quality ratchet (new errors = zero)
+        run: |
+          cd "$PROJECT_DIR"
+          uv run python tools/ci/check_quality_ratchet.py
+
+  # ------------------------------------------------------------------
+  # BACKEND UNIT TESTS — sharded by directory (pytest-xdist is NOT in
+  # uv.lock, so parallelism comes from separate jobs, not from -n).
+  # ------------------------------------------------------------------
+
+  unit-backend:
+    name: unit · ${{ matrix.dir }}
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck-ratchet]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [tools, agents, knowledge, models, config, contracts, observability, cache]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      # Runs from $PROJECT_DIR so pytest's pythonpath = ["."] resolves and
+      # every `from backend...` import works (the old `cd backend` broke them).
+      - name: pytest backend/tests/${{ matrix.dir }}
+        run: |
+          cd "$PROJECT_DIR"
+          uv run pytest "backend/tests/${{ matrix.dir }}" -q
+
+  unit-backend-misc:
+    name: unit · ${{ matrix.chunk }}
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck-ratchet]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The remaining directories of backend/tests, grouped so no job is
+        # much heavier than the rest. Chunk 3 also covers the root-level
+        # test_*.py modules (security_hardening_* and the e2e scripts do NOT
+        # match pytest's test_*.py default and are run explicitly by the
+        # security and mission-smoke jobs).
+        chunk:
+          - "backend/tests/api backend/tests/core backend/tests/middleware backend/tests/mocks backend/tests/persistence backend/tests/lint"
+          - "backend/tests/llm backend/tests/pipeline backend/tests/swarm backend/tests/evolution"
+          - "backend/tests/experience backend/tests/infrastructure backend/tests/sandbox backend/tests/stress backend/tests/test_cache backend/tests/test_token backend/tests/test_*.py"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      # Unquoted on purpose: the chunk is a space-separated path list (and
+      # chunk 3 contains a shell glob), both meant to word-split here.
+      - name: pytest ${{ matrix.chunk }}
+        run: |
+          cd "$PROJECT_DIR"
+          uv run pytest ${{ matrix.chunk }} -q
+
+  security:
+    name: security (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [lint, typecheck-ratchet]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      # Explicit file paths (not a directory): these modules are deliberately
+      # NOT named test_*.py, so plain directory collection would skip them.
+      - name: Security hardening suites
+        run: |
+          cd "$PROJECT_DIR"
+          uv run pytest backend/tests/security_hardening_*.py backend/tests/core/test_workspace_security.py -q
+
+      # Route/auth contract inventory. FAILS while the file is absent — this
+      # is a required gate, deliberately not skipped: a silent skip here is
+      # how the previous pipeline rotted. Once the contracts workstream lands
+      # backend/tests/contracts/test_route_auth_inventory.py the same step
+      # simply runs it.
+      - name: Route-auth contract inventory (fails while absent)
+        run: |
+          cd "$PROJECT_DIR"
+          inventory="backend/tests/contracts/test_route_auth_inventory.py"
+          if [ ! -f "$inventory" ]; then
+            echo "::error file=$inventory::$inventory is a required contract gate and does not exist yet. It is owned by the contracts workstream. This job stays red until it lands (NOT skipped)."
+            exit 1
+          fi
+          uv run pytest "$inventory" -q
+
+  integration:
+    name: integration (backend/tests/integration)
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck-ratchet]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      - name: pytest backend/tests/integration
+        run: |
+          cd "$PROJECT_DIR"
+          uv run pytest backend/tests/integration -q
+
+  orchestrator:
+    # 82 test files — the single heaviest shard of the suite. Split from
+    # `integration` and given its own timeout for that reason.
+    name: orchestrator (backend/tests/orchestrator)
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck-ratchet]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      - name: pytest backend/tests/orchestrator
+        run: |
+          cd "$PROJECT_DIR"
+          uv run pytest backend/tests/orchestrator -q
+
+  runtime:
+    name: runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [lint, typecheck-ratchet]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      # PRIMARY loop (Fase 3). Windows is in the matrix on purpose: the loop
+      # touches paths, pipes and asyncio primitives that behave differently
+      # there, and this project is developed on Windows.
+      - name: pytest backend/tests/runtime
+        run: |
+          cd "$PROJECT_DIR"
+          uv run pytest backend/tests/runtime -q
+
+  schema-check:
+    name: schema-check (schemas.sql vs alembic head)
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck-ratchet]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      # alembic/sqlalchemy are NOT declared in pyproject/uv.lock, so
+      # `--frozen` leaves them out on purpose (the test jobs above must keep
+      # exercising the degraded no-alembic path). This step installs them
+      # into the same interpreter, immediately before the parity check.
+      # TODO: declare both in pyproject.toml and re-lock; then delete this.
+      - name: Install migration toolchain if absent
+        run: |
+          cd "$PROJECT_DIR"
+          if ! uv run python -c "import alembic, sqlalchemy" 2>/dev/null; then
+            echo "alembic/sqlalchemy absent from the locked env; installing for the parity check"
+            uv pip install --python "$(uv run python -c 'import sys; print(sys.executable)')" "alembic>=1.13" "sqlalchemy>=2.0"
+          else
+            echo "alembic/sqlalchemy already present"
+          fi
+
+      # schemas.sql is canonical: this asserts `alembic upgrade head` converges
+      # on it (same comparison as backend/tests/persistence/test_schema_parity.py,
+      # runnable standalone). Temp dirs only; never touches data/.
+      - name: Schema parity (schemas.sql vs alembic head)
+        run: |
+          cd "$PROJECT_DIR"
+          uv run python tools/ci/schema_parity.py
+
+  frontend:
+    name: frontend (typecheck + eslint + vitest + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      # pnpm, not npm: package-lock.json does not exist, pnpm-lock.yaml does.
+      # Version pinned to frontend/package.json `packageManager` (pnpm@11.17.0)
+      # because this action resolves packageManager from the workspace root,
+      # which differs between the two repo layouts this workflow supports;
+      # --frozen-lockfile below keeps the lockfile authoritative.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: "**/frontend/pnpm-lock.yaml"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR/frontend"
+          pnpm install --frozen-lockfile
+
+      - name: Type check (tsc --noEmit)
+        run: |
+          cd "$PROJECT_DIR/frontend"
+          pnpm run type-check
+
+      - name: Lint (eslint .)
+        run: |
+          cd "$PROJECT_DIR/frontend"
+          pnpm run lint
+
+      - name: Unit tests (vitest run)
+        run: |
+          cd "$PROJECT_DIR/frontend"
+          pnpm run test
+
+      # next build is the slowest step; isolated timeout so a hang cannot eat
+      # the whole job budget.
+      - name: Build (next build)
+        timeout-minutes: 15
+        run: |
+          cd "$PROJECT_DIR/frontend"
+          pnpm run build
+
+  # ------------------------------------------------------------------
+  # SCRIPTED SMOKE TESTS — no provider, no API keys, no secrets.
+  # ------------------------------------------------------------------
+
+  mission-smoke:
+    name: mission-smoke (scripted e2e audit, no API keys)
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck-ratchet]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      # The 16 audit scenarios run against a fully scripted provider
+      # (backend/tests/e2e_audit_harness.py); measured locally at ~2 minutes.
+      # Known state at HEAD: 13/16 scenarios pass. Failures:
+      #   * "P1 custo por turno"     — 3 inferences where the audit expects <=2
+      #   * "Mudança explícita de modelo" — model id not propagated to the provider
+      #   * "P4 sem projeto selecionado"  — project-state context check
+      # Advisory (continue-on-error) until those three land; the step RUNS on
+      # every PR and uploads its JSON evidence, so the count cannot regress
+      # unnoticed. Flip to blocking when it reaches 16/16.
+      - name: Mission smoke — scripted audit scenarios
+        continue-on-error: true
+        run: |
+          cd "$PROJECT_DIR"
+          uv run python -m backend.tests.e2e_audit_scenarios
+
+      - name: Upload mission smoke results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-audit-results
+          path: ${{ env.PROJECT_DIR }}/e2e_audit_results.json
+          if-no-files-found: warn
+
+  recovery-smoke:
+    name: recovery-smoke (autonomous recovery integration)
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck-ratchet]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project root
+        run: |
+          if [ -f pyproject.toml ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          elif [ -f nexus-ide/pyproject.toml ]; then
+            echo "PROJECT_DIR=nexus-ide" >> "$GITHUB_ENV"
+          else
+            echo "::error::pyproject.toml found neither at the workspace root nor one level down (nexus-ide/). Check out the NEXUS IDE repository itself."
+            exit 1
+          fi
+          echo "project root: $PROJECT_DIR"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          uv sync --frozen --all-extras
+
+      # The 2026-08-01 incident (autonomous run reported failed although the
+      # agent recovered): error-then-success must complete the run. Scripted
+      # LLM — no provider contacted, no secrets.
+      - name: Autonomous recovery integration
+        run: |
+          cd "$PROJECT_DIR"
+          uv run pytest backend/tests/orchestrator/test_autonomous_recovery_integration.py -q
