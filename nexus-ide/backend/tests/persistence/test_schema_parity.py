@@ -96,7 +96,7 @@ def test_alembic_upgrade_head_succeeds_on_a_fresh_database(tmp_path: Path) -> No
     finally:
         conn.close()
     assert stamped is not None
-    assert stamped[0] == "008_message_run_link"
+    assert stamped[0] == "009_todos_scheduled_tasks"
 
 
 def test_tables_match(parity: dict[str, object]) -> None:

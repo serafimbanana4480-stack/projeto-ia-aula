@@ -437,3 +437,172 @@ CREATE TABLE IF NOT EXISTS role_permissions (
 
 CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id);
 CREATE INDEX IF NOT EXISTS idx_role_permissions_role ON role_permissions(role_id);
+
+-- ---------------------------------------------------------------------------
+-- TODOS — persistent per-session task list
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS todos (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    priority        TEXT NOT NULL DEFAULT 'normal'
+        CHECK (priority IN ('low', 'normal', 'high')),
+    status          TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'in_progress', 'completed', 'cancelled')),
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_todos_session_status ON todos(session_id, status);
+
+-- ---------------------------------------------------------------------------
+-- SCHEDULED TASKS — persistent autonomous task queue
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    task_type       TEXT NOT NULL DEFAULT 'monitoring',
+    priority        TEXT NOT NULL DEFAULT 'normal',
+    status          TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','scheduled','running','completed',
+                          'failed','cancelled','retrying','waiting')),
+    handler         TEXT,
+    parameters_json TEXT NOT NULL DEFAULT '{}',
+    dependencies_json TEXT NOT NULL DEFAULT '[]',
+    retry_count     INTEGER DEFAULT 0,
+    max_retries     INTEGER DEFAULT 3,
+    timeout         INTEGER DEFAULT 300,
+    interval        INTEGER,
+    auto_retry      INTEGER DEFAULT 1,
+    result_json     TEXT,
+    error           TEXT,
+    execution_time  REAL DEFAULT 0.0,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    scheduled_at    TEXT,
+    started_at      TEXT,
+    completed_at    TEXT,
+    source          TEXT NOT NULL DEFAULT 'custom',
+    metadata_json   TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_status ON scheduled_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_source ON scheduled_tasks(source);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_handler ON scheduled_tasks(handler);
+
+-- ---------------------------------------------------------------------------
+-- RUN STATE — durable core of the run coordinator (Fase 1a).
+-- One row per run: goal, requirements, constraints, definition of done, the
+-- state-machine position, the plan, budget limits and accumulated usage.
+-- The four tables below are the persistence contract of
+-- backend/runtime/run_coordinator.py; keep them byte-identical to the copies in
+-- backend/migrations/versions/008_run_state.py so schema parity holds.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS run_state (
+    run_id                 TEXT PRIMARY KEY,
+    project_id             TEXT NOT NULL DEFAULT '',
+    user_id                TEXT NOT NULL DEFAULT '',
+    session_id             TEXT NOT NULL DEFAULT '',
+    goal                   TEXT NOT NULL DEFAULT '',
+    requirements_json      TEXT NOT NULL DEFAULT '[]',
+    constraints_json       TEXT NOT NULL DEFAULT '[]',
+    definition_of_done_json TEXT NOT NULL DEFAULT '[]',
+    state                  TEXT NOT NULL DEFAULT 'created'
+        CHECK (state IN ('created','planning','running','waiting_tool','waiting_approval',
+                         'verifying','recovering','paused','completed','failed','cancelled','expired')),
+    plan_json              TEXT,
+    current_task_id        TEXT,
+    retry_count            INTEGER NOT NULL DEFAULT 0,
+    budget_json            TEXT NOT NULL DEFAULT '{}',
+    provider_json          TEXT NOT NULL DEFAULT '{}',
+    memory_refs_json       TEXT NOT NULL DEFAULT '[]',
+    artifacts_json         TEXT NOT NULL DEFAULT '[]',
+    changed_files_json     TEXT NOT NULL DEFAULT '[]',
+    dod_results_json       TEXT,
+    usage_tokens           INTEGER NOT NULL DEFAULT 0,
+    usage_cost_usd         REAL NOT NULL DEFAULT 0.0,
+    usage_tool_calls       INTEGER NOT NULL DEFAULT 0,
+    usage_retries          INTEGER NOT NULL DEFAULT 0,
+    usage_browser_actions  INTEGER NOT NULL DEFAULT 0,
+    usage_subagents        INTEGER NOT NULL DEFAULT 0,
+    usage_runtime_seconds  REAL NOT NULL DEFAULT 0.0,
+    usage_provider_calls   INTEGER NOT NULL DEFAULT 0,
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    heartbeat_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    stop_reason            TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_state_session ON run_state(session_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_state_project ON run_state(project_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_state_user ON run_state(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_state_state ON run_state(state, updated_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- RUN CHECKPOINTS — one row per phase boundary, so a run can be restored.
+-- Ties on created_at are resolved by checkpoint_id (latest_checkpoint).
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS run_checkpoints (
+    checkpoint_id  TEXT PRIMARY KEY,
+    run_id         TEXT NOT NULL,
+    phase          TEXT NOT NULL
+        CHECK (phase IN ('after_planning','before_side_effect','after_side_effect','after_task',
+                         'before_verification','after_verification','pause','provider_failover','heartbeat')),
+    payload_json   TEXT NOT NULL DEFAULT '{}',
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    FOREIGN KEY (run_id) REFERENCES run_state(run_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_checkpoints_run_created ON run_checkpoints(run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_checkpoints_run_phase ON run_checkpoints(run_id, phase, created_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- RUN SIDE EFFECTS — idempotency ledger. UNIQUE(run_id, idempotency_key) makes
+-- a replayed side effect a no-op instead of a second real-world action.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS run_side_effects (
+    id              INTEGER PRIMARY KEY,
+    run_id          TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    kind            TEXT NOT NULL DEFAULT '',
+    result_digest   TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (run_id, idempotency_key),
+    FOREIGN KEY (run_id) REFERENCES run_state(run_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_side_effects_run ON run_side_effects(run_id, idempotency_key);
+
+-- ---------------------------------------------------------------------------
+-- RUN DEAD LETTERS — failed units parked for a human or a later retry.
+-- run_id carries no foreign key on purpose: a DLQ entry outlives its run and
+-- pruned runs must not make the failure evidence unreadable.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS run_dead_letters (
+    id                   TEXT PRIMARY KEY,
+    run_id               TEXT NOT NULL DEFAULT '',
+    task_id              TEXT NOT NULL DEFAULT '',
+    error_class          TEXT NOT NULL DEFAULT '',
+    sanitized_traceback  TEXT NOT NULL DEFAULT '',
+    attempts             INTEGER NOT NULL DEFAULT 0,
+    last_tool            TEXT,
+    last_provider        TEXT,
+    last_evidence_json   TEXT NOT NULL DEFAULT '{}',
+    recoverability       TEXT NOT NULL DEFAULT 'unknown',
+    retry_after          TEXT,
+    state                TEXT NOT NULL DEFAULT 'open'
+        CHECK (state IN ('open','retrying','requeued','replanned','abandoned','escalated')),
+    note                 TEXT NOT NULL DEFAULT '',
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_dead_letters_run ON run_dead_letters(run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_dead_letters_state ON run_dead_letters(state, created_at DESC);
