@@ -4,6 +4,7 @@ import TopBar from "../../../components/layout/TopBar";
 import Sidebar from "../../../components/layout/Sidebar";
 import BottomHUD from "../../../components/layout/BottomHUD";
 import { Activity, BrainCircuit, CheckCircle2, GitBranch, History, Play, Zap } from "lucide-react";
+import { authenticatedFetch } from "../../../lib/auth";
 
 interface EvolutionState {
   version_tree: Record<string, unknown>;
@@ -33,7 +34,7 @@ export default function EvolutionDashboard() {
 
   const fetchState = async () => {
     try {
-      const res = await fetch("/api/evolution/state");
+      const res = await authenticatedFetch("/api/evolution/state");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setState(data);
@@ -46,7 +47,7 @@ export default function EvolutionDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/evolution/run", {
+      const res = await authenticatedFetch("/api/evolution/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ max_cycles: 1, allow_simulation: true }),
@@ -71,7 +72,7 @@ export default function EvolutionDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/evolution/bootstrap", { method: "POST" });
+      const res = await authenticatedFetch("/api/evolution/bootstrap", { method: "POST" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       alert(`Bootstrapped ${data.count} champions`);

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Activity, Bot, RefreshCw, Wifi, WifiOff } from "lucide-react";
 import { apiUrl, authHeaders } from "../../lib/api";
+import { getAccessToken } from "../../lib/auth";
 
 type Message = {
   id: string;
@@ -63,26 +64,66 @@ export default function SimpleDashboard() {
   }, []);
 
   useEffect(() => {
-    const stream = new EventSource(apiUrl("/api/autonomous-tasks/stream"));
-    stream.onopen = () => setConnected(true);
-    stream.onerror = () => setConnected(false);
-    stream.onmessage = (event) => {
+    // `EventSource` cannot send an Authorization header, so the stream is
+    // consumed as a plain fetch + ReadableStream (same pattern as useSSE.ts).
+    const controller = new AbortController();
+    const token = getAccessToken();
+
+    void (async () => {
       try {
-        const data = JSON.parse(event.data) as Record<string, unknown>;
-        if (!data.type || data.type === "heartbeat") return;
-        const task = typeof data.task === "object" && data.task !== null ? data.task as Record<string, unknown> : {};
-        const source = String(data.agent ?? task.agent ?? "Sistema");
-        const content = String(data.content ?? task.goal ?? data.message ?? "");
-        if (!content) return;
-        setMessages((previous) => [
-          ...previous.slice(-49),
-          { id: crypto.randomUUID(), agent: source, content, timestamp: new Date().toISOString(), type: String(data.type) },
-        ]);
+        const response = await fetch(apiUrl("/api/autonomous-tasks/stream"), {
+          headers: {
+            Accept: "text/event-stream",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          signal: controller.signal,
+        });
+        if (!response.ok || !response.body) {
+          setConnected(false);
+          return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (!controller.signal.aborted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split(/\r?\n\r?\n/);
+          buffer = frames.pop() ?? "";
+
+          for (const frame of frames) {
+            const payload = frame
+              .split(/\r?\n/)
+              .filter((line) => line.startsWith("data:"))
+              .map((line) => line.slice(5).trimStart())
+              .join("\n");
+            if (!payload) continue;
+            try {
+              const data = JSON.parse(payload) as Record<string, unknown>;
+              setConnected(true);
+              if (!data.type || data.type === "heartbeat") continue;
+              const task = typeof data.task === "object" && data.task !== null ? data.task as Record<string, unknown> : {};
+              const source = String(data.agent ?? task.agent ?? "Sistema");
+              const content = String(data.content ?? task.goal ?? data.message ?? "");
+              if (!content) continue;
+              setMessages((previous) => [
+                ...previous.slice(-49),
+                { id: crypto.randomUUID(), agent: source, content, timestamp: new Date().toISOString(), type: String(data.type) },
+              ]);
+            } catch {
+              // Ignore malformed SSE frames; they are not user-visible events.
+            }
+          }
+        }
       } catch {
-        // Ignore malformed SSE frames; they are not user-visible events.
+        // Stream closed or aborted; the badge reflects the disconnected state.
       }
-    };
-    return () => stream.close();
+    })();
+
+    return () => controller.abort();
   }, []);
 
   const visibleMessages = useMemo(
@@ -103,14 +144,14 @@ export default function SimpleDashboard() {
             <p className="mt-1 text-sm text-slate-400">Eventos e estado recebidos do backend.</p>
           </div>
           <span className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium ${
-            connected ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" : "border-slate-700 bg-slate-900 text-slate-400"
+            connected ? "border-emerald-500/40 bg-emerald-500/10 text-nexus-accent2" : "border-slate-700 bg-slate-900 text-slate-400"
           }`}>
             {connected ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
             {connected ? "Em direto" : "Sem ligação"}
           </span>
         </header>
 
-        {error ? <div className="mb-5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">{error}</div> : null}
+        {error ? <div className="mb-5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-nexus-accent3">{error}</div> : null}
 
         <section className="mb-5 flex flex-wrap gap-2">
           <button type="button" onClick={() => setSelectedAgent(null)} className={`rounded-full px-3 py-1.5 text-xs ${selectedAgent === null ? "bg-violet-600 text-white" : "bg-slate-800 text-slate-300 hover:bg-slate-700"}`}>Todos</button>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useCallback, useState, useEffect } from "react";
+import { getAccessToken } from "../lib/auth";
 import { mapApiAgent, useAgentStore } from "./useAgentStore";
 import { useTaskStore, type TaskStatus } from "./useTaskStore";
 import { useSystemStore, type SystemMetrics } from "./useSystemStore";
@@ -109,6 +110,9 @@ export function useEventBus() {
   // `connectSSE` refused the retry ("already connected") and the scheduled
   // reconnect silently no-op'ed — a dropped stream never recovered.
   const desired = useRef<Set<string>>(new Set());
+  // Streams the backend refused on credentials. Retrying the same request
+  // cannot succeed, so these must not enter the reconnect loop.
+  const authRejected = useRef<Set<string>>(new Set());
 
   const { updateAgent, setAgents } = useAgentStore();
   const { updateTask } = useTaskStore();
@@ -159,12 +163,23 @@ export function useEventBus() {
       const controller = new AbortController();
       abortControllers.current.set(storeKey, controller);
 
+      // Read the token per attempt, not per mount: a reconnect after an
+      // expired access token picks up the refreshed one.
+      const token = getAccessToken();
       fetch(`${API_BASE}${url}`, {
         signal: controller.signal,
-        headers: { Accept: "text/event-stream" },
+        headers: {
+          Accept: "text/event-stream",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
       })
         .then((response) => {
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          if (!response.ok) {
+            if (response.status === 401 || response.status === 403) {
+              authRejected.current.add(storeKey);
+            }
+            throw new Error(`HTTP ${response.status}`);
+          }
           const reader = response.body?.getReader();
           if (!reader) throw new Error("No reader available");
 
@@ -210,11 +225,19 @@ export function useEventBus() {
           if (abortControllers.current.get(storeKey) === controller) {
             abortControllers.current.delete(storeKey);
           }
-          setConnectionError(`Falha ao ligar a ${storeKey}`);
+          setConnectionError(
+            authRejected.current.has(storeKey)
+              ? `Sem autorização para ${storeKey}. Inicia sessão novamente.`
+              : `Falha ao ligar a ${storeKey}`,
+          );
           setIsConnected(false);
           connectedRef.current = false;
           console.warn(`SSE connection ${storeKey} failed:`, err);
-          scheduleReconnect(url, storeKey, onData);
+          // A rejected credential will not become valid by trying again; only
+          // a fresh `startBus` (after re-login) may retry this stream.
+          if (!authRejected.current.has(storeKey)) {
+            scheduleReconnect(url, storeKey, onData);
+          }
         });
     },
     [scheduleReconnect],
@@ -226,6 +249,7 @@ export function useEventBus() {
 
   const disconnectSSE = useCallback((storeKey: string) => {
     desired.current.delete(storeKey);
+    authRejected.current.delete(storeKey);
     const controller = abortControllers.current.get(storeKey);
     if (controller) {
       controller.abort();
@@ -240,6 +264,7 @@ export function useEventBus() {
 
   const startSSEConnections = useCallback(() => {
     setConnectionError(null);
+    authRejected.current.clear();
 
     // Connect to the system metrics stream
     connectSSE("/api/system/metrics/stream", "metrics", (data) => {

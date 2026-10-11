@@ -17,6 +17,7 @@ import { useEventBus } from "../../stores/useEventBus";
 import { useSystemStore, type SystemMetrics } from "../../stores/useSystemStore";
 import { useTaskStore } from "../../stores/useTaskStore";
 import { useAgentStore } from "../../stores/useAgentStore";
+import { clearAuth, setAccessToken } from "../../lib/auth";
 
 interface FakeStream {
   body: ReadableStream<Uint8Array>;
@@ -48,6 +49,16 @@ function sseResponse(stream: FakeStream): Response {
     ok: true,
     status: 200,
     body: stream.body,
+    text: async () => "",
+    headers: new Headers(),
+  } as unknown as Response;
+}
+
+function unauthorizedResponse(): Response {
+  return {
+    ok: false,
+    status: 401,
+    body: null,
     text: async () => "",
     headers: new Headers(),
   } as unknown as Response;
@@ -96,6 +107,8 @@ describe("useEventBus", () => {
 
   beforeEach(() => {
     streams = new Map();
+    clearAuth();
+    setAccessToken("bus-token");
     useSystemStore.setState({
       metrics: emptySystemMetrics(),
       hasTelemetry: false,
@@ -121,6 +134,47 @@ describe("useEventBus", () => {
     vi.unstubAllGlobals();
     globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
+    clearAuth();
+  });
+
+  it("sends the access token on every stream", () => {
+    const { result } = renderHook(() => useEventBus());
+    act(() => result.current.startBus());
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    for (const call of fetchMock.mock.calls) {
+      const headers = (call[1] as RequestInit).headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer bus-token");
+      expect(headers.Accept).toBe("text/event-stream");
+    }
+  });
+
+  it("stops retrying a stream the backend rejects as unauthorized", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation((url: string) =>
+      STREAM_URLS.some((candidate) => String(url).endsWith(candidate))
+        ? Promise.resolve(unauthorizedResponse())
+        : Promise.reject(new Error(`unexpected fetch: ${String(url)}`)),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { result } = renderHook(() => useEventBus());
+    act(() => result.current.startBus());
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.isConnected).toBe(false);
+    expect(result.current.connectionError).toMatch(/Sem autorização/);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    // One attempt per stream, never a reconnect loop on 401.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("opens exactly one connection per stream and never re-opens on re-render", () => {

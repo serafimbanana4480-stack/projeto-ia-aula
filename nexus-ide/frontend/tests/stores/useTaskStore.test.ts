@@ -333,6 +333,7 @@ describe("useTaskStore", () => {
   });
 
   it("fetchWorkflows normalizes the backend array and leaves absent metrics unset", async () => {
+    setAccessToken("workflows-token");
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ([{
@@ -356,7 +357,12 @@ describe("useTaskStore", () => {
       await useTaskStore.getState().fetchWorkflows();
     });
     expect(useTaskStore.getState().isLoading).toBe(false);
-    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/api/workflows"));
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/workflows"),
+      expect.any(Object),
+    );
+    const workflowRequest = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    expect(new Headers(workflowRequest.headers).get("Authorization")).toBe("Bearer workflows-token");
     expect(useTaskStore.getState().workflows["wf-1"]).toMatchObject({
       id: "wf-1",
       name: "Test workflow",

@@ -1,3 +1,5 @@
+import { getAccessToken } from "./auth";
+
 interface ErrorContext {
   component?: string;
   action?: string;
@@ -56,11 +58,18 @@ class ErrorLogger {
 
   private async sendToBackend(errorLog: ErrorLog): Promise<void> {
     try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      const token = getAccessToken();
+      // Without a token the report can only be rejected: it is already kept in
+      // localStorage, so skip the guaranteed-to-fail round trip.
+      if (!token) return;
+      headers.Authorization = `Bearer ${token}`;
+
       const response = await fetch("/api/errors/report", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers,
         body: JSON.stringify(errorLog),
       });
 

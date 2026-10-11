@@ -396,7 +396,7 @@ export const useTaskStore = create<TaskStore>()(
     fetchWorkflows: async () => {
       set({ isLoading: true, workflowsLoading: true, error: null, workflowsError: null });
       try {
-        const response = await fetch(apiUrl("/api/workflows"));
+        const response = await authenticatedFetch(apiUrl("/api/workflows"));
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data: unknown = await response.json();
         const rawWorkflows = Array.isArray(data)

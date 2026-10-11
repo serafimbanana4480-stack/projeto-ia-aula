@@ -7,6 +7,7 @@ import {
   Clock, TrendingUp, TrendingDown, X,
 } from "lucide-react";
 import { apiUrl } from "../../../lib/api";
+import { authenticatedFetch } from "../../../lib/auth";
 
 type Conv = {
   id: string;
@@ -62,7 +63,7 @@ export default function HistoryPage() {
         ...(filterAgent ? { agent: filterAgent } : {}),
         ...(filterSentiment ? { sentiment: filterSentiment } : {}),
       });
-      const res = await fetch(apiUrl(`/api/analytics/conversations?${params}`));
+      const res = await authenticatedFetch(apiUrl(`/api/analytics/conversations?${params}`));
       const data = await res.json();
       let convs: Conv[] = data.conversations || [];
       if (debouncedSearch) {
@@ -104,7 +105,7 @@ export default function HistoryPage() {
       {/* Sidebar */}
       <aside className="w-60 shrink-0 border-r border-slate-800 bg-[#07071a] flex flex-col">
         <div className="p-5 border-b border-slate-800">
-          <p className="text-[10px] uppercase tracking-[0.25em] text-cyan-400 font-bold">Nexus Omega</p>
+          <p className="text-[10px] uppercase tracking-[0.25em] text-nexus-cyan font-bold">Nexus Omega</p>
           <h2 className="text-base font-bold text-slate-100 mt-1">History</h2>
           <p className="text-[11px] text-slate-500 mt-0.5">{total} total interactions</p>
         </div>
@@ -226,7 +227,7 @@ export default function HistoryPage() {
                   <td className="px-4 py-3 text-xs font-mono text-slate-400">{conv.tokens_generated}</td>
                   <td className="px-4 py-3">
                     {conv.success
-                      ? <CheckCircle2 size={15} className="text-emerald-400" />
+                      ? <CheckCircle2 size={15} className="text-nexus-accent2" />
                       : <XCircle size={15} className="text-red-400" />}
                   </td>
                 </tr>
@@ -268,7 +269,7 @@ export default function HistoryPage() {
               <div className="flex justify-between"><span className="text-slate-500">Tokens</span><span className="text-slate-300 font-mono">{selected.tokens_generated}</span></div>
               <div className="flex justify-between"><span className="text-slate-500">Sentiment</span><SentimentPill label={selected.sentiment.label} /></div>
               <div className="flex justify-between"><span className="text-slate-500">Status</span>
-                {selected.success ? <CheckCircle2 size={14} className="text-emerald-400" /> : <XCircle size={14} className="text-red-400" />}
+                {selected.success ? <CheckCircle2 size={14} className="text-nexus-accent2" /> : <XCircle size={14} className="text-red-400" />}
               </div>
             </div>
             <div>

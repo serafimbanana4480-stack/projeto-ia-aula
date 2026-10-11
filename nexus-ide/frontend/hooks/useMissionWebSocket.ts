@@ -5,6 +5,13 @@
  * Falls back to SSE on `/api/bus/stream?topics=mission.update,agent.status`
  * if the WebSocket is unavailable.
  *
+ * Browsers cannot set headers on a WebSocket handshake, so the access token
+ * travels in the query string; the SSE transport uses a real
+ * `Authorization: Bearer` header. A 401/403 on the SSE transport is
+ * definitive — the credential is not going to become valid by retrying — so
+ * the transport stops instead of hammering the backend, and the store is left
+ * in an explicit error state.
+ *
  * Every event the backend emits — whether it arrives as a routing decision,
  * an execution_state/execution_error checkpoint, or one of the legacy
  * bus / mission_update envelopes — is normalized through
@@ -23,11 +30,15 @@ import {
   resumeMission as apiResumeMission,
   apiUrl,
 } from "../lib/api";
+import { getAccessToken } from "../lib/auth";
 import { normalizeStreamEvent } from "../lib/executionTypes";
 import { useMissionStore, type BusMessage, type Decision } from "../stores/missionStore";
 
 /** Maximum reconnect delay — keeps exponential growth bounded. */
 const MAX_RECONNECT_DELAY = 30_000;
+
+const AUTH_FAILURE_MESSAGE =
+  "Sem autorização para receber eventos da missão. Inicia sessão novamente.";
 
 /** Topics the SSE stream subscribes to. Mirrors the backend bus topics. */
 const SSE_TOPICS =
@@ -63,11 +74,35 @@ interface LegacyEnvelope {
   timestamp?: string;
 }
 
-function wsUrl(missionId: string): string {
+function wsUrl(missionId: string, token: string | null): string {
   const httpUrl = apiUrl("");
   const wsProtocol = httpUrl.startsWith("https") ? "wss" : "ws";
   const host = httpUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
-  return `${wsProtocol}://${host}/ws/missions/${missionId}`;
+  // A WebSocket handshake cannot carry an `Authorization` header from the
+  // browser, so the token is passed as a query parameter.
+  const query = token ? `?token=${encodeURIComponent(token)}` : "";
+  return `${wsProtocol}://${host}/ws/missions/${missionId}${query}`;
+}
+
+/**
+ * Split an SSE byte buffer into frames, returning the payload of every
+ * default-message frame plus the trailing partial frame.
+ */
+function extractSseData(buffer: string): { payloads: string[]; rest: string } {
+  const frames = buffer.split(/\r?\n\r?\n/);
+  const rest = frames.pop() ?? "";
+  const payloads: string[] = [];
+  for (const frame of frames) {
+    const lines = frame.split(/\r?\n/);
+    const namedEvent = lines.find((line) => line.startsWith("event:"));
+    if (namedEvent && namedEvent.slice(6).trim() !== "message") continue;
+    const data = lines
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    if (data) payloads.push(data);
+  }
+  return { payloads, rest };
 }
 
 function parseBusMessage(data: Record<string, unknown>): BusMessage | null {
@@ -96,10 +131,31 @@ function parseDecision(data: Record<string, unknown>): Decision | null {
 
 export function useMissionWebSocket(missionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
-  const esRef = useRef<EventSource | null>(null);
+  // The SSE transport is a `fetch` stream (an `EventSource` cannot send an
+  // Authorization header), so the live handle is an AbortController.
+  const sseAbortRef = useRef<AbortController | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempt = useRef(0);
   const bindingRef = useRef(false);
+  // Set once the backend rejects our credentials. A 401/403 is definitive:
+  // retrying the same token cannot succeed, so every transport stops here
+  // instead of reconnecting forever.
+  const authRejected = useRef(false);
+
+  const rejectAuth = useCallback(() => {
+    authRejected.current = true;
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
+    wsRef.current?.close();
+    wsRef.current = null;
+    sseAbortRef.current?.abort();
+    sseAbortRef.current = null;
+    useMissionStore.getState().setBackendOnline(false);
+    useMissionStore.getState().setError(AUTH_FAILURE_MESSAGE);
+  }, []);
+
   const dispatch = useCallback((raw: unknown) => {
     // The stream normalizer accepts anything that looks like an SSE/WS
     // envelope. When the event is not a known execution shape we fall back to
@@ -173,72 +229,115 @@ export function useMissionWebSocket(missionId: string | null) {
     }
   }, []);
 
+  const handleBusFrame = useCallback(
+    (payload: string) => {
+      try {
+        const data = JSON.parse(payload) as Record<string, unknown>;
+        // Route SSE bus messages through the same dispatcher. The bus
+        // sometimes wraps execution envelopes under ``data``.
+        if (data && typeof data === "object") {
+          dispatch({ type: "bus_message", data });
+        }
+
+        // Keep legacy behaviour: certain bus topics imply a decision.
+        const topic = (data.topic as string) || "";
+        if (topic === "architecture.proposals" || topic === "review.completed") {
+          const decision = parseDecision({
+            agent: data.source_agent,
+            summary: `${data.source_agent} ${topic === "architecture.proposals" ? "proposed" : "reviewed"} ${(data.payload as Record<string, unknown>)?.proposal || (data.payload as Record<string, unknown>)?.verdict || "update"}`,
+            type: topic === "architecture.proposals" ? "proposal" : "review",
+            timestamp: data.timestamp,
+          });
+          if (decision) {
+            dispatch({ type: "decision", payload: decision as unknown as Record<string, unknown> });
+          }
+        }
+      } catch {
+        /* ignore parse errors */
+      }
+    },
+    [dispatch],
+  );
+
   const startSSE = useCallback(() => {
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
+    if (authRejected.current) return;
+    if (sseAbortRef.current) {
+      sseAbortRef.current.abort();
+      sseAbortRef.current = null;
     }
 
-    try {
-      const es = new EventSource(apiUrl(`/api/bus/stream?topics=${SSE_TOPICS}`));
-      esRef.current = es;
+    // The token is read per attempt: a reconnect after a token refresh sends
+    // the new credential instead of the rejected one.
+    const token = getAccessToken();
+    if (!token) {
+      rejectAuth();
+      return;
+    }
 
-      es.onopen = () => {
+    const controller = new AbortController();
+    sseAbortRef.current = controller;
+
+    void (async () => {
+      try {
+        const response = await fetch(apiUrl(`/api/bus/stream?topics=${SSE_TOPICS}`), {
+          headers: {
+            Accept: "text/event-stream",
+            Authorization: `Bearer ${token}`,
+          },
+          signal: controller.signal,
+        });
+
+        if (response.status === 401 || response.status === 403) {
+          rejectAuth();
+          return;
+        }
+        if (!response.ok || !response.body) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
         reconnectAttempt.current = 0;
         useMissionStore.getState().setBackendOnline(true);
-      };
 
-      es.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data) as Record<string, unknown>;
-          // Route SSE bus messages through the same dispatcher. The bus
-          // sometimes wraps execution envelopes under ``data``.
-          if (data && typeof data === "object") {
-            dispatch({ type: "bus_message", data });
-          }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
 
-          // Keep legacy behaviour: certain bus topics imply a decision.
-          const topic = (data.topic as string) || "";
-          if (topic === "architecture.proposals" || topic === "review.completed") {
-            const decision = parseDecision({
-              agent: data.source_agent,
-              summary: `${data.source_agent} ${topic === "architecture.proposals" ? "proposed" : "reviewed"} ${(data.payload as Record<string, unknown>)?.proposal || (data.payload as Record<string, unknown>)?.verdict || "update"}`,
-              type: topic === "architecture.proposals" ? "proposal" : "review",
-              timestamp: data.timestamp,
-            });
-            if (decision) {
-              dispatch({ type: "decision", payload: decision as unknown as Record<string, unknown> });
-            }
-          }
-        } catch {
-          /* ignore parse errors */
+        while (!controller.signal.aborted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const { payloads, rest } = extractSseData(buffer);
+          buffer = rest;
+          for (const payload of payloads) handleBusFrame(payload);
         }
-      };
-
-      es.onerror = () => {
-        es.close();
-        esRef.current = null;
+      } catch {
+        if (controller.signal.aborted) return;
         const delay = Math.min(1000 * 2 ** reconnectAttempt.current, MAX_RECONNECT_DELAY);
         reconnectAttempt.current += 1;
         if (reconnectAttempt.current > 2) {
           useMissionStore.getState().setBackendOnline(false);
         }
         reconnectTimer.current = setTimeout(startSSE, delay);
-      };
-    } catch {
-      /* SSE not available */
-    }
-  }, [dispatch]);
+      }
+    })();
+  }, [handleBusFrame, rejectAuth]);
 
   const startWebSocket = useCallback(() => {
     if (!missionId) return;
+    if (authRejected.current) return;
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
 
+    const token = getAccessToken();
+    if (!token) {
+      rejectAuth();
+      return;
+    }
+
     try {
-      const ws = new WebSocket(wsUrl(missionId));
+      const ws = new WebSocket(wsUrl(missionId, token));
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -255,8 +354,15 @@ export function useMissionWebSocket(missionId: string | null) {
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         wsRef.current = null;
+        // A handshake the backend refused on policy/auth grounds (1008 policy
+        // violation, 4401/4403 private auth codes) is not worth retrying: the
+        // SSE transport reports the definitive HTTP status instead.
+        if (event.code === 1008 || event.code === 4401 || event.code === 4403) {
+          if (!authRejected.current && !sseAbortRef.current) startSSE();
+          return;
+        }
         const delay = Math.min(1000 * 2 ** reconnectAttempt.current, MAX_RECONNECT_DELAY);
         reconnectAttempt.current += 1;
         if (reconnectAttempt.current > 2) {
@@ -276,7 +382,7 @@ export function useMissionWebSocket(missionId: string | null) {
     } catch {
       startSSE();
     }
-  }, [missionId, dispatch, startSSE]);
+  }, [missionId, dispatch, rejectAuth, startSSE]);
 
   // Wire the store's action verbs to REST calls. We bind once per mount; the
   // store keeps the binding for the lifetime of the hook, and any later
@@ -315,6 +421,7 @@ export function useMissionWebSocket(missionId: string | null) {
   useEffect(() => {
     if (!missionId) return;
     reconnectAttempt.current = 0;
+    authRejected.current = false;
     startWebSocket();
 
     return () => {
@@ -322,9 +429,9 @@ export function useMissionWebSocket(missionId: string | null) {
         wsRef.current.close();
         wsRef.current = null;
       }
-      if (esRef.current) {
-        esRef.current.close();
-        esRef.current = null;
+      if (sseAbortRef.current) {
+        sseAbortRef.current.abort();
+        sseAbortRef.current = null;
       }
       if (reconnectTimer.current) {
         clearTimeout(reconnectTimer.current);

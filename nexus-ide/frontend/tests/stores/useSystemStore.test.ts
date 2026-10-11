@@ -237,7 +237,8 @@ describe("useSystemStore", () => {
     expect(state.hasTelemetry).toBe(true);
     expect(state.measuredMetrics.cpuUsage).toBe(true);
     expect(state.metrics.cpuUsage).toBe(23);
-    expect(state.error).toBe("Network error");
+    // `authenticatedFetch` reports transport failures as an ApiError.
+    expect(state.error).toBe("Failed to connect to the server");
   });
 
   it("handles a malformed successful response without crashing", async () => {
@@ -280,7 +281,18 @@ describe("useSystemStore", () => {
     });
     await act(() => promise);
 
-    expect(useSystemStore.getState().error).toBe("Network error");
+    expect(useSystemStore.getState().error).toBe("Failed to connect to the server");
+    expect(useSystemStore.getState().isLive).toBe(false);
+  });
+
+  it("fetchMetrics surfaces an unauthorized response without retrying it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 401 }) as any;
+    global.fetch = fetchMock;
+
+    await act(() => useSystemStore.getState().fetchMetrics());
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(useSystemStore.getState().error).toContain("HTTP 401");
     expect(useSystemStore.getState().isLive).toBe(false);
   });
 

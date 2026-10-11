@@ -7,6 +7,7 @@ import {
   Calendar, Filter, File,
 } from "lucide-react";
 import { apiUrl } from "../../../lib/api";
+import { authenticatedFetch } from "../../../lib/auth";
 
 type Report = {
   id: string;
@@ -30,7 +31,7 @@ export default function ReportsPage() {
   useEffect(() => {
     async function load() {
       try {
-        const res = await fetch(apiUrl("/api/analytics/reports/available"));
+        const res = await authenticatedFetch(apiUrl("/api/analytics/reports/available"));
         const data = await res.json();
         setReports(data);
         const fmt: Record<string, string> = {};
@@ -46,7 +47,7 @@ export default function ReportsPage() {
   async function generateReport(reportId: string, format: string) {
     setGenState(s => ({ ...s, [reportId]: { status: "generating" } }));
     try {
-      const res = await fetch(apiUrl("/api/analytics/reports/generate"), {
+      const res = await authenticatedFetch(apiUrl("/api/analytics/reports/generate"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ report_id: reportId, format }),
@@ -63,7 +64,7 @@ export default function ReportsPage() {
       {/* Sidebar */}
       <aside className="w-60 shrink-0 border-r border-slate-800 bg-[#07071a] flex flex-col">
         <div className="p-5 border-b border-slate-800">
-          <p className="text-[10px] uppercase tracking-[0.25em] text-cyan-400 font-bold">Nexus Omega</p>
+          <p className="text-[10px] uppercase tracking-[0.25em] text-nexus-cyan font-bold">Nexus Omega</p>
           <h2 className="text-base font-bold text-slate-100 mt-1">Reports</h2>
           <p className="text-[11px] text-slate-500 mt-0.5">Export & Analytics</p>
         </div>
@@ -88,8 +89,8 @@ export default function ReportsPage() {
             <p className="text-xs text-slate-500 mt-0.5">Generate and download detailed analytics reports in PDF or Excel format</p>
           </div>
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
-            <CheckCircle2 size={13} className="text-emerald-400" />
-            <span className="text-xs text-emerald-400 font-medium">All systems operational</span>
+            <CheckCircle2 size={13} className="text-nexus-accent2" />
+            <span className="text-xs text-nexus-accent2 font-medium">All systems operational</span>
           </div>
         </header>
 
@@ -157,7 +158,7 @@ export default function ReportsPage() {
                         <a
                           href={state.downloadUrl}
                           download
-                          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors"
+                          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-nexus-accent2 text-white text-xs font-semibold transition-colors"
                         >
                           <Download size={13} /> Download
                         </a>

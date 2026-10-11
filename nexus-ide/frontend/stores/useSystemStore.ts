@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { apiUrl } from "../lib/api";
+import { authenticatedFetch } from "../lib/auth";
 
 export interface SystemMetrics {
   cpuUsage: number;
@@ -126,7 +127,7 @@ export const useSystemStore = create<SystemStore>((set) => ({
   fetchMetrics: async () => {
     set({ isLoading: true, error: null });
     try {
-      const res = await fetch(apiUrl("/api/metrics/current"));
+      const res = await authenticatedFetch(apiUrl("/api/metrics/current"));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const payload: unknown = await res.json();
       if (!isRecord(payload)) {
