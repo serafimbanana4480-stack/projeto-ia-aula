@@ -13,6 +13,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backend.persistence.db import log_tool_execution
+from backend.tools.sanitizer import (
+    detect_injection,
+    is_external_tool,
+    wrap_external_content,
+)
 
 # Tool result cache — best-effort; system works without it
 try:
@@ -87,6 +92,141 @@ def _record_tool_failure(name: str, session_id: str | None) -> int:
 def tool_failure_count(name: str, session_id: str | None) -> int:
     """Current consecutive-failure count for a tool in a session."""
     return _tool_failures.get(_failure_key(name, session_id), 0)
+
+
+# --- Trust boundary ---------------------------------------------------------
+# A tool result is not automatically trustworthy. ``read_file`` on an
+# untrusted checkout, shell stdout, a fetched page or an MCP server reply all
+# carry text this process did not author, and that text reaches the model with
+# whatever authority the surrounding message has. ``execute_tool`` is the only
+# place every tool result passes through, so the quoting happens here: the
+# payload is framed as data before the agent ever sees it.
+
+#: Payload keys that carry text from the outside world. Their values are
+#: quoted; the control-plane keys (``ok``, ``error``, ``exit_code``,
+#: ``written``, ``evidence``, ...) are left alone so the guards, the circuit
+#: breaker and the verification gate keep reading the real values.
+#:
+#: The keys were inventoried from the handlers of the external tools
+#: themselves (``web_search_v2``, ``web_fetcher``, ``shell_runner``,
+#: ``file_ops``, ``api_tester``, ``db_client``, ``email_tools``,
+#: ``embeddings``) rather than guessed: a missing entry means that field
+#: reaches the model unframed. Inside a framed field every string leaf is
+#: quoted regardless of its own key, so nested payloads (``hits`` ->
+#: ``snippet``/``title``/``url``) are covered by the parent.
+_EXTERNAL_TEXT_FIELDS: frozenset[str] = frozenset(
+    {
+        "content",
+        "text",
+        "output",
+        "stdout",
+        "stderr",
+        "summary",
+        "answer",
+        "body",
+        "snippet",
+        "snippets",
+        "page_text",
+        "markdown",
+        "raw",
+        "results",
+        "hits",
+        "links",
+        "repositories",
+        "rows",
+        "columns",
+        "emails",
+        "memories",
+        "sources",
+        "response",
+        "matches",
+        "entries",
+        # Fields the external handlers return at the top level: a fetched
+        # page's <title>, an inbox listing's subjects/senders, the parsed JSON
+        # body of an api_request, response headers, and the diagnostic text a
+        # tool writes about itself. All of them are attacker-influenceable.
+        "title",
+        "message",
+        "subjects",
+        "senders",
+        "parsed",
+        "headers",
+    }
+)
+
+#: Recursion cap for content trees. Web results nest (hits -> snippets), and a
+#: hostile payload must not be able to spend the agent's turn walking it.
+_EXTERNAL_FRAME_MAX_DEPTH = 4
+
+
+def _frame_external_text(text: str, source: str) -> str:
+    """Quote one text field, and log an injection attempt as a signal.
+
+    Detection never blocks: a search result that says "ignore previous
+    instructions" is still legitimate data the user asked about. The log line
+    is what makes the attempt visible.
+    """
+    if not text or not text.strip():
+        return text
+    framed = wrap_external_content(text, source=source)
+    signal = detect_injection(text)
+    if signal.detected:
+        logger.info(
+            "[UNTRUSTED CONTENT] injection pattern %r found in %s output "
+            "(%d chars quoted as data, not blocked)",
+            signal.pattern,
+            source,
+            len(text),
+        )
+    return framed
+
+
+def _frame_external_tree(value: Any, source: str, depth: int = 0) -> Any:
+    """Quote every string leaf under a content field as external data."""
+    if isinstance(value, str):
+        return _frame_external_text(value, source)
+    if depth >= _EXTERNAL_FRAME_MAX_DEPTH:
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _frame_external_tree(item, source, depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_frame_external_tree(item, source, depth + 1) for item in value]
+    return value
+
+
+def frame_external_result(name: str, payload: Any) -> Any:
+    """Quote an external tool's payload as data before it leaves the registry.
+
+    Only the textual content is framed: the success/error schema is untouched,
+    so ``ok``, ``error``, ``exit_code``, ``evidence`` and the typed fields keep
+    their real values. The call is idempotent — a payload that is already a
+    complete data block is returned unchanged, so a cache hit cannot double
+    the framing.
+
+    Args:
+        name: Tool name, used both to classify the payload and as the source
+            recorded in the block.
+        payload: The handler's result.
+
+    Returns:
+        The same payload with its external text quoted.
+    """
+    if not is_external_tool(name):
+        return payload
+    source = f"tool:{name}"
+    if isinstance(payload, str):
+        return _frame_external_text(payload, source)
+    if not isinstance(payload, dict):
+        return payload
+    framed: dict[str, Any] = {}
+    for key, value in payload.items():
+        framed[key] = (
+            _frame_external_tree(value, source) if key in _EXTERNAL_TEXT_FIELDS else value
+        )
+    return framed
 
 
 def reset_tool_failures(session_id: str | None = None) -> None:
@@ -1261,6 +1401,111 @@ def _sentinel_assessment(
     )
 
 
+# --- Run budget accounting (Fase 1c) ---------------------------------------
+# Every tool call an agent makes inside a run is charged to that run, and a run
+# that has exhausted a hard limit is stopped *here*, at the single place every
+# tool call passes through, instead of being discovered after it has spent more.
+#
+# The channel is a context variable (``backend.runtime.run_context``) rather
+# than a new ``execute_tool`` parameter: the run id is ambient context owned by
+# whoever opened the run, and adding a parameter would touch every caller (the
+# agents, the MCP server, the e2e scenarios) for a value most of them do not
+# have. With no run in context the guard is a no-op, so no existing caller
+# changes behaviour.
+#
+# There is deliberately no read-only exemption. A budget is the operator's
+# statement of how much work a run may do, and a run that may spend nothing is
+# a run that has to stop: letting "free" reads through keeps an over-budget
+# run looping (and keep spending tokens and wall-clock) on evidence it is no
+# longer allowed to act on. The block is observable — the response names the
+# exceeded limits and the accumulated usage — so the agent reports the stop
+# instead of retrying into it.
+
+#: Kill switch for the accounting hook (``0``/``false`` disables it). Present
+#: because a mis-configured budget must be able to stop blocking a run by an
+#: environment change during an incident, rather than by a code rollback.
+TOOL_BUDGET_HOOK_ENV = "NEXUS_TOOL_BUDGET_HOOK"
+
+_budget_coordinator: Any | None = None
+_budget_coordinator_path: str | None = None
+
+
+def _tool_budget_hook_enabled() -> bool:
+    return os.environ.get(TOOL_BUDGET_HOOK_ENV, "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _run_budget_coordinator() -> Any | None:
+    """Return a cached :class:`RunCoordinator`, rebuilt when the database moves.
+
+    ``RunCoordinator()`` resolves the database path at call time and re-runs
+    the (idempotent) schema check, so caching one instance per path keeps the
+    per-call cost at a single ``UPDATE`` while a test that repoints
+    ``DB_PATH`` still gets a coordinator pointed at the right file.
+    """
+    global _budget_coordinator, _budget_coordinator_path
+    from backend.persistence import db
+
+    path = str(db.DB_PATH)
+    if _budget_coordinator is None or _budget_coordinator_path != path:
+        from backend.runtime.run_coordinator import RunCoordinator
+
+        try:
+            _budget_coordinator = RunCoordinator()
+        except Exception:
+            logger.debug("[TOOL BUDGET] run coordinator unavailable", exc_info=True)
+            return None
+        _budget_coordinator_path = path
+    return _budget_coordinator
+
+
+def record_run_tool_call(name: str) -> dict[str, Any] | None:
+    """Charge one tool call to the active run and report an exhausted budget.
+
+    Returns ``None`` when the call may proceed: no active run in context, the
+    hook is disabled, no coordinator is reachable, the run does not exist, or
+    the run is still inside its limits. Returns a dict carrying ``error``,
+    ``exceeded``, ``usage`` and ``run_id`` when a hard limit was exceeded and
+    the tool must not run.
+
+    Accounting must never break a tool call: a storage failure is logged and
+    the call proceeds. The only thing that stops a tool is a *verdict*, because
+    that is the operator's explicit limit rather than an infrastructure error.
+    """
+    from backend.runtime.run_context import get_current_run_id
+
+    run_id = get_current_run_id()
+    if not run_id or not _tool_budget_hook_enabled():
+        return None
+    coordinator = _run_budget_coordinator()
+    if coordinator is None:
+        return None
+    try:
+        verdict = coordinator.record_usage(run_id, tool_calls=1)
+    except Exception as exc:
+        logger.warning("[TOOL BUDGET] could not charge %s to run %s: %s", name, run_id, exc)
+        return None
+    if verdict.ok:
+        return None
+    logger.warning(
+        "[TOOL BUDGET] %s blocked for run %s: budget exceeded %s (usage=%s)",
+        name,
+        run_id,
+        verdict.exceeded,
+        verdict.usage,
+    )
+    return {
+        "run_id": run_id,
+        "exceeded": dict(verdict.exceeded),
+        "usage": dict(verdict.usage),
+        "error": f"budget exceeded: {dict(verdict.exceeded)}",
+    }
+
+
 async def execute_tool(
     name: str,
     session_id: str | None,
@@ -1433,6 +1678,21 @@ async def execute_tool(
             valid_arguments=dropped_args.get("valid_arguments", []),
         )
 
+    # Run budget accounting, before the cache: a cache hit is still a tool call
+    # the agent spent a turn on, and a run past its limits must be told to stop
+    # rather than be served quietly.
+    budget_block = record_run_tool_call(name)
+    if budget_block is not None:
+        return _typed_tool_response(
+            name,
+            ok=False,
+            error=budget_block["error"],
+            error_category="budget_exceeded",
+            run_id=budget_block.get("run_id", ""),
+            budget_exceeded=budget_block.get("exceeded", {}),
+            budget_usage=budget_block.get("usage", {}),
+        )
+
     # Check cache for idempotent tools (only after confirmation is satisfied)
     if _HAVE_TOOL_CACHE:
         try:
@@ -1443,7 +1703,7 @@ async def execute_tool(
                 return _typed_tool_response(
                     name,
                     ok=bool(cached.get("ok", True)) and not bool(cached.get("error")),
-                    result=cached.get("result"),
+                    result=frame_external_result(name, cached.get("result")),
                     error=cached.get("error"),
                     error_category=cached.get("error_category", "none"),
                     duration_ms=int(cached.get("duration_ms", 0)),
@@ -1479,13 +1739,22 @@ async def execute_tool(
             spec.handler(**handler_args), timeout=timeout_seconds
         )
         duration_ms = int((time.time() - start) * 1000)
+        # The failure verdict is read from the RAW handler payload. Framing
+        # first would turn ``{"status": "error", "summary": "Error fetching
+        # URL: ..."}`` into a quoted blob and the error text handed to the model
+        # would carry wrapper fences — a broken, unquotable diagnostic.
         handler_error = _handler_result_failed(result)
+        # Quote the external content, then build the response. The control
+        # plane (``ok``, ``error``, ``exit_code``, ``evidence``) keeps the
+        # handler's own values; only text the model reads as evidence is
+        # framed, so the success/error schema is unchanged.
+        framed_result = frame_external_result(name, result)
         if handler_error:
             failure_count = _record_tool_failure(name, session_id)
             response = _typed_tool_response(
                 name,
                 ok=False,
-                result=result,
+                result=framed_result,
                 error=handler_error,
                 error_category="timeout" if result.get("timed_out") else "tool",
                 duration_ms=duration_ms,
@@ -1505,7 +1774,7 @@ async def execute_tool(
             return response
         _record_tool_success(name, session_id)
         response = _typed_tool_response(
-            name, ok=True, result=result, duration_ms=duration_ms
+            name, ok=True, result=framed_result, duration_ms=duration_ms
         )
         if sentinel_gate:
             response["sentinel_gate"] = sentinel_gate

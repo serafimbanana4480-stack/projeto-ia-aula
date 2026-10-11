@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from backend.config.settings import get_settings
 from backend.core.build_info import NEXUS_VERSION as __version__
 from backend.llm.cost_governor import BudgetExceededError
+from backend.middleware.deny_by_default import DenyByDefaultMiddleware
 from backend.middleware.security import SecurityHeadersMiddleware
 
 try:
@@ -73,6 +74,7 @@ from backend.core.disk_guard import (
 from backend.core.routes.improvement import router as improvement_router
 from backend.observability.routes.workflows import router as workflows_router
 from backend.orchestrator.chat_cancellation import chat_cancellation_middleware
+from backend.orchestrator.routes.autonomous_tasks import router as autonomous_tasks_router
 from backend.orchestrator.routes.cancellation_routes import router as cancellation_router
 from backend.orchestrator.routes.chat import router as chat_router
 from backend.orchestrator.routes.collaboration import router as collaboration_router
@@ -93,7 +95,6 @@ from backend.orchestrator.routes.mission import router as mission_router
 from backend.orchestrator.routes.models_ui import router as models_ui_router
 from backend.orchestrator.routes.modes import router as modes_router
 from backend.orchestrator.routes.neural_dashboard import router as neural_dashboard_router
-from backend.orchestrator.routes.observability import agents_topology
 from backend.orchestrator.routes.observability import router as observability_router
 from backend.orchestrator.routes.omega import router as omega_router
 from backend.orchestrator.routes.orchestrator import router as orchestrator_router
@@ -113,7 +114,20 @@ from backend.orchestrator.routes.terminal import router as terminal_router
 from backend.orchestrator.routes.wizard import router as wizard_router
 from backend.orchestrator.routes.workers import router as workers_router
 from backend.orchestrator.routes.workspace import router as workspace_router
+from backend.runtime.dead_letter_service import DeadLetterService
+from backend.runtime.primary import get_run_coordinator
+from backend.runtime.run_coordinator import RunCoordinator, RunState
+from backend.runtime.run_watchdog import start_watchdog, stop_watchdog
 from backend.swarm.api.routes import router as swarm_router
+
+# The dead-letter surface (Fase 1a) may be produced by another workstream; the
+# mount is optional so this app keeps starting while that router does not exist
+# yet, instead of failing the whole import.
+try:
+    from backend.orchestrator.routes.dead_letters import router as dead_letters_router
+except ImportError:
+    dead_letters_router = None
+
 
 _WORKER_OWNERSHIP = WorkerOwnershipGuard()
 
@@ -153,6 +167,62 @@ async def _require_auth_if_deep(
 def _is_deep_probe(request: Request) -> bool:
     """Whether ``?deep=`` asked for the internal-topology form."""
     return request.query_params.get("deep", "").lower() in {"1", "true", "yes"}
+
+
+def _stop_watchdog_safely() -> None:
+    """Stop the run watchdog, logging (never raising) if it refuses."""
+    try:
+        stop_watchdog()
+        logger.info("[RUN] watchdog stopped")
+    except Exception:
+        logger.exception("Could not stop the run watchdog")
+
+
+def _recover_resumable_runs(coordinator: RunCoordinator | None = None) -> list[str]:
+    """Log the durable runs a previous process left open and mark them RECOVERING.
+
+    A restart used to be invisible to the run state: whatever was in flight at
+    the moment of the crash stayed ``RUNNING`` forever, which is indistinguishable
+    from a healthy run.  Every non-terminal run is now (1) logged and (2) moved to
+    ``RECOVERING`` so it is discoverable through ``GET /api/runs/resumable`` and
+    can be resumed explicitly (``POST /api/runs/{run_id}/resume``).
+
+    This does NOT re-execute anything: a run that died mid-plan is resumed by an
+    agent that reads its checkpoint, never by a timer or by this startup path.
+    """
+    if coordinator is None:
+        coordinator = get_run_coordinator()
+    if coordinator is None:
+        logger.info("Run lifecycle integration disabled or unavailable; nothing to recover")
+        return []
+    try:
+        runs = coordinator.find_resumable_runs()
+    except Exception:
+        logger.exception("Could not list the runs left open by the previous process")
+        return []
+    recovered: list[str] = []
+    for record in runs:
+        run_id = str(record.run_id)
+        recovered.append(run_id)
+        logger.warning(
+            "[RUN] incomplete run at startup | run_id=%s state=%s session=%s goal=%.120s",
+            run_id,
+            getattr(record, "state", None),
+            record.session_id,
+            record.goal,
+        )
+        try:
+            coordinator.transition(run_id, RunState.RECOVERING, reason="startup recovery")
+            logger.info("[RUN] run %s is now recovering and listed as resumable", run_id)
+        except Exception:
+            # Not every state may move to RECOVERING (``CREATED`` may not).  The
+            # run is still logged above and still resumable, so this is a note.
+            logger.debug("[RUN] run %s could not move to RECOVERING", run_id, exc_info=True)
+    if recovered:
+        logger.warning(
+            "[RUN] %d run(s) recovered at startup: %s", len(recovered), ", ".join(recovered)
+        )
+    return recovered
 
 
 def _allow_degraded_startup() -> bool:
@@ -249,6 +319,7 @@ async def _cleanup_failed_lifespan(app: FastAPI) -> None:
         ("ai_orchestrator", getattr(app.state, "ai_orchestrator", None), "stop"),
         ("auto_trigger", getattr(app.state, "auto_trigger", None), "stop"),
         ("continuous_improvement", getattr(app.state, "improvement_loop", None), "stop"),
+        ("task_scheduler", getattr(app.state, "task_manager", None), "stop"),
         ("session_gc", getattr(app.state, "session_lifecycle", None), "stop"),
     )
     for name, service, method in services:
@@ -364,6 +435,18 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
         source="startup",
         extra={"recovered_count": len(recovered_runs)},
     )
+    # Fase 1b: give the durable run state its process-wide owner, then recover
+    # whatever runs the previous process left open. Both are best-effort — a
+    # coordinator failure is logged here, never fatal to the app.
+    try:
+        app.state.run_coordinator = RunCoordinator()
+        app.state.dead_letter_service = DeadLetterService(
+            app.state.run_coordinator, task_manager=getattr(app.state, "task_manager", None)
+        )
+        _recover_resumable_runs(app.state.run_coordinator)
+        start_watchdog(app.state.run_coordinator)
+    except Exception:
+        logger.exception("Durable run state could not be recovered at startup")
     # Check the reserve before provider construction or any background start.
     try:
         disk_snapshot = require_disk_headroom(_runtime_root())
@@ -407,6 +490,7 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     enable_session_gc    = _svc("SESSION_GC")
     enable_catalog_refresh = _svc("CATALOG_REFRESH")
     enable_log_prune     = _svc("LOG_PRUNE")
+    enable_tasks         = _svc("TASK_SCHEDULER")
 
     # ``NEXUS_ALLOW_DEGRADED_STARTUP`` only means that the HTTP service may
     # come up.  It must not silently turn a critical disk condition into
@@ -431,6 +515,7 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
         enable_ai_orchestrator = False
         enable_auto_trigger = False
         enable_session_gc = False
+        enable_tasks = False
         logger.warning(
             "Critical disk pressure: autonomous background services disabled; "
             "set NEXUS_ALLOW_DEGRADED_AUTONOMY=1 only for an explicit operator override"
@@ -450,6 +535,7 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
         ("SESSION_GC", enable_session_gc),
         ("CATALOG_REFRESH", enable_catalog_refresh),
         ("LOG_PRUNE", enable_log_prune),
+        ("TASK_SCHEDULER", enable_tasks),
     ] if not on]
     if off:
         logger.info("Disabled background services: %s (default is ON; NEXUS_ENABLE_<NAME>=false disables)", ", ".join(off))
@@ -740,6 +826,28 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
             session_lifecycle.gc_interval_minutes,
         )
 
+    # Autonomous task scheduler. The manager is always installed on app.state
+    # (the dashboard routes read it), but the scheduler only *starts* when this
+    # worker owns it. NEXUS_TASKS_RESUME_PENDING defaults false: recovered
+    # write-effect tasks are quarantined rather than fired at boot.
+    from backend.observability.event_system import get_event_bus as _get_task_event_bus
+    from backend.tasks.autonomous_tasks import get_autonomous_task_manager
+
+    task_manager = await get_autonomous_task_manager(await _get_task_event_bus())
+    app.state.task_manager = task_manager
+    task_scheduler_owned = enable_tasks and _claim_worker("task_scheduler", owned_workers)
+    tasks_resume_pending = _as_bool_env("NEXUS_TASKS_RESUME_PENDING", default=False)
+    if task_scheduler_owned:
+        await task_manager.start(resume_pending=tasks_resume_pending)
+        logger.info(
+            "Autonomous task scheduler started (resume_pending=%s)", tasks_resume_pending
+        )
+    else:
+        logger.info(
+            "Autonomous task scheduler not started (disabled by configuration or "
+            "ownership held by another lifespan); task_manager exposed on app.state"
+        )
+
     logger.info("NEXUS orchestrator ready (provider=%s)", settings.llm_provider)
 
     # --- supervised background tasks owned by the lifespan ---------------
@@ -786,6 +894,10 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
         await _safe_shutdown("auto_trigger", auto_trigger.stop() if auto_trigger_owned else asyncio.sleep(0))
         await _safe_shutdown("improvement", improvement_loop.stop() if improvement_owned else asyncio.sleep(0))
         await _safe_shutdown(
+            "task_scheduler",
+            task_manager.stop() if task_scheduler_owned else asyncio.sleep(0),
+        )
+        await _safe_shutdown(
             "session_gc",
             session_lifecycle.stop() if session_gc_owned else asyncio.sleep(0),
         )
@@ -797,6 +909,9 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
             from backend.llm.model_catalog import stop_catalog_refresh_worker
 
             await _safe_shutdown("catalog_refresh", stop_catalog_refresh_worker())
+        # Fase 1b: the watchdog is a thread of its own, so it must be stopped
+        # explicitly or it outlives the loop it belongs to.
+        await _safe_shutdown("run_watchdog", _stop_watchdog_safely())
         for name in tuple(owned_workers):
             _release_worker(name, owned_workers)
         from backend.mcp.runtime import close_all_sessions
@@ -819,6 +934,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="NEXUS IDE Orchestrator", version=__version__, lifespan=lifespan)
 
 app.add_middleware(SecurityHeadersMiddleware)
+
+# ---------------------------------------------------------------------------
+# Deny-by-default authentication (audit P0.2)
+# ---------------------------------------------------------------------------
+# Every route is protected unless it is named in
+# ``backend/middleware/public_routes.py``.  Ordering matters: Starlette's
+# ``add_middleware`` inserts the newest middleware as the OUTERMOST one, so
+# this call must sit *between* the two calls below to end up inside CORS and
+# outside the router:
+#
+#   (outer) chat cancellation → rate limit → CORS → deny-by-default → security
+#   headers → router (inner)
+#
+# Inside CORS: preflight OPTIONS are answered by CORS itself and the 401 this
+# middleware emits still carries Access-Control-* headers, so the frontend sees
+# a real 401 instead of an opaque CORS error.  Outside the rate limiter would
+# be harmless but pointless (every anonymous request is refused here anyway);
+# inside it, anonymous traffic still consumes quota.  Measured by
+# backend/tests/contracts/test_route_auth_inventory.py.
+app.add_middleware(DenyByDefaultMiddleware)
 
 settings = get_settings()
 app.add_middleware(
@@ -923,9 +1058,9 @@ app.include_router(settings_router, prefix="/api")
 app.include_router(logs_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(neural_dashboard_router, prefix="/api")
-app.add_api_route("/api/agents/topology", agents_topology, methods=["GET"], tags=["agents"])
 app.include_router(omega_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
+app.include_router(autonomous_tasks_router, prefix="/api")
 app.include_router(mission_router, prefix="/api")
 app.include_router(knowledge_router, prefix="/api")
 app.include_router(errors_router, prefix="/api")
@@ -934,6 +1069,16 @@ app.include_router(sessions_router)
 app.include_router(swarm_router)
 app.include_router(advanced_modes_router, prefix="/api")
 app.include_router(evolution_router, prefix="/api")
+
+# Fase 1b: the dead-letter surface is optional (another workstream owns it), so
+# it is mounted only when it exists. A missing router means fewer read endpoints,
+# never a dead app.
+if dead_letters_router is not None:
+    app.include_router(dead_letters_router, prefix="/api")
+else:
+    logger.warning(
+        "dead_letters router is not available; /api/dead-letters endpoints are not mounted"
+    )
 
 from backend.orchestrator.routes.meta import mission_websocket as _meta_ws  # noqa: E402
 

@@ -28,8 +28,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.core.disk_guard import DiskPressureError, require_disk_headroom
 from backend.middleware.auth import require_auth
+from backend.middleware.deny_by_default import require_websocket_token
 from backend.orchestrator.meta import MetaOrchestrator, Mission
 from backend.orchestrator.registry import get_registry
+from backend.runtime.run_coordinator import RunState
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -77,6 +79,10 @@ class MissionActionResponse(BaseModel):
     mission_id: str
     status: str
     action: str
+    #: Durable runs of this mission that were marked ``RECOVERING`` (Fase 1b).
+    #: Optional with a default so existing clients of the pause/abort actions
+    #: keep their exact response shape.
+    resumed_runs: list[str] = Field(default_factory=list)
 
 
 class ActiveAgentsResponse(BaseModel):
@@ -87,6 +93,121 @@ class ActiveAgentsResponse(BaseModel):
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+# ── Durable runs (Fase 1b — checkpoint/resume/idempotência) ──────────────────
+
+
+class ResumableRunsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runs: list[dict[str, Any]]
+    count: int
+
+
+class ResumeRunResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    state: str
+    goal: str
+    session_id: str
+    project_id: str
+    checkpoint_id: str
+    phase: str
+    checkpoint: dict[str, Any]
+    resumable: bool
+
+
+def _get_run_coordinator(request: Request):
+    """Return the process-wide run coordinator, or ``None``.
+
+    The lifespan installs the singleton on ``app.state``; a client that never
+    ran the startup path (an ad-hoc TestClient, for instance) falls back to the
+    accessor, which is the same object anyway.
+    """
+    coordinator = getattr(request.app.state, "run_coordinator", None)
+    if coordinator is not None:
+        return coordinator
+    from backend.runtime.primary import get_run_coordinator as _accessor
+
+    return _accessor()
+
+
+def _run_to_dict(record: Any) -> dict[str, Any]:
+    """Serialise one ``RunRecord`` for an API client."""
+    return {
+        "run_id": str(getattr(record, "run_id", "")),
+        "goal": str(getattr(record, "goal", "")),
+        "state": str(getattr(getattr(record, "state", None), "value", record.state)),
+        "session_id": str(getattr(record, "session_id", "")),
+        "project_id": str(getattr(record, "project_id", "")),
+        "user_id": str(getattr(record, "user_id", "")),
+        "requirements": list(getattr(record, "requirements", []) or []),
+        "constraints": list(getattr(record, "constraints", []) or []),
+        "definition_of_done": list(getattr(record, "definition_of_done", []) or []),
+        "current_task_id": getattr(record, "current_task_id", None),
+        "changed_files": list(getattr(record, "changed_files", []) or []),
+        "artifacts": list(getattr(record, "artifacts", []) or []),
+        "created_at": str(getattr(record, "created_at", "")),
+        "updated_at": str(getattr(record, "updated_at", "")),
+        "heartbeat_at": str(getattr(record, "heartbeat_at", "")),
+        "stop_reason": str(getattr(record, "stop_reason", "")),
+        "plan": getattr(record, "plan", None),
+        "budget": dict(getattr(record, "budget", {}) or {}),
+    }
+
+
+def _resume_mission_runs(request: Request, mission_id: str) -> list[str]:
+    """Mark the runs a mission left behind as ``RECOVERING`` and list them.
+
+    A mission's runs are the engine runs whose ``session_id`` is the mission id
+    (that is how ``MetaOrchestrator._run_phase`` drives the engine) plus any run
+    carrying the explicit mission marker. This deliberately does NOT re-execute
+    anything: it flips the durable state so the runs are listed as resumable and
+    leaves the decision of what to do next to the caller and the client.
+    """
+    coordinator = _get_run_coordinator(request)
+    if coordinator is None:
+        return []
+    marker = f"mission:{mission_id}"
+    try:
+        candidates = coordinator.find_resumable_runs()
+    except Exception:
+        logger.warning(
+            "Could not list resumable runs for mission %s", mission_id, exc_info=True
+        )
+        return []
+    resumed: list[str] = []
+    for record in candidates:
+        belongs = str(getattr(record, "session_id", "")) == mission_id or marker in [
+            str(item) for item in (getattr(record, "memory_refs", []) or [])
+        ]
+        if not belongs:
+            continue
+        run_id = str(record.run_id)
+        resumed.append(run_id)
+        try:
+            coordinator.transition(
+                run_id,
+                RunState.RECOVERING,
+                reason=f"mission {mission_id} resumed",
+            )
+            logger.info(
+                "[RUN] mission %s marked run %s as recovering (state=%s)",
+                mission_id,
+                run_id,
+                getattr(record, "state", None),
+            )
+        except Exception:
+            # An illegal move (``CREATED`` cannot reach ``RECOVERING``) or a
+            # coordinator problem must not fail the mission resume itself.
+            logger.warning(
+                "Could not mark run %s of mission %s as recovering",
+                run_id,
+                mission_id,
+                exc_info=True,
+            )
+    return resumed
+
 
 
 def _get_meta(request: Request) -> MetaOrchestrator:
@@ -215,20 +336,100 @@ async def pause_mission(
 
 @router.post("/missions/{mission_id}/resume")
 async def resume_mission(
-    request: Request, mission_id: str, _auth: None = Depends(require_auth)
+    request: Request,
+    mission_id: str,
+    _auth: None = Depends(require_auth),
 ) -> MissionActionResponse:
-    """Resume a paused mission."""
+    """Resume a paused or failed mission.
+
+    Also flips the mission's durable runs to ``RECOVERING`` so a client (or the
+    next agent turn) can continue them from their last checkpoint instead of
+    redoing the work. Runs that cannot be associated with the mission are
+    logged and left untouched.
+    """
     meta = _get_meta(request)
-    mission = await meta.resume(mission_id)
+    mission = meta.resume(mission_id) if meta.get_mission(mission_id) else None
     if mission is None:
-        return JSONResponse(
-            status_code=404,
-            content={"detail": f"Mission {mission_id} not found"},
-        )
+        raise HTTPException(status_code=404, detail=f"Mission {mission_id} not found")
+    resumed_runs = _resume_mission_runs(request, mission_id)
+    mission = meta.resume(mission_id)
     return MissionActionResponse(
         mission_id=mission_id,
-        status=mission.status.value,
-        action="resume",
+        status=mission.status,
+        resumed_runs=resumed_runs,
+    )
+
+
+@router.get("/runs/resumable")
+async def list_resumable_runs(
+    request: Request,
+    _auth: None = Depends(require_auth),
+) -> ResumableRunsResponse:
+    """List the durable runs that still own work (i.e. can be resumed).
+
+    This is the recovery surface a restart populates: every run that was not
+    terminal when its process stopped is here, newest first.
+    """
+    coordinator = _get_run_coordinator(request)
+    if coordinator is None:
+        return ResumableRunsResponse(runs=[], count=0)
+    runs = coordinator.find_resumable_runs()
+    return ResumableRunsResponse(
+        runs=[_run_to_dict(record) for record in runs], count=len(runs)
+    )
+
+
+@router.post("/runs/{run_id}/resume")
+async def resume_run(
+    request: Request,
+    run_id: str,
+    _auth: None = Depends(require_auth),
+) -> ResumeRunResponse:
+    """Restore one durable run from its last checkpoint.
+
+    The run is moved to ``RECOVERING`` and its restored state — goal, plan,
+    changed files, current task, and the checkpoint the run stopped at — is
+    returned so the client can present it and the agent can continue from there.
+    Nothing is re-executed here: resuming is a state transition, not a re-run.
+    """
+    coordinator = _get_run_coordinator(request)
+    if coordinator is None:
+        raise HTTPException(
+            status_code=503, detail="Durable run coordinator is unavailable."
+        )
+    try:
+        checkpoint = coordinator.restore(run_id)
+    except ValueError as exc:
+        # ``restore`` refuses an unknown run and a run with nothing to restore
+        # from; both are the client's problem, not a server fault.
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except Exception:
+        logger.warning("Could not restore run %s", run_id, exc_info=True)
+        raise HTTPException(
+            status_code=503, detail="Durable run coordinator failed to restore the run."
+        ) from None
+    try:
+        record = coordinator.get_run(run_id)
+    except Exception:
+        logger.warning("Restored run %s but could not re-read it", run_id, exc_info=True)
+        record = None
+    checkpoint_payload: dict[str, Any] = dict(getattr(checkpoint, "payload", {}) or {})
+    checkpoint_payload.setdefault("checkpoint_id", str(getattr(checkpoint, "checkpoint_id", "")))
+    checkpoint_payload.setdefault("phase", str(getattr(checkpoint, "phase", "")))
+    checkpoint_payload.setdefault("created_at", str(getattr(checkpoint, "created_at", "")))
+    logger.info(
+        "[RUN] resumed run %s from checkpoint phase=%s", run_id, checkpoint_payload.get("phase")
+    )
+    return ResumeRunResponse(
+        run_id=str(run_id),
+        state=str(getattr(getattr(record, "state", None), "value", "") or ""),
+        goal=str(getattr(record, "goal", "") or ""),
+        session_id=str(getattr(record, "session_id", "") or ""),
+        project_id=str(getattr(record, "project_id", "") or ""),
+        checkpoint_id=str(checkpoint_payload.get("checkpoint_id") or ""),
+        phase=str(checkpoint_payload.get("phase") or ""),
+        checkpoint=checkpoint_payload,
+        resumable=True,
     )
 
 
@@ -264,6 +465,7 @@ async def list_active_agents(
     )
 
 
+
 # NOTE: The WebSocket endpoint lives directly on the FastAPI app so that
 # the path is exactly ``/ws/missions/{mission_id}`` without the ``/api`` prefix.
 # See ``backend/orchestrator/main.py`` where it is mounted with
@@ -272,8 +474,18 @@ async def list_active_agents(
 # ── WebSocket handler (mounted directly on app for ``/ws/missions/{id}``) ──
 
 
-async def mission_websocket(websocket: WebSocket, mission_id: str) -> None:
-    """WebSocket endpoint for real-time mission updates."""
+async def mission_websocket(
+    websocket: WebSocket, mission_id: str, user: dict = Depends(require_websocket_token)
+) -> None:
+    """WebSocket endpoint for real-time mission updates.
+
+    Authenticated at the route level as well as at the middleware, because this
+    route is mounted directly on the app (``/ws/missions/{mission_id}`` has no
+    ``/api`` prefix) and streams mission events: the token may arrive in
+    ``?token=`` or in ``Sec-WebSocket-Protocol``, and a missing or invalid one
+    raises ``WebSocketException(4401)`` -- a close before ``accept()``, so no
+    event is ever sent to an anonymous subscriber.
+    """
     await websocket.accept()
     meta: MetaOrchestrator | None = None
     try:
