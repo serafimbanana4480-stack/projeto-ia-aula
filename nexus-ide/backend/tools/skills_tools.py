@@ -15,6 +15,7 @@ its root.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -25,8 +26,12 @@ from backend.core.skill_runtime import (
     list_skill_summaries,
     load_skill_document,
     parse_skill_markdown,
+    promote_skill,
+    record_skill_outcome,
 )
 from backend.tools.registry import ToolSpec, register_tool
+
+logger = logging.getLogger(__name__)
 
 _SKILL_MAX_CHARS = 4000
 _TRUNCATION_NOTE = "\n\n[... skill truncado; lê o ficheiro original para o resto ...]"
@@ -151,6 +156,7 @@ async def build_skill(
     """Create a validated reusable skill; experience-derived skills stay draft."""
     request = str(request or "")
     experience_candidate = str(experience_candidate or "").strip()
+    candidate: dict[str, Any] | None = None
     if experience_candidate:
         try:
             candidates = await asyncio.to_thread(_discover_experience_candidates, "", 10)
@@ -190,6 +196,7 @@ async def build_skill(
         )
     except (OSError, ValueError) as exc:
         return {"ok": False, "error": str(exc)}
+    store_skill_id = _register_experience_skill(built, candidate)
     return {
         "ok": True,
         "name": built.name,
@@ -198,7 +205,49 @@ async def build_skill(
         "status": built.validation.get("status"),
         "validation": built.validation,
         "triggers": parse_skill_markdown(built.content).manifest.triggers,
+        "store_skill_id": store_skill_id,
+        "promotion": "draft; promote with the promote_skill tool after review",
     }
+
+
+def _register_experience_skill(
+    built: Any, candidate: dict[str, Any] | None
+) -> str | None:
+    """Optionally track an evidence-backed draft in the SkillsStore.
+
+    Enabled with ``NEXUS_SKILLS_STORE_EXPERIENCE=1`` and only for experience
+    candidates that carry evidence (repeated successful traces). The stored
+    skill is created with ``auto_apply=False`` so it stays inert: it is a
+    reviewable record, never re-injected on its own.
+    """
+    if candidate is None:
+        return None
+    if os.environ.get("NEXUS_SKILLS_STORE_EXPERIENCE", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return None
+    try:
+        from backend.core.skills_store import SkillsStore
+
+        manifest = parse_skill_markdown(built.content).manifest
+        skill = SkillsStore.get_instance().create_skill(
+            name=built.name,
+            skill_type="workflow",
+            description=str(candidate.get("description") or manifest.description)[:2_000],
+            trigger_pattern=", ".join(manifest.triggers),
+            steps=[str(step) for step in candidate.get("action_sequence", [])],
+            verification="Review the drafted SKILL.md, then promote it with promote_skill.",
+            tags=list(manifest.tags),
+            source="experience_candidate",
+            auto_apply=False,
+        )
+        return skill.id
+    except Exception:
+        logger.debug("Could not register experience skill in SkillsStore", exc_info=True)
+        return None
 
 
 def _discover_experience_candidates(
@@ -240,6 +289,55 @@ async def discover_skill_candidates(
         ],
         "promotion": "none; experience-derived skills must be built as drafts and reviewed",
     }
+
+
+async def promote_skill_tool(
+    skill_id: str = "",
+    reason: str = "",
+    approved_by: str = "",
+    project_path: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    """Promote a reviewed DRAFT skill to ACTIVE (high risk, confirmation-gated).
+
+    This is the explicit human activation action for skills authored as drafts
+    (by ``build_skill``). The runtime gate checks schema, required_tools,
+    required_mcps and declarative validation rules, enforces an approval policy
+    (``approved_by`` or ``NEXUS_SKILLS_AUTO_PROMOTE=1`` with measured
+    confidence >= ``NEXUS_SKILLS_MIN_CONFIDENCE``) and writes an audit entry.
+    """
+    wanted = str(skill_id or "").strip()
+    if not wanted:
+        return {"ok": False, "error": "skill_id is required (e.g. 'python-project-audit')."}
+    reason_text = str(reason or "").strip()
+    if not reason_text:
+        return {"ok": False, "error": "reason is required to promote a skill"}
+    owner = _session_owner(session_id)
+    approver = str(approved_by or "").strip() or owner
+    return await asyncio.to_thread(
+        promote_skill,
+        wanted,
+        actor=owner or "agent",
+        reason=reason_text,
+        approved_by=approver or None,
+        project_path=project_path or None,
+    )
+
+
+async def report_skill_outcome(
+    skill_id: str = "",
+    success: bool = True,
+    name: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    """Record a skill execution outcome to drive its success_rate and confidence."""
+    del session_id
+    wanted = str(skill_id or "").strip()
+    if not wanted:
+        return {"ok": False, "error": "skill_id is required (e.g. 'audit-repo-readonly')."}
+    return await asyncio.to_thread(
+        record_skill_outcome, wanted, bool(success), name=str(name or "").strip()
+    )
 
 
 register_tool(
@@ -369,6 +467,91 @@ register_tool(
             "required": ["name"],
         },
         handler=load_skill,
+        timeout_seconds=10,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="promote_skill",
+        description=(
+            "Promote a reviewed draft skill to ACTIVE so it can be selected for "
+            "future tasks. High risk: activation injects the playbook into "
+            "system prompts, so it requires human confirmation. The gate validates "
+            "schema, required_tools, required_mcps and declarative validation rules; "
+            "it needs an approving operator (approved_by) unless NEXUS_SKILLS_AUTO_PROMOTE=1."
+        ),
+        tags=["skills", "lifecycle", "promotion"],
+        category="system",
+        # Activating a skill makes it part of future system prompts without a
+        # further human step; the registry's high-risk gate is the real control
+        # and stays true even if the name list in _CONFIRMATION_TOOLS is pruned.
+        risk_level="high",
+        requires_confirmation=True,
+        when_to_use="Only to activate a skill a human has reviewed and approved, "
+        "typically right after build_skill produced a validated draft.",
+        schema={
+            "type": "object",
+            "properties": {
+                "skill_id": {
+                    "type": "string",
+                    "description": "Skill id/name to promote (as shown by list_skills).",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why this draft is safe to activate (recorded in the audit log).",
+                },
+                "approved_by": {
+                    "type": "string",
+                    "description": "Approving operator identity; required unless NEXUS_SKILLS_AUTO_PROMOTE=1.",
+                },
+                "project_path": {
+                    "type": "string",
+                    "description": "Active project is injected by NEXUS; omit this field.",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Trusted session is injected by NEXUS; omit this field.",
+                },
+            },
+            "required": ["skill_id", "reason"],
+        },
+        handler=promote_skill_tool,
+        timeout_seconds=15,
+    )
+)
+
+register_tool(
+    ToolSpec(
+        name="report_skill_outcome",
+        description=(
+            "Report whether an activated skill helped (success) or not (failure). "
+            "Records the outcome so the skill's success_rate and confidence track reality."
+        ),
+        tags=["skills", "measurement", "feedback"],
+        category="system",
+        risk_level="low",
+        when_to_use="After following an activated skill, to feed measured outcomes back "
+        "into skill selection and the promotion confidence gate.",
+        schema={
+            "type": "object",
+            "properties": {
+                "skill_id": {
+                    "type": "string",
+                    "description": "Skill id/name whose outcome is being reported.",
+                },
+                "success": {
+                    "type": "boolean",
+                    "description": "True if the skill helped accomplish the task.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional human-readable skill name for memory skills.",
+                },
+            },
+            "required": ["skill_id", "success"],
+        },
+        handler=report_skill_outcome,
         timeout_seconds=10,
     )
 )

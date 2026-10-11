@@ -49,7 +49,9 @@ class SkillBuilder:
         The result is always a draft: request-derived and experience-derived
         skills alike require human review before activation.
 
-        TODO: add an explicit human activation action (reviewed draft -> ACTIVE).
+        Activation is a separate, gated action: ``skill_runtime.promote_skill``
+        (audited, approval-required unless NEXUS_SKILLS_AUTO_PROMOTE=1) is what
+        flips a reviewed draft to ACTIVE so ``select_skills`` can reuse it.
         """
         request = str(request or "").strip()
         if not request:
@@ -128,7 +130,8 @@ class SkillBuilder:
         # which runs without human confirmation) must never enter the system prompt
         # on its own: skill_runtime only selects/applies ACTIVE manifests and the
         # orchestrator injects them into the next turn's system message.  Always
-        # create drafts here; promoting one to ACTIVE is an explicit human action.
+        # create drafts here; promoting one to ACTIVE is the explicit human action
+        # ``skill_runtime.promote_skill``.
         status = SkillStatus.DRAFT.value
         metadata: dict[str, Any] = {
             "schema_version": "1.0",

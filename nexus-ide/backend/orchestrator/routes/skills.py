@@ -109,6 +109,18 @@ async def search_skills(
     }
 
 
+@router.get("/skills/promotions")
+async def read_promotions(
+    limit: int = Query(default=100, ge=1, le=1000),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Skill promotion audit trail (skill_id, from→to, actor, reason, timestamp)."""
+    from backend.core.skill_runtime import read_promotion_log
+
+    entries = await asyncio.to_thread(read_promotion_log, limit)
+    return {"promotions": entries, "count": len(entries)}
+
+
 @router.get("/skills/{skill_id}")
 async def get_skill(skill_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
     skill = _store.get_skill(skill_id, user_id=str(_user.get("user_id") or ""))
@@ -132,6 +144,79 @@ async def get_skill(skill_id: str, _user: dict = Depends(require_auth)) -> dict[
         "created_at": skill.created_at,
         "updated_at": skill.updated_at,
     }
+
+
+@router.post("/skills/{skill_id}/promote")
+async def promote_skill(
+    skill_id: str,
+    data: dict[str, Any],
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Promote a reviewed DRAFT file skill to ACTIVE through the runtime gate.
+
+    The authenticated caller is the approving operator: their identity is
+    recorded as both actor and approver in the promotion audit log.
+    """
+    from backend.core.skill_runtime import promote_skill as runtime_promote
+
+    user_id = str(_user.get("user_id") or "")
+    reason = str(data.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required to promote a skill")
+    confidence = data.get("confidence")
+    result = await asyncio.to_thread(
+        runtime_promote,
+        skill_id,
+        actor=user_id,
+        reason=reason,
+        approved_by=str(data.get("approved_by") or "").strip() or user_id,
+        confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error", "promotion rejected"))
+    return result
+
+
+@router.post("/skills/{skill_id}/deprecate")
+async def deprecate_skill(
+    skill_id: str,
+    data: dict[str, Any],
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Retire an ACTIVE skill (ACTIVE → DEPRECATED)."""
+    from backend.core.skill_runtime import deprecate_skill as runtime_deprecate
+
+    user_id = str(_user.get("user_id") or "")
+    reason = str(data.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required to deprecate a skill")
+    result = await asyncio.to_thread(
+        runtime_deprecate, skill_id, actor=user_id, reason=reason
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error", "transition rejected"))
+    return result
+
+
+@router.post("/skills/{skill_id}/disable")
+async def disable_skill(
+    skill_id: str,
+    data: dict[str, Any],
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Kill switch: force a skill to DISABLED from any state (audited)."""
+    from backend.core.skill_runtime import disable_skill as runtime_disable
+
+    user_id = str(_user.get("user_id") or "")
+    reason = str(data.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required to disable a skill")
+    result = await asyncio.to_thread(
+        runtime_disable, skill_id, actor=user_id, reason=reason
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error", "transition rejected"))
+    return result
 
 
 @router.post("/skills")
