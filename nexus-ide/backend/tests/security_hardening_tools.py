@@ -39,6 +39,38 @@ PREVIOUSLY_INVISIBLE = (
 )
 
 
+# ---------------------------------------------------------------------------
+# 0. Helper modules documented as intentionally never registered
+# ---------------------------------------------------------------------------
+#: ``DO_NOT_REGISTER_MODULES`` (the canonical escape hatch) lives in
+#: ``backend/tools/__init__.py``, which is outside this module's ownership.
+#: ``safe_http`` and ``search_errors`` carry the same guarantee and are
+#: documented here so the coverage test still fails loudly on any *new*
+#: unaccounted module instead of silently whitelisting the whole directory.
+#: Both were verified to contain no ``register_tool`` / ``ToolSpec`` call and
+#: no schema, and each is imported only by already-registered tools:
+#:   * ``safe_http``     -> web_search, web_search_v2, web_fetcher, api_tester,
+#:                          browser_automation, notifications
+#:   * ``search_errors`` -> web_search, web_search_v2
+_LOCAL_DO_NOT_REGISTER_MODULES: dict[str, str] = {
+    "safe_http": (
+        "HTTP transport helper (public-IP SSRF guard) consumed by the "
+        "registered fetch/web-search tools; not a tool surface"
+    ),
+    "search_errors": (
+        "search provider error types raised by web_search/web_search_v2; "
+        "not a tool surface"
+    ),
+}
+
+
+def _do_not_register() -> dict[str, str]:
+    """Canonical do-not-register reasons merged with locally documented ones."""
+    merged = dict(DO_NOT_REGISTER_MODULES)
+    merged.update(_LOCAL_DO_NOT_REGISTER_MODULES)
+    return merged
+
+
 @pytest.fixture(autouse=True)
 def _no_disk_guard(monkeypatch):
     monkeypatch.setattr(disk_guard, "require_disk_headroom", lambda *_a, **_k: None)
@@ -122,7 +154,7 @@ class TestModuleCoverage:
             if path.stem != "__init__"
         }
         registered = set(TOOL_MODULES)
-        do_not = set(DO_NOT_REGISTER_MODULES)
+        do_not = set(_do_not_register())
         overlap = registered & do_not
         assert not overlap, f"module in both lists: {sorted(overlap)}"
 
@@ -139,7 +171,7 @@ class TestModuleCoverage:
         assert not missing, f"TOOL_MODULES lists non-existent modules: {missing}"
 
     def test_do_not_register_entries_have_a_reason(self) -> None:
-        for name, reason in DO_NOT_REGISTER_MODULES.items():
+        for name, reason in _do_not_register().items():
             assert reason and len(reason) > 10, f"{name} has no documented reason"
             assert (TOOLS_DIR / f"{name}.py").exists(), f"{name} does not exist"
 
@@ -152,7 +184,7 @@ class TestModuleCoverage:
         """
         import ast
 
-        for name in DO_NOT_REGISTER_MODULES:
+        for name in _do_not_register():
             tree = ast.parse((TOOLS_DIR / f"{name}.py").read_text(encoding="utf-8"))
             for node in tree.body:  # module level only
                 if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
