@@ -12,7 +12,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from functools import wraps
@@ -94,7 +94,7 @@ class SQLiteConnectionPool:
 
     def _create_connection(self) -> sqlite3.Connection:
         """Create a new database connection with proper settings."""
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
@@ -283,7 +283,7 @@ CREATE INDEX IF NOT EXISTS idx_git_commits_created ON git_commits(created_at DES
 def _ensure_git_commits_table() -> None:
     """Ensure the git_commits table exists in the database (idempotent migration)."""
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             conn.executescript(_GIT_COMMIT_SCHEMA)
             conn.commit()
     except Exception as e:
@@ -293,7 +293,7 @@ def _ensure_git_commits_table() -> None:
 def _ensure_message_cost_column() -> None:
     """Repair databases created from older/stamped schemas."""
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             columns = {
                 row[1]
                 for row in conn.execute("PRAGMA table_info(messages)").fetchall()
@@ -312,7 +312,7 @@ def _ensure_message_cost_column() -> None:
 def _ensure_message_run_link_column() -> None:
     """Add the nullable run link before schemas.sql creates its index."""
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             columns = {
                 str(row[1]) for row in conn.execute("PRAGMA table_info(messages)").fetchall()
             }
@@ -328,7 +328,7 @@ def _ensure_current_schema() -> None:
     """Create any tables added since an existing database was first made."""
     try:
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             conn.executescript(schema)
             conn.commit()
     except Exception as exc:
@@ -350,7 +350,7 @@ _SESSION_COMPAT_COLUMNS: tuple[tuple[str, str], ...] = (
 def _ensure_session_compatibility_schema() -> None:
     """Repair legacy sessions before schemas.sql creates dependent indexes."""
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")}
             if columns:
                 for name, column_type in _SESSION_COMPAT_COLUMNS:
@@ -379,7 +379,7 @@ _EXECUTION_ENVELOPE_COLUMNS: tuple[tuple[str, str], ...] = (
 def _ensure_execution_envelope_schema() -> None:
     """Repair untracked/partially stamped databases before run persistence."""
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             columns = {
                 str(row[1])
                 for row in conn.execute("PRAGMA table_info(session_runs)").fetchall()
@@ -420,7 +420,7 @@ def init_db(run_migrations: bool = True) -> None:
     if is_fresh_db:
         logger.info("Fresh database, applying initial schema")
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             conn.executescript(schema)
             conn.commit()
         _ensure_execution_envelope_schema()
@@ -454,26 +454,35 @@ def init_db(run_migrations: bool = True) -> None:
 def _seed_default_user() -> None:
     """Create a default admin user if the users table is empty.
 
-    Uses credentials from the ``NEXUS_DEFAULT_EMAIL`` and
-    ``NEXUS_DEFAULT_PASSWORD`` environment variables, falling back to
-    ``admin@nexus-ide.com`` / ``admin123`` in development.
+    Credentials come from the ``NEXUS_DEFAULT_EMAIL`` and
+    ``NEXUS_DEFAULT_PASSWORD`` environment variables. If either is
+    not set, seeding is skipped — no known-password admin account
+    is created.
     """
     import os
 
     import bcrypt
+
+    email = os.environ.get("NEXUS_DEFAULT_EMAIL", "")
+    password = os.environ.get("NEXUS_DEFAULT_PASSWORD", "")
+    if not email or not password:
+        logger.info(
+            "NEXUS_DEFAULT_EMAIL/NEXUS_DEFAULT_PASSWORD not set — "
+            "skipping default user seed"
+        )
+        return
+
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
             if row and row[0] > 0:
                 logger.debug("Users already exist, skipping default user seed")
                 return
 
-        email = os.environ.get("NEXUS_DEFAULT_EMAIL", "admin@nexus-ide.com")
-        password = os.environ.get("NEXUS_DEFAULT_PASSWORD", "admin123")
         password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
         uid = _new_id()
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             conn.execute(
                 "INSERT INTO users (id, username, email, password_hash, full_name) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -481,11 +490,7 @@ def _seed_default_user() -> None:
             )
             conn.commit()
 
-        logger.info(
-            "Default admin user created (email=%s, password=%s) — CHANGE IN PRODUCTION",
-            email,
-            password,
-        )
+        logger.info("Default admin user created (email=%s)", email)
     except Exception as exc:
         logger.warning("Failed to seed default user: %s", exc)
 
@@ -493,13 +498,18 @@ def _seed_default_user() -> None:
 def ensure_dev_default_user() -> dict | None:
     """Ensure a development default user exists when there are no users yet.
 
-    This is a safety net for fresh or partially-initialized SQLite databases.
-    Returns the created user without password hash or ``None`` if it could not be created.
+    Credentials come from ``NEXUS_DEFAULT_EMAIL`` /
+    ``NEXUS_DEFAULT_PASSWORD`` environment variables. If either is
+    not set, returns ``None`` — no known-password admin account is created.
     """
     import os
 
+    default_email = os.environ.get("NEXUS_DEFAULT_EMAIL", "")
+    default_password = os.environ.get("NEXUS_DEFAULT_PASSWORD", "")
+    if not default_email or not default_password:
+        return None
+
     try:
-        default_email = os.environ.get("NEXUS_DEFAULT_EMAIL", "admin@nexus-ide.com")
         with sqlite3.connect(str(DB_PATH)) as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
             if row and row[0] > 0:
@@ -527,8 +537,11 @@ def _seed_default_rbac() -> None:
 
     Idempotent: safe to run multiple times.
     """
+    import os
+
+    admin_email = os.environ.get("NEXUS_DEFAULT_EMAIL", "")
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             conn.executescript("""
                 INSERT OR IGNORE INTO roles (id, name, description) VALUES
                     ('role_admin',    'admin',    'Full system access'),
@@ -559,16 +572,27 @@ def _seed_default_rbac() -> None:
                     ('rp_011', 'role_user',     'perm_projects_read'),
                     ('rp_012', 'role_readonly', 'perm_projects_read'),
                     ('rp_013', 'role_readonly', 'perm_system_read');
-
-                INSERT OR IGNORE INTO user_roles (id, user_id, role_id)
-                    SELECT 'ur_admin_001', u.id, 'role_admin'
-                      FROM users u
-                     WHERE u.email = 'admin@nexus-ide.com'
-                     LIMIT 1;
             """)
             conn.commit()
     except Exception as exc:
         logger.warning("Failed to seed default RBAC: %s", exc)
+        return
+
+    # Assign admin role to the default user (if created via env vars)
+    if admin_email:
+        try:
+            with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
+                conn.execute(
+                    """INSERT OR IGNORE INTO user_roles (id, user_id, role_id)
+                       SELECT 'ur_admin_001', u.id, 'role_admin'
+                         FROM users u
+                        WHERE u.email = ?
+                        LIMIT 1""",
+                    (admin_email,),
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("Failed to assign admin role: %s", exc)
 
 
 # Alembic is deliberately not a hard dependency (it is absent from
@@ -648,7 +672,7 @@ def _stamp_alembic() -> None:
 
 def _run_alembic_migrations() -> None:
     """Run pending Alembic migrations on an existing tracked database."""
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
         tracked = conn.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type='table' AND name='alembic_version'"
@@ -702,18 +726,36 @@ def get_db() -> Iterator[sqlite3.Connection]:
     """Context manager yielding a sqlite connection from the pool.
 
     Uses the connection pool for better performance instead of creating
-    a new connection every time.
+    a new connection every time. Retries on Windows SQLite locking
+    errors since WAL/shm file handles may be held briefly by the OS
+    after a previous connection closes.
     """
     pool = get_connection_pool()
-    conn = pool.get_connection()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        pool.return_connection(conn)
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        conn = pool.get_connection()
+        try:
+            yield conn
+            conn.commit()
+            pool.return_connection(conn)
+            return
+        except sqlite3.OperationalError as exc:
+            last_exc = exc
+            conn.rollback()
+            # Retry on locked/busy errors — Windows holds WAL locks briefly
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+                continue
+            pool.return_connection(conn)
+            raise
+        except Exception:
+            conn.rollback()
+            pool.return_connection(conn)
+            raise
+    raise last_exc if last_exc else RuntimeError("get_db exhausted retries")
 
 
 # ───── PROJECTS ─────────────────────────────────────────────────────────
@@ -1606,6 +1648,34 @@ def get_token_usage_overview() -> dict[str, Any]:
         # SQLite stores timestamps as UTC ISO strings with a ``Z`` suffix.
         return value.strftime("%Y-%m-%dT%H:%M:%S")
 
+    def _compute_missing_costs(conn: sqlite3.Connection, start: str | None = None, model: str | None = None) -> float:
+        """Compute cost from token counts for messages where cost_usd was never populated."""
+        where = "WHERE cost_usd = 0 AND (tokens_in > 0 OR tokens_out > 0)"
+        params: tuple[Any, ...] = ()
+        if start:
+            where += " AND created_at >= ?"
+            params = (start,)
+        if model:
+            where += " AND model_used = ?"
+            params = params + (model,)
+        try:
+            from backend.llm.multi_llm_manager import _compute_cost
+        except ImportError:
+            return 0.0
+        rows = conn.execute(
+            f"SELECT model_used, tokens_in, tokens_out FROM messages {where}",
+            params,
+        ).fetchall()
+        total = 0.0
+        for row in rows:
+            total += _compute_cost(
+                model=row["model_used"] or "",
+                input_tokens=int(row["tokens_in"] or 0),
+                output_tokens=int(row["tokens_out"] or 0),
+                conservative_unknown=True,
+            )
+        return total
+
     def period_stats(conn: sqlite3.Connection, start: str | None) -> dict[str, Any]:
         where = "WHERE created_at >= ?" if start else ""
         params: tuple[Any, ...] = (start,) if start else ()
@@ -1634,7 +1704,7 @@ def get_token_usage_overview() -> dict[str, Any]:
             "tokens_out": int(row["tokens_out"] or 0),
             "requests": int(row["requests"] or 0),
             "sessions": int(row["sessions"] or 0),
-            "cost": round(float(row["cost"] or 0.0), 6),
+            "cost": round(float(row["cost"] or 0.0) + _compute_missing_costs(conn, start), 6),
             "avg_tokens_per_second": round(generated / (latency_ms / 1000), 2) if latency_ms > 0 else 0.0,
         }
 
@@ -1660,14 +1730,19 @@ def get_token_usage_overview() -> dict[str, Any]:
         for row in rows:
             latency_ms = int(row["latency_ms"] or 0)
             generated = int(row["generated_tokens"] or 0)
+            model_name = str(row["name"])
             result.append(
                 {
-                    "name": str(row["name"]),
+                    "name": model_name,
                     "total_tokens": int(row["total_tokens"] or 0),
                     "tokens_in": int(row["tokens_in"] or 0),
                     "tokens_out": int(row["tokens_out"] or 0),
                     "requests": int(row["requests"] or 0),
-                    "cost": round(float(row["cost"] or 0.0), 6),
+                    "cost": round(
+                        float(row["cost"] or 0.0)
+                        + _compute_missing_costs(conn, None, str(row["model_used"]) if row["model_used"] else ""),
+                        6,
+                    ),
                     "avg_tokens_per_second": round(generated / (latency_ms / 1000), 2) if latency_ms > 0 else 0.0,
                 }
             )
@@ -2392,6 +2467,116 @@ def delete_email_account(account_id: str) -> None:
         conn.execute("DELETE FROM email_accounts WHERE id = ?", (account_id,))
 
 
+# ───── TODOS ───────────────────────────────────────────
+
+_MAX_TODO_CONTENT_CHARS = 2000
+
+
+def create_todo(
+    session_id: str,
+    content: str,
+    priority: str = "normal",
+) -> dict | None:
+    """Create a todo item for a session."""
+    tid = _new_id()
+    now = _now_iso()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO todos (id, session_id, content, priority, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (tid, session_id, content, priority, "pending", now, now),
+        )
+        row = conn.execute("SELECT * FROM todos WHERE id = ?", (tid,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_todo(
+    todo_id: str,
+    *,
+    session_id: str | None = None,
+    content: str | None = None,
+    priority: str | None = None,
+    status: str | None = None,
+) -> dict | None:
+    """Update mutable fields on a todo. Returns the updated row."""
+    fields: list[str] = []
+    values: list[Any] = []
+    if content is not None:
+        fields.append("content = ?")
+        values.append(content[:_MAX_TODO_CONTENT_CHARS])
+    if priority is not None:
+        fields.append("priority = ?")
+        values.append(priority)
+    if status is not None:
+        fields.append("status = ?")
+        values.append(status)
+    if not fields:
+        return get_todo(todo_id)
+    now = _now_iso()
+    fields.append("updated_at = ?")
+    values.append(now)
+    values.append(todo_id)
+    if session_id is not None:
+        fields.append("session_id = ?")
+        values.append(session_id)
+    with get_db() as conn:
+        conn.execute(
+            f"UPDATE todos SET {', '.join(fields)} WHERE id = ?",
+            values,
+        )
+    return get_todo(todo_id)
+
+
+def delete_todo(todo_id: str, *, session_id: str | None = None) -> bool:
+    """Delete a todo. Returns True if the row existed."""
+    with get_db() as conn:
+        params: tuple[Any, ...] = (todo_id,)
+        if session_id is not None:
+            params = (todo_id, session_id)
+        cursor = conn.execute(
+            "DELETE FROM todos WHERE id = ?"
+            + (" AND session_id = ?" if session_id is not None else ""),
+            params,
+        )
+    return cursor.rowcount > 0
+
+
+def clear_session_todos(session_id: str) -> int:
+    """Delete all todos for a session. Returns count deleted."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM todos WHERE session_id = ?", (session_id,)
+        )
+    return cursor.rowcount
+
+
+def get_todo(todo_id: str) -> dict | None:
+    """Return a single todo by id."""
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_session_todos_db(session_id: str) -> list[dict]:
+    """Return all todos for a session, ordered by created_at ASC."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM todos WHERE session_id = ? ORDER BY created_at ASC",
+            (session_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_todos_by_status(session_id: str, status: str) -> list[dict]:
+    """Return todos for a session filtered by status."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM todos WHERE session_id = ? AND status = ? ORDER BY created_at ASC",
+            (session_id, status),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ───── SESSION LIFECYCLE (GARBAGE COLLECTION) ────────────────────────────
 
 
@@ -2425,8 +2610,7 @@ def _ensure_session_gc_schema() -> None:
                     "ALTER TABLE sessions ADD COLUMN expired_at TEXT"
                 )
                 logger.info("Added 'expired_at' column to sessions table")
-            if "status" in existing and "expired_at" in existing:
-                _SESSION_GC_SCHEMA_MIGRATED = True
+            _SESSION_GC_SCHEMA_MIGRATED = True
     except Exception as exc:
         logger.warning("Session GC schema migration failed: %s", exc)
 
@@ -2546,3 +2730,861 @@ def get_session_stats() -> dict[str, int]:
         ).fetchone()
         expired = int(expired_row["c"]) if expired_row else 0
     return {"active": active, "expired": expired, "total": total}
+
+
+# ───── SCHEDULED TASKS ──────────────────────────────────────────
+
+
+def save_scheduled_task(task_data: dict) -> None:
+    """Persist a scheduled task (upsert by id).
+
+    Expects a dict compatible with ``Task.to_dict()`` plus a ``source`` key.
+    JSON columns (parameters_json, dependencies_json, metadata_json,
+    result_json) are serialized automatically.
+    """
+    try:
+        with get_db() as conn:
+            conn.execute(
+                """INSERT INTO scheduled_tasks
+                   (id, name, task_type, priority, status, handler,
+                    parameters_json, dependencies_json, retry_count, max_retries,
+                    timeout, interval, auto_retry, result_json, error,
+                    execution_time, created_at, updated_at, scheduled_at,
+                    started_at, completed_at, source, metadata_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       name = excluded.name,
+                       task_type = excluded.task_type,
+                       priority = excluded.priority,
+                       status = excluded.status,
+                       handler = excluded.handler,
+                       parameters_json = excluded.parameters_json,
+                       dependencies_json = excluded.dependencies_json,
+                       retry_count = excluded.retry_count,
+                       max_retries = excluded.max_retries,
+                       timeout = excluded.timeout,
+                       interval = excluded.interval,
+                       auto_retry = excluded.auto_retry,
+                       result_json = excluded.result_json,
+                       error = excluded.error,
+                       execution_time = excluded.execution_time,
+                       updated_at = excluded.updated_at,
+                       scheduled_at = excluded.scheduled_at,
+                       started_at = excluded.started_at,
+                       completed_at = excluded.completed_at,
+                       source = excluded.source,
+                       metadata_json = excluded.metadata_json
+                """,
+                (
+                    task_data["task_id"],
+                    task_data["name"],
+                    task_data.get("task_type", "monitoring"),
+                    task_data.get("priority", "normal"),
+                    task_data.get("status", "pending"),
+                    task_data.get("handler"),
+                    json.dumps(task_data.get("parameters", {}))
+                    if isinstance(task_data.get("parameters"), dict)
+                    else task_data.get("parameters", "{}"),
+                    json.dumps(task_data.get("dependencies", []))
+                    if isinstance(task_data.get("dependencies"), (list, set))
+                    else "[]",
+                    task_data.get("retry_count", 0),
+                    task_data.get("max_retries", 3),
+                    task_data.get("timeout", 300),
+                    task_data.get("interval"),
+                    1 if task_data.get("auto_retry", True) else 0,
+                    json.dumps(task_data.get("result"))
+                    if task_data.get("result") is not None
+                    else None,
+                    task_data.get("error"),
+                    task_data.get("execution_time", 0.0),
+                    task_data.get("created_at", _now_iso()),
+                    task_data.get("updated_at", _now_iso()),
+                    task_data.get("scheduled_at"),
+                    task_data.get("started_at"),
+                    task_data.get("completed_at"),
+                    task_data.get("source", "custom"),
+                    json.dumps(task_data.get("metadata", {}))
+                    if isinstance(task_data.get("metadata"), dict)
+                    else task_data.get("metadata", "{}"),
+                ),
+            )
+    except Exception as e:
+        logger.warning("Failed to save scheduled task: %s", e)
+
+
+def delete_scheduled_task(task_id: str) -> None:
+    """Remove a scheduled task from the database."""
+    try:
+        with get_db() as conn:
+            conn.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
+    except Exception as e:
+        logger.warning("Failed to delete scheduled task %s: %s", task_id, e)
+
+
+def load_scheduled_tasks(source: str = "custom") -> list[dict]:
+    """Load scheduled tasks from the database, filtered by source."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scheduled_tasks WHERE source = ? AND status IN ('pending', 'scheduled', 'waiting', 'retrying') ORDER BY CASE priority WHEN 'critical' THEN 1 WHEN 'urgent' THEN 2 WHEN 'high' THEN 3 WHEN 'normal' THEN 4 WHEN 'low' THEN 5 END, created_at ASC",
+                (source,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning("Failed to load scheduled tasks: %s", e)
+        return []
+
+
+def update_scheduled_task_status(task_id: str, status: str, **fields: Any) -> None:
+    """Update status and optional fields on a scheduled task."""
+    try:
+        sets = ["status = ?", "updated_at = ?"]
+        values: list[Any] = [status, _now_iso()]
+        for k, v in fields.items():
+            if v is not None:
+                sets.append(f"{k} = ?")
+                values.append(v)
+        values.append(task_id)
+        with get_db() as conn:
+            conn.execute(
+                f"UPDATE scheduled_tasks SET {', '.join(sets)} WHERE id = ?",
+                values,
+            )
+    except Exception as e:
+        logger.warning("Failed to update scheduled task %s: %s", task_id, e)
+
+
+def prune_scheduled_tasks(
+    max_age_days: int,
+    *,
+    dry_run: bool = False,
+    db_path: str | Path | None = None,
+) -> int:
+    """Delete scheduled-task rows that finished before the retention window.
+
+    Recurring tasks completed once per tick accumulate ~1440 rows/day, so the
+    queue needs a TTL. Only *terminal* rows carrying a completion timestamp are
+    candidates: a pending, scheduled, retrying or running row is live state, and
+    a completed row younger than ``max_age_days`` is recent history that stays
+    untouched. When ``completed_at`` is missing (legacy rows), ``updated_at`` is
+    used so those rows age out as well instead of living forever.
+
+    Returns the number of rows that were (or, with ``dry_run``, would be)
+    deleted.
+    """
+    cutoff = _now_iso_minus_hours(max_age_days * 24)
+    where = (
+        "status IN ('completed', 'failed', 'cancelled') "
+        "AND COALESCE(completed_at, updated_at) < ?"
+    )
+    with run_state_connection(db_path) as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduled_tasks'"
+        ).fetchone()
+        if exists is None:
+            # A database that only carries the run-state tables (the run
+            # coordinator can be pointed at its own file) has nothing to prune.
+            logger.debug("scheduled_tasks table absent; nothing to prune")
+            return 0
+        row = conn.execute(
+            f"SELECT COUNT(*) AS total FROM scheduled_tasks WHERE {where}",
+            (cutoff,),
+        ).fetchone()
+        total = int(row["total"]) if row else 0
+        if total and not dry_run:
+            conn.execute(
+                f"DELETE FROM scheduled_tasks WHERE {where}",
+                (cutoff,),
+            )
+            logger.info(
+                "Pruned %d scheduled task row(s) older than %d day(s)", total, max_age_days
+            )
+    return total
+
+
+# ───── RUN STATE / RUN COORDINATOR (Fase 1a) ─────────────────────────────
+
+
+# Copied verbatim from backend/persistence/schemas.sql. The schema file is the
+# canonical source (AGENTS.md rule 6) and ``_ensure_current_schema`` applies it
+# to every database ``init_db`` touches, so this copy exists only so a caller —
+# mainly backend/runtime/run_coordinator.py against an explicit ``db_path`` —
+# can make the run tables ready without replaying the whole schema.
+_RUN_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_state (
+    run_id                 TEXT PRIMARY KEY,
+    project_id             TEXT NOT NULL DEFAULT '',
+    user_id                TEXT NOT NULL DEFAULT '',
+    session_id             TEXT NOT NULL DEFAULT '',
+    goal                   TEXT NOT NULL DEFAULT '',
+    requirements_json      TEXT NOT NULL DEFAULT '[]',
+    constraints_json       TEXT NOT NULL DEFAULT '[]',
+    definition_of_done_json TEXT NOT NULL DEFAULT '[]',
+    state                  TEXT NOT NULL DEFAULT 'created'
+        CHECK (state IN ('created','planning','running','waiting_tool','waiting_approval',
+                         'verifying','recovering','paused','completed','failed','cancelled','expired')),
+    plan_json              TEXT,
+    current_task_id        TEXT,
+    retry_count            INTEGER NOT NULL DEFAULT 0,
+    budget_json            TEXT NOT NULL DEFAULT '{}',
+    provider_json          TEXT NOT NULL DEFAULT '{}',
+    memory_refs_json       TEXT NOT NULL DEFAULT '[]',
+    artifacts_json         TEXT NOT NULL DEFAULT '[]',
+    changed_files_json     TEXT NOT NULL DEFAULT '[]',
+    dod_results_json       TEXT,
+    usage_tokens           INTEGER NOT NULL DEFAULT 0,
+    usage_cost_usd         REAL NOT NULL DEFAULT 0.0,
+    usage_tool_calls       INTEGER NOT NULL DEFAULT 0,
+    usage_retries          INTEGER NOT NULL DEFAULT 0,
+    usage_browser_actions  INTEGER NOT NULL DEFAULT 0,
+    usage_subagents        INTEGER NOT NULL DEFAULT 0,
+    usage_runtime_seconds  REAL NOT NULL DEFAULT 0.0,
+    usage_provider_calls   INTEGER NOT NULL DEFAULT 0,
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    heartbeat_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    stop_reason            TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_run_state_session ON run_state(session_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_state_project ON run_state(project_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_state_user ON run_state(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_state_state ON run_state(state, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS run_checkpoints (
+    checkpoint_id  TEXT PRIMARY KEY,
+    run_id         TEXT NOT NULL,
+    phase          TEXT NOT NULL
+        CHECK (phase IN ('after_planning','before_side_effect','after_side_effect','after_task',
+                         'before_verification','after_verification','pause','provider_failover','heartbeat')),
+    payload_json   TEXT NOT NULL DEFAULT '{}',
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    FOREIGN KEY (run_id) REFERENCES run_state(run_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_run_checkpoints_run_created ON run_checkpoints(run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_checkpoints_run_phase ON run_checkpoints(run_id, phase, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS run_side_effects (
+    id              INTEGER PRIMARY KEY,
+    run_id          TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    kind            TEXT NOT NULL DEFAULT '',
+    result_digest   TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (run_id, idempotency_key),
+    FOREIGN KEY (run_id) REFERENCES run_state(run_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_run_side_effects_run ON run_side_effects(run_id, idempotency_key);
+
+CREATE TABLE IF NOT EXISTS run_dead_letters (
+    id                   TEXT PRIMARY KEY,
+    run_id               TEXT NOT NULL DEFAULT '',
+    task_id              TEXT NOT NULL DEFAULT '',
+    error_class          TEXT NOT NULL DEFAULT '',
+    sanitized_traceback  TEXT NOT NULL DEFAULT '',
+    attempts             INTEGER NOT NULL DEFAULT 0,
+    last_tool            TEXT,
+    last_provider        TEXT,
+    last_evidence_json   TEXT NOT NULL DEFAULT '{}',
+    recoverability       TEXT NOT NULL DEFAULT 'unknown',
+    retry_after          TEXT,
+    state                TEXT NOT NULL DEFAULT 'open'
+        CHECK (state IN ('open','retrying','requeued','replanned','abandoned','escalated')),
+    note                 TEXT NOT NULL DEFAULT '',
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_run_dead_letters_run ON run_dead_letters(run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_dead_letters_state ON run_dead_letters(state, created_at DESC);
+"""
+
+
+def ensure_run_state_schema(db_path: str | Path | None = None) -> None:
+    """Create the run-coordinator tables in ``db_path`` (idempotent).
+
+    Every statement is ``CREATE ... IF NOT EXISTS``, so calling this against an
+    already-migrated database is a no-op. ``db_path`` defaults to ``DB_PATH``.
+    """
+    with run_state_connection(db_path) as conn:
+        conn.executescript(_RUN_STATE_SCHEMA)
+
+
+@contextmanager
+def run_state_connection(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
+    """Yield a short-lived connection for run-state persistence.
+
+    Same pragmas as ``SQLiteConnectionPool._create_connection`` (row factory,
+    foreign keys, WAL, busy timeout) without going through the global pool: the
+    run coordinator points at an explicit ``db_path`` (tests and sidecar
+    databases), which the pool cannot express. Writes commit when the block
+    exits normally and roll back when it raises.
+    """
+    target = Path(db_path) if db_path is not None else DB_PATH
+    conn = sqlite3.connect(str(target), check_same_thread=False, timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _json_text(value: Any) -> str:
+    """Serialize a value the way the other JSON columns in this file do."""
+    return json.dumps(value)
+
+
+def create_run_row(
+    *,
+    run_id: str,
+    project_id: str,
+    user_id: str,
+    session_id: str,
+    goal: str,
+    requirements: list[str],
+    constraints: list[str],
+    definition_of_done: list[str],
+    state: str,
+    plan: dict[str, Any] | None,
+    budget: dict[str, Any],
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Insert one run row, returning it as stored (timestamps included)."""
+    now = _now_iso()
+    with run_state_connection(db_path) as conn:
+        conn.execute(
+            """INSERT INTO run_state
+               (run_id, project_id, user_id, session_id, goal, requirements_json,
+                constraints_json, definition_of_done_json, state, plan_json,
+                budget_json, created_at, updated_at, heartbeat_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id,
+                project_id,
+                user_id,
+                session_id,
+                goal,
+                _json_text(list(requirements)),
+                _json_text(list(constraints)),
+                _json_text(list(definition_of_done)),
+                state,
+                _json_text(plan) if plan is not None else None,
+                _json_text(dict(budget)),
+                now,
+                now,
+                now,
+            ),
+        )
+        row = conn.execute("SELECT * FROM run_state WHERE run_id = ?", (run_id,)).fetchone()
+    return dict(row) if row else {}
+
+
+def get_run_row(run_id: str, *, db_path: str | Path | None = None) -> dict[str, Any] | None:
+    """Return one run row, or ``None`` when it does not exist."""
+    with run_state_connection(db_path) as conn:
+        row = conn.execute("SELECT * FROM run_state WHERE run_id = ?", (run_id,)).fetchone()
+    return dict(row) if row else None
+
+
+# Columns update_run_row may write. Anything else is a programming error, so it
+# raises instead of silently ignoring the request.
+_RUN_ROW_MUTABLE_COLUMNS = frozenset(
+    {
+        "state",
+        "plan_json",
+        "current_task_id",
+        "retry_count",
+        "budget_json",
+        "provider_json",
+        "memory_refs_json",
+        "artifacts_json",
+        "changed_files_json",
+        "dod_results_json",
+        "stop_reason",
+        "heartbeat_at",
+        "updated_at",
+    }
+)
+
+
+def update_run_row(
+    run_id: str,
+    updates: Mapping[str, Any],
+    *,
+    db_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Apply whitelisted column updates to one run, returning the fresh row.
+
+    All columns of one call are written by a single UPDATE, so a progress write
+    is atomic. Returns ``None`` when the run does not exist.
+    """
+    if not updates:
+        return get_run_row(run_id, db_path=db_path)
+    unknown = set(updates) - _RUN_ROW_MUTABLE_COLUMNS
+    if unknown:
+        raise ValueError(f"unknown run_state columns: {sorted(unknown)}")
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    values: list[Any] = [*updates.values(), run_id]
+    with run_state_connection(db_path) as conn:
+        conn.execute(
+            f"UPDATE run_state SET {assignments} WHERE run_id = ?",
+            values,
+        )
+        row = conn.execute("SELECT * FROM run_state WHERE run_id = ?", (run_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_run_rows(
+    *,
+    project_id: str | None = None,
+    session_id: str | None = None,
+    user_id: str | None = None,
+    states: Sequence[str] | None = None,
+    limit: int = 100,
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Return run rows, newest activity first, filtered by the given fields."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if project_id:
+        clauses.append("project_id = ?")
+        params.append(project_id)
+    if session_id:
+        clauses.append("session_id = ?")
+        params.append(session_id)
+    if user_id:
+        clauses.append("user_id = ?")
+        params.append(user_id)
+    if states:
+        placeholders = ", ".join("?" for _ in states)
+        clauses.append(f"state IN ({placeholders})")
+        params.extend(states)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    with run_state_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM run_state" + where + " ORDER BY updated_at DESC, run_id DESC LIMIT ?",
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def insert_checkpoint_row(
+    *,
+    checkpoint_id: str,
+    run_id: str,
+    phase: str,
+    payload_json: str,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Insert one checkpoint row, returning it as stored."""
+    with run_state_connection(db_path) as conn:
+        conn.execute(
+            """INSERT INTO run_checkpoints (checkpoint_id, run_id, phase, payload_json)
+               VALUES (?, ?, ?, ?)""",
+            (checkpoint_id, run_id, phase, payload_json),
+        )
+        row = conn.execute(
+            "SELECT * FROM run_checkpoints WHERE checkpoint_id = ?",
+            (checkpoint_id,),
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def get_checkpoint_row(
+    checkpoint_id: str,
+    *,
+    db_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Return one checkpoint by id, or ``None`` when it does not exist."""
+    with run_state_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM run_checkpoints WHERE checkpoint_id = ?",
+            (checkpoint_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def latest_checkpoint_row(
+    run_id: str,
+    *,
+    phase: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Return the newest checkpoint of a run (optionally of one phase).
+
+    Ordering is ``created_at DESC, checkpoint_id DESC``: two checkpoints written
+    in the same millisecond still resolve deterministically.
+    """
+    clauses = ["run_id = ?"]
+    params: list[Any] = [run_id]
+    if phase:
+        clauses.append("phase = ?")
+        params.append(phase)
+    params.append(1)
+    with run_state_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM run_checkpoints WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY created_at DESC, checkpoint_id DESC LIMIT ?",
+            params,
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_checkpoint_rows(
+    run_id: str,
+    *,
+    limit: int = 50,
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Return a run's checkpoints, newest first."""
+    with run_state_connection(db_path) as conn:
+        rows = conn.execute(
+            """SELECT * FROM run_checkpoints
+               WHERE run_id = ?
+               ORDER BY created_at DESC, checkpoint_id DESC
+               LIMIT ?""",
+            (run_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_side_effect_row(
+    run_id: str,
+    idempotency_key: str,
+    *,
+    db_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Return the recorded side effect for a key, or ``None`` if unconfirmed."""
+    with run_state_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM run_side_effects WHERE run_id = ? AND idempotency_key = ?",
+            (run_id, idempotency_key),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def insert_side_effect_row(
+    run_id: str,
+    idempotency_key: str,
+    *,
+    kind: str,
+    result_digest: str,
+    db_path: str | Path | None = None,
+) -> bool:
+    """Record a side effect idempotently.
+
+    ``UNIQUE(run_id, idempotency_key)`` plus ``ON CONFLICT DO NOTHING`` makes a
+    replayed call a no-op: the first writer wins and the stored digest is kept.
+    Returns ``True`` when this call inserted the row.
+    """
+    with run_state_connection(db_path) as conn:
+        cursor = conn.execute(
+            """INSERT INTO run_side_effects (run_id, idempotency_key, kind, result_digest)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT (run_id, idempotency_key) DO NOTHING""",
+            (run_id, idempotency_key, kind, result_digest),
+        )
+        inserted = cursor.rowcount == 1
+    return inserted
+
+
+# usage metric name -> run_state column that accumulates it.
+_USAGE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("tokens", "usage_tokens"),
+    ("cost_usd", "usage_cost_usd"),
+    ("tool_calls", "usage_tool_calls"),
+    ("retries", "usage_retries"),
+    ("browser_actions", "usage_browser_actions"),
+    ("subagents", "usage_subagents"),
+    ("runtime_seconds", "usage_runtime_seconds"),
+    ("provider_calls", "usage_provider_calls"),
+)
+
+_USAGE_SELECT = ", ".join(column for _, column in _USAGE_COLUMNS)
+
+
+def record_usage_row(
+    run_id: str,
+    *,
+    tokens: int = 0,
+    cost_usd: float = 0.0,
+    tool_calls: int = 0,
+    retries: int = 0,
+    browser_actions: int = 0,
+    subagents: int = 0,
+    runtime_seconds: float = 0.0,
+    provider_calls: int = 0,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Accumulate usage for a run and return the running totals.
+
+    A single ``INSERT ... ON CONFLICT DO UPDATE`` statement does the add, so two
+    concurrent writers cannot lose each other's increment. Raises
+    ``ValueError`` when the run does not exist rather than inserting an orphan
+    usage row with a defaulted state.
+    """
+    increments: list[Any] = [
+        int(tokens),
+        float(cost_usd),
+        int(tool_calls),
+        int(retries),
+        int(browser_actions),
+        int(subagents),
+        float(runtime_seconds),
+        int(provider_calls),
+    ]
+    columns = ", ".join(column for _, column in _USAGE_COLUMNS)
+    placeholders = ", ".join("?" for _ in _USAGE_COLUMNS)
+    accumulations = ", ".join(
+        f"{column} = {column} + excluded.{column}" for _, column in _USAGE_COLUMNS
+    )
+    with run_state_connection(db_path) as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM run_state WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if exists is None:
+            raise ValueError(f"unknown run_id: {run_id}")
+        conn.execute(
+            f"INSERT INTO run_state (run_id, {columns}) VALUES (?, {placeholders}) "
+            f"ON CONFLICT (run_id) DO UPDATE SET {accumulations}",
+            (run_id, *increments),
+        )
+        row = conn.execute(
+            f"SELECT {_USAGE_SELECT} FROM run_state WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    if row is None:  # pragma: no cover - the insert above just created it
+        return {name: 0 for name, _ in _USAGE_COLUMNS}
+    return {name: row[column] for name, column in _USAGE_COLUMNS}
+
+
+def get_usage_row(
+    run_id: str,
+    *,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return the accumulated usage totals for a run (zeros when unknown)."""
+    with run_state_connection(db_path) as conn:
+        row = conn.execute(
+            f"SELECT {_USAGE_SELECT} FROM run_state WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    if row is None:
+        return {name: 0 for name, _ in _USAGE_COLUMNS}
+    return {name: row[column] for name, column in _USAGE_COLUMNS}
+
+
+def insert_dead_letter_row(
+    *,
+    entry_id: str,
+    run_id: str,
+    task_id: str,
+    error_class: str,
+    sanitized_traceback: str,
+    attempts: int,
+    last_tool: str,
+    last_provider: str,
+    last_evidence_json: str,
+    recoverability: str,
+    retry_after: str | None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Insert one dead-letter entry, returning it as stored."""
+    with run_state_connection(db_path) as conn:
+        conn.execute(
+            """INSERT INTO run_dead_letters
+               (id, run_id, task_id, error_class, sanitized_traceback, attempts,
+                last_tool, last_provider, last_evidence_json, recoverability,
+                retry_after, state)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')""",
+            (
+                entry_id,
+                run_id,
+                task_id,
+                error_class,
+                sanitized_traceback,
+                attempts,
+                last_tool,
+                last_provider,
+                last_evidence_json,
+                recoverability,
+                retry_after,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM run_dead_letters WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def list_dead_letter_rows(
+    *,
+    run_id: str | None = None,
+    state: str | None = "open",
+    limit: int = 100,
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Return dead-letter entries, newest first, optionally scoped to a run."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if run_id:
+        clauses.append("run_id = ?")
+        params.append(run_id)
+    if state:
+        clauses.append("state = ?")
+        params.append(state)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    with run_state_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM run_dead_letters" + where
+            + " ORDER BY created_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_dead_letter_row(
+    entry_id: str,
+    *,
+    state: str,
+    note: str,
+    db_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Move a dead-letter entry to a new state, appending ``note`` to its trail.
+
+    Returns the updated row, or ``None`` when the entry does not exist.
+    """
+    with run_state_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM run_dead_letters WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        existing_note = str(row["note"] or "")
+        merged_note = f"{existing_note}\n{note}" if existing_note and note else (note or existing_note)
+        conn.execute(
+            "UPDATE run_dead_letters SET state = ?, note = ?, updated_at = ? WHERE id = ?",
+            (state, merged_note, _now_iso(), entry_id),
+        )
+        updated = conn.execute(
+            "SELECT * FROM run_dead_letters WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+    return dict(updated) if updated else None
+
+
+# Runs that own no more future work. prune_run_state_tables only deletes these,
+# so a paused or still-running run is never dropped by retention.
+_TERMINAL_RUN_STATES: tuple[str, ...] = ("completed", "failed", "cancelled", "expired")
+
+
+def _count_and_delete(
+    conn: sqlite3.Connection,
+    table: str,
+    where: str,
+    params: Sequence[Any],
+    *,
+    dry_run: bool,
+) -> int:
+    """Count the rows matching ``where`` and delete them unless ``dry_run``."""
+    row = conn.execute(
+        f"SELECT COUNT(*) AS total FROM {table} WHERE {where}",
+        tuple(params),
+    ).fetchone()
+    total = int(row["total"]) if row else 0
+    if total and not dry_run:
+        conn.execute(
+            f"DELETE FROM {table} WHERE {where}",
+            tuple(params),
+        )
+    return total
+
+
+def prune_run_state_tables(
+    *,
+    runs_cutoff: str,
+    checkpoints_cutoff: str,
+    dead_letters_cutoff: str,
+    dry_run: bool = False,
+    db_path: str | Path | None = None,
+) -> dict[str, int]:
+    """Apply retention to the run-state tables.
+
+    * runs         — terminal states whose ``updated_at`` is older than
+      ``runs_cutoff``; their checkpoints, side effects and dead letters go with
+      them (the foreign keys cascade).
+    * checkpoints  — any checkpoint older than ``checkpoints_cutoff``, including
+      those of runs that are still alive: checkpoints are history.
+    * dead_letters — any entry older than ``dead_letters_cutoff`` (or belonging
+      to a run that is being deleted).
+
+    ``dry_run`` reports the counts without deleting. The developer database is
+    only touched when ``db_path`` is ``None``.
+    """
+    with run_state_connection(db_path) as conn:
+        run_rows = conn.execute(
+            "SELECT run_id FROM run_state WHERE state IN (?, ?, ?, ?) AND updated_at < ?",
+            (*_TERMINAL_RUN_STATES, runs_cutoff),
+        ).fetchall()
+        run_ids = [str(row["run_id"]) for row in run_rows]
+
+        checkpoint_clauses = ["(created_at < ?)"]
+        side_effect_clauses: list[str] = []
+        dead_letter_clauses = ["(created_at < ?)"]
+        checkpoint_params: list[Any] = [checkpoints_cutoff]
+        dead_letter_params: list[Any] = [dead_letters_cutoff]
+        if run_ids:
+            placeholders = ", ".join("?" for _ in run_ids)
+            checkpoint_clauses.append(f"run_id IN ({placeholders})")
+            checkpoint_params.extend(run_ids)
+            side_effect_clauses.append(f"run_id IN ({placeholders})")
+            dead_letter_clauses.append(f"run_id IN ({placeholders})")
+            dead_letter_params.extend(run_ids)
+
+        checkpoint_where = " OR ".join(checkpoint_clauses)
+        dead_letter_where = " OR ".join(dead_letter_clauses)
+        # Side effects carry no timestamp of their own: they only age out with
+        # the run they belong to.
+        side_effect_where = " OR ".join(side_effect_clauses)
+
+        counts = {
+            "runs": 0,
+            "checkpoints": _count_and_delete(
+                conn,
+                "run_checkpoints",
+                checkpoint_where,
+                checkpoint_params,
+                dry_run=dry_run,
+            ),
+            "side_effects": _count_and_delete(
+                conn,
+                "run_side_effects",
+                side_effect_where or "1 = 0",
+                run_ids,
+                dry_run=dry_run,
+            ),
+            "dead_letters": _count_and_delete(
+                conn,
+                "run_dead_letters",
+                dead_letter_where,
+                dead_letter_params,
+                dry_run=dry_run,
+            ),
+        }
+        counts["runs"] = _count_and_delete(
+            conn,
+            "run_state",
+            "run_id IN (SELECT run_id FROM run_state WHERE state IN (?, ?, ?, ?) AND updated_at < ?)",
+            (*_TERMINAL_RUN_STATES, runs_cutoff),
+            dry_run=dry_run,
+        )
+    logger.debug("Run-state prune: %s (dry_run=%s)", counts, dry_run)
+    return counts
