@@ -31,9 +31,13 @@ function kindIcon(kind: ActivityItem["kind"]) {
 function ExecutionActivity({
   items,
   isStreaming = false,
+  hasError = false,
+  pending = false,
 }: {
   items: ActivityItem[];
   isStreaming?: boolean;
+  hasError?: boolean;
+  pending?: boolean;
 }) {
   const [open, setOpen] = useState(isStreaming);
 
@@ -43,12 +47,13 @@ function ExecutionActivity({
 
   const summary = useMemo(() => {
     const agents = new Set(items.map((item) => item.agent).filter(Boolean));
-    const errors = items.filter((item) => item.status === "error").length;
+    const errors = items.filter((item) => item.status === "error").length + (hasError ? 1 : 0);
     if (isStreaming) return "A executar";
+    if (pending) return "À espera de aprovação";
     if (errors) return `${errors} problema${errors === 1 ? "" : "s"} durante a execução`;
     if (agents.size > 1) return `${agents.size} agentes colaboraram`;
     return "Trabalho concluído";
-  }, [isStreaming, items]);
+  }, [hasError, isStreaming, items, pending]);
 
   if (items.length === 0) return null;
 
@@ -63,6 +68,10 @@ function ExecutionActivity({
         <span className="flex h-5 w-5 items-center justify-center rounded-md bg-violet-400/10">
           {isStreaming ? (
             <Loader2 className="h-3 w-3 animate-spin text-violet-300" />
+          ) : pending ? (
+            <ShieldCheck className="h-3 w-3 text-amber-300" />
+          ) : hasError || items.some((item) => item.status === "error") ? (
+            <XCircle className="h-3 w-3 text-rose-300" />
           ) : (
             <Check className="h-3 w-3 text-emerald-400" />
           )}

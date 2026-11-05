@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, memo } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useMemo, useRef, useState, memo } from "react";
 import {
   ChevronDown,
   ChevronUp,
+  Copy,
   FileText,
   Save,
   FolderOpen,
@@ -17,16 +17,18 @@ import {
   CheckCircle2,
   XCircle,
   Wrench,
-  Code2,
   RotateCcw,
   ShieldAlert,
+  Square,
 } from "lucide-react";
 import type { ToolCallItem } from "../../lib/types";
 import { confirmTool, executeTool } from "../../lib/api";
+import { looksLikeDiff, terminalFields, toolAction, toolKind } from "../../lib/runLifecycle";
 
 interface ToolCallTimelineProps {
   calls: ToolCallItem[];
   sessionId?: string;
+  onCancel?: () => void;
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -94,13 +96,12 @@ function StatusIcon({ status }: { status: ToolCallItem["status"] }) {
     return <ShieldAlert className="h-3.5 w-3.5 text-amber-300" />;
   }
   if (status === "success") {
-    return (
-      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 drop-shadow-[0_0_3px_rgba(52,211,153,0.5)]" />
-    );
+    return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />;
   }
-  return (
-    <XCircle className="h-3.5 w-3.5 text-rose-400 drop-shadow-[0_0_3px_rgba(251,113,133,0.5)]" />
-  );
+  if (status === "cancelled") {
+    return <Square className="h-3.5 w-3.5 text-nexus-muted" />;
+  }
+  return <XCircle className="h-3.5 w-3.5 text-rose-400" />;
 }
 
 function StatusConfig(status: ToolCallItem["status"]) {
@@ -140,38 +141,12 @@ function StatusConfig(status: ToolCallItem["status"]) {
   };
 }
 
-function JsonSyntaxHighlight({ data }: { data: unknown }) {
-  const json = JSON.stringify(data, null, 2);
-
-  const highlighted = json
-    .replace(
-      /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
-      (match: string) => {
-        let cls = "text-amber-300/90";
-        if (/^"/.test(match)) {
-          if (/:$/.test(match)) {
-            cls = "text-indigo-300 font-semibold";
-          } else {
-            cls = "text-emerald-300/90";
-          }
-        } else if (/true|false/.test(match)) {
-          cls = "text-purple-300/90";
-        } else if (/null/.test(match)) {
-          cls = "text-slate-400";
-        } else if (!isNaN(Number(match))) {
-          cls = "text-orange-300/90";
-        }
-        return `<span class="${cls}">${match}</span>`;
-      },
-    )
-    .replace(/\n/g, "<br/>")
-    .replace(/\s/g, "&nbsp;");
-
+function JsonBlock({ data }: { data: unknown }) {
+  const json = typeof data === "string" ? data : JSON.stringify(data, null, 2);
   return (
-    <pre
-      className="font-mono text-[10px] leading-relaxed"
-      dangerouslySetInnerHTML={{ __html: highlighted }}
-    />
+    <pre className="max-h-56 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-nexus-text">
+      {json}
+    </pre>
   );
 }
 
@@ -207,300 +182,214 @@ function getMemoryOrigins(result: unknown): string[] {
   );
 }
 
-function phaseForTool(name: string): number {
-  if (/^(read|list|recall|memory)/i.test(name)) return 0;
-  if (/search|fetch|browser|consult/i.test(name)) return 1;
-  if (/write|delete|move|copy|execute|run|git|install|scaffold/i.test(name)) return 2;
-  return 3;
+function statusLabel(status: ToolCallItem["status"]): string {
+  switch (status) {
+    case "running":
+      return "a correr";
+    case "awaiting_confirmation":
+      return "à espera";
+    case "success":
+      return "feito";
+    case "cancelled":
+      return "cancelado";
+    default:
+      return "falhou";
+  }
 }
 
-function ExecutionStages({ calls }: { calls: ToolCallItem[] }) {
-  const labels = ["A ler", "A pesquisar", "A executar", "A validar"];
-  const highest = Math.max(...calls.map((call) => phaseForTool(call.name)), 0);
+function resultText(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (result == null) return "";
+  try {
+    return JSON.stringify(result, null, 2);
+  } catch {
+    return String(result);
+  }
+}
+
+function DiffBlock({ text }: { text: string }) {
   return (
-    <div className="flex flex-wrap items-center gap-1.5 border-b border-nexus-border/30 bg-nexus-bg/20 px-3 py-2">
-      {labels.map((label, index) => {
-        const completed = highest > index || calls.some((call) => phaseForTool(call.name) === index && call.status === "success");
-        const active = highest === index && calls.some((call) => phaseForTool(call.name) === index && call.status === "running");
+    <pre className="max-h-64 overflow-auto font-mono text-[10px] leading-relaxed">
+      {text.split("\n").map((line, index) => {
+        const tone = line.startsWith("+") && !line.startsWith("+++")
+          ? "text-emerald-300"
+          : line.startsWith("-") && !line.startsWith("---")
+            ? "text-rose-300"
+            : "text-nexus-muted";
         return (
-          <span
-            key={label}
-            className={`rounded-full px-2 py-0.5 text-[9px] font-semibold ${
-              completed ? "bg-emerald-400/10 text-emerald-300" : active ? "bg-nexus-accent/15 text-nexus-accent" : "bg-nexus-bg/60 text-nexus-muted/60"
-            }`}
-          >
-            {label}
-          </span>
+          <div key={`${index}-${line.slice(0, 12)}`} className={tone}>
+            {line || " "}
+          </div>
         );
       })}
+    </pre>
+  );
+}
+
+function ToolRow({
+  call,
+  sessionId,
+  onCancel,
+}: {
+  call: ToolCallItem;
+  sessionId: string;
+  onCancel?: () => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(call.status === "awaiting_confirmation" || call.status === "error");
+  useEffect(() => {
+    if (!open) return;
+    rootRef.current?.scrollIntoView({ block: "nearest" });
+  }, [open]);
+  const [query, setQuery] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [retryResult, setRetryResult] = useState<unknown>();
+  const { label } = getToolDisplay(call.name);
+  const kind = toolKind(call.name);
+  const action = toolAction(call.name, call.args);
+  const terminal = useMemo(() => terminalFields(call.result), [call.result]);
+  const plain = resultText(retryResult ?? call.result);
+  const diff = !terminal && looksLikeDiff(plain) ? plain : "";
+  const status = StatusConfig(call.status);
+  const output = terminal
+    ? [terminal.stdout, terminal.stderr].filter(Boolean).join("\n")
+    : plain;
+  const filtered = query
+    ? output.split("\n").filter((line) => line.toLowerCase().includes(query.toLowerCase())).join("\n")
+    : output;
+
+  async function copyOutput() {
+    try {
+      await navigator.clipboard.writeText(output);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <div ref={rootRef} data-testid="tool-row" className={`rounded-lg border border-white/10 bg-black/20 ${status.border}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left"
+        aria-expanded={open}
+      >
+        <span className="w-16 shrink-0 font-mono text-[10px] uppercase tracking-wide text-nexus-faint">{kind}</span>
+        <span className="min-w-0 flex-1 truncate text-xs text-nexus-text">
+          <span className="text-nexus-muted">{label}</span>
+          <span className="px-1 text-nexus-faint">·</span>
+          {action}
+        </span>
+        <span className={`shrink-0 font-mono text-[10px] ${status.icon}`}>{statusLabel(call.status)}</span>
+        <span className="w-14 shrink-0 text-right font-mono text-[10px] text-nexus-faint">
+          {call.durationMs != null ? `${call.durationMs} ms` : "—"}
+        </span>
+        {open ? <ChevronUp className="h-3 w-3 text-nexus-faint" /> : <ChevronDown className="h-3 w-3 text-nexus-faint" />}
+      </button>
+      {open && (
+        <div className="space-y-2 border-t border-white/8 px-2.5 py-2">
+          {Object.keys(call.args || {}).length > 0 && (
+            <div>
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-nexus-faint">Argumentos</div>
+              <JsonBlock data={call.args} />
+            </div>
+          )}
+          {terminal && (
+            <div data-testid="terminal-output" className="flex flex-wrap items-center gap-2 text-[10px] text-nexus-muted">
+              <span>cwd {terminal.cwd || "—"}</span>
+              <span>exit {terminal.exitCode ?? "—"}</span>
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Procurar na saída"
+                aria-label="Procurar na saída do terminal"
+                className="min-w-0 flex-1 rounded border border-white/10 bg-transparent px-2 py-1 text-[11px] text-nexus-text outline-none"
+              />
+              <button type="button" onClick={() => void copyOutput()} className="inline-flex items-center gap-1 rounded px-1.5 py-1 hover:bg-white/5">
+                <Copy className="h-3 w-3" />
+                {copied ? "Copiado" : "Copiar"}
+              </button>
+              {call.status === "running" && onCancel && (
+                <button type="button" onClick={onCancel} className="rounded px-1.5 py-1 text-rose-300 hover:bg-rose-400/10">
+                  Parar
+                </button>
+              )}
+            </div>
+          )}
+          {diff ? <DiffBlock text={diff} /> : filtered ? <JsonBlock data={filtered} /> : null}
+          {call.error && <p className="text-[11px] text-rose-300">{call.error}</p>}
+          {call.status === "error" && call.error && getToolErrorSuggestion(call.name, call.error) && (
+            <p className="text-[11px] text-amber-200">Sugestão: {getToolErrorSuggestion(call.name, call.error)}</p>
+          )}
+          {call.status === "error" && (
+            <button
+              type="button"
+              disabled={retrying}
+              onClick={() => {
+                setRetrying(true);
+                void executeTool(call.name, call.args, sessionId)
+                  .then((result) => setRetryResult(result))
+                  .finally(() => setRetrying(false));
+              }}
+              className="inline-flex items-center gap-1 rounded border border-rose-300/30 px-2 py-1 text-[10px] text-rose-200"
+            >
+              <RotateCcw className={`h-3 w-3 ${retrying ? "animate-spin" : ""}`} />
+              Repetir
+            </button>
+          )}
+          {call.status === "awaiting_confirmation" && (
+            <div className="flex gap-2">
+              <button
+                type="button"
+                disabled={confirming || !call.confirmationId}
+                onClick={() => {
+                  if (!call.confirmationId) return;
+                  setConfirming(true);
+                  void confirmTool(call.confirmationId, true).finally(() => setConfirming(false));
+                }}
+                className="rounded bg-emerald-400/15 px-2 py-1 text-[10px] font-semibold text-emerald-200"
+              >
+                Permitir uma vez
+              </button>
+              <button
+                type="button"
+                disabled={confirming || !call.confirmationId}
+                onClick={() => {
+                  if (!call.confirmationId) return;
+                  setConfirming(true);
+                  void confirmTool(call.confirmationId, false).finally(() => setConfirming(false));
+                }}
+                className="rounded bg-rose-400/10 px-2 py-1 text-[10px] font-semibold text-rose-200"
+              >
+                Recusar
+              </button>
+            </div>
+          )}
+          {getMemoryOrigins(call.result).length > 0 && (
+            <div className="flex flex-wrap gap-1 text-[10px] text-cyan-200/80">
+              {getMemoryOrigins(call.result).map((origin) => (
+                <span key={origin} className="rounded-full bg-cyan-400/10 px-2 py-0.5">Memória: {origin}</span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function ToolCallTimeline({ calls, sessionId = "default" }: ToolCallTimelineProps) {
-  const [expanded, setExpanded] = useState(false);
-  const [retrying, setRetrying] = useState<string | null>(null);
-  const [retryResults, setRetryResults] = useState<Record<string, unknown>>({});
-  const [confirming, setConfirming] = useState<string | null>(null);
+function ToolCallTimeline({ calls, sessionId = "default", onCancel }: ToolCallTimelineProps) {
   if (!calls || calls.length === 0) return null;
-
-  const runningCount = calls.filter((c) => c.status === "running").length;
-  const successCount = calls.filter((c) => c.status === "success").length;
-  const errorCount = calls.filter((c) => c.status === "error").length;
-  const confirmationCount = calls.filter((c) => c.status === "awaiting_confirmation").length;
-
-  const retryTool = async (call: ToolCallItem, confirmed = false) => {
-    setRetrying(call.id);
-    try {
-      const result = await executeTool(call.name, call.args, sessionId, confirmed);
-      setRetryResults((current) => ({ ...current, [call.id]: result }));
-    } finally {
-      setRetrying(null);
-    }
-  };
-
-  const resolveConfirmation = async (call: ToolCallItem, approved: boolean) => {
-    if (!call.confirmationId) return;
-    setConfirming(call.id);
-    try {
-      await confirmTool(call.confirmationId, approved);
-    } finally {
-      setConfirming(null);
-    }
-  };
-
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 5 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, ease: "easeOut" }}
-      className="mt-3 overflow-hidden rounded-xl border border-nexus-border/50 bg-nexus-panel/50 shadow-lg backdrop-blur-sm"
-    >
-      <motion.button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center justify-between gap-3 p-3 text-left transition-colors duration-200 hover:bg-nexus-bg/40"
-        whileHover={{ scale: 1.005 }}
-        whileTap={{ scale: 0.995 }}
-      >
-        <div className="flex flex-wrap items-center gap-2">
-          {calls.slice(0, 4).map((call) => {
-            const { label, Icon } = getToolDisplay(call.name);
-            const statusConfig = StatusConfig(call.status);
-            return (
-              <motion.span
-                key={call.id}
-                className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${statusConfig.badge}`}
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: 0.05 }}
-              >
-                <Icon className="h-3 w-3" />
-                {label}
-                <StatusIcon status={call.status} />
-              </motion.span>
-            );
-          })}
-          {calls.length > 4 && (
-            <span className="rounded-full bg-nexus-bg/60 px-2 py-0.5 text-[10px] font-medium text-nexus-muted ring-1 ring-nexus-border/50">
-              +{calls.length - 4}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2 text-[10px] font-medium text-nexus-muted">
-          {runningCount > 0 && (
-            <span className="flex items-center gap-1 text-nexus-accent">
-              <motion.span
-                className="inline-block h-1.5 w-1.5 rounded-full bg-nexus-accent"
-                animate={{ scale: [1, 1.4, 1], opacity: [0.5, 1, 0.5] }}
-                transition={{ duration: 1.5, repeat: Infinity }}
-              />
-              {runningCount} a correr
-            </span>
-          )}
-          {successCount > 0 && (
-            <span className="text-emerald-400">{successCount} ok</span>
-          )}
-          {errorCount > 0 && (
-            <span className="text-rose-400">{errorCount} erro</span>
-          )}
-          {confirmationCount > 0 && (
-            <span className="text-amber-300">{confirmationCount} aprovação</span>
-          )}
-          <motion.div
-            className="flex items-center gap-1 rounded-full bg-nexus-bg/60 p-1 ring-1 ring-nexus-border/50"
-            whileHover={{ scale: 1.1 }}
-          >
-            {expanded ? (
-              <ChevronUp className="h-3 w-3" />
-            ) : (
-              <ChevronDown className="h-3 w-3" />
-            )}
-          </motion.div>
-        </div>
-      </motion.button>
-
-      <ExecutionStages calls={calls} />
-
-      <AnimatePresence initial={false}>
-        {expanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.3, ease: "easeInOut" }}
-            className="overflow-hidden"
-          >
-            <div className="space-y-2.5 border-t border-nexus-border/30 bg-nexus-bg/20 p-3">
-              {calls.map((call, idx) => {
-                const { label, Icon } = getToolDisplay(call.name);
-                const statusConfig = StatusConfig(call.status);
-                return (
-                  <motion.div
-                    key={call.id}
-                    initial={{ opacity: 0, x: -10 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: idx * 0.05 }}
-                    className={`rounded-lg border border-nexus-border/40 bg-nexus-card/80 p-3 shadow-md ${statusConfig.border}`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2.5">
-                        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-nexus-bg/80 text-[9px] font-bold text-nexus-muted ring-1 ring-nexus-border/50">
-                          {idx + 1}
-                        </span>
-                        <Icon className={`h-4 w-4 ${statusConfig.icon}`} />
-                        <span className="text-xs font-semibold text-nexus-text">
-                          {label}
-                        </span>
-                        <span className="rounded bg-nexus-bg/60 px-1.5 py-0.5 font-mono text-[9px] text-nexus-muted ring-1 ring-nexus-border/40">
-                          {call.name}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <StatusIcon status={call.status} />
-                        {call.durationMs !== undefined && (
-                          <span className="rounded-full bg-nexus-bg/60 px-2 py-0.5 font-mono text-[10px] text-nexus-muted ring-1 ring-nexus-border/40">
-                            {call.durationMs}ms
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    {call.args && Object.keys(call.args).length > 0 && (
-                      <div className="mt-2.5 overflow-hidden rounded-lg border border-nexus-border/30 bg-nexus-bg/80 p-2.5 shadow-inner">
-                        <div className="mb-1.5 flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-wider text-nexus-muted">
-                          <Code2 className="h-3 w-3" />
-                          Argumentos
-                        </div>
-                        <JsonSyntaxHighlight data={call.args} />
-                      </div>
-                    )}
-                    {call.status === "success" && call.result !== undefined && (
-                      <motion.div
-                        initial={{ opacity: 0, y: 4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className={`mt-2.5 overflow-hidden rounded-lg ${statusConfig.resultBg} p-2.5 shadow-inner`}
-                      >
-                        <div className="mb-1.5 flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-wider text-emerald-400/80">
-                          <CheckCircle2 className="h-3 w-3" />
-                          Resultado
-                        </div>
-                        <div
-                          className={`text-[10px] leading-relaxed ${statusConfig.resultText} whitespace-pre-wrap font-light`}
-                        >
-                          {typeof call.result === "string"
-                            ? call.result
-                            : JSON.stringify(call.result, null, 2)}
-                        </div>
-                      </motion.div>
-                    )}
-                    {call.status === "error" && call.error && (
-                      <motion.div
-                        initial={{ opacity: 0, y: 4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="mt-2.5 overflow-hidden rounded-lg border border-rose-400/20 bg-rose-500/5 p-2.5 shadow-inner"
-                      >
-                        <div className="mb-1.5 flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-wider text-rose-400/80">
-                          <XCircle className="h-3 w-3" />
-                          Erro
-                        </div>
-                        <div className="text-[10px] leading-relaxed text-rose-400/80">
-                          {call.error}
-                        </div>
-                        {getToolErrorSuggestion(call.name, call.error) && (
-                          <div className="mt-2 rounded border border-amber-300/20 bg-amber-300/5 p-2 text-[10px] text-amber-200/90">
-                            Sugestão: {getToolErrorSuggestion(call.name, call.error)}
-                          </div>
-                        )}
-                        <button
-                          type="button"
-                          disabled={retrying === call.id}
-                          onClick={() => void retryTool(call)}
-                          className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-rose-300/25 px-2 py-1 text-[10px] font-semibold text-rose-200 hover:bg-rose-400/10 disabled:opacity-50"
-                        >
-                          <RotateCcw className={`h-3 w-3 ${retrying === call.id ? "animate-spin" : ""}`} />
-                          {retrying === call.id ? "A repetir…" : "Repetir tool"}
-                        </button>
-                      </motion.div>
-                    )}
-                    {call.status === "awaiting_confirmation" && (
-                      <motion.div className="mt-2.5 rounded-lg border border-amber-300/20 bg-amber-300/5 p-2.5">
-                        <div className="text-[10px] leading-relaxed text-amber-100/90">
-                          Esta operação pode alterar ficheiros, executar código ou aceder a um serviço externo.
-                          {call.suggestion && <span className="block mt-1 text-amber-200/70">{call.suggestion}</span>}
-                        </div>
-                        <div className="mt-2 flex gap-2">
-                          <button
-                            type="button"
-                            disabled={confirming === call.id}
-                            onClick={() => void resolveConfirmation(call, true)}
-                            className="rounded-md bg-emerald-400/15 px-2 py-1 text-[10px] font-semibold text-emerald-200 hover:bg-emerald-400/25 disabled:opacity-50"
-                          >
-                            Confirmar
-                          </button>
-                          <button
-                            type="button"
-                            disabled={confirming === call.id}
-                            onClick={() => void resolveConfirmation(call, false)}
-                            className="rounded-md bg-rose-400/10 px-2 py-1 text-[10px] font-semibold text-rose-200 hover:bg-rose-400/20 disabled:opacity-50"
-                          >
-                            Recusar
-                          </button>
-                        </div>
-                      </motion.div>
-                    )}
-                    {retryResults[call.id] !== undefined && (
-                      <div className="mt-2.5 rounded-lg border border-cyan-300/20 bg-cyan-300/5 p-2.5 text-[10px] text-cyan-100/90">
-                        <div className="font-semibold">Resultado da repetição</div>
-                        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[9px]">
-                          {JSON.stringify(retryResults[call.id], null, 2)}
-                        </pre>
-                        {typeof retryResults[call.id] === "object" && retryResults[call.id] !== null &&
-                          (retryResults[call.id] as { confirmation_required?: boolean }).confirmation_required && (
-                            <button
-                              type="button"
-                              onClick={() => void retryTool(call, true)}
-                              className="mt-2 rounded-md bg-amber-400/15 px-2 py-1 font-semibold text-amber-200 hover:bg-amber-400/25"
-                            >
-                              Confirmar repetição
-                            </button>
-                          )}
-                      </div>
-                    )}
-                    {getMemoryOrigins(call.result).length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1 text-[9px] text-cyan-200/80">
-                        {getMemoryOrigins(call.result).map((origin) => (
-                          <span key={origin} className="rounded-full bg-cyan-400/10 px-2 py-0.5">Memória: {origin}</span>
-                        ))}
-                      </div>
-                    )}
-                  </motion.div>
-                );
-              })}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </motion.div>
+    <div className="mt-3 space-y-1.5" data-testid="tool-timeline">
+      {calls.map((call) => (
+        <ToolRow key={call.id} call={call} sessionId={sessionId} onCancel={onCancel} />
+      ))}
+    </div>
   );
 }
 

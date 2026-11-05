@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ChevronLeft,
@@ -93,6 +93,7 @@ export default function EditorWorkspace() {
   const [explorerCollapsed, setExplorerCollapsed] = useState(false);
   const [workspaceInput, setWorkspaceInput] = useState(".");
   const [desktopMode, setDesktopMode] = useState(false);
+  const openedPendingFile = useRef(false);
 
   const workspacePresets = useMemo(
     () => [
@@ -156,6 +157,16 @@ export default function EditorWorkspace() {
   }, [loadTree]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const pending = window.sessionStorage.getItem("nexus.openFile");
+    if (!pending) return;
+    openedPendingFile.current = true;
+    window.sessionStorage.removeItem("nexus.openFile");
+    void loadFile(pending);
+  }, [loadFile]);
+
+  useEffect(() => {
+    if (openedPendingFile.current) return;
     if (tree.length === 0) return;
     const firstFile = findFirstFile(tree);
     if (firstFile && !activePath) {

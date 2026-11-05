@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.core.workspace_security import shell_argv
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,8 +89,8 @@ class SandboxExecutor:
 
     async def _run_in_subprocess(self, test_command: str, start: float) -> SandboxResult:
         result = subprocess.run(
-            test_command,
-            shell=True,
+            shell_argv(test_command),
+            shell=False,
             capture_output=True,
             text=True,
             timeout=120,
@@ -107,8 +109,8 @@ class SandboxExecutor:
         start = time.time()
         try:
             result = subprocess.run(
-                lint_command,
-                shell=True,
+                shell_argv(lint_command),
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=60,

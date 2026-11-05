@@ -51,7 +51,8 @@ export type StepStatus =
   | "success"
   | "error"
   | "awaiting_confirmation"
-  | "pending";
+  | "pending"
+  | "cancelled";
 
 /**
  * One row of the unified run timeline.
@@ -162,7 +163,7 @@ export interface ToolCallItem {
   id: string;
   name: string;
   args: Record<string, unknown>;
-  status: "running" | "awaiting_confirmation" | "success" | "error";
+  status: "running" | "awaiting_confirmation" | "success" | "error" | "cancelled";
   result?: unknown;
   error?: string;
   durationMs?: number;

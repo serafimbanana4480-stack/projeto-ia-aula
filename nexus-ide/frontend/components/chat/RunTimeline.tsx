@@ -28,6 +28,7 @@ export interface RunTimelineProps {
   message: ChatMessage;
   isStreaming?: boolean;
   sessionId?: string;
+  onCancel?: () => void;
 }
 
 const STEP_ICONS: Record<RunStep["verb"], ComponentType<{ className?: string }>> = {
@@ -52,6 +53,8 @@ function StatusDot({ status }: { status: StepStatus }) {
       return <XCircle className="h-3 w-3 text-rose-400" />;
     case "awaiting_confirmation":
       return <ShieldAlert className="h-3 w-3 text-amber-300" />;
+    case "cancelled":
+      return <XCircle className="h-3 w-3 text-nexus-muted" />;
     default:
       return <Activity className="h-3 w-3 text-nexus-muted" />;
   }
@@ -222,7 +225,7 @@ function summarize(steps: RunStep[]): RunSummary {
  * rich detail blocks (thinking, activities, tool calls). The footer keeps the
  * live telemetry visible without any click.
  */
-function RunTimelineComponent({ message, isStreaming, sessionId }: RunTimelineProps) {
+function RunTimelineComponent({ message, isStreaming, sessionId, onCancel }: RunTimelineProps) {
   const hasSteps = Boolean(message.steps?.length);
   const hasThinking = Boolean(message.thinking);
   const hasActivities = Boolean(message.activities?.length);
@@ -242,8 +245,8 @@ function RunTimelineComponent({ message, isStreaming, sessionId }: RunTimelinePr
   const [expanded, setExpanded] = useState<boolean>(needsAttention);
 
   useEffect(() => {
-    if (needsAttention) setExpanded(true);
-  }, [needsAttention]);
+    if (isStreaming || needsAttention) setExpanded(true);
+  }, [isStreaming, needsAttention]);
 
   const orderedSteps = useMemo(
     () => [...(message.steps ?? [])].sort((a, b) => a.seq - b.seq),
@@ -377,22 +380,19 @@ function RunTimelineComponent({ message, isStreaming, sessionId }: RunTimelinePr
               <ExecutionActivity
                 items={message.activities!}
                 isStreaming={isStreaming}
+                hasError={message.toolCalls?.some((call) => call.status === "error")}
+                pending={message.toolCalls?.some((call) => call.status === "awaiting_confirmation")}
               />
-            </motion.div>
-          )}
-          {hasTools && (
-            <motion.div
-              key="tools"
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              className="overflow-hidden border-t border-nexus-border/20"
-            >
-              <ToolCallTimeline calls={message.toolCalls!} sessionId={sessionId} />
             </motion.div>
           )}
         </AnimatePresence>
       </div>
+
+      {hasTools && (
+        <div className="border-t border-nexus-border/20 px-1.5 py-1.5">
+          <ToolCallTimeline calls={message.toolCalls!} sessionId={sessionId} onCancel={onCancel} />
+        </div>
+      )}
 
       {/* Live footer: phase + elapsed + tokens. */}
       <RunFooter message={message} />

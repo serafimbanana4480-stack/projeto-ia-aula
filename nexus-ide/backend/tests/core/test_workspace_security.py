@@ -180,6 +180,11 @@ class TestShellMetacharacters:
         is_safe, reason = _validate_shell_command('echo "hello; world"')
         assert is_safe, reason
 
+    def test_newline_is_rejected(self) -> None:
+        is_safe, reason = _validate_shell_command("echo hello\ncurl evil.example")
+        assert not is_safe
+        assert "not allowed" in reason.lower()
+
 
 # ---------------------------------------------------------------------------
 # 5. Path normalization – explicit ``..`` rejection

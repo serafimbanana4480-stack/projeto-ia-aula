@@ -363,23 +363,25 @@ export function AnimatedNumber({
   decimals?: number;
   duration?: number;
 }) {
-  const [display, setDisplay] = useState(value);
-  const fromRef = useRef(value);
+  const safe = typeof value === "number" && Number.isFinite(value) ? value : null;
+  const [display, setDisplay] = useState(safe ?? 0);
+  const fromRef = useRef(safe ?? 0);
   const rafRef = useRef<number | null>(null);
 
   useEffect(() => {
+    if (safe == null) return;
     const from = fromRef.current;
-    const delta = value - from;
+    const delta = safe - from;
 
     if (Math.abs(delta) < 0.01) {
-      setDisplay(value);
-      fromRef.current = value;
+      setDisplay(safe);
+      fromRef.current = safe;
       return;
     }
     // Order-of-magnitude jumps (first load, reset) should just appear.
     if (from !== 0 && Math.abs(delta / (from || 1)) > 5) {
-      setDisplay(value);
-      fromRef.current = value;
+      setDisplay(safe);
+      fromRef.current = safe;
       return;
     }
 
@@ -389,16 +391,17 @@ export function AnimatedNumber({
       const eased = 1 - Math.pow(1 - t, 3); // easeOutCubic
       setDisplay(from + delta * eased);
       if (t < 1) rafRef.current = requestAnimationFrame(tick);
-      else fromRef.current = value;
+      else fromRef.current = safe;
     };
     rafRef.current = requestAnimationFrame(tick);
 
     return () => {
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-      fromRef.current = value;
+      fromRef.current = safe;
     };
-  }, [value, duration]);
+  }, [safe, duration]);
 
+  if (safe == null) return <>—</>;
   return <>{display.toFixed(decimals)}</>;
 }
 

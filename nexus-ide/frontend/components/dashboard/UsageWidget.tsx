@@ -221,7 +221,7 @@ export default function UsageWidget() {
     );
   }
 
-  if (!data || data.total_tokens === 0) {
+  if (!data || typeof data.total_tokens !== "number" || data.total_tokens === 0) {
     return (
       <WidgetShell>
         <div className="mt-4">

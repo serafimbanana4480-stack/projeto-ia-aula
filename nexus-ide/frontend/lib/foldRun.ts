@@ -17,7 +17,7 @@
  *  - the live footer (phase, elapsed, tokens) is captured from the ``done``
  *    frame and the last ``metric``/``progress`` events.
  */
-import { RunEventBuffer, type RuntimeEventLike } from "./eventOrdering";
+import { segmentByRun, type RuntimeEventLike } from "./eventOrdering";
 import type {
   ActivityItem,
   AgentName,
@@ -233,14 +233,43 @@ function findRunningTool(
   return -1;
 }
 
+/**
+ * Fold every run in the stream, then interleave the pending user turns.
+ *
+ * One buffer used to keep the first `run_id` and discard the rest, and the
+ * pending users were all rendered before every assistant reply. Each segment
+ * is now its own reply, paired with the user turn that started it.
+ */
 export function foldRun(
   pendingUser: ChatMessage[],
   events: StreamEvent[],
   lastUserMessage = "",
 ): FoldRunResult {
-  const buffer = new RunEventBuffer();
-  for (const e of events) buffer.push(e as unknown as RuntimeEventLike);
-  const ordered = buffer.events() as unknown as StreamEvent[];
+  const segments = segmentByRun(events as unknown as RuntimeEventLike[]);
+  if (segments.length === 0) {
+    return { messages: [...pendingUser], lastUserMessage };
+  }
+
+  const paired = pendingUser.slice(0, segments.length);
+  const trailing = pendingUser.slice(segments.length);
+  const out: ChatMessage[] = [];
+  let last = lastUserMessage;
+  segments.forEach((segment, index) => {
+    if (paired[index]) out.push(paired[index]);
+    const folded = foldSingle([], segment as unknown as StreamEvent[], last);
+    out.push(...folded.messages);
+    if (folded.lastUserMessage) last = folded.lastUserMessage;
+  });
+  out.push(...trailing);
+  return { messages: out, lastUserMessage: last };
+}
+
+function foldSingle(
+  pendingUser: ChatMessage[],
+  events: StreamEvent[],
+  lastUserMessage = "",
+): FoldRunResult {
+  const ordered = events;
 
   const out: ChatMessage[] = [...pendingUser];
   let current: ChatMessage | null = null;
@@ -417,9 +446,24 @@ export function foldRun(
         break;
       }
       case "done": {
+        const cancelled = e.data?.cancelled === true || e.data?.status === "cancelled";
         if (typeof e.data?.elapsed === "number") elapsedMs = e.data.elapsed * 1000;
         if (e.data?.telemetry && typeof e.data.telemetry === "object") {
           telemetry = { ...(telemetry ?? {}), ...(e.data.telemetry as Record<string, unknown>) };
+        }
+        if (cancelled && current) {
+          for (const call of current.toolCalls ?? []) {
+            if (call.status === "running" || call.status === "awaiting_confirmation") {
+              call.status = "cancelled";
+              call.error = call.error || "Cancelado pelo utilizador";
+            }
+          }
+          for (const step of current.steps ?? []) {
+            if (step.status === "running" || step.status === "awaiting_confirmation") {
+              step.status = "cancelled";
+            }
+          }
+          current.metadata = { ...(current.metadata ?? {}), cancelled: true };
         }
         current = null;
         break;

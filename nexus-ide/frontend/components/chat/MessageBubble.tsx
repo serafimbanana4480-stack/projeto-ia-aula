@@ -4,15 +4,10 @@ import ReactMarkdown from "react-markdown";
 import { memo, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Copy, Check, RefreshCw, AlertCircle, Pencil, RotateCw, Save, X } from "lucide-react";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import {
-  oneDark,
-  oneLight,
-} from "react-syntax-highlighter/dist/esm/styles/prism";
-import type { ChatMessage, AgentName } from "../../lib/types";
+import type { ChatMessage } from "../../lib/types";
 import { stripAnsiCodes } from "../../lib/utils";
-import { useThemeStore } from "../../stores/themeStore";
 import RunTimeline from "./RunTimeline";
+import CodeBlock from "./CodeBlock";
 import { sanitizeAssistantContent } from "../../lib/chatPresentation";
 import { agentColor } from "../../lib/foldRun";
 
@@ -62,6 +57,7 @@ function MessageBubbleComponent({
   onRetry,
   onEdit,
   onRegenerate,
+  onCancel,
 }: {
   message: ChatMessage;
   sessionId?: string;
@@ -69,6 +65,7 @@ function MessageBubbleComponent({
   onRetry?: (prompt: string) => void;
   onEdit?: (messageId: string, newContent: string) => void;
   onRegenerate?: (messageId: string) => void;
+  onCancel?: () => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(message.content);
@@ -76,7 +73,6 @@ function MessageBubbleComponent({
   const [relativeTime, setRelativeTime] = useState(() =>
     getRelativeTime(new Date(message.timestamp)),
   );
-  const theme = useThemeStore((s) => s.theme);
   const visibleContent = isUser ? message.content : sanitizeAssistantContent(message.content);
   const color = agentColor(message.agent || "");
 
@@ -109,11 +105,11 @@ function MessageBubbleComponent({
       )}
 
       <div
-        className={`min-w-0 text-[15px] leading-7 transition-all duration-200 ${
+        className={`min-w-0 max-w-full text-[15px] leading-7 ${
           isUser
-            ? "max-w-[78%] rounded-2xl rounded-br-md bg-gradient-to-br from-nexus-accent to-nexus-accent-deep p-4 text-white shadow-lg shadow-nexus-accent/20 hover:scale-[1.01]"
+            ? "max-w-[min(78%,40rem)] rounded-2xl rounded-br-md border border-white/10 bg-[var(--nx-surface-3)] px-4 py-3 text-nexus-text"
             : "w-full max-w-[880px]"
-        }`}
+        } ${isStreaming ? "min-h-[4.5rem]" : ""}`}
       >
         {/* Meta row: name + time */}
         <div className={`mb-1 flex items-center gap-2 text-[11px] ${isUser ? "justify-end" : ""}`}>
@@ -130,8 +126,8 @@ function MessageBubbleComponent({
               )}
             </>
           )}
-          {isUser && <span className="font-medium text-white/70">Você</span>}
-          <span className={`tabular-nums opacity-60 ${isUser ? "text-white/60" : "text-nexus-muted"}`}>
+          {isUser && <span className="font-medium text-nexus-muted">Tu</span>}
+          <span className="tabular-nums text-nexus-muted opacity-70">
             {relativeTime}
           </span>
         </div>
@@ -146,40 +142,15 @@ function MessageBubbleComponent({
           {visibleContent.trim() && typeof ReactMarkdown !== "undefined" ? (
             <ReactMarkdown
               className="prose prose-base max-w-none leading-7"
+              urlTransform={(url) => (url.startsWith("javascript:") || url.startsWith("data:") ? "" : url)}
               components={{
                 code({ inline, className, children, ...props }: any) {
-                  const match = /language-(\w+)/.exec(className || "");
+                  const match = /language-([\w./+-]+)/.exec(className || "");
                   const lang = match ? match[1] : "";
                   const codeString = String(children).replace(/\n$/, "");
 
-                  if (!inline && lang) {
-                    const style = theme === "light" ? oneLight : oneDark;
-                    return (
-                      <div className="relative group/code">
-                        <div className="absolute right-2 top-2 z-10 flex items-center gap-1.5">
-                          <span className="rounded bg-nexus-bg/60 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-nexus-muted font-mono border border-nexus-border/40">
-                            {lang}
-                          </span>
-                          <CopyCodeButton code={codeString} />
-                        </div>
-                        <SyntaxHighlighter
-                          language={lang}
-                          style={style}
-                          customStyle={{
-                            margin: 0,
-                            borderRadius: "0.5rem",
-                            fontSize: "0.75rem",
-                            lineHeight: "1.4",
-                            padding: "1rem",
-                            background: "rgba(11, 11, 20, 0.8)",
-                          }}
-                          PreTag="div"
-                          showLineNumbers={codeString.split("\n").length > 3}
-                        >
-                          {codeString}
-                        </SyntaxHighlighter>
-                      </div>
-                    );
+                  if (!inline && (lang || codeString.includes("\n"))) {
+                    return <CodeBlock code={codeString} language={lang || "texto"} />;
                   }
 
                   const mergedClassName = `${className ?? ""} ${inline ? "rounded bg-nexus-bg/80 px-1 py-0.5 text-[11px]" : "rounded-lg bg-nexus-bg/80 p-3 text-xs overflow-x-auto border border-nexus-border/60 block"}`.trim();
@@ -208,6 +179,7 @@ function MessageBubbleComponent({
               message={message}
               isStreaming={isStreaming}
               sessionId={sessionId}
+              onCancel={onCancel}
             />
           )}
 
@@ -306,36 +278,6 @@ function MessageBubbleComponent({
         </div>
       )}
     </motion.div>
-  );
-}
-
-function CopyCodeButton({ code }: { code: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      onClick={async (e) => {
-        e.stopPropagation();
-        try {
-          await navigator.clipboard.writeText(code);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
-        } catch {}
-      }}
-      className="flex items-center gap-1 rounded border border-nexus-border/40 bg-nexus-bg/60 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-nexus-muted opacity-0 transition-all hover:text-nexus-text group-hover/code:opacity-100"
-      title="Copiar código"
-    >
-      {copied ? (
-        <>
-          <Check className="h-3 w-3 text-emerald-400" />
-          <span className="text-emerald-400">Copiado</span>
-        </>
-      ) : (
-        <>
-          <Copy className="h-3 w-3" />
-          Copiar
-        </>
-      )}
-    </button>
   );
 }
 

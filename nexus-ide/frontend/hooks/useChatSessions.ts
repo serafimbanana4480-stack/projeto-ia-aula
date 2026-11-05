@@ -64,7 +64,26 @@ export const useChatSessionsStore = create<ChatSessionsState>((set, get) => ({
       const res = await authenticatedFetch(`${API_BASE}/api/sessions?limit=100`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      set({ sessions: data.sessions || [], error: null });
+      const sessions = data.sessions || [];
+      set({ sessions, error: null });
+      if (!get().currentId && sessions.length > 0) {
+        let stored: string | null = null;
+        try {
+          stored = localStorage.getItem(SESSION_KEY);
+        } catch {
+          stored = null;
+        }
+        const match = stored ? sessions.find((session: ChatSession) => session.id === stored) : undefined;
+        const pick = match || sessions[0];
+        if (pick) {
+          set({ currentId: pick.id });
+          try {
+            localStorage.setItem(SESSION_KEY, pick.id);
+          } catch {
+            // Preference is optional.
+          }
+        }
+      }
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) });
     } finally {
