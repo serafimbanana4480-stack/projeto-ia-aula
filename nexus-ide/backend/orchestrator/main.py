@@ -825,25 +825,53 @@ async def health_deep(
     return data
 
 
+def _history_from_db(session_id: str) -> list[dict[str, str]] | None:
+    """Read the durable transcript. The in-memory window is capped and drops older turns."""
+    try:
+        from backend.persistence.db import get_messages
+
+        rows = get_messages(session_id, limit=500)
+    except Exception:
+        logger.exception("Failed to read chat history for session %s", session_id)
+        return None
+    messages: list[dict[str, str]] = []
+    for row in rows:
+        role = row.get("role") or ""
+        if role not in {"user", "assistant"}:
+            continue
+        messages.append(
+            {
+                "role": role,
+                "content": row.get("content") or "",
+                "timestamp": row.get("created_at") or "",
+            }
+        )
+    return messages or None
+
+
 @app.get("/api/sessions/{session_id}/history")
 async def get_history(
     request: Request,
     session_id: str,
     _user: dict = Depends(require_auth),
 ) -> dict[str, list[dict[str, str]]]:
+    db_messages = _history_from_db(session_id) or []
     history = await app.state.context.get_history(session_id)
-    return {
-        "messages": [
-            {
-                "role": m.role,
-                "content": m.content,
-                "timestamp": getattr(m, "timestamp", ""),
-                **({"agent": m.agent} if getattr(m, "agent", None) else {}),
-                **({"metrics": m.metrics} if getattr(m, "metrics", None) else {}),
-            }
-            for m in history
-        ]
-    }
+    memory_messages = [
+        {
+            "role": m.role,
+            "content": m.content,
+            "timestamp": getattr(m, "timestamp", ""),
+            **({"agent": m.agent} if getattr(m, "agent", None) else {}),
+            **({"metrics": m.metrics} if getattr(m, "metrics", None) else {}),
+        }
+        for m in history
+    ]
+    # SQLite keeps the full transcript. Memory is a 20-message window, so a
+    # longer database copy is the one a refresh must show. A longer memory
+    # copy means the latest turn has not been committed yet.
+    chosen = db_messages if len(db_messages) >= len(memory_messages) else memory_messages
+    return {"messages": chosen}
 
 
 def main() -> None:  # pragma: no cover

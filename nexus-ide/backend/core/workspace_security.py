@@ -829,6 +829,21 @@ def _validate_single_command(command: str) -> tuple[bool, str]:
     return True, ""
 
 
+def shell_argv(command: str) -> list[str]:
+    """Run a command without ``subprocess`` ``shell=True``.
+
+    Pipes stay inside the system shell because the validated command is one
+    argument. Python itself does not concatenate the string into a shell line.
+    Callers must reject newlines first; ``_validate_shell_command`` does that
+    for workspace commands.
+    """
+    import os
+
+    if os.name == "nt":
+        return ["cmd.exe", "/d", "/s", "/c", command]
+    return ["/bin/sh", "-c", command]
+
+
 def _validate_shell_command(command: str) -> tuple[bool, str]:
     """Validate a shell command against blacklist and whitelist.
 
@@ -838,6 +853,8 @@ def _validate_shell_command(command: str) -> tuple[bool, str]:
     """
     if not command or not command.strip():
         return False, "Empty command"
+    if any(char in command for char in ("\n", "\r", "\x00")):
+        return False, "Newlines and null bytes are not allowed"
 
     cmd_str = command.strip()
     cmd_lower = cmd_str.lower()

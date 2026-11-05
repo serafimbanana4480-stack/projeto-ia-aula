@@ -3,6 +3,7 @@ import {
   RunEventBuffer,
   dedupeAndOrder,
   isOrderable,
+  segmentByRun,
   type RuntimeEventLike,
   type OrderedEvent,
 } from "../../lib/eventOrdering";
@@ -240,6 +241,16 @@ describe("event ordering", () => {
       ];
       const result = dedupeAndOrder(events);
       expect(result).toHaveLength(2);
+    });
+
+    it("keeps every run in its own segment", () => {
+      const segments = segmentByRun([
+        makeEvent("token", 1, "e1", "run-1"),
+        makeEvent("done", 2, "e2", "run-1"),
+        makeEvent("token", 1, "e3", "run-2"),
+      ]);
+      expect(segments).toHaveLength(2);
+      expect(segments[1][0].run_id).toBe("run-2");
     });
 
     it("deduplicates by event_id in batch", () => {

@@ -29,6 +29,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.core.agent_bus import BusMessage, get_agent_bus
+from backend.core.workspace_security import shell_argv
 
 logger = logging.getLogger(__name__)
 
@@ -823,8 +824,8 @@ class ProposalApplier:
         cwd = str(self._repo_path) if self._repo_path else None
         try:
             proc = subprocess.run(
-                self._test_command,
-                shell=True,
+                shell_argv(self._test_command),
+                shell=False,
                 capture_output=True,
                 text=True,
                 cwd=cwd,

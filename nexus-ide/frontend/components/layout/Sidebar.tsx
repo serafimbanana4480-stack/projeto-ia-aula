@@ -35,6 +35,9 @@ import {
 type KnownRoute =
   | "/"
   | "/editor"
+  | "/agents"
+  | "/activity"
+  | "/dashboard"
   | "/projects"
   | "/swarm"
   | "/analysis"
@@ -66,43 +69,36 @@ interface NavGroup {
 // sidebar was 15 flat links with no hierarchy. `/nexus` and SWARM used to
 // have no entry point at all; `/analytics` (the conversation-intelligence
 // dashboard) was reachable only by typing the URL.
-const NAV_GROUPS: NavGroup[] = [
+const PRIMARY_NAV: NavItem[] = [
+  { id: "chat", label: "Chat", icon: <MessageSquare className="h-4 w-4" />, path: "/" },
+  { id: "workspace", label: "Workspace", icon: <FileCode2 className="h-4 w-4" />, path: "/editor" },
+  { id: "agents", label: "Agentes", icon: <Bot className="h-4 w-4" />, path: "/agents" },
+  { id: "activity", label: "Atividade", icon: <Activity className="h-4 w-4" />, path: "/activity" },
+  { id: "dashboard", label: "Dashboard", icon: <BarChart3 className="h-4 w-4" />, path: "/dashboard" },
+];
+
+const MORE_NAV: NavGroup[] = [
   {
-    id: "work",
-    label: "Trabalho",
+    id: "more-work",
+    label: "Projeto",
     items: [
-      { id: "chat", label: "Chat", icon: <MessageSquare className="h-4 w-4" />, path: "/" },
-      { id: "editor", label: "Editor", icon: <FileCode2 className="h-4 w-4" />, path: "/editor" },
       { id: "projects", label: "Projetos", icon: <FolderKanban className="h-4 w-4" />, path: "/projects" },
-    ],
-  },
-  {
-    id: "intelligence",
-    label: "Inteligência",
-    items: [
       { id: "swarm", label: "SWARM", icon: <Bot className="h-4 w-4" />, path: "/swarm" },
-      { id: "analysis", label: "Métricas", icon: <BarChart3 className="h-4 w-4" />, path: "/analysis" },
-      { id: "analytics", label: "Analytics", icon: <Activity className="h-4 w-4" />, path: "/analytics" },
+      { id: "models", label: "Modelos", icon: <Cpu className="h-4 w-4" />, path: "/models" },
     ],
   },
   {
-    id: "resources",
-    label: "Recursos",
+    id: "more-tools",
+    label: "Ferramentas",
     items: [
-      { id: "models", label: "Modelos IA", icon: <Cpu className="h-4 w-4" />, path: "/models" },
-      { id: "mcp", label: "Conectores MCP", icon: <Plug className="h-4 w-4" />, path: "/mcp" },
+      { id: "mcp", label: "Conectores", icon: <Plug className="h-4 w-4" />, path: "/mcp" },
       { id: "tools", label: "Ferramentas", icon: <Wrench className="h-4 w-4" />, path: "/tools" },
       { id: "database", label: "Base de Dados", icon: <Database className="h-4 w-4" />, path: "/database" },
-    ],
-  },
-  {
-    id: "content",
-    label: "Conteúdo",
-    items: [
       { id: "documents", label: "Documentos", icon: <FileText className="h-4 w-4" />, path: "/documents" },
-      { id: "pdf", label: "Leitor PDF", icon: <FileText className="h-4 w-4" />, path: "/pdf" },
-      { id: "search", label: "Web Search", icon: <Search className="h-4 w-4" />, path: "/search" },
+      { id: "pdf", label: "PDF", icon: <FileText className="h-4 w-4" />, path: "/pdf" },
+      { id: "search", label: "Pesquisa", icon: <Search className="h-4 w-4" />, path: "/search" },
       { id: "scraping", label: "Scraping", icon: <Globe className="h-4 w-4" />, path: "/scraping" },
+      { id: "analytics", label: "Métricas", icon: <BarChart3 className="h-4 w-4" />, path: "/analytics" },
     ],
   },
 ];
@@ -170,13 +166,13 @@ function SidebarLink({
         collapsed ? "justify-center px-0" : "px-3"
       } ${
         active
-          ? "border border-[rgba(124,106,251,0.30)] bg-gradient-to-b from-[rgba(124,106,251,0.16)] to-[rgba(124,106,251,0.05)] font-medium text-nexus-text shadow-[inset_0_1px_0_var(--nx-rim),0_0_0_1px_rgba(124,106,251,0.12),0_8px_18px_-10px_rgba(124,106,251,0.55)]"
-          : "border border-transparent text-nexus-muted hover:border-white/[0.06] hover:bg-white/[0.05] hover:text-nexus-text"
+          ? "border border-white/10 bg-white/[0.06] font-medium text-nexus-text"
+          : "border border-transparent text-nexus-muted hover:bg-white/[0.04] hover:text-nexus-text"
       }`}
     >
       {/* Active-state accent rail */}
       {active && (
-        <span className="absolute left-0 top-1/2 h-5 w-[2px] -translate-y-1/2 rounded-full bg-nexus-accent-bright shadow-[0_0_10px_var(--nx-accent)]" />
+        <span className="absolute left-0 top-1/2 h-4 w-[2px] -translate-y-1/2 rounded-full bg-nexus-text" />
       )}
       <span className={`shrink-0 ${active ? "text-nexus-accent-bright" : ""}`}>{item.icon}</span>
       {!collapsed && <span className="truncate">{item.label}</span>}
@@ -224,20 +220,7 @@ export default function Sidebar() {
   }, []);
 
   const effectiveCollapsed = collapsed && isDesktop;
-
-  const formatProjectDate = useCallback((dateStr: string) => {
-    try {
-      const diffMs = Date.now() - new Date(dateStr).getTime();
-      const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-      if (diffHours < 1) return "agora";
-      if (diffHours < 24) return `há ${diffHours}h`;
-      if (diffDays < 7) return `há ${diffDays}d`;
-      return new Date(dateStr).toLocaleDateString();
-    } catch {
-      return "";
-    }
-  }, []);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   return (
     <>
@@ -269,7 +252,7 @@ export default function Sidebar() {
             href="/projects"
             prefetch={false}
             title="Novo Projeto"
-            className={`flex h-10 items-center justify-center gap-2 rounded-xl bg-gradient-to-b from-[var(--nx-accent-bright)] to-[var(--nx-accent)] text-sm font-semibold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),var(--nx-shadow-accent)] transition-all duration-150 hover:brightness-110 ${
+            className={`flex h-10 items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.06] text-sm font-semibold text-nexus-text transition-colors hover:bg-white/[0.1] ${
               effectiveCollapsed ? "w-10 shrink-0 px-0" : "flex-1 px-4"
             }`}
           >
@@ -288,28 +271,43 @@ export default function Sidebar() {
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 space-y-4 px-3">
-          {NAV_GROUPS.map((group) => (
-            <div key={group.id}>
-              {effectiveCollapsed ? (
-                <div className="mx-1 mb-1.5 h-px bg-nexus-border" />
-              ) : (
-                <div className="mb-1.5 px-3 text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
-                  {group.label}
+        <nav className="flex-1 space-y-4 overflow-y-auto px-3" aria-label="Principal">
+          <div className="space-y-0.5">
+            {PRIMARY_NAV.map((item) => (
+              <SidebarLink
+                key={item.id}
+                item={item}
+                active={isRouteActive(pathname, item.path)}
+                collapsed={effectiveCollapsed}
+              />
+            ))}
+          </div>
+          <div>
+            <button
+              type="button"
+              onClick={() => setMoreOpen((open) => !open)}
+              className="mb-1 flex w-full items-center justify-between px-3 text-[10px] font-semibold uppercase tracking-wider text-nexus-faint"
+              aria-expanded={moreOpen}
+            >
+              {effectiveCollapsed ? "···" : "Mais"}
+            </button>
+            {(moreOpen || effectiveCollapsed) &&
+              MORE_NAV.map((group) => (
+                <div key={group.id} className="mb-3 space-y-0.5">
+                  {!effectiveCollapsed && (
+                    <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-nexus-faint/70">{group.label}</div>
+                  )}
+                  {group.items.map((item) => (
+                    <SidebarLink
+                      key={item.id}
+                      item={item}
+                      active={isRouteActive(pathname, item.path)}
+                      collapsed={effectiveCollapsed}
+                    />
+                  ))}
                 </div>
-              )}
-              <div className="space-y-0.5">
-                {group.items.map((item) => (
-                  <SidebarLink
-                    key={item.id}
-                    item={item}
-                    active={isRouteActive(pathname, item.path)}
-                    collapsed={effectiveCollapsed}
-                  />
-                ))}
-              </div>
-            </div>
-          ))}
+              ))}
+          </div>
         </nav>
 
         {/* Definições — pinned below the topic groups, not inside any of them */}

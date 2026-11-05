@@ -142,3 +142,41 @@ export function dedupeAndOrder(events: RuntimeEventLike[]): RuntimeEventLike[] {
   for (const event of events) buffer.push(event);
   return buffer.events();
 }
+
+/**
+ * Split a session stream into one ordered timeline per run.
+ *
+ * A single `RunEventBuffer` keeps only the first `run_id` and drops every
+ * later run, which made the second turn of a conversation disappear. This
+ * walks the arrival order, starts a new segment when the run changes or when
+ * a `done` frame has already closed the previous turn, and orders each
+ * segment on its own so replays still de-duplicate.
+ */
+export function segmentByRun<T extends RuntimeEventLike>(events: T[]): T[][] {
+  const segments: T[][] = [];
+  let current: T[] = [];
+  let runId: string | null = null;
+  let closed = false;
+
+  const flush = () => {
+    if (current.length === 0) return;
+    const buffer = new RunEventBuffer();
+    for (const event of current) buffer.push(event);
+    segments.push(buffer.events() as T[]);
+    current = [];
+    runId = null;
+    closed = false;
+  };
+
+  for (const event of events) {
+    const nextRun =
+      typeof event.run_id === "string" && event.run_id.length > 0 ? event.run_id : null;
+    const runChanged = current.length > 0 && nextRun !== null && runId !== null && nextRun !== runId;
+    if (runChanged || (current.length > 0 && closed)) flush();
+    current.push(event);
+    if (nextRun) runId = nextRun;
+    if (event.type === "done") closed = true;
+  }
+  flush();
+  return segments;
+}

@@ -92,6 +92,39 @@ describe("lib/foldRun", () => {
       expect(errorMsg!.metadata!.prompt).toBe("user query");
     });
 
+    it("keeps a later run instead of dropping it", () => {
+      const events: StreamEvent[] = [
+        { type: "token", content: "primeiro", timestamp: "2026-01-01T00:00:00Z", run_id: "run-a", seq: 1, event_id: "a1" },
+        { type: "done", timestamp: "2026-01-01T00:00:01Z", run_id: "run-a", seq: 2, event_id: "a2" },
+        { type: "token", content: "segundo", timestamp: "2026-01-01T00:00:02Z", run_id: "run-b", seq: 1, event_id: "b1" },
+        { type: "done", timestamp: "2026-01-01T00:00:03Z", run_id: "run-b", seq: 2, event_id: "b2" },
+      ];
+      const users: ChatMessage[] = [
+        { id: "u1", role: "user", content: "um", timestamp: "2026-01-01T00:00:00Z" },
+        { id: "u2", role: "user", content: "dois", timestamp: "2026-01-01T00:00:02Z" },
+      ];
+      const result = foldRun(users, events, "dois");
+      expect(result.messages.map((message) => message.content)).toEqual(["um", "primeiro", "dois", "segundo"]);
+    });
+
+    it("drops a replayed event with the same id", () => {
+      const events: StreamEvent[] = [
+        { type: "token", content: "ola", timestamp: "2026-01-01T00:00:00Z", run_id: "run-a", seq: 1, event_id: "same" },
+        { type: "token", content: "ola", timestamp: "2026-01-01T00:00:01Z", run_id: "run-a", seq: 1, event_id: "same" },
+      ];
+      const result = foldRun([], events, "");
+      expect(result.messages.find((message) => message.role === "assistant")?.content).toBe("ola");
+    });
+
+    it("marks a cancelled run", () => {
+      const events: StreamEvent[] = [
+        { type: "tool_call", tool_name: "execute_terminal", tool_args: { command: "sleep 5" }, timestamp: "2026-01-01T00:00:00Z", run_id: "run-a", seq: 1, event_id: "t1" },
+        { type: "done", timestamp: "2026-01-01T00:00:01Z", run_id: "run-a", seq: 2, event_id: "t2", data: { cancelled: true, status: "cancelled" } },
+      ];
+      const result = foldRun([], events, "");
+      expect(result.messages[0].toolCalls?.[0].status).toBe("cancelled");
+    });
+
     it("processes done event with telemetry", () => {
       const events: StreamEvent[] = [
         { type: "agent_started", agent: "CODER", timestamp: "2026-01-01T00:00:00Z" },

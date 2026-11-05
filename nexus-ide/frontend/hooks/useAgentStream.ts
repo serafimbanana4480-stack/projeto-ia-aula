@@ -23,6 +23,7 @@ export function useAgentStream(sessionId: string) {
   const activeRequestId = useRef(0);
   const activeCancellationRequestId = useRef<string | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
+  const seenEventIds = useRef<Set<string>>(new Set());
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setTelemetry = useChatTelemetryStore((state) => state.setStream);
 
@@ -124,6 +125,10 @@ export function useAgentStream(sessionId: string) {
               if (!jsonStr) continue;
               const evt = JSON.parse(jsonStr) as StreamEvent;
               if (requestId !== activeRequestId.current) return;
+              if (evt.event_id) {
+                if (seenEventIds.current.has(evt.event_id)) continue;
+                seenEventIds.current.add(evt.event_id);
+              }
               receivedEvent = true;
               setEvents((prev) => [...prev, evt]);
 
@@ -395,6 +400,7 @@ export function useAgentStream(sessionId: string) {
   );
 
   const cancel = useCallback(() => {
+    const inFlight = Boolean(activeCancellationRequestId.current);
     cancelServerRequest();
     abortRef.current?.abort();
     readerRef.current?.cancel().catch(() => {});
@@ -402,10 +408,21 @@ export function useAgentStream(sessionId: string) {
       clearTimeout(timeoutRef.current);
       timeoutRef.current = null;
     }
+    if (inFlight) {
+      setEvents((prev) => [
+        ...prev,
+        {
+          type: "done",
+          timestamp: new Date().toISOString(),
+          data: { cancelled: true, status: "cancelled" },
+        },
+      ]);
+    }
     setStreaming(false);
   }, [cancelServerRequest]);
 
   const reset = useCallback(() => {
+    seenEventIds.current.clear();
     setEvents([]);
     setError(null);
   }, []);

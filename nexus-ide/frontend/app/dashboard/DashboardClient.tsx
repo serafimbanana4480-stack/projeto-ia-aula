@@ -183,9 +183,16 @@ export default function DashboardClient() {
                 ) : null}
               </span>
             </div>
-            <h1 className="nx-title text-[28px] font-bold leading-tight sm:text-[32px]">
+            <h1 id="overview" className="nx-title text-[28px] font-bold leading-tight sm:text-[32px]">
               Painel de Operações
             </h1>
+            <nav aria-label="Secções do painel" className="flex flex-wrap gap-2 pt-2 text-[12px]">
+              <a href="#overview" className="rounded-full border border-white/10 px-2.5 py-1 text-nexus-text">Visão geral</a>
+              <Link href="/activity" className="rounded-full border border-white/10 px-2.5 py-1 text-nexus-muted hover:text-nexus-text">Atividade</Link>
+              <Link href="/agents" className="rounded-full border border-white/10 px-2.5 py-1 text-nexus-muted hover:text-nexus-text">Agentes</Link>
+              <Link href="/models" className="rounded-full border border-white/10 px-2.5 py-1 text-nexus-muted hover:text-nexus-text">Modelos</Link>
+              <Link href="/editor" className="rounded-full border border-white/10 px-2.5 py-1 text-nexus-muted hover:text-nexus-text">Workspace</Link>
+            </nav>
             <p className="max-w-xl text-[13px] leading-relaxed text-nexus-muted">
               Débito, latência e fiabilidade dos agentes em tempo real. Orquestre
               o Swarm e lance objetivos sem sair desta página.

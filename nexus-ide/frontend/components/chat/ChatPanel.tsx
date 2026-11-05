@@ -6,10 +6,12 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useAgentStream } from "../../hooks/useAgentStream";
 import { useChatSessions } from "../../hooks/useChatSessions";
 import { useToast } from "./Toast";
-import { ApiError, getSessionHistory, getSessionRuns, createPlan, continuePlan, approvePlan, executePlan, getPlanStatus, cancelPlan, getProvidersStatus } from "../../lib/api";
+import { ApiError, apiUrl, getSessionHistory, getSessionRuns, createPlan, continuePlan, approvePlan, executePlan, getPlanStatus, cancelPlan, getProvidersStatus } from "../../lib/api";
 import type { PlanCreateResult, PlanStatus as PlanStatusType } from "../../lib/api";
 import { useModeStore, type Mode } from "../../stores/modeStore";
 import { useModelStore } from "../../stores/modelStore";
+import { useRunUiStore } from "../../stores/runUiStore";
+import { useChatTelemetryStore } from "../../stores/chatTelemetryStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { initMetricsStream } from "../../stores/metricsStore";
@@ -117,9 +119,15 @@ function ModeDropdown() {
     };
   }, [open]);
 
-  const list: Mode[] = modesLoaded
-    ? modes
-    : ([{ id: currentMode }] as Mode[]);
+  if (!modesLoaded) return null;
+  if (modes.length === 0) {
+    return (
+      <span className="hidden text-[11px] text-nexus-muted sm:inline" title="O backend não devolveu modos">
+        Sem modos
+      </span>
+    );
+  }
+  const list: Mode[] = modes;
   const activeCfg = MODE_CONFIG[currentMode] || {
     icon: Sparkles,
     label: currentMode,
@@ -216,11 +224,13 @@ export default function ChatPanel({
   rightOpen = true,
   setRightOpen,
 }: ChatPanelProps) {
-  const [sessionId, setSessionId] = useState<string>("default");
+  const [sessionId, setSessionId] = useState<string>("");
   const sessions = useChatSessions();
   const toast = useToast();
   const { currentMode, modes, modesLoaded, loadModes } = useModeStore();
-  const { activeModel, activeProvider, modelsLoaded, loadModels } = useModelStore();
+  const { activeModel, activeProvider, models, modelsLoaded, loadModels } = useModelStore();
+  const setRunUi = useRunUiStore((state) => state.setRunUi);
+  const usage = useChatTelemetryStore((state) => state.usage);
   const { currentProject } = useProjectStore();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -392,6 +402,10 @@ export default function ChatPanel({
   }, [thinkingStrength]);
 
   const loadHistory = useCallback(async () => {
+    if (!sessionId) {
+      setHistoryLoaded(false);
+      return;
+    }
     try {
       setHistoryError(null);
       const history = await getSessionHistory(sessionId);
@@ -433,6 +447,44 @@ export default function ChatPanel({
   const commandsLoading = useAdvancedModeStore((s) => s.commandsLoading);
   const commandsError = useAdvancedModeStore((s) => s.commandsError);
   const advancedModes = useAdvancedModeStore((s) => s.modes);
+
+  const sessionEnsured = useRef(false);
+  useEffect(() => {
+    if (sessions.loading || sessions.currentId || sessions.sessions.length > 0) return;
+    if (sessionEnsured.current) return;
+    sessionEnsured.current = true;
+    void sessions.create("Nova sessão");
+  }, [sessions]);
+
+  useEffect(() => {
+    let stop = false;
+    const ping = async () => {
+      try {
+        const response = await fetch(apiUrl("/health"), { cache: "no-store" });
+        if (!stop) setBackendOffline(!response.ok);
+      } catch {
+        if (!stop) setBackendOffline(true);
+      }
+    };
+    void ping();
+    const timer = window.setInterval(() => void ping(), 15000);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    setRunUi({
+      goal: lastUserMessageRef.current,
+      sessionId,
+      backendOffline,
+      demoMode,
+      streaming,
+      modelLabel: activeModel || (modelsLoaded ? "automático" : ""),
+      cancel,
+    });
+  }, [activeModel, backendOffline, cancel, demoMode, modelsLoaded, sessionId, setRunUi, streaming]);
 
   useEffect(() => {
     loadHistory();
@@ -507,7 +559,7 @@ export default function ChatPanel({
 
   const doSendMessage = async (overrideText?: string) => {
     const trimmed = (overrideText ?? input).trim();
-    if (!trimmed || streaming) return;
+    if (!trimmed || streaming || !sessionId) return;
     autoTitleSession(trimmed);
     const hasAttachments = attachedFiles.length > 0;
     const displayContent = hasAttachments
@@ -791,7 +843,7 @@ export default function ChatPanel({
       const e = events[i];
       switch (e.type) {
         case "agent_started":
-          return `${e.agent ?? "IA"} a pensar…`;
+          return e.agent ? `${e.agent} em execução` : "Em execução";
         case "thinking":
           return `${e.agent ?? "IA"} a raciocinar…`;
         case "tool_call":
@@ -804,29 +856,19 @@ export default function ChatPanel({
           break;
       }
     }
-    return "A pensar…";
+    return "A aguardar resposta…";
   }, [streaming, events]);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const previousMessagesLength = useRef(messages.length);
   const userScrolledUp = useRef(false);
 
+  const tail = messages[messages.length - 1];
+  const tailSize = (tail?.content.length ?? 0) + (tail?.toolCalls?.length ?? 0) + (tail?.thinking?.length ?? 0);
+
   useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-
-    const isNewMessageAdded = messages.length > previousMessagesLength.current;
-    previousMessagesLength.current = messages.length;
-
-    if (!isNewMessageAdded) return;
-
-    const isNearBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight < 100;
-
-    if (!userScrolledUp.current || isNearBottom) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [messages]);
+    if (userScrolledUp.current) return;
+    messagesEndRef.current?.scrollIntoView({ behavior: streaming ? "auto" : "smooth" });
+  }, [messages.length, tailSize, streaming]);
 
   useEffect(() => {
     const container = messagesContainerRef.current;
@@ -1188,8 +1230,26 @@ export default function ChatPanel({
           {/* Advanced mode indicator + toggle */}
           <AdvancedModeHeaderIndicator />
 
-          {/* Model selector — search, provider grouping, price/context */}
-          <ModelSelector />
+          {modelsLoaded && models.length > 0 ? (
+            <ModelSelector />
+          ) : modelsLoaded ? (
+            <span className="hidden text-[11px] text-nexus-muted lg:inline" title="Nenhum modelo foi devolvido pelo backend">
+              Sem modelo
+            </span>
+          ) : null}
+          <span
+            className={`hidden items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] sm:inline-flex ${
+              backendOffline
+                ? "border-rose-400/40 text-rose-300"
+                : demoMode
+                  ? "border-amber-300/40 text-amber-200"
+                  : "border-emerald-400/30 text-emerald-300"
+            }`}
+            data-testid="connection-state"
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${backendOffline ? "bg-rose-400" : demoMode ? "bg-amber-300" : "bg-emerald-400"}`} />
+            {backendOffline ? "Sem ligação" : demoMode ? "Modelo indisponível" : "Ligado"}
+          </span>
 
           {/* Thinking strength selector */}
           <motion.div
@@ -1552,15 +1612,21 @@ export default function ChatPanel({
         <VirtualMessageList
           messages={messages}
           renderItem={(m, idx) => (
-            <MessageBubble
+            <div
               key={m.id}
-              message={m}
-              sessionId={sessionId}
-              isStreaming={streaming && idx === messages.length - 1}
-              onRetry={handleRetryFromError}
-              onEdit={handleEditMessage}
-              onRegenerate={handleRegenerateMessage}
-            />
+              data-message-index={idx}
+              className={searchResults[searchIdx] === idx ? "rounded-xl ring-1 ring-white/20" : undefined}
+            >
+              <MessageBubble
+                message={m}
+                sessionId={sessionId}
+                isStreaming={streaming && idx === messages.length - 1}
+                onRetry={handleRetryFromError}
+                onEdit={handleEditMessage}
+                onRegenerate={handleRegenerateMessage}
+                onCancel={streaming ? handleCancel : undefined}
+              />
+            </div>
           )}
           initialLimit={50}
           className="space-y-4"
@@ -1586,7 +1652,7 @@ export default function ChatPanel({
                   />
                 ))}
               </div>
-              <div className="mt-1 text-[10px] text-nexus-muted">a pensar…</div>
+              <div className="mt-1 text-[10px] text-nexus-muted">A aguardar resposta…</div>
             </div>
           </div>
         )}
@@ -1852,6 +1918,7 @@ export default function ChatPanel({
             {streaming ? (
               <motion.button
                 type="button"
+                aria-label="Parar"
                 onClick={handleCancel}
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
@@ -1862,7 +1929,8 @@ export default function ChatPanel({
             ) : (
               <motion.button
                 type="submit"
-                disabled={!input.trim()}
+                aria-label="Enviar"
+                disabled={!input.trim() || !sessionId}
                 whileHover={{ scale: input.trim() ? 1.05 : 1 }}
                 whileTap={{ scale: 0.92 }}
                 className={`shrink-0 rounded-lg p-2 text-white transition-all duration-200 shadow-md ${
@@ -1879,7 +1947,9 @@ export default function ChatPanel({
 
         <div className="mt-1.5 flex items-center justify-between text-[10px] text-nexus-muted">
           <span>
-            NEXUS IDE — Modo {currentMode} · Força: {thinkingStrength === "low" ? "Rápido" : thinkingStrength === "medium" ? "Médio" : "Alto"}
+            Enter envia · Shift+Enter nova linha · Esc para
+            {usage?.total_tokens != null ? ` · ${usage.total_tokens} tokens` : ""}
+            {activeModel ? ` · ${activeModel}` : ""}
           </span>
           <motion.button
             type="button"
@@ -1942,7 +2012,12 @@ export default function ChatPanel({
                   return (
                     <button
                       key={idx}
-                      onClick={() => setSearchIdx(i)}
+                      onClick={() => {
+                        setSearchIdx(i);
+                        messagesContainerRef.current
+                          ?.querySelector(`[data-message-index="${idx}"]`)
+                          ?.scrollIntoView({ block: "center", behavior: "smooth" });
+                      }}
                       className={`block w-full rounded px-2 py-1 text-left text-[11px] ${
                         i === searchIdx
                           ? "bg-nexus-accent/20 text-nexus-accent"

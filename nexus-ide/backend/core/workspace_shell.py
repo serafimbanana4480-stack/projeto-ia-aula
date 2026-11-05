@@ -23,6 +23,7 @@ from backend.core.workspace_security import (
     _validate_shell_command,
     _verify_auth_token,
     logger,
+    shell_argv,
 )
 
 
@@ -90,12 +91,12 @@ async def execute_shell(
         import subprocess
 
         process = subprocess.Popen(
-            command,
+            shell_argv(command),
             cwd=str(cwd_path) if cwd_path else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=merged_env,
-            shell=True,
+            shell=False,
             text=True,
             errors="replace",
             creationflags=(
