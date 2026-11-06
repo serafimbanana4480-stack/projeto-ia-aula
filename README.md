@@ -1,352 +1,147 @@
-# 🧠 Projeto IA Aula — NEXUS IDE
+# NEXUS IDE
 
-> **Uma IDE assistida por IA com arquitetura multi-agente** — Desenvolvimento de software acelerado com colaboração de múltiplos agentes de IA.
+### Um espaço para desenvolver com IA, acompanhar tarefas e explorar agentes.
 
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Node.js 18+](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Active-brightgreen.svg)]()
-[![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](Dockerfile)
+O NEXUS IDE junta chat, projetos, ferramentas e modelos de IA numa interface local. Podes conversar com um modelo, configurar bots com instruções próprias e acompanhar a atividade das tuas tarefas a partir do mesmo sítio.
 
----
+![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white) ![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=next.js) ![React](https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white) ![Estado](https://img.shields.io/badge/estado-em%20desenvolvimento-8B5CF6)
 
-## 🎯 Visão Geral
+[Ver a interface](#a-interface) · [Começar](#começar) · [Modelos e agentes](#modelos-bots-e-agentes) · [Arquitetura](#arquitetura) · [Testes](#testes-e-verificação)
 
-O **NEXUS IDE** é uma **IDE do futuro** que combina:
+![Painel de operações do NEXUS IDE](docs/readme/dashboard.png)
 
-1. **Múltiplos Agentes de IA** (Executivo, Arquiteto, Coder, Reviewer, etc.)
-2. **Orquestração Inteligente** (topologia de agentes, comunicação assíncrona)
-3. **Frontend Moderno** (Next.js + TypeScript + Tailwind)
-4. **Backend Robusto** (FastAPI + Python + WebSocket)
-5. **Observabilidade Completa** (métricas, logs, tracing, dashboard)
-6. **Colaboração em Tempo Real** (chat multi-agente, partilha de contexto)
+*Painel de operações numa captura de outubro de 2026. Os valores e o estado apresentados pertencem a essa sessão.*
 
----
+## O que podes explorar
 
-## ✨ Funcionalidades Principais
+| Área | Para que serve |
+| --- | --- |
+| **Chat** | Conversar com a IA, acompanhar respostas e consultar atividade, contexto e tarefas da sessão. |
+| **Bots** | Criar assistentes com nome, instruções, fornecedor e modelo próprios; organizar conversas individuais e de grupo. |
+| **Projetos e ficheiros** | Trabalhar com o contexto de um projeto e aceder às áreas de ficheiros disponíveis na interface. |
+| **Tarefas e agentes** | Acompanhar trabalho, estados e atividade reportada durante as execuções. |
+| **Skills, memória e integrações** | Explorar instruções reutilizáveis, contexto persistente e integrações configuradas. |
+| **Modelos** | Configurar fornecedores locais ou externos, conforme os serviços e credenciais disponíveis. |
 
-| Funcionalidade | Descrição | Estado |
-|----------------|-------------|--------|
-| **Multi-Agent System** | 15+ agentes especializados (CEO, CTO, Arquiteto, Coder, etc.) | ✅ Ativo |
-| **Intelligent Orchestrator** | Decisão autónoma de qual agente usar | ✅ Ativo |
-| **Real-Time Chat** | Chat com múltiplos agentes simultâneos | ✅ Ativo |
-| **Code Generation** | Geração de código com refatoração automática | ✅ Ativo |
-| **Project Analysis** | Análise profunda de código (AST, dependências) | ✅ Ativo |
-| **Testing Framework** | Geração de testes unitários e E2E | ✅ Ativo |
-| **Observabilidade** | Métricas Prometheus, logs estruturados, tracing | ✅ Ativo |
-| **Docker Ready** | Deploy completo com Docker Compose | ✅ Ativo |
-| **Next.js Frontend** | UI moderna, responsiva, tema escuro | ✅ Ativo |
-| **FastAPI Backend** | API REST + WebSocket em Python | ✅ Ativo |
+> **Estado do projeto:** o NEXUS está em desenvolvimento. A disponibilidade de modelos, ferramentas e integrações depende da configuração e dos serviços em execução. Uma interface ou um teste isolado não garante autonomia prolongada nem prontidão para produção.
 
----
+## A interface
 
-## 🏗️ Arquitetura
+### Bots com identidade própria
 
-```
-nexus-ide/
-├── frontend/                  # Next.js + TypeScript + Tailwind
-│   ├── app/                # App Router (Next.js 13+)
-│   ├── components/          # Componentes React
-│   ├── hooks/             # Custom hooks
-│   ├── lib/               # Utilitários frontend
-│   └── stores/            # State management (Zustand)
-├── backend/                  # FastAPI + Python
-│   ├── agents/            # Agentes especializados
-│   │   ├── executive/     # CEO, CTO, Arquiteto
-│   │   ├── backend/       # API Agent, Database Agent
-│   │   ├── frontend/      # UI/UX Agent, Component Agent
-│   │   └── ...          # +10 outros agentes
-│   ├── orchestrator/      # Orquestrador principal
-│   ├── llm/              # Provedores LLM (OpenAI, Anthropic, etc.)
-│   ├── tools/             # Ferramentas (git, shell, browser)
-│   ├── observability/     # Métricas, logs, tracing
-│   └── api/              # Endpoints FastAPI
-├── docker/                  # Configurações Docker
-├── docs/                    # Documentação
-├── tests/                   # Testes E2E e unitários
-└── README.md              # Este ficheiro
-```
+Define as instruções e escolhe o fornecedor e o modelo para cada conversa. A captura mostra a configuração de um bot num ambiente de teste; o modelo apresentado é simulado.
 
----
+![Janela de criação de um bot](docs/readme/bots-configuracao.png)
 
-## 🚀 Quick Start
+Na área de bots podes voltar às conversas e consultar a configuração. Nesta captura, a resposta também é simulada para testar a interface e o streaming.
 
-### Opção 1: Docker (Recomendado)
+![Conversa com um bot em ambiente de teste](docs/readme/bots-conversa.png)
 
-```bash
-# 1. Clonar o repositório
+### Acompanhar uma equipa de agentes
+
+Uma vista de atividade pode apresentar agentes, tarefas, estados e dependências. A imagem seguinte é uma **pré-visualização com dados simulados**, não uma demonstração de agentes reais em execução.
+
+![Pré-visualização de uma equipa de agentes com dados simulados](docs/readme/agentes-simulados.jpg)
+
+## Começar
+
+### Requisitos
+
+- Python **3.12 ou superior** e Node.js; o frontend declara **pnpm 10.34.9**.
+- Git e acesso ao fornecedor de modelos escolhido. Para modelos locais, instala e inicia o serviço correspondente, como Ollama ou LM Studio.
+- Credenciais apenas se escolheres um fornecedor externo. Nunca publiques o teu ficheiro `.env` ou as tuas chaves.
+
+### Instalação local no Windows
+
+No PowerShell, a partir da pasta onde queres guardar o projeto:
+
+```powershell
 git clone https://github.com/serafimbanana4480-stack/projeto-ia-aula.git
 cd projeto-ia-aula/nexus-ide
-
-# 2. Configurar ambiente
-cp .env.example .env
-# Editar .env com as tuas configurações
-
-# 3. Iniciar com Docker Compose
-docker-compose up -d
-
-# 4. Aceder à IDE
-http://localhost:3000  (Frontend)
-http://localhost:8000  (Backend API)
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+Copy-Item .env.example .env
+cd frontend
+corepack enable
+corepack prepare pnpm@10.34.9 --activate
+pnpm install --frozen-lockfile
 ```
 
-### Opção 2: Instalação Local
+Edita `nexus-ide/.env` de acordo com o teu ambiente e fornecedor. Consulta as opções em [.env.example](nexus-ide/.env.example) antes de iniciar.
 
-```bash
-# 1. Backend (Python)
-cd nexus-ide/backend
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# .\venv\Scripts\Activate.ps1  # Windows
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+**Terminal 1 — backend**, a partir de `nexus-ide/`:
 
-# 2. Frontend (Node.js)
-cd nexus-ide/frontend
-npm install
-npm run dev  # http://localhost:3000
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8000
 ```
 
----
+**Terminal 2 — frontend**, a partir de `nexus-ide/frontend/`:
 
-## 📖 Guia de Uso
-
-### 1. Primeiro Contacto
-
-1. Acede a `http://localhost:3000`
-2. Fazes login (ou usa modo guest)
-3. Crias um novo projeto ou importas um existente
-4. Abres o chat multi-agente
-5. Pedes ao "CEO Agent" para planear uma funcionalidade
-6. O orquestrador distribui tarefas pelos agentes especializados
-7. Acompanhas o progresso em tempo real
-
-### 2. Chat Multi-Agente
-
-```
-Tu: "Quero criar uma API REST para gestão de utilizadores"
-
-CEO Agent: "Vou planear isto. Arquiteto, podes desenhar a arquitetura?"
-Arquiteto Agent: "Desenhei. Coder, podes implementar os endpoints?"
-Coder Agent: "Implementei. Reviewer, podes rever o código?"
-Reviewer Agent: "Revisei. Testes necessários. Tester, podes gerar testes?"
-Tester Agent: "Gerados. PR pronto para review!"
+```powershell
+$env:NEXT_PUBLIC_API_URL = 'http://127.0.0.1:8000'
+pnpm run dev
 ```
 
-### 3. Agentes Disponíveis
+Abre [localhost:3000](http://localhost:3000). A documentação da API fica em [localhost:8000/docs](http://localhost:8000/docs) e a verificação básica do backend em [localhost:8000/health](http://localhost:8000/health). Se uma porta já estiver ocupada, verifica primeiro que processo a está a usar.
 
-| Agente | Função | Exemplo de Uso |
-|--------|----------|-------------|
-| **CEO** | Decisões estratégicas | "Planear arquitetura de microserviços" |
-| **CTO** | Decisões técnicas | "Escolher entre PostgreSQL vs MongoDB" |
-| **Arquiteto** | Desenho de sistemas | "Criar diagrama de classes" |
-| **Coder** | Implementação | "Escrever código Python" |
-| **Reviewer** | Revisão de código | "Analisar qualidade do código" |
-| **Tester** | Testes | "Gerar testes unitários" |
-| **Debugger** | Debugging | "Encontrar bug no código" |
-| **Documenter** | Documentação | "Gerar documentação API" |
-| **Refactor** | Refatoração | "Melhorar performance" |
-| **Researcher** | Pesquisa | "Pesquisar melhores práticas" |
+> O script `INICIAR_NEXUS.bat` na raiz contém um caminho específico desta máquina. Para uma instalação noutro computador, usa os comandos manuais acima ou adapta o caminho antes de o executar.
 
----
+### Primeiros passos
 
-## 🔧 Configuração
+1. Inicia o backend e o frontend e entra na interface.
+2. Configura um fornecedor e confirma que o modelo escolhido está disponível.
+3. Abre o chat ou cria um bot com instruções adequadas à tarefa.
+4. Começa com um pedido pequeno e verifica a resposta e a atividade apresentada.
+5. Revê alterações e resultados antes de os aplicares ao teu projeto.
 
-### Ficheiro `.env`
+## Modelos, bots e agentes
 
-| Variável | Descrição | Defeito |
-|----------|-------------|----------|
-| `OPENAI_API_KEY` | API key OpenAI | - |
-| `ANTHROPIC_API_KEY` | API key Anthropic (Claude) | - |
-| `GEMINI_API_KEY` | API key Google Gemini | - |
-| `DATABASE_URL` | PostgreSQL connection | SQLite |
-| `REDIS_URL` | Redis para cache | `redis://localhost:6379` |
-| `JWT_SECRET` | Secret para JWT | - |
-| `CORS_ORIGINS` | Origens CORS permitidas | `*` |
+O backend inclui integrações para fornecedores locais e cloud, incluindo Ollama, LM Studio, OpenRouter e OpenAI. **Um fornecedor aparecer na interface não significa que esteja ligado ou que a inferência tenha sido verificada.** Quando usas um fornecedor externo, os dados enviados no pedido saem da tua máquina e ficam sujeitos às condições desse serviço.
 
----
+Os bots permitem configurar conversas com instruções próprias. O runtime principal e os restantes componentes de agentes e orquestração têm responsabilidades diferentes; a seleção de um modo ou a apresentação de uma equipa não prova que vários agentes independentes tenham trabalhado numa execução concreta. Consulta os eventos e os relatórios da execução para perceber o que aconteceu.
 
-## 📊 Observabilidade
+## Arquitetura
 
-O NEXUS IDE inclui **observabilidade completa**:
-
-### 1. Métricas (Prometheus)
-
-- **Requests por segundo**
-- **Latência de LLM**
-- **Uso de CPU/Memória**
-- **Número de agentes ativos**
-
-Aceder: `http://localhost:8000/metrics`
-
-### 2. Logs Estruturados
-
-- **Formato JSON** (fácil de parser)
-- **Níveis**: DEBUG, INFO, WARNING, ERROR
-- **Contexto**: request_id, agent_id, user_id
-
-### 3. Tracing (OpenTelemetry)
-
-- **Rastreio de requests** fim-a-fim
-- **Latência por componente**
-- **Dependency graph**
-
-### 4. Dashboard (Grafana)
-
-- **Pré-configurado** com Docker Compose
-- **Templates** para métricas de LLM
-- **Alertas** para erros críticos
-
----
-
-## 🌐 Deploy
-
-### Railway
-
-1. Conectar repositório GitHub ao Railway
-2. Adicionar variáveis de ambiente
-3. Fazer deploy
-
-### Render
-
-1. Fazer push do código para GitHub
-2. Criar novo Web Service no Render
-3. Configurar variáveis de ambiente
-4. Fazer deploy
-
-### VPS (Linux)
-
-```bash
-# 1. SSH para o servidor
-ssh user@server-ip
-
-# 2. Clonar repositório
-git clone https://github.com/serafimbanana4480-stack/projeto-ia-aula.git
-
-# 3. Configurar `.env`
-nano .env
-
-# 4. Iniciar com Docker Compose
-docker-compose up -d
-
-# 5. Verificar logs
-docker-compose logs -f
+```text
+Browser
+  └── frontend/          Next.js, React, TypeScript e Zustand
+        └── backend/     FastAPI
+              ├── runtime/       execução e eventos do runtime principal
+              ├── orchestrator/ rotas e orquestração
+              ├── agents/       agentes e papéis
+              ├── llm/          fornecedores de modelos
+              ├── tools/        ferramentas disponíveis
+              ├── persistence/  SQLite e esquema
+              └── knowledge/    memória e conhecimento
 ```
 
----
+O código principal está em [`nexus-ide/`](nexus-ide/). A documentação e os relatórios de auditoria estão em [`nexus-ide/docs/`](nexus-ide/docs/) e [`docs/`](docs/). Os eventos do chat são um contrato entre frontend e backend; `backend/persistence/schemas.sql` é a referência do esquema de persistência.
 
-## 🧪 Testes
+## Testes e verificação
 
-```bash
-# 1. Backend (Python)
-cd nexus-ide/backend
-python -m pytest tests/ -v
+Executa os testes do backend a partir de `nexus-ide/`:
 
-# 2. Frontend (Node.js)
-cd nexus-ide/frontend
-npm run test
-
-# 3. E2E (Playwright)
-npm run test:e2e
-
-# 4. Lint
-cd backend && ruff check .
-cd frontend && npm run lint
+```powershell
+.\.venv\Scripts\python.exe -m pytest backend/tests -q
 ```
 
----
+Para verificar o frontend, a partir de `nexus-ide/frontend/`:
 
-## 📂 Estrutura do Projeto
-
-```
-projeto-ia-aula/
-├── nexus-ide/               # Código principal
-│   ├── backend/            # FastAPI + Python
-│   ├── frontend/          # Next.js + TypeScript
-│   ├── docker/            # Configurações Docker
-│   ├── docs/              # Documentação
-│   ├── tests/             # Testes
-│   └── README.md          # Documentação completa
-├── README.md              # Este ficheiro
-└── .gitignore            # Ficheiros ignorados
+```powershell
+pnpm run type-check
+pnpm run lint
+pnpm run test
 ```
 
----
+Os resultados dependem da versão e do ambiente em uso. Para testar uma integração real, confirma também a configuração, a ligação ao fornecedor e o resultado de uma execução completa; testes com dados simulados têm um alcance diferente.
 
-## 🔍 Troubleshooting
+## Mais informação
 
-### Backend não inicia
-
-- Verificar se Python 3.11+ está instalado
-- Confirmar que todas as dependências estão instaladas (`pip install -r requirements.txt`)
-- Rever logs em `backend/logs/nexus.log`
-
-### Frontend não carrega
-
-- Verificar se Node.js 18+ está instalado
-- Confirmar que `npm install` foi executado
-- Rever logs no terminal (Next.js)
-
-### Agentes não respondem
-
-- Verificar se as API keys dos LLMs estão configuradas
-- Confirmar que o Redis está a correr (para filas de mensagens)
-- Rever métricas em `http://localhost:8000/metrics`
-
-### Docker não funciona
-
-- Verificar se Docker e Docker Compose estão instalados
-- Confirmar que as portas 3000, 8000, 5432, 6379 estão livres
-- Rever logs: `docker-compose logs -f`
+- [Guia do projeto](nexus-ide/README.md) e [documentação em português](nexus-ide/README_PT.md) — documentação adicional, que pode conter detalhes históricos.
+- [Guia de arranque](nexus-ide/STARTUP.md) — referência adicional; verifica caminhos específicos da máquina.
+- [Instruções para contribuir](nexus-ide/CONTRIBUTING.md).
+- [Auditorias e evidências](nexus-ide/docs/auditorias/).
 
 ---
 
-## 📝 Licença
-
-MIT — usar com liberdade.
-
----
-
-## 🤝 Contribuições
-
-Contribuições são bem-vindas! Por favor:
-
-1. Fazer fork do repositório
-2. Criar uma branch de funcionalidade
-3. Fazer as tuas alterações
-4. Submeter um Pull Request
-
----
-
-## 📞 Suporte
-
-Para problemas e questões:
-
-- Consultar a seção de troubleshooting
-- Rever logs em `backend/logs/nexus.log`
-- Abrir uma issue no GitHub
-
----
-
-## 🙏 Agradecimentos
-
-- **FastAPI**: https://fastapi.tiangolo.com/
-- **Next.js**: https://nextjs.org/
-- **Tailwind CSS**: https://tailwindcss.com/
-- **OpenAI**: https://openai.com/
-- **Anthropic**: https://www.anthropic.com/
-
----
-
-## 📈 Estatísticas do Projeto
-
-- **Última atualização:** 2026-06-28
-- **Branch:** `main`
-- **Total de ficheiros:** ~1000 (backend + frontend)
-- **Módulos Python:** 50+
-- **Componentes React:** 100+
-- **Cobertura de testes:** 80%+
-
----
-
-**Feito com ❤️ em Portugal** 🇵🇹
+**NEXUS IDE** · Um projeto em evolução para experimentar desenvolvimento assistido por IA.
