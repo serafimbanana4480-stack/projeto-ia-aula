@@ -158,6 +158,12 @@ export interface ChatMessage {
   toolCalls?: ToolCallItem[];
   activities?: ActivityItem[];
   metadata?: ChatMessageMetadata;
+  /**
+   * The run's ordered `(run_id, seq)` frames. `AgentTranscript` renders the
+   * chronological conversation (text, thinking, tools, subagents) from them,
+   * live and after a refresh (rebuilt from the run replay).
+   */
+  events?: StreamEvent[];
 }
 
 export interface ActivityItem {
@@ -174,8 +180,12 @@ export interface ActivityItem {
 export interface ToolCallItem {
   id: string;
   name: string;
+  /** Identity supplied by the runtime, when this call belongs to a worker. */
+  agent?: AgentName;
+  taskId?: string;
+  callId?: string;
   args: Record<string, unknown>;
-  status: "running" | "awaiting_confirmation" | "success" | "error";
+  status: "running" | "awaiting_confirmation" | "success" | "error" | "unknown";
   result?: unknown;
   error?: string;
   durationMs?: number;
@@ -232,6 +242,12 @@ export interface TerminalExecutionResult {
   timed_out: boolean;
   duration_ms: number;
   risk_level: string;
+  /**
+   * Who issued the command. Optional because older backend payloads do not
+   * send it; without it a command an agent ran is indistinguishable from one
+   * the user typed, which matters when the run was autonomous.
+   */
+  origin?: "user" | "agent";
 }
 
 export interface Tool {

@@ -286,8 +286,14 @@ def _load_file(
         return None
 
 
-def discover_skills(project_path: str | Path | None = None) -> list[SkillDocument]:
-    """Discover immediate child skills; earlier roots override later duplicates."""
+def discover_skills(
+    project_path: str | Path | None = None, *, active_only: bool = False
+) -> list[SkillDocument]:
+    """Discover child skills; earlier roots override later duplicates.
+
+    Selection filters before deduplication so a draft cannot hide an active
+    version. Management callers retain access to the latest version.
+    """
     found: dict[str, SkillDocument] = {}
     for root in configured_skill_roots(project_path):
         try:
@@ -303,6 +309,8 @@ def discover_skills(project_path: str | Path | None = None) -> list[SkillDocumen
                     continue
                 document = _load_file(skill_path, entry.name, resolved_root)
                 if document is None:
+                    continue
+                if active_only and document.manifest.status is not SkillStatus.ACTIVE:
                     continue
                 key = document.name.casefold()
                 current = root_found.get(key)
@@ -332,6 +340,8 @@ def _memory_skills(user_id: str | None = None) -> list[SkillDocument]:
 
     documents: list[SkillDocument] = []
     for skill in stored:
+        if str(getattr(skill, "status", "") or "").strip().casefold() != "active":
+            continue
         if not skill.auto_apply or skill.confidence < 0.55:
             continue
         body_lines = [f"## Learned procedure\n{skill.description.strip()}", "## Steps"]
@@ -435,7 +445,7 @@ def load_skill_document(
             }
     for doc in _memory_skills(user_id):
         if doc.name.casefold() == wanted.casefold() or doc.manifest.skill_id.casefold() == wanted.casefold():
-            header = f"### Skill: {doc.name}"
+            header = f"### Skill: {doc.name} (v{doc.manifest.version})"
             body = doc.body[: max(0, max_chars - len(header) - 2)]
             truncated = len(doc.body) > len(body)
             content = f"{header}\n\n{body}"
@@ -534,7 +544,7 @@ def select_skills(
     user_id: str | None = None,
 ) -> dict[str, Any]:
     """Select and load only relevant, compatible skills for a single task."""
-    documents = discover_skills(project_path)
+    documents = discover_skills(project_path, active_only=True)
     if include_memory:
         file_names = {doc.name.casefold() for doc in documents}
         documents.extend(
@@ -679,6 +689,7 @@ def select_skills(
 
     entries: list[dict[str, Any]] = []
     chunks: list[str] = []
+    delivered: list[SkillDocument] = []
     remaining = max(0, min(max_chars, MAX_SKILL_CONTEXT_CHARS))
     for doc, reason, score in selected:
         manifest = doc.manifest
@@ -696,6 +707,7 @@ def select_skills(
             block = block[: max(0, allowance - len(note))] + note
         chunks.append(block)
         remaining -= len(block) + 2
+        delivered.append(doc)
         entries.append(
             {
                 "name": doc.name,
@@ -709,8 +721,11 @@ def select_skills(
             }
         )
 
-    for selected_doc, _reason, _score_value in selected:
-        record_skill_usage(selected_doc.name)
+    # Only the skills whose content actually reached the context count as used:
+    # a skill dropped by the context budget was never delivered, and the usage
+    # counter feeds the promotion-confidence gate.
+    for doc in delivered:
+        record_skill_usage(doc.name)
 
     if entries:
         logger.info("Activated skills for task: %s", entries)
@@ -723,6 +738,92 @@ def select_skills(
     }
 
 
+def _agent_surface_tools(agent: Any) -> tuple[set[str], str | None]:
+    """Resolve the tools an agent's action surface exposes.
+
+    Returns ``(tools, error)``. ``error`` carries a human-readable reason when
+    the action registry could not be consulted — a broken
+    ``config/agent_actions.yaml`` changes which skills can be selected, so it
+    must never be swallowed.
+    """
+    tools: set[str] = set()
+    try:
+        from backend.agents.action_registry import get_action_registry
+
+        action_registry = get_action_registry()
+        for action in getattr(agent, "supported_actions", set()) or set():
+            key = getattr(action, "name", None) or str(action)
+            mapping = action_registry.get(str(key))
+            if mapping is not None:
+                tools.add(mapping.tool)
+    except Exception as exc:
+        reason = f"action_surface_unavailable:{exc.__class__.__name__}: {exc}"
+        logger.error(
+            "Could not resolve the agent action surface for skill selection: %s",
+            exc,
+            exc_info=True,
+        )
+        return tools, reason
+    return tools, None
+
+
+def _registry_tool_names() -> set[str] | None:
+    """Names of the tools that are enabled AND available in the registry.
+
+    ``None`` means the registry itself could not be inspected (fail closed).
+    """
+    try:
+        from backend.tools.registry import get_tool_catalog
+
+        names: set[str] = set()
+        for tool in get_tool_catalog():
+            if tool.get("enabled") and tool.get("available"):
+                name = tool.get("name")
+                if name:
+                    names.add(str(name).casefold())
+        return names
+    except Exception:
+        logger.error("Could not resolve the enabled tool registry", exc_info=True)
+        return None
+
+
+def skill_capability_tools(
+    surface_tools: set[str] | None = None,
+    *,
+    available_tools: set[str] | None = None,
+) -> set[str] | None:
+    """The tool names a skill may legitimately require.
+
+    The selector and the promotion gate MUST resolve this the same way: a
+    skill that passes the gate but can never be selected is false assurance.
+
+    * ``available_tools`` — an explicit override (used by tests and by callers
+      that already know the real surface). When given it replaces the
+      registry lookup.
+    * ``surface_tools`` — the tools the agent's action surface exposes. They
+      are *added* to the resolved set: the action surface is a partial view of
+      the registry (``AgentAction`` has no entry for every registered tool),
+      so a skill whose tools all exist and are enabled must stay reachable.
+
+    Returns ``None`` when nothing could be resolved at all; the caller then
+    fails closed for skills that declare ``required_tools``.
+    """
+    names: set[str] = set()
+    resolved = False
+    if available_tools is not None:
+        names |= {str(tool).casefold() for tool in available_tools}
+        resolved = True
+    else:
+        registry = _registry_tool_names()
+        if registry is not None:
+            names |= registry
+            resolved = True
+    if surface_tools:
+        names |= {str(tool).casefold() for tool in surface_tools}
+        resolved = True
+    return names if resolved else None
+
+
 def select_skills_for_agent(
     query: str,
     project_path: str | Path | None,
@@ -731,27 +832,42 @@ def select_skills_for_agent(
     allowed_tools: set[str] | None = None,
     user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Select skills against the real tool surface of one agent invocation."""
-    available: set[str] = set()
-    try:
-        from backend.agents.action_registry import get_action_registry
+    """Select skills against the real tool surface of one agent invocation.
 
-        action_registry = get_action_registry()
-        for action in getattr(agent, "supported_actions", set()):
-            mapping = action_registry.get(action.name)
-            if mapping is not None:
-                available.add(mapping.tool)
-    except Exception:
-        logger.warning("Could not resolve agent tool dependencies for skill selection", exc_info=True)
-    if allowed_tools is not None:
-        available.intersection_update(allowed_tools)
-    return select_skills(
+    The capability set is the agent's action surface **plus** the tools that
+    exist and are enabled in the tool registry. The action surface alone is
+    not enough: ``AgentAction`` has no entry for every registered tool (there
+    is no ``SEARCH_IN_FILES``/``LIST_PROJECT_FILES``/``INDEX_CODEBASE``), so
+    the seeded product skills were rejected with ``missing_tools:…`` even
+    though every tool they need exists and is enabled.
+    """
+    surface_tools, surface_error = _agent_surface_tools(agent)
+    declares_actions = bool(getattr(agent, "supported_actions", set()) or set())
+    # An agent that advertises no action at all has no tool surface, so no
+    # tool-dependent skill can be delivered to it.
+    capability = skill_capability_tools(surface_tools) if declares_actions else set()
+    if capability is None:
+        logger.error(
+            "No tool surface could be resolved for skill selection; "
+            "tool-dependent skills will be rejected"
+        )
+    if allowed_tools is not None and capability is not None:
+        # An explicit runtime contract is a hard restriction, never a grant.
+        capability &= {str(tool).casefold() for tool in allowed_tools}
+    result = select_skills(
         query,
         project_path,
-        available_tools=available,
+        available_tools=capability,
         agent_name=str(getattr(agent, "name", "") or ""),
         user_id=user_id,
     )
+    if surface_error:
+        # The cause must reach the caller: a broken action registry silently
+        # changes which skills can be selected.
+        result["rejected"].insert(
+            0, {"name": "<agent-tool-surface>", "reason": surface_error}
+        )
+    return result
 
 
 # ── Skill lifecycle: DRAFT → ACTIVE → DEPRECATED / DISABLED ────────────────
@@ -874,19 +990,7 @@ def _available_tool_names(available_tools: set[str] | None) -> set[str] | None:
     """
     if available_tools is not None:
         return {str(tool).casefold() for tool in available_tools}
-    try:
-        from backend.tools.registry import get_tool_catalog
-
-        names: set[str] = set()
-        for tool in get_tool_catalog():
-            if tool.get("enabled") and tool.get("available"):
-                name = tool.get("name")
-                if name:
-                    names.add(str(name).casefold())
-        return names
-    except Exception:
-        logger.debug("Could not resolve available tool names", exc_info=True)
-        return None
+    return _registry_tool_names()
 
 
 def _run_validation_command(command: str) -> int:
@@ -949,7 +1053,10 @@ def _evaluate_promotion_gate(
         }
 
     if manifest.required_tools:
-        names = _available_tool_names(available_tools)
+        # The gate must test the SAME capability set the selector uses,
+        # otherwise a skill can pass the gate and then be permanently
+        # unreachable (false assurance).
+        names = skill_capability_tools(available_tools=available_tools)
         if names is None:
             errors.append("tool_availability_unverified")
         else:
@@ -1036,6 +1143,240 @@ def _rewrite_skill_status(path: Path, new_status: SkillStatus) -> None:
     clear_skill_cache()
 
 
+def _approval_policy(
+    target: SkillStatus,
+    current: SkillStatus,
+    *,
+    approved_by: str | None,
+    confidence: float | None,
+    enforce_promotion_gate: bool,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Check the human-approval / measured-confidence policy of a promotion.
+
+    Returns ``(error, auto_promote)``. ``error`` is ``None`` when the
+    transition may proceed.
+    """
+    if not enforce_promotion_gate:
+        return None, False
+
+    def _failure(message: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": message,
+            "from": current.value,
+            "to": target.value,
+            "status": current.value,
+        }
+
+    threshold = _min_confidence()
+    auto = _auto_promote_enabled()
+    if confidence is not None and float(confidence) < threshold:
+        return (
+            _failure(
+                f"confidence {float(confidence):.2f} is below the minimum "
+                f"{threshold:.2f} required to promote this skill"
+            ),
+            False,
+        )
+    if auto:
+        if confidence is None:
+            return (
+                _failure(
+                    "auto-promotion (NEXUS_SKILLS_AUTO_PROMOTE=1) requires a "
+                    f"measured confidence >= {threshold:.2f}"
+                ),
+                False,
+            )
+        return None, True
+    if not str(approved_by or "").strip():
+        return (
+            _failure(
+                "promotion requires human approval: pass approved_by, or set "
+                "NEXUS_SKILLS_AUTO_PROMOTE=1 with sufficient confidence"
+            ),
+            False,
+        )
+    return None, False
+
+
+def _store_skill(skill_id: str, *, user_id: str | None = None) -> Any | None:
+    """Resolve a store-backed skill (SkillsStore) by id or by name.
+
+    A skill that belongs to a user is only reachable by that user; a skill
+    without an owner is a shared/global one and stays manageable by anyone.
+    """
+    try:
+        from backend.core.skills_store import SkillsStore
+    except Exception:
+        logger.error("SkillsStore is unavailable for the skill lifecycle", exc_info=True)
+        return None
+    store = SkillsStore.get_instance()
+    try:
+        skill = store.get_skill(skill_id)
+        if skill is not None:
+            if _store_skill_is_visible(skill, user_id):
+                return skill
+            return None
+        wanted = str(skill_id or "").strip().casefold()
+        if not wanted:
+            return None
+        for candidate in store.list_skills(limit=1000):
+            if str(candidate.name or "").strip().casefold() != wanted:
+                continue
+            if _store_skill_is_visible(candidate, user_id):
+                return candidate
+            return None
+    except Exception:
+        logger.error("Could not resolve the stored skill %r", skill_id, exc_info=True)
+        return None
+    return None
+
+
+def _store_skill_is_visible(skill: Any, user_id: str | None) -> bool:
+    """Whether ``user_id`` may act on this stored skill."""
+    owner = str(getattr(skill, "user_id", "") or "")
+    if not owner or not user_id:
+        return True
+    return owner == str(user_id)
+
+
+def _store_skill_status(skill: Any) -> SkillStatus:
+    """The lifecycle state of a store-backed skill."""
+    raw = str(getattr(skill, "status", "") or "").strip().casefold()
+    try:
+        return SkillStatus(raw)
+    except ValueError:
+        return SkillStatus.DRAFT
+
+
+def _store_promotion_errors(skill: Any) -> list[str]:
+    """Schema checks for a store-backed skill (it has no ``SKILL.md`` file)."""
+    errors: list[str] = []
+    if not str(getattr(skill, "name", "") or "").strip():
+        errors.append("missing_name")
+    if not str(getattr(skill, "description", "") or "").strip():
+        errors.append("missing_description")
+    if not list(getattr(skill, "steps", []) or []):
+        errors.append("missing_steps")
+    return errors
+
+
+def _transition_store_skill(
+    skill_id: str,
+    target: SkillStatus,
+    *,
+    actor: str,
+    reason: str,
+    approved_by: str | None = None,
+    available_tools: set[str] | None = None,
+    confidence: float | None = None,
+    enforce_promotion_gate: bool = False,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    """Apply the same audited lifecycle to a store-backed skill.
+
+    Skills created through ``POST /api/skills`` live in the SkillsStore, not
+    in a ``SKILL.md`` file. They follow the same DRAFT → ACTIVE → DEPRECATED /
+    DISABLED machine, so the lifecycle routes are usable for them too.
+    """
+    skill = _store_skill(skill_id, user_id=user_id)
+    if skill is None:
+        return {
+            "ok": False,
+            "code": "not_found",
+            "error": f"Skill {str(skill_id or '').strip()!r} is not a discoverable file skill",
+        }
+
+    current = _store_skill_status(skill)
+    if current is target:
+        return {
+            "ok": False,
+            "error": f"skill is already {target.value}",
+            "status": current.value,
+        }
+    if current not in _ALLOWED_TRANSITIONS.get(target, frozenset()):
+        return {
+            "ok": False,
+            "error": f"invalid transition {current.value} -> {target.value}",
+            "from": current.value,
+            "to": target.value,
+            "status": current.value,
+        }
+
+    gate: dict[str, Any] = {}
+    if enforce_promotion_gate:
+        errors = _store_promotion_errors(skill)
+        if errors:
+            return {
+                "ok": False,
+                "error": "promotion gate rejected: " + "; ".join(errors),
+                "gate": {
+                    "errors": errors,
+                    "validation": {"valid": False, "errors": errors},
+                    "validation_commands": [],
+                },
+                "from": current.value,
+                "to": target.value,
+                "status": current.value,
+            }
+
+    policy_error, auto_promote = _approval_policy(
+        target,
+        current,
+        approved_by=approved_by,
+        confidence=confidence,
+        enforce_promotion_gate=enforce_promotion_gate,
+    )
+    if policy_error is not None:
+        return policy_error
+
+    try:
+        from backend.core.skills_store import SkillsStore
+
+        updated = SkillsStore.get_instance().set_status(skill.id, target.value)
+    except Exception as exc:
+        return {"ok": False, "error": f"could not update skill status: {exc}"}
+    if updated is None:
+        return {
+            "ok": False,
+            "error": f"Skill {str(skill_id or '').strip()!r} could not be updated",
+        }
+
+    audit = {
+        "skill_id": skill.id,
+        "name": skill.name,
+        "from": current.value,
+        "to": target.value,
+        "actor": actor,
+        "approved_by": str(approved_by or "").strip() or None,
+        "auto_promote": auto_promote,
+        "reason": reason,
+        "path": None,
+        "source": "store",
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    _append_promotion_audit(audit)
+    logger.info(
+        "Skill %s %s -> %s by %s (%s)",
+        skill.id,
+        current.value,
+        target.value,
+        actor,
+        reason,
+    )
+    return {
+        "ok": True,
+        "skill_id": skill.id,
+        "name": skill.name,
+        "from": current.value,
+        "to": target.value,
+        "path": None,
+        "source": "store",
+        "audit": audit,
+        **({"gate": gate} if gate else {}),
+    }
+
+
 def _transition_skill(
     skill_id: str,
     target: SkillStatus,
@@ -1047,11 +1388,13 @@ def _transition_skill(
     available_tools: set[str] | None = None,
     confidence: float | None = None,
     enforce_promotion_gate: bool = False,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Apply a validated, audited skill state transition.
 
     Refuses invalid transitions before touching the file, so a rejected
-    promotion leaves the skill's state untouched.
+    promotion leaves the skill's state untouched. Store-backed skills (the
+    ones created through ``POST /api/skills``) follow the same lifecycle.
     """
     actor_name = str(actor or "").strip()
     reason_text = str(reason or "").strip()
@@ -1062,10 +1405,17 @@ def _transition_skill(
 
     document = _find_skill_document(skill_id, project_path)
     if document is None or document.path is None:
-        return {
-            "ok": False,
-            "error": f"Skill {str(skill_id or '').strip()!r} is not a discoverable file skill",
-        }
+        return _transition_store_skill(
+            skill_id,
+            target,
+            actor=actor_name,
+            reason=reason_text,
+            approved_by=approved_by,
+            available_tools=available_tools,
+            confidence=confidence,
+            enforce_promotion_gate=enforce_promotion_gate,
+            user_id=user_id,
+        )
     path = document.path
     current = document.manifest.status
 
@@ -1103,46 +1453,15 @@ def _transition_skill(
         except OSError as exc:
             return {"ok": False, "error": f"skill file is unreadable: {exc}"}
 
-    approved_by_value = str(approved_by or "").strip()
-    auto_promote = False
-    if enforce_promotion_gate:
-        threshold = _min_confidence()
-        auto = _auto_promote_enabled()
-        if confidence is not None and float(confidence) < threshold:
-            return {
-                "ok": False,
-                "error": (
-                    f"confidence {float(confidence):.2f} is below the minimum "
-                    f"{threshold:.2f} required to promote this skill"
-                ),
-                "from": current.value,
-                "to": target.value,
-                "status": current.value,
-            }
-        if auto:
-            if confidence is None:
-                return {
-                    "ok": False,
-                    "error": (
-                        "auto-promotion (NEXUS_SKILLS_AUTO_PROMOTE=1) requires a "
-                        f"measured confidence >= {threshold:.2f}"
-                    ),
-                    "from": current.value,
-                    "to": target.value,
-                    "status": current.value,
-                }
-            auto_promote = True
-        elif not approved_by_value:
-            return {
-                "ok": False,
-                "error": (
-                    "promotion requires human approval: pass approved_by, or set "
-                    "NEXUS_SKILLS_AUTO_PROMOTE=1 with sufficient confidence"
-                ),
-                "from": current.value,
-                "to": target.value,
-                "status": current.value,
-            }
+    policy_error, auto_promote = _approval_policy(
+        target,
+        current,
+        approved_by=approved_by,
+        confidence=confidence,
+        enforce_promotion_gate=enforce_promotion_gate,
+    )
+    if policy_error is not None:
+        return policy_error
 
     try:
         _rewrite_skill_status(path, target)
@@ -1155,7 +1474,7 @@ def _transition_skill(
         "from": current.value,
         "to": target.value,
         "actor": actor_name,
-        "approved_by": approved_by_value or None,
+        "approved_by": str(approved_by or "").strip() or None,
         "auto_promote": auto_promote,
         "reason": reason_text,
         "path": str(path),
@@ -1191,6 +1510,7 @@ def promote_skill(
     project_path: str | Path | None = None,
     available_tools: set[str] | None = None,
     confidence: float | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Promote a reviewed DRAFT skill to ACTIVE behind an explicit gate.
 
@@ -1215,6 +1535,7 @@ def promote_skill(
         available_tools=available_tools,
         confidence=confidence,
         enforce_promotion_gate=True,
+        user_id=user_id,
     )
 
 
@@ -1224,10 +1545,16 @@ def deprecate_skill(
     actor: str,
     reason: str,
     project_path: str | Path | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Retire an ACTIVE skill (ACTIVE → DEPRECATED)."""
     return _transition_skill(
-        skill_id, SkillStatus.DEPRECATED, actor=actor, reason=reason, project_path=project_path
+        skill_id,
+        SkillStatus.DEPRECATED,
+        actor=actor,
+        reason=reason,
+        project_path=project_path,
+        user_id=user_id,
     )
 
 
@@ -1237,10 +1564,16 @@ def disable_skill(
     actor: str,
     reason: str,
     project_path: str | Path | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Kill switch: force any skill to DISABLED (any → DISABLED)."""
     return _transition_skill(
-        skill_id, SkillStatus.DISABLED, actor=actor, reason=reason, project_path=project_path
+        skill_id,
+        SkillStatus.DISABLED,
+        actor=actor,
+        reason=reason,
+        project_path=project_path,
+        user_id=user_id,
     )
 
 
@@ -1372,4 +1705,5 @@ __all__ = [
     "reset_skill_metrics",
     "select_skills",
     "select_skills_for_agent",
+    "skill_capability_tools",
 ]

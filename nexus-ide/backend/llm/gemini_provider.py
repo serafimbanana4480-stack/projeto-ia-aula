@@ -24,7 +24,16 @@ from typing import Any
 import httpx
 
 from backend.config.settings import get_settings
-from backend.llm.openai_provider import _system_verify_context
+from backend.llm.openai_provider import (
+    ProviderHTTPStatusError,
+    _system_verify_context,
+    retry_delay,
+)
+from backend.llm.tool_calls import (
+    gemini_tool_config,
+    openai_tools_to_gemini,
+    render_tool_call,
+)
 from backend.runtime.reasoning import REASONING_SINK_OPTION, deliver_reasoning
 
 logger = logging.getLogger(__name__)
@@ -68,6 +77,9 @@ class GeminiProvider:
         )
         # Internal — set after each successful chat call
         self._last_usage: dict[str, int] = {}
+        # The provider's own stop reason ("STOP", "MAX_TOKENS", …). The runtime
+        # reads it to detect a token-limit truncation.
+        self.last_finish_reason: str = ""
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -117,7 +129,12 @@ class GeminiProvider:
         json_payload: dict[str, Any],
         max_retries: int = 3,
     ) -> httpx.Response:
-        """POST with exponential backoff retry for transient errors."""
+        """POST with exponential backoff retry for transient errors.
+
+        A provider that answers with ``Retry-After`` knows when it will be
+        available again; honouring it is the difference between a polite
+        backoff and hammering a struggling endpoint.
+        """
         params = self._key_param()
         last_exc: Exception | None = None
         for attempt in range(1, max_retries + 1):
@@ -125,11 +142,17 @@ class GeminiProvider:
                 resp = await self._client.post(url, json=json_payload, params=params)
                 if resp.status_code < 500:
                     return resp
-                last_exc = RuntimeError(f"Gemini API error {resp.status_code}: {resp.text}")
+                last_exc = ProviderHTTPStatusError(
+                    resp.status_code,
+                    resp.text,
+                    label="Gemini API",
+                    headers=getattr(resp, "headers", None),
+                )
+                wait = retry_delay(resp, attempt)
             except (httpx.NetworkError, httpx.TimeoutException) as exc:
                 last_exc = exc
-            if attempt < max_retries:
                 wait = 2 ** (attempt - 1)
+            if attempt < max_retries:
                 logger.warning(
                     "Gemini request failed (attempt %d/%d), retrying in %.1fs: %s",
                     attempt,
@@ -160,6 +183,45 @@ class GeminiProvider:
             usage["reasoning_tokens"] = int(thoughts)
         return usage
 
+    @staticmethod
+    def _tool_payload(options: dict[str, Any] | None) -> tuple[list[dict], dict | None]:
+        """Translate the neutral tool options into Gemini's own schema."""
+        if not isinstance(options, dict):
+            return [], None
+        tools = options.get("tools")
+        if not tools:
+            return [], None
+        converted = openai_tools_to_gemini(tools)
+        if not converted:
+            return [], None
+        return converted, gemini_tool_config(options.get("tool_choice"))
+
+    @staticmethod
+    def _function_calls(chunk: dict[str, Any]) -> list[tuple[str, Any]]:
+        """Return the native ``functionCall`` parts of one Gemini frame."""
+        calls: list[tuple[str, Any]] = []
+        candidates = chunk.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            return calls
+        candidate = candidates[0]
+        if not isinstance(candidate, dict):
+            return calls
+        content = candidate.get("content")
+        parts = content.get("parts") if isinstance(content, dict) else None
+        if not isinstance(parts, list):
+            return calls
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            call = part.get("functionCall") or part.get("function_call")
+            if not isinstance(call, dict):
+                continue
+            name = str(call.get("name") or "").strip()
+            if not name:
+                continue
+            calls.append((name, call.get("args") or call.get("arguments") or {}))
+        return calls
+
     async def chat_stream(
         self,
         model: str,
@@ -170,6 +232,7 @@ class GeminiProvider:
     ) -> AsyncIterator[str]:
         """Stream chat completion from Gemini API."""
         self._last_usage = {}
+        self.last_finish_reason = ""
         resolved = self.resolve_model(model)
         payload: dict[str, Any] = self._convert_messages(messages)
         # Gemini uses camelCase generationConfig fields.  Accept the common
@@ -178,6 +241,12 @@ class GeminiProvider:
         gen_config = self._generation_config(options)
         if gen_config:
             payload["generationConfig"] = gen_config
+        # Native function calling: Gemini speaks ``functionDeclarations``.
+        tools, tool_config = self._tool_payload(options)
+        if tools:
+            payload["tools"] = tools
+            if tool_config:
+                payload["toolConfig"] = tool_config
 
         url = self._get_model_url(resolved, "streamGenerateContent")
         # Gemini only delivers incremental SSE frames when ``alt=sse`` is
@@ -188,13 +257,14 @@ class GeminiProvider:
         last_exc: Exception | None = None
         emitted_text = False
         emitted_thinking = False
+        tool_calls: list[tuple[str, Any]] = []
         for attempt in range(1, max_retries + 1):
             try:
                 async with self._client.stream("POST", url, json=payload, params=params) as resp:
                     if resp.status_code != 200:
                         text = await resp.aread()
                         if resp.status_code >= 500 and attempt < max_retries:
-                            wait = 2 ** (attempt - 1)
+                            wait = retry_delay(resp, attempt)
                             logger.warning(
                                 "Gemini stream error %d (attempt %d/%d), retrying in %.1fs",
                                 resp.status_code,
@@ -204,7 +274,12 @@ class GeminiProvider:
                             )
                             await asyncio.sleep(wait)
                             continue
-                        raise RuntimeError(f"Gemini API error {resp.status_code}: {text.decode()}")
+                        raise ProviderHTTPStatusError(
+                            resp.status_code,
+                            text.decode(),
+                            label="Gemini API",
+                            headers=getattr(resp, "headers", None),
+                        )
 
                     async for line in resp.aiter_lines():
                         line = line.strip()
@@ -239,6 +314,18 @@ class GeminiProvider:
                             candidates = chunk.get("candidates", [])
                             if not candidates:
                                 continue
+                            candidate = candidates[0]
+                            if isinstance(candidate, dict):
+                                finish_reason = candidate.get("finishReason")
+                                if finish_reason:
+                                    self.last_finish_reason = (
+                                        str(finish_reason).strip().lower()
+                                    )
+                            # Gemini's native function calls live in the same
+                            # ``parts`` list as the text; they used to be
+                            # dropped, so the ReAct loop could never execute a
+                            # tool on this provider.
+                            tool_calls.extend(self._function_calls(chunk))
                             # Gemini marks a thinking part with ``thought: true``
                             # and carries its answer in the remaining parts. The
                             # shared parser splits the two so a thought summary
@@ -253,7 +340,11 @@ class GeminiProvider:
                                 emitted_text = True
                                 yield text_piece
 
-                    if emitted_text:
+                    # Fold Gemini's native ``functionCall`` parts back into the
+                    # explicit ``<tool_call>`` wrapper the agent loop parses.
+                    for name, arguments in tool_calls:
+                        yield "\n" + render_tool_call(name, arguments)
+                    if emitted_text or tool_calls:
                         return
                     # A successful HTTP status with no parsed content used to
                     # look like a successful blank assistant response.  Treat
@@ -292,25 +383,44 @@ class GeminiProvider:
         **kwargs: Any,
     ) -> str:
         """Non-streaming chat completion."""
+        self.last_finish_reason = ""
         resolved = self.resolve_model(model)
         payload: dict[str, Any] = self._convert_messages(messages)
         gen_config = self._generation_config(options)
         if gen_config:
             payload["generationConfig"] = gen_config
+        tools, tool_config = self._tool_payload(options)
+        if tools:
+            payload["tools"] = tools
+            if tool_config:
+                payload["toolConfig"] = tool_config
 
         url = self._get_model_url(resolved, "generateContent")
         resp = await self._post_with_retry(url, payload)
         if resp.status_code != 200:
-            raise RuntimeError(f"Gemini API error {resp.status_code}: {resp.text}")
+            raise ProviderHTTPStatusError(
+                resp.status_code,
+                resp.text,
+                label="Gemini API",
+                headers=getattr(resp, "headers", None),
+            )
         data = resp.json()
         self._last_usage = self._extract_usage_from_gemini(data)
         candidates = data.get("candidates", [])
         if not candidates:
             raise RuntimeError(f"Gemini returned no candidates. Response: {data}")
+        candidate = candidates[0] if isinstance(candidates[0], dict) else {}
+        finish_reason = candidate.get("finishReason")
+        if finish_reason:
+            self.last_finish_reason = str(finish_reason).strip().lower()
         parsed = deliver_reasoning(
             (options or {}).get(REASONING_SINK_OPTION), "gemini", data
         )
-        return parsed.content
+        answer = parsed.content
+        for name, arguments in self._function_calls(data):
+            rendered = render_tool_call(name, arguments)
+            answer = f"{answer}\n{rendered}".strip() if answer else rendered
+        return answer
 
     @staticmethod
     def _generation_config(options: dict[str, Any] | None) -> dict[str, Any]:
@@ -348,7 +458,12 @@ class GeminiProvider:
             }
             resp = await self._post_with_retry(f"/models/{resolved}:embedContent", payload)
             if resp.status_code != 200:
-                raise RuntimeError(f"Gemini API error {resp.status_code}: {resp.text}")
+                raise ProviderHTTPStatusError(
+                    resp.status_code,
+                    resp.text,
+                    label="Gemini API",
+                    headers=getattr(resp, "headers", None),
+                )
             data = resp.json()
             embedding = data.get("embedding", {}).get("values", [])
             results.append(list(map(float, embedding)))

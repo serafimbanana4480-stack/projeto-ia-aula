@@ -517,8 +517,14 @@ class VibeDirector:
                 self._announce(worker, "turn_completed")
             if became_idle:
                 self._announce(worker, "idle")
-            if not persistence_ok:
+            if not persistence_ok or outcome == "cancelled":
+                # A cancelled turn must not silently run what was queued behind
+                # it: "stop" has to actually stop. The queued messages are
+                # dropped here and the worker settles as cancelled, so the user
+                # sees the stop took effect instead of the agent resuming work
+                # they just cancelled.
                 worker._queue.clear()
+                worker.queued_count = 0
             nxt = worker._queue.popleft() if persistence_ok and worker._queue else None
             if nxt is not None and worker.state is WorkerState.IDLE:
                 try:

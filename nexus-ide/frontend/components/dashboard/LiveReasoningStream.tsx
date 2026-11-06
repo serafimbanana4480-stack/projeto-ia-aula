@@ -65,7 +65,7 @@ export function LiveReasoningStream() {
   return (
     <div className={`live-reasoning-stream nx-elev-2 nx-surface relative w-full h-full !border !border-cyan-500/25 rounded-lg overflow-hidden ${isConnected ? 'nx-live-rim' : ''}`}>
       <div className="absolute top-0 left-0 right-0 z-10 bg-gradient-to-b from-black/80 to-transparent p-4">
-        <h2 className="flex items-center gap-2 text-cyan-400 text-xl font-bold">
+        <h2 className="flex items-center gap-2 text-nexus-cyan text-xl font-bold">
           RACIOCÍNIO EM DIRETO
           <StatusDot tone={isConnected ? 'success' : 'neutral'} pulse={isConnected} label={isConnected ? 'Ligado' : 'Desligado'} />
         </h2>
@@ -100,11 +100,11 @@ function ReasoningMessageItem({ message, index }: { message: ReasoningMessage, i
   const getTypeColor = (type: string) => {
     switch (type) {
       case 'reasoning': return 'text-blue-400';
-      case 'planning': return 'text-emerald-400';
+      case 'planning': return 'text-nexus-accent2';
       case 'debate': return 'text-purple-400';
-      case 'reflection': return 'text-amber-400';
-      case 'architecture': return 'text-cyan-400';
-      case 'critique': return 'text-rose-400';
+      case 'reflection': return 'text-nexus-accent3';
+      case 'architecture': return 'text-nexus-cyan';
+      case 'critique': return 'text-nexus-accent4';
       default: return 'text-gray-400';
     }
   };
@@ -135,7 +135,7 @@ function ReasoningMessageItem({ message, index }: { message: ReasoningMessage, i
         <span className={`text-xs font-bold uppercase ${getTypeColor(message.type)}`}>
           [{TYPE_LABEL_PT[message.type] ?? message.type}]
         </span>
-        <span className="text-cyan-400 font-semibold text-sm truncate" title={message.agentId}>
+        <span className="text-nexus-cyan font-semibold text-sm truncate" title={message.agentId}>
           {message.agentId}
         </span>
         <span className="text-gray-500 text-xs">
@@ -156,7 +156,7 @@ function ReasoningMessageItem({ message, index }: { message: ReasoningMessage, i
             <div className="flex items-center gap-2">
               <span className="text-gray-500 text-xs">Confiança:</span>
               <Meter value={confidencePct} tone="info" height={6} showThresholds={false} className="w-20" />
-              <span className="text-xs text-cyan-400 tabular-nums">
+              <span className="text-xs text-nexus-cyan tabular-nums">
                 <AnimatedNumber value={confidencePct} decimals={0} />%
               </span>
             </div>
@@ -175,7 +175,7 @@ function ReasoningMessageItem({ message, index }: { message: ReasoningMessage, i
           )}
 
           {message.metadata.decision && (
-            <span className="text-xs text-emerald-400">
+            <span className="text-xs text-nexus-accent2">
               ✓ {message.metadata.decision}
             </span>
           )}

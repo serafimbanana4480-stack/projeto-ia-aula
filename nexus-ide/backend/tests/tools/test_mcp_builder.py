@@ -14,9 +14,11 @@ from backend.mcp import builder, runtime
 from backend.mcp import store as store_module
 from backend.mcp.builder import MCPBuilderError, build_from_description
 from backend.mcp.store import MCPConnector, MCPConnectorStore
+from backend.middleware import auth as auth_module
 from backend.tools import mcp_tools as mcp_tools_module
+from backend.tools.confirmations import discard_confirmation
 from backend.tools.mcp_tools import mcp_call_readonly_tool
-from backend.tools.registry import get_tool, tool_requires_confirmation
+from backend.tools.registry import execute_tool, get_tool, tool_requires_confirmation
 
 
 class _FakeLLM:
@@ -321,3 +323,49 @@ def test_primary_agent_exposes_discovery_call_and_builder_actions():
     } <= names
     assert tool_requires_confirmation(get_tool("mcp_call_tool"))
     assert tool_requires_confirmation(get_tool("mcp_builder"))
+
+
+async def test_mcp_builder_tool_requires_admin_and_keeps_human_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        auth_module.get_auth_service(),
+        "is_admin",
+        lambda user_id: user_id == "admin-user",
+        raising=False,
+    )
+    arguments = {
+        "description": "Listar tickets abertos no serviço externo",
+        "base_url": "https://api.example.com",
+    }
+
+    anonymous = await execute_tool(
+        "mcp_builder",
+        "mcp-builder-auth-session",
+        arguments,
+        enforce_confirmation=True,
+    )
+    assert anonymous["ok"] is False
+    assert anonymous["error_category"] == "auth_context_missing"
+
+    denied = await execute_tool(
+        "mcp_builder",
+        "mcp-builder-auth-session",
+        arguments,
+        user_id="ordinary-user",
+        enforce_confirmation=True,
+    )
+    assert denied["ok"] is False
+    assert denied["error_category"] == "forbidden"
+    assert "confirmation_id" not in denied
+
+    admin = await execute_tool(
+        "mcp_builder",
+        "mcp-builder-auth-session",
+        arguments,
+        user_id="admin-user",
+        enforce_confirmation=True,
+    )
+    assert admin["confirmation_required"] is True
+    confirmation_id = str(admin["confirmation_id"])
+    assert discard_confirmation(confirmation_id)

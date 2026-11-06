@@ -10,8 +10,11 @@ Uses SandboxExecutor which provides:
 from __future__ import annotations
 
 import logging
+import tempfile
+import time
 from typing import Any
 
+from backend.tools.interpreters import run_python_code
 from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
@@ -90,6 +93,11 @@ async def execute_code(code: str, language: str = "python", timeout: int = 30) -
     dangerous command detection, and resource limits. Falls back to
     subprocess with security checks when Docker is unavailable.
 
+    When the local fallback is used for Python, the child process is started
+    with a scrubbed environment: the generic executor hands the child the full
+    server environment, which let model-supplied code read the provider API
+    keys straight out of ``os.environ``.
+
     Args:
         code: Source code to execute.
         language: One of 'python', 'javascript', 'bash'.
@@ -108,6 +116,28 @@ async def execute_code(code: str, language: str = "python", timeout: int = 30) -
 
     try:
         executor = _get_executor()
+
+        # Docker isolation already provides an empty environment inside the
+        # container.  The local fallback does not, so Python is executed
+        # through the hardened runner instead.
+        if language == "python" and not await executor.check_docker():
+            workdir = tempfile.gettempdir()
+            started = time.monotonic()
+            local = await run_python_code(
+                code,
+                cwd=workdir,
+                timeout=timeout,
+                project_root=workdir,
+                script_dir=workdir,
+            )
+            return ExecutionResult(
+                stdout=str(local.get("stdout") or "")[:100_000],
+                stderr=str(local.get("stderr") or "")[:100_000],
+                exit_code=int(local.get("exit_code") or 0),
+                execution_time=time.monotonic() - started,
+                timed_out=bool(local.get("timed_out", False)),
+            )
+
         result = await executor.execute(
             code=code,
             language=language,

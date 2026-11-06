@@ -6,8 +6,8 @@
  * Loads global infrastructure components like the Advanced Mode selector
  * that need to exist above the page layout but below the auth guard.
  */
-import { useEffect } from "react";
 import dynamic from "next/dynamic";
+import { usePathname } from "next/navigation";
 
 // Load the AdvancedModePanel only when needed (code-split)
 const AdvancedModePanel = dynamic(
@@ -20,11 +20,12 @@ export default function InfrastructureProviders({
 }: {
   children: React.ReactNode;
 }) {
+  const pathname = usePathname();
   return (
     <>
       {children}
-      {/* Floating Advanced Mode button — rendered above all pages */}
-      <div className="fixed bottom-6 left-6 z-50">
+      {/* Floating Advanced Mode button: bottom-right, above the status HUD, so it never covers the sidebar footer. */}
+      <div className={pathname === "/" || pathname === "/bots" ? "hidden" : "fixed bottom-12 right-5 z-50"}>
         <AdvancedModePanel />
       </div>
     </>

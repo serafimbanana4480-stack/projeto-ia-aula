@@ -79,6 +79,7 @@ async def recall_context(
     project_id: str = "",
     memory_type: str = "",
     top_k: int = 5,
+    user_id: str = "",
 ) -> dict[str, Any]:
     """Search semantic memory for relevant context from past sessions.
 
@@ -97,6 +98,8 @@ async def recall_context(
     """
     if not query.strip():
         return {"error": "Query cannot be empty."}
+    if not user_id.strip():
+        return {"error": "A trusted authenticated user context is required."}
 
     try:
         store = get_memory_store()
@@ -110,6 +113,7 @@ async def recall_context(
 
         results = await store.search(
             query,
+            user_id=user_id,
             session_id=session_id or None,
             project_id=project_id or None,
             memory_type=mem_type,
@@ -190,6 +194,7 @@ async def store_memory(
     rationale: str = "",
     impact: str = "",
     project_goal: bool = False,
+    user_id: str = "",
 ) -> dict[str, Any]:
     """Store a memory for future recall by agents.
 
@@ -217,6 +222,8 @@ async def store_memory(
     """
     if not content.strip():
         return {"error": "Content cannot be empty."}
+    if not user_id.strip():
+        return {"error": "A trusted authenticated user context is required."}
 
     try:
         store = get_memory_store()
@@ -230,6 +237,7 @@ async def store_memory(
 
         memory = await store.store(
             content,
+            user_id=user_id,
             memory_type=mem_type,
             session_id=session_id,
             project_id=project_id,
@@ -244,14 +252,17 @@ async def store_memory(
         decision_recorded = False
         project_goal_recorded = False
         if (decision_key or project_goal) and mem_type is MemoryType.PROJECT:
-            root = project_path or project_id
+            # ``project_id`` is model-visible metadata, not a filesystem path.
+            # Only the selected project root injected by the authenticated
+            # runtime may receive durable continuity files.
+            root = project_path
             try:
                 from pathlib import Path
 
                 from backend.knowledge.project_continuity import ProjectContinuityStore
 
                 if root and Path(root).expanduser().is_dir():
-                    continuity = ProjectContinuityStore(root)
+                    continuity = ProjectContinuityStore(root, owner_id=user_id)
                     if decision_key:
                         continuity.record_decision(
                             decision_key=decision_key,

@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import shutil
+import sqlite3
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -120,6 +121,42 @@ def _prune_orphaned_basetemps(keep_pid: int) -> list[str]:
     return removed
 
 
+def _prune_old_basetemps(max_age_hours: float = 24.0) -> list[str]:
+    """Remove ``basetemp-<pid>`` dirs older than *max_age_hours*.
+
+    Catches dirs left behind by crashed/killed processes whose PID
+    has since been recycled (so ``_process_alive`` lies), and general
+    accumulation that the orphan prune misses. Never touches the
+    current run's own directory.
+    """
+    removed: list[str] = []
+    if not PYTEST_CACHE_ROOT.is_dir():
+        return removed
+    cutoff = time.time() - (max_age_hours * 3600)
+    for entry in PYTEST_CACHE_ROOT.iterdir():
+        if not entry.is_dir() or not entry.name.startswith("basetemp-"):
+            continue
+        suffix = entry.name[len("basetemp-"):]
+        if not suffix.isdigit():
+            continue
+        pid = int(suffix)
+        if pid == os.getpid():
+            continue  # never prune current run's own dir
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > cutoff:
+            continue
+        try:
+            shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
+        if not entry.exists():
+            removed.append(entry.name)
+    return removed
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config: pytest.Config) -> None:
     """Point ``--basetemp`` at a per-process directory under ``.cache/pytest``.
@@ -137,7 +174,8 @@ def pytest_configure(config: pytest.Config) -> None:
 
     An explicit ``--basetemp=...`` on the command line still wins, so ad-hoc
     runs remain possible. Orphaned directories from dead runs are reclaimed by
-    :func:`_prune_orphaned_basetemps`, which is what keeps this bounded.
+    :func:`_prune_orphaned_basetemps`, and dirs older than 24 h by
+    :func:`_prune_old_basetemps`; together they keep this bounded.
     """
     if config.option.basetemp is not None:
         # Operator passed --basetemp explicitly; respect it verbatim.
@@ -145,12 +183,14 @@ def pytest_configure(config: pytest.Config) -> None:
     PYTEST_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     pid = os.getpid()
     reclaimed = _prune_orphaned_basetemps(pid)
-    if reclaimed:
-        print(
-            f"\n[conftest] reclaimed {len(reclaimed)} orphaned pytest basetemp "
-            f"dir(s) from finished runs: {', '.join(sorted(reclaimed)[:5])}"
-            f"{' ...' if len(reclaimed) > 5 else ''}"
-        )
+    old_reclaimed = _prune_old_basetemps()
+    for label, dirs in (("orphaned", reclaimed), ("aged", old_reclaimed)):
+        if dirs:
+            print(
+                f"\n[conftest] reclaimed {len(dirs)} {label} pytest basetemp "
+                f"dir(s): {', '.join(sorted(dirs)[:5])}"
+                f"{' ...' if len(dirs) > 5 else ''}"
+            )
     config.option.basetemp = str(PYTEST_CACHE_ROOT / f"basetemp-{pid}")
 
 
@@ -173,7 +213,7 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         "LOG_LEVEL": "DEBUG",
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://test-otel:4317",
         "PROMETHEUS_PORT": "9099",
-        "JWT_SECRET": "test-jwt-secret-for-testing",
+        "JWT_SECRET": "test-only-jwt-secret-for-the-pytest-suite-0123456789",
         "JWT_ALGORITHM": "HS256",
         # A TestClient lifespan must never start autonomous loops against the
         # developer worktree. Some of those loops create git checkpoints with
@@ -207,6 +247,14 @@ def mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         # contract pin the threshold explicitly (see tests/orchestrator/
         # test_disk_guard.py) so this global does not weaken them.
         "NEXUS_DISK_GUARD_MIN_PERCENT": "0",
+        # Vibe/advanced-mode worker state is durable runtime state under
+        # ``.nexus/`` by default. Leaving it there made every run of
+        # ``test_chat_endpoint`` inherit the previous run's workers: a stale
+        # ``turn_count`` of 9 and its history were restored, so the endpoint
+        # test asserted against another run's state. Per-process scratch keeps
+        # the suite hermetic and stops pytest writing into the worktree.
+        "NEXUS_VIBE_STATE_ROOT": str(PYTEST_CACHE_ROOT / f"vibe-state-{os.getpid()}"),
+        "NEXUS_ADVANCED_STATE_ROOT": str(PYTEST_CACHE_ROOT / f"advanced-state-{os.getpid()}"),
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -398,19 +446,53 @@ def mock_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect the SQLite DB to a temporary file so tests are isolated."""
     db_file = tmp_path / "test_nexus.db"
+    # The persistence layer, the structured-log store and the persistent
+    # memory store all honour NEXUS_DB_PATH.  A developer machine that sets
+    # it would otherwise make the suite write to the real database (the
+    # stores resolve the path at call time), so the variable is removed for
+    # the whole run and the monkeypatched DB_PATH below is the only source
+    # of truth.
+    monkeypatch.delenv("NEXUS_DB_PATH", raising=False)
     monkeypatch.setattr("backend.persistence.db.DB_PATH", db_file)
     monkeypatch.setattr("backend.persistence.db.MAX_POOL_SIZE", 100)
     from backend.persistence.db import close_pool, init_db
 
     close_pool()
-    init_db()
+    # Retry init_db on Windows: WAL/shm locks from a previous test's
+    # connections may still be held by the OS briefly.
+    for attempt in range(3):
+        try:
+            init_db()
+            break
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
     try:
         yield
     finally:
-        # Teardown: close connections so Windows can release the file lock
+        # Checkpoint WAL before closing so the -wal/-shm files are
+        # cleanly released and don't leave stale locks on Windows.
+        try:
+            from backend.persistence.db import get_connection_pool
+            pool = get_connection_pool()
+            if pool is not None:
+                conn = pool.get_connection()
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                finally:
+                    pool.return_connection(conn)
+        except Exception:  # noqa: BLE001
+            pass
         close_pool()
         gc.collect()
-        time.sleep(0.1)
+        # Windows needs time to release file handles on WAL/shm files.
+        # Poll rather than a single short sleep.
+        for _ in range(5):
+            if not db_file.exists():
+                break
+            time.sleep(0.2)
 
 
 @pytest.fixture

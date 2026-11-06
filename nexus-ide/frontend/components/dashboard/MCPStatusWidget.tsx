@@ -8,9 +8,9 @@ import { StatusDot, AnimatedNumber, EmptyState } from "../ui/Primitives";
 
 const TONE_TEXT = {
   neutral: "text-nexus-text",
-  success: "text-emerald-400",
-  warning: "text-amber-400",
-  danger: "text-rose-400",
+  success: "text-nexus-accent2",
+  warning: "text-nexus-accent3",
+  danger: "text-nexus-accent4",
 } as const;
 
 const TEST_STATUS_TONE: Record<MCPConnector["last_test_status"], "success" | "warning" | "danger" | "neutral"> = {

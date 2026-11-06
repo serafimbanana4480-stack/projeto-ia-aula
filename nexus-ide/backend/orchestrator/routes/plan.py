@@ -410,6 +410,7 @@ async def execute_plan(
         session_id=req.session_id,
         auto_approve=False,
         project_path=req.project_path,
+        user_id=user_id,
     )
     return {
         "run_id": result.run_id,

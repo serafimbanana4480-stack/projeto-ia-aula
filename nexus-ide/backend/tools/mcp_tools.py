@@ -6,8 +6,7 @@ import re
 from typing import Any
 
 from backend.mcp.runtime import MCPRuntimeError, call_connector_tool
-from backend.mcp.store import mcp_store
-from backend.mcp.store import tool_permission_fingerprint
+from backend.mcp.store import mcp_store, redact_connector_secrets, tool_permission_fingerprint
 from backend.tools.registry import ToolSpec, register_tool
 
 
@@ -157,7 +156,13 @@ async def mcp_list_tools(connector_id: str = "") -> dict[str, Any]:
                 phase="tools_list",
                 detail=f"Descoberta falhou ({type(exc).__name__})",
             )
-            out.append({"connector_id": connector.id, "connector": connector.name, "error": str(exc)})
+            out.append(
+                {
+                    "connector_id": connector.id,
+                    "connector": connector.name,
+                    "error": redact_connector_secrets(connector, str(exc)),
+                }
+            )
             continue
         mcp_store.update_activity(
             activity_id,
@@ -281,7 +286,7 @@ async def mcp_recommend_tools(task: str, limit: int = 5) -> dict[str, Any]:
 
 
 async def mcp_build_from_description(description: str, base_url: str) -> dict[str, Any]:
-    """Agent-facing MCP Builder entry point; install is approval-gated in ToolSpec."""
+    """Agent-facing MCP Builder entry point; admin-only and approval-gated."""
     from backend.mcp.builder import build_from_description
     from backend.orchestrator.main import app
 
@@ -308,7 +313,7 @@ register_tool(ToolSpec(
     schema={"type": "object", "properties": {
         "connector_id": {"type": "string", "maxLength": 64},
         "tool_name": {"type": "string", "maxLength": 128},
-        "arguments": {"type": "object", "description": "Arguments forwarded verbatim to the MCP server."},
+        "arguments": {"type": "object", "description": "Arguments validated against the tool's live inputSchema and the connector's declared root before the call."},
     }, "required": ["connector_id", "tool_name"], "additionalProperties": False},
     handler=mcp_call_tool, timeout_seconds=55,
 ))
@@ -337,10 +342,10 @@ register_tool(ToolSpec(
 ))
 register_tool(ToolSpec(
     name="mcp_builder",
-    description="Generate a declarative REST MCP from a natural-language need, create server/schema/config/tests, validate it, then register it only after all gates pass.",
+    description="For admins: generate and validate a declarative REST MCP, then register it after all gates pass.",
     tags=["mcp", "builder", "code_generation", "integration"], category="mcp", risk_level="high",
     requires_confirmation=True,
-    when_to_use="When no validated MCP already covers the task and the user supplied a specific HTTP/S API base URL.",
+    when_to_use="For an administrator, when no validated MCP already covers the task and a specific HTTP/S API base URL is available.",
     schema={"type": "object", "properties": {
         "description": {"type": "string", "minLength": 8, "maxLength": 4000},
         "base_url": {"type": "string", "minLength": 8, "maxLength": 500},

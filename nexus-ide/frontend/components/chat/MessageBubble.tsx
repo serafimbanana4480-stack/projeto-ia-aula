@@ -2,15 +2,28 @@
 
 import ReactMarkdown from "react-markdown";
 import Link from "next/link";
-import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  memo,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { motion } from "framer-motion";
-import { Copy, Check, RefreshCw, AlertCircle, Pencil, RotateCw, Save, X, ExternalLink, ThumbsUp, ThumbsDown, FileCode2 } from "lucide-react";
+import { Copy, Check, RefreshCw, AlertCircle, Pencil, RotateCw, Save, X, ExternalLink, ThumbsUp, ThumbsDown, FileCode2, Sparkles } from "lucide-react";
 import type { ChatMessage } from "../../lib/types";
 import { stripAnsiCodes } from "../../lib/utils";
 import { useThemeStore } from "../../stores/themeStore";
 import RunTimeline from "./RunTimeline";
+import AgentTranscript from "./AgentTranscript";
+import { RunDeliveryNote } from "./WorkNarration";
 import { sanitizeAssistantContent } from "../../lib/chatPresentation";
 import { agentColor } from "../../lib/foldRun";
+import { parseRichBlock, promoteMarkdownTables } from "../../lib/richBlocks";
+import RichDataBlock from "./RichDataBlock";
 
 const MessageCodeBlock = lazy(() => import("./MessageCodeBlock"));
 
@@ -71,8 +84,61 @@ function TypingDots() {
           />
         ))}
       </span>
-      <span className="text-nexus-muted">A pensar...</span>
+      <span className="text-nexus-muted">A pensar…</span>
     </span>
+  );
+}
+
+/** Assistant meta row — dimensional agent chip (replaces flat ● + label). */
+function AssistantAgentMeta({
+  agent,
+  color,
+  isStreaming,
+  relativeTime,
+  timestamp,
+}: {
+  agent: string;
+  color: string;
+  isStreaming: boolean;
+  relativeTime: string;
+  timestamp: string | number | Date;
+}) {
+  const label = agent === "NEXUS" ? "NEXUS" : agent || "NEXUS";
+
+  return (
+    <div
+      className="mb-2.5 flex flex-wrap items-center gap-2"
+    >
+      <span
+        className="nx-conversation-agent inline-flex items-center gap-2.5"
+        data-live={isStreaming ? "true" : undefined}
+        style={{ "--nx-agent": color } as CSSProperties}
+      >
+        <span className="nx-conversation-avatar flex h-8 w-8 shrink-0 items-center justify-center rounded-xl" aria-hidden="true">
+          <Sparkles className="h-[15px] w-[15px]" />
+        </span>
+        <span className="text-[12px] font-semibold tracking-wide text-nexus-text">
+          {label}
+        </span>
+        {isStreaming ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-black/20 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-nexus-text/90">
+            <motion.span
+              className="h-1.5 w-1.5 rounded-full"
+              style={{ background: color }}
+              animate={{ opacity: [0.35, 1, 0.35], scale: [0.85, 1.15, 0.85] }}
+              transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
+            />
+            ao vivo
+          </span>
+        ) : null}
+      </span>
+      <time
+        className="nx-agent-meta-time text-[10px] tabular-nums text-nexus-faint"
+        dateTime={new Date(timestamp).toISOString()}
+      >
+        {relativeTime}
+      </time>
+    </div>
   );
 }
 
@@ -105,6 +171,17 @@ function MessageBubbleComponent({
       )
     : [];
   const color = agentColor(message.agent || "");
+  // Runs that carry their ordered frames render as one chronological
+  // transcript (text ↔ thinking ↔ tools ↔ subagents) instead of
+  // "answer on top, activity log below".
+  const useTranscript = !isUser && message.metadata?.kind !== "error" && (message.events?.length ?? 0) > 0;
+  const renderSegment = useCallback(
+    (text: string) => {
+      const clean = sanitizeAssistantContent(text);
+      return clean.trim() ? <AssistantMarkdown text={clean} theme={theme} /> : null;
+    },
+    [theme],
+  );
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -114,186 +191,52 @@ function MessageBubbleComponent({
   }, [message.timestamp]);
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.16, ease: "easeOut" }}
-      className={`group flex ${isUser ? "justify-end" : "justify-start"}`}
-    >
+    <div className={`nx-chat-message group flex ${isUser ? "justify-end" : "justify-start"}`} data-role={message.role}>
       <div
         className={`min-w-0 text-[15px] transition-all duration-200 ${
           isUser
-            ? "max-w-[92%] rounded-[20px] rounded-br-md border border-nexus-border/70 bg-nexus-elevated px-4 py-3 text-nexus-text shadow-sm sm:max-w-[80%]"
-            : "w-full max-w-[900px] py-2"
+            ? "nx-chat-user-message max-w-[92%] rounded-[20px] rounded-br-md border border-nexus-border/70 bg-nexus-elevated px-4 py-3 text-nexus-text sm:max-w-[80%] sm:px-5"
+            : "w-full max-w-[900px] py-2 sm:py-3"
         }`}
       >
         {/* Meta row: editorial label + time. Activity lives in RunTimeline; this is Result. */}
-        <div className={`mb-2 flex items-center gap-2 text-[11px] ${isUser ? "justify-end" : ""}`}>
-          {!isUser && (
-            <>
-              <span aria-hidden="true" className="flex h-5 w-5 items-center justify-center rounded-md bg-nexus-accent/10 text-[9px] leading-none" style={{ color }}>
-                ●
-              </span>
-              <span className="text-[12px] font-semibold tracking-wide" style={{ color }}>
-                {message.agent === "NEXUS" ? "NEXUS" : message.agent || "NEXUS"}
-              </span>
-              {isStreaming && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-nexus-accent/10 px-1.5 py-px text-[9px] font-medium text-nexus-accent">
-                  <span className="h-1 w-1 animate-pulse rounded-full bg-nexus-accent" />
-                  ao vivo
-                </span>
-              )}
-            </>
-          )}
-          {isUser && <span className="font-medium text-nexus-muted">Você</span>}
-          <span className="text-[10px] tabular-nums text-nexus-faint">
-            {relativeTime}
-          </span>
-        </div>
+        {!isUser ? (
+          <AssistantAgentMeta
+            agent={message.agent || "NEXUS"}
+            color={color}
+            isStreaming={isStreaming}
+            relativeTime={relativeTime}
+            timestamp={message.timestamp}
+          />
+        ) : (
+          <div className="mb-2 flex items-center justify-end gap-2 text-[11px]">
+            <span className="font-medium text-nexus-muted">Você</span>
+            <span className="text-[10px] tabular-nums text-nexus-faint">{relativeTime}</span>
+          </div>
+        )}
 
         <div
           className="min-w-0 break-words [&_pre]:max-w-full"
           data-testid={!isUser ? "assistant-response" : undefined}
         >
-          {visibleContent.trim() && typeof ReactMarkdown !== "undefined" ? (
-            <ReactMarkdown
-              className="prose prose-base max-w-[900px] text-[15px] leading-[1.65] text-nexus-text prose-headings:font-semibold prose-headings:text-nexus-text prose-h1:text-[24px] prose-h2:text-[20px] prose-h2:mt-5 prose-h1:mt-5 prose-p:my-2.5 prose-p:leading-[1.65] prose-li:leading-[1.65] prose-table:w-full prose-table:overflow-hidden prose-table:rounded-lg prose-pre:rounded-lg prose-pre:border prose-pre:border-nexus-border/60 [&_table]:w-full [&_table]:rounded-lg [&_table]:border [&_table]:border-nexus-border/40"
-              components={{
-                ol({ children, className, ...props }: any) {
-                  return (
-                    <ol className={`my-2 list-decimal space-y-1 pl-6 ${className ?? ""}`.trim()} {...props}>
-                      {children}
-                    </ol>
-                  );
-                },
-                ul({ children, className, ...props }: any) {
-                  return (
-                    <ul className={`my-2 list-disc space-y-1 pl-6 ${className ?? ""}`.trim()} {...props}>
-                      {children}
-                    </ul>
-                  );
-                },
-                h1({ children, ...props }: any) {
-                  return (
-                    <h1 className="mb-2 mt-5 text-[20px] font-semibold tracking-tight text-nexus-text" {...props}>
-                      {children}
-                    </h1>
-                  );
-                },
-                h2({ children, ...props }: any) {
-                  return (
-                    <h2 className="mb-2 mt-5 text-[18px] font-semibold tracking-tight text-nexus-text" {...props}>
-                      {children}
-                    </h2>
-                  );
-                },
-                h3({ children, ...props }: any) {
-                  return (
-                    <h3 className="mb-1.5 mt-4 text-[16px] font-semibold tracking-tight text-nexus-text" {...props}>
-                      {children}
-                    </h3>
-                  );
-                },
-                blockquote({ children, ...props }: any) {
-                  return (
-                    <blockquote className="my-3 rounded-r-lg border-l-2 border-nexus-accent/60 bg-nexus-accent/5 px-3 py-2 text-[14px] text-nexus-text/90" {...props}>
-                      {children}
-                    </blockquote>
-                  );
-                },
-                table({ children, ...props }: any) {
-                  return (
-                    <div className="my-3 overflow-x-auto rounded-lg border border-nexus-border/40">
-                      <table className="w-full border-collapse text-[13px]" {...props}>
-                        {children}
-                      </table>
-                    </div>
-                  );
-                },
-                th({ children, ...props }: any) {
-                  return (
-                    <th className="bg-nexus-bg/60 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-nexus-muted" {...props}>
-                      {children}
-                    </th>
-                  );
-                },
-                td({ children, ...props }: any) {
-                  return (
-                    <td className="border-t border-nexus-border/30 px-3 py-2 align-top text-[13px]" {...props}>
-                      {children}
-                    </td>
-                  );
-                },
-                a({ href, children, ...props }: any) {
-                  const url = typeof href === "string" ? href : "";
-                  if (!/^https?:\/\//i.test(url)) {
-                    return (
-                      <a href={url} {...props}>
-                        {children}
-                      </a>
-                    );
-                  }
-                  return (
-                    <a
-                      href={url}
-                      target="_blank"
-                      rel="noreferrer"
-                      title={url}
-                      className="underline decoration-nexus-accent/60 underline-offset-2 hover:decoration-nexus-accent"
-                      {...props}
-                    >
-                      {children}
-                      <ExternalLink className="mb-0.5 ml-0.5 inline h-2.5 w-2.5 opacity-60" aria-hidden="true" />
-                    </a>
-                  );
-                },
-                input({ type, checked, ...props }: any) {
-                  if (type === "checkbox") {
-                    return (
-                      <input
-                        type="checkbox"
-                        checked={!!checked}
-                        readOnly
-                        className="mr-1.5 h-3.5 w-3.5 align-[-2px]"
-                        style={{ accentColor: "var(--color-nexus-accent, #8b7cf6)" }}
-                        {...props}
-                      />
-                    );
-                  }
-                  return <input type={type} {...props} />;
-                },
-                code({ inline, className, children, ...props }: any) {
-                  const match = /language-(\w+)/.exec(className || "");
-                  const lang = match ? match[1] : "";
-                  const codeString = String(children).replace(/\n$/, "");
-
-                  if (!inline && lang) {
-                    return <FencedCodeBlock lang={lang} code={codeString} theme={theme} />;
-                  }
-
-                  const mergedClassName = `${className ?? ""} ${inline ? "rounded bg-nexus-bg/80 px-1 py-0.5 text-[11px]" : "rounded-lg bg-nexus-bg/80 p-3 text-xs overflow-x-auto border border-nexus-border/60 block"}`.trim();
-                  return (
-                    <code className={mergedClassName} {...props}>
-                      {children}
-                    </code>
-                  );
-                },
-              }}
-            >
-              {stripAnsiCodes(visibleContent)}
-            </ReactMarkdown>
-          ) : visibleContent.trim() ? (
-            <div className="whitespace-pre-wrap text-[15px] leading-[1.65]">{visibleContent}</div>
-          ) : null}
-          {/* Soft streaming caret: a 2px pulse appended to the prose, not a full re-render. */}
-          {!isUser && isStreaming && visibleContent.trim() && (
-            <span
-              aria-hidden="true"
-              className="ml-1 inline-block h-4 w-[2px] animate-pulse rounded-full bg-nexus-accent align-[-2px]"
+          {useTranscript ? (
+            <AgentTranscript
+              events={message.events ?? []}
+              isStreaming={isStreaming}
+              fallbackContent={visibleContent}
+              renderMarkdown={renderSegment}
             />
+          ) : visibleContent.trim() ? (
+            <AssistantMarkdown text={visibleContent} theme={theme} />
+          ) : visibleContent.trim() ? (
+            <div className="nx-prose whitespace-pre-wrap">{visibleContent}</div>
+          ) : null}
+          {/* Soft streaming caret: the design-system block caret, reduced-motion aware. */}
+          {!isUser && !useTranscript && isStreaming && visibleContent.trim() && (
+            <span aria-hidden="true" className="nx-caret" />
           )}
 
-          {!isUser && isStreaming && !visibleContent.trim() && !message.thinking && (!message.toolCalls || message.toolCalls.length === 0) && (!message.activities || message.activities.length === 0) && (
+          {!isUser && !useTranscript && isStreaming && !visibleContent.trim() && !message.thinking && (!message.toolCalls || message.toolCalls.length === 0) && (!message.activities || message.activities.length === 0) && (
             <div className="mt-2 flex items-center gap-2 text-xs text-nexus-muted">
               <TypingDots />
             </div>
@@ -301,18 +244,18 @@ function MessageBubbleComponent({
 
           {/* Error retry + copy actions (only for error messages) */}
           {!isUser && message.metadata?.kind === "error" && (
-            <div className="mt-3 flex items-center gap-2 border-t border-rose-500/20 pt-2">
-              <AlertCircle className="h-3.5 w-3.5 text-rose-400" />
-              <span className="text-[10px] uppercase tracking-wider text-rose-400/80">
+            <div className="mt-3 flex items-center gap-2 border-t border-nexus-accent4/20 pt-2">
+              <AlertCircle className="h-3.5 w-3.5 text-nexus-accent4" aria-hidden="true" />
+              <span className="text-[10px] uppercase tracking-wider text-nexus-accent4">
                 {message.metadata?.outcome === "interrupted" ? "Interrompido" : "Erro"}
               </span>
               {message.metadata?.canRetry && onRetry && message.metadata?.prompt && (
                 <button
                   onClick={() => onRetry(message.metadata!.prompt as string)}
-                  className="ml-auto flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[11px] font-medium text-rose-300 transition-colors hover:bg-rose-500/20"
+                  className="ml-auto flex items-center gap-1 rounded-md border border-nexus-accent4/30 bg-nexus-accent4/10 px-2 py-0.5 text-[11px] font-medium text-nexus-accent4 transition-colors hover:bg-nexus-accent4/20"
                   title="Reenviar a mesma mensagem"
                 >
-                  <RefreshCw className="h-3 w-3" />
+                  <RefreshCw className="h-3 w-3" aria-hidden="true" />
                   Tentar novamente
                 </button>
               )}
@@ -331,11 +274,15 @@ function MessageBubbleComponent({
               <FollowUpChips content={message.content} hasFiles={changedFiles.length > 0} />
             )}
 
-            <RunTimeline
-              message={message}
-              isStreaming={isStreaming}
-              sessionId={sessionId}
-            />
+            {!useTranscript && !isStreaming && <RunDeliveryNote message={message} />}
+
+            {!useTranscript && (
+              <RunTimeline
+                message={message}
+                isStreaming={isStreaming}
+                sessionId={sessionId}
+              />
+            )}
 
             {changedFiles.length > 0 && <CheckpointArtifact files={changedFiles} />}
           </div>
@@ -347,7 +294,7 @@ function MessageBubbleComponent({
             <textarea
               value={editContent}
               onChange={(e) => setEditContent(e.target.value)}
-              className="w-full resize-none rounded-lg border border-nexus-border bg-nexus-bg/40 p-2 text-sm text-nexus-text focus:border-nexus-accent focus:outline-none"
+              className="w-full resize-none rounded-lg border border-nexus-border bg-nexus-bg/40 p-2 text-sm text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/50"
               rows={Math.max(2, editContent.split("\n").length)}
               autoFocus
             />
@@ -376,9 +323,11 @@ function MessageBubbleComponent({
           </div>
         )}
 
-        {/* Action buttons (edit, regenerate, copy) — hover-only, 100ms fade */}
+        {/* Action buttons (edit, regenerate, copy). On pointer devices they
+            fade in on hover/focus; on touch there is no hover, so they stay
+            visible rather than becoming unreachable. */}
         {!isStreaming && visibleContent.trim() && !isEditing && (
-          <div className={`mt-2 flex items-center gap-1 opacity-70 transition-opacity duration-100 sm:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 ${isUser ? "justify-end" : ""}`}>
+          <div className={`mt-2 flex items-center gap-1 opacity-70 transition-opacity duration-100 sm:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 ${isUser ? "justify-end" : ""}`}>
             {/* Edit button (user messages only) */}
             {isUser && onEdit && (
               <button
@@ -408,7 +357,7 @@ function MessageBubbleComponent({
           </div>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 }
 
@@ -472,10 +421,10 @@ function FencedCodeBlock({
             }
           }}
           className={headerBtn}
-          aria-label="Aplicar bloco de código"
-          title="Copia para aplicar no editor"
+          aria-label="Copiar bloco de código"
+          title="Copia o bloco para colares no editor"
         >
-          {applied ? "Copiado" : "Aplicar"}
+          {applied ? "Copiado" : "Copiar"}
         </button>
       </div>
       <Suspense
@@ -650,8 +599,8 @@ function CopyCodeButton({ code }: { code: string }) {
     >
       {copied ? (
         <>
-          <Check className="h-3 w-3 text-emerald-400" />
-          <span className="text-emerald-400">Copiado</span>
+          <Check className="h-3 w-3 text-nexus-accent2" />
+          <span className="text-nexus-accent2">Copiado</span>
         </>
       ) : (
         <>
@@ -663,6 +612,13 @@ function CopyCodeButton({ code }: { code: string }) {
   );
 }
 
+function fileParts(path: string): { name: string; dir: string } {
+  const normalized = path.replace(/\\/g, "/");
+  const slash = normalized.lastIndexOf("/");
+  if (slash < 0) return { name: path, dir: "" };
+  return { name: normalized.slice(slash + 1), dir: normalized.slice(0, slash) };
+}
+
 function CheckpointArtifact({ files }: { files: string[] }) {
   const [copiedList, setCopiedList] = useState(false);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
@@ -671,11 +627,13 @@ function CheckpointArtifact({ files }: { files: string[] }) {
   return (
     <details
       data-testid="changed-files-artifact"
-      className="overflow-hidden rounded-xl border border-nexus-border/30 bg-nexus-card/20"
+      className="overflow-hidden rounded-xl border border-nexus-border/40 bg-nexus-card/25"
+      open
     >
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs [&::-webkit-details-marker]:hidden">
-        <span className="font-medium text-nexus-text">Checkpoint</span>
-        <span className="tabular-nums text-nexus-muted">({files.length}) ficheiros</span>
+        <FileCode2 className="h-3.5 w-3.5 shrink-0 text-nexus-accent2" aria-hidden="true" />
+        <span className="font-medium text-nexus-text">Ficheiros alterados</span>
+        <span className="tabular-nums text-nexus-muted">({files.length})</span>
         <span className="ml-auto flex items-center gap-1.5">
           <button
             type="button"
@@ -707,8 +665,13 @@ function CheckpointArtifact({ files }: { files: string[] }) {
             key={`${path}-${index}`}
             className="group/file flex items-center gap-2 rounded px-1.5 py-1 transition-colors duration-100 hover:bg-nexus-bg/40"
           >
-            <FileCode2 className="h-3.5 w-3.5 shrink-0 text-nexus-muted" aria-hidden="true" />
-            <span className="break-all font-mono text-[11px] leading-5 text-nexus-text/80">{path}</span>
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-nexus-accent2" aria-hidden="true" />
+            <span className="min-w-0 break-all font-mono text-[12px] leading-5">
+              {fileParts(path).dir ? (
+                <span className="text-nexus-faint">{fileParts(path).dir}/</span>
+              ) : null}
+              <span className="text-nexus-text">{fileParts(path).name}</span>
+            </span>
             <button
               type="button"
               onClick={async (event) => {
@@ -748,9 +711,146 @@ function CopyMessageButton({ text, className = "" }: { text: string; className?:
       aria-label={copied ? "Mensagem copiada" : "Copiar mensagem"}
       title="Copiar mensagem"
     >
-      {copied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+      {copied ? <Check className="h-3 w-3 text-nexus-accent2" /> : <Copy className="h-3 w-3" />}
     </button>
   );
 }
 
 export default memo(MessageBubbleComponent);
+
+/** The assistant Markdown renderer (shared by the bubble and AgentTranscript segments). */
+function AssistantMarkdown({ text, theme }: { text: string; theme: Parameters<typeof FencedCodeBlock>[0]["theme"] }) {
+  return (
+    <ReactMarkdown
+      className="nx-prose text-nexus-text prose-headings:font-semibold prose-headings:text-nexus-text prose-h1:text-[24px] prose-h2:text-[20px] prose-h2:mt-5 prose-h1:mt-5 prose-p:my-2.5 prose-p:leading-[1.65] prose-li:leading-[1.65]"
+      components={{
+        ol({ children, className, ...props }: any) {
+          return (
+            <ol className={`my-2 list-decimal space-y-1 pl-6 ${className ?? ""}`.trim()} {...props}>
+              {children}
+            </ol>
+          );
+        },
+        ul({ children, className, ...props }: any) {
+          return (
+            <ul className={`my-2 list-disc space-y-1 pl-6 ${className ?? ""}`.trim()} {...props}>
+              {children}
+            </ul>
+          );
+        },
+        h1({ children, ...props }: any) {
+          return (
+            <h1 className="mb-2 mt-5 text-[20px] font-semibold tracking-tight text-nexus-text" {...props}>
+              {children}
+            </h1>
+          );
+        },
+        h2({ children, ...props }: any) {
+          return (
+            <h2 className="mb-2 mt-5 text-[18px] font-semibold tracking-tight text-nexus-text" {...props}>
+              {children}
+            </h2>
+          );
+        },
+        h3({ children, ...props }: any) {
+          return (
+            <h3 className="mb-1.5 mt-4 text-[16px] font-semibold tracking-tight text-nexus-text" {...props}>
+              {children}
+            </h3>
+          );
+        },
+        blockquote({ children, ...props }: any) {
+          return (
+            <blockquote className="my-3 rounded-r-lg border-l-2 border-nexus-accent/60 bg-nexus-accent/5 px-3 py-2 text-[14px] text-nexus-text/90" {...props}>
+              {children}
+            </blockquote>
+          );
+        },
+        table({ children, ...props }: any) {
+          return (
+            <div className="my-3 overflow-x-auto rounded-lg border border-nexus-border/40">
+              <table className="w-full border-collapse text-[13px]" {...props}>
+                {children}
+              </table>
+            </div>
+          );
+        },
+        th({ children, ...props }: any) {
+          return (
+            <th className="bg-nexus-bg/60 px-3 py-2 text-left text-[12px] font-medium text-nexus-muted" {...props}>
+              {children}
+            </th>
+          );
+        },
+        td({ children, ...props }: any) {
+          return (
+            <td className="border-t border-nexus-border/30 px-3 py-2 align-top text-[13px]" {...props}>
+              {children}
+            </td>
+          );
+        },
+        a({ href, children, ...props }: any) {
+          const url = typeof href === "string" ? href : "";
+          if (!/^https?:\/\//i.test(url)) {
+            return (
+              <a href={url} {...props}>
+                {children}
+              </a>
+            );
+          }
+          return (
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              title={url}
+              className="underline decoration-nexus-accent/60 underline-offset-2 hover:decoration-nexus-accent"
+              {...props}
+            >
+              {children}
+              <ExternalLink className="mb-0.5 ml-0.5 inline h-2.5 w-2.5 opacity-60" aria-hidden="true" />
+            </a>
+          );
+        },
+        input({ type, checked, ...props }: any) {
+          if (type === "checkbox") {
+            return (
+              <input
+                type="checkbox"
+                checked={!!checked}
+                readOnly
+                className="mr-1.5 h-3.5 w-3.5 align-[-2px]"
+                style={{ accentColor: "var(--nx-accent)" }}
+                {...props}
+              />
+            );
+          }
+          return <input type={type} {...props} />;
+        },
+        code({ inline: inlineProp, className, children, node: _node, ...props }: any) {
+          const match = /language-([\w-]+)/.exec(className || "");
+          const lang = match ? match[1] : "";
+          const codeString = String(children).replace(/\n$/, "");
+          // react-markdown 9 no longer passes `inline`: a span of code is
+          // inline when it carries no language and no line break.
+          const inline = typeof inlineProp === "boolean" ? inlineProp : !lang && !String(children).includes("\n");
+
+          if (!inline && lang) {
+            const rich = parseRichBlock(lang, codeString);
+            if (rich) return <RichDataBlock block={rich} />;
+            return <FencedCodeBlock lang={lang} code={codeString} theme={theme} />;
+          }
+
+          const mergedClassName = `${className ?? ""} ${inline ? "nx-inline-code rounded-[5px] border border-nexus-border/50 bg-white/[0.06] px-[5px] py-px font-mono text-[0.86em] text-nexus-text/95" : "rounded-lg bg-nexus-bg/80 p-3 text-xs overflow-x-auto border border-nexus-border/60 block"}`.trim();
+          return (
+            <code className={mergedClassName} {...props}>
+              {children}
+            </code>
+          );
+        },
+      }}
+    >
+      {promoteMarkdownTables(stripAnsiCodes(text))}
+    </ReactMarkdown>
+  );
+}

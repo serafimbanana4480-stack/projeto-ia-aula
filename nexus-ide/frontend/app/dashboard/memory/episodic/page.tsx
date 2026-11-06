@@ -19,7 +19,7 @@ export default function MemoryEpisodicPage() {
             animate={{ opacity: 1, y: 0 }}
           >
             <div className="mb-6 flex items-center gap-3">
-              <Database className="h-6 w-6 text-cyan-400" />
+              <Database className="h-6 w-6 text-nexus-cyan" />
               <h1 className="text-2xl font-bold">Episodic Memory</h1>
             </div>
 

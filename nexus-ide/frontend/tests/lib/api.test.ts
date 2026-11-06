@@ -170,7 +170,19 @@ describe("lib/api.ts Client Suite", () => {
         runs: [{ id: "run-101", session_id: "sess 1", status: "completed" }],
         has_more: true,
         next_offset: 101,
+        paginationKnown: true,
       });
+    });
+
+    it("marks complete history only when the initial response explicitly confirms it", async () => {
+      mockResponse(200, { messages: [], has_more: false, next_cursor: null });
+      expect((await api.getSessionHistoryPage("session-1")).hasCompleteHistory).toBe(true);
+
+      mockResponse(200, { messages: [] });
+      expect((await api.getSessionHistoryPage("session-1")).hasCompleteHistory).toBe(false);
+
+      mockResponse(200, { messages: [], has_more: false, next_cursor: null });
+      expect((await api.getSessionHistoryPage("session-1", 100, "previous")).hasCompleteHistory).toBe(false);
     });
 
     it("loads a cursor history page and preserves run_id/seq replay identity", async () => {

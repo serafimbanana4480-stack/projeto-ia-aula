@@ -48,7 +48,7 @@ export function ExecutionTimeline() {
     <div className={`execution-timeline nx-elev-2 nx-surface relative h-full w-full overflow-hidden rounded-lg !border !border-cyan-500/25 ${isConnected ? 'nx-live-rim' : ''}`}>
       <div className="absolute top-0 left-0 right-0 z-10 bg-gradient-to-b from-black/80 to-transparent p-4 flex justify-between items-center">
         <div>
-          <h2 className="flex items-center gap-2 text-cyan-400 text-xl font-bold">
+          <h2 className="flex items-center gap-2 text-nexus-cyan text-xl font-bold">
             LINHA TEMPORAL DE EXECUÇÃO
             <StatusDot tone={isConnected ? 'success' : 'neutral'} pulse={isConnected} label={isConnected ? 'Ligado' : 'Desligado'} />
           </h2>
@@ -59,21 +59,21 @@ export function ExecutionTimeline() {
           <button
             onClick={() => setZoom(Math.min(zoom * 1.2, 3))}
             aria-label="Aproximar"
-            className="px-3 py-1 bg-cyan-500/20 text-cyan-400 rounded hover:bg-cyan-500/30 transition-colors text-sm"
+            className="px-3 py-1 bg-cyan-500/20 text-nexus-cyan rounded hover:bg-cyan-500/30 transition-colors text-sm"
           >
             Aproximar
           </button>
           <button
             onClick={() => setZoom(Math.max(zoom / 1.2, 0.5))}
             aria-label="Afastar"
-            className="px-3 py-1 bg-cyan-500/20 text-cyan-400 rounded hover:bg-cyan-500/30 transition-colors text-sm"
+            className="px-3 py-1 bg-cyan-500/20 text-nexus-cyan rounded hover:bg-cyan-500/30 transition-colors text-sm"
           >
             Afastar
           </button>
           <button
             onClick={() => setZoom(1)}
             aria-label="Repor zoom"
-            className="px-3 py-1 bg-cyan-500/20 text-cyan-400 rounded hover:bg-cyan-500/30 transition-colors text-sm"
+            className="px-3 py-1 bg-cyan-500/20 text-nexus-cyan rounded hover:bg-cyan-500/30 transition-colors text-sm"
           >
             Repor
           </button>
@@ -137,8 +137,8 @@ function TimelineEventItem({ event, index, onClick, selected }: {
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'running': return 'bg-[var(--nx-accent)]';
-      case 'completed': return 'bg-emerald-500';
-      case 'failed': return 'bg-rose-500';
+      case 'completed': return 'bg-nexus-accent2';
+      case 'failed': return 'bg-nexus-accent4';
       case 'pending': return 'bg-slate-500';
       default: return 'bg-slate-500';
     }
@@ -211,7 +211,7 @@ function TimelineEventItem({ event, index, onClick, selected }: {
       <div className="absolute top-full left-0 mt-2 nx-elev-2 nx-surface p-2 rounded border !border-cyan-500/25 min-w-[150px]">
         <div className="flex items-center gap-2 mb-1">
           <span aria-hidden="true">{getTypeIcon(event.type)}</span>
-          <span className="text-cyan-400 text-xs font-semibold uppercase">
+          <span className="text-nexus-cyan text-xs font-semibold uppercase">
             {TYPE_LABEL_PT[event.type]}
           </span>
         </div>
@@ -235,7 +235,7 @@ function EventDetailsPanel({ event, onClose }: { event: TimelineEvent, onClose: 
       className="absolute bottom-4 right-4 z-20 nx-elev-3 nx-surface nx-glass p-6 rounded-lg !border !border-cyan-500/40 w-96 max-h-[80vh] overflow-y-auto"
     >
       <div className="flex justify-between items-center mb-4">
-        <h3 className="text-cyan-400 font-bold">{event.title}</h3>
+        <h3 className="text-nexus-cyan font-bold">{event.title}</h3>
         <button onClick={onClose} aria-label="Fechar detalhes" className="text-gray-400 hover:text-white">✕</button>
       </div>
 
@@ -247,8 +247,8 @@ function EventDetailsPanel({ event, onClose }: { event: TimelineEvent, onClose: 
         <div className="flex justify-between">
           <span className="text-gray-400">Estado:</span>
           <span className={`${
-            event.status === 'completed' ? 'text-emerald-400' :
-            event.status === 'failed' ? 'text-rose-400' :
+            event.status === 'completed' ? 'text-nexus-accent2' :
+            event.status === 'failed' ? 'text-nexus-accent4' :
             event.status === 'running' ? 'text-[var(--nx-accent-bright)]' :
             'text-gray-400'
           }`}>

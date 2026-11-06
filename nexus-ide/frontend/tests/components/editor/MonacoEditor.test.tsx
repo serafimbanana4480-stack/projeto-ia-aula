@@ -23,10 +23,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * are observable; setup.ts's mock returns null and would assert nothing.
  */
 
-const editorProps = vi.fn();
+const { editorProps, loaderConfig } = vi.hoisted(() => ({
+  editorProps: vi.fn(),
+  loaderConfig: vi.fn(),
+}));
 
 vi.mock("@monaco-editor/react", () => ({
   __esModule: true,
+  // `loader.config({ monaco })` is how the app points the wrapper at the
+  // *bundled* editor instead of the CDN. The mock therefore has to expose a
+  // `loader` too, otherwise configuring the local editor throws.
+  loader: { config: loaderConfig },
   default: (props: Record<string, unknown>) => {
     editorProps(props);
     return <div data-testid="monaco-stub" />;
@@ -44,6 +51,16 @@ function lastProps() {
 describe("MonacoEditor", () => {
   beforeEach(() => {
     editorProps.mockClear();
+    loaderConfig.mockClear();
+  });
+
+  it("usa o editor empacotado em vez do CDN", async () => {
+    render(<MonacoEditor path="a.ts" language="ts" value="" onChange={() => {}} />);
+
+    // The CDN loader is blocked by the app's own Content-Security-Policy and
+    // needs the public internet, so the editor is served from the bundle.
+    await vi.waitFor(() => expect(loaderConfig).toHaveBeenCalled());
+    expect(loaderConfig.mock.calls[0][0]).toHaveProperty("monaco");
   });
 
   it("repassa path, language e value ao editor", () => {
@@ -57,11 +74,15 @@ describe("MonacoEditor", () => {
     expect(props.value).toBe("const a = 1;");
   });
 
-  it("usa o tema vs-dark e altura total, como documentado", () => {
+  it("usa o tema nexus-ide derivado dos tokens e altura total, como documentado", () => {
     render(<MonacoEditor path="a.ts" language="ts" value="" onChange={() => {}} />);
 
     const props = lastProps();
-    expect(props.theme).toBe("vs-dark");
+    // The built-in "vs-dark" palette shared nothing with the app's --nx-*
+    // tokens, so the editor now registers (and uses) a custom "nexus-ide"
+    // theme built from the live design tokens in `beforeMount`.
+    expect(props.theme).toBe("nexus-ide");
+    expect(typeof props.beforeMount).toBe("function");
     expect(props.height).toBe("100%");
   });
 

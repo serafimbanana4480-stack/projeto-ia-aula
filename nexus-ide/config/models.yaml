@@ -236,7 +236,7 @@ providers:
     requires_api_key: true
     primary: true
     default_models:
-      - "openrouter/free"
+      - "minimax-m3"
   # Optional: Ollama (local). Only enabled if NEXUS_ENABLE_OLLAMA=true.
   ollama:
     name: "Ollama (local)"

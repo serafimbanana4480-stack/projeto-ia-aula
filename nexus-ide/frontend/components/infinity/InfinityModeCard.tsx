@@ -78,7 +78,7 @@ export function InfinityModeCard({ mode, disabled, onUseCommand }: {
       <code className="mt-0.5 block break-all text-[11px] text-nexus-muted">/{mode.mode_id}</code>
       <p className="mt-2 text-xs leading-relaxed text-nexus-muted">{mode.description}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px]">
-        <span className={`rounded-md px-2 py-1 font-medium ${hasIntegration ? "bg-cyan-400/10 text-cyan-300" : "bg-nexus-border/50 text-nexus-muted"}`}
+        <span className={`rounded-md px-2 py-1 font-medium ${hasIntegration ? "bg-cyan-400/10 text-nexus-cyan" : "bg-nexus-border/50 text-nexus-muted"}`}
           title="Tipo de implementação no código. Não mede uma ligação nem uma execução em curso.">
           {!mode.available ? "Indisponível" : hasIntegration ? "Integração no código" : mode.runtime_status === "composed" ? "Política composta" : "Contrato desconhecido"}
         </span>
@@ -99,7 +99,7 @@ export function InfinityModeCard({ mode, disabled, onUseCommand }: {
       {expanded && <div id={`infinity-details-${mode.mode_id}`} className="mt-3 space-y-3 border-t border-nexus-border/60 pt-3 text-xs leading-relaxed text-nexus-muted">
         <p>{mode.limitations || "A execução deste modo ainda não foi medida. Consulta os eventos e resultados do pedido no chat."}</p>
         <p className="text-[11px]">Atividade em curso: <strong className="font-medium text-nexus-text">não medida</strong>. As sessões abaixo são estado persistido.</p>
-        {detailsLoading ? <p role="status">A carregar histórico…</p> : detailsError ? <p role="alert" className="text-amber-300">Não foi possível consultar o histórico. Fecha e abre os detalhes para tentar novamente.</p> : details && <>
+        {detailsLoading ? <p role="status">A carregar histórico…</p> : detailsError ? <p role="alert" className="text-nexus-accent3">Não foi possível consultar o histórico. Fecha e abre os detalhes para tentar novamente.</p> : details && <>
           <dl className="grid grid-cols-3 gap-2 text-[11px]">
             <div><dt>Sessões guardadas</dt><dd className="mt-1 text-sm font-semibold text-nexus-text">{details.total_session_count ?? details.session_count}</dd></div>
             <div><dt>Evidências registadas</dt><dd className="mt-1 text-sm font-semibold text-nexus-text">{details.evidence_count ?? "—"}</dd></div>

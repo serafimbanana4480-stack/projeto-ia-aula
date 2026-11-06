@@ -316,6 +316,23 @@ class TestUpdateAndRemove:
         assert item["priority"] == "high"
         assert item["status"] == "in_progress"
 
+    async def test_starting_a_new_task_requeues_the_previous_active_task(self) -> None:
+        await todo_write(operation="add", content="Ler o projeto", session_id="single-focus")
+        await todo_write(operation="add", content="Validar o resultado", session_id="single-focus")
+        await todo_write(
+            operation="update", id=1, status="in_progress", session_id="single-focus"
+        )
+
+        result = await todo_write(
+            operation="update", id=2, status="in_progress", session_id="single-focus"
+        )
+
+        assert [(item["id"], item["status"]) for item in result["todos"]] == [
+            (1, "pending"),
+            (2, "in_progress"),
+        ]
+        assert result["counts"]["in_progress"] == 1
+
     async def test_update_unknown_id_is_an_error(self) -> None:
         result = await todo_write(operation="update", id=99, status="done", session_id="u1")
         assert result["ok"] is False
@@ -448,3 +465,41 @@ class TestCompactInjection:
             "underscore"
         ]
         assert len(list(_todos_dir.glob("*.json"))) == 2
+
+async def test_hierarchical_plan_survives_reload_and_rejects_invalid_changes() -> None:
+    created = await todo_write(operation="set_all", session_id="tree", items=[
+        {"content": "Sistema", "type": "objective"},
+        {"content": "Backend", "type": "category", "parent_id": 1},
+        {"content": "Testar", "type": "task", "parent_id": 2, "rules": ["Não inventar"], "criteria": ["Testes passam"]},
+    ])
+    assert created["ok"] and created["counts"]["total"] == 1
+    saved = await todo_list(session_id="tree")
+    assert saved["todos"][2]["criteria"] == ["Testes passam"]
+    cycle = await todo_write(operation="update", session_id="tree", id=1, parent_id=2)
+    assert not cycle["ok"]
+    removed = await todo_write(operation="remove", session_id="tree", id=2)
+    assert not removed["ok"]
+    assert (await todo_list(session_id="tree"))["todos"] == saved["todos"]
+    done = await todo_write(operation="update", session_id="tree", id=3, status="completed")
+    assert done["counts"]["completed"] == 1
+
+
+async def test_invalid_hierarchical_replacement_preserves_existing_plan() -> None:
+    await todo_write(operation="add", content="Existente", session_id="tree")
+    result = await todo_write(operation="set_all", session_id="tree", items=[
+        {"content": "Órfã", "type": "task", "parent_id": 9},
+    ])
+    assert not result["ok"]
+    assert (await todo_list(session_id="tree"))["todos"][0]["content"] == "Existente"
+
+async def test_hierarchical_plan_through_registered_tool() -> None:
+    result = await execute_tool("todo_write", "tool-tree", {
+        "operation": "set_all",
+        "items": [
+            {"content": "Objetivo", "type": "objective"},
+            {"content": "Verificar", "type": "task", "parent_id": 1, "criteria": ["Passa"]},
+        ],
+    })
+    assert result["ok"] is True
+    assert result["result"]["todos"][1]["parent_id"] == 1
+    assert result["result"]["todos"][1]["criteria"] == ["Passa"]

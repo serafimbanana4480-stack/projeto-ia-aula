@@ -26,10 +26,25 @@ echo  Python: %PYEXE%
 echo ============================================================
 echo.
 
+where pnpm >nul 2>&1
+if errorlevel 1 (
+    echo [ERRO] pnpm 10.34.9 nao encontrado. Instala essa versao antes de arrancar.
+    exit /b 1
+)
+for /f %%v in ('pnpm --version') do set "PNPM_VERSION=%%v"
+if not "%PNPM_VERSION%"=="10.34.9" (
+    echo [ERRO] Esta IDE requer pnpm 10.34.9; encontrado: %PNPM_VERSION%.
+    exit /b 1
+)
+
 if not exist "%ROOT%\frontend\node_modules" (
     echo [AVISO] node_modules nao encontrado em frontend\. A instalar dependencias...
     pushd "%ROOT%\frontend"
-    call npm install
+    call pnpm install --frozen-lockfile
+    if errorlevel 1 (
+        popd
+        exit /b 1
+    )
     popd
 )
 
@@ -40,7 +55,7 @@ echo A aguardar alguns segundos antes de arrancar o frontend...
 timeout /t 3 /nobreak >nul
 
 echo A abrir janela do frontend...
-start "NEXUS Frontend" cmd /k "cd /d "%ROOT%\frontend" && npm run dev"
+start "NEXUS Frontend" cmd /k "cd /d "%ROOT%\frontend" && pnpm run dev"
 
 echo.
 echo ============================================================

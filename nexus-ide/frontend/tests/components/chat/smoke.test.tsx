@@ -205,7 +205,9 @@ describe("SessionList", () => {
     sessions.list.mockReturnValue(base);
     render(<SessionList />);
 
-    const renameButton = screen.getAllByTitle("Renomear")[0];
+    // The rename affordance's title now names the object it renames
+    // ("Renomear sessão"), not the bare verb.
+    const renameButton = screen.getAllByTitle("Renomear sessão")[0];
     fireEvent.click(renameButton);
 
     const input = screen.getByDisplayValue("Primeira sessão");
@@ -221,7 +223,7 @@ describe("SessionList", () => {
     sessions.list.mockReturnValue(base);
     render(<SessionList />);
 
-    fireEvent.click(screen.getAllByTitle("Renomear")[0]);
+    fireEvent.click(screen.getAllByTitle("Renomear sessão")[0]);
     const input = screen.getByDisplayValue("Primeira sessão");
     fireEvent.change(input, { target: { value: "   " } });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -233,7 +235,7 @@ describe("SessionList", () => {
     sessions.list.mockReturnValue(base);
     render(<SessionList />);
 
-    fireEvent.click(screen.getAllByTitle("Renomear")[0]);
+    fireEvent.click(screen.getAllByTitle("Renomear sessão")[0]);
     const input = screen.getByDisplayValue("Primeira sessão");
     fireEvent.change(input, { target: { value: "descartado" } });
     fireEvent.keyDown(input, { key: "Escape" });

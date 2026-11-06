@@ -164,8 +164,8 @@ python -m uvicorn backend.orchestrator.main:app --host 0.0.0.0 --port 8000
 
 ```bash
 cd frontend
-npm install
-npm run dev
+pnpm install --frozen-lockfile
+pnpm run dev
 ```
 
 ### Parar os serviços

@@ -126,6 +126,12 @@ export default function TopBar({ title }: { title?: string }) {
 
           {projectMenuOpen && (
             <div className="nx-elev-2 absolute left-0 top-full z-50 mt-2 max-h-[60dvh] w-60 max-w-[calc(100vw-6rem)] overflow-y-auto rounded-2xl p-1.5">
+              <button
+                onClick={() => { setCurrentProject(null); setProjectMenuOpen(false); }}
+                className="flex w-full items-center rounded-md px-3 py-2 text-left text-xs text-nexus-text hover:bg-white/[0.05]"
+              >
+                Sem projeto
+              </button>
               {projects.length > 0 ? (
                 projects.map((p) => (
                   <button

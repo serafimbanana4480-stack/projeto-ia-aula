@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from typing import Any
 
 from backend.tools.registry import ToolSpec, register_tool
 
@@ -21,6 +22,47 @@ logger = logging.getLogger(__name__)
 # Connection management
 # ---------------------------------------------------------------------------
 _DB_URL = os.environ.get("NEXUS_DB_URL", "sqlite:///./nexus.db")
+
+
+def _missing_driver() -> str:
+    """Return the name of the missing DB driver, or "" when all are present.
+
+    The tools need an async driver (``aiosqlite`` for SQLite, ``asyncpg`` for
+    PostgreSQL). Without one every call fails with "aiosqlite not installed",
+    but the catalog used to report the tool as available, so the model was
+    offered a tool that could never work.
+    """
+    db_type, _ = _parse_db_url(_DB_URL)
+    if db_type == "sqlite":
+        return "" if _module_is_importable("aiosqlite") else "aiosqlite"
+    if db_type == "postgresql":
+        return "" if _module_is_importable("asyncpg") else "asyncpg"
+    return ""
+
+
+def _module_is_importable(module_name: str) -> bool:
+    """Whether *module_name* can be imported (without importing it)."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _db_unavailable_fields() -> dict[str, Any]:
+    """Availability metadata for the db_* tools (empty when usable)."""
+    missing = _missing_driver()
+    if not missing:
+        return {}
+    return {
+        "available": False,
+        "missing_dependency": missing,
+        "unavailable_reason": (
+            f"the optional dependency '{missing}' is not installed; "
+            f"install it with: pip install {missing}"
+        ),
+    }
 
 
 def _parse_db_url(url: str) -> tuple[str, str]:
@@ -234,6 +276,7 @@ register_tool(
             "Use params for parameterised queries to prevent injection. "
             "Returns columns + rows."
         ),
+        category="data",
         schema={
             "type": "object",
             "properties": {
@@ -243,6 +286,7 @@ register_tool(
             "required": ["query"],
         },
         handler=db_query,
+        **_db_unavailable_fields(),
     )
 )
 
@@ -254,6 +298,7 @@ register_tool(
             "**Requires explicit confirm=True** to prevent accidental data loss. "
             "Without confirm, returns a preview. Multi-statement queries are blocked."
         ),
+        category="data",
         schema={
             "type": "object",
             "properties": {
@@ -264,6 +309,7 @@ register_tool(
             "required": ["query"],
         },
         handler=db_execute,
+        **_db_unavailable_fields(),
     )
 )
 
@@ -271,8 +317,10 @@ register_tool(
     ToolSpec(
         name="db_schema",
         description="List all tables and views in the database (catalog-level).",
+        category="data",
         schema={"type": "object", "properties": {}},
         handler=db_schema,
+        **_db_unavailable_fields(),
     )
 )
 
@@ -283,7 +331,9 @@ register_tool(
             "List all tables and their columns as a {table: [columns]} dict. "
             "Convenience wrapper around db_schema with per-table introspection."
         ),
+        category="data",
         schema={"type": "object", "properties": {}},
         handler=db_tables,
+        **_db_unavailable_fields(),
     )
 )

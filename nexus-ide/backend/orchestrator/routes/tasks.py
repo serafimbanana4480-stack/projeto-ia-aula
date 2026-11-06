@@ -10,6 +10,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -18,6 +19,7 @@ from pydantic import BaseModel
 from backend.middleware.auth import require_auth
 from backend.observability.workflow_tracker import Workflow
 from backend.orchestrator.dependency_graph import ExecutionPlan
+from backend.orchestrator.routes.autonomous_tasks import _get_task_manager
 from backend.orchestrator.types import OrchestrationState
 
 logger = logging.getLogger(__name__)
@@ -71,7 +73,7 @@ def _get_workflows(limit: int = 1000) -> list[Workflow]:
         ) from exc
 
 
-def _list_plan_tasks(request: Request) -> tuple[list[dict], str | None, bool]:
+def _list_plan_tasks(request: Request, *, include_steps: bool = True) -> tuple[list[dict], str | None, bool]:
     """Read actual plan and step status from the orchestration engine, if live."""
     engine = getattr(request.app.state, "orchestration_engine", None)
     if engine is None:
@@ -81,7 +83,7 @@ def _list_plan_tasks(request: Request) -> tuple[list[dict], str | None, bool]:
 
     try:
         plans = engine.list_plans()
-        return [_task_from_plan(engine, plan) for plan in plans], None, True
+        return [_task_from_plan(engine, plan, include_steps=include_steps) for plan in plans], None, True
     except Exception:
         logger.exception("Could not read plans for the task dashboard")
         return [], "Os planos não estão disponíveis neste momento.", True
@@ -91,7 +93,7 @@ def _enum_value(value: object) -> str:
     return str(getattr(value, "value", value))
 
 
-def _task_from_plan(engine: object, plan: ExecutionPlan) -> dict:
+def _task_from_plan(engine: object, plan: ExecutionPlan, *, include_steps: bool = True) -> dict:
     """Serialize a plan from its authoritative state and step records."""
     steps = list(plan.steps)
     step_statuses = [_enum_value(step.status) for step in steps]
@@ -168,22 +170,30 @@ def _task_from_plan(engine: object, plan: ExecutionPlan) -> dict:
         "approval_status": approval_status,
         "completed_steps": sum(value == "completed" for value in step_statuses),
         "total_steps": len(steps),
-        "steps": [
-            {
-                "id": step.task_id,
-                "title": step.name,
-                "description": step.description,
-                "agent": step.agent,
-                "status": _enum_value(step.status),
-                "error": step.error_message or None,
-                "depends_on": list(step.depends_on),
-            }
-            for step in steps
-        ],
+        "steps": (
+            [
+                {
+                    "id": step.task_id,
+                    "title": step.name,
+                    "description": step.description,
+                    "agent": step.agent,
+                    "status": _enum_value(step.status),
+                    "error": step.error_message or None,
+                    "depends_on": list(step.depends_on),
+                }
+                for step in steps
+            ]
+            if include_steps
+            else []
+        ),
     }
 
 
-def _task_source_rows(request: Request) -> tuple[list[dict], list[str], bool, dict[str, dict[str, bool]]]:
+def _task_source_rows(
+    request: Request,
+    *,
+    include_steps: bool = True,
+) -> tuple[list[dict], list[str], bool, dict[str, dict[str, bool]]]:
     """Merge the two real in-process task sources without hiding partial failures."""
     errors: list[str] = []
     rows: list[dict] = []
@@ -199,7 +209,7 @@ def _task_source_rows(request: Request) -> tuple[list[dict], list[str], bool, di
         logger.exception("Workflow tracker could not be read for the task dashboard")
         errors.append("Os workflows não estão disponíveis neste momento.")
 
-    plans, plan_error, plans_initialized = _list_plan_tasks(request)
+    plans, plan_error, plans_initialized = _list_plan_tasks(request, include_steps=include_steps)
     if plan_error:
         errors.append(plan_error)
     else:
@@ -275,9 +285,10 @@ async def get_tasks_list(
     request: Request,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    include_steps: bool = Query(default=False),
 ) -> dict:
     """Return a page from each task state, with totals and source health."""
-    rows, errors, available, sources = _task_source_rows(request)
+    rows, errors, available, sources = _task_source_rows(request, include_steps=include_steps)
     if not available:
         raise HTTPException(status_code=503, detail="; ".join(errors) or "Task data unavailable")
     groups = _group_tasks(rows)
@@ -330,3 +341,22 @@ async def tasks_stream() -> StreamingResponse:
             "Connection": "keep-alive",
         },
     )
+
+
+@router.get("/tasks/{task_id}")
+async def get_task_detail(
+    request: Request,
+    task_id: str,
+    task_manager: Any = Depends(_get_task_manager),
+) -> dict:
+    """Return one dashboard or autonomous task (with plan steps when applicable)."""
+    rows, errors, available, sources = _task_source_rows(request, include_steps=True)
+    for row in rows:
+        if str(row.get("id")) == task_id:
+            return {"task": row, "warnings": errors, "sources": sources}
+    task = await task_manager.get_task(task_id)
+    if task is not None:
+        return {"task": task.to_dict(), "warnings": errors, "sources": sources}
+    if not available:
+        raise HTTPException(status_code=503, detail="; ".join(errors) or "Task data unavailable")
+    raise HTTPException(status_code=404, detail="Task not found")

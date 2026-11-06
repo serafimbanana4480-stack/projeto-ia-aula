@@ -74,6 +74,15 @@ class OpenCodeGoProvider:
         "anthropic/claude-3-opus": "glm-5.2",
         "google/gemini-2.0-flash": "glm-5.2",
         "google/gemini-1.5-pro": "glm-5.2",
+        # The ``vision`` tier of config/models.yaml points at Gemini. OpenCode
+        # Go does not serve a Gemini model, so the tier is mapped explicitly
+        # instead of falling through to the default *text* model.
+        "gemini-2.0-flash": "glm-5.2",
+        "gemini-2.5-flash": "glm-5.2",
+        "gemini-2.5-pro": "glm-5.2",
+        "gemini-1.5-pro": "glm-5.2",
+        "gemini-1.5-flash": "glm-5.2",
+        "gemini-1.5-flash-8b": "glm-5.2",
         "meta-llama/llama-4-maverick": "qwen3.7-max",
         "mistral/mistral-large": "qwen3.7-max",
         "auto": "minimax-m3",
@@ -102,6 +111,16 @@ class OpenCodeGoProvider:
         """Return usage from the most recent call (delegates to OpenAIProvider)."""
         return dict(getattr(self._client, "_last_usage", {}))
 
+    @property
+    def last_finish_reason(self) -> str:
+        """Expose the OpenAI-compatible stop reason to the runtime.
+
+        Without it a token-limit truncation was undetectable for this
+        provider: the runtime marks a run as interrupted when the provider
+        says it stopped because it ran out of output tokens.
+        """
+        return str(getattr(self._client, "last_finish_reason", "") or "")
+
     def list_models(self) -> list[str]:
         """Return the catalog of models offered by OpenCode Go."""
         return list(self.MODELS)
@@ -109,13 +128,33 @@ class OpenCodeGoProvider:
     def resolve_model(self, model: str) -> str:
         """Resolve a NEXUS model alias to the canonical OpenCode Go name.
 
-        Falls back to the default model if the alias is unknown.
+        An unknown model id is an *error*, not a silent substitution: the
+        ``vision`` tier of ``config/models.yaml`` points at ``gemini-2.0-flash``
+        and the old code quietly answered it with the default *text* model,
+        so the caller had no way of knowing which model actually ran.  Every
+        id the deployment declares is listed in :data:`MODEL_ALIASES` (or is
+        a native model of this provider), so an unknown id means a
+        configuration mistake that must be reported.
         """
         if not model:
             return self.DEFAULT_MODEL
         if model in self.MODELS:
             return model
-        return self.MODEL_ALIASES.get(model, self.DEFAULT_MODEL)
+        alias = self.MODEL_ALIASES.get(model)
+        if alias:
+            if alias != model:
+                logger.warning(
+                    "OpenCode Go: model '%s' is not served by this provider; "
+                    "using the declared alias '%s'",
+                    model,
+                    alias,
+                )
+            return alias
+        raise ValueError(
+            f"Unknown OpenCode Go model '{model}'. Known models: "
+            f"{', '.join(self.MODELS)}. Declare an alias in "
+            "OpenCodeGoProvider.MODEL_ALIASES before using it."
+        )
 
     async def chat_stream(
         self,

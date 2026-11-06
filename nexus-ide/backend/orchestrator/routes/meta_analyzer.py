@@ -33,8 +33,10 @@ def _get_meta_analyzer(request: Request):
     return registry.get("META_ANALYZER")
 
 
-@router.post("/meta/analyze", dependencies=[Depends(require_auth)])
-async def meta_analyze(request: Request) -> StreamingResponse:
+@router.post("/meta/analyze")
+async def meta_analyze(
+    request: Request, _user: dict = Depends(require_auth)
+) -> StreamingResponse:
     """Run META_ANALYZER on the current session state and stream results via SSE."""
     agent = _get_meta_analyzer(request)
     if not agent:
@@ -54,6 +56,7 @@ async def meta_analyze(request: Request) -> StreamingResponse:
             client=llm_client,
             max_iterations=7,
             enable_thinking=True,
+            user_id=str(_user.get("user_id") or ""),
         )
         yield _sse(StreamEvent(type="agent_started", agent="META_ANALYZER"))
         try:

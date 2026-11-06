@@ -42,7 +42,7 @@ export default function SkillCatalog() {
       <span className="font-mono text-xs text-nexus-faint">{filtered.length}</span>
     </label>
     {current.loading && <p role="status" className="mt-4 flex items-center gap-2 text-sm text-nexus-muted"><Loader2 className="h-4 w-4 animate-spin" />A descobrir skills…</p>}
-    {current.error && <p role="alert" className="mt-4 flex items-center gap-2 text-sm text-amber-300"><AlertCircle className="h-4 w-4 shrink-0" />{current.error}</p>}
+    {current.error && <p role="alert" className="mt-4 flex items-center gap-2 text-sm text-nexus-accent3"><AlertCircle className="h-4 w-4 shrink-0" />{current.error}</p>}
     {!current.loading && !current.error && filtered.length === 0 && <EmptyState icon={<BookOpen className="h-5 w-5" />} title={query ? "Nenhuma skill corresponde à pesquisa" : "Ainda sem skills descobertas"} hint={query ? "Experimenta outro termo." : "Seleciona um projeto com skills em .opencode/skills ou skills."} />}
     <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
       {shown.map((skill) => <article key={`${skill.source}:${skill.name}`} className="nx-resource-card flex min-w-0 flex-col rounded-xl border border-nexus-border/60 bg-nexus-panel p-4">

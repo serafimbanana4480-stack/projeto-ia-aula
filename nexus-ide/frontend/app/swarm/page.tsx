@@ -2,7 +2,6 @@
 import { Suspense, useState, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
-import AppShell from "../../components/layout/AppShell";
 import SwarmPanel from "../../components/swarm/SwarmPanel";
 import ThinkingBlock from "../../components/chat/ThinkingBlock";
 import { useChatInput } from "../../hooks/useChatInput";
@@ -93,10 +92,8 @@ function SwarmClient() {
 
 export default function SwarmPage() {
   return (
-    <AppShell title="SWARM" noPadding>
-      <Suspense fallback={<div className="flex h-full items-center justify-center text-nexus-muted">A carregar SWARM...</div>}>
-        <SwarmClient />
-      </Suspense>
-    </AppShell>
+    <Suspense fallback={<div className="flex h-full items-center justify-center text-nexus-muted">A carregar SWARM...</div>}>
+      <SwarmClient />
+    </Suspense>
   );
 }

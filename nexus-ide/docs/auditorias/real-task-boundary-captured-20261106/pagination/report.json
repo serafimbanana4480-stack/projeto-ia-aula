@@ -1,0 +1,45 @@
+{
+  "scenario": "pagination",
+  "model_requested": "lfm3-1.7b-uncensored",
+  "endpoint": "http://127.0.0.1:1234/v1",
+  "duration_seconds": 180.6,
+  "baseline": {
+    "passed": false,
+    "returncode": 1,
+    "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import importlib.util,sys; s=importlib.util.spec_from_file_location('subject',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); assert m.page(list(range(10)), 1, 3) == [0,1,2]; assert m.page(list(range(10)), 2, 3) == [3,4,5]; assert m.page([1], 2, 3) == []\n                                                                                                                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+  },
+  "oracle": {
+    "passed": false,
+    "returncode": 1,
+    "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import importlib.util,sys; s=importlib.util.spec_from_file_location('subject',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); assert m.page(list(range(10)), 1, 3) == [0,1,2]; assert m.page(list(range(10)), 2, 3) == [3,4,5]; assert m.page([1], 2, 3) == []\n                                                                                                                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+  },
+  "changed_files": [
+    ".nexus/project-continuity.sqlite3",
+    ".nexus/project-continuity.sqlite3-shm",
+    ".nexus/project-continuity.sqlite3-wal",
+    ".nexus/project-memory.md",
+    ".nexus/project-state-0e89820860c342f2c7ec694d.md"
+  ],
+  "new_nexus_files": [
+    ".nexus/project-continuity.sqlite3",
+    ".nexus/project-continuity.sqlite3-shm",
+    ".nexus/project-continuity.sqlite3-wal",
+    ".nexus/project-memory.md",
+    ".nexus/project-state-0e89820860c342f2c7ec694d.md"
+  ],
+  "unexpected_changes": [],
+  "tool_calls": [
+    "list_dir",
+    "read_file",
+    "list_dir",
+    "list_dir",
+    "list_dir",
+    "list_dir",
+    "read_file"
+  ],
+  "response": "",
+  "error": "TimeoutError: ",
+  "cost": null,
+  "cost_status": "not measured",
+  "scope": "in-process primary runtime; provider on loopback; no HTTP or browser"
+}

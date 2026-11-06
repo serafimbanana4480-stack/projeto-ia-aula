@@ -165,7 +165,7 @@ function MetricCard({ period, stats, active }: { period: (typeof PERIODS)[number
         <span className="mb-1 text-[11px] text-nexus-muted">tokens</span>
       </div>
       <div className="mt-3 flex items-center gap-3 text-[10px]">
-        <span className="text-cyan-300">{compact(stats.tokens_in)} entrada</span>
+        <span className="text-nexus-cyan">{compact(stats.tokens_in)} entrada</span>
         <span className="text-nexus-faint">/</span>
         <span className="text-nexus-accent-bright">{compact(stats.tokens_out)} saída</span>
       </div>
@@ -273,7 +273,7 @@ export default function AnalyticsPage() {
           <div className="relative mx-auto flex max-w-[1480px] flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
             <div>
               <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.18em] text-nexus-accent-bright">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-nexus-accent2" />
                 Telemetria de uso
               </div>
               <h1 className="nx-title mt-2 text-3xl font-bold tracking-tight sm:text-4xl">Métricas</h1>
@@ -281,7 +281,7 @@ export default function AnalyticsPage() {
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <div className="flex items-center gap-2 rounded-lg border border-nexus-border bg-nexus-card/70 px-3 py-2 text-[11px] text-nexus-muted">
-                <Database className="h-3.5 w-3.5 text-emerald-400" /> Dados persistentes
+                <Database className="h-3.5 w-3.5 text-nexus-accent2" /> Dados persistentes
               </div>
               <span className="text-[11px] text-nexus-faint">{lastRefresh ? `Atualizado ${formatRelativeTime(lastRefresh / 1000)}` : "A carregar…"}</span>
               <button type="button" onClick={() => { setLoading(true); fetchOverview(); }} className="flex items-center gap-2 rounded-lg border border-nexus-border bg-nexus-card px-3 py-2 text-xs font-medium text-nexus-text transition hover:border-nexus-accent/45 hover:text-nexus-accent-bright" aria-label="Atualizar métricas">
@@ -293,7 +293,7 @@ export default function AnalyticsPage() {
 
         <main className="mx-auto max-w-[1480px] space-y-5 px-6 py-6 sm:px-8">
           {error ? (
-            <div className="flex items-center justify-between gap-4 rounded-xl border border-rose-400/25 bg-rose-400/10 px-4 py-3 text-xs text-rose-200">
+            <div className="flex items-center justify-between gap-4 rounded-xl border border-rose-400/25 bg-rose-400/10 px-4 py-3 text-xs text-nexus-accent4">
               <span>Não foi possível carregar os dados de métricas ({error}).</span>
               <button type="button" className="font-semibold underline" onClick={() => { setLoading(true); fetchOverview(); }}>Tentar novamente</button>
             </div>
@@ -311,7 +311,7 @@ export default function AnalyticsPage() {
                   </div>
                   <p className="mt-2 text-xs text-indigo-100/60">média de {selectedStats?.avg_tokens_per_second?.toFixed(1) ?? "0.0"} t/s em {PERIODS.find((period) => period.key === activePeriod)?.short}</p>
                 </div>
-                <div className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-300">LIVE</div>
+                <div className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2.5 py-1 text-[10px] font-semibold text-nexus-accent2">LIVE</div>
               </div>
               <div className="relative mt-7 grid grid-cols-2 gap-3 border-t border-white/10 pt-4">
                 <div><p className="text-[10px] uppercase tracking-wider text-indigo-100/45">Modelo ativo</p><p className="mt-1 truncate font-mono text-xs font-semibold text-indigo-100">{data?.current?.active_model || "Automático"}</p></div>
@@ -334,9 +334,9 @@ export default function AnalyticsPage() {
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-nexus-border/60 pt-3 text-[10px] text-nexus-muted"><div className="flex items-center gap-4"><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-cyan-300" />Entrada</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-nexus-accent" />Saída</span></div><span>O total geral permanece visível no resumo acima</span></div>
             </Panel>
 
-            <Panel title="Velocidade média" subtitle="Tokens gerados por segundo" icon={<Zap className="h-4 w-4" />} action={<span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[10px] font-semibold text-emerald-300">{selectedStats?.avg_tokens_per_second ? `${selectedStats.avg_tokens_per_second.toFixed(1)} t/s` : "Sem dados"}</span>}>
+            <Panel title="Velocidade média" subtitle="Tokens gerados por segundo" icon={<Zap className="h-4 w-4" />} action={<span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[10px] font-semibold text-nexus-accent2">{selectedStats?.avg_tokens_per_second ? `${selectedStats.avg_tokens_per_second.toFixed(1)} t/s` : "Sem dados"}</span>}>
               {hasTimeline ? <div className="h-[278px] w-full"><ResponsiveContainer width="100%" height="100%"><LineChart data={timeline} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}><CartesianGrid vertical={false} stroke="var(--nx-line)" strokeDasharray="4 6" /><XAxis dataKey="day" tickFormatter={dateLabel} tick={{ fill: "var(--nx-muted)", fontSize: 10 }} axisLine={false} tickLine={false} minTickGap={28} /><YAxis tickFormatter={(value) => `${value}`} tick={{ fill: "var(--nx-muted)", fontSize: 10 }} axisLine={false} tickLine={false} /><Tooltip content={<ChartTooltip kind="speed" />} /><Line type="monotone" dataKey="avg_tokens_per_second" name="avg_tokens_per_second" stroke="#ffb454" strokeWidth={2.5} dot={false} activeDot={{ r: 4, fill: "#ffb454", stroke: "#171a39", strokeWidth: 2 }} /></LineChart></ResponsiveContainer></div> : <EmptyChart label="a velocidade" />}
-              <div className="mt-4 flex items-center justify-between border-t border-nexus-border/60 pt-3 text-[10px] text-nexus-muted"><span>Baseado em tokens de saída + latência</span><span className="flex items-center gap-1 text-amber-300"><ArrowUpRight className="h-3 w-3" /> picos destacam-se</span></div>
+              <div className="mt-4 flex items-center justify-between border-t border-nexus-border/60 pt-3 text-[10px] text-nexus-muted"><span>Baseado em tokens de saída + latência</span><span className="flex items-center gap-1 text-nexus-accent3"><ArrowUpRight className="h-3 w-3" /> picos destacam-se</span></div>
             </Panel>
           </section>
 
@@ -352,10 +352,10 @@ export default function AnalyticsPage() {
           </section>
 
           <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Indicadores auxiliares">
-            <div className="rounded-xl border border-nexus-border/70 bg-nexus-card/50 p-4"><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-nexus-muted"><ArrowDownRight className="h-3.5 w-3.5 text-cyan-300" />Tokens de entrada</div><p className="mt-2 font-mono text-xl font-semibold tabular-nums text-nexus-text">{compact(selectedStats?.tokens_in)}</p><p className="mt-1 text-[10px] text-nexus-faint">{PERIODS.find((period) => period.key === activePeriod)?.short}</p></div>
+            <div className="rounded-xl border border-nexus-border/70 bg-nexus-card/50 p-4"><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-nexus-muted"><ArrowDownRight className="h-3.5 w-3.5 text-nexus-cyan" />Tokens de entrada</div><p className="mt-2 font-mono text-xl font-semibold tabular-nums text-nexus-text">{compact(selectedStats?.tokens_in)}</p><p className="mt-1 text-[10px] text-nexus-faint">{PERIODS.find((period) => period.key === activePeriod)?.short}</p></div>
             <div className="rounded-xl border border-nexus-border/70 bg-nexus-card/50 p-4"><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-nexus-muted"><ArrowUpRight className="h-3.5 w-3.5 text-nexus-accent-bright" />Tokens de saída</div><p className="mt-2 font-mono text-xl font-semibold tabular-nums text-nexus-text">{compact(selectedStats?.tokens_out)}</p><p className="mt-1 text-[10px] text-nexus-faint">{PERIODS.find((period) => period.key === activePeriod)?.short}</p></div>
-            <div className="rounded-xl border border-nexus-border/70 bg-nexus-card/50 p-4"><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-nexus-muted"><Clock3 className="h-3.5 w-3.5 text-amber-300" />Pedidos processados</div><p className="mt-2 font-mono text-xl font-semibold tabular-nums text-nexus-text">{exact(selectedStats?.requests)}</p><p className="mt-1 text-[10px] text-nexus-faint">{exact(selectedStats?.sessions)} sessões no período</p></div>
-            <div className="rounded-xl border border-nexus-border/70 bg-nexus-card/50 p-4"><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-nexus-muted"><Sparkles className="h-3.5 w-3.5 text-emerald-300" />Custo estimado</div><p className="mt-2 font-mono text-xl font-semibold tabular-nums text-nexus-text">{selectedStats?.cost ? `$${selectedStats.cost.toFixed(4)}` : "$0.0000"}</p><p className="mt-1 text-[10px] text-nexus-faint">Estimativa · USD</p></div>
+            <div className="rounded-xl border border-nexus-border/70 bg-nexus-card/50 p-4"><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-nexus-muted"><Clock3 className="h-3.5 w-3.5 text-nexus-accent3" />Pedidos processados</div><p className="mt-2 font-mono text-xl font-semibold tabular-nums text-nexus-text">{exact(selectedStats?.requests)}</p><p className="mt-1 text-[10px] text-nexus-faint">{exact(selectedStats?.sessions)} sessões no período</p></div>
+            <div className="rounded-xl border border-nexus-border/70 bg-nexus-card/50 p-4"><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-nexus-muted"><Sparkles className="h-3.5 w-3.5 text-nexus-accent2" />Custo estimado</div><p className="mt-2 font-mono text-xl font-semibold tabular-nums text-nexus-text">{selectedStats?.cost ? `$${selectedStats.cost.toFixed(4)}` : "$0.0000"}</p><p className="mt-1 text-[10px] text-nexus-faint">Estimativa · USD</p></div>
           </section>
 
           <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-nexus-border/60 pt-4 text-[10px] text-nexus-faint"><span>As médias usam apenas respostas com latência registada.</span><span>Retenção visual: 30 dias · total acumulado: desde sempre</span></footer>

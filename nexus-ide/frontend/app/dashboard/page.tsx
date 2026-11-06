@@ -1,6 +1,8 @@
-import { Suspense } from "react";
-import DashboardClient from "./DashboardClient";
-import AppShell from "../../components/layout/AppShell";
+import dynamic from "next/dynamic";
+
+const DashboardClient = dynamic(() => import("./DashboardClient"), {
+  loading: () => <DashboardSkeleton />,
+});
 
 export const metadata = {
   title: "Dashboard | NEXUS IDE",
@@ -74,21 +76,6 @@ function DashboardSkeleton() {
   );
 }
 
-// `AppShell` is a client component but a Server Component (this file) is
-// allowed to render one directly and pass Server/Client children into its
-// `children` slot — that's the standard App Router composition pattern, so
-// this page does not need "use client" itself and keeps its `metadata`
-// export valid.
-//
-// `DashboardClient` renders a plain `<div>` root, so `AppShell` supplies the
-// single `<main>` landmark for the route. (It previously rendered its own
-// `<main>`, which is why this used to pass `mainAs="div"`.)
 export default function DashboardPage() {
-  return (
-    <AppShell title="Dashboard" noPadding>
-      <Suspense fallback={<DashboardSkeleton />}>
-        <DashboardClient />
-      </Suspense>
-    </AppShell>
-  );
+  return <DashboardClient />;
 }

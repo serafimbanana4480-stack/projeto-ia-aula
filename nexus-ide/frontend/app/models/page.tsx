@@ -97,12 +97,12 @@ export default function ModelsPage() {
                 key={provider.provider}
                 className={`inline-flex max-w-full items-center gap-2 rounded-lg border px-3 py-2 text-xs ${
                   provider.error
-                    ? "border-amber-400/25 bg-amber-400/[0.06] text-amber-200"
+                    ? "border-amber-400/25 bg-amber-400/[0.06] text-nexus-accent3"
                     : "border-nexus-border bg-nexus-card/60 text-nexus-muted"
                 }`}
                 title={provider.error ?? undefined}
               >
-                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${provider.error ? "bg-amber-400" : "bg-emerald-400"}`} />
+                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${provider.error ? "bg-nexus-accent3" : "bg-nexus-accent2"}`} />
                 <span className="truncate">{provider.label}</span>
                 <span className="tabular-nums">{provider.count}</span>
               </span>
@@ -169,7 +169,7 @@ export default function ModelsPage() {
               <p className="mx-auto mt-2 max-w-lg text-sm leading-relaxed text-nexus-muted">
                 Configura um provider ou confirma que o serviço local está ativo para carregar o catálogo.
               </p>
-              <Link href="/settings" className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-xl bg-nx-accent px-4 text-sm font-semibold text-white">
+              <Link href="/settings" className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-xl bg-nexus-accent px-4 text-sm font-semibold text-white transition hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg">
                 Abrir definições <ArrowRight className="h-4 w-4" aria-hidden="true" />
               </Link>
             </div>
@@ -187,7 +187,7 @@ export default function ModelsPage() {
                   className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-nexus-border px-3 transition hover:border-nexus-accent/50 hover:text-nexus-text"
                 >
                   <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-                  Usar seleção automática
+                  Deixar o NEXUS escolher
                 </button>
               </div>
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -224,7 +224,7 @@ export default function ModelsPage() {
                           const label = capability === "code" ? "Código" : capability === "vision" ? "Visão" : "Raciocínio";
                           return <span key={capability} className="inline-flex items-center gap-1 rounded-md bg-nexus-bg/70 px-2 py-1 text-[10px] text-nexus-muted"><Icon className="h-3 w-3" aria-hidden="true" />{label}</span>;
                         })}
-                        {model.free ? <span className="rounded-md bg-emerald-400/10 px-2 py-1 text-[10px] text-emerald-300">Grátis</span> : null}
+                        {model.free ? <span className="rounded-md bg-emerald-400/10 px-2 py-1 text-[10px] text-nexus-accent2">Grátis</span> : null}
                       </div>
                       <button
                         type="button"

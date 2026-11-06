@@ -112,6 +112,7 @@ interface AdvancedModeStore {
   groups: Record<string, AdvancedModeGroup>;
   commands: Record<string, CommandAlias>;
   commandsLoading: boolean;
+  commandsLoaded: boolean;
   commandsError: string | null;
   activeModeIds: string[];
   loading: boolean;
@@ -122,8 +123,8 @@ interface AdvancedModeStore {
   actionError: string | null;
   lastSyncedAt: number | null;
 
-  loadModes: () => Promise<void>;
-  loadCommands: () => Promise<void>;
+  loadModes: (force?: boolean) => Promise<void>;
+  loadCommands: (force?: boolean) => Promise<void>;
   activateMode: (modeId: string) => Promise<{ success: boolean; message?: string; session_id?: string }>;
   deactivateMode: (modeId: string) => Promise<{ success: boolean; message?: string }>;
   getModeStatus: (modeId: string) => Promise<AdvancedMode | null>;
@@ -151,6 +152,7 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
   groups: {},
   commands: {},
   commandsLoading: false,
+  commandsLoaded: false,
   commandsError: null,
   activeModeIds: [],
   loading: false,
@@ -161,8 +163,12 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
   actionError: null,
   lastSyncedAt: null,
 
-  loadModes: async () => {
+  loadModes: async (force = false) => {
     if (healthRequest) return healthRequest;
+    // The chat mounts several effects that all ask for the mode catalogue.
+    // Without this guard the same two endpoints were requested five times on
+    // a single page load. A forced refresh (``refreshHealth``) still works.
+    if (!force && get().health && !get().error) return;
     const generation = healthGeneration;
     set({ loading: true });
     healthRequest = (async () => {
@@ -230,7 +236,10 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
     return healthRequest;
   },
 
-  loadCommands: async () => {
+  loadCommands: async (force = false) => {
+    // Same guard as ``loadModes``: the command catalogue is static for a
+    // session and was refetched on every re-render of the chat header.
+    if (!force && get().commandsLoaded && !get().commandsError) return;
     set({ commandsLoading: true, commandsError: null });
     try {
       const res = await authenticatedFetch(apiUrl("/api/advanced-modes/commands"), {
@@ -263,12 +272,14 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
       );
       set({
         commands,
+        commandsLoaded: true,
         commandsError:
           Object.keys(commands).length === 0 ? "O backend não devolveu comandos disponíveis" : null,
         commandsLoading: false,
       });
     } catch (error) {
       set({
+        commandsLoaded: false,
         commandsError:
           error instanceof Error
             ? `Não foi possível carregar os comandos: ${error.message}`
@@ -363,7 +374,9 @@ export const useAdvancedModeStore = create<AdvancedModeStore>((set, get) => ({
 
   refreshHealth: async () => {
     if (healthRequest) await healthRequest;
-    await get().loadModes();
+    // Forced: a refresh must always re-read the backend, even when the
+    // catalogue is already in the store.
+    await get().loadModes(true);
   },
 
   resolveCommand: async (command: string) => {

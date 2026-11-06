@@ -56,6 +56,9 @@ class TestWriteProposal:
         assert lines[0] == "---"
         assert any(line.startswith('name: "') for line in lines[:4])
         assert any(line.startswith('description: "') for line in lines[:4])
+        from backend.core.skill_runtime import parse_skill_markdown
+
+        assert parse_skill_markdown(content).manifest.status.value == "draft"
         assert "1. read" in lines
         assert "2. write" in lines
         assert "3. run_tests" in lines

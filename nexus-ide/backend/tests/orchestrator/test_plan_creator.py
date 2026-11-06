@@ -260,6 +260,60 @@ class TestPlannerModelCascade:
         assert len(chain) == len(set(chain))
 
     @pytest.mark.asyncio
+    async def test_explicit_model_override_is_used_for_planning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_planner_config(monkeypatch)
+        selected_model = "liquid/lfm-2.5-2.6b:free"
+        valid_plan = json.dumps(
+            [
+                {
+                    "name": "Read project README",
+                    "description": "Read README.md and report its marker.",
+                    "agent": "ANALYZER",
+                    "model_key": "reasoning",
+                    "depends_on": [],
+                    "priority": "high",
+                    "file_scope": ["README.md"],
+                    "completion_criteria": ["The exact marker is reported."],
+                    "verification_commands": ["python -m pytest"],
+                    "risk": "low",
+                    "rollback": "No files are changed.",
+                    "lock_scope": "read:README.md",
+                    "allowed_tools": ["read_file"],
+                    "sandboxed": False,
+                },
+                {
+                    "name": "Verify the reported marker",
+                    "description": "Confirm the read task reported the README marker.",
+                    "agent": "DEBUGGER",
+                    "model_key": "coder",
+                    "depends_on": [0],
+                    "priority": "high",
+                    "file_scope": ["README.md"],
+                    "completion_criteria": ["The marker matches README.md."],
+                    "verification_commands": ["python -m pytest"],
+                    "risk": "low",
+                    "rollback": "No files are changed.",
+                    "lock_scope": "read:README.md",
+                    "allowed_tools": ["read_file"],
+                    "sandboxed": False,
+                },
+            ]
+        )
+        client = FlakyPlanner([], valid_plan)
+        creator = PlanCreator(
+            llm_client=client,
+            event_bus=RecordingEventBus(),
+            model_override=selected_model,
+        )
+
+        result = await creator.create("Audit the project", "s-selected-model")
+
+        assert result.status == "ready"
+        assert client.models_tried == [selected_model]
+
+    @pytest.mark.asyncio
     async def test_rate_limited_primary_blocks_without_auto_approval(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

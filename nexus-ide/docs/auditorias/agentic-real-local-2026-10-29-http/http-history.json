@@ -1,0 +1,16 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Olá! Responde de forma curta em português.",
+      "timestamp": "2026-10-29T03:19:01.403Z",
+      "run_id": "run-0cab5d5febe043fdb1f3e90428026926"
+    },
+    {
+      "role": "assistant",
+      "content": "Olá! Estou pronto para ajudar. Qual é a tarefa que desejas que eu realize?",
+      "timestamp": "2026-10-29T03:19:10.827Z",
+      "run_id": "run-0cab5d5febe043fdb1f3e90428026926"
+    }
+  ]
+}

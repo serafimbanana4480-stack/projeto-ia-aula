@@ -4,16 +4,21 @@ Tool Result Cache — TTL-based cache for tool execution results.
 Prevents redundant execution of idempotent tools (search, list, read) within
 the same session. Shell commands, writes, and code execution are never cached.
 
+The cache is a process-global singleton, so its key MUST carry the identity of
+the caller: without the session id, a second session received the first
+session's file content (``_cache_hit=True``). The key therefore combines the
+tool name, the session id, the effective project root and the arguments.
+
 Usage:
     from backend.cache import tool_cache
 
     # Before executing tool
-    cached = tool_cache.get(tool_name, arguments)
+    cached = tool_cache.get(tool_name, arguments, session_id=session_id)
     if cached:
         return cached
 
     # After executing tool
-    tool_cache.store(tool_name, arguments, result)
+    tool_cache.store(tool_name, arguments, result, session_id=session_id)
 """
 
 from __future__ import annotations
@@ -70,7 +75,13 @@ TOOL_TTL_CONFIG: dict[str, int] = {
 
 
 class ToolResultCache:
-    """In-memory TTL cache for tool results with automatic eviction."""
+    """In-memory TTL cache for tool results with automatic eviction.
+
+    The cache is shared by the whole process, so an entry is only valid for
+    the caller that produced it. The key therefore includes the session id
+    and the effective project root: a tool result depends on *who* asked and
+    *which project* was selected, so two sessions must never share an entry.
+    """
 
     def __init__(self, max_entries: int = 500):
         self._cache: dict[str, tuple[Any, float]] = {}  # key -> (result, expiry)
@@ -78,20 +89,36 @@ class ToolResultCache:
         self._hits = 0
         self._misses = 0
 
-    def _make_key(self, tool_name: str, arguments: dict) -> str:
-        """Generate deterministic cache key from tool name + arguments."""
+    def _make_key(
+        self,
+        tool_name: str,
+        arguments: dict,
+        *,
+        session_id: str = "",
+        project_root: str = "",
+    ) -> str:
+        """Generate deterministic cache key from tool name + caller + arguments."""
         args_normalized = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
-        content = f"{tool_name}:{args_normalized}"
+        content = f"{tool_name}:{session_id or ''}:{project_root or ''}:{args_normalized}"
         return hashlib.md5(content.encode("utf-8")).hexdigest()
 
-    def get(self, tool_name: str, arguments: dict) -> Any | None:
+    def get(
+        self,
+        tool_name: str,
+        arguments: dict,
+        *,
+        session_id: str = "",
+        project_root: str = "",
+    ) -> Any | None:
         """Return cached result or None if miss/expired."""
         ttl = TOOL_TTL_CONFIG.get(tool_name, 0)
         if ttl == 0:
             self._misses += 1
             return None
 
-        key = self._make_key(tool_name, arguments)
+        key = self._make_key(
+            tool_name, arguments, session_id=session_id, project_root=project_root
+        )
         entry = self._cache.get(key)
         if entry is not None:
             result, expiry = entry
@@ -104,13 +131,23 @@ class ToolResultCache:
         self._misses += 1
         return None
 
-    def store(self, tool_name: str, arguments: dict, result: Any) -> None:
+    def store(
+        self,
+        tool_name: str,
+        arguments: dict,
+        result: Any,
+        *,
+        session_id: str = "",
+        project_root: str = "",
+    ) -> None:
         """Store result in cache with TTL."""
         ttl = TOOL_TTL_CONFIG.get(tool_name, 0)
         if ttl == 0:
             return
 
-        key = self._make_key(tool_name, arguments)
+        key = self._make_key(
+            tool_name, arguments, session_id=session_id, project_root=project_root
+        )
         self._cache[key] = (result, time.time() + ttl)
 
         # Eviction: remove expired entries if over max

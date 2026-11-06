@@ -8,6 +8,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import ToolCallTimeline from "../../../components/chat/ToolCallTimeline";
+import { usePresentationStore } from "../../../stores/presentationStore";
 import type { ToolCallItem } from "../../../lib/types";
 
 const executeTool = vi.fn();
@@ -36,13 +37,15 @@ function calls(n: number, overrides: Partial<ToolCallItem> = {}): ToolCallItem[]
 }
 
 function expand(): void {
-  fireEvent.click(screen.getByRole("button", { expanded: false }));
+  const toggle = screen.getByRole("button", { name: /Ferramentas/ });
+  if (toggle.getAttribute("aria-expanded") === "false") fireEvent.click(toggle);
 }
 
 describe("ToolCallTimeline — header, counters and overflow", () => {
   beforeEach(() => {
     executeTool.mockReset();
     confirmTool.mockReset();
+    usePresentationStore.setState({ level: "simple" });
   });
 
   it("não renderiza nada sem chamadas", () => {
@@ -100,12 +103,19 @@ describe("ToolCallTimeline — header, counters and overflow", () => {
     expect(screen.getByText("2 aprovações")).toBeTruthy();
   });
 
-  it("traduz o nome da ferramenta e mantém o identificador técnico", () => {
-    render(<ToolCallTimeline calls={[call({ name: "write_file_absolute" })]} />);
-    // The friendly label is the chip; the wire name is the badge in the body.
+  it("traduz o nome da ferramenta e mostra o identificador só no modo técnico", () => {
+    usePresentationStore.setState({ level: "simple" });
+    const { unmount } = render(<ToolCallTimeline calls={[call({ name: "write_file_absolute" })]} />);
     expect(screen.getByText("Escrever ficheiro")).toBeTruthy();
     expand();
+    expect(screen.queryByText("write_file_absolute")).toBeNull();
+    unmount();
+
+    usePresentationStore.setState({ level: "technical" });
+    render(<ToolCallTimeline calls={[call({ name: "write_file_absolute" })]} />);
+    expand();
     expect(screen.getByText("write_file_absolute")).toBeTruthy();
+    usePresentationStore.setState({ level: "simple" });
   });
 
   it("mostra o nome cru de uma ferramenta desconhecida", () => {
@@ -156,26 +166,25 @@ describe("ToolCallTimeline — expand toggle and accessibility", () => {
 });
 
 describe("ToolCallTimeline — ExecutionStages chips", () => {
-  it("marca como concluídas as fases anteriores à mais alta atingida", () => {
-    // `write_file` is phase 2 ("A executar"), so reading and searching are done.
+  it("mostra só a fase que teve mesmo uma chamada", () => {
     render(<ToolCallTimeline calls={[call({ name: "write_file" })]} />);
 
-    const stages = screen.getByText("A ler").parentElement!;
-    expect(stages.textContent).toContain("A ler");
-    expect(stages.textContent).toContain("A pesquisar");
-    expect(stages.textContent).toContain("A executar");
-    expect(stages.textContent).toContain("A validar");
+    expect(screen.queryByText("A ler")).toBeNull();
+    expect(screen.queryByText("A pesquisar")).toBeNull();
+    expect(screen.getByText("A executar")).toBeTruthy();
+    expect(screen.queryByText("A validar")).toBeNull();
+    expect(screen.getByText("A executar").className).toContain("text-nexus-accent2");
   });
 
-  it("não marca como concluída uma fase que só corrreu", () => {
+  it("não marca como concluída uma fase que só correu", () => {
     const { container } = render(
       <ToolCallTimeline calls={[call({ name: "execute_terminal", status: "running" })]} />,
     );
-    // A validar (the highest possible) must not be green when nothing ran there.
-    const validating = [...container.querySelectorAll("span")].find(
-      (el) => el.textContent === "A validar",
+    const executing = [...container.querySelectorAll("span")].find(
+      (el) => el.textContent === "A executar",
     );
-    expect(validating?.className).toContain("bg-nexus-bg/60");
+    expect(executing?.className).toContain("bg-nexus-accent/15");
+    expect(screen.queryByText("A validar")).toBeNull();
   });
 });
 
@@ -600,7 +609,7 @@ describe("ToolCallTimeline — human-in-the-loop confirmation", () => {
 
   it("explica o risco e mostra a sugestão do agente", () => {
     render(<ToolCallTimeline calls={[pending()]} />);
-    expand();
+    expect(screen.getByRole("button", { name: /Ferramentas/ }).getAttribute("aria-expanded")).toBe("true");
 
     expect(screen.getByText(/pode alterar ficheiros/)).toBeTruthy();
     expect(screen.getByText("Vai apagar a pasta de testes.")).toBeTruthy();
@@ -641,6 +650,9 @@ describe("ToolCallTimeline — human-in-the-loop confirmation", () => {
     );
     expand();
 
+    expect((screen.getByRole("button", { name: "Confirmar" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Recusar" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/falta o identificador desta operação/)).toBeTruthy();
     fireEvent.click(screen.getByText("Confirmar"));
     await Promise.resolve();
     expect(confirmTool).not.toHaveBeenCalled();

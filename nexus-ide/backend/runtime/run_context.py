@@ -30,13 +30,20 @@ from contextvars import ContextVar, Token
 __all__ = [
     "active_run",
     "current_run_id",
+    "current_task_id",
     "get_current_run_id",
+    "get_current_task_id",
     "reset_current_run_id",
+    "reset_current_task_id",
     "set_current_run_id",
+    "set_current_task_id",
 ]
 
 #: The run the current coroutine is executing for. ``""`` means no run.
 current_run_id: ContextVar[str] = ContextVar("nexus_current_run_id", default="")
+
+#: The task within that run (e.g. ``cycle-2``). ``""`` means run-wide keys.
+current_task_id: ContextVar[str] = ContextVar("nexus_current_task_id", default="")
 
 
 def get_current_run_id() -> str:
@@ -68,6 +75,26 @@ def reset_current_run_id(token: Token[str]) -> None:
         # A token created in a different Context is a caller bug; refusing to
         # raise keeps tool execution alive, and the log makes it visible.
         current_run_id.reset(token)
+
+
+def get_current_task_id() -> str:
+    """Return the task id scoped to the current run, or ``""`` when unset."""
+    try:
+        value = current_task_id.get()
+    except LookupError:  # pragma: no cover
+        return ""
+    return str(value or "").strip()
+
+
+def set_current_task_id(task_id: str | None) -> Token[str]:
+    """Publish *task_id* for side-effect idempotency keys in this context."""
+    return current_task_id.set(str(task_id or "").strip())
+
+
+def reset_current_task_id(token: Token[str]) -> None:
+    """Undo a :func:`set_current_task_id` for the context that made it."""
+    with contextlib.suppress(ValueError):
+        current_task_id.reset(token)
 
 
 @contextlib.contextmanager

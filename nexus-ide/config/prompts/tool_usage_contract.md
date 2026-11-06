@@ -34,7 +34,9 @@ CRITICAL RULES:
 12. In the final response, lead with the outcome, then mention the important changes, verification, and any remaining limitation.
 13. Use CONSULT_AGENT when you need specialised expertise you do not have.
     Examples: consult ARCHITECT for design, ANALYZER for review, DEBUGGER for bugs, RESEARCHER for external info.
-14. In MODO AUTÓNOMO / auto mode, act with maximum autonomy: plan, explore, consult, execute, verify, and summarise.
+14. In MODO AUTÓNOMO / auto mode, act with maximum autonomy:
+    - For work with multiple real stages, read the current todo list and resume it only when it matches the user's objective; replace a stale plan when the objective changes. Keep one task in_progress, update it as each stage starts or ends, and mark it completed only after the work and required verification succeed. Record blockers and replan when the user changes direction. Skip plans for simple requests.
+    - Plan, explore, consult, execute, verify with tests/checks, and summarise.
 
 EXAMPLE - create a file with an absolute path:
 ```tool

@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _whiteboard_owner_id(current_user: dict[str, Any]) -> str:
+    owner_id = str(current_user.get("user_id") or "").strip()
+    if not owner_id:
+        raise HTTPException(status_code=401, detail="Authenticated user has no owner id")
+    return owner_id
+
+
 # ── Pydantic request/response models ──────────────────────────────────────────
 
 
@@ -93,7 +100,7 @@ class DebateCreateRequest(BaseModel):
 @router.get("/whiteboard")
 async def list_whiteboard(
     request: Request,
-    _auth: None = Depends(require_auth),
+    current_user: dict[str, Any] = Depends(require_auth),
     topic: str | None = Query(None),
     agent: str | None = Query(None),
     tags: list[str] | None = Query(None),
@@ -115,6 +122,7 @@ async def list_whiteboard(
         tags=tags,
         limit=limit,
         since=since_dt,
+        user_id=_whiteboard_owner_id(current_user),
     )
     return {
         "entries": [e.model_dump(mode="json") for e in entries],
@@ -126,7 +134,7 @@ async def list_whiteboard(
 async def write_whiteboard(
     req: WhiteboardWriteRequest,
     request: Request,
-    _auth: None = Depends(require_auth),
+    current_user: dict[str, Any] = Depends(require_auth),
 ) -> WhiteboardWriteResponse:
     """Write a new entry to the shared whiteboard."""
     shm = get_shared_memory()
@@ -137,6 +145,7 @@ async def write_whiteboard(
         importance=req.importance,
         tags=req.tags,
         related_entries=req.related_entries,
+        user_id=_whiteboard_owner_id(current_user),
     )
     return WhiteboardWriteResponse(
         entry_id=entry.entry_id,
@@ -149,13 +158,15 @@ async def write_whiteboard(
 @router.get("/whiteboard/search")
 async def search_whiteboard(
     request: Request,
-    _auth: None = Depends(require_auth),
+    current_user: dict[str, Any] = Depends(require_auth),
     q: str = Query(..., min_length=1, max_length=500),
     limit: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
     """Search whiteboard entries by text."""
     shm = get_shared_memory()
-    entries = await shm.search_entries(query=q, limit=limit)
+    entries = await shm.search_entries(
+        query=q, limit=limit, user_id=_whiteboard_owner_id(current_user)
+    )
     return {
         "query": q,
         "entries": [e.model_dump(mode="json") for e in entries],
@@ -167,11 +178,11 @@ async def search_whiteboard(
 async def get_whiteboard_thread(
     request: Request,
     entry_id: str,
-    _auth: None = Depends(require_auth),
+    current_user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Return an entry and all related entries recursively."""
     shm = get_shared_memory()
-    thread = await shm.get_thread(entry_id)
+    thread = await shm.get_thread(entry_id, user_id=_whiteboard_owner_id(current_user))
     if not thread:
         raise HTTPException(status_code=404, detail="Entry not found")
     return {

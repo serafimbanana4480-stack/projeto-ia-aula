@@ -815,6 +815,76 @@ select {
     animation: pulse-subtle 1.6s ease-in-out infinite;
   }
 
+  /* Chip de agente nas mensagens do assistente — profundidade + brilho por cor. */
+  .nx-agent-meta-badge {
+    --nx-agent: var(--nx-accent);
+    background: linear-gradient(
+      165deg,
+      color-mix(in srgb, var(--nx-agent) 24%, var(--nx-surface-2)),
+      color-mix(in srgb, var(--nx-agent) 7%, var(--nx-surface-1))
+    );
+    border: 1px solid color-mix(in srgb, var(--nx-agent) 40%, var(--nx-line));
+    box-shadow:
+      inset 0 1px 0 color-mix(in srgb, var(--nx-agent) 32%, white),
+      0 8px 22px color-mix(in srgb, var(--nx-agent) 18%, transparent),
+      0 1px 0 rgba(0, 0, 0, 0.4);
+    transition:
+      transform 200ms var(--nx-ease),
+      box-shadow 200ms var(--nx-ease);
+  }
+
+  .group:hover .nx-agent-meta-badge {
+    transform: translateY(-1px) scale(1.015);
+    box-shadow:
+      inset 0 1px 0 color-mix(in srgb, var(--nx-agent) 40%, white),
+      0 12px 28px color-mix(in srgb, var(--nx-agent) 26%, transparent),
+      0 1px 0 rgba(0, 0, 0, 0.4);
+  }
+
+  .nx-agent-meta-badge[data-live="true"]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(
+      105deg,
+      transparent 30%,
+      color-mix(in srgb, var(--nx-agent) 65%, white) 50%,
+      transparent 70%
+    );
+    opacity: 0.55;
+    animation: rim-sweep 2.6s ease-in-out infinite;
+    pointer-events: none;
+    mix-blend-mode: screen;
+  }
+
+  .nx-agent-meta-dot {
+    background: linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--nx-agent) 70%, white),
+      var(--nx-agent)
+    );
+    box-shadow:
+      0 0 10px color-mix(in srgb, var(--nx-agent) 50%, transparent),
+      inset 0 -1px 2px rgba(0, 0, 0, 0.35),
+      inset 0 1px 1px rgba(255, 255, 255, 0.35);
+  }
+
+  .nx-agent-meta-label {
+    color: var(--nx-agent);
+    text-shadow:
+      0 1px 0 rgba(0, 0, 0, 0.5),
+      0 0 16px color-mix(in srgb, var(--nx-agent) 38%, transparent);
+  }
+
+  .nx-agent-meta-time {
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--nx-line);
+    background: color-mix(in srgb, var(--nx-text-dim) 5%, transparent);
+    box-shadow: inset 0 1px 0 var(--nx-rim);
+  }
+
   /* Caret de streaming: bloco que pisca. Pausa com reduced-motion. */
   .nx-caret {
     display: inline-block;
@@ -847,9 +917,8 @@ select {
     display: none !important;
   }
 
-  /* ChatPanel RunTimeline: minimal esconde o detalhe, fica só o recap do
-     header ("N passos · M ferramentas" / "Trabalhou …"). */
-  [data-density="minimal"] [data-testid="run-timeline-body"],
+  /* Vista simples: o corpo da timeline só existe depois de expandir.
+     A telemetria (tokens, latência, ids) fica na vista técnica. */
   [data-density="minimal"] [data-testid="run-observability"] {
     display: none !important;
   }
@@ -934,8 +1003,12 @@ select {
   .nx-caret,
   .nx-live-dot,
   .nx-msg-enter,
-  .nx-panel-enter {
+  .nx-panel-enter,
+  .nx-agent-meta-badge::after {
     animation: none !important;
+  }
+  .group:hover .nx-agent-meta-badge {
+    transform: none !important;
   }
 }
 
@@ -971,8 +1044,90 @@ select {
 .nx-resource-card summary { list-style-position: inside; }
 .nx-resource-card details[open] { padding-bottom: 4px; }
 .nx-task-panel { box-shadow: inset 0 1px 0 var(--nx-rim); }
+
+/* Shared chrome for the live chat surfaces: work card, agents, tools, checklist. */
+.nx-work-surface {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--nx-surface-2) 94%, transparent),
+    color-mix(in srgb, var(--nx-bg) 62%, transparent)
+  );
+  box-shadow: inset 0 1px 0 var(--nx-rim);
+}
 .nx-plan-panel { background-image: linear-gradient(150deg, color-mix(in srgb, var(--nx-accent) 4%, transparent), transparent 50%); }
+
+/* Conversation workspace: one visual hierarchy, shared with the existing theme. */
+.nx-chat-workspace {
+  --nx-conv-max: 860px;
+  isolation: isolate;
+}
+.nx-chat-workspace.nx-ambient::after { opacity: 0.18; }
+.nx-conversation-header {
+  background: color-mix(in srgb, var(--nx-bg) 94%, var(--nx-surface-2));
+}
+.nx-chat-icon-button { transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease; }
+.nx-conversation-scroll { scrollbar-gutter: stable; overscroll-behavior-y: contain; }
+.nx-chat-message + .nx-chat-message { margin-top: 24px; }
+.nx-chat-user-message {
+  background: color-mix(in srgb, var(--nx-surface-3) 68%, var(--nx-bg));
+  box-shadow: inset 0 1px 0 var(--nx-rim);
+}
+.nx-conversation-avatar {
+  color: var(--nx-agent, var(--nx-accent-bright));
+  background: color-mix(in srgb, var(--nx-agent, var(--nx-accent)) 10%, var(--nx-surface-1));
+  border: 1px solid color-mix(in srgb, var(--nx-agent, var(--nx-accent)) 18%, transparent);
+}
+.nx-chat-composer {
+  background: color-mix(in srgb, var(--nx-surface-2) 78%, var(--nx-bg));
+  box-shadow: 0 8px 28px -12px rgba(0, 0, 0, 0.28), inset 0 1px 0 var(--nx-rim);
+}
+.nx-chat-composer:focus-within {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--nx-accent) 8%, transparent), 0 8px 28px -12px rgba(0, 0, 0, 0.28);
+}
+.nx-chat-suggestion, .nx-agent-team {
+  background: color-mix(in srgb, var(--nx-surface-1) 78%, var(--nx-bg));
+  box-shadow: inset 0 1px 0 var(--nx-rim);
+}
+.nx-agent-card { background: color-mix(in srgb, var(--nx-surface-2) 62%, var(--nx-bg)); }
+.nx-agent-card:hover { border-color: color-mix(in srgb, var(--nx-accent) 40%, var(--nx-line)); }
+.nx-chat-context { background: color-mix(in srgb, var(--nx-surface-1) 75%, var(--nx-bg)); }
+.nx-chat-context-drawer::backdrop { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(3px); }
+
+@media (max-width: 767px) {
+  .nx-conversation-header { padding-left: 50px; }
+  .nexus-focus .nx-conversation-header { padding-left: 8px; }
+}
+
+@media (max-width: 639px) {
+  .nx-conversation-header { min-height: 68px; gap: 4px; padding-right: 8px; }
+  .nx-conversation-header > div:first-child { gap: 2px; }
+  .nx-conversation-header > div:last-child { gap: 0; }
+  .nx-chat-icon-button { min-width: 36px; }
+  .nx-composer-toolbar > div:first-child { gap: 0; }
+  .nx-chat-composer { padding-inline: 10px; }
+  .nx-chat-composer textarea { min-height: 64px; font-size: 16px; }
+  .nx-conversation-scroll { scrollbar-gutter: auto; }
+  .nx-chat-welcome { min-height: 340px; padding-block: 24px; }
+}
 @media (prefers-reduced-motion: reduce) {
   .nx-workspace-shortcut, .nx-resource-card { transition: none; }
   .nx-workspace-shortcut:hover { transform: none; }
+}
+
+/* AgentTranscript: low-key "working" text shimmer (Claude Code / Codex style),
+   used instead of spinners and bouncing dots. */
+.nx-shimmer-text {
+  background: linear-gradient(90deg, rgba(255,255,255,0.32) 0%, rgba(255,255,255,0.85) 50%, rgba(255,255,255,0.32) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: nx-shimmer-text 2.2s linear infinite;
+}
+@keyframes nx-shimmer-text {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nx-shimmer-text { animation: none; color: inherit; background: none; }
 }

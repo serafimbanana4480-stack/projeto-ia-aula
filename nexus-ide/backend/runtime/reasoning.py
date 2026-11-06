@@ -129,7 +129,9 @@ def visibility_for_strength(
 ) -> ReasoningVisibility:
     """Map the UI's thinking-depth control onto the visibility policy.
 
-    ``low``/``""`` can only ever show a label. ``medium``/``high`` unlock an
+    ``low`` can only ever show a label. An unspecified strength (``""``)
+    follows the operator's explicit opt-in, so ``NEXUS_REASONING_VISIBILITY=full``
+    shows the model's real reasoning by default. ``medium``/``high`` unlock an
     operator's explicit ``full`` opt-in, and are silently ignored when the
     operator did not opt in — but they are never ignored *silently*: the
     resulting policy is returned so the caller can log or surface it.
@@ -142,7 +144,9 @@ def visibility_for_strength(
     if operator is ReasoningVisibility.OFF:
         return ReasoningVisibility.OFF
     normalized = (strength or "").strip().lower()
-    if normalized in _STRENGTH_ALLOW_FULL and operator is ReasoningVisibility.FULL:
+    if operator is ReasoningVisibility.FULL and (
+        normalized in _STRENGTH_ALLOW_FULL or normalized == ""
+    ):
         return ReasoningVisibility.FULL
     return ReasoningVisibility.LABEL
 
@@ -199,12 +203,45 @@ def bound_reasoning_text(
         if limit and len(clean) > limit:
             return clean[:limit].rstrip() + "…"
         return clean
-    return bound_label(text, cap=LABEL_CAP if cap is None else cap)
+    # A character bound is not a privacy boundary: a model can put private
+    # analysis, prompt text or secrets inside the first 160 characters. Keep
+    # LABEL useful as a progress indicator, but never forward model-authored
+    # text unless the operator explicitly selected FULL.
+    clean = collapse_reasoning_whitespace(strip_reasoning_markup(text))
+    if not clean:
+        return ""
+    return bound_label(DEFAULT_LABEL, cap=LABEL_CAP if cap is None else cap)
 
 
-def reasoning_label_or_default(text: str, *, cap: int = LABEL_CAP) -> str:
-    """A label that is never empty, so a block always has a renderable row."""
-    return bound_label(text, cap=cap) or DEFAULT_LABEL
+def reasoning_delta_text(
+    text: str,
+    *,
+    visibility: ReasoningVisibility | None = None,
+) -> str:
+    """Policy for one *streamed* reasoning chunk.
+
+    Providers stream reasoning as small deltas (`` the``, ``\n\n``). Under
+    ``full`` the chunk keeps its own whitespace so the browser can concatenate
+    deltas verbatim (stripping each chunk glued words together). ``label`` and
+    ``off`` are unchanged: they delegate to :func:`bound_reasoning_text`.
+    """
+    policy = reasoning_visibility() if visibility is None else visibility
+    if policy is ReasoningVisibility.FULL:
+        clean = strip_reasoning_markup(text)
+        if FULL_CAP and len(clean) > FULL_CAP:
+            clean = clean[:FULL_CAP]
+        return clean
+    return bound_reasoning_text(text, visibility=policy)
+
+
+def reasoning_label_or_default(
+    text: str,
+    *,
+    visibility: ReasoningVisibility | None = None,
+    cap: int = LABEL_CAP,
+) -> str:
+    """A safe label that is never empty, even when detail is hidden."""
+    return bound_reasoning_text(text, visibility=visibility, cap=cap) or DEFAULT_LABEL
 
 
 def count_reasoning_tokens(text: str, model: str = "fast") -> int:

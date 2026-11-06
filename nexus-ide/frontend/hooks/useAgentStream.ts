@@ -23,7 +23,60 @@ import { useChatTelemetryStore } from "../stores/chatTelemetryStore";
  */
 const NO_EVENTS: StreamEvent[] = [];
 const TOKEN_BATCH_WINDOW_MS = 20;
-const STREAM_RECONNECT_DELAYS_MS = [250, 500, 1_000] as const;
+/** Retry the same durable event stream without reposting the user's prompt. */
+const STREAM_RECONNECT_MAX_ATTEMPTS = 10;
+const STREAM_RECONNECT_DELAY_MS = 15_000;
+/** Retry a failed chat POST with one stable idempotency key. */
+const CHAT_POST_MAX_ATTEMPTS = 10;
+const CHAT_POST_RETRY_DELAY_MS = 15_000;
+/** Bound each chat POST attempt before retrying it idempotently. */
+const CHAT_POST_ATTEMPT_TIMEOUT_MS = 30_000;
+
+function isRetryableStreamStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599);
+}
+
+async function fetchRunEventStreamReaderWithRetry(
+  url: string,
+  signal: AbortSignal,
+): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+  let attempts = 0;
+  let lastError: unknown = null;
+
+  while (true) {
+    if (signal.aborted) throw new DOMException("Request was aborted", "AbortError");
+    attempts += 1;
+
+    try {
+      const response = await fetch(url, {
+        headers: { ...authHeaders(), Accept: "text/event-stream" },
+        signal,
+      });
+      if (response.ok && response.body) return response.body.getReader();
+
+      const retryable = response.ok || isRetryableStreamStatus(response.status);
+      lastError = new ApiError(
+        `HTTP ${response.status}: não foi possível recuperar a execução`,
+        response.ok ? 0 : response.status,
+      );
+      if (!retryable) throw lastError;
+      await response.body?.cancel().catch(() => {});
+    } catch (reason) {
+      if (
+        signal.aborted ||
+        (reason instanceof ApiError && reason.status > 0 && !isRetryableStreamStatus(reason.status))
+      ) {
+        throw reason;
+      }
+      lastError = reason;
+    }
+
+    if (attempts >= STREAM_RECONNECT_MAX_ATTEMPTS) {
+      throw lastError ?? new ApiError("Não foi possível recuperar a execução", 0);
+    }
+    await waitForReconnect(STREAM_RECONNECT_DELAY_MS, signal);
+  }
+}
 
 function createCancellationRequestId(): string {
   if (typeof globalThis.crypto?.randomUUID === "function") {
@@ -47,6 +100,75 @@ function waitForReconnect(delayMs: number, signal: AbortSignal): Promise<void> {
     timer = setTimeout(finish, delayMs);
     signal.addEventListener("abort", finish, { once: true });
   });
+}
+
+function createChatPostAttemptSignal(parentSignal: AbortSignal): {
+  signal: AbortSignal;
+  clearTimeout: () => void;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  const abortWithParent = () => controller.abort();
+  if (parentSignal.aborted) {
+    controller.abort();
+  } else {
+    parentSignal.addEventListener("abort", abortWithParent, { once: true });
+  }
+  const timer = setTimeout(
+    () => controller.abort(),
+    CHAT_POST_ATTEMPT_TIMEOUT_MS,
+  );
+
+  let timeoutCleared = false;
+  const clearAttemptTimeout = () => {
+    if (timeoutCleared) return;
+    timeoutCleared = true;
+    clearTimeout(timer);
+  };
+
+  return {
+    signal: controller.signal,
+    clearTimeout: clearAttemptTimeout,
+    dispose: () => {
+      clearAttemptTimeout();
+      parentSignal.removeEventListener("abort", abortWithParent);
+    },
+  };
+}
+
+async function postChatWithRetry(
+  args: Parameters<typeof postChat>,
+  signal: AbortSignal,
+): Promise<Response> {
+  let attempts = 0;
+  let lastError: unknown = null;
+
+  while (true) {
+    if (signal.aborted) throw new DOMException("Request was aborted", "AbortError");
+    attempts += 1;
+    const attempt = createChatPostAttemptSignal(signal);
+    try {
+      const attemptArgs = [...args] as Parameters<typeof postChat>;
+      attemptArgs[3] = attempt.signal;
+      const response = await postChat(...attemptArgs);
+      attempt.dispose();
+      if (response.body) return response;
+      lastError = new ApiError("O servidor não devolveu um stream", 0);
+    } catch (reason) {
+      attempt.dispose();
+      if (signal.aborted) throw reason;
+      const retryable =
+        reason instanceof ApiError &&
+        (reason.status === 0 || isRetryableStreamStatus(reason.status));
+      if (!retryable) throw reason;
+      lastError = reason;
+    }
+
+    if (attempts >= CHAT_POST_MAX_ATTEMPTS) {
+      throw lastError ?? new ApiError("Não foi possível enviar a mensagem", 0);
+    }
+    await waitForReconnect(CHAT_POST_RETRY_DELAY_MS, signal);
+  }
 }
 
 /**
@@ -535,13 +657,12 @@ export function useAgentStream(sessionId: string) {
           if (completed || requestId !== activeRequestId.current || signal.aborted) break;
 
           const runId = activeRunIdRef.current || runEventBufferRef.current.currentRunId;
-          if (!runId || reconnectAttempts >= STREAM_RECONNECT_DELAYS_MS.length) break;
+          if (!runId || reconnectAttempts >= STREAM_RECONNECT_MAX_ATTEMPTS) break;
 
           // The current connection ended without a terminal `done`. Reattach to
           // the same durable run journal; never POST the user's prompt again.
-          const delayMs = STREAM_RECONNECT_DELAYS_MS[reconnectAttempts];
           reconnectAttempts += 1;
-          await waitForReconnect(delayMs, signal);
+          await waitForReconnect(STREAM_RECONNECT_DELAY_MS, signal);
           if (completed || requestId !== activeRequestId.current || signal.aborted) break;
 
           const firstMissingSeq = runEventBufferRef.current.firstMissingSeq();
@@ -557,9 +678,12 @@ export function useAgentStream(sessionId: string) {
             if (requestId !== activeRequestId.current || signal.aborted) break;
             if (!response.ok || !response.body) {
               recoveryFailure = `HTTP ${response.status}: não foi possível recuperar a execução`;
-              // Retry only server-side transient failures. Other statuses (for
-              // example an expired session or missing run) need user attention.
-              if (response.status < 500 || reconnectAttempts >= STREAM_RECONNECT_DELAYS_MS.length) {
+              // Retry transient API failures only. Authentication, missing
+              // sessions and other client errors need user attention.
+              if (
+                (!response.ok && !isRetryableStreamStatus(response.status)) ||
+                reconnectAttempts >= STREAM_RECONNECT_MAX_ATTEMPTS
+              ) {
                 break;
               }
               continue;
@@ -652,6 +776,20 @@ export function useAgentStream(sessionId: string) {
       const requestId = ++activeRequestId.current;
       const cancellationRequestId = createCancellationRequestId();
       activeCancellationRequestId.current = cancellationRequestId;
+      const chatRequestArgs: Parameters<typeof postChat> = [
+        message,
+        sessionId,
+        mode,
+        controller.signal,
+        model,
+        projectPath,
+        thinkingStrength,
+        swarmOptions,
+        cancellationRequestId,
+        provider,
+        modelIsConcrete,
+        cancellationRequestId,
+      ];
 
       setSessionStreaming(sessionId, true);
       setSessionError(sessionId, null);
@@ -673,19 +811,7 @@ export function useAgentStream(sessionId: string) {
       resetInactivityWatchdog();
 
       try {
-        const res = await postChat(
-          message,
-          sessionId,
-          mode,
-          controller.signal,
-          model,
-          projectPath,
-          thinkingStrength,
-          swarmOptions,
-          cancellationRequestId,
-          provider,
-          modelIsConcrete,
-        );
+        const res = await postChatWithRetry(chatRequestArgs, controller.signal);
 
         if (!res.ok) {
           const errorText = await res.text();
@@ -738,22 +864,43 @@ export function useAgentStream(sessionId: string) {
         })();
         if (error instanceof ApiError && error.status === 401 && typeof window !== "undefined") {
           // Try to silently refresh the access token before giving up.
-          const refreshed = await refreshAuth();
+          let refreshed: boolean;
+          try {
+            refreshed = await refreshAuth();
+          } catch (refreshError) {
+            // A temporary auth endpoint outage must not turn into a logout or
+            // leave this conversation stuck in its streaming state. refreshAuth
+            // deliberately preserves the tokens and idempotency key on transient
+            // failures so the next request can resume the same exchange.
+            if (controller.signal.aborted || requestId !== activeRequestId.current) {
+              return false;
+            }
+            const refreshMessage =
+              refreshError instanceof Error
+                ? refreshError.message
+                : "Não foi possível renovar a sessão.";
+            if (activeCancellationRequestId.current === cancellationRequestId) {
+              activeCancellationRequestId.current = null;
+            }
+            clearInactivityWatchdog();
+            setSessionError(
+              sessionId,
+              `Falha temporária ao renovar a sessão. A conversa foi preservada. ${refreshMessage}`,
+            );
+            appendSessionEvent(sessionId, {
+              type: "error",
+              content: `Falha temporária ao renovar a sessão. A conversa foi preservada. ${refreshMessage}`,
+              timestamp: new Date().toISOString(),
+            });
+            setSessionStreaming(sessionId, false);
+            return false;
+          }
           if (refreshed) {
             // Retry the request once with the new token.
             try {
-              const retryResponse = await postChat(
-                message,
-                sessionId,
-                mode,
+              const retryResponse = await postChatWithRetry(
+                chatRequestArgs,
                 controller.signal,
-                model,
-                projectPath,
-                thinkingStrength,
-                swarmOptions,
-                cancellationRequestId,
-                provider,
-                modelIsConcrete,
               );
               if (requestId === activeRequestId.current) {
                 const retryReader = retryResponse.body?.getReader();
@@ -840,20 +987,10 @@ export function useAgentStream(sessionId: string) {
       resetInactivityWatchdog();
 
       try {
-        const response = await fetch(
+        const reader = await fetchRunEventStreamReaderWithRetry(
           `${apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/events`)}?run_id=${encodeURIComponent(runId)}`,
-          {
-            headers: {
-              ...authHeaders(),
-              Accept: "text/event-stream",
-            },
-            signal: controller.signal,
-          },
+          controller.signal,
         );
-        if (!response.ok || !response.body) {
-          throw new ApiError(`HTTP ${response.status}: não foi possível recuperar a missão`, response.status);
-        }
-        const reader = response.body.getReader();
         readerRef.current = reader;
         await consumeStream(reader, requestId, "", controller.signal, sessionId);
       } catch (reason) {
@@ -879,32 +1016,20 @@ export function useAgentStream(sessionId: string) {
   const cancel = useCallback(() => {
     const ownerSessionId = activeStreamSessionRef.current;
     if (ownerSessionId !== sessionId) return;
-    // The user asked for this run to stop, so record it as an ordered event
-    // BEFORE the reader is killed. The backend does emit `RUN_CANCELLED`
-    // (`progress`, `data.kind === "run_cancelled"`), but aborting first means
-    // that frame can never arrive — the cancellation used to leave no trace at
-    // all: no timeline row, no banner, and every in-flight tool call stuck
-    // spinning because `foldRun.closeDanglingWork` only runs on done/error.
-    // `data.requested_by`/`data.local` say the fact is the user's request
-    // observed client-side, not a server confirmation; the wording matches the
-    // server's own "a pedido do utilizador". `foldRun` de-duplicates this
-    // against a server frame that arrives late, so the timeline shows one
-    // cancellation line, not two.
-    const seq = runEventBufferRef.current.lastSeq + 1;
+    // A local stop request is not a runtime cancellation confirmation. Keep
+    // it unsequenced so it cannot collide with a later replayed server event.
     const runId = activeRunIdRef.current ?? runEventBufferRef.current.currentRunId ?? undefined;
     appendSessionEvent(ownerSessionId, {
       type: "progress",
-      content: "execução parada a pedido do utilizador",
+      content: "Paragem pedida. O estado final ainda não foi confirmado pelo servidor.",
       data: {
-        kind: "run_cancelled",
-        runtime_type: "run_cancelled",
+        kind: "cancel_requested",
+        status: "warning",
         requested_by: "user",
         local: true,
       },
       timestamp: new Date().toISOString(),
       ...(runId ? { run_id: runId } : {}),
-      seq,
-      event_id: `local-cancellation-${runId ?? "run"}-${seq}`,
     });
     cancelServerRequest();
     abortRef.current?.abort();

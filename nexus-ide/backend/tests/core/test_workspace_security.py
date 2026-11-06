@@ -22,7 +22,11 @@ from unittest.mock import patch
 import pytest
 
 from backend.core.workspace import _is_safe_git_remote
-from backend.core.workspace_security import _SHELL_WHITELIST, _validate_single_command
+from backend.core.workspace_security import (
+    _SHELL_WHITELIST,
+    _validate_single_command,
+    argv_for_validated_shell_command,
+)
 from backend.core.workspace_shell import (
     _check_python_sandbox,
     _is_blocked_path,
@@ -32,6 +36,28 @@ from backend.core.workspace_shell import (
 # ---------------------------------------------------------------------------
 # 1. Pipe bypass
 # ---------------------------------------------------------------------------
+
+
+class TestArgvExecution:
+    def test_single_command_uses_exec_argv_not_shell(self) -> None:
+        command = "git status"
+        is_safe, reason = _validate_shell_command(command)
+        assert is_safe, reason
+        argv = argv_for_validated_shell_command(command)
+        assert argv[:2] == ["git", "status"]
+
+    def test_piped_command_argv_on_windows_or_posix_pipeline(self) -> None:
+        command = "echo hello | grep hello"
+        is_safe, reason = _validate_shell_command(command)
+        assert is_safe, reason
+        import os
+
+        if os.name == "nt":
+            argv = argv_for_validated_shell_command(command)
+            assert argv[0].lower().endswith("cmd.exe")
+        else:
+            with pytest.raises(ValueError, match="posix pipeline"):
+                argv_for_validated_shell_command(command)
 
 
 class TestPipeBypass:

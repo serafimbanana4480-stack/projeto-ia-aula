@@ -16,6 +16,21 @@ function renderRow(row: Row) {
 }
 
 describe("VirtualMessageList long history window", () => {
+  it("passa índices reais em conversas curtas e ao revelar mensagens antigas", () => {
+    const indexed = (row: Row, index: number) => <div key={row.id}>{row.id}: {index}</div>;
+    const { rerender } = render(
+      <VirtualMessageList messages={rows(3)} renderItem={indexed} initialLimit={50} resetKey="short" />,
+    );
+    expect(screen.getByText("row-0: 0")).toBeTruthy();
+    expect(screen.getByText("row-2: 2")).toBeTruthy();
+
+    rerender(<VirtualMessageList messages={rows(4)} renderItem={indexed} initialLimit={2} resetKey="paged" />);
+    expect(screen.getByText("row-2: 2")).toBeTruthy();
+    expect(screen.getByText("row-3: 3")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Carregar mais/ }));
+    expect(screen.getByText("row-0: 0")).toBeTruthy();
+    expect(screen.getByText("row-3: 3")).toBeTruthy();
+  });
   it("keeps a 10,000-message snapshot bounded and pages older rows without duplicates", () => {
     const { container } = render(
       <VirtualMessageList messages={rows(10_000)} renderItem={renderRow} initialLimit={50} resetKey="large-session" />,

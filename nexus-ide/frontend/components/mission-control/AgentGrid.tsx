@@ -15,73 +15,96 @@ import {
 import { useMissionStore, type AgentInstance } from "../../stores/missionStore";
 import { interveneAgent } from "../../lib/api";
 
+/**
+ * Agent status vocabulary. Token-anchored so the tiles follow the theme, and
+ * consistent with the tone used by `ActiveMissionsPanel` — the two panels sit
+ * side by side on the same page and previously painted "em execução" green on
+ * one and violet on the other.
+ */
 const statusConfig: Record<
   AgentInstance["status"],
   { label: string; border: string; bg: string; dot: string; text: string }
 > = {
   pending: {
     label: "Pendente",
-    border: "border-slate-500/30",
-    bg: "bg-slate-500/5",
-    dot: "bg-slate-400",
-    text: "text-slate-400",
+    border: "border-nexus-faint/30",
+    bg: "bg-nexus-faint/5",
+    dot: "bg-nexus-faint",
+    text: "text-nexus-muted",
   },
   running: {
     label: "Em execução",
-    border: "border-green-500/30",
-    bg: "bg-green-500/5",
-    dot: "bg-green-400 animate-pulse",
-    text: "text-green-400",
+    border: "border-nexus-accent/30",
+    bg: "bg-nexus-accent/5",
+    dot: "bg-nexus-accent animate-pulse",
+    text: "text-nexus-accent-bright",
   },
   paused: {
     label: "Pausado",
-    border: "border-yellow-500/30",
-    bg: "bg-yellow-500/5",
-    dot: "bg-yellow-400",
-    text: "text-yellow-400",
+    border: "border-nexus-accent3/30",
+    bg: "bg-nexus-accent3/5",
+    dot: "bg-nexus-accent3",
+    text: "text-nexus-accent3",
   },
   failed: {
     label: "Falhou",
-    border: "border-red-500/30",
-    bg: "bg-red-500/5",
-    dot: "bg-red-400",
-    text: "text-red-400",
+    border: "border-nexus-accent4/30",
+    bg: "bg-nexus-accent4/5",
+    dot: "bg-nexus-accent4",
+    text: "text-nexus-accent4",
   },
   idle: {
     label: "Inativo",
-    border: "border-gray-500/30",
-    bg: "bg-gray-500/5",
-    dot: "bg-gray-400",
-    text: "text-gray-400",
+    border: "border-nexus-faint/30",
+    bg: "bg-nexus-faint/5",
+    dot: "bg-nexus-faint",
+    text: "text-nexus-muted",
   },
   completed: {
     label: "Concluído",
-    border: "border-blue-500/30",
-    bg: "bg-blue-500/5",
-    dot: "bg-blue-400",
-    text: "text-blue-400",
+    border: "border-nexus-accent2/30",
+    bg: "bg-nexus-accent2/5",
+    dot: "bg-nexus-accent2",
+    text: "text-nexus-accent2",
   },
   aborted: {
     label: "Parado",
-    border: "border-slate-500/30",
-    bg: "bg-slate-500/5",
-    dot: "bg-slate-400",
-    text: "text-slate-400",
+    border: "border-nexus-faint/30",
+    bg: "bg-nexus-faint/5",
+    dot: "bg-nexus-faint",
+    text: "text-nexus-muted",
   },
 };
+
+/** Sort order. `aborted` must be listed: an absent key made `indexOf` return
+ *  -1, so stopped agents sorted ABOVE the running ones. */
+const STATUS_ORDER: AgentInstance["status"][] = [
+  "running",
+  "paused",
+  "pending",
+  "idle",
+  "completed",
+  "failed",
+  "aborted",
+];
 
 const AgentTile = React.memo(function AgentTile({ agent }: { agent: AgentInstance }) {
   const [expanded, setExpanded] = useState(false);
   const [acting, setActing] = useState(false);
   const cfg = statusConfig[agent.status];
 
+  const [actionError, setActionError] = useState<string | null>(null);
+
   async function handleAction(action: "pause" | "resume" | "abort") {
     setActing(true);
+    setActionError(null);
     try {
       await interveneAgent(agent.id, action);
       useMissionStore.getState().updateAgentStatus(agent.id, action === "abort" ? "aborted" : action === "pause" ? "paused" : "running");
     } catch {
-      /* ignore */
+      // Swallowing the error made a failed intervention look identical to a
+      // successful one: the row simply never changed.
+      setActionError("A ação não foi aplicada. Verifica a ligação e tenta novamente.");
     } finally {
       setActing(false);
     }
@@ -90,7 +113,7 @@ const AgentTile = React.memo(function AgentTile({ agent }: { agent: AgentInstanc
   return (
     <motion.div
       layout
-      className={`rounded-lg border ${cfg.border} ${cfg.bg} p-3 transition-colors hover:brightness-110`}
+      className={`rounded-lg border ${cfg.border} ${cfg.bg} p-3 transition-colors hover:border-nexus-accent/30`}
     >
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-2 min-w-0">
@@ -140,12 +163,17 @@ const AgentTile = React.memo(function AgentTile({ agent }: { agent: AgentInstanc
             exit={{ height: 0, opacity: 0 }}
             className="overflow-hidden"
           >
+            {actionError && (
+              <p role="alert" className="mt-2 text-[10px] text-nexus-accent4">
+                {actionError}
+              </p>
+            )}
             <div className="mt-2 flex flex-wrap gap-1.5 border-t border-nexus-border/50 pt-2">
               {agent.status === "running" && (
                 <button
                   onClick={() => handleAction("pause")}
                   disabled={acting}
-                  className="flex items-center gap-1 rounded bg-yellow-500/10 px-2 py-1 text-[10px] text-yellow-400 hover:bg-yellow-500/20 disabled:opacity-50"
+                  className="flex items-center gap-1 rounded bg-nexus-accent3/10 px-2 py-1 text-[10px] text-nexus-accent3 hover:bg-nexus-accent3/20 disabled:opacity-50"
                 >
                   <Pause className="h-3 w-3" />
                   Pausar
@@ -155,7 +183,7 @@ const AgentTile = React.memo(function AgentTile({ agent }: { agent: AgentInstanc
                 <button
                   onClick={() => handleAction("resume")}
                   disabled={acting}
-                  className="flex items-center gap-1 rounded bg-green-500/10 px-2 py-1 text-[10px] text-green-400 hover:bg-green-500/20 disabled:opacity-50"
+                  className="flex items-center gap-1 rounded bg-nexus-accent2/10 px-2 py-1 text-[10px] text-nexus-accent2 hover:bg-nexus-accent2/20 disabled:opacity-50"
                 >
                   <Play className="h-3 w-3" />
                   Retomar
@@ -165,7 +193,7 @@ const AgentTile = React.memo(function AgentTile({ agent }: { agent: AgentInstanc
                 <button
                   onClick={() => handleAction("abort")}
                   disabled={acting}
-                  className="flex items-center gap-1 rounded bg-red-500/10 px-2 py-1 text-[10px] text-red-400 hover:bg-red-500/20 disabled:opacity-50"
+                  className="flex items-center gap-1 rounded bg-nexus-accent4/10 px-2 py-1 text-[10px] text-nexus-accent4 hover:bg-nexus-accent4/20 disabled:opacity-50"
                 >
                   <XOctagon className="h-3 w-3" />
                   Abortar
@@ -183,10 +211,15 @@ const AgentGrid = React.memo(function AgentGrid() {
   const agents = useMissionStore((s) => s.agents);
   const loading = useMissionStore((s) => s.loading);
 
-  const statusOrder: AgentInstance["status"][] = ["running", "paused", "failed", "idle", "completed"];
-  const sorted = [...agents].sort(
-    (a, b) => statusOrder.indexOf(a.status) - statusOrder.indexOf(b.status)
-  );
+  // Total comparator: equal statuses fall back to name so the grid does not
+  // reshuffle on every 30s poll, and unknown statuses sort last rather than -1.
+  const sorted = [...agents].sort((a, b) => {
+    const rank = (status: AgentInstance["status"]) => {
+      const i = STATUS_ORDER.indexOf(status);
+      return i === -1 ? STATUS_ORDER.length : i;
+    };
+    return rank(a.status) - rank(b.status) || a.name.localeCompare(b.name);
+  });
 
   return (
     <div className="rounded-lg border border-nexus-border bg-nexus-panel p-4">
@@ -198,28 +231,29 @@ const AgentGrid = React.memo(function AgentGrid() {
             {agents.length} total
           </span>
         </div>
-        <div className="flex items-center gap-2 text-[10px] text-nexus-muted">
+        {/* Counts spelled out, not three bare numbers next to coloured dots. */}
+        <div className="flex flex-wrap items-center gap-2 text-[10px] text-nexus-muted">
           <span className="flex items-center gap-1">
-            <span className="h-1.5 w-1.5 rounded-full bg-green-400" />
-            {agents.filter((a) => a.status === "running").length}
+            <span className="h-1.5 w-1.5 rounded-full bg-nexus-accent" aria-hidden="true" />
+            {agents.filter((a) => a.status === "running").length} em execução
           </span>
           <span className="flex items-center gap-1">
-            <span className="h-1.5 w-1.5 rounded-full bg-yellow-400" />
-            {agents.filter((a) => a.status === "paused").length}
+            <span className="h-1.5 w-1.5 rounded-full bg-nexus-accent3" aria-hidden="true" />
+            {agents.filter((a) => a.status === "paused").length} pausados
           </span>
           <span className="flex items-center gap-1">
-            <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
-            {agents.filter((a) => a.status === "failed").length}
+            <span className="h-1.5 w-1.5 rounded-full bg-nexus-accent4" aria-hidden="true" />
+            {agents.filter((a) => a.status === "failed").length} falhados
           </span>
         </div>
       </div>
 
       {loading && agents.length === 0 ? (
         <div className="space-y-2">
-          <div className="h-6 animate-pulse rounded bg-nexus-border/20" />
+          <div className="nx-shimmer h-6 rounded" />
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3">
             {[...Array(4)].map((_, i) => (
-              <div key={i} className="h-24 animate-pulse rounded bg-nexus-border/20" />
+              <div key={i} className="nx-shimmer h-24 rounded" />
             ))}
           </div>
         </div>

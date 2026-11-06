@@ -66,7 +66,7 @@ def test_every_runtime_event_maps_to_frames_the_frontend_knows(monkeypatch) -> N
     # This test checks adapter coverage, not the separate reasoning-display
     # policy that can intentionally suppress thinking text.
     monkeypatch.setattr(
-        "backend.orchestrator.routes.chat_primary.bound_reasoning_text",
+        "backend.orchestrator.routes.chat_primary.reasoning_delta_text",
         lambda text: text,
     )
     stream = RunEventStream("run-map")
@@ -117,6 +117,7 @@ def test_every_runtime_event_maps_to_frames_the_frontend_knows(monkeypatch) -> N
             "note": "A condição de erro ainda não está coberta.",
             "delivered": "card",
         },
+        RuntimeEventType.CHAT_FRAME: {"frame": {"type": "progress", "content": "atualização"}},
     }
     cases = [stream.emit(kind, **payloads.get(kind, {})) for kind in RuntimeEventType]
     for event in cases:
@@ -169,7 +170,7 @@ def test_suppressed_runtime_payloads_keep_order_without_leaking_content(monkeypa
     from backend.orchestrator.routes.chat_primary import runtime_event_to_stream_events
 
     monkeypatch.setattr(
-        "backend.orchestrator.routes.chat_primary.bound_reasoning_text",
+        "backend.orchestrator.routes.chat_primary.reasoning_delta_text",
         lambda _text: "",
     )
     stream = RunEventStream("run-suppressed")
@@ -335,19 +336,61 @@ def test_primary_max_cycles_reads_env_with_safe_bounds(
     assert _primary_max_cycles(False) == 2, "invalid values fall back to the default"
 
 
-def test_no_project_tool_policy_is_fail_closed() -> None:
+@pytest.mark.asyncio
+async def test_no_project_direct_turn_keeps_general_tools_but_blocks_project_tools() -> None:
     from backend.orchestrator.routes.chat_primary import (
         _tool_policy_context,
         _uses_project_runtime_tools,
     )
 
-    direct = triage_request("lê o README", has_project=False)
+    direct = triage_request(
+        "verifica porque não consegues usar ferramentas",
+        requested_mode="coder",
+        has_project=False,
+    )
     policy = _tool_policy_context(direct, has_project=False)
-    assert policy["_allowed_tools"] == ()
-    assert policy["_fast_chat_lane"] is True
-    assert "selecione um projeto" in policy["_system_addon"]
-    assert "nem peças para mudar para auto" in policy["_system_addon"].casefold()
+    allowed = set(policy["_allowed_tools"])
+    assert {"web_search", "fetch_url", "search_docs", "mcp_list_tools"} <= allowed
+    assert not {
+        "read_file",
+        "read_file_absolute",
+        "write_file",
+        "write_file_absolute",
+        "run_shell",
+        "run_tests",
+        "search_codebase",
+    } & allowed
+    assert "_fast_chat_lane" not in policy
+    assert "selecione o projeto" in policy["_system_addon"]
+    assert "não substituas essa inspeção por pesquisa web" in policy["_system_addon"]
     assert _uses_project_runtime_tools(direct, has_project=False) is False
+
+    from backend.agents.base import AgentRequest
+    from backend.agents.nexus_primary import NexusPrimaryAgent
+
+    agent = NexusPrimaryAgent()
+    agent.enable_memory = False
+    request = AgentRequest(
+        session_id="no-project-tools",
+        query="verifica porque não consegues usar ferramentas",
+        client=object(),
+        context=policy,
+    )
+    messages = await agent.abuild_messages(request)
+    system = messages[0]["content"]
+    assert "NO-TOOLS LANE" not in system
+    assert "web_search" in system
+    advertised = {
+        schema["function"]["name"]
+        for schema in agent._openai_tool_schemas(only=frozenset(allowed)) or []
+    }
+    assert "web_search" in advertised
+    assert "read_file" not in advertised
+
+    direct_read = triage_request("lê o README", requested_mode="coder", has_project=False)
+    assert "read_file" not in _tool_policy_context(
+        direct_read, has_project=False
+    )["_allowed_tools"]
 
     with_project = triage_request("lê o README", has_project=True)
     assert _tool_policy_context(with_project, has_project=True) == {}
@@ -359,6 +402,7 @@ def test_no_project_tool_policy_is_fail_closed() -> None:
     no_project_conversation = triage_request("tás aí?", has_project=False)
     conversational_policy = _tool_policy_context(no_project_conversation, has_project=False)
     assert conversational_policy["_allowed_tools"] == ()
+    assert conversational_policy["_fast_chat_lane"] is True
     assert "responde normalmente" in conversational_policy["_system_addon"]
     assert (
         "não digas que estás em modo de leitura"

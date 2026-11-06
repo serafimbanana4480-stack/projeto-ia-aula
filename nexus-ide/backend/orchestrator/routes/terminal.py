@@ -5,11 +5,11 @@ from __future__ import annotations
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 
 from backend.core.workspace_security import _validate_shell_command
 from backend.core.workspace_shell import execute_shell
-from backend.middleware.auth import require_auth
+from backend.middleware.auth import require_admin
 from backend.models.api import TerminalExecuteRequest, TerminalExecuteResponse
 from backend.sandbox.executor import DangerousCommandDetector
 
@@ -18,16 +18,19 @@ router = APIRouter()
 
 @router.post("/terminal/execute", response_model=TerminalExecuteResponse)
 async def execute_terminal_command(
-    req: TerminalExecuteRequest, request: Request, _user: dict = Depends(require_auth)
+    req: TerminalExecuteRequest, _user: dict = Depends(require_admin)
 ) -> TerminalExecuteResponse:
-    # Resolve working directory from project_path
-    cwd = None
-    if req.project_path and req.project_path != ".":
-        from pathlib import Path
+    # Use the same server-side project boundary as the file API. A client may
+    # select a registered project, but cannot point terminal execution at an
+    # arbitrary directory on the host.
+    from backend.orchestrator.routes.files import _resolve_project_root
 
-        project = Path(req.project_path).resolve()
-        if project.is_dir():
-            cwd = str(project)
+    project_root = _resolve_project_root(
+        req.project_path,
+        req.session_id,
+        str(_user.get("user_id") or ""),
+    )
+    cwd = str(project_root)
 
     started = time.perf_counter()
     execution_id = uuid.uuid4().hex[:12]

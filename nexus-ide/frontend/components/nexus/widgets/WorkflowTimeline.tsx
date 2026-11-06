@@ -51,7 +51,7 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
           <span className="truncate text-[12px] font-bold text-slate-200">{workflowName}</span>
           <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold border ${
             workflow.status === "running" ? "bg-violet-500/15 border-violet-500/40 text-violet-300" :
-            workflow.status === "completed" ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300" :
+            workflow.status === "completed" ? "bg-emerald-500/15 border-emerald-500/40 text-nexus-accent2" :
             workflow.status === "failed" ? "bg-red-500/15 border-red-500/40 text-red-300" :
             "bg-slate-700/50 border-slate-600/60 text-slate-400"
           }`}>
@@ -132,13 +132,13 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
                 {!isLast && (
                   <div className="flex-1 flex items-center min-w-[16px]">
                     <div className={`h-px flex-1 ${
-                      step.status === "done" ? "bg-emerald-500" :
+                      step.status === "done" ? "bg-nexus-accent2" :
                       step.status === "failed" ? "bg-red-500" :
                       "bg-slate-700"
                     }`} />
                     <ArrowRight size={10} className="text-slate-600 mx-0.5 shrink-0" />
                     <div className={`h-px flex-1 ${
-                      steps[idx + 1]?.status === "done" ? "bg-emerald-500" :
+                      steps[idx + 1]?.status === "done" ? "bg-nexus-accent2" :
                       steps[idx + 1]?.status === "running" ? "bg-violet-500" :
                       "bg-slate-700"
                     }`} />
@@ -185,7 +185,7 @@ export default function WorkflowTimeline() {
       {/* Header */}
       <div className="px-4 py-3 border-b border-slate-800/60 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <GitBranch size={13} className="text-emerald-400" />
+          <GitBranch size={13} className="text-nexus-accent2" />
           <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Fluxos</span>
         </div>
         <span className="text-[10px] text-slate-500">{workflowList.length > 0 ? `${workflowList.length} ${workflowList.length === 1 ? "fluxo" : "fluxos"}` : ""}</span>
@@ -194,7 +194,7 @@ export default function WorkflowTimeline() {
       {/* Workflows */}
       <div className="flex-1 overflow-y-auto">
         {error && (
-          <p role="status" className="border-b border-rose-500/20 px-4 py-2 text-[10px] text-rose-300">
+          <p role="status" className="border-b border-rose-500/20 px-4 py-2 text-[10px] text-nexus-accent4">
             {workflowList.length > 0
               ? "Não foi possível atualizar os fluxos. A mostrar a última versão recebida."
               : "Não foi possível obter os fluxos agora."}

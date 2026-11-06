@@ -1,4 +1,4 @@
-"""FastAPI-version-compatible global rate-limit middleware.
+﻿"""FastAPI-version-compatible global rate-limit middleware.
 
 Why this exists instead of ``slowapi.middleware.SlowAPIMiddleware``
 -------------------------------------------------------------------
@@ -17,7 +17,7 @@ routes in ``app.routes`` directly: each ``include_router`` call becomes an
 ``effective_candidates()``.  ``_IncludedRouter`` has no ``.endpoint``, so the
 lookup returns ``None``; ``_should_exempt(None, handler)`` is ``True``; and
 every single request silently skips the global limit.  The middleware therefore
-had to be installed but did nothing — exactly the class of failure the audit
+had to be installed but did nothing â€” exactly the class of failure the audit
 flagged (a limiter that exists and does not limit).
 
 This middleware does the same job using an endpoint index built once from
@@ -80,8 +80,10 @@ class NexusRateLimitMiddleware(BaseHTTPMiddleware):
                 RateLimitExceeded, _rate_limit_exceeded_handler
             )
             if inspect.iscoroutinefunction(handler):
-                return await handler(request, exc)
-            return handler(request, exc)
+                response = await handler(request, exc)
+            else:
+                response = handler(request, exc)
+            return _with_cors(request, response)
         except Exception as exc:  # pragma: no cover - storage failure
             logger.warning("Rate limit check failed: %s", exc)
             return await call_next(request)
@@ -94,3 +96,27 @@ class NexusRateLimitMiddleware(BaseHTTPMiddleware):
             except Exception:  # pragma: no cover - header injection is best effort
                 logger.debug("Could not inject rate limit headers", exc_info=True)
         return response
+
+
+def _with_cors(request: Request, response: Response) -> Response:
+    """Give limiter 429s the CORS headers the inner CORSMiddleware never adds.
+
+    This middleware sits OUTSIDE CORS, so without this the browser reports an
+    opaque CORS error instead of a 429 the frontend can back off from.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return response
+    try:
+        from backend.config.settings import get_settings
+
+        allowed = set(get_settings().get_allowed_origins_list())
+    except Exception:  # pragma: no cover - settings unavailable
+        return response
+    if origin in allowed or "*" in allowed:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Expose-Headers"] = "Retry-After, X-Nexus-Request-Id"
+        vary = response.headers.get("Vary")
+        response.headers["Vary"] = f"{vary}, Origin" if vary else "Origin"
+    return response

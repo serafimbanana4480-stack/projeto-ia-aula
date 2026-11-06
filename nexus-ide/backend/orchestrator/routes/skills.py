@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, StrictStr
 
 from backend.core.skills_store import SkillsStore
 from backend.middleware.auth import require_auth
@@ -15,6 +16,100 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _store = SkillsStore.get_instance()
+
+#: Upper bound for the list endpoints. A skill list is a UI-sized payload.
+MAX_SKILL_LIMIT = 500
+MAX_SEARCH_LIMIT = 100
+
+SkillName = Annotated[StrictStr, Field(min_length=1, max_length=200)]
+SkillType = Annotated[StrictStr, Field(min_length=1, max_length=64)]
+SkillText = Annotated[StrictStr, Field(max_length=4_000)]
+SkillTrigger = Annotated[StrictStr, Field(max_length=2_000)]
+SkillSteps = Annotated[list[StrictStr], Field(max_length=200)]
+SkillTags = Annotated[list[StrictStr], Field(max_length=100)]
+
+
+class SkillCreateRequest(BaseModel):
+    """Typed payload of ``POST /api/skills``.
+
+    The model exists so a malformed payload is rejected at the edge instead
+    of being persisted: ``steps`` used to accept a bare string, which was then
+    rendered character by character.
+    """
+
+    name: SkillName = "Unnamed Skill"
+    type: SkillType = "workflow"
+    description: SkillText = ""
+    trigger_pattern: SkillTrigger = ""
+    steps: SkillSteps = Field(default_factory=list)
+    verification: SkillText = ""
+    tags: SkillTags = Field(default_factory=list)
+    source: Annotated[StrictStr, Field(max_length=64)] = "manual"
+    auto_apply: bool = False
+
+
+class SkillUpdateRequest(BaseModel):
+    """Typed payload of ``PUT /api/skills/{skill_id}``.
+
+    Every field is optional; only the fields actually present in the request
+    are written. ``record_use`` keeps the historical "log one usage" side
+    effect.
+    """
+
+    name: SkillName | None = None
+    type: SkillType | None = None
+    description: SkillText | None = None
+    trigger_pattern: SkillTrigger | None = None
+    steps: SkillSteps | None = None
+    verification: SkillText | None = None
+    tags: SkillTags | None = None
+    auto_apply: bool | None = None
+    record_use: bool = False
+    success: bool = True
+
+
+#: The fields ``PUT`` may persist, mapped to the store's attribute names.
+_UPDATABLE_FIELDS = {
+    "name": "name",
+    "type": "skill_type",
+    "description": "description",
+    "trigger_pattern": "trigger_pattern",
+    "steps": "steps",
+    "verification": "verification",
+    "tags": "tags",
+    "auto_apply": "auto_apply",
+}
+
+
+def _skill_payload(skill: Any) -> dict[str, Any]:
+    """The public representation of one stored skill."""
+    return {
+        "id": skill.id,
+        "name": skill.name,
+        "type": skill.skill_type,
+        "description": skill.description,
+        "trigger_pattern": skill.trigger_pattern,
+        "steps": list(skill.steps),
+        "verification": skill.verification,
+        "tags": list(skill.tags),
+        "confidence": skill.confidence,
+        "times_used": skill.times_used,
+        "success_count": skill.success_count,
+        "fail_count": skill.fail_count,
+        "source": skill.source,
+        "auto_apply": skill.auto_apply,
+        "status": getattr(skill, "status", ""),
+        "created_at": skill.created_at,
+        "updated_at": skill.updated_at,
+    }
+
+
+def _transition_error(result: dict[str, Any], default: str) -> HTTPException:
+    """Map a failed lifecycle transition to the right HTTP status."""
+    detail = str(result.get("error") or default)
+    if result.get("code") == "not_found":
+        return HTTPException(status_code=404, detail=detail)
+    return HTTPException(status_code=409, detail=detail)
 
 
 @router.get("/skills/catalog")
@@ -53,7 +148,7 @@ async def runtime_skill_catalog(
 async def list_skills(
     skill_type: str | None = None,
     tag: str | None = None,
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=MAX_SKILL_LIMIT),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     user_id = str(_user.get("user_id") or "")
@@ -73,6 +168,7 @@ async def list_skills(
                 "tags": s.tags,
                 "source": s.source,
                 "auto_apply": s.auto_apply,
+                "status": getattr(s, "status", ""),
                 "updated_at": s.updated_at,
             }
             for s in skills
@@ -85,7 +181,7 @@ async def list_skills(
 @router.get("/skills/search")
 async def search_skills(
     q: str,
-    limit: int = 10,
+    limit: int = Query(default=10, ge=1, le=MAX_SEARCH_LIMIT),
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     skills = _store.search_skills(
@@ -126,24 +222,7 @@ async def get_skill(skill_id: str, _user: dict = Depends(require_auth)) -> dict[
     skill = _store.get_skill(skill_id, user_id=str(_user.get("user_id") or ""))
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
-    return {
-        "id": skill.id,
-        "name": skill.name,
-        "type": skill.skill_type,
-        "description": skill.description,
-        "trigger_pattern": skill.trigger_pattern,
-        "steps": skill.steps,
-        "verification": skill.verification,
-        "tags": skill.tags,
-        "confidence": skill.confidence,
-        "times_used": skill.times_used,
-        "success_count": skill.success_count,
-        "fail_count": skill.fail_count,
-        "source": skill.source,
-        "auto_apply": skill.auto_apply,
-        "created_at": skill.created_at,
-        "updated_at": skill.updated_at,
-    }
+    return _skill_payload(skill)
 
 
 @router.post("/skills/{skill_id}/promote")
@@ -152,7 +231,7 @@ async def promote_skill(
     data: dict[str, Any],
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
-    """Promote a reviewed DRAFT file skill to ACTIVE through the runtime gate.
+    """Promote a reviewed DRAFT skill to ACTIVE through the runtime gate.
 
     The authenticated caller is the approving operator: their identity is
     recorded as both actor and approver in the promotion audit log.
@@ -171,9 +250,10 @@ async def promote_skill(
         reason=reason,
         approved_by=str(data.get("approved_by") or "").strip() or user_id,
         confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
+        user_id=user_id,
     )
     if not result.get("ok"):
-        raise HTTPException(status_code=409, detail=result.get("error", "promotion rejected"))
+        raise _transition_error(result, "promotion rejected")
     return result
 
 
@@ -191,10 +271,10 @@ async def deprecate_skill(
     if not reason:
         raise HTTPException(status_code=422, detail="reason is required to deprecate a skill")
     result = await asyncio.to_thread(
-        runtime_deprecate, skill_id, actor=user_id, reason=reason
+        runtime_deprecate, skill_id, actor=user_id, reason=reason, user_id=user_id
     )
     if not result.get("ok"):
-        raise HTTPException(status_code=409, detail=result.get("error", "transition rejected"))
+        raise _transition_error(result, "transition rejected")
     return result
 
 
@@ -212,47 +292,65 @@ async def disable_skill(
     if not reason:
         raise HTTPException(status_code=422, detail="reason is required to disable a skill")
     result = await asyncio.to_thread(
-        runtime_disable, skill_id, actor=user_id, reason=reason
+        runtime_disable, skill_id, actor=user_id, reason=reason, user_id=user_id
     )
     if not result.get("ok"):
-        raise HTTPException(status_code=409, detail=result.get("error", "transition rejected"))
+        raise _transition_error(result, "transition rejected")
     return result
 
 
 @router.post("/skills")
 async def create_skill(
-    data: dict[str, Any],
+    data: SkillCreateRequest,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     skill = _store.create_skill(
-        name=data.get("name", "Unnamed Skill"),
-        skill_type=data.get("type", "workflow"),
-        description=data.get("description", ""),
-        trigger_pattern=data.get("trigger_pattern", ""),
-        steps=data.get("steps", []),
-        verification=data.get("verification", ""),
-        tags=data.get("tags", []),
-        source=data.get("source", "manual"),
-        auto_apply=data.get("auto_apply", False),
+        name=data.name,
+        skill_type=data.type,
+        description=data.description,
+        trigger_pattern=data.trigger_pattern,
+        steps=list(data.steps),
+        verification=data.verification,
+        tags=list(data.tags),
+        source=data.source,
+        auto_apply=data.auto_apply,
         user_id=str(_user.get("user_id") or ""),
     )
-    return {"id": skill.id, "status": "created", "name": skill.name}
+    return {
+        "id": skill.id,
+        "status": "created",
+        "name": skill.name,
+        "skill": _skill_payload(skill),
+    }
 
 
 @router.put("/skills/{skill_id}")
 async def update_skill(
     skill_id: str,
-    data: dict[str, Any],
+    data: SkillUpdateRequest,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
+    """Persist the submitted fields of a skill.
+
+    Every field present in the request is written to the store; the response
+    echoes the persisted skill so the caller can see what was actually saved.
+    """
     user_id = str(_user.get("user_id") or "")
     skill = _store.get_skill(skill_id, user_id=user_id)
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
-    # Record use if applicable
-    if data.get("record_use"):
-        _store.record_use(skill_id, data.get("success", True), user_id=user_id)
-    return {"status": "updated"}
+    if data.record_use:
+        _store.record_use(skill_id, data.success, user_id=user_id)
+    changes: dict[str, Any] = {}
+    for field, attribute in _UPDATABLE_FIELDS.items():
+        if field in data.model_fields_set:
+            changes[attribute] = getattr(data, field)
+    if changes:
+        updated = _store.update_skill(skill_id, user_id=user_id, **changes)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        skill = updated
+    return {"status": "updated", "skill": _skill_payload(skill)}
 
 
 @router.delete("/skills/{skill_id}")
@@ -261,7 +359,9 @@ async def delete_skill(
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     ok = _store.delete_skill(skill_id, user_id=str(_user.get("user_id") or ""))
-    return {"status": "deleted" if ok else "not_found"}
+    if not ok:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return {"status": "deleted"}
 
 
 @router.get("/skills/match/{context}")

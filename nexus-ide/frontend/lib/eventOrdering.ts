@@ -9,6 +9,7 @@
  *
  * Responsibilities of this module:
  *  - drop duplicates by `event_id` (replay after a reconnect re-sends events);
+ *  - reject a second, conflicting event that claims the same `(run_id, seq)`;
  *  - keep a single run's timeline strictly ordered by `seq`;
  *  - discard events belonging to a previous run of the same session, which is
  *    what made stale files and test counts reappear in a new run;
@@ -53,6 +54,7 @@ export function isOrderable(event: RuntimeEventLike): event is OrderedEvent {
  */
 export class RunEventBuffer {
   private readonly seen = new Set<string>();
+  private readonly seenSeqs = new Set<number>();
   private ordered: OrderedEvent[] = [];
   private legacy: RuntimeEventLike[] = [];
   private readonly pendingSeqs = new Set<number>();
@@ -96,7 +98,15 @@ export class RunEventBuffer {
     if (this.seen.has(event.event_id)) {
       return false;
     }
+    // `(run_id, seq)` is the runtime's ordering identity. A different event ID
+    // reusing a sequence is a corrupt duplicate run envelope, not a second
+    // legitimate timeline row. Keep the first event and avoid duplicate work
+    // appearing in restored history.
+    if (this.seenSeqs.has(event.seq)) {
+      return false;
+    }
     this.seen.add(event.event_id);
+    this.seenSeqs.add(event.seq);
 
     // Insert in order. The common case is an append, so scan from the end.
     let index = this.ordered.length;
@@ -117,6 +127,7 @@ export class RunEventBuffer {
   /** Reset for a new run; called when the user sends a new message. */
   reset(runId?: string): void {
     this.seen.clear();
+    this.seenSeqs.clear();
     this.ordered = [];
     this.legacy = [];
     this.pendingSeqs.clear();

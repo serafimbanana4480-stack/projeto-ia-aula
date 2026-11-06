@@ -15,7 +15,12 @@ from typing import Any
 import httpx
 
 from backend.config.settings import get_settings
-from backend.llm.openai_provider import _system_verify_context
+from backend.llm.openai_provider import ProviderHTTPStatusError, _system_verify_context
+from backend.llm.tool_calls import (
+    anthropic_tool_choice,
+    openai_tools_to_anthropic,
+    render_tool_call,
+)
 from backend.runtime.reasoning import (
     REASONING_REQUEST_OPTION,
     REASONING_SINK_OPTION,
@@ -60,6 +65,10 @@ class AnthropicProvider:
         )
         # Internal — populated after each successful chat call
         self._last_usage: dict[str, int] = {}
+        # The provider's own stop reason ("end_turn", "max_tokens", "tool_use").
+        # The runtime reads it to tell a normal stop from a token-limit
+        # truncation, so it has to survive on the provider.
+        self.last_finish_reason: str = ""
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -122,6 +131,47 @@ class AnthropicProvider:
             usage_out["reasoning_tokens"] = reasoning
         return usage_out
 
+    def _merge_usage(self, usage: Any) -> None:
+        """Merge one usage frame into the accumulated usage.
+
+        A frame that does not carry a field must never reset it.  Anthropic
+        reports ``input_tokens`` in ``message_start`` and ``output_tokens`` in
+        ``message_delta``; overwriting the accumulated usage with the missing
+        field's default of ``0`` erased the input tokens, so the request was
+        never billed and the session panel showed ``ENTRADA 0``.
+        """
+        if not isinstance(usage, dict):
+            return
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            value = usage.get(key)
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                continue
+            self._last_usage[key] = int(value)
+        for key in ("thinking_tokens", "reasoning_tokens"):
+            value = usage.get(key)
+            if isinstance(value, int | float) and value > 0:
+                self._last_usage["reasoning_tokens"] = int(value)
+                break
+        if "total_tokens" not in usage:
+            known = self._last_usage.get("input_tokens", 0) + self._last_usage.get(
+                "output_tokens", 0
+            )
+            if known:
+                self._last_usage["total_tokens"] = known
+
+    @staticmethod
+    def _tool_payload(options: dict[str, Any] | None) -> tuple[list[dict], dict | None]:
+        """Translate the neutral tool options into Anthropic's own schema."""
+        if not isinstance(options, dict):
+            return [], None
+        tools = options.get("tools")
+        if not tools:
+            return [], None
+        converted = openai_tools_to_anthropic(tools)
+        if not converted:
+            return [], None
+        return converted, anthropic_tool_choice(options.get("tool_choice"))
+
     @staticmethod
     def _thinking_payload(
         payload: dict[str, Any], options: dict[str, Any] | None
@@ -164,6 +214,7 @@ class AnthropicProvider:
     ) -> AsyncIterator[str]:
         """Stream a chat completion from the Anthropic Messages API."""
         self._last_usage = {}
+        self.last_finish_reason = ""
         normalized_messages, system = self._openai_to_anthropic_messages(messages)
         payload: dict[str, Any] = {
             "model": self.resolve_model(model),
@@ -181,52 +232,125 @@ class AnthropicProvider:
                 payload["max_tokens"] = options["max_tokens"]
             if "top_p" in options:
                 payload["top_p"] = options["top_p"]
+            # Native tool calling: Anthropic speaks its own ``input_schema``
+            # dialect, so the neutral OpenAI-style schema has to be translated
+            # before it is sent.
+            tools, tool_choice = self._tool_payload(options)
+            if tools:
+                payload["tools"] = tools
+                if tool_choice:
+                    payload["tool_choice"] = tool_choice
         self._thinking_payload(payload, options)
+
+        emitted_text = False
+        emitted_reasoning = False
+        emitted_tool_call = False
+        # Native tool-use blocks, keyed by the content-block index Anthropic
+        # streams them under.
+        tool_blocks: dict[int, dict[str, str]] = {}
+        current_tool_index: int | None = None
 
         async with self._client.stream("POST", "/v1/messages", json=payload) as resp:
             if resp.status_code != 200:
                 text = await resp.aread()
-                raise RuntimeError(f"Anthropic API error {resp.status_code}: {text.decode()}")
+                raise ProviderHTTPStatusError(
+                    resp.status_code,
+                    text.decode(),
+                    label="Anthropic API",
+                    headers=getattr(resp, "headers", None),
+                )
 
             async for line in resp.aiter_lines():
                 line = line.strip()
                 if not line or line.startswith("event:"):
                     continue
-                if line.startswith("data: "):
-                    data = line[6:]
-                    if data == "[DONE]":
-                        continue
-                    try:
-                        event = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    # ``thinking_delta`` / ``signature_delta`` /
-                    # ``redacted_thinking`` are the extended-thinking channel.
-                    # They are parsed and routed to the caller's sink and are
-                    # NEVER yielded as answer text: the answer is whatever
-                    # ``text_delta`` carries.
-                    parsed = deliver_reasoning(
-                        (options or {}).get(REASONING_SINK_OPTION), "anthropic", event
-                    )
-                    if parsed.usage:
-                        self._last_usage.update(parsed.usage)
-                    if parsed.content:
-                        yield parsed.content
-                    event_type = event.get("type")
-                    if event_type == "message_delta":
-                        # End-of-stream — usage info is usually in message_start
-                        # but some providers put it here.
-                        usage = event.get("usage")
-                        if usage:
-                            self._last_usage.update(
-                                {
-                                    "input_tokens": usage.get("input_tokens", 0) or 0,
-                                    "output_tokens": usage.get("output_tokens", 0) or 0,
-                                }
-                            )
-                    elif event_type == "message_start":
-                        msg = event.get("message", {})
-                        self._last_usage.update(self._extract_usage_from_message(msg))
+                # The SSE spec allows ``data:`` with or without the space
+                # after the colon; requiring the exact ``"data: "`` prefix
+                # dropped legal frames.
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].lstrip()
+                if data == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                # ``thinking_delta`` / ``signature_delta`` /
+                # ``redacted_thinking`` are the extended-thinking channel.
+                # They are parsed and routed to the caller's sink and are
+                # NEVER yielded as answer text: the answer is whatever
+                # ``text_delta`` carries.
+                parsed = deliver_reasoning(
+                    (options or {}).get(REASONING_SINK_OPTION), "anthropic", event
+                )
+                if parsed.usage:
+                    self._last_usage.update(parsed.usage)
+                if parsed.reasoning:
+                    emitted_reasoning = True
+                if parsed.content:
+                    emitted_text = True
+                    yield parsed.content
+                event_type = event.get("type")
+                if event_type == "content_block_start":
+                    block = event.get("content_block")
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        try:
+                            index = int(event.get("index") or 0)
+                        except (TypeError, ValueError):
+                            index = 0
+                        current_tool_index = index
+                        slot = tool_blocks.setdefault(index, {"name": "", "arguments": ""})
+                        slot["name"] = str(block.get("name") or "")
+                        initial = block.get("input")
+                        if isinstance(initial, dict) and initial:
+                            slot["arguments"] = json.dumps(initial)
+                elif event_type == "content_block_delta":
+                    delta = event.get("delta")
+                    if (
+                        isinstance(delta, dict)
+                        and delta.get("type") == "input_json_delta"
+                        and current_tool_index is not None
+                    ):
+                        slot = tool_blocks.setdefault(
+                            current_tool_index, {"name": "", "arguments": ""}
+                        )
+                        slot["arguments"] += str(delta.get("partial_json") or "")
+                elif event_type == "content_block_stop":
+                    current_tool_index = None
+                elif event_type == "message_delta":
+                    # End-of-stream — ``usage`` here usually carries the final
+                    # output tokens only.  It must MERGE with what
+                    # ``message_start`` already reported, never replace it.
+                    delta = event.get("delta")
+                    if isinstance(delta, dict):
+                        stop_reason = delta.get("stop_reason")
+                        if stop_reason:
+                            self.last_finish_reason = str(stop_reason).strip().lower()
+                    self._merge_usage(event.get("usage"))
+                elif event_type == "message_start":
+                    msg = event.get("message")
+                    if isinstance(msg, dict):
+                        self._merge_usage(msg.get("usage"))
+
+        # Fold Anthropic's native ``tool_use`` blocks back into the explicit
+        # ``<tool_call>`` wrapper the agent loop parses and enforces, so a
+        # native call and a hand-written wrapper share one execution path.
+        for _index, slot in sorted(tool_blocks.items()):
+            name = (slot.get("name") or "").strip()
+            if not name:
+                continue
+            emitted_tool_call = True
+            yield "\n" + render_tool_call(name, slot.get("arguments") or "")
+
+        if not emitted_text and not emitted_tool_call:
+            if emitted_reasoning:
+                raise RuntimeError(
+                    "Anthropic stream completed with reasoning but no text content"
+                )
+            raise RuntimeError("Anthropic stream completed without text content")
 
     async def chat_complete(
         self,
@@ -237,6 +361,7 @@ class AnthropicProvider:
         **kwargs: Any,
     ) -> str:
         """Non-streaming chat completion from the Anthropic Messages API."""
+        self.last_finish_reason = ""
         normalized_messages, system = self._openai_to_anthropic_messages(messages)
         payload: dict[str, Any] = {
             "model": self.resolve_model(model),
@@ -254,16 +379,27 @@ class AnthropicProvider:
                 payload["max_tokens"] = options["max_tokens"]
             if "top_p" in options:
                 payload["top_p"] = options["top_p"]
+            tools, tool_choice = self._tool_payload(options)
+            if tools:
+                payload["tools"] = tools
+                if tool_choice:
+                    payload["tool_choice"] = tool_choice
         self._thinking_payload(payload, options)
 
         resp = await self._client.post("/v1/messages", json=payload)
         if resp.status_code != 200:
-            raise RuntimeError(f"Anthropic API error {resp.status_code}: {resp.text}")
+            raise ProviderHTTPStatusError(
+                resp.status_code,
+                resp.text,
+                label="Anthropic API",
+                headers=getattr(resp, "headers", None),
+            )
 
         data = resp.json()
         self._last_usage = self._extract_usage_from_message(data)
         contents = data.get("content", [])
         text_parts: list[str] = []
+        tool_calls: list[tuple[str, Any]] = []
         for block in contents:
             if not isinstance(block, dict):
                 continue
@@ -273,9 +409,21 @@ class AnthropicProvider:
             deliver_reasoning(
                 (options or {}).get(REASONING_SINK_OPTION), "anthropic", block
             )
-            if block.get("type") == "text":
+            block_type = block.get("type")
+            if block_type == "text":
                 text_parts.append(str(block.get("text") or ""))
-        return "".join(text_parts)
+            elif block_type == "tool_use":
+                name = str(block.get("name") or "").strip()
+                if name:
+                    tool_calls.append((name, block.get("input") or {}))
+        stop_reason = data.get("stop_reason")
+        if stop_reason:
+            self.last_finish_reason = str(stop_reason).strip().lower()
+        answer = "".join(text_parts)
+        for name, arguments in tool_calls:
+            rendered = render_tool_call(name, arguments)
+            answer = f"{answer}\n{rendered}".strip() if answer else rendered
+        return answer
 
     async def embed(
         self,

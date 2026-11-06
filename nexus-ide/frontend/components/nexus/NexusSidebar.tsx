@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
 import {
   Activity,
   BookOpen,
@@ -86,7 +87,12 @@ function NavGroup({ section }: { section: NavSection }) {
   const pathname = usePathname();
   const activeInSection = section.items.some((item) => isActiveRoute(pathname, item.href));
   const [open, setOpen] = useState(true);
-  const sectionId = `nexus-nav-${section.label.toLowerCase().replaceAll(" ", "-")}`;
+  // Stable ASCII slug: Portuguese labels would otherwise leak accents into ids.
+  const sectionId = `nexus-nav-${section.label
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\W+/g, "-")}`;
 
   useEffect(() => {
     if (activeInSection) setOpen(true);
@@ -99,7 +105,7 @@ function NavGroup({ section }: { section: NavSection }) {
         aria-expanded={open}
         aria-controls={sectionId}
         onClick={() => setOpen((value) => !value)}
-        className="flex min-h-8 w-full items-center justify-between rounded-md px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500 transition-colors hover:bg-white/[0.04] hover:text-slate-300"
+        className="flex min-h-8 w-full items-center justify-between rounded-md px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-nexus-faint transition-colors hover:bg-white/[0.04] hover:text-nexus-text"
       >
         {section.label}
         {open ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />}
@@ -114,13 +120,13 @@ function NavGroup({ section }: { section: NavSection }) {
                 key={item.href}
                 href={item.href}
                 aria-current={active ? "page" : undefined}
-                className={`flex min-h-9 items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors ${
+                className={`flex min-h-9 items-center gap-2.5 rounded-lg border px-3 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/70 ${
                   active
-                    ? "border border-violet-400/25 bg-violet-500/10 font-medium text-slate-100"
-                    : "border border-transparent text-slate-400 hover:bg-white/[0.05] hover:text-slate-100"
+                    ? "border-nexus-accent/25 bg-nexus-accent/10 font-medium text-nexus-text"
+                    : "border-transparent text-nexus-muted hover:bg-white/[0.05] hover:text-nexus-text"
                 }`}
               >
-                <Icon size={15} className={active ? "text-violet-300" : "text-slate-500"} aria-hidden="true" />
+                <Icon size={15} className={active ? "text-nexus-accent-bright" : "text-nexus-faint"} aria-hidden="true" />
                 <span className="min-w-0 flex-1 truncate">{item.label}</span>
               </Link>
             );
@@ -134,6 +140,7 @@ function NavGroup({ section }: { section: NavSection }) {
 export default function NexusSidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const isMobile = useMediaQuery("(max-width: 767px)");
 
   useEffect(() => setMobileOpen(false), [pathname]);
   useEffect(() => {
@@ -145,7 +152,10 @@ export default function NexusSidebar() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [mobileOpen]);
 
-  const hiddenOnMobile = !mobileOpen;
+  // The drawer is only genuinely hidden below `md`. On desktop it is always
+  // visible, so marking it inert/aria-hidden there would remove the whole
+  // navigation from the tab order and the accessibility tree.
+  const hiddenFromAT = isMobile && !mobileOpen;
 
   return (
     <>
@@ -155,7 +165,7 @@ export default function NexusSidebar() {
         aria-controls="nexus-secondary-navigation"
         aria-expanded={mobileOpen}
         onClick={() => setMobileOpen((open) => !open)}
-        className="fixed left-3 top-3 z-50 flex h-8 w-8 items-center justify-center rounded-lg border border-slate-700 bg-[#10102b] text-slate-200 shadow-md md:hidden"
+        className="fixed left-3 top-3 z-50 flex h-8 w-8 items-center justify-center rounded-lg border border-nexus-border bg-nexus-elevated text-nexus-text shadow-md transition-colors hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent md:hidden"
       >
         {mobileOpen ? <X size={16} aria-hidden="true" /> : <Menu size={16} aria-hidden="true" />}
       </button>
@@ -169,23 +179,23 @@ export default function NexusSidebar() {
       <aside
         id="nexus-secondary-navigation"
         aria-label="Navegação NEXUS"
-        aria-hidden={hiddenOnMobile || undefined}
-        inert={hiddenOnMobile}
-        className={`fixed inset-y-0 left-0 z-40 flex w-60 shrink-0 flex-col border-r border-slate-700/50 bg-[#0a0a25]/95 shadow-[4px_0_24px_rgba(0,0,0,0.3)] backdrop-blur-2xl transition-transform duration-200 md:relative md:translate-x-0 ${
+        aria-hidden={hiddenFromAT || undefined}
+        inert={hiddenFromAT}
+        className={`fixed inset-y-0 left-0 z-40 flex w-60 shrink-0 flex-col border-r border-nexus-border bg-nexus-panel/95 shadow-[4px_0_24px_rgba(0,0,0,0.3)] backdrop-blur-2xl transition-transform duration-200 md:relative md:translate-x-0 ${
           mobileOpen ? "translate-x-0" : "-translate-x-full"
         } ${mobileOpen ? "pt-12 md:pt-0" : "pt-0"}`}
       >
         <Link
           href="/nexus"
-          className="border-b border-slate-700/50 bg-gradient-to-b from-slate-800/20 to-transparent px-4 py-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-400"
+          className="border-b border-nexus-border bg-gradient-to-b from-white/[0.04] to-transparent px-4 py-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent"
         >
           <span className="flex items-center gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-gradient-to-br from-violet-600 to-cyan-500 shadow-[0_0_15px_rgba(124,58,237,0.25)]">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-nexus-accent shadow-[0_0_15px_rgba(124,106,251,0.25)]">
               <Brain size={18} className="text-white" aria-hidden="true" />
             </span>
             <span>
-              <span className="block text-[11px] font-black uppercase leading-none tracking-[0.2em] text-cyan-300">NEXUS</span>
-              <span className="mt-1 block text-[10px] font-bold tracking-wider text-slate-400">Workspace</span>
+              <span className="block text-[11px] font-black uppercase leading-none tracking-[0.2em] text-nexus-cyan">NEXUS</span>
+              <span className="mt-1 block text-[10px] font-bold tracking-wider text-nexus-faint">Workspace</span>
             </span>
           </span>
         </Link>
@@ -194,8 +204,8 @@ export default function NexusSidebar() {
           {NAV_SECTIONS.map((section) => <NavGroup key={section.label} section={section} />)}
         </nav>
 
-        <footer className="border-t border-slate-800/60 px-4 py-3">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">NEXUS IDE</p>
+        <footer className="border-t border-nexus-border px-4 py-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-nexus-faint">NEXUS IDE</p>
         </footer>
       </aside>
     </>

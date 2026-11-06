@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from backend.mcp.store import mcp_store
 from backend.mcp.templates import list_templates
-from backend.middleware.auth import require_auth
+from backend.middleware.auth import require_admin, require_auth
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/mcp", tags=["mcp"])
@@ -34,7 +34,6 @@ class UpdateConnectorRequest(BaseModel):
     name: str | None = None
     enabled: bool | None = None
     env: dict[str, str] | None = None
-    approved_readonly_tools: list[str] | None = None
     approved_readonly_tools: list[str] | None = None
 
 
@@ -91,10 +90,22 @@ async def get_overview(
 async def build_mcp(
     req: MCPBuildRequest,
     request: Request,
-    _user: dict = Depends(require_auth),
+    _user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
     """Generate, validate, and register a declarative REST MCP."""
-    from backend.mcp.builder import MCPBuilderError, build_from_description
+    # The builder imports the MCP SDK, so it can be unavailable in a broken
+    # runtime. That is a deployment problem, not a user error: it must be a
+    # typed 503 instead of an opaque 500.
+    try:
+        from backend.mcp.builder import MCPBuilderError, build_from_description
+    except Exception as exc:  # noqa: BLE001 - any import failure is a 503
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "category": "dependency_unavailable",
+                "message": f"O MCP Builder não está disponível neste runtime: {exc}",
+            },
+        ) from exc
 
     try:
         llm_client = getattr(request.app.state, "llm_client", None)
@@ -120,7 +131,7 @@ async def build_mcp(
 @router.post("/connectors")
 async def create_connector(
     req: CreateConnectorRequest,
-    _user: dict = Depends(require_auth),
+    _user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
     try:
         connector = mcp_store.create_connector(
@@ -146,15 +157,9 @@ async def get_connector(connector_id: str, _user: dict = Depends(require_auth)) 
 async def update_connector(
     connector_id: str,
     req: UpdateConnectorRequest,
-    _user: dict = Depends(require_auth),
+    _user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
     updates = {k: v for k, v in req.model_dump().items() if v is not None}
-    readonly_permissions = updates.pop("approved_readonly_tools", None)
-    if readonly_permissions is not None:
-        try:
-            mcp_store.set_approved_readonly_tools(connector_id, readonly_permissions)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
     readonly_permissions = updates.pop("approved_readonly_tools", None)
     if readonly_permissions is not None:
         try:
@@ -174,7 +179,7 @@ async def update_connector(
 
 
 @router.delete("/connectors/{connector_id}")
-async def delete_connector(connector_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def delete_connector(connector_id: str, _user: dict = Depends(require_admin)) -> dict[str, Any]:
     ok = mcp_store.delete_connector(connector_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Connector not found")
@@ -182,7 +187,7 @@ async def delete_connector(connector_id: str, _user: dict = Depends(require_auth
 
 
 @router.post("/connectors/{connector_id}/test")
-async def test_connector(connector_id: str, _user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def test_connector(connector_id: str, _user: dict = Depends(require_admin)) -> dict[str, Any]:
     connector = mcp_store.get_connector(connector_id)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")

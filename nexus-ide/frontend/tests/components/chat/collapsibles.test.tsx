@@ -27,19 +27,34 @@ describe("ThinkingBlock — collapsible accessibility", () => {
   it("expõe o estado de expansão e aponta para o corpo", () => {
     const { container } = render(<ThinkingBlock content="Vou ler o ficheiro." />);
 
-    const toggle = screen.getByRole("button", { name: /Resumo da abordagem/ });
+    const toggle = screen.getByRole("button", { name: /Pensou/ });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(toggle.getAttribute("aria-controls")).toBe("thinking-block-body");
+    // `aria-controls` is no longer the hardcoded string "thinking-block-body":
+    // several reasoning blocks can share one page and duplicate DOM ids broke
+    // every one of them. It is now a unique `useId()`-derived id, so the
+    // requirement is that it resolves to THIS block's body, not that it equals
+    // a fixed literal.
+    const controls = toggle.getAttribute("aria-controls");
+    expect(controls).toBeTruthy();
     // Collapsed by default when the run is over.
-    expect(container.querySelector("#thinking-block-body")).toBeNull();
+    expect(container.querySelector(`#${controls}`)).toBeNull();
+
+    fireEvent.click(toggle);
+    // Open, the control must point at an element that actually exists.
+    expect(container.querySelector(`#${controls}`)).not.toBeNull();
   });
 
   it("abre e fecha ao clicar, reflectindo o estado em aria-expanded", () => {
     const { container } = render(<ThinkingBlock content="Vou ler o ficheiro." />);
 
-    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    const toggle = screen.getByRole("button", { expanded: false });
+    fireEvent.click(toggle);
     expect(screen.getByRole("button", { expanded: true })).toBeTruthy();
-    expect(container.querySelector("#thinking-block-body")).not.toBeNull();
+    // Unique per-block `useId()`-derived id (no longer the colliding literal
+    // "thinking-block-body"), so look the body up through `aria-controls`.
+    const bodyId = toggle.getAttribute("aria-controls");
+    expect(bodyId).toBeTruthy();
+    expect(container.querySelector(`#${bodyId}`)).not.toBeNull();
 
     fireEvent.click(screen.getByRole("button", { expanded: true }));
     expect(screen.getByRole("button", { expanded: false })).toBeTruthy();
@@ -47,8 +62,11 @@ describe("ThinkingBlock — collapsible accessibility", () => {
 
   it("abre automaticamente enquanto transmite", () => {
     const { container } = render(<ThinkingBlock content="a definir" isStreaming />);
-    expect(screen.getByRole("button", { expanded: true })).toBeTruthy();
-    expect(container.querySelector("#thinking-block-body")).not.toBeNull();
+    const toggle = screen.getByRole("button", { expanded: true });
+    // Id is `useId()`-derived per block; assert it resolves to the open body.
+    const bodyId = toggle.getAttribute("aria-controls");
+    expect(bodyId).toBeTruthy();
+    expect(container.querySelector(`#${bodyId}`)).not.toBeNull();
   });
 
   it("não renderiza nada sem conteúdo", () => {

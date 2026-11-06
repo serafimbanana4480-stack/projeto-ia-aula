@@ -129,7 +129,7 @@ export default function DatabasePage() {
           name: "Messages",
           icon: MessageSquare,
           count: stats.table_counts.messages,
-          color: "text-cyan-400",
+          color: "text-nexus-cyan",
         },
         {
           name: "Tool Executions",
@@ -248,7 +248,7 @@ export default function DatabasePage() {
                 </div>
                 <div>
                   <div className="text-xs text-gray-500">Tokens In</div>
-                  <div className="text-lg font-bold text-cyan-400">
+                  <div className="text-lg font-bold text-nexus-cyan">
                     {stats.message_stats.tokens_in_total.toLocaleString()}
                   </div>
                 </div>

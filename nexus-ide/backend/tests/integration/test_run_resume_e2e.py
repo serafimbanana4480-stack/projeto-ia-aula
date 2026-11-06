@@ -220,7 +220,15 @@ def _phases(db_path: Path, run_id: str) -> list[str]:
 class BackendUnderTest:
     """One real ``uvicorn`` process, with the log it writes on disk."""
 
-    def __init__(self, port: int, db_path: Path, log_path: Path, ollama_host: str) -> None:
+    def __init__(
+        self,
+        port: int,
+        db_path: Path,
+        log_path: Path,
+        ollama_host: str,
+        *,
+        env_overrides: dict[str, str] | None = None,
+    ) -> None:
         self.port = port
         self.base_url = f"http://127.0.0.1:{port}"
         self.db_path = db_path
@@ -236,6 +244,11 @@ class BackendUnderTest:
                 "LOG_LEVEL": "INFO",
                 "LLM_PROVIDER": "ollama",
                 "MULTI_LLM_ENABLED": "false",
+                # The child reads both inherited environment and the repo's
+                # runtime settings.json. Never let an exhausted scripted
+                # Ollama response fall through to the operator's cloud keys.
+                "NEXUS_TEST_DISABLE_REMOTE_FALLBACKS": "true",
+                "NEXUS_AUTONOMOUS_AUDIT_PASS": "auto",
                 "NEXUS_ENABLE_OLLAMA": "true",
                 "NEXUS_FREE_ONLY": "false",
                 "OLLAMA_HOST": ollama_host,
@@ -254,11 +267,13 @@ class BackendUnderTest:
                 # checkpoint (and the liveness it implies) part of what the
                 # kill and the resume actually exercise.
                 "NEXUS_PRIMARY_HEARTBEAT_INTERVAL": "1",
-                "JWT_SECRET": "run-resume-e2e",
+                "JWT_SECRET": "test-run-resume-e2e-secret-2026-10-23",
                 "PYTHONUNBUFFERED": "1",
                 "PYTHONPATH": str(REPO_ROOT),
             }
         )
+        if env_overrides:
+            env.update(env_overrides)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "w", encoding="utf-8") as handle:
             self._log_handle = handle
@@ -340,7 +355,12 @@ class BackendUnderTest:
         return self._token
 
     def _authorised(
-        self, path: str, *, method: str = "GET", body: dict[str, Any] | None = None
+        self,
+        path: str,
+        *,
+        token: str,
+        method: str = "GET",
+        body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = json.dumps(body if body is not None else {}).encode()
         request = urllib.request.Request(
@@ -348,7 +368,7 @@ class BackendUnderTest:
             data=payload,
             method=method,
             headers={
-                "Authorization": f"Bearer {self.token()}",
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
             },
         )
@@ -364,7 +384,7 @@ class BackendUnderTest:
             return json.loads(response.read())
 
     def post(self, path: str, token: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._authorised(path, method="POST", body=body or {})
+        return self._authorised(path, token=token, method="POST", body=body or {})
 
     def chat(
         self,
@@ -382,6 +402,11 @@ class BackendUnderTest:
                 "message": message,
                 "session_id": session_id,
                 "mode": "auto",
+                # This harness's Ollama server only exposes one concrete model.
+                # Pin it explicitly so PRIMARY never has to resolve a cloud
+                # tier ID against the local scripted provider.
+                "provider": "ollama",
+                "model": "scripted:latest",
                 "project_path": str(project),
                 "autonomous": True,
             }
@@ -501,7 +526,11 @@ def test_real_restart_resumes_the_run_the_process_left_open(
     assert not first.alive(), "the killed process must not exist"
 
     # -- process 2: same database, brand new process ----------------------
-    script.replies = [_tool_call(WRITE_FILE_TOOL, write_args), "notas.txt confirmado."]
+    script.replies = [
+        _tool_call(WRITE_FILE_TOOL, write_args),
+        "notas.txt confirmado.",
+        "A auditoria confirma o ficheiro. Não encontrou outra melhoria segura dentro do âmbito.",
+    ]
     second = BackendUnderTest(
         _free_port(), db, harness["logs"] / "second.log", harness["ollama"]
     )
@@ -613,9 +642,10 @@ def test_idempotency_key_does_not_duplicate_a_running_run(
         assert len(runs) == 1, [str(row["run_id"]) for row in runs]
         run_id = str(runs[0]["run_id"])
         assert str(runs[0]["state"]) != "completed"
+        provider_calls_before_retry = script.call_count
 
-        # The retry runs while the first turn is still parked: it must adopt the
-        # run that is already in flight instead of creating a second one.
+        # The retry runs while the first turn is still parked: it must attach
+        # to the existing event stream without calling the provider twice.
         with ThreadPoolExecutor(max_workers=1) as pool:
             retry = pool.submit(
                 backend.chat,
@@ -626,15 +656,16 @@ def test_idempotency_key_does_not_duplicate_a_running_run(
                 key=key,
                 until_parked=True,
             )
-            deadline = time.time() + 60.0
-            while time.time() < deadline and script.call_count < 2:
-                time.sleep(0.25)
+            time.sleep(1.0)
             rows = _run_rows(db)
             assert len(rows) == 1, (
                 "the retry must not create a second durable run: "
                 f"{[str(row['run_id']) for row in rows]}"
             )
             assert str(rows[0]["run_id"]) == run_id
+            assert script.call_count == provider_calls_before_retry, (
+                "an idempotent retry must not add another provider call"
+            )
             script.release()
             retry.result(timeout=180)
 

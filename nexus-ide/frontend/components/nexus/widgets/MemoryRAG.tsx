@@ -40,7 +40,7 @@ function ChunkCard({ chunk }: { chunk: MemoryChunk }) {
         </div>
         <div className="flex items-center gap-3 text-[9px] text-slate-500">
           <span className="flex items-center gap-1"><Clock size={9} />{new Date(chunk.createdAt).toLocaleDateString()}</span>
-          <span>Relevância: <span className="font-semibold text-emerald-400">{(chunk.relevance * 100).toFixed(0)}%</span></span>
+          <span>Relevância: <span className="font-semibold text-nexus-accent2">{(chunk.relevance * 100).toFixed(0)}%</span></span>
           <span>Acedida {chunk.accessCount}×</span>
           {chunk.tags.slice(0, 3).map(tag => (
             <span key={tag} className="px-1 py-0.5 rounded bg-slate-800/80 text-slate-400">{tag}</span>
@@ -221,7 +221,7 @@ export default function MemoryRAG() {
       </div>
 
       {error && (
-        <p role="status" className="border-b border-amber-500/20 px-4 py-2 text-[10px] leading-relaxed text-amber-200">
+        <p role="status" className="border-b border-amber-500/20 px-4 py-2 text-[10px] leading-relaxed text-nexus-accent3">
           {statsStale ? "Estatísticas desatualizadas; a mostrar os últimos valores recebidos." : "Não foi possível obter estatísticas de memória."}
         </p>
       )}

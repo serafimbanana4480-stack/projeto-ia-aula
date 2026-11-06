@@ -403,9 +403,10 @@ register_tool(
     ToolSpec(
         name="git_pull",
         description=(
-            "Pull changes from a remote repository. Safe read-only operation. "
-            "Force-pull and rebase flags are blocked."
+            "Pull changes from a remote repository into the project worktree. "
+            "Force-pull and rebase flags are blocked; human confirmation is required."
         ),
+        risk_level="high",
         schema={
             "type": "object",
             "properties": {

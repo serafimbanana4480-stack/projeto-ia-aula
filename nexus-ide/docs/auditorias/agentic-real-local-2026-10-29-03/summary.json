@@ -1,0 +1,16 @@
+{
+  "model": "nexus-local-validation",
+  "duration_seconds": 50.3,
+  "timed_out": false,
+  "calls": [
+    "read_file"
+  ],
+  "children_started": 0,
+  "text_frames": 1,
+  "terminal_errors": [
+    "O agente declarou que a tarefa não foi concluída ([RECOLHA CONCLUÍDA — SÍNTESE INCOMPLETA])."
+  ],
+  "module_changed": false,
+  "project_copy": "C:\\Users\\rodri\\Desktop\\nexus\\nexus-ide\\.cache\\pytest\\codex-real-agentic-0a09e358b77648d7873ba0fbb6f168be\\test_local_model_agentic_accep0\\nexus-module-copy",
+  "model_server": "http://127.0.0.1:1239/v1"
+}

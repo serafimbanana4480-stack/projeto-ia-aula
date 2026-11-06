@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -96,6 +97,65 @@ async def test_stream_records_provider_finish_reason() -> None:
         )
         assert text == "partial"
         assert provider.last_finish_reason == "length"
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_folds_native_tool_call_with_object_arguments() -> None:
+    native_call = {
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-read-seed",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                # Some OpenAI-compatible local servers emit a
+                                # parsed object here instead of a JSON string.
+                                "arguments": {"path": "seed.txt"},
+                            },
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=(
+                b"data: " + json.dumps(native_call).encode() + b"\n\n"
+                b"data: [DONE]\n\n"
+            ),
+        )
+
+    provider = OpenAIProvider("https://api.example.test/v1", api_key="test-key")
+    await provider.aclose()
+    provider._client = httpx.AsyncClient(
+        base_url="https://api.example.test",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        response = "".join(
+            [
+                token
+                async for token in provider.chat_stream(
+                    "spark-x2.5-4b", [{"role": "user", "content": "lê seed.txt"}]
+                )
+            ]
+        )
+
+        assert response.startswith("\n<tool_call>")
+        assert response.endswith("</tool_call>")
+        call = json.loads(response.removeprefix("\n<tool_call>").removesuffix("</tool_call>"))
+        assert call == {"name": "read_file", "arguments": {"path": "seed.txt"}}
+        assert provider.last_finish_reason == "tool_calls"
     finally:
         await provider.aclose()
 

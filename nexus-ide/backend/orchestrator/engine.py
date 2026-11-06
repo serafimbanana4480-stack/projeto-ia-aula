@@ -69,6 +69,71 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+#: Reason stored on the durable run when the engine re-enters one it inherited.
+#: It must differ from the "run in flight for this request" reuse inside
+#: ``RunLifecycle.begin``: that one is a client retry inside a live process,
+#: this one is a process that died and came back for the same work.
+ADOPTED_RUN_REASON = "adopted after restart"
+
+
+def _adoptable_run_id(
+    session_id: str, goal: str, mission_id: str = "", user_id: str = ""
+) -> str:
+    """Run id of the non-terminal durable run this request continues, or ``""``.
+
+    A restart (crash, deploy, manual re-run of the same session) must not fork a
+    second run for the same session and goal: the checkpoints, the side-effect
+    ledger and the budget of the first run are exactly what the resumed
+    execution has to build on. ``find_run_for_identity`` only offers
+    non-terminal runs, so a finished goal always starts a fresh one.
+
+    Every failure degrades to ``""`` and the caller creates a run as before.
+    """
+    if not (session_id and goal and user_id):
+        return ""
+    try:
+        from backend.runtime.primary import find_run_for_identity
+
+        existing = find_run_for_identity(
+            session_id=session_id,
+            user_id=user_id,
+            goal=goal,
+            mission_id=mission_id,
+        )
+    except Exception:
+        logger.debug(
+            "Could not look up a resumable run for session %s", session_id, exc_info=True
+        )
+        return ""
+    return str(getattr(existing, "run_id", "") or "")
+
+
+def _reenter_adopted_run(run_id: str, session_id: str, goal: str) -> None:
+    """Put an inherited run back into ``RUNNING``, recording why.
+
+    The reason is stored as the run's ``stop_reason``, so "adopted after
+    restart" is what an operator reads when auditing why a run moved without a
+    client asking for it. An illegal move — the run is already ``RUNNING``,
+    which is the common case — is a no-op, never a broken run.
+    """
+    try:
+        from backend.runtime.primary import get_run_coordinator
+        from backend.runtime.run_coordinator import RunState
+
+        coordinator = get_run_coordinator()
+        if coordinator is None:
+            return
+        coordinator.transition(run_id, RunState.RUNNING, reason=ADOPTED_RUN_REASON)
+    except Exception as exc:
+        logger.debug("Could not re-enter adopted run %s: %s", run_id, exc)
+        return
+    logger.info(
+        "[RUN] adopting durable run %s after restart (session=%s goal=%.80s)",
+        run_id,
+        session_id,
+        goal,
+    )
+
 @dataclass
 class PlanApprovalRequest:
     """A plan waiting for user approval, with metadata for the frontend."""
@@ -124,6 +189,7 @@ class OrchestrationEngine:
         plan_executor: PlanExecutor | None = None,
         retry_manager: RetryManager | None = None,
         cancellation_registry: CancellationRegistry | None = None,
+        model_override: str = "",
     ) -> None:
         self._llm_client = llm_client
         self._registry = registry
@@ -131,6 +197,7 @@ class OrchestrationEngine:
         self._max_parallel = max_parallel
         self._default_timeout = default_timeout
         self._max_retries = max_retries
+        self._model_override = str(model_override or "").strip()
 
         # Active runs
         self._state: dict[str, OrchestrationState] = {}
@@ -153,7 +220,11 @@ class OrchestrationEngine:
         self._modifications: dict[str, dict[str, Any]] = {}
 
         # Sub-components — fall back to defaults if not injected
-        self._plan_creator = plan_creator or PlanCreator(llm_client, event_bus)
+        self._plan_creator = plan_creator or PlanCreator(
+            llm_client,
+            event_bus,
+            model_override=self._model_override,
+        )
         self._plan_executor = plan_executor or PlanExecutor(
             llm_client,
             registry,
@@ -161,6 +232,7 @@ class OrchestrationEngine:
             self._agent_pool,
             default_timeout=default_timeout,
             max_parallel=max_parallel,
+            model_override=self._model_override,
         )
         self._retry_manager = retry_manager or RetryManager(base_delay=1.0, max_retries=max_retries)
         self._cancellation = cancellation_registry or CancellationRegistry()
@@ -188,10 +260,16 @@ class OrchestrationEngine:
         session_id: str,
         mission_id: str = "",
         project_path: str = ".",
+        user_id: str = "",
         plan: Any = None,
         create: bool = True,
     ) -> RunLifecycle | None:
         """Return the durable run mirror for this session, creating one once.
+
+        A session that already has a mirror gets it back. Otherwise the run a
+        previous process left behind for the same session and goal is *adopted*
+        (re-entered as ``RUNNING``, never duplicated); only when there is no
+        such run is a new one created.
 
         Every coordinator failure degrades to ``None`` — the orchestration
         itself is never what breaks because durability is unavailable.
@@ -200,18 +278,47 @@ class OrchestrationEngine:
             return self._run_lifecycles[session_id]
         if not create:
             return None
+        # Adopt the durable run a previous process left behind for this session
+        # and goal instead of forking a second one: two runs for the same work
+        # means two checkpoints, two side-effect ledgers and two budgets.
+        # ``reuse_existing=False`` keeps ``RunLifecycle.begin`` from repeating
+        # the lookup above (and from being able to raise out of it); the engine
+        # has already decided, and a lookup failure must degrade here rather
+        # than take the cycle down.
+        adopted_run_id = _adoptable_run_id(
+            session_id, goal, mission_id, user_id=user_id
+        )
+        if adopted_run_id:
+            _reenter_adopted_run(adopted_run_id, session_id, goal)
         steps = list(getattr(plan, "steps", []) or []) if plan is not None else []
         lifecycle = RunLifecycle.begin(
             goal=goal,
             session_id=session_id,
+            user_id=user_id,
             project_id=str(project_path or "."),
             mission_id=mission_id,
             requirements=[str(getattr(step, "name", "") or "") for step in steps],
             constraints=[str(getattr(step, "agent", "") or "") for step in steps],
             definition_of_done=[f"step:{str(getattr(step, 'name', '') or '')}" for step in steps],
+            run_id=adopted_run_id,
+            reuse_existing=False,
         )
         if lifecycle is not None and session_id:
             self._run_lifecycles[session_id] = lifecycle
+            # The plan itself is part of the executable state a restart must
+            # recover: requirements and the definition of done name the steps,
+            # but only the plan carries their agents, dependencies and tool
+            # scopes. Without it a resumed run knows *what* it must satisfy and
+            # not *how* it was going to. The primary lane persists the plan via
+            # its PLAN_UPDATED bridge; the engine lane persists it here, where
+            # the plan the executor is about to run is in hand.
+            if plan is not None:
+                try:
+                    lifecycle.update_progress(plan=self._plan_payload(plan))
+                except Exception:  # pragma: no cover - durability must not break execution
+                    logger.debug(
+                        "Could not persist the plan for run %s", lifecycle.run_id, exc_info=True
+                    )
             # Publish the run so the tool budget hook charges the tools this
             # session executes (see ``backend/runtime/run_context.py``). The
             # context variable is per-task, so a sibling session's tools are
@@ -246,6 +353,42 @@ class OrchestrationEngine:
             or str(getattr(plan, "title", "") or "").strip()
             or str(getattr(plan, "plan_id", "") or "")
         )
+
+    @staticmethod
+    def _plan_payload(plan: Any) -> dict[str, Any]:
+        """A JSON-serialisable mirror of a plan, for the durable run state.
+
+        Only plain data goes in: ids, names, descriptions, the agent each step
+        belongs to, its dependencies and the completion criteria the definition
+        of done is checked against. Anything a restart would need to *decide*
+        what remains to do lives here; anything it needs to *execute* is
+        re-derived from the steps by the executor.
+        """
+        steps: list[dict[str, Any]] = []
+        for step in getattr(plan, "steps", []) or []:
+            steps.append(
+                {
+                    "name": str(getattr(step, "name", "") or ""),
+                    "description": str(getattr(step, "description", "") or ""),
+                    "agent": str(getattr(step, "agent", "") or ""),
+                    "depends_on": [
+                        str(getattr(dep, "name", "") or dep)
+                        for dep in (getattr(step, "depends_on", []) or [])
+                    ],
+                    "completion_criteria": [
+                        str(item)
+                        for item in (getattr(step, "completion_criteria", []) or [])
+                    ],
+                    "status": str(getattr(getattr(step, "status", None), "value", None)
+                                  or getattr(step, "status", "") or ""),
+                }
+            )
+        return {
+            "plan_id": str(getattr(plan, "plan_id", "") or ""),
+            "title": str(getattr(plan, "title", "") or ""),
+            "description": str(getattr(plan, "description", "") or ""),
+            "steps": steps,
+        }
 
     @staticmethod
     def _dod_results_from_tasks(
@@ -470,6 +613,7 @@ class OrchestrationEngine:
             plan=plan,
             session_id=session_id,
             auto_approve=True,
+            user_id=user_id,
         )
         return result
 
@@ -687,6 +831,7 @@ class OrchestrationEngine:
         *,
         auto_approve: bool = False,
         project_path: str = ".",
+        user_id: str = "",
         mission_id: str = "",
     ) -> OrchestrationResult:
         """Execute a ready plan; blocked planning never reaches the executor."""
@@ -737,6 +882,7 @@ class OrchestrationEngine:
         lifecycle = self._run_lifecycle_for(
             goal=self._plan_goal(plan) or f"plano {plan.plan_id}",
             session_id=session_id,
+            user_id=user_id,
             mission_id=mission_id,
             project_path=project_path,
             plan=plan,
@@ -874,6 +1020,7 @@ class OrchestrationEngine:
         context: str = "",
         history: list[ChatMessage] | None = None,
         project_path: str = ".",
+        user_id: str = "",
         max_verify_iterations: int = 3,
         mission_id: str = "",
     ) -> OrchestrationResult:
@@ -900,6 +1047,7 @@ class OrchestrationEngine:
                 context=context,
                 history=history,
                 project_path=project_path,
+                user_id=user_id,
                 max_verify_iterations=max_verify_iterations,
                 mission_id=mission_id,
             )
@@ -978,6 +1126,7 @@ class OrchestrationEngine:
         context: str = "",
         history: list[ChatMessage] | None = None,
         project_path: str = ".",
+        user_id: str = "",
         max_verify_iterations: int = 3,
         mission_id: str = "",
     ) -> OrchestrationResult:
@@ -1067,6 +1216,7 @@ class OrchestrationEngine:
             session_id=session_id,
             mission_id=mission_id,
             project_path=project_path,
+            user_id=user_id,
             plan=plan,
         )
         if lifecycle is not None:
@@ -1093,6 +1243,7 @@ class OrchestrationEngine:
             session_id,
             auto_approve=True,
             project_path=project_path,
+            user_id=user_id,
             mission_id=mission_id,
         )
         # A failed, cancelled, or blocked primary plan is terminal.
@@ -1181,6 +1332,7 @@ class OrchestrationEngine:
                 session_id,
                 auto_approve=True,
                 project_path=project_path,
+                user_id=user_id,
             )
             if verify_result.state in (OrchestrationState.CANCELLED, OrchestrationState.FAILED):
                 self._state[session_id] = verify_result.state
@@ -1251,6 +1403,7 @@ class OrchestrationEngine:
                 session_id,
                 auto_approve=True,
                 project_path=project_path,
+                user_id=user_id,
             )
             if fix_result.state in (OrchestrationState.CANCELLED, OrchestrationState.FAILED):
                 self._state[session_id] = fix_result.state
@@ -1276,6 +1429,7 @@ class OrchestrationEngine:
             session_id,
             auto_approve=True,
             project_path=project_path,
+            user_id=user_id,
         )
         if review_result.state in (OrchestrationState.CANCELLED, OrchestrationState.FAILED):
             self._state[session_id] = review_result.state

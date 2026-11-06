@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useId, useMemo, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Activity,
   Bot,
@@ -18,6 +18,8 @@ import {
 import type { ActivityItem } from "../../lib/types";
 import { formatRunClock, groupAdjacentFileReads } from "../../lib/chatPresentation";
 import { isFailingActivityStatus } from "../../lib/foldRun";
+import { presentActivity } from "../../lib/plainNarration";
+import { usePresentationStore } from "../../stores/presentationStore";
 
 const ACTIVITY_VIRTUAL_THRESHOLD = 80;
 const ACTIVITY_ROW_HEIGHT = 48;
@@ -28,11 +30,11 @@ const FILE_READ_VIEWPORT_HEIGHT = 192;
 const FILE_READ_OVERSCAN = 4;
 
 function statusIcon(status: ActivityItem["status"]) {
-  if (status === "running") return <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-300" />;
-  if (status === "error") return <XCircle className="h-3.5 w-3.5 text-rose-400" />;
-  if (status === "success") return <Check className="h-3.5 w-3.5 text-emerald-400" />;
-  if (status === "warning") return <TriangleAlert className="h-3.5 w-3.5 text-amber-300" />;
-  if (status === "paused") return <Pause className="h-3.5 w-3.5 text-amber-300" />;
+  if (status === "running") return <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-300 motion-reduce:animate-none" />;
+  if (status === "error") return <XCircle className="h-3.5 w-3.5 text-nexus-accent4" />;
+  if (status === "success") return <Check className="h-3.5 w-3.5 text-nexus-accent2" />;
+  if (status === "warning") return <TriangleAlert className="h-3.5 w-3.5 text-nexus-accent3" />;
+  if (status === "paused") return <Pause className="h-3.5 w-3.5 text-nexus-accent3" />;
   if (status === "cancelled") return <CircleDashed className="h-3.5 w-3.5 text-nexus-muted" />;
   return <CircleDashed className="h-3.5 w-3.5 text-nexus-muted" />;
 }
@@ -95,7 +97,7 @@ function GroupedFileReads({ group }: { group: { items: ActivityItem[]; fileCount
         className="flex cursor-pointer flex-wrap items-center gap-1.5"
       >
         <span className="text-[11px] font-medium text-nexus-text/90">
-          Leu {group.fileCount} ficheiro{group.fileCount === 1 ? "" : "s"}
+          Leu {group.fileCount ?? group.items.length} ficheiro{(group.fileCount ?? group.items.length) === 1 ? "" : "s"}
         </span>
         <span className="text-[9px] text-nexus-muted">
           {group.items.length} leituras
@@ -116,6 +118,8 @@ function ExecutionActivity({
   hasErrors?: boolean;
 }) {
   const [open, setOpen] = useState(isStreaming);
+  const level = usePresentationStore((state) => state.level);
+  const reduceMotion = useReducedMotion();
   const activityBodyId = `execution-activity-${useId().replace(/:/g, "")}`;
   const [scrollTop, setScrollTop] = useState(0);
   const displayGroups = useMemo(() => groupAdjacentFileReads(items), [items]);
@@ -164,7 +168,6 @@ function ExecutionActivity({
   // so the accessible header strings the tests assert on never change.
   const editorial = useMemo(() => {
     const agentNames = Array.from(new Set(items.map((item) => item.agent).filter(Boolean) as string[]));
-    const runningAgents = items.filter((item) => item.kind === "agent" && item.status === "running");
     const verifications = items.filter((item) => item.kind === "verification");
     const passed = verifications.filter((item) => item.status === "success").length;
     const failed = verifications.filter((item) => item.status === "error").length;
@@ -172,7 +175,7 @@ function ExecutionActivity({
       .map((item) => Date.parse(item.timestamp ?? ""))
       .filter((value) => Number.isFinite(value));
     const t0 = stamps.length > 0 ? Math.min(...stamps) : undefined;
-    return { agentNames, runningAgents, verifications, passed, failed, t0, parallel: runningAgents.length > 1 || agentNames.length > 1 };
+    return { agentNames, verifications, passed, failed, t0 };
   }, [items]);
 
   if (items.length === 0 && !hasErrors) return null;
@@ -184,26 +187,26 @@ function ExecutionActivity({
   const wasCancelled = items.some((item) => item.status === "cancelled");
   const hasSucceeded = items.some((item) => item.status === "success");
   const badgeIcon = hasProblems ? (
-    <XCircle className="h-3 w-3 text-rose-400" />
+    <XCircle className="h-3 w-3 text-nexus-accent4" />
   ) : wasCancelled ? (
     <CircleDashed className="h-3 w-3 text-nexus-muted" />
   ) : hasSucceeded ? (
-    <Check className="h-3 w-3 text-emerald-400" />
+    <Check className="h-3 w-3 text-nexus-accent2" />
   ) : (
     <Activity className="h-3 w-3 text-nexus-muted" />
   );
 
   return (
-    <div className="my-2 overflow-hidden rounded-xl border border-violet-400/15 bg-violet-400/[0.025]">
+    <div className="nx-work-surface my-2 overflow-hidden rounded-xl border border-nexus-accent/20">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="nx-motion-feedback flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-violet-400/[0.04]"
+        className="nx-motion-feedback flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-nexus-accent/[0.04]"
         aria-expanded={open}
         aria-controls={open ? activityBodyId : undefined}
       >
-        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-violet-400/10">
-          {isStreaming ? <Loader2 className="h-3 w-3 animate-spin text-violet-300" /> : badgeIcon}
+        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-nexus-accent/10">
+          {isStreaming ? <Loader2 className="h-3 w-3 animate-spin text-nexus-accent motion-reduce:animate-none" /> : badgeIcon}
         </span>
         <span className="text-[11px] font-semibold text-nexus-text">{summary}</span>
         <span className="text-[10px] text-nexus-muted">
@@ -214,13 +217,13 @@ function ExecutionActivity({
         {/* Editorial Activity level: agents in parallel + test tally. Inside the
             toggle so the collapsed one-liner already tells the story. */}
         {editorial.agentNames.length > 1 && (
-          <span className="hidden rounded-full bg-violet-400/10 px-1.5 py-px text-[9px] text-violet-200/80 sm:inline">
-            {editorial.agentNames.length} agentes{editorial.parallel ? " · em paralelo" : ""}
+          <span className="hidden rounded-full bg-nexus-accent/10 px-1.5 py-px text-[9px] text-nexus-accent-bright sm:inline">
+            {editorial.agentNames.length} agentes
           </span>
         )}
         {editorial.verifications.length > 0 && (
           <span className="hidden rounded-full bg-nexus-bg/60 px-1.5 py-px text-[9px] tabular-nums text-nexus-muted sm:inline">
-            {editorial.passed}✓·{editorial.failed}✕ testes
+            {editorial.passed}✓ · {editorial.failed}✕ verificações
           </span>
         )}
         <ChevronDown
@@ -236,14 +239,15 @@ function ExecutionActivity({
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.16, ease: "easeOut" }}
-            className={`border-t border-violet-400/10 px-3 py-2 [content-visibility:auto] ${virtualized ? "max-h-[360px] overflow-y-auto" : "overflow-hidden"}`}
+            transition={reduceMotion ? { duration: 0 } : { duration: 0.16, ease: "easeOut" }}
+            className={`border-t border-nexus-accent/10 px-3 py-2 [content-visibility:auto] ${virtualized ? "max-h-[360px] overflow-y-auto" : "overflow-hidden"}`}
             onScroll={virtualized ? (event) => setScrollTop(event.currentTarget.scrollTop) : undefined}
           >
             {virtualized && <li aria-hidden="true" className="list-none" style={{ height: firstVisible * ACTIVITY_ROW_HEIGHT }} />}
             {visibleGroups.map((group, offset) => {
               const index = firstVisible + offset;
               const item = group.items[0];
+              const presented = presentActivity(item, level);
               const Icon = kindIcon(item.kind);
               const parsed = Date.parse(item.timestamp ?? "");
               const clock = editorial.t0 !== undefined && Number.isFinite(parsed)
@@ -262,7 +266,7 @@ function ExecutionActivity({
                       <span className="absolute left-[7px] top-5 h-[calc(100%-8px)] w-px bg-nexus-border" />
                     )}
                     <span className="relative z-10 mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-nexus-card">
-                      {statusIcon("success")}
+                      {statusIcon(group.items.some((i) => isFailingActivityStatus(i.status)) ? "error" : "success")}
                     </span>
                     <GroupedFileReads group={group} />
                   </li>
@@ -289,27 +293,27 @@ function ExecutionActivity({
                           {clock}
                         </time>
                       )}
-                      <span className={`text-[11px] font-medium text-nexus-text/90 ${virtualized ? "truncate" : ""}`}>{item.title}</span>
-                      {item.agent && (
-                        <span className="inline-flex items-center gap-1 rounded bg-violet-400/8 px-1.5 py-0.5 text-[9px] font-medium text-violet-200/75">
+                      <span className={`text-[11px] font-medium text-nexus-text/90 ${virtualized ? "truncate" : ""}`}>{presented.title}</span>
+                      {presented.showAgent && item.agent && (
+                        <span className="inline-flex items-center gap-1 rounded-md bg-nexus-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-nexus-accent-bright">
                           {item.kind === "agent" && item.status === "running" && (
-                            <span aria-hidden="true" className="animate-pulse text-[9px] leading-none">◉</span>
+                            <span aria-hidden="true" className="animate-pulse text-[9px] leading-none motion-reduce:animate-none">◉</span>
                           )}
                           {item.kind === "agent" && item.status === "success" && (
-                            <span aria-hidden="true" className="text-[9px] leading-none text-emerald-400">✓</span>
+                            <span aria-hidden="true" className="text-[9px] leading-none text-nexus-accent2">✓</span>
                           )}
                           {item.agent}
                         </span>
                       )}
-                      {item.kind === "verification" && (
-                        <span className="rounded bg-nexus-bg/60 px-1 py-px font-mono text-[8px] uppercase tracking-wide text-nexus-muted/70">
-                          teste
+                      {item.kind === "verification" && level !== "simple" && (
+                        <span className="rounded bg-nexus-bg/60 px-1 py-px text-[9px] text-nexus-muted/70">
+                          verificação
                         </span>
                       )}
                     </div>
-                    {item.detail && item.detail !== item.title && (
-                      <p className={`mt-0.5 truncate text-[10px] text-nexus-muted ${virtualized ? "hidden" : ""}`} title={item.detail}>
-                        {item.detail}
+                    {presented.detail && (
+                      <p className={`mt-0.5 truncate text-[10px] text-nexus-muted ${virtualized ? "hidden" : ""}`} title={presented.detail}>
+                        {presented.detail}
                       </p>
                     )}
                   </div>

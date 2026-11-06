@@ -5,7 +5,7 @@ This document provides instructions for starting the NEXUS IDE frontend and back
 ## Prerequisites
 
 - Python 3.12.10 installed
-- Node.js and npm installed
+- Node.js and pnpm 10.34.9 installed
 - Redis (optional, for some features)
 - Ollama (optional, for LLM features)
 
@@ -79,12 +79,12 @@ PROMETHEUS_PORT=9090
 ### Frontend Dependencies
 ```bash
 cd nexus-ide/frontend
-npm install
+pnpm install --frozen-lockfile
 ```
 
 Verify installation:
 ```bash
-npm list --depth=0
+pnpm list --depth=0
 ```
 
 ### Backend Dependencies
@@ -127,7 +127,7 @@ Backend will start on: http://localhost:8000
 ### Start Frontend (Terminal 2)
 ```bash
 cd nexus-ide/frontend
-npm run dev
+pnpm run dev
 ```
 
 Frontend will start on: http://localhost:3000

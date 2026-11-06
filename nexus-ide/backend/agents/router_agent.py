@@ -14,10 +14,9 @@ from .base import AgentBase, AgentRequest
 class RouterAgent(AgentBase):
     """Pure JSON classifier. Used indirectly via :func:`router.route_with_model`.
 
-    This class exists so the router conforms to the generic AgentBase contract
-    (useful for observability and consistent metrics labels). It is *not*
-    invoked by the orchestrator; the router module calls ``chat_complete``
-    directly to enforce a non-streaming JSON response.
+    Deprecated for orchestration: production routing uses ``chat_primary`` /
+    ``orchestrator/router``. This class exists for the AgentBase contract and
+    metrics labels only; the orchestrator calls ``chat_complete`` directly.
     """
 
     name = "ROUTER"
@@ -30,3 +29,10 @@ class RouterAgent(AgentBase):
         # streaming variant for debugging & uniformity.
         async for token in self.stream_llm(request, temperature=0.1):
             yield token
+        # The stream completed without raising, so the run succeeded.  The
+        # verdict is instance state and ``AgentBase.run`` resets it to False
+        # before every run: an agent that never sets it (this one overrides
+        # ``_execute`` and never calls the ReAct loop) would never be
+        # remembered, and — worse — a run that RAISED would be remembered as
+        # "Agent ROUTER completed a task".
+        self._record_run_success(request, True)

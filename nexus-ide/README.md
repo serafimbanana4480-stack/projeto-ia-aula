@@ -230,7 +230,7 @@ Arquitetura **defense-in-depth** com 8 camadas de proteção:
 | Suite | Tecnologia | Como executar | Cobertura (medida 2026-07-25) |
 |-------|-----------|---------------|-------------------------------|
 | **Backend** | pytest + coverage | `python -m pytest backend/tests/ --cov=backend -q` ou `make test-backend` | ~8% linha (baseline). Alvo: 80%+ |
-| **Frontend** | Vitest | `cd frontend && npm test` | 4 ficheiros para widgets (RequestFlow, TokenTimeline, AgentActivity, MetricsGrid) |
+| **Frontend** | Vitest | `cd frontend && pnpm run test` | 4 ficheiros para widgets (RequestFlow, TokenTimeline, AgentActivity, MetricsGrid) |
 | **E2E** | Playwright | `cd e2e && npx playwright test` | Fluxos críticos de ponta a ponta |
 | **Lint** | ruff + mypy + eslint | `make lint` | Qualidade de código, tipos, estilo |
 

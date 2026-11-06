@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveContextUsage, loadedSkillsFromEvents } from "../../lib/contextTelemetry";
+import { deriveContextUsage, loadedSkillsFromEvents, runAgentsFromEvents } from "../../lib/contextTelemetry";
 import type { UsageSnapshot } from "../../stores/chatTelemetryStore";
 import type { StreamEvent } from "../../lib/types";
 
@@ -36,6 +36,26 @@ describe("session context telemetry", () => {
     expect(result.percent).toBe(10);
     expect(result.segments.every((part) => Number.isFinite(part.value) && part.value >= 0)).toBe(true);
     expect(deriveContextUsage(usage(), Infinity).percent).toBeNull();
+  });
+
+  it("names the agent already present on a live run", () => {
+    const events = [
+      { type: "agent_started", agent: "NEXUS", run_id: "r1", timestamp: "t" },
+      { type: "token", agent: "NEXUS", content: "oi", run_id: "r1", timestamp: "t" },
+    ] as StreamEvent[];
+    expect(runAgentsFromEvents(events, true)).toEqual([{ name: "NEXUS", status: "active" }]);
+  });
+
+  it("keeps a finished subagent out of the live count", () => {
+    const events = [
+      { type: "agent_started", agent: "NEXUS", run_id: "r1", timestamp: "t" },
+      { type: "agent_started", agent: "NEXUS", run_id: "r1", timestamp: "t", data: { name: "REVIEWER" } },
+      { type: "agent_finished", agent: "NEXUS", run_id: "r1", timestamp: "t", data: { name: "REVIEWER" } },
+      { type: "token", agent: "NEXUS", run_id: "r1", timestamp: "t" },
+    ] as StreamEvent[];
+    const agents = runAgentsFromEvents(events, true);
+    expect(agents.find((agent) => agent.name === "NEXUS")?.status).toBe("active");
+    expect(agents.find((agent) => agent.name === "REVIEWER")?.status).toBe("finished");
   });
 
   it("records a skill only after a successful load result", () => {

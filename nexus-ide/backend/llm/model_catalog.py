@@ -1000,10 +1000,12 @@ def apply_catalog_to_llm_client(client: Any, provider: str, models: list[ModelIn
     """Push refreshed catalog entries into live provider instances."""
     updated = 0
     stack: list[Any] = [client]
+    seen: set[int] = set()
     while stack:
         obj = stack.pop()
-        if obj is None:
+        if obj is None or id(obj) in seen:
             continue
+        seen.add(id(obj))
         if getattr(obj, "provider_name", None) == provider and hasattr(obj, "_catalog"):
             obj._catalog = models
             obj.validated_at = None

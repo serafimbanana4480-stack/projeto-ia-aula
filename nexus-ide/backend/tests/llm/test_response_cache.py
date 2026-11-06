@@ -204,8 +204,8 @@ class TestManagerIntegration:
         manager.register_provider("cache-fake", provider)
 
         messages = [{"role": "user", "content": "olá"}]
-        first = await manager.chat_complete("modelo-x", messages)
-        second = await manager.chat_complete("modelo-x", messages)
+        first = await manager.chat_complete("modelo-x", messages, run_id="session-a")
+        second = await manager.chat_complete("modelo-x", messages, run_id="session-a")
 
         assert first == second == "answer:olá:1"
         assert provider.complete_calls == 1
@@ -219,8 +219,12 @@ class TestManagerIntegration:
         provider = _CountingProvider()
         manager.register_provider("cache-fake-diff", provider)
 
-        first = await manager.chat_complete("m", [{"role": "user", "content": "um"}])
-        second = await manager.chat_complete("m", [{"role": "user", "content": "dois"}])
+        first = await manager.chat_complete(
+            "m", [{"role": "user", "content": "um"}], run_id="session-a"
+        )
+        second = await manager.chat_complete(
+            "m", [{"role": "user", "content": "dois"}], run_id="session-a"
+        )
 
         assert first != second
         assert provider.complete_calls == 2
@@ -286,13 +290,13 @@ class TestManagerIntegration:
             manager.register_provider("cache-budget-fake", provider)
 
             messages = [{"role": "user", "content": "olá"}]
-            first = await manager.chat_complete("m", messages)  # gasta $0.50
+            first = await manager.chat_complete("m", messages, run_id="session-a")  # gasta $0.50
             # Orçamento diário agora exaurido ($0.50 ≥ $0.10):
             # um HIT tem de ser devolvido — custa $0.
-            hit = await manager.chat_complete("m", messages)
+            hit = await manager.chat_complete("m", messages, run_id="session-a")
             with pytest.raises(ProviderUnavailableError) as excinfo:
                 await manager.chat_complete(
-                    "m", [{"role": "user", "content": "outro"}]
+                    "m", [{"role": "user", "content": "outro"}], run_id="session-a"
                 )
 
             assert first.startswith("answer:")

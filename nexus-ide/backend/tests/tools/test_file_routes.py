@@ -9,9 +9,11 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from backend.middleware.auth import create_access_token
 from backend.orchestrator.main import app
+from backend.orchestrator.routes import files as files_routes
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +25,10 @@ def mock_propose_change(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def client() -> TestClient:
+def client(tmp_path: Path) -> TestClient:
+    from backend.persistence.db import create_project
+
+    create_project(name="file route test project", path=str(tmp_path.resolve()), trust=True)
     token = create_access_token({"sub": "test-user", "email": "test@test.com"})
     return TestClient(app, headers={"Authorization": f"Bearer {token}"})
 
@@ -164,8 +169,23 @@ class TestUploadRoute:
         assert "error" not in body
         assert (tmp_path / "hello.py").read_bytes() == b"print('hi')"
 
-    def test_upload_rejects_oversize(self, client: TestClient, tmp_path: Path) -> None:
+    def test_upload_rejects_oversize(
+        self,
+        client: TestClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         oversized = b"x" * (10 * 1024 * 1024 + 1)
+        read_sizes: list[int] = []
+        original_read = StarletteUploadFile.read
+
+        async def read_with_tracking(
+            upload: StarletteUploadFile, size: int = -1
+        ) -> bytes:
+            read_sizes.append(size)
+            return await original_read(upload, size)
+
+        monkeypatch.setattr(StarletteUploadFile, "read", read_with_tracking)
         response = client.post(
             "/api/files/upload",
             files={"file": ("big.txt", oversized, "text/plain")},
@@ -175,6 +195,7 @@ class TestUploadRoute:
         body = response.json()
         assert "error" in body
         assert "size" in body["error"].lower()
+        assert read_sizes == [files_routes._MAX_UPLOAD_BYTES + 1]
 
     def test_upload_rejects_disallowed_extension(self, client: TestClient, tmp_path: Path) -> None:
         response = client.post(

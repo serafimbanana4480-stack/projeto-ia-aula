@@ -169,7 +169,7 @@ export default function SessionsWidget() {
                 onClick={() => terminate(s.id)}
                 disabled={terminating === s.id}
                 aria-label={`Terminar sessão ${s.id}`}
-                className="rounded p-1 text-nexus-faint hover:bg-rose-500/10 hover:text-rose-400 disabled:opacity-50"
+                className="rounded p-1 text-nexus-faint hover:bg-rose-500/10 hover:text-nexus-accent4 disabled:opacity-50"
               >
                 {terminating === s.id ? (
                   <Loader2 className="h-3 w-3 animate-spin" aria-hidden />

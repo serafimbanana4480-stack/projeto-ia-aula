@@ -98,12 +98,16 @@ class TestMemoryTools:
             project_id="proj_1",
             tags="tech,stack",
             source="TEST",
+            user_id="test-user",
         )
         assert stored["stored"] is True
         assert "memory_id" in stored
 
         recall = await recall_context(
-            "The project uses FastAPI and SQLAlchemy", project_id="proj_1", top_k=5
+            "The project uses FastAPI and SQLAlchemy",
+            project_id="proj_1",
+            top_k=5,
+            user_id="test-user",
         )
         assert "memories" in recall
         assert any("FastAPI" in m["content"] for m in recall["memories"])
@@ -119,10 +123,14 @@ class TestMemoryTools:
         store = MemoryStore(embedding_service=svc, max_memories=100)
         monkeypatch.setattr("backend.knowledge.memory._memory_store", store)
 
-        await store_memory("Global note", memory_type="global")
-        await store_memory("Session note", memory_type="session", session_id="s1")
+        await store_memory("Global note", memory_type="global", user_id="user-1")
+        await store_memory(
+            "Session note", memory_type="session", session_id="s1", user_id="user-1"
+        )
 
-        recall = await recall_context("note", memory_type="session", session_id="s1")
+        recall = await recall_context(
+            "note", memory_type="session", session_id="s1", user_id="user-1"
+        )
         assert all(m["type"] == "session" for m in recall["memories"])
 
 

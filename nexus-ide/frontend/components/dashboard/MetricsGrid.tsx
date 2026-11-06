@@ -199,15 +199,15 @@ export default function MetricsGrid() {
   const getTrendColor = (trend: string | undefined, key: string) => {
     const badUp = ["avg_latency_ms", "queue_depth", "requests_failed", "cpu_percent", "ram_percent", "disk_percent"];
     const isBadUp = badUp.includes(key);
-    if (trend === "up") return isBadUp ? "text-rose-400" : "text-emerald-400";
-    if (trend === "down") return isBadUp ? "text-emerald-400" : "text-rose-400";
+    if (trend === "up") return isBadUp ? "text-nexus-accent4" : "text-nexus-accent2";
+    if (trend === "down") return isBadUp ? "text-nexus-accent2" : "text-nexus-accent4";
     return "text-nexus-faint";
   };
 
   if (!backendOnline && !metrics) {
     return (
       <Surface elevation={1} padding="sm" tone="warning">
-        <div role="status" aria-live="polite" className="flex items-center gap-2 text-xs text-amber-300">
+        <div role="status" aria-live="polite" className="flex items-center gap-2 text-xs text-nexus-accent3">
           <StatusDot tone="warning" pulse />
           Backend offline — a aguardar ligação…
         </div>
@@ -262,7 +262,7 @@ export default function MetricsGrid() {
                 </div>
                 <div
                   className={`truncate font-mono text-sm font-bold tabular-nums sm:text-base ${
-                    cell.critical ? "text-rose-400" : cell.warning ? "text-amber-400" : cell.color || "text-nexus-text"
+                    cell.critical ? "text-nexus-accent4" : cell.warning ? "text-nexus-accent3" : cell.color || "text-nexus-text"
                   }`}
                 >
                   {cell.rawValue != null ? (

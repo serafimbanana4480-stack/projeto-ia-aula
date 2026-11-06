@@ -70,20 +70,23 @@ module.exports = [
     // Build output, reports and vendored code. `.next*` matters twice over: the
     // project sets `distDir: .next-dev` for `next dev` (next.config.mjs:27), so
     // BOTH .next and .next-dev exist on disk and both contain generated
-    // TypeScript that must never be linted or type-checked.
+    // TypeScript that must never be linted or type-checked. The trailing-`*`
+    // also covers the one-off capture/debug builds (.next-capture-…,
+    // .next-infinity-…) which are full Next.js builds and were otherwise
+    // linted, producing hundreds of errors from generated chunks.
     ignores: [
-      ".next/**",
-      ".next-dev/**",
+      ".next*/**",
       "node_modules/**",
       "out/**",
       "coverage/**",
       "playwright-report/**",
       "playwright_report/**",
-      "test-results/**",
+      "test-results*/**",
       "blob-report/**",
       ".playwright-mcp/**",
       "next-env.d.ts",
       "**/*.tsbuildinfo",
+      "**/dist/**",
     ],
   },
 

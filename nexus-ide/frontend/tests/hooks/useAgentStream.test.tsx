@@ -3,6 +3,7 @@ import { renderHook, act } from "@testing-library/react";
 import type { StreamEvent } from "../../lib/types";
 import { foldRun } from "../../lib/foldRun";
 import { replayRunEvents, useAgentStream } from "../../hooks/useAgentStream";
+import { ApiError } from "../../lib/api";
 
 const { mockRefreshAuth, mockClearAuth } = vi.hoisted(() => ({
   mockRefreshAuth: vi.fn(),
@@ -179,7 +180,12 @@ describe("useAgentStream", () => {
   });
 
   it("reports a rejected chat request so the composer can restore its draft", async () => {
-    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 422,
+      statusText: "Unprocessable Entity",
+      text: async () => "invalid request",
+    } as unknown as Response);
     const { result } = renderHook(() => useAgentStream("s1"));
     let accepted = true;
 
@@ -189,7 +195,7 @@ describe("useAgentStream", () => {
 
     expect(accepted).toBe(false);
     expect(result.current.streaming).toBe(false);
-    expect(result.current.error).toContain("backend");
+    expect(result.current.error).toContain("HTTP 422");
   });
 
   it("batches token deltas for 20ms and flushes them before a status event", async () => {
@@ -238,7 +244,7 @@ describe("useAgentStream", () => {
   it("deduplicates a duplicated runtime event by event_id", async () => {
     const first = stamped("r-dup", 1, "dup-id");
     fetchMock.mockResolvedValueOnce(
-      sseResponse([first, stamped("r-dup", 2, "other-id"), { ...first }]),
+      sseResponse([first, stamped("r-dup", 2, "other-id"), { ...first }, terminal("r-dup", 3), done()]),
     );
     const { result } = renderHook(() => useAgentStream("s1"));
 
@@ -246,7 +252,7 @@ describe("useAgentStream", () => {
       await result.current.send("oi");
     });
 
-    expect(result.current.events).toHaveLength(2);
+    expect(result.current.events).toHaveLength(3);
     expect(result.current.events.filter((e) => e.event_id === "dup-id")).toHaveLength(1);
   });
 
@@ -266,7 +272,14 @@ describe("useAgentStream", () => {
     });
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(14_999);
+    });
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/sessions/s1/events")),
+    ).toHaveLength(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
       await activeSend;
     });
 
@@ -321,16 +334,21 @@ describe("useAgentStream", () => {
     });
   });
 
-  it("recovers a dropped connection from before the earliest missing sequence", async () => {
+  it("recovers a sequence gap from before the earliest missing event", async () => {
     vi.useFakeTimers();
     fetchMock
       // Seq 2 is missing when the first connection drops, even though seq 3
       // was already received. Resuming after seq 3 would lose the missing event.
       .mockResolvedValueOnce(
-        sseResponse([stamped("r-gap-reconnect", 1), stamped("r-gap-reconnect", 3)]),
+        sseResponse([stamped("r-gap-reconnect", 1), stamped("r-gap-reconnect", 3), done()]),
       )
       .mockResolvedValueOnce(
-        sseResponse([stamped("r-gap-reconnect", 2), stamped("r-gap-reconnect", 3), done()]),
+        sseResponse([
+          stamped("r-gap-reconnect", 2),
+          stamped("r-gap-reconnect", 3),
+          terminal("r-gap-reconnect", 4),
+          done(),
+        ]),
       );
     const { result } = renderHook(() => useAgentStream("s1"));
     let activeSend: Promise<boolean> | undefined;
@@ -341,8 +359,8 @@ describe("useAgentStream", () => {
     });
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(250);
       await activeSend;
+      await vi.advanceTimersByTimeAsync(1_500);
     });
 
     const replayCall = fetchMock.mock.calls.find(([url]) =>
@@ -355,7 +373,7 @@ describe("useAgentStream", () => {
       .map((event) => event.seq)
       .filter((seq): seq is number => typeof seq === "number")
       .sort((a, b) => a - b);
-    expect(seqs).toEqual([1, 2, 3]);
+    expect(seqs).toEqual([1, 2, 3, 4]);
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat"))).toHaveLength(1);
   });
 
@@ -373,7 +391,7 @@ describe("useAgentStream", () => {
     });
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(15_000);
       await activeSend;
     });
 
@@ -387,13 +405,19 @@ describe("useAgentStream", () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat"))).toHaveLength(1);
   });
 
-  it("bounds reconnection attempts and does not retry the chat POST", async () => {
+  it("retries transient stream API failures up to ten times without reposting the chat", async () => {
     vi.useFakeTimers();
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       if (String(input).includes("/api/chat")) {
         return sseResponse([stamped("r-exhaust", 1)]);
       }
-      return sseResponse([]);
+      return {
+        ok: false,
+        status: 503,
+        statusText: "Service Unavailable",
+        body: null,
+        headers: new Headers(),
+      } as Response;
     });
     const { result } = renderHook(() => useAgentStream("s1"));
     let activeSend: Promise<boolean> | undefined;
@@ -404,16 +428,226 @@ describe("useAgentStream", () => {
     });
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(10 * 15_000);
       await activeSend;
     });
 
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat"))).toHaveLength(1);
     expect(
       fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/sessions/s1/events")),
-    ).toHaveLength(3);
+    ).toHaveLength(10);
     expect(result.current.streaming).toBe(false);
-    expect(result.current.error).toContain("interrompida antes de terminar");
+    expect(result.current.error).toContain("recuperação falhou (HTTP 503");
+    expect(result.current.events.map((event) => event.seq).filter(Number.isInteger)).toEqual([1]);
+  });
+
+  it("retries a transient chat API failure every 15 seconds with the same request context and key", async () => {
+    vi.useFakeTimers();
+    let chatCalls = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      if (!String(input).includes("/api/chat")) {
+        throw new Error(`unexpected fetch: ${String(input)}`);
+      }
+      chatCalls += 1;
+      if (chatCalls < 3) {
+        return {
+          ok: false,
+          status: 503,
+          statusText: "Service Unavailable",
+          text: async () => "backend temporarily unavailable",
+        } as unknown as Response;
+      }
+      return sseResponse([stamped("r-post-retry", 1), terminal("r-post-retry", 2), done()]);
+    });
+    const { result } = renderHook(() => useAgentStream("session-retry"));
+    let activeSend: Promise<boolean> | undefined;
+    const originalMessage = "continua sem perder o contexto";
+
+    await act(async () => {
+      activeSend = result.current.send(
+        originalMessage,
+        "auto",
+        "model-preserved",
+        "C:/workspace/project",
+        "high",
+        { agents: ["CODER"] },
+        "openrouter",
+        true,
+      );
+      for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    });
+    expect(chatCalls).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(chatCalls).toBe(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+      await activeSend;
+    });
+
+    expect(chatCalls).toBe(3);
+    const chatCallsWithArgs = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("/api/chat"),
+    );
+    expect(chatCallsWithArgs).toHaveLength(3);
+    const requestHeaders = chatCallsWithArgs.map(([, init]) =>
+      new Headers((init as RequestInit | undefined)?.headers),
+    );
+    expect(requestHeaders.map((headers) => headers.get("Idempotency-Key"))).toEqual([
+      expect.any(String),
+      requestHeaders[0].get("Idempotency-Key"),
+      requestHeaders[0].get("Idempotency-Key"),
+    ]);
+    expect(requestHeaders[0].get("Idempotency-Key")).toBeTruthy();
+    for (const [, init] of chatCallsWithArgs) {
+      expect(JSON.parse(String((init as RequestInit).body))).toMatchObject({
+        message: originalMessage,
+        session_id: "session-retry",
+        mode: "auto",
+        project_path: "C:/workspace/project",
+        model: "model-preserved",
+        model_is_concrete: true,
+        provider: "openrouter",
+        thinking_strength: "high",
+        swarm_agents: ["CODER"],
+      });
+    }
+    expect(result.current.error).toBeNull();
+    expect(result.current.events.map((event) => event.seq).filter(Number.isInteger)).toEqual([1, 2]);
+  });
+
+  it("retries a chat POST that never receives API headers without losing its context", async () => {
+    vi.useFakeTimers();
+    let chatCalls = 0;
+    const bodies: string[] = [];
+    const idempotencyKeys: string[] = [];
+    const firstAttemptSignal: { current: AbortSignal | null } = { current: null };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).includes("/api/chat")) {
+        throw new Error(`unexpected fetch: ${String(input)}`);
+      }
+      chatCalls += 1;
+      bodies.push(String(init?.body));
+      idempotencyKeys.push(new Headers(init?.headers).get("Idempotency-Key") ?? "");
+      if (chatCalls === 1) {
+        firstAttemptSignal.current = init?.signal as AbortSignal;
+        return new Promise<Response>((_resolve, reject) => {
+          firstAttemptSignal.current?.addEventListener(
+            "abort",
+            () => reject(new DOMException("request timed out", "AbortError")),
+            { once: true },
+          );
+        });
+      }
+      return Promise.resolve(
+        sseResponse([stamped("r-post-timeout-retry", 1), terminal("r-post-timeout-retry", 2), done()]),
+      );
+    });
+
+    const { result } = renderHook(() => useAgentStream("session-timeout-retry"));
+    let activeSend: Promise<boolean> | undefined;
+    const originalMessage = "mantém o contexto se a API ficar pendurada";
+    await act(async () => {
+      activeSend = result.current.send(originalMessage, "auto", "model-preserved");
+      for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    });
+
+    expect(chatCalls).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+      for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    });
+    expect(firstAttemptSignal.current?.aborted).toBe(true);
+    expect(chatCalls).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+      await activeSend;
+    });
+
+    expect(chatCalls).toBe(2);
+    expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
+    expect(JSON.parse(bodies[1])).toMatchObject({
+      message: originalMessage,
+      session_id: "session-timeout-retry",
+      model: "model-preserved",
+    });
+    expect(result.current.error).toBeNull();
+    expect(result.current.events.map((event) => event.seq).filter(Number.isInteger)).toEqual([1, 2]);
+  });
+
+  it("caps initial chat API requests at ten attempts", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+      text: async () => "temporarily unavailable",
+    } as unknown as Response);
+    const { result } = renderHook(() => useAgentStream("s1"));
+    let activeSend: Promise<boolean> | undefined;
+
+    await act(async () => {
+      activeSend = result.current.send("tenta outra vez");
+      for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9 * 15_000);
+      await activeSend;
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(10);
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.error).toContain("HTTP 503");
+  });
+
+  it("retries opening a recovered run stream after transient API failures", async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    fetchMock.mockImplementation(async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        return {
+          ok: false,
+          status: 503,
+          statusText: "Service Unavailable",
+          body: null,
+          headers: new Headers(),
+        } as Response;
+      }
+      return sseResponse([stamped("r-resume-retry", 1), terminal("r-resume-retry", 2), done()]);
+    });
+    const { result } = renderHook(() => useAgentStream("s1"));
+    let resumeRun: Promise<void> | undefined;
+
+    await act(async () => {
+      resumeRun = result.current.resume("r-resume-retry");
+      for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    });
+    expect(attempts).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(attempts).toBe(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+      await resumeRun;
+    });
+
+    expect(attempts).toBe(3);
+    expect(result.current.error).toBeNull();
+    expect(result.current.streaming).toBe(false);
+    expect(
+      result.current.events.map((event) => event.seq).filter((seq): seq is number => typeof seq === "number"),
+    ).toEqual([1, 2]);
+    expect(fetchMock.mock.calls.every(([url]) => String(url).includes("/api/sessions/s1/events"))).toBe(true);
   });
 
   it("keeps a live run and its events attached to the originating chat", async () => {
@@ -595,18 +829,16 @@ describe("useAgentStream", () => {
       await activeSend;
     });
 
-    // One marker, ordered after the run's own frames, and explicitly labelled
-    // as a request made by the user — observed locally, not a server
-    // confirmation.
+    // The local request cannot claim the runtime stopped or occupy a server seq.
     const markers = result.current.events.filter(
-      (event) => event.data?.kind === "run_cancelled",
+      (event) => event.data?.kind === "cancel_requested",
     );
     expect(markers).toHaveLength(1);
     expect(markers[0].type).toBe("progress");
     expect(markers[0].data).toMatchObject({ requested_by: "user", local: true });
-    expect(markers[0].content).toContain("a pedido do utilizador");
+    expect(markers[0].content).toContain("não foi confirmado");
     expect(markers[0].run_id).toBe("r-user-cancel");
-    expect(markers[0].seq).toBe(3);
+    expect(markers[0].seq).toBeUndefined();
     expect(result.current.events.at(-1)).toBe(markers[0]);
 
     // Folding what the user actually sees: the cancellation is in the timeline
@@ -616,7 +848,9 @@ describe("useAgentStream", () => {
     );
     expect(timeline?.toolCalls?.some((call) => call.status === "running")).toBe(false);
     expect(timeline?.steps?.some((step) => step.status === "running")).toBe(false);
-    expect(timeline?.steps?.some((step) => step.kind === "run_cancelled")).toBe(true);
+    expect(timeline?.steps?.some((step) => step.kind === "cancel_requested")).toBe(true);
+    expect(timeline?.steps?.some((step) => step.kind === "run_cancelled")).toBe(false);
+    expect(timeline?.toolCalls?.[0].status).toBe("unknown");
 
     // A single fire-and-forget cancel POST, and never the prompt again.
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/chat/cancel/"))).toHaveLength(1);
@@ -681,5 +915,36 @@ describe("useAgentStream", () => {
       "depois do refresh",
       undefined,
     ]);
+  });
+
+  it("keeps the conversation usable when auth refresh exhausts its transient retries", async () => {
+    let chatCalls = 0;
+    fetchMock.mockImplementation(async () => {
+      chatCalls += 1;
+      if (chatCalls === 1) return sseResponse([token("histórico preservado"), done()]);
+      return {
+        ok: false,
+        status: 401,
+        text: async () => "expired",
+      } as unknown as Response;
+    });
+    const { result } = renderHook(() => useAgentStream("s1"));
+
+    await act(async () => {
+      await result.current.send("mensagem anterior");
+    });
+    mockRefreshAuth.mockRejectedValue(new ApiError("Refresh failed after 10 attempts", 503));
+
+    let sendResult: boolean | undefined;
+    await act(async () => {
+      sendResult = await result.current.send("continua a conversa");
+    });
+
+    expect(sendResult).toBe(false);
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.error).toContain("A conversa foi preservada");
+    expect(result.current.events.map((event) => event.content)).toContain("histórico preservado");
+    expect(result.current.events.at(-1)?.content).toContain("A conversa foi preservada");
+    expect(mockClearAuth).not.toHaveBeenCalled();
   });
 });

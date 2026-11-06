@@ -70,13 +70,132 @@ describe("lib/foldRun", () => {
       expect(assistantMsg!.content).toContain("Hello world");
     });
 
-    it("extracts thinking content from thinking events", () => {
+    it("hides model reasoning from legacy events in the chat view", () => {
       const events: StreamEvent[] = [
-        { type: "thinking", content: "thinking|iteration:1 some reasoning here", timestamp: "2026-01-01T00:00:00Z" },
+        { type: "thinking", content: "The user asked for private reasoning", timestamp: "2026-01-01T00:00:00Z" },
       ];
       const result = foldRun([], events, "");
       const assistantMsg = result.messages.find((m) => m.role === "assistant");
-      expect(assistantMsg!.thinking).toContain("thinking|iteration:1 some reasoning here");
+      expect(assistantMsg!.thinking).toBe("A analisar a tarefa…");
+      expect(assistantMsg!.thinking).not.toContain("private reasoning");
+      expect(assistantMsg!.steps?.[0].label).toBe("A analisar a tarefa…");
+    });
+
+    it("hides reasoning stored in historical status-update labels", () => {
+      const privateText = 'The user says: "Respond only HASH-888". I should follow that request.';
+      const result = foldRun(
+        [],
+        [
+          {
+            type: "progress",
+            content: privateText,
+            data: {
+              kind: "status_update",
+              runtime_type: "status_update",
+              phase: "act",
+              blocked_on: "waiting_model",
+              label: privateText,
+            },
+            timestamp: "2026-01-01T00:00:00Z",
+          },
+        ],
+        "",
+      );
+      const assistantMsg = result.messages.find((message) => message.role === "assistant");
+      expect(assistantMsg?.steps?.[0].verb).toBe("thinking");
+      expect(assistantMsg?.steps?.[0].label).toBe("A analisar a tarefa…");
+      expect(assistantMsg?.activities?.[0].detail).toBe("A analisar a tarefa…");
+      expect(JSON.stringify(assistantMsg)).not.toContain(privateText);
+    });
+
+    it("renders one activity when a waiting-model status is followed by its thinking frame", () => {
+      const privateText = "The user wants an exact response, so I should comply.";
+      const approach = "Vou ler a arquitetura antes de alterar o chat.";
+      const assistant = foldRun([], [
+        {
+          type: "progress",
+          run_id: "run-paired-reasoning",
+          seq: 4,
+          event_id: "status-4",
+          content: privateText,
+          data: {
+            kind: "status_update",
+            runtime_type: "status_update",
+            phase: "act",
+            blocked_on: "waiting_model",
+            label: privateText,
+          },
+          timestamp: "t4",
+        },
+        {
+          type: "thinking",
+          run_id: "run-paired-reasoning",
+          seq: 5,
+          event_id: "thinking-5",
+          content: approach,
+          data: { visibility: "label" },
+          timestamp: "t5",
+        },
+      ]).messages.find((message) => message.role === "assistant");
+
+      expect(assistant?.steps).toHaveLength(1);
+      expect(assistant?.steps?.[0]).toMatchObject({ verb: "thinking", label: approach });
+      expect(assistant?.thinking).toBe(approach);
+      expect(assistant?.metadata?.reasoningVisibility).toBe("label");
+      expect(assistant?.activities).toHaveLength(0);
+      expect(JSON.stringify(assistant)).not.toContain(privateText);
+    });
+
+    it("closes the message-start activity as successful when its answer completes", () => {
+      const assistant = foldRun([], [
+        {
+          type: "progress",
+          run_id: "run-message-lifecycle",
+          seq: 1,
+          event_id: "message-started",
+          content: "a preparar resposta",
+          data: { kind: "message_started", runtime_type: "message_started", cycle: 1 },
+          timestamp: "t1",
+        },
+        {
+          type: "progress",
+          run_id: "run-message-lifecycle",
+          seq: 2,
+          event_id: "message-completed",
+          content: "resposta concluída",
+          data: { kind: "message_completed", runtime_type: "message_completed", cycles: 1 },
+          timestamp: "t2",
+        },
+        {
+          type: "done",
+          run_id: "run-message-lifecycle",
+          seq: 3,
+          event_id: "run-done",
+          timestamp: "t3",
+        },
+      ]).messages.find((message) => message.role === "assistant");
+
+      expect(assistant?.activities).toHaveLength(1);
+      expect(assistant?.activities?.[0]).toMatchObject({
+        id: "message-1",
+        status: "success",
+        detail: "resposta concluída",
+      });
+    });
+
+    it("shows full reasoning only when the persisted event marks explicit operator visibility", () => {
+      const events: StreamEvent[] = [
+        {
+          type: "thinking",
+          content: "Resumo autorizado.",
+          data: { visibility: "full" },
+          timestamp: "2026-01-01T00:00:00Z",
+        },
+      ];
+      const result = foldRun([], events, "");
+      const assistantMsg = result.messages.find((m) => m.role === "assistant");
+      expect(assistantMsg!.thinking).toBe("Resumo autorizado.");
+      expect(assistantMsg!.metadata?.reasoningVisibility).toBe("full");
     });
 
     it("processes tool_call and tool_result events", () => {
@@ -90,6 +209,40 @@ describe("lib/foldRun", () => {
       expect(assistantMsg!.toolCalls).toHaveLength(1);
       expect(assistantMsg!.toolCalls![0].name).toBe("bash");
       expect(assistantMsg!.toolCalls![0].status).toBe("success");
+      expect(assistantMsg!.steps?.find((step) => step.target === "bash")?.durationMs).toBe(1000);
+      // Replaying a completed run later must not make the tool seem slower.
+      const replayed = foldRun([], events, "").messages.find((message) => message.role === "assistant");
+      expect(replayed?.steps?.find((step) => step.target === "bash")?.durationMs).toBe(1000);
+    });
+
+    it("uses the failure event time to close a tool", () => {
+      const events: StreamEvent[] = [
+        { type: "tool_call", tool_name: "bash", timestamp: "2026-01-01T00:00:00Z" },
+        { type: "tool_error", tool_name: "bash", tool_error: "failed", timestamp: "2026-01-01T00:00:02Z" },
+      ];
+      const assistant = foldRun([], events, "").messages.find((message) => message.role === "assistant");
+      expect(assistant?.steps?.find((step) => step.target === "bash")?.durationMs).toBe(2000);
+    });
+
+    it("uses the replayed event time to close reasoning and status steps", () => {
+      const result = foldRun([], [
+        {
+          type: "thinking",
+          content: "Abordagem reportada.",
+          data: { visibility: "label" },
+          timestamp: "2026-01-01T00:00:00Z",
+        },
+        {
+          type: "progress",
+          content: "A explorar",
+          data: { event: "run_progress" },
+          timestamp: "2026-01-01T00:00:01Z",
+        },
+        { type: "done", timestamp: "2026-01-01T00:00:02Z" },
+      ], "");
+      const assistant = result.messages.find((message) => message.role === "assistant");
+      expect(assistant?.steps?.find((step) => step.verb === "thinking")?.durationMs).toBe(1000);
+      expect(assistant?.steps?.find((step) => step.verb === "status")?.durationMs).toBe(1000);
     });
 
     it("processes error events", () => {
@@ -540,7 +693,7 @@ describe("lib/foldRun", () => {
       timestamp: "t4",
     };
 
-    it("leaves no tool call spinning and does not repaint the cancellation as a failure", () => {
+    it("treats an old local cancellation marker as an unconfirmed request", () => {
       const assistant = foldRun([], [
         {
           type: "tool_call",
@@ -567,13 +720,14 @@ describe("lib/foldRun", () => {
       // face of the same lie.
       expect(assistant?.toolCalls?.some((call) => call.status === "running")).toBe(false);
       expect(assistant?.steps?.some((step) => step.status === "running")).toBe(false);
-      // The work was never cancelled by itself: the steps are cancelled, and
-      // the tool calls say why they are not a success.
+      // The runtime has not confirmed cancellation or the tool outcome.
       expect(assistant?.steps?.filter((step) => step.verb === "tool").map((step) => step.status)).toEqual([
-        "cancelled",
-        "cancelled",
+        "warning",
+        "warning",
       ]);
-      expect(assistant?.toolCalls?.[0].error).toContain("a pedido do utilizador");
+      expect(assistant?.toolCalls?.[0].status).toBe("unknown");
+      expect(assistant?.toolCalls?.[0].error).toContain("não foi confirmado");
+      expect(assistant?.steps?.some((step) => step.kind === "run_cancelled")).toBe(false);
       expect(assistant?.steps?.some((step) => step.kind === "run_interrupted")).toBe(false);
     });
 
@@ -595,8 +749,8 @@ describe("lib/foldRun", () => {
       expect(assistant?.activities?.filter((item) => item.status === "cancelled")).toHaveLength(1);
     });
 
-    it("recognises the cancellation frame of both producers", () => {
-      expect(isCancellationFrame(cancellation)).toBe(true);
+    it("only treats a server frame as a cancellation confirmation", () => {
+      expect(isCancellationFrame(cancellation)).toBe(false);
       expect(isCancellationFrame({ type: "progress", data: { kind: "run_cancelled" }, timestamp: "t" })).toBe(
         true,
       );

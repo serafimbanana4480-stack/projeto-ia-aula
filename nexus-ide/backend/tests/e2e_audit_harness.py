@@ -36,6 +36,7 @@ class ScriptedProvider:
     def __init__(self) -> None:
         self.prompts: list[list[dict[str, Any]]] = []
         self.models: list[str] = []
+        self.call_roles: list[str] = []
         self.script: list[str] = []
         self.responses_by_marker: dict[str, str] = {}
         self.calls = 0
@@ -45,6 +46,7 @@ class ScriptedProvider:
         self.script = list(answers)
         self.prompts.clear()
         self.models.clear()
+        self.call_roles.clear()
         self.responses_by_marker.clear()
         self.calls = 0
         self.finish_reason = finish_reason
@@ -62,6 +64,14 @@ class ScriptedProvider:
             messages = body.get("messages", [])
             self.prompts.append(messages)
             self.models.append(str(body.get("model") or ""))
+            system_text = "\n".join(
+                str(message.get("content") or "")
+                for message in messages
+                if message.get("role") == "system"
+            )
+            self.call_roles.append(
+                "advisor" if "You are the ADVISOR:" in system_text else "primary"
+            )
             index = min(self.calls, len(self.script) - 1) if self.script else 0
             answer = self.script[index] if self.script else "sem guião"
             if self.responses_by_marker:

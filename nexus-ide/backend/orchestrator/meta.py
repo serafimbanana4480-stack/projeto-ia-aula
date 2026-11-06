@@ -510,6 +510,7 @@ class MetaOrchestrator:
             mission.id,
             auto_approve=True,
             project_path=mission.metadata.get("project_path", "."),
+            user_id=str(mission.metadata.get("user_id") or ""),
         )
 
         # Update trackers with results

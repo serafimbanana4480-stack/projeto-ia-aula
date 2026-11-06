@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from backend.core.workspace import WorkspaceManager
+from backend.tools.interpreters import run_python_code
 from backend.tools.registry import ToolSpec, register_tool
 
 
@@ -75,14 +76,25 @@ async def run_python_script(
     project_path: str = ".",
     timeout: int = 30,
 ) -> dict:
-    """Run a Python script string in the project directory."""
+    """Run a Python script string in the project directory.
+
+    The script runs in a child interpreter whose environment is scrubbed:
+    model-supplied code never inherits the server process environment, which
+    holds provider API keys and signing secrets.
+    """
     manager = WorkspaceManager(project_path)
     effective_timeout = max(
         1,
         min(int(timeout), int(float(os.environ.get("NEXUS_SUBPROCESS_TIMEOUT", "300")))),
     )
     started = time.monotonic()
-    result = await manager.execute_python(code, cwd=project_path, timeout=effective_timeout)
+    workdir = str(manager.project_path)
+    result = await run_python_code(
+        code,
+        cwd=workdir,
+        timeout=effective_timeout,
+        project_root=workdir,
+    )
     return _typed_process_result(result, "python -c <script>", started)
 
 
@@ -94,6 +106,14 @@ register_tool(
             "Allowed commands include: python, pip, npm, node, git, cargo, go, make, "
             "gcc, clang, find, grep, awk, sed, tar, rsync, and many more. "
             "Dangerous commands (rm -rf /, dd, mkfs, format, shutdown, etc.) are blocked."
+            + (
+                " WINDOWS: commands run in cmd.exe, NOT bash/PowerShell - grep, ls, cat, "
+                "head, find -name and Get-ChildItem do not exist. Use: dir /s /b, type FILE, "
+                "findstr /s /n /i \"text\" *.py, where, python -m pytest -q. Prefer read_file, "
+                "list_dir and search_codebase for reading/searching files."
+                if os.name == "nt"
+                else ""
+            )
         ),
         schema={
             "type": "object",

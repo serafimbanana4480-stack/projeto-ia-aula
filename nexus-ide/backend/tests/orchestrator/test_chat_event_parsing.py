@@ -39,7 +39,7 @@ def test_text_after_tool_event_is_not_dropped() -> None:
     assert events[1].content == "Resposta final."
 
 
-def test_thinking_is_emitted_before_the_provider_closes_the_block() -> None:
+def test_default_thinking_is_a_safe_progress_label_before_the_block_closes() -> None:
     parser = _IncrementalResponseParser("ARCHITECT")
 
     first = parser.feed("<think>Estou a comparar")
@@ -49,7 +49,7 @@ def test_thinking_is_emitted_before_the_provider_closes_the_block() -> None:
     thinking = [event.content for event in first + second if event.type == "thinking"]
     visible = [event.content for event in first + second if event.type == "token"]
 
-    assert thinking == ["Estou a comparar", " duas abordagens antes de decidir"]
+    assert thinking == ["a definir a abordagem"]
     assert "Resposta" in "".join(visible)
 
 
@@ -60,8 +60,31 @@ def test_thinking_tags_split_across_provider_chunks_are_not_leaked() -> None:
     events.extend(parser.feed("k>Plano curto</think>feito"))
     events.extend(parser.flush())
 
-    assert "".join(event.content or "" for event in events if event.type == "thinking") == "Plano curto"
+    assert "".join(event.content or "" for event in events if event.type == "thinking") == (
+        "a definir a abordagem"
+    )
     assert "".join(event.content or "" for event in events if event.type == "token") == "feito"
+
+
+def test_full_reasoning_requires_operator_opt_in(monkeypatch) -> None:
+    monkeypatch.setenv("NEXUS_REASONING_VISIBILITY", "full")
+    parser = _IncrementalResponseParser("CODER")
+
+    events = parser.feed("<think>Resumo autorizado pelo operador.</think>Resposta")
+
+    thinking = [event for event in events if event.type == "thinking"]
+    assert [event.content for event in thinking] == ["Resumo autorizado pelo operador."]
+    assert thinking[0].data == {"visibility": "full"}
+
+
+def test_reasoning_visibility_off_emits_no_legacy_thinking(monkeypatch) -> None:
+    monkeypatch.setenv("NEXUS_REASONING_VISIBILITY", "off")
+    parser = _IncrementalResponseParser("CODER")
+
+    events = parser.feed("<think>segredo</think>Resposta")
+
+    assert not [event for event in events if event.type == "thinking"]
+    assert "Resposta" in "".join(event.content or "" for event in events if event.type == "token")
 
 
 def test_native_tool_markup_is_not_rendered_as_chat_text() -> None:

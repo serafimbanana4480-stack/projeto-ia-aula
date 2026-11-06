@@ -4,9 +4,15 @@ import { useMemoryStore } from "../../stores/useMemoryStore";
 
 const mockFetch = vi.fn();
 
-vi.mock("../../lib/api", () => ({
-  apiUrl: (path: string) => `/api${path}`,
-}));
+// A partial mock: `apiUrl` is stubbed, but `ApiError` stays real because
+// `authenticatedFetch` (which the store now uses) imports it from here.
+vi.mock("../../lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/api")>();
+  return {
+    ...actual,
+    apiUrl: (path: string) => `/api${path}`,
+  };
+});
 
 describe("useMemoryStore", () => {
   beforeEach(() => {
@@ -287,7 +293,10 @@ describe("useMemoryStore", () => {
     });
 
     expect(useMemoryStore.getState().isLoading).toBe(false);
-    expect(useMemoryStore.getState().error).toBe("Network error");
+    // `authenticatedFetch` normalises a transport failure into a message the
+    // user can act on ("Failed to connect to the server") instead of echoing
+    // the raw exception text.
+    expect(useMemoryStore.getState().error).toBe("Failed to connect to the server");
   });
 
   it("keeps the last statistics and reports the refresh failure", async () => {
@@ -309,7 +318,7 @@ describe("useMemoryStore", () => {
     expect(state.vectorDbSize).toBe(17);
     expect(state.totalRetrievals).toBe(21);
     expect(state.avgRelevance).toBe(0.8);
-    expect(state.error).toBe("Network error");
+    expect(state.error).toBe("Failed to connect to the server");
     expect(state.hasCurrentStats).toBe(false);
     expect(state.statsStale).toBe(true);
   });

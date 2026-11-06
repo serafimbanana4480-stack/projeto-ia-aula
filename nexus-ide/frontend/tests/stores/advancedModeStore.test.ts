@@ -7,6 +7,7 @@ describe("advancedModeStore slash commands", () => {
     useAdvancedModeStore.setState({
       commands: {},
       commandsLoading: false,
+      commandsLoaded: false,
       commandsError: null,
       modes: {}, groups: {}, activeModeIds: [], health: null, executionProfile: null,
       loading: false, error: null, actionError: null, pendingModeIds: [], lastSyncedAt: null,
@@ -72,6 +73,50 @@ describe("advancedModeStore slash commands", () => {
     await useAdvancedModeStore.getState().loadCommands();
 
     expect(Object.keys(useAdvancedModeStore.getState().commands)).toEqual(["valid"]);
+  });
+
+  it("does not refetch a catalogue it already has", async () => {
+    // The chat mounts several effects that all ask for the same catalogue.
+    // Refetching it on each of them was five identical requests per page
+    // load; the guard keeps the first result and only re-reads on a forced
+    // refresh.
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ commands: { forge: { aliases: ["/forge"], description: "d", mode: "forge" } } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await useAdvancedModeStore.getState().loadCommands();
+    await useAdvancedModeStore.getState().loadCommands();
+    await useAdvancedModeStore.getState().loadCommands();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await useAdvancedModeStore.getState().loadCommands(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries after a failure instead of caching the error", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ commands: { forge: { aliases: ["/forge"], description: "d", mode: "forge" } } }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await useAdvancedModeStore.getState().loadCommands();
+    expect(useAdvancedModeStore.getState().commandsError).toContain("HTTP 500");
+
+    await useAdvancedModeStore.getState().loadCommands();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(useAdvancedModeStore.getState().commandsError).toBeNull();
+    expect(useAdvancedModeStore.getState().commands.forge).toBeDefined();
   });
 
   const health = (active: boolean) => ({

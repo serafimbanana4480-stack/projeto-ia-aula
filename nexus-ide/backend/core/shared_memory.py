@@ -39,6 +39,7 @@ class WhiteboardEntry(BaseModel):
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     tags: list[str] = Field(default_factory=list)
     related_entries: list[str] = Field(default_factory=list)
+    user_id: str = Field(default="", max_length=128, exclude=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -55,6 +56,7 @@ def _init_whiteboard_db() -> None:
                 entry_id         TEXT PRIMARY KEY,
                 topic            TEXT NOT NULL,
                 author_agent     TEXT NOT NULL,
+                user_id          TEXT NOT NULL DEFAULT '',
                 content          TEXT NOT NULL,
                 timestamp        TEXT NOT NULL,
                 importance       REAL NOT NULL DEFAULT 0.5
@@ -81,6 +83,19 @@ def _init_whiteboard_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_wb_author ON whiteboard_entries(author_agent)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_wb_timestamp ON whiteboard_entries(timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_wb_archived ON whiteboard_entries(archived)")
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(whiteboard_entries)").fetchall()
+        }
+        if "user_id" not in columns:
+            # Existing whiteboard rows remain ownerless. Authenticated users
+            # must not inherit them because the old table mixed every session.
+            conn.execute(
+                "ALTER TABLE whiteboard_entries ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wb_user_timestamp "
+            "ON whiteboard_entries(user_id, timestamp)"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_wb_links_1 ON whiteboard_entry_links(entry_id_1)"
         )
@@ -137,6 +152,7 @@ class SharedMemory:
         importance: float = 0.5,
         tags: list[str] | None = None,
         related_entries: list[str] | None = None,
+        user_id: str | None = None,
     ) -> WhiteboardEntry:
         """Write a new entry to the whiteboard."""
         await self._ensure_init()
@@ -147,6 +163,7 @@ class SharedMemory:
             importance=importance,
             tags=tags or [],
             related_entries=related_entries or [],
+            user_id=str(user_id or "").strip(),
         )
         await asyncio.to_thread(self._insert_entry, entry)
         logger.info(
@@ -162,14 +179,15 @@ class SharedMemory:
             conn.execute(
                 """
                 INSERT INTO whiteboard_entries
-                (entry_id, topic, author_agent, content, timestamp,
+                (entry_id, topic, author_agent, user_id, content, timestamp,
                  importance, tags, related_entries, archived)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.entry_id,
                     entry.topic,
                     entry.author_agent,
+                    entry.user_id,
                     entry.content,
                     entry.timestamp.isoformat(),
                     entry.importance,
@@ -186,10 +204,11 @@ class SharedMemory:
         tags: list[str] | None = None,
         limit: int = 50,
         since: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[WhiteboardEntry]:
         """Read whiteboard entries with optional filtering."""
         await self._ensure_init()
-        rows = await asyncio.to_thread(self._fetch_entries, topic, agent, since, limit)
+        rows = await asyncio.to_thread(self._fetch_entries, topic, agent, since, limit, user_id)
 
         results: list[WhiteboardEntry] = []
         for row in rows:
@@ -205,9 +224,14 @@ class SharedMemory:
         agent: str | None,
         since: datetime | None,
         limit: int,
+        user_id: str | None = None,
     ) -> list[sqlite3.Row]:
         conditions = ["archived = 0"]
         params: list[Any] = []
+
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            params.append(user_id)
 
         if topic:
             conditions.append("topic = ?")
@@ -232,10 +256,12 @@ class SharedMemory:
                 (*params, limit),
             ).fetchall()
 
-    async def search_entries(self, query: str, limit: int = 20) -> list[WhiteboardEntry]:
+    async def search_entries(
+        self, query: str, limit: int = 20, *, user_id: str | None = None
+    ) -> list[WhiteboardEntry]:
         """Full-text search across topics, authors, content and tags."""
         await self._ensure_init()
-        rows = await asyncio.to_thread(self._fetch_all_active_entries)
+        rows = await asyncio.to_thread(self._fetch_all_active_entries, user_id)
 
         query_lower = query.lower()
         scored: list[tuple[float, WhiteboardEntry]] = []
@@ -257,14 +283,20 @@ class SharedMemory:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [e for _, e in scored[:limit]]
 
-    def _fetch_all_active_entries(self) -> list[sqlite3.Row]:
+    def _fetch_all_active_entries(self, user_id: str | None = None) -> list[sqlite3.Row]:
         with get_db() as conn:
+            where_clause = "archived = 0"
+            params: tuple[str, ...] = ()
+            if user_id is not None:
+                where_clause += " AND user_id = ?"
+                params = (user_id,)
             return conn.execute(
-                """
+                f"""
                 SELECT * FROM whiteboard_entries
-                WHERE archived = 0
+                WHERE {where_clause}
                 ORDER BY timestamp DESC
                 """,
+                params,
             ).fetchall()
 
     async def link_entries(
@@ -301,10 +333,12 @@ class SharedMemory:
                 return False
         return True
 
-    async def get_thread(self, entry_id: str) -> list[WhiteboardEntry]:
+    async def get_thread(
+        self, entry_id: str, *, user_id: str | None = None
+    ) -> list[WhiteboardEntry]:
         """Return an entry and all related entries recursively."""
         await self._ensure_init()
-        entry = await asyncio.to_thread(self._get_entry_by_id_sync, entry_id)
+        entry = await asyncio.to_thread(self._get_entry_by_id_sync, entry_id, user_id)
         if entry is None:
             return []
 
@@ -318,7 +352,7 @@ class SharedMemory:
                 continue
             visited.add(current_id)
 
-            current = await asyncio.to_thread(self._get_entry_by_id_sync, current_id)
+            current = await asyncio.to_thread(self._get_entry_by_id_sync, current_id, user_id)
             if current is None:
                 continue
             results.append(current)
@@ -385,16 +419,21 @@ class SharedMemory:
             importance=row["importance"],
             tags=json.loads(row["tags"]) if row["tags"] else [],
             related_entries=json.loads(row["related_entries"]) if row["related_entries"] else [],
+            user_id=str(row["user_id"] or ""),
         )
 
-    def _get_entry_by_id_sync(self, entry_id: str) -> WhiteboardEntry | None:
+    def _get_entry_by_id_sync(
+        self, entry_id: str, user_id: str | None = None
+    ) -> WhiteboardEntry | None:
         with get_db() as conn:
+            user_clause = " AND user_id = ?" if user_id is not None else ""
+            params: tuple[str, ...] = (entry_id, user_id) if user_id is not None else (entry_id,)
             row = conn.execute(
-                """
+                f"""
                 SELECT * FROM whiteboard_entries
-                WHERE entry_id = ? AND archived = 0
+                WHERE entry_id = ? AND archived = 0{user_clause}
                 """,
-                (entry_id,),
+                params,
             ).fetchone()
             if row:
                 return self._row_to_entry(row)

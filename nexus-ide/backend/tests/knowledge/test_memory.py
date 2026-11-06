@@ -142,6 +142,61 @@ class TestMemoryStore:
         assert all(r[0].session_id == "s1" for r in results)
 
     @pytest.mark.asyncio
+    async def test_long_term_recall_crosses_sessions_without_crossing_projects_or_users(
+        self, store: MemoryStore
+    ) -> None:
+        project_memory = await store.store(
+            "Project alpha durable authentication decision",
+            user_id="alice",
+            memory_type=MemoryType.CONVERSATION,
+            session_id="old-session",
+            project_id="project-alpha",
+        )
+        session_memory = await store.store(
+            "Project alpha temporary tool result",
+            user_id="alice",
+            memory_type=MemoryType.SESSION,
+            session_id="old-session",
+            project_id="project-alpha",
+        )
+        other_project = await store.store(
+            "Project beta unrelated deployment decision",
+            user_id="alice",
+            memory_type=MemoryType.CONVERSATION,
+            session_id="another-session",
+            project_id="project-beta",
+        )
+        other_user = await store.store(
+            "Project alpha private account preference",
+            user_id="bob",
+            memory_type=MemoryType.CONVERSATION,
+            session_id="old-session",
+            project_id="project-alpha",
+        )
+
+        results = await store.search(
+            "project alpha durable authentication decision",
+            user_id="alice",
+            session_id="new-session",
+            project_id="project-alpha",
+            top_k=20,
+            min_similarity=0.0,
+        )
+        assert {memory.memory_id for memory, _score in results} == {project_memory.memory_id}
+        assert session_memory.memory_id not in {memory.memory_id for memory, _score in results}
+        assert other_project.memory_id not in {memory.memory_id for memory, _score in results}
+        assert other_user.memory_id not in {memory.memory_id for memory, _score in results}
+
+        context = await store.get_context(
+            "project alpha durable authentication decision",
+            user_id="alice",
+            session_id="new-session",
+            project_id="project-alpha",
+        )
+        assert project_memory.content in context
+        assert "Project beta" not in context
+
+    @pytest.mark.asyncio
     async def test_search_with_type_filter(self, store: MemoryStore) -> None:
         await store.store("Global knowledge", memory_type=MemoryType.GLOBAL)
         await store.store("Session note", memory_type=MemoryType.SESSION, session_id="s1")

@@ -27,6 +27,28 @@ import type {
   StreamEvent,
   ToolCallItem,
 } from "./types";
+
+const SAFE_THINKING_LABEL = "A analisar a tarefa…";
+
+/** The runtime already bounded this text. `label` is the public approach;
+ * `full` is the operator opt-in. Anything else is historical private text. */
+function publishedReasoning(data: Record<string, unknown> | undefined): "full" | "label" | null {
+  const visibility = data?.visibility;
+  return visibility === "full" || visibility === "label" ? visibility : null;
+}
+
+/** Old journals put model-authored reasoning in STATUS_UPDATE.label as well as
+ * in the THINKING frame. Treat the waiting-model status as reasoning when
+ * rebuilding history, so older runs receive the same privacy boundary. */
+function isReasoningStatusUpdate(event: StreamEvent): boolean {
+  const data = event.data ?? {};
+  return (
+    event.type === "progress" &&
+    (data.kind === "status_update" || data.runtime_type === "status_update") &&
+    data.phase === "act" &&
+    data.blocked_on === "waiting_model"
+  );
+}
 import {
   activityFromProgress,
   activityFromMissionEvent,
@@ -174,6 +196,16 @@ function displayPhase(phase: string): string {
 /** Build a single timeline step from an SSE frame. */
 function stepOf(event: StreamEvent): RunStep {
   const data = event.data ?? {};
+  const published = publishedReasoning(data);
+  const suppressReasoning =
+    (event.type === "thinking" && published === null) ||
+    (isReasoningStatusUpdate(event) && published === null);
+  const visibleData = suppressReasoning
+    ? { ...data, label: SAFE_THINKING_LABEL, text: SAFE_THINKING_LABEL }
+    : data;
+  const visibleEvent = suppressReasoning
+    ? { ...event, content: SAFE_THINKING_LABEL, data: visibleData }
+    : event;
   const kind =
     (typeof data.kind === "string" && data.kind) ||
     (typeof data.runtime_type === "string" && data.runtime_type) ||
@@ -182,13 +214,19 @@ function stepOf(event: StreamEvent): RunStep {
     (typeof data.label === "string" && data.label) ||
     (typeof event.content === "string" && event.content) ||
     "";
+  const publishedText =
+    published && typeof event.content === "string" ? event.content.trim() : "";
+  const visibleLabel = suppressReasoning ? SAFE_THINKING_LABEL : publishedText || label;
   const target =
-    (typeof data.target === "string" && data.target) ||
-    event.tool_name ||
-    (typeof event.agent === "string" ? event.agent : "") ||
-    "";
+    event.type === "agent_started" || event.type === "agent_finished"
+      ? agentActor(event)
+      : (typeof data.target === "string" && data.target) ||
+        event.tool_name ||
+        (typeof event.agent === "string" ? event.agent : "") ||
+        "";
 
   let verb: RunStep["verb"] = verbFor(event.type);
+  if (isReasoningStatusUpdate(event)) verb = "thinking";
   if (kind.startsWith("file_")) verb = "file";
   else if (kind.startsWith("command_")) verb = "command";
   else if (kind.startsWith("test")) verb = "test";
@@ -204,7 +242,7 @@ function stepOf(event: StreamEvent): RunStep {
     status: "a avançar",
     message: "a pensar",
   };
-  let stepLabel = label;
+  let stepLabel = visibleLabel;
   if (!stepLabel && verb === "status") {
     stepLabel = typeof event.content === "string" ? event.content : "";
   }
@@ -228,8 +266,8 @@ function stepOf(event: StreamEvent): RunStep {
     // unparseable timestamp must not produce NaN, which would poison every
     // duration computed from it.
     startedAt: eventTimestamp(event),
-    detail: data,
-    event,
+    detail: visibleData,
+    event: visibleEvent,
   };
 }
 
@@ -260,13 +298,21 @@ function closeStep(
   detail?: unknown,
   resultSeq?: number,
   closedAt?: number,
+  event?: StreamEvent,
 ): void {
+  const callId = typeof event?.data?.call_id === "string" ? event.data.call_id : "";
+  const workerTaskId = event?.agent && !["NEXUS", "ORCHESTRATOR"].includes(event.agent)
+    ? event.task_id : undefined;
   for (let i = steps.length - 1; i >= 0; i -= 1) {
     const step = steps[i];
+    const stepCallId = step.event?.data?.call_id;
     if (
       step.verb === "tool" &&
       (step.status === "running" || step.status === "awaiting_confirmation") &&
-      step.target === target
+      step.target === target &&
+      (!callId || stepCallId === callId) &&
+      (!callId || !event?.task_id || step.taskId === event.task_id) &&
+      (!workerTaskId || step.taskId === workerTaskId)
     ) {
       sealStep(step, status, closedAt ?? Date.now());
       if (detail !== undefined) {
@@ -305,15 +351,17 @@ function closeAgentStep(
 ): boolean {
   const data = event.data ?? {};
   const target = String(data.target || data.name || event.agent || message.agent || "");
+  const taskId = String(event.task_id || data.task_id || "");
   const steps = message.steps ?? [];
   for (let i = steps.length - 1; i >= 0; i -= 1) {
     const step = steps[i];
     if (
       step.verb === "agent" &&
       step.status === "running" &&
+      (!taskId || !step.taskId || step.taskId === taskId) &&
       (!target || !step.target || step.target === target)
     ) {
-      step.status = status;
+      sealStep(step, status, eventTimestamp(event));
       step.label =
         status === "success"
           ? `${target || "Agente"} concluiu`
@@ -334,12 +382,21 @@ function closeAgentStep(
 
 function findRunningTool(
   calls: ToolCallItem[],
-  name?: string,
+  event: StreamEvent,
 ): number {
   if (!calls) return -1;
+  const callId = typeof event.data?.call_id === "string" ? event.data.call_id : "";
+  const workerTaskId = event.agent && !["NEXUS", "ORCHESTRATOR"].includes(event.agent)
+    ? event.task_id : undefined;
   for (let i = calls.length - 1; i >= 0; i -= 1) {
-    if (calls[i].status !== "running") continue;
-    if (!name || calls[i].name === name) return i;
+    const call = calls[i];
+    if (call.status !== "running" && call.status !== "awaiting_confirmation") continue;
+    if (event.tool_name && call.name !== event.tool_name) continue;
+    if (callId && call.callId !== callId) continue;
+    if (callId && event.task_id && call.taskId !== event.task_id) continue;
+    if (workerTaskId && call.taskId !== workerTaskId) continue;
+    if (!callId && event.agent && call.agent && call.agent !== event.agent) continue;
+    return i;
   }
   return -1;
 }
@@ -430,8 +487,8 @@ export function isFailingActivityStatus(status: ActivityItem["status"] | undefin
  */
 export function isCancellationFrame(event: StreamEvent): boolean {
   const data = event.data ?? {};
-  return String(data.kind ?? "") === "run_cancelled" ||
-    String(data.runtime_type ?? "") === "run_cancelled";
+  return data.local !== true && (String(data.kind ?? "") === "run_cancelled" ||
+    String(data.runtime_type ?? "") === "run_cancelled");
 }
 
 function foldSingleRun(
@@ -443,6 +500,23 @@ function foldSingleRun(
   const buffer = new RunEventBuffer();
   for (const e of events) buffer.push(e as unknown as RuntimeEventLike);
   const ordered = buffer.events() as unknown as StreamEvent[];
+  const cancellationConfirmed = ordered.some(isCancellationFrame);
+  const thinkingSequences = new Set(
+    ordered
+      .filter((event) => event.type === "thinking")
+      .map(seqOf)
+      .filter((seq) => Number.isSafeInteger(seq) && seq > 0),
+  );
+
+  // Frames authored by a subagent belong to that subagent's own conversation
+  // (rendered by AgentTranscript), never to the parent's answer text.
+  const subagentTaskIds = new Set(
+    ordered
+      .filter((event) => event.type === "agent_started" && event.data?.kind === "subagent_started" && event.task_id)
+      .map((event) => event.task_id as string),
+  );
+  const isChildFrame = (event: StreamEvent) =>
+    event.data?.subagent === true || Boolean(event.task_id && subagentTaskIds.has(event.task_id));
 
   const out: ChatMessage[] = [...pendingUser];
   let current: ChatMessage | null = null;
@@ -495,9 +569,19 @@ function foldSingleRun(
   };
 
   for (const e of ordered) {
+    // Newer journals emit a waiting-model status immediately before its
+    // matching thinking frame. The thinking frame already carries the visible
+    // activity; keeping both made one analysis phase look like two updates.
+    const seq = seqOf(e);
+    if (isReasoningStatusUpdate(e) && seq > 0 && thinkingSequences.has(seq + 1)) continue;
+
     switch (e.type) {
       case "agent_started": {
-        currentAgent = (e.agent ?? "CODER") as AgentName;
+        // A child start is an activity in the parent run, not a change of
+        // author for the next parent answer.
+        if (e.data?.kind !== "subagent_started") {
+          currentAgent = (e.agent ?? "CODER") as AgentName;
+        }
         const message = ensureCurrent(e);
         if (!message.agent || message.agent === "CODER") message.agent = currentAgent;
         upsertActivity(agentActivity(e, out.length, "running"));
@@ -508,15 +592,23 @@ function foldSingleRun(
         if (e.content && e.content.startsWith("<event>thinking|iteration:")) {
           break;
         }
+        if (isChildFrame(e)) {
+          ensureCurrent(e);
+          break;
+        }
         // The first answer token ends the reasoning block.
         if (openThinkingStep) {
-          sealStep(openThinkingStep, "success", Date.now());
+          sealStep(openThinkingStep, "success", eventTimestamp(e));
           openThinkingStep = null;
         }
         ensureCurrent(e).content += e.content ?? "";
         break;
       }
       case "thinking": {
+        if (isChildFrame(e)) {
+          ensureCurrent(e);
+          break;
+        }
         const iterMatch = (e.content ?? "").match(/thinking\|iteration:(\d+)/);
         if (iterMatch) {
           const iteration = parseInt(iterMatch[1], 10);
@@ -533,13 +625,31 @@ function foldSingleRun(
         const message = ensureCurrent(e);
         const content = e.content ?? "";
         if (!content) break;
-        const separator = message.thinking ? "\n" : "";
-        message.thinking = (message.thinking ?? "") + separator + content;
+        const published = publishedReasoning(e.data);
+        if (published === "full") {
+          const separator = message.thinking ? "\n" : "";
+          message.thinking = (message.thinking ?? "") + separator + content;
+        } else if (published === "label") {
+          // One public line, already capped by the runtime. The latest frame wins.
+          message.thinking = content.trim();
+        } else {
+          // Older journals stored the private transcript with no visibility flag.
+          message.thinking = SAFE_THINKING_LABEL;
+        }
+        if (published) {
+          message.metadata = {
+            ...(message.metadata ?? {}),
+            reasoningVisibility: published,
+          };
+        }
+        const thoughtLabel = published ? content.trim() : SAFE_THINKING_LABEL;
         if (openThinkingStep && openThinkingStep.status === "running") {
           // Same block: one row, updated in place.
+          const visibleStep = stepOf(e);
           openThinkingStep.repeatCount = (openThinkingStep.repeatCount ?? 0) + 1;
-          openThinkingStep.event = e;
-          if (e.data?.label) openThinkingStep.label = String(e.data.label);
+          openThinkingStep.event = visibleStep.event;
+          openThinkingStep.detail = visibleStep.detail;
+          openThinkingStep.label = thoughtLabel;
         } else {
           const step = stepOf(e);
           step.repeatCount = 1;
@@ -554,6 +664,9 @@ function foldSingleRun(
         current.toolCalls.push({
           id: `tc-${current.toolCalls.length}-${e.timestamp}`,
           name: e.tool_name || "tool",
+          agent: e.agent,
+          taskId: e.task_id || undefined,
+          callId: typeof e.data?.call_id === "string" && e.data.call_id ? e.data.call_id : undefined,
           args: e.tool_args || {},
           status: "running",
           timestamp: e.timestamp,
@@ -567,7 +680,7 @@ function foldSingleRun(
         // so the row, the step and the header cannot disagree.
         const failed = toolResultReportsFailure(e.tool_result);
         const status: StepStatus = failed ? "error" : "success";
-        const idx = findRunningTool(current?.toolCalls || [], e.tool_name);
+        const idx = findRunningTool(current?.toolCalls || [], e);
         if (idx >= 0 && current) {
           current.toolCalls![idx].status = status;
           if (failed) {
@@ -576,6 +689,10 @@ function foldSingleRun(
           current.toolCalls![idx].result = e.tool_result;
           const duration = e.data?.duration_ms;
           if (typeof duration === "number") current.toolCalls![idx].durationMs = duration;
+          else {
+            const started = Date.parse(current.toolCalls![idx].timestamp);
+            if (Number.isFinite(started)) current.toolCalls![idx].durationMs = Math.max(0, eventTimestamp(e) - started);
+          }
         }
         closeStep(
           current?.steps || [],
@@ -583,14 +700,18 @@ function foldSingleRun(
           status,
           e.tool_result,
           seqOf(e),
+          eventTimestamp(e),
+          e,
         );
         break;
       }
       case "tool_error": {
-        const idx = findRunningTool(current?.toolCalls || [], e.tool_name);
+        const idx = findRunningTool(current?.toolCalls || [], e);
         if (idx >= 0 && current) {
           current.toolCalls![idx].status = "error";
           current.toolCalls![idx].error = e.tool_error;
+          const started = Date.parse(current.toolCalls![idx].timestamp);
+          if (Number.isFinite(started)) current.toolCalls![idx].durationMs = Math.max(0, eventTimestamp(e) - started);
         }
         closeStep(
           current?.steps || [],
@@ -598,11 +719,13 @@ function foldSingleRun(
           "error",
           e.tool_error,
           seqOf(e),
+          eventTimestamp(e),
+          e,
         );
         break;
       }
       case "tool_confirmation": {
-        const idx = findRunningTool(current?.toolCalls || [], e.tool_name);
+        const idx = findRunningTool(current?.toolCalls || [], e);
         if (idx >= 0 && current) {
           const confirmation = e.data ?? {};
           current.toolCalls![idx].status = "awaiting_confirmation";
@@ -618,7 +741,12 @@ function foldSingleRun(
         // for the user. Keep them in the ordered stream without adding a row
         // to the visible run timeline.
         if (e.data?.kind === "heartbeat") break;
-        if (isCancellationFrame(e)) {
+        const localStop = e.data?.kind === "cancel_requested" ||
+          (e.data?.local === true && e.data?.kind === "run_cancelled");
+        if (localStop && cancellationConfirmed) break;
+        if (localStop) {
+          closeDanglingWork(current, "Paragem pedida; o estado desta ação não foi confirmado.", "warning", eventTimestamp(e));
+        } else if (isCancellationFrame(e)) {
           // A cancellation is ONE fact about the run. `useAgentStream` records
           // the user's request locally the instant the button is pressed — the
           // reader is aborted before the server's `run_cancelled` frame can
@@ -629,9 +757,20 @@ function foldSingleRun(
           // call still in flight stayed "running" forever, spinning, because
           // `done`/`error` never arrive on a cancelled stream. Cancelled work
           // is closed as CANCELLED, never as a failure.
-          closeDanglingWork(current, USER_CANCELLATION_REASON, "cancelled");
+          closeDanglingWork(current, USER_CANCELLATION_REASON, "cancelled", eventTimestamp(e));
         }
-        const activity = activityFromProgress(e, out.length);
+        const reasoningStatus = isReasoningStatusUpdate(e);
+        const visibleEvent = localStop
+          ? { ...e, content: "Paragem pedida. O estado final ainda não foi confirmado pelo servidor.",
+              data: { ...(e.data ?? {}), kind: "cancel_requested", runtime_type: "cancel_requested", status: "warning" } }
+          : reasoningStatus
+          ? {
+              ...e,
+              content: SAFE_THINKING_LABEL,
+              data: { ...(e.data ?? {}), label: SAFE_THINKING_LABEL },
+            }
+          : e;
+        const activity = activityFromProgress(visibleEvent, out.length);
         const progressMessage = ensureCurrent(e);
         if (e.run_id && !progressMessage.runId) progressMessage.runId = e.run_id;
         upsertActivity(activity);
@@ -645,7 +784,7 @@ function foldSingleRun(
             ...(e.data.telemetry as Record<string, unknown>),
           };
         }
-        const step = stepOf(e);
+        const step = stepOf(visibleEvent);
         step.status = activity.status;
         current?.steps?.push(step);
         break;
@@ -719,7 +858,7 @@ function foldSingleRun(
           const ran = e.data?.ran !== false;
           const passed = e.data?.ok === true;
           const status: StepStatus = !ran ? "pending" : passed ? "success" : "error";
-          closeStepByVerb(current.steps ?? [], "test", status, e.data, seqOf(e));
+          closeStepByVerb(current.steps ?? [], "test", status, e.data, seqOf(e), eventTimestamp(e));
           const verification = [...(current.activities ?? [])]
             .reverse()
             .find((item) => item.kind === "verification" && item.status === "running");
@@ -747,6 +886,8 @@ function foldSingleRun(
         closeDanglingWork(
           current,
           e.content || "A execução terminou antes de receber o resultado desta ação.",
+          "error",
+          eventTimestamp(e),
         );
         // An interrupted run is neither a failure nor a cancellation, and the
         // error bubble below says so — but the bubble is a DIFFERENT message
@@ -821,6 +962,8 @@ function foldSingleRun(
         closeDanglingWork(
           current,
           "A execução terminou antes de chegar o resultado desta ferramenta.",
+          "error",
+          eventTimestamp(e),
         );
         current = null;
         break;
@@ -841,10 +984,14 @@ function foldSingleRun(
       default:
         break;
     }
-    // Anything other than a reasoning frame ends the current reasoning block.
-    // The step itself is sealed by the case that consumed the transition
-    // (token, a new iteration, done) or by closeDanglingWork below.
-    if (e.type !== "thinking") openThinkingStep = null;
+    // The first later event closes this block. Use its own time so replaying a
+    // completed run later cannot turn a short thought into minutes of work.
+    if (e.type !== "thinking" && openThinkingStep) {
+      if (openThinkingStep.status === "running") {
+        sealStep(openThinkingStep, "success", eventTimestamp(e));
+      }
+      openThinkingStep = null;
+    }
   }
 
   // Post-process: strip transport syntax from the rendered answer.
@@ -857,6 +1004,21 @@ function foldSingleRun(
     if (m.content) {
       m.content = sanitizeAssistantContent(stripAnsiCodes(m.content));
     }
+  }
+
+  // The chronological transcript is rendered from the ordered frames, so the
+  // run's main assistant message carries them (live and after a replay).
+  const timelineHolder = out.find(
+    (message) => message.role === "assistant" && message.metadata?.kind !== "error",
+  );
+  // Only frames the transcript may show are kept: label-mode reasoning and the
+  // waiting-model status that pairs with it never ride along on the message.
+  if (timelineHolder) {
+    timelineHolder.events = ordered.filter((event) => {
+      if (event.type === "thinking") return event.data?.visibility === "full";
+      if (event.type === "progress" && event.data?.blocked_on === "waiting_model") return false;
+      return true;
+    });
   }
 
   // Capture the live footer on the last assistant message.
@@ -888,16 +1050,16 @@ function foldSingleRun(
 function closeDanglingWork(
   message: ChatMessage | null,
   reason: string,
-  outcome: "error" | "cancelled" = "error",
+  outcome: "error" | "cancelled" | "warning" = "error",
+  closedAt = Date.now(),
 ): void {
   if (!message) return;
-  const cancelled = outcome === "cancelled";
   for (const call of message.toolCalls ?? []) {
     if (call.status === "running") {
       // `ToolCallItem` has no `cancelled` state, and one must not be invented:
       // a tool call that never reported a result is NOT a success, so it can
       // only be `error` — with a `reason` that says it was the cancellation.
-      call.status = "error";
+      call.status = outcome === "warning" ? "unknown" : "error";
       call.error = reason;
     }
   }
@@ -908,11 +1070,11 @@ function closeDanglingWork(
     // thinking. Marking it as an error painted a red X on every successful run
     // that reasoned first. Real work — tools, tests, files, commands — still
     // becomes an error so the user can see what never reported back.
-    if (!cancelled && (step.verb === "thinking" || step.verb === "status" || step.verb === "message")) {
-      sealStep(step, "success", Date.now());
+    if (outcome === "error" && (step.verb === "thinking" || step.verb === "status" || step.verb === "message")) {
+      sealStep(step, "success", closedAt);
       continue;
     }
-    sealStep(step, outcome, Date.now());
+    sealStep(step, outcome, closedAt);
     step.detail = step.detail ?? reason;
   }
   for (const activity of message.activities ?? []) {

@@ -18,6 +18,7 @@ from backend.llm.airllm_provider import (
 )
 from backend.llm.dev_provider import DevProvider
 from backend.llm.factory import MockProvider, ResilientLLMProvider, _build_fallback_chain
+from backend.llm.free_policy import ProviderUnavailableError
 
 OllamaProvider = AirLLMProvider  # backwards-compat alias for existing tests
 from backend.tests.conftest import make_stream_response  # noqa: E402
@@ -34,14 +35,11 @@ def _legacy_fallback_contract(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="OllamaClient is now a shim over AirLLMProvider; HTTP retry logic is no longer applicable"
-)
 class TestRetryLogic:
     async def test_retry_on_connect_error_then_success(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Transport errors should be retried up to 3 times with backoff."""
+        """Transport errors retry with a fixed 15-second delay."""
         sleeps: list[float] = []
 
         async def fake_sleep(delay: float) -> None:
@@ -63,12 +61,12 @@ class TestRetryLogic:
             result = await client.chat_complete("m", [ChatMessage(role="user", content="hi")])
             assert result == "ok"
             assert call_count == 3
-            assert sleeps == [1, 2]
+            assert sleeps == [15.0, 15.0]
         finally:
             await client.aclose()
 
     async def test_retry_exhausted_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """After 4 retries an OllamaError with full history should be raised."""
+        """After ten total attempts an OllamaError with full history is raised."""
         sleeps: list[float] = []
 
         async def fake_sleep(delay: float) -> None:
@@ -83,9 +81,9 @@ class TestRetryLogic:
         try:
             with pytest.raises(OllamaError) as excinfo:
                 await client.chat_complete("m", [ChatMessage(role="user", content="hi")])
-            assert "failed after 5 attempts" in str(excinfo.value)
+            assert "failed after 10 attempts" in str(excinfo.value)
             assert "ConnectError" in str(excinfo.value)
-            assert sleeps == [1, 2, 4, 8]
+            assert sleeps == [15.0] * 9
         finally:
             await client.aclose()
 
@@ -138,7 +136,7 @@ class TestRetryLogic:
             result = await client.chat_complete("m", [ChatMessage(role="user", content="hi")])
             assert result == "ok"
             assert call_count == 2
-            assert sleeps == [1]
+            assert sleeps == [15.0]
         finally:
             await client.aclose()
 
@@ -165,7 +163,7 @@ class TestRetryLogic:
             result = await client.chat_complete("m", [ChatMessage(role="user", content="hi")])
             assert result == "ok"
             assert call_count == 3
-            assert sleeps == [1, 2]
+            assert sleeps == [15.0, 15.0]
         finally:
             await client.aclose()
 
@@ -192,12 +190,12 @@ class TestRetryLogic:
             result = await client.chat_complete("m", [ChatMessage(role="user", content="hi")])
             assert result == "ok"
             assert call_count == 2
-            assert sleeps == [1]
+            assert sleeps == [15.0]
         finally:
             await client.aclose()
 
     async def test_retry_503_exhausted_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """After 4 retries on HTTP 503 an OllamaError with history should be raised."""
+        """After ten total retries on HTTP 503, report the full failure history."""
         sleeps: list[float] = []
 
         async def fake_sleep(delay: float) -> None:
@@ -212,9 +210,9 @@ class TestRetryLogic:
         try:
             with pytest.raises(OllamaError) as excinfo:
                 await client.chat_complete("m", [ChatMessage(role="user", content="hi")])
-            assert "failed after 5 attempts" in str(excinfo.value)
+            assert "failed after 10 attempts" in str(excinfo.value)
             assert "HTTP 503" in str(excinfo.value)
-            assert sleeps == [1, 2, 4, 8]
+            assert sleeps == [15.0] * 9
         finally:
             await client.aclose()
 
@@ -521,13 +519,21 @@ class TestResilientLLMProvider:
         with pytest.raises(RuntimeError, match="All providers failed"):
             await rlp.chat_complete("m", [{"role": "user", "content": "hi"}])
 
-    async def test_fallback_to_mock_provider(self) -> None:
+    async def test_fallback_to_mock_provider_is_refused_as_a_simulation(self) -> None:
+        """A simulated provider may never satisfy a real request.
+
+        The MockProvider is the last-resort fallback of the chain, but it is
+        a *simulation*: delivering its canned text as the answer persisted the
+        run as completed.  The chain must fail with a typed error instead.
+        """
         primary = AsyncMock()
         primary.chat_complete = AsyncMock(side_effect=RuntimeError("primary down"))
 
         rlp = ResilientLLMProvider(primary, [MockProvider()])
-        result = await rlp.chat_complete("m", [{"role": "user", "content": "hi"}])
-        assert "currently unavailable" in result
+        with pytest.raises(ProviderUnavailableError) as excinfo:
+            await rlp.chat_complete("m", [{"role": "user", "content": "hi"}])
+        assert excinfo.value.category == "simulation"
+        assert "currently unavailable" not in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -607,3 +613,34 @@ class TestBuildFallbackChain:
         fallbacks = _build_fallback_chain(settings, {}, primary_provider="openai")
         # No local fallback when primary is not local
         assert all(not isinstance(fb, OllamaClient) for fb in fallbacks)
+
+    async def test_free_local_fallback_does_not_disable_tools(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from backend.llm.ollama_provider import OllamaProvider as NativeOllamaProvider
+
+        monkeypatch.setenv("NEXUS_TEST_DISABLE_REMOTE_FALLBACKS", "true")
+        settings = MagicMock()
+        settings.free_only = True
+        settings.ollama_host = "http://127.0.0.1:11434"
+        settings.ollama_dashboard_host = ""
+        settings.nexus_enable_ollama = True
+
+        fallbacks = _build_fallback_chain(
+            settings,
+            {"local_models": ["qwen3"]},
+            primary_provider="openrouter",
+        )
+        local = next(
+            provider
+            for provider in fallbacks
+            if isinstance(provider, NativeOllamaProvider)
+        )
+        try:
+            assert local.direct_answer is True
+            assert getattr(local, "disable_tools", False) is False
+        finally:
+            for provider in fallbacks:
+                close = getattr(provider, "aclose", None)
+                if callable(close):
+                    await close()
