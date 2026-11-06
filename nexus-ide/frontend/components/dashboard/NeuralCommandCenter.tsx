@@ -10,10 +10,10 @@ import { useMetricsStore } from '../../stores/metricsStore';
 import { AnimatedNumber } from '../ui/Primitives';
 
 const STATUS_STYLES: Record<string, string> = {
-  operational: 'text-emerald-400',
-  degraded: 'text-amber-400',
-  incident: 'text-rose-400',
-  maintenance: 'text-amber-400',
+  operational: 'text-nexus-accent2',
+  degraded: 'text-nexus-accent3',
+  incident: 'text-nexus-accent4',
+  maintenance: 'text-nexus-accent3',
 };
 
 const STATUS_LABEL_PT: Record<string, string> = {
@@ -43,13 +43,13 @@ export default function NeuralCommandCenter() {
 
           <div className="flex items-center gap-6">
             <div className="text-right">
-              <div className="text-cyan-400 text-2xl font-bold tabular-nums">
+              <div className="text-nexus-cyan text-2xl font-bold tabular-nums">
                 <AnimatedNumber value={runningAgents} />
               </div>
               <div className="text-gray-500 text-xs">Agentes Ativos</div>
             </div>
             <div className="text-right">
-              <div className={`text-2xl font-bold ${STATUS_STYLES[globalStatus] ?? 'text-emerald-400'}`}>
+              <div className={`text-2xl font-bold ${STATUS_STYLES[globalStatus] ?? 'text-nexus-accent2'}`}>
                 {STATUS_LABEL_PT[globalStatus] ?? globalStatus}
               </div>
               <div className="text-gray-500 text-xs">Saúde do Sistema</div>
@@ -61,7 +61,7 @@ export default function NeuralCommandCenter() {
               </div>
               <div className="text-gray-500 text-xs">Tokens/s</div>
             </div>
-            <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" title="Ligado" />
+            <div className="w-2 h-2 rounded-full bg-nexus-accent2 animate-pulse" title="Ligado" />
           </div>
         </div>
       </div>

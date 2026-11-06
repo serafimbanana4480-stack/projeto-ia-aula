@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from fastapi import Request
@@ -19,6 +20,7 @@ from backend.orchestrator.chat_cancellation import (
     chat_cancellation_middleware,
 )
 from backend.orchestrator.main import app
+from backend.orchestrator.routes import chat as chat_module
 from backend.orchestrator.routes.cancellation_routes import cancel_request
 from backend.orchestrator.routes.cancellation_routes import router as cancellation_router
 from backend.orchestrator.routes.chat import _stream_autonomous_execution
@@ -169,6 +171,78 @@ async def test_registry_cancels_a_bound_task() -> None:
     assert await registry.cancel("bound_task") is True
     with pytest.raises(asyncio.CancelledError):
         await waiting_task
+
+
+@pytest.mark.asyncio
+async def test_explicit_chat_cancel_persists_a_running_legacy_run(
+    _fresh_cancellation_registry: CancellationRegistry,
+) -> None:
+    from backend.persistence.db import create_session, get_session_run, upsert_session_run
+
+    request_id = "persist-cancelled-run"
+    session_id = "session-cancelled"
+    run_id = "run-cancelled"
+    create_session(title="cancel test", session_id=session_id)
+    upsert_session_run(
+        run_id,
+        session_id,
+        status="running",
+        phase="streaming",
+        partial_output="partial answer",
+    )
+    await _fresh_cancellation_registry.register(request_id)
+    await _fresh_cancellation_registry.cancel(request_id)
+
+    request = _chat_request(request_id)
+    request.state.nexus_request_id = request_id
+    request.state.nexus_run_id = run_id
+
+    chat_module._persist_cancelled_chat_run(request, session_id)
+
+    persisted = get_session_run(run_id)
+    assert persisted is not None
+    assert persisted["status"] == "cancelled"
+    assert persisted["phase"] == "cancelled"
+    assert persisted["execution_state"] == "cancelled"
+    assert persisted["partial_output"] == "partial answer"
+    assert persisted["error"] == "Client or server cancelled the stream"
+    assert persisted["finished_at"]
+
+
+@pytest.mark.asyncio
+async def test_closing_selected_pipeline_closes_legacy_agent_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.orchestrator.routes import chat_primary
+
+    closed = asyncio.Event()
+
+    async def fake_legacy(*_args):
+        try:
+            yield "first frame"
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    monkeypatch.setattr(chat_primary, "is_primary_enabled", lambda: False)
+    monkeypatch.setattr(chat_module, "_run_pipeline", fake_legacy)
+    request = SimpleNamespace(
+        message="Faz uma tarefa simples",
+        session_id="cancel-pipeline-test",
+        mode="chat",
+        project_path="",
+    )
+    stream = chat_module._select_pipeline(
+        request,
+        llm_client=object(),
+        registry={},
+        context=object(),
+    )
+
+    assert await anext(stream) == "first frame"
+    await stream.aclose()
+
+    assert closed.is_set()
 
 
 @pytest.mark.asyncio

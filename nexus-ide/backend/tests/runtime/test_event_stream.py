@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
 
 import pytest
 
 from backend.runtime.events import (
+    JournalWriteError,
     RunEventStream,
     RuntimeEvent,
     RuntimeEventType,
@@ -107,6 +110,97 @@ async def test_journal_survives_a_backend_restart(tmp_path) -> None:
     restored = RunEventStream.load_journal(path)
     assert [event.seq for event in restored] == list(range(1, 11))
     assert restored[0].payload["command"] == "cmd 0"
+
+
+@pytest.mark.asyncio
+async def test_subscriber_waits_for_journal_before_receiving_event(tmp_path, monkeypatch) -> None:
+    from backend.runtime import events as event_module
+
+    path = tmp_path / "delayed.jsonl"
+    writing = threading.Event()
+    release = threading.Event()
+    append = event_module._append_line
+
+    def delayed_append(target, line):
+        writing.set()
+        if not release.wait(5):
+            raise TimeoutError("test did not release writer")
+        append(target, line)
+
+    monkeypatch.setattr(event_module, "_append_line", delayed_append)
+    stream = RunEventStream("run-delayed", journal_path=path)
+    stream.start_journal()
+    event = stream.emit(RuntimeEventType.MESSAGE_DELTA, text="gravado antes de enviar")
+    subscription = stream.subscribe()
+    received = asyncio.create_task(anext(subscription))
+    try:
+        assert await asyncio.to_thread(writing.wait, 3)
+        assert not received.done()
+        release.set()
+        assert await asyncio.wait_for(received, 3) == event
+        assert RunEventStream.load_journal(path)[0] == event
+    finally:
+        release.set()
+        await subscription.aclose()
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_journal_failure_is_reported_instead_of_delivering_unrecorded_event(
+    tmp_path, monkeypatch,
+) -> None:
+    from backend.runtime import events as event_module
+
+    def broken_append(_path, _line):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(event_module, "_append_line", broken_append)
+    stream = RunEventStream("run-disk-error", journal_path=tmp_path / "run.jsonl")
+    stream.start_journal()
+    event = stream.emit(RuntimeEventType.MESSAGE_DELTA, text="não foi gravado")
+    with pytest.raises(JournalWriteError):
+        await asyncio.wait_for(stream.wait_persisted(event.seq), 3)
+    subscription = stream.subscribe()
+    with pytest.raises(JournalWriteError):
+        await asyncio.wait_for(anext(subscription), 3)
+    await subscription.aclose()
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_autonomous_chat_waits_for_journal_before_sse_delivery(tmp_path, monkeypatch) -> None:
+    from backend.models.api import StreamEvent
+    from backend.orchestrator.routes import chat, chat_primary
+    from backend.runtime import events as event_module
+
+    path = tmp_path / "autonomous.jsonl"
+    writing = threading.Event()
+    release = threading.Event()
+    append = event_module._append_line
+
+    def delayed_append(target, line):
+        writing.set()
+        if not release.wait(5):
+            raise TimeoutError("test did not release writer")
+        append(target, line)
+
+    async def frames():
+        yield chat._sse(StreamEvent(type="token", content="primeiro"))
+
+    monkeypatch.setattr(chat_primary, "_primary_journal_path", lambda _run_id: path)
+    monkeypatch.setattr(event_module, "_append_line", delayed_append)
+    stream = chat._ordered_autonomous_frames(frames(), "autonomous-journal")
+    received = asyncio.create_task(anext(stream))
+    try:
+        assert await asyncio.to_thread(writing.wait, 3)
+        assert not received.done()
+        release.set()
+        delivered = json.loads((await asyncio.wait_for(received, 3)).removeprefix("data: ").strip())
+        assert delivered["content"] == "primeiro"
+        assert RunEventStream.load_journal(path)[0].seq == delivered["seq"]
+    finally:
+        release.set()
+        await stream.aclose()
 
 
 def test_dedupe_and_order_is_the_frontend_contract() -> None:

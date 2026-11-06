@@ -9,14 +9,48 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any
 
 from backend.knowledge.memory import EmbeddingService, Memory, MemoryStore, MemoryType
 from backend.persistence.db import DB_PATH
 
 logger = logging.getLogger(__name__)
+
+#: The value :data:`DB_PATH` had when this module was imported.  A difference
+#: means the attribute was overridden explicitly (the test suite does that).
+_INITIAL_DB_PATH = DB_PATH
+
+
+def _db_path() -> Path:
+    """Return the SQLite file the persistent memories are stored in.
+
+    The path used to be bound at import time, so an override of
+    ``backend.persistence.db.DB_PATH`` — the one the test fixture installs,
+    and the one ``NEXUS_DB_PATH`` produces — was ignored and every memory was
+    written to the real database, even under pytest.  Resolving the location
+    on every call makes the store follow the same override as the rest of the
+    application.
+
+    The order is:
+
+    1. this module's :data:`DB_PATH` when it was overridden explicitly;
+    2. ``NEXUS_DB_PATH`` — the same override the persistence layer honours;
+    3. ``backend.persistence.db.DB_PATH`` — the database the rest of the
+       application uses, read at call time.
+    """
+    if DB_PATH != _INITIAL_DB_PATH:
+        return Path(DB_PATH)
+    override = os.environ.get("NEXUS_DB_PATH")
+    if override:
+        return Path(override).expanduser().resolve()
+    from backend.persistence import db as persistence_db
+
+    return Path(persistence_db.DB_PATH)
+
 
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS persistent_memories (
@@ -73,8 +107,9 @@ class PersistentMemoryStore(MemoryStore):
     # ------------------------------------------------------------------
 
     def _ensure_schema(self) -> None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        db_path = _db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(str(db_path)) as conn:
             conn.execute(_CREATE_TABLE_SQL)
             # Backwards-compatible migrations must run before creating indexes
             # that reference the newly-added columns.
@@ -107,7 +142,7 @@ class PersistentMemoryStore(MemoryStore):
         if not session_id:
             return None
         try:
-            with sqlite3.connect(str(DB_PATH)) as conn:
+            with sqlite3.connect(str(_db_path())) as conn:
                 row = conn.execute(
                     "SELECT user_id FROM sessions WHERE id = ? LIMIT 1",
                     (session_id,),
@@ -116,9 +151,15 @@ class PersistentMemoryStore(MemoryStore):
         except sqlite3.Error:
             return None
 
-    def _save_memory(self, memory: Memory, user_id: str | None = None) -> None:
+    def _save_memory(
+        self,
+        memory: Memory,
+        user_id: str | None = None,
+        *,
+        evicted_memory_ids: tuple[str, ...] = (),
+    ) -> None:
         owner_id = memory.user_id if user_id is None else user_id
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(_db_path())) as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO persistent_memories
                    (id, user_id, session_id, project_id, content, summary, embedding_json,
@@ -146,10 +187,12 @@ class PersistentMemoryStore(MemoryStore):
                     memory.access_count,
                 ),
             )
+            for memory_id in evicted_memory_ids:
+                conn.execute("DELETE FROM persistent_memories WHERE id = ?", (memory_id,))
             conn.commit()
 
     def _delete_from_db(self, memory_id: str, user_id: str | None = None) -> None:
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(_db_path())) as conn:
             if user_id is None:
                 conn.execute("DELETE FROM persistent_memories WHERE id = ?", (memory_id,))
             else:
@@ -161,21 +204,35 @@ class PersistentMemoryStore(MemoryStore):
 
     def _load_from_db(self) -> None:
         try:
-            with sqlite3.connect(str(DB_PATH)) as conn:
+            with sqlite3.connect(str(_db_path())) as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT * FROM persistent_memories ORDER BY created_at DESC"
                 ).fetchall()
 
+                loaded_count = 0
                 for row in rows:
-                    memory = self._row_to_memory(row)
+                    try:
+                        memory = self._row_to_memory(row)
+                    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                        # One malformed legacy row must not prevent healthy,
+                        # older memories later in the ordered result from
+                        # being restored after restart. Keep the row in the
+                        # canonical database so it can be inspected/repaired.
+                        logger.warning(
+                            "Skipping malformed persistent memory %s: %s",
+                            row["id"],
+                            exc,
+                        )
+                        continue
                     self._memories[memory.memory_id] = memory
                     self._index[memory.memory_id] = memory.embedding
+                    loaded_count += 1
 
-                if rows:
+                if loaded_count:
                     logger.info(
                         "Loaded %d persistent memories from DB",
-                        len(rows),
+                        loaded_count,
                     )
         except Exception as exc:
             logger.warning("Failed to load persistent memories: %s", exc)
@@ -231,22 +288,30 @@ class PersistentMemoryStore(MemoryStore):
     ) -> Memory:
         """Store a new memory and persist it to SQLite."""
         owner_id = user_id or self._user_for_session(session_id) or ""
-        memory = await super().store(
-            content,
-            user_id=owner_id,
-            memory_type=memory_type,
-            session_id=session_id,
-            project_id=project_id,
-            tags=tags,
-            source=source,
-            summary=summary,
-            importance=importance,
-            file_path=file_path,
-            language=language,
-            kind=kind,
-            related_memory_ids=related_memory_ids,
-        )
-        self._save_memory(memory)
+        memories_before = self._memories.copy()
+        index_before = self._index.copy()
+        try:
+            memory = await super().store(
+                content,
+                user_id=owner_id,
+                memory_type=memory_type,
+                session_id=session_id,
+                project_id=project_id,
+                tags=tags,
+                source=source,
+                summary=summary,
+                importance=importance,
+                file_path=file_path,
+                language=language,
+                kind=kind,
+                related_memory_ids=related_memory_ids,
+            )
+            evicted_ids = tuple(memories_before.keys() - self._memories.keys())
+            self._save_memory(memory, evicted_memory_ids=evicted_ids)
+        except Exception:
+            self._memories = memories_before
+            self._index = index_before
+            raise
         return memory
 
     async def delete(self, memory_id: str, *, user_id: str | None = None) -> bool:
@@ -264,7 +329,7 @@ class PersistentMemoryStore(MemoryStore):
 
     def stats(self, *, user_id: str | None = None) -> dict[str, Any]:
         stats = super().stats(user_id=user_id)
-        stats["persistent_db"] = str(DB_PATH)
+        stats["persistent_db"] = str(_db_path())
         return stats
 
     async def search(self, *args: Any, **kwargs: Any) -> list[tuple[Memory, float]]:
@@ -275,7 +340,17 @@ class PersistentMemoryStore(MemoryStore):
                 kwargs["user_id"] = self._user_for_session(session_id) or "__unowned_session__"
         results = await super().search(*args, **kwargs)
         for memory, _score in results:
-            self._save_memory(memory)
+            try:
+                self._save_memory(memory)
+            except sqlite3.Error as exc:
+                # last_accessed_at/access_count improve future eviction but
+                # must not make an otherwise successful recall fail when
+                # SQLite is briefly busy. The memory content is unchanged.
+                logger.warning(
+                    "Could not persist access telemetry for memory %s: %s",
+                    memory.memory_id,
+                    exc,
+                )
         return results
 
     async def get_context(

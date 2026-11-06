@@ -1,10 +1,9 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ChevronDown,
   Brain,
-  Sparkles,
   Copy,
   Check,
   X,
@@ -61,11 +60,19 @@ export function extractStructuredPlan(content: string): PlanTask[] | null {
   }
 }
 
+/** First sentence of the approach the runtime already published. */
+function thoughtHeadline(content: string): string {
+  const clean = content.replace(/\s+/g, " ").trim();
+  if (!clean || clean === "A analisar a tarefa…") return operationalSummaryForThinking(content);
+  const sentence = clean.split(/(?<=[.!?…])\s+/)[0] || clean;
+  return sentence.length > 96 ? `${sentence.slice(0, 95).trimEnd()}…` : sentence;
+}
+
 function priorityClass(priority?: string) {
   switch (priority?.toLowerCase()) {
     case "high":
     case "alta":
-      return "border-rose-400/30 bg-rose-400/10 text-rose-200";
+      return "border-rose-400/30 bg-rose-400/10 text-nexus-accent4";
     case "medium":
     case "media":
     case "média":
@@ -110,23 +117,41 @@ export default function ThinkingBlock({
     }
   }, [isStreaming, startedAt]);
 
+  // Live elapsed clock. Only runs while the block is open — a collapsed block
+  // does not need to re-render the reasoning text ten times a second.
   useEffect(() => {
-    if (!isStreaming || now !== null) return;
-    const t = setInterval(() => {
-      if (startRef.current) {
-        setNow(Date.now() - startRef.current);
-      }
-    }, 100);
+    if (!isStreaming || !open) return;
+    const tick = () => {
+      if (startRef.current) setNow(Date.now() - startRef.current);
+    };
+    tick();
+    const t = setInterval(tick, 500);
     return () => clearInterval(t);
-  }, [isStreaming, now]);
+  }, [isStreaming, open]);
 
   const toggle = useCallback(() => setOpen((o) => !o), []);
+
+  // One instance per reasoning block: a hardcoded id would collide on the
+  // second reasoned answer and every aria-controls would resolve to the first.
+  const bodyId = `thinking-block-body-${useId().replace(/:/g, "")}`;
+
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+    },
+    [],
+  );
 
   const onCopy = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(content);
       setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = setTimeout(() => {
+        setCopied(false);
+        copiedTimerRef.current = null;
+      }, 1500);
     } catch {}
   }, [content]);
 
@@ -138,7 +163,7 @@ export default function ThinkingBlock({
   // The full reasoning wall stays behind the toggle (Detail level).
   const operational = plan
     ? `Planeando ${plan.length} tarefa${plan.length === 1 ? "" : "s"}…`
-    : operationalSummaryForThinking(content);
+    : thoughtHeadline(content);
   if (!plan && !visibleContent) return null;
   // ``durationMs`` used to be destructured into ``_durationMs`` and thrown away,
   // so a completed block always read "concluído" no matter how long the model
@@ -153,29 +178,32 @@ export default function ThinkingBlock({
     <motion.div
       initial={{ opacity: 0, y: -4 }}
       animate={{ opacity: 1, y: 0 }}
-      className="my-2 overflow-hidden rounded-xl border border-nexus-accent/15 bg-nexus-accent/[0.035]"
+      className="my-1.5 overflow-hidden rounded-xl border border-nexus-border/50 bg-nexus-bg/30"
     >
       <button
         onClick={toggle}
         aria-expanded={open}
-        aria-controls="thinking-block-body"
-        className="group flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-[12px] font-medium text-nexus-text transition-colors hover:bg-nexus-accent/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-accent/50"
+        aria-controls={bodyId}
+        className="group flex w-full items-center gap-2 px-3 py-2.5 text-left text-[12px] font-medium text-nexus-text transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-accent/50"
       >
-        {/* Discreet operational dot: ◉ pulses while streaming, Brain when done */}
+        <ChevronDown
+          className={`h-3 w-3 shrink-0 text-nexus-muted transition-transform ${
+            open ? "rotate-180" : "-rotate-90"
+          }`}
+        />
         <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
           {isStreaming ? (
             <span aria-hidden="true" className="animate-pulse text-[13px] leading-none text-nexus-accent">
               ◉
             </span>
           ) : (
-            <Brain className="h-3.5 w-3.5 text-nexus-accent" />
+            <Brain className="h-3.5 w-3.5 text-nexus-muted" />
           )}
         </span>
 
         <span className="flex min-w-0 items-center gap-1.5">
-          <Sparkles className="hidden h-3 w-3 shrink-0 text-nexus-accent/70 sm:block" />
-          <span className="truncate text-[11px] font-medium text-nexus-text">
-            {plan ? "Plano de execução" : isStreaming ? "A definir a abordagem" : "Resumo da abordagem"}
+          <span className="truncate text-[12px] font-medium text-nexus-text">
+            {plan ? "Plano de execução" : isStreaming ? "A definir a abordagem" : "Pensou"}
           </span>
           <span
             data-testid="thinking-operational"
@@ -188,7 +216,7 @@ export default function ThinkingBlock({
 
         {/* Word/chars counter */}
         {plan && (
-          <span className="hidden text-[10px] text-sky-300/50 sm:inline">
+          <span className="hidden text-[10px] text-nexus-muted sm:inline">
             {plan.length} tarefas
           </span>
         )}
@@ -201,28 +229,23 @@ export default function ThinkingBlock({
           )}
           {isStreaming || totalSec > 0 ? `${totalSec}s` : "concluído"}
         </span>
-
-        <ChevronDown
-          className={`h-3 w-3 shrink-0 text-nexus-muted transition-transform ${
-            open ? "rotate-180" : ""
-          }`}
-        />
       </button>
 
       <AnimatePresence initial={false}>
         {open && (
           <motion.div
-            id="thinking-block-body"
+            id={bodyId}
             data-testid="thinking-block-body"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.16, ease: "easeOut" }}
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
             className="overflow-hidden border-t border-nexus-accent/10 [content-visibility:auto]"
           >
             <div className="relative">
               {/* Subtle left blue accent line */}
               <div className="absolute left-0 top-0 h-full w-0.5 bg-gradient-to-b from-nexus-accent/40 to-transparent" />
+              <p className="px-5 pt-3 text-[11px] text-nexus-faint">Abordagem reportada durante a execução</p>
 
               {plan ? (
                 <ol className="space-y-2 px-4 py-3 pl-5" aria-label="Tarefas do plano">
@@ -237,7 +260,7 @@ export default function ThinkingBlock({
                         </span>
                         <span className="text-xs font-medium text-nexus-text">{task.name}</span>
                         {task.agent && (
-                          <span className="rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-0.5 text-[9px] font-medium tracking-wide text-violet-200">
+                          <span className="rounded border border-nexus-accent/25 bg-nexus-accent/10 px-1.5 py-0.5 text-[9px] font-medium tracking-wide text-nexus-accent-bright">
                             {task.agent}
                           </span>
                         )}
@@ -261,7 +284,7 @@ export default function ThinkingBlock({
                   ))}
                 </ol>
               ) : (
-                <pre className="whitespace-pre-wrap break-words px-4 py-3 pl-5 font-mono text-[12px] leading-relaxed text-nexus-muted thin-scrollbar">
+                <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words px-4 py-3 pl-5 font-sans text-[12.5px] leading-relaxed text-nexus-muted thin-scrollbar">
                   {visibleContent}
                   {isStreaming && (
                     <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-nexus-accent/80" />

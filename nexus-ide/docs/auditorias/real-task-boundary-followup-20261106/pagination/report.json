@@ -1,0 +1,51 @@
+{
+  "scenario": "pagination",
+  "model_requested": "lfm3-1.7b-uncensored",
+  "endpoint": "http://127.0.0.1:1234/v1",
+  "duration_seconds": 180.63,
+  "baseline": {
+    "passed": false,
+    "returncode": 1,
+    "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import importlib.util,sys; s=importlib.util.spec_from_file_location('subject',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); assert m.page(list(range(10)), 1, 3) == [0,1,2]; assert m.page(list(range(10)), 2, 3) == [3,4,5]; assert m.page([1], 2, 3) == []\n                                                                                                                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+  },
+  "oracle": {
+    "passed": false,
+    "returncode": 1,
+    "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import importlib.util,sys; s=importlib.util.spec_from_file_location('subject',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); assert m.page(list(range(10)), 1, 3) == [0,1,2]; assert m.page(list(range(10)), 2, 3) == [3,4,5]; assert m.page([1], 2, 3) == []\n                                                                                                                                      ~~~~~~~~~~~~~~~~~~~~^^^\n  File \"<frozen importlib._bootstrap_external>\", line 1019, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1157, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1087, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"C:\\Users\\rodri\\Desktop\\nexus\\nexus-ide\\.cache\\pytest\\basetemp-53120\\test_real_task_pagination_0\\project\\app\\pagination.py\", line 1\n    ---\n       ^\nSyntaxError: invalid syntax\n"
+  },
+  "changed_files": [
+    ".nexus/project-continuity.sqlite3",
+    ".nexus/project-continuity.sqlite3-shm",
+    ".nexus/project-continuity.sqlite3-wal",
+    ".nexus/project-memory.md",
+    ".nexus/project-state-0e89820860c342f2c7ec694d.md",
+    ".nexus/rollback/snapshots/a48d4f50-97b3-431f-bbe1-9c86f5bbfa54.json",
+    "app/pagination.py"
+  ],
+  "new_nexus_files": [
+    ".nexus/project-continuity.sqlite3",
+    ".nexus/project-continuity.sqlite3-shm",
+    ".nexus/project-continuity.sqlite3-wal",
+    ".nexus/project-memory.md",
+    ".nexus/project-state-0e89820860c342f2c7ec694d.md",
+    ".nexus/rollback/snapshots/a48d4f50-97b3-431f-bbe1-9c86f5bbfa54.json"
+  ],
+  "unexpected_changes": [],
+  "tool_calls": [
+    "list_dir",
+    "read_file",
+    "read_file",
+    "list_dir",
+    "list_dir",
+    "list_dir",
+    "write_file",
+    "read_file",
+    "read_file",
+    "run_tests"
+  ],
+  "response": "",
+  "error": "TimeoutError: ",
+  "cost": null,
+  "cost_status": "not measured",
+  "scope": "in-process primary runtime; provider on loopback; no HTTP or browser"
+}

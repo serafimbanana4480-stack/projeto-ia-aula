@@ -183,6 +183,57 @@ describe("chatTelemetryStore", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("reads token counts nested under usage.provider and a reported cost", () => {
+    const store = useChatTelemetryStore.getState();
+    store.setStream("a", true, [
+      makeEvent({
+        type: "metric",
+        data: {
+          usage: {
+            provider: {
+              input_tokens: 100,
+              output_tokens: 50,
+              total_tokens: 150,
+              name: "openrouter",
+              model: "nemotron",
+            },
+            cost_usd: 0,
+          },
+        },
+      }),
+    ]);
+    expect(useChatTelemetryStore.getState().usage).toMatchObject({
+      input_tokens: 100,
+      output_tokens: 50,
+      total_tokens: 150,
+      cost_usd: 0,
+      provider: { name: "openrouter", model: "nemotron" },
+    });
+  });
+
+  it("reads a usage snapshot carried on a live token frame", () => {
+    const store = useChatTelemetryStore.getState();
+    store.setStream("a", true, [
+      makeEvent({
+        type: "token",
+        content: "olá",
+        data: {
+          usage: {
+            input_tokens: 20,
+            output_tokens: 3,
+            total_tokens: 23,
+            source: "estimated",
+          },
+        },
+      }),
+    ]);
+    expect(useChatTelemetryStore.getState().usage).toMatchObject({
+      input_tokens: 20,
+      output_tokens: 3,
+      source: "estimated",
+    });
+  });
+
   it("ignores malformed usage and normalises negative or non-finite token values", () => {
     const store = useChatTelemetryStore.getState();
     store.setStream("a", false, [makeEvent({ data: { usage: [] } })]);

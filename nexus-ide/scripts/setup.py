@@ -9,7 +9,7 @@ O script:
 1. Verifica Python 3.12+
 2. Cria venv se não existir
 3. Instala dependências Python
-4. Verifica Node.js e npm
+4. Verifica Node.js e pnpm 10.34.9
 5. Instala dependências do frontend
 6. Verifica Ollama
 7. Puxa modelos necessários
@@ -29,6 +29,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VENV_DIR = REPO_ROOT / ".venv"
 FRONTEND_DIR = REPO_ROOT / "frontend"
+PNPM_VERSION = "10.34.9"
 
 def run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
     """Run a command and return the result."""
@@ -126,14 +127,18 @@ def main() -> int:
 
     # 5. Install frontend dependencies
     print("\n[5/9] Instalando dependências do frontend...")
-    if check_command("npm") and FRONTEND_DIR.exists():
-        result = run(["npm", "install"], cwd=FRONTEND_DIR, check=False)
-        if result.returncode == 0:
-            print("  ✓ Frontend dependencies instaladas")
+    if check_command("pnpm") and FRONTEND_DIR.exists():
+        version = run(["pnpm", "--version"], check=False)
+        if version.returncode != 0 or version.stdout.strip() != PNPM_VERSION:
+            print(f"  ⚠ pnpm {PNPM_VERSION} obrigatório; encontrado: {version.stdout.strip() or 'indisponível'}")
         else:
-            print(f"  ⚠ npm install falhou: {result.stderr[:200]}")
+            result = run(["pnpm", "install", "--frozen-lockfile"], cwd=FRONTEND_DIR, check=False)
+            if result.returncode == 0:
+                print("  ✓ Frontend dependencies instaladas (lockfile congelado)")
+            else:
+                print(f"  ⚠ pnpm install falhou: {result.stderr[:200]}")
     else:
-        print("  ⚠ npm ou frontend/ não encontrado")
+        print(f"  ⚠ pnpm {PNPM_VERSION} ou frontend/ não encontrado")
 
     # 6. Check Ollama
     print("\n[6/9] Verificando Ollama...")
@@ -170,7 +175,7 @@ def main() -> int:
     print("  1. Terminal 1 - Backend:")
     print(f"     {python_cmd} run.py")
     print("  2. Terminal 2 - Frontend:")
-    print(f"     cd frontend && npm run dev")
+    print(f"     cd frontend && pnpm run dev")
     print("\nAceder:")
     print("  IDE: http://localhost:3000")
     print("  API: http://localhost:8000/docs")

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
+
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.mcp.store import MCPConnector, MCPConnectorStore
-from backend.middleware.auth import create_access_token
+from backend.middleware.auth import create_access_token, require_admin
 from backend.orchestrator.main import app
 
 
@@ -17,8 +19,17 @@ def auth_headers() -> dict[str, str]:
 
 
 @pytest.fixture
-def client():
-    return TestClient(app)
+def client() -> Generator[TestClient, None, None]:
+    previous_override = app.dependency_overrides.get(require_admin)
+    app.dependency_overrides[require_admin] = lambda: {"user_id": "test-mcp-admin"}
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        if previous_override is None:
+            app.dependency_overrides.pop(require_admin, None)
+        else:
+            app.dependency_overrides[require_admin] = previous_override
 
 
 @pytest.fixture(autouse=True)

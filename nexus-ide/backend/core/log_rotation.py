@@ -18,6 +18,7 @@ import contextlib
 import logging
 import logging.handlers
 import os
+import sys
 from pathlib import Path
 
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
@@ -94,14 +95,41 @@ class NexusRotatingFileHandler(logging.handlers.RotatingFileHandler):
         )
 
     def doRollover(self) -> None:  # noqa: N802 — stdlib naming
+        # A re-entrancy guard is load-bearing: the old failure path logged
+        # through the logging system from inside a handler, and when that
+        # logger's own handler is *this* handler (the common case), the
+        # warning re-entered doRollover forever. On Windows the rollover
+        # fails with WinError 32 while another process still holds the file,
+        # which turned one rollover failure into ~100 MB of recursive spam
+        # and starved every request.
+        if getattr(self, "_nexus_rollover_in_progress", False):
+            return
+        self._nexus_rollover_in_progress = True
         try:
             super().doRollover()
         except (OSError, ValueError) as exc:  # pragma: no cover - full/read-only disk
             # Never propagate out of ``emit``: a log line must not take the app
             # down.  Leaving the old file in place is the safest degradation.
-            logging.getLogger(__name__).warning("Log rollover failed: %s", exc)
+            # Report through stderr (rate-limited), never through logging.
+            self._warn_through_stderr(f"Log rollover failed: {exc}")
             return
+        finally:
+            self._nexus_rollover_in_progress = False
         self.enforce_total_cap()
+
+    def _warn_through_stderr(self, message: str) -> None:
+        """Rate-limited stderr report that cannot recurse into this handler."""
+        warned = getattr(self, "_nexus_warned_messages", None)
+        if warned is None:
+            warned = set()
+            self._nexus_warned_messages = warned
+        if message in warned:
+            return
+        if len(warned) >= 16:  # keep the set bounded over a long process life
+            warned.clear()
+        warned.add(message)
+        with contextlib.suppress(Exception):
+            print(f"[nexus] {message}", file=sys.stderr, flush=True)
 
     def enforce_total_cap(self) -> int:
         """Delete the oldest rotated files until the total fits the cap.

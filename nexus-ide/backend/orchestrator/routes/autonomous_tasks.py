@@ -167,19 +167,6 @@ async def get_task_stats(
     return await task_manager.get_task_manager_stats()
 
 
-@router.get("/tasks/{task_id}")
-async def get_task(
-    task_id: str,
-    task_manager: Any = Depends(_get_task_manager),
-) -> dict[str, Any]:
-    """Get a specific autonomous task by ID."""
-    task = await task_manager.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    return {"task": task.to_dict()}
-
-
 @router.post("/tasks")
 async def create_task(
     payload: TaskCreateRequest,

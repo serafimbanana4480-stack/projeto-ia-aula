@@ -123,7 +123,12 @@ def validate_agent_contract(name: str, model: str, tools: list[str] | tuple[str,
     except KeyError as exc:
         return [str(exc)]
     requested_model = str(model or "").strip()
-    if requested_model and requested_model not in capability.allowed_models:
+    # A concrete provider model id (``vendor/model[:tag]`` or a local
+    # ``model:tag`` such as Ollama's ``qwen2.5:7b``) is an explicit user pin,
+    # not a routing alias. The alias allowlist governs automatic routing only,
+    # so a selected provider model must remain usable by delegated tasks.
+    is_concrete_pin = "/" in requested_model or ":" in requested_model
+    if requested_model and not is_concrete_pin and requested_model not in capability.allowed_models:
         errors.append(
             f"agent {capability.name} does not allow model {requested_model!r}; "
             f"allowed: {', '.join(capability.allowed_models) or 'none'}"

@@ -29,6 +29,7 @@ from backend.tools.safe_http import (
     PublicAddressHTTPTransport,
     PublicAddressNetworkBackend,
     normalize_public_http_url,
+    validate_public_http_url,
 )
 
 #: Targets that must never be reachable from a tool call, whatever the model says.
@@ -451,7 +452,9 @@ async def test_browser_navigate_navigates_to_a_public_url(
 
     monkeypatch.setattr(browser_automation, "_ensure_page", fake_page)
 
-    result = await browser_navigate(url="https://EXAMPLE.org:443/Path#frag")
+    result = await browser_navigate(
+        url="https://EXAMPLE.org:443/Path#frag", user_id="test-user"
+    )
 
     assert result["success"] is True
     assert result["status"] == 200
@@ -461,6 +464,90 @@ async def test_browser_navigate_navigates_to_a_public_url(
     # lower-cased and the fragment is dropped; an explicit standard port is
     # preserved by the shared normaliser.
     assert visited == ["https://example.org:443/Path"]
+
+
+async def test_public_url_validator_rejects_mixed_public_and_private_dns_answers() -> None:
+    async def mixed_resolver(_host: str, _port: int) -> list[str]:
+        return ["93.184.216.34", "127.0.0.1"]
+
+    with pytest.raises(ValueError, match="DNS did not resolve"):
+        await validate_public_http_url(
+            f"https://{_PROBE_HOST}/", resolver=mixed_resolver
+        )
+
+
+async def test_browser_route_checks_redirect_and_subresource_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validated: list[str] = []
+
+    async def validate(url: str) -> str:
+        validated.append(url)
+        if "127.0.0.1" in url:
+            raise ValueError("Non-public IP address")
+        return url
+
+    monkeypatch.setattr(browser_automation, "validate_public_http_url", validate)
+
+    class Route:
+        def __init__(self) -> None:
+            self.continued = False
+            self.aborted: list[str] = []
+
+        async def continue_(self) -> None:
+            self.continued = True
+
+        async def abort(self, reason: str) -> None:
+            self.aborted.append(reason)
+
+    class Request:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+    public_route = Route()
+    await browser_automation._guard_browser_route(
+        public_route, Request(f"https://{_PROBE_HOST}/redirect")
+    )
+    private_route = Route()
+    await browser_automation._guard_browser_route(
+        private_route, Request("http://127.0.0.1/admin")
+    )
+
+    assert validated == [f"https://{_PROBE_HOST}/redirect", "http://127.0.0.1/admin"]
+    assert public_route.continued is True
+    assert public_route.aborted == []
+    assert private_route.continued is False
+    assert private_route.aborted == ["blockedbyclient"]
+
+
+async def test_browser_websocket_route_blocks_private_destinations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def validate(url: str) -> str:
+        if "127.0.0.1" in url:
+            raise ValueError("Non-public IP address")
+        return url
+
+    monkeypatch.setattr(browser_automation, "validate_public_http_url", validate)
+
+    class WebSocket:
+        url = "ws://127.0.0.1/admin"
+
+        def __init__(self) -> None:
+            self.closed: list[tuple[int, str]] = []
+            self.connected = False
+
+        async def close(self, *, code: int, reason: str) -> None:
+            self.closed.append((code, reason))
+
+        async def connect_to_server(self) -> None:
+            self.connected = True
+
+    websocket = WebSocket()
+    await browser_automation._guard_browser_websocket(websocket)
+
+    assert websocket.closed == [(1008, "destination is not public")]
+    assert websocket.connected is False
 
 
 # ---------------------------------------------------------------------------
@@ -528,18 +615,20 @@ async def test_browser_navigate_defaults_a_blank_session_id(
         async def title(self) -> str:
             return "Example"
 
-    async def fake_page(session_id: str) -> Any:
-        seen.append(session_id)
+    async def fake_page(session_key: str) -> Any:
+        seen.append(session_key)
         return _Page()
 
     monkeypatch.setattr(browser_automation, "_ensure_page", fake_page)
 
-    result = await browser_navigate(url="https://example.org/", session_id=payload)
+    result = await browser_navigate(
+        url="https://example.org/", session_id=payload, user_id="test-user"
+    )
 
     assert result["success"] is True, result
     # The value that reaches the pool is the default, not the raw payload.
     assert result["session_id"] == "default"
-    assert seen == ["default"]
+    assert seen == [browser_automation._browser_pool_key("default", "test-user")]
 
 
 def test_normalize_session_id_rejects_windows_device_names() -> None:
@@ -575,7 +664,7 @@ def test_screenshot_path_refuses_traversal(
     monkeypatch.setattr(browser_automation, "_screenshot_dir", lambda: root)
 
     with pytest.raises(ValueError):
-        browser_automation._screenshot_path(payload)
+        browser_automation._screenshot_path(payload, "0123456789abcdef")
 
     # Nothing was created anywhere under the scratch directory: no screenshot
     # file, and no directory that a traversal payload would have needed.
@@ -590,10 +679,11 @@ def test_screenshot_path_stays_inside_the_screenshot_directory(
     monkeypatch.setattr(browser_automation, "_screenshot_dir", lambda: root)
 
     for session_id in ("default", "run-1", "a.b_c-9", "A" * 128):
-        path = browser_automation._screenshot_path(session_id)
+        path = browser_automation._screenshot_path(session_id, "0123456789abcdef")
         assert path.parent == root.resolve()
         assert path.suffix == ".png"
         assert session_id in path.name
+        assert "0123456789abcdef" in path.name
 
 
 async def test_browser_screenshot_rejects_traversal_session_id(

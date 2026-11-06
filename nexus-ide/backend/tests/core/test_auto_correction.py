@@ -445,3 +445,53 @@ class TestCheckStillFailing:
 
     def test_no_failures_phrase(self):
         assert AutoCorrectionLoop._check_still_failing("no failures found") is False
+
+
+class TestSelfHealReplanOwnership:
+    @pytest.mark.asyncio
+    async def test_replan_without_owner_fails_closed_before_engine_creation(
+        self, fresh_loop: AutoCorrectionLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from backend.orchestrator import engine as engine_module
+
+        engine_factory = MagicMock()
+        monkeypatch.setattr(engine_module, "OrchestrationEngine", engine_factory)
+
+        result = await fresh_loop.replan_for(
+            artifact_id="broken-artifact",
+            original_objective="repair the failing tests",
+            session_id="session-1",
+        )
+
+        assert result is None
+        engine_factory.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_replan_passes_trusted_owner_to_autonomous_engine(
+        self, fresh_loop: AutoCorrectionLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from backend.orchestrator import engine as engine_module
+
+        calls: dict[str, Any] = {}
+        expected_result = object()
+
+        class FakeEngine:
+            async def execute_autonomous(self, **kwargs: Any) -> object:
+                calls.update(kwargs)
+                return expected_result
+
+        monkeypatch.setattr(engine_module, "OrchestrationEngine", FakeEngine)
+
+        result = await fresh_loop.replan_for(
+            artifact_id="broken-artifact",
+            original_objective="repair the failing tests",
+            session_id="session-1",
+            user_id=" alice ",
+        )
+
+        assert result is expected_result
+        assert calls == {
+            "objective": "Re-attempt failed artifact broken-artifact: repair the failing tests",
+            "session_id": "session-1",
+            "user_id": "alice",
+        }

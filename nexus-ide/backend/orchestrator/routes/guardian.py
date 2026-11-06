@@ -1,4 +1,11 @@
-"""Guardian API routes — system health, suggestions, and structured logs."""
+"""Guardian API routes — system health, suggestions, and structured logs.
+
+The log-shaped endpoints are scoped to the caller: the structured logger is
+a process-wide ring buffer shared by every tenant, so an unscoped read
+disclosed every other tenant's ``session_id``, ``correlation_id`` and agent
+activity.  The scope and the reasoning live in
+:mod:`backend.orchestrator.routes.logs`.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +17,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from backend.agents.guardian import NexusGuardianAgent
 from backend.middleware.auth import require_auth
 from backend.observability.advanced_logging import get_structured_logger
+from backend.orchestrator.routes.logs import (
+    _buffer_capacity,
+    _owned_entries,
+    _owned_stats,
+    _require_user,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -91,28 +104,35 @@ async def guardian_logs(
     level: str | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
-    """Query structured logs."""
-    slog = get_structured_logger()
-    return {
-        "logs": slog.get_logs(
-            session_id=session_id,
-            agent=agent,
-            level=level,
-            limit=limit,
-        ),
-    }
+    """Query structured logs — the caller's own entries only.
+
+    The buffer behind this endpoint is shared by every session of the
+    instance, so the entries are filtered by the caller's own sessions
+    before they are returned.  A ``session_id`` that belongs to somebody
+    else therefore yields an empty list, not somebody else's log.
+    """
+    user_id = _require_user(auth_user)
+    entries = _owned_entries(user_id, session_id=session_id, agent=agent, level=level)
+    return {"logs": entries[:limit]}
 
 
 @router.get("/guardian/metrics")
 async def guardian_metrics(
     request: Request, auth_user: dict[str, Any] = Depends(require_auth)
 ) -> dict[str, Any]:
-    """Get real-time guardian metrics."""
+    """Get real-time guardian metrics.
+
+    The log statistics are the caller's own (see
+    :mod:`backend.orchestrator.routes.logs`): a global count would disclose
+    how much work the other tenants of this instance are doing.
+    """
     guardian = _get_guardian(request)
     slog = get_structured_logger()
 
     status = guardian.get_status() if guardian else {"running": False}
-    stats = slog.get_stats()
+    user_id = _require_user(auth_user)
+    entries = _owned_entries(user_id)
+    stats = _owned_stats(entries, _buffer_capacity(slog))
 
     return {
         "guardian": status,

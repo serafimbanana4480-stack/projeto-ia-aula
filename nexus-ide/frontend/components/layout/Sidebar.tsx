@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
+import type { Route } from "next";
 import { usePathname, useRouter } from "next/navigation";
 import {
   MessageSquare,
@@ -25,7 +26,24 @@ import {
   Bot,
   LayoutDashboard,
   ListTodo,
+  Brain,
+  Layers,
+  MoreHorizontal,
+  PenLine,
 } from "lucide-react";
+
+/**
+ * Primary navigation — small, elegant, honest.
+ *
+ * IA decision (audit 2026-10-14): the rail answers "where do I work?", not
+ * "what does the system expose?". Eight primary destinations cover the agentic
+ * loop (talk, projects, tasks, agents, files, skills, memory, integrations);
+ * everything else — metrics, analytics, database, documents — lives in the
+ * "Mais" overflow so it never competes with the conversation for attention.
+ *
+ * Every href points at a route that EXISTS. A nav item for a page that was
+ * never built is a lie the user clicks on.
+ */
 
 /**
  * Routes linked from this sidebar. Next's `typedRoutes` (next.config.mjs)
@@ -37,6 +55,7 @@ import {
 type KnownRoute =
   | "/"
   | "/dashboard"
+  | "/bots"
   | "/dashboard/tasks"
   | "/editor"
   | "/projects"
@@ -51,7 +70,8 @@ type KnownRoute =
   | "/pdf"
   | "/search"
   | "/scraping"
-  | "/settings";
+  | "/settings"
+  | "/nexus";
 
 interface NavItem {
   id: string;
@@ -60,54 +80,29 @@ interface NavItem {
   path: KnownRoute;
 }
 
-interface NavGroup {
-  id: string;
-  label: string;
-  items: NavItem[];
-}
+/** The working loop. Chat first: the conversation is the product. */
+const PRIMARY_ITEMS: NavItem[] = [
+  { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard className="h-4 w-4" />, path: "/dashboard" },
+  { id: "bots", label: "Bots", icon: <Bot className="h-4 w-4" />, path: "/bots" },
+  { id: "chat", label: "Chat", icon: <MessageSquare className="h-4 w-4" />, path: "/" },
+  { id: "projects", label: "Projetos", icon: <FolderKanban className="h-4 w-4" />, path: "/projects" },
+  { id: "tasks", label: "Tarefas", icon: <ListTodo className="h-4 w-4" />, path: "/dashboard/tasks" },
+  { id: "agents", label: "Agentes", icon: <Bot className="h-4 w-4" />, path: "/swarm" },
+  { id: "files", label: "Ficheiros", icon: <FileCode2 className="h-4 w-4" />, path: "/editor" },
+  { id: "skills", label: "Skills", icon: <Wrench className="h-4 w-4" />, path: "/tools" },
+  { id: "memory", label: "Memória", icon: <Brain className="h-4 w-4" />, path: "/nexus" },
+  { id: "integrations", label: "Integrações", icon: <Plug className="h-4 w-4" />, path: "/mcp" },
+];
 
-// Grouped by what the user is trying to do, not alphabetically.
-const NAV_GROUPS: NavGroup[] = [
-  {
-    id: "work",
-    label: "Trabalho",
-    items: [
-      { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard className="h-4 w-4" />, path: "/dashboard" },
-      { id: "tasks", label: "Tarefas", icon: <ListTodo className="h-4 w-4" />, path: "/dashboard/tasks" },
-      { id: "chat", label: "Chat", icon: <MessageSquare className="h-4 w-4" />, path: "/" },
-      { id: "editor", label: "Editor", icon: <FileCode2 className="h-4 w-4" />, path: "/editor" },
-      { id: "projects", label: "Projetos", icon: <FolderKanban className="h-4 w-4" />, path: "/projects" },
-    ],
-  },
-  {
-    id: "intelligence",
-    label: "Inteligência",
-    items: [
-      { id: "swarm", label: "SWARM", icon: <Bot className="h-4 w-4" />, path: "/swarm" },
-      { id: "analysis", label: "Métricas", icon: <BarChart3 className="h-4 w-4" />, path: "/analysis" },
-      { id: "analytics", label: "Analytics", icon: <Activity className="h-4 w-4" />, path: "/analytics" },
-    ],
-  },
-  {
-    id: "resources",
-    label: "Recursos",
-    items: [
-      { id: "models", label: "Modelos IA", icon: <Cpu className="h-4 w-4" />, path: "/models" },
-      { id: "mcp", label: "Conectores MCP", icon: <Plug className="h-4 w-4" />, path: "/mcp" },
-      { id: "tools", label: "Ferramentas", icon: <Wrench className="h-4 w-4" />, path: "/tools" },
-      { id: "database", label: "Base de Dados", icon: <Database className="h-4 w-4" />, path: "/database" },
-    ],
-  },
-  {
-    id: "content",
-    label: "Conteúdo",
-    items: [
-      { id: "documents", label: "Documentos", icon: <FileText className="h-4 w-4" />, path: "/documents" },
-      { id: "pdf", label: "Leitor PDF", icon: <FileText className="h-4 w-4" />, path: "/pdf" },
-      { id: "search", label: "Pesquisa", icon: <Search className="h-4 w-4" />, path: "/search" },
-      { id: "scraping", label: "Scraping", icon: <Globe className="h-4 w-4" />, path: "/scraping" },
-    ],
-  },
+/** Secondary surfaces — reachable, never competing. */
+const OVERFLOW_ITEMS: NavItem[] = [
+  { id: "analysis", label: "Métricas", icon: <BarChart3 className="h-4 w-4" />, path: "/analysis" },
+  { id: "analytics", label: "Analytics", icon: <Activity className="h-4 w-4" />, path: "/analytics" },
+  { id: "models", label: "Modelos IA", icon: <Cpu className="h-4 w-4" />, path: "/models" },
+  { id: "database", label: "Base de dados", icon: <Database className="h-4 w-4" />, path: "/database" },
+  { id: "documents", label: "Documentos", icon: <FileText className="h-4 w-4" />, path: "/documents" },
+  { id: "search", label: "Pesquisa", icon: <Search className="h-4 w-4" />, path: "/search" },
+  { id: "scraping", label: "Scraping", icon: <Globe className="h-4 w-4" />, path: "/scraping" },
 ];
 
 const SETTINGS_ITEM: NavItem = {
@@ -148,7 +143,7 @@ function SidebarLink({
     prefetchTimerRef.current = setTimeout(() => {
       prefetchTimerRef.current = null;
       prefetchedRef.current = true;
-      void router.prefetch(item.path);
+      void router.prefetch(item.path as Route);
     }, 90);
   }, [item.path, router]);
 
@@ -163,7 +158,7 @@ function SidebarLink({
 
   return (
     <Link
-      href={item.path}
+      href={item.path as Route}
       prefetch={false}
       onMouseEnter={prefetchOnIntent}
       onFocus={prefetchOnIntent}
@@ -195,14 +190,19 @@ function SidebarLink({
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [isDesktop, setIsDesktop] = useState(false);
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const [creatingTask, setCreatingTask] = useState(false);
   const hydratedRef = useRef(false);
   const mobileNavigationHidden = !isDesktop && !mobileOpen;
+  const overflowActive = OVERFLOW_ITEMS.some((item) => isRouteActive(pathname, item.path));
 
   useEffect(() => {
     setMobileOpen(false);
+    setOverflowOpen(false);
   }, [pathname]);
 
   // Restore persisted preference; when nothing is stored, default to the
@@ -245,6 +245,26 @@ export default function Sidebar() {
 
   const effectiveCollapsed = collapsed && isDesktop;
 
+  /**
+   * Nova tarefa — the primary action of the whole product.
+   * Creates a fresh chat session (the durable kind, when the backend answers)
+   * and lands on the chat. If the backend cannot create one, the chat route
+   * still opens with a local session — the action never dead-ends.
+   */
+  const handleNewTask = useCallback(async () => {
+    if (creatingTask) return;
+    setCreatingTask(true);
+    try {
+      const { useChatSessionsStore } = await import("../../hooks/useChatSessions");
+      await useChatSessionsStore.getState().create();
+    } catch {
+      // Offline: the chat route creates/ensures its own local session.
+    } finally {
+      setCreatingTask(false);
+      router.push("/");
+    }
+  }, [creatingTask, router]);
+
   return (
     <>
       {/* Mobile hamburger toggle */}
@@ -274,19 +294,20 @@ export default function Sidebar() {
         aria-hidden={mobileNavigationHidden || undefined}
         inert={mobileNavigationHidden}
       >
-        {/* Discreet new-project action + collapse toggle */}
-        <div className={`flex items-center gap-1.5 p-3 pb-4 ${effectiveCollapsed ? "flex-col" : ""}`}>
-          <Link
-            href="/projects"
-            prefetch={false}
-            title="Novo projeto"
-            className={`flex h-9 items-center justify-center gap-2 rounded-xl border border-nexus-accent/20 bg-nexus-accent/10 text-xs font-medium text-nexus-accent-bright transition-[transform,opacity,background-color,border-color,color] duration-100 hover:border-nexus-accent/40 hover:bg-nexus-accent/15 focus-visible:ring-2 focus-visible:ring-nexus-accent ${
+        {/* Nova tarefa — the one action the rail leads with. */}
+        <div className={`flex items-center gap-1.5 p-3 pb-3 ${effectiveCollapsed ? "flex-col" : ""}`}>
+          <button
+            type="button"
+            onClick={() => void handleNewTask()}
+            disabled={creatingTask}
+            title="Nova tarefa"
+            className={`flex h-9 items-center justify-center gap-2 rounded-xl border border-nexus-accent/20 bg-nexus-accent/10 text-xs font-medium text-nexus-accent-bright transition-[transform,opacity,background-color,border-color,color] duration-100 hover:border-nexus-accent/40 hover:bg-nexus-accent/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent disabled:opacity-60 ${
               effectiveCollapsed ? "w-8 shrink-0 px-0" : "flex-1 px-2.5"
             }`}
           >
-            <Plus className="h-3.5 w-3.5 shrink-0" />
-            {!effectiveCollapsed && <span className="truncate">Novo projeto</span>}
-          </Link>
+            <Plus className={`h-3.5 w-3.5 shrink-0 ${creatingTask ? "animate-spin" : ""}`} />
+            {!effectiveCollapsed && <span className="truncate">{creatingTask ? "A criar…" : "Nova tarefa"}</span>}
+          </button>
           <button
             onClick={() => setCollapsed((c) => !c)}
             className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nexus-faint transition-[transform,opacity,background-color,color] duration-100 hover:bg-white/[0.06] hover:text-nexus-text md:flex"
@@ -298,32 +319,77 @@ export default function Sidebar() {
           </button>
         </div>
 
-        {/* Navigation — tighter density so the chat keeps visual priority */}
-        <nav className="thin-scrollbar flex-1 space-y-5 overflow-y-auto px-2.5 pb-3">
-          {NAV_GROUPS.map((group) => (
-            <div key={group.id}>
-              {effectiveCollapsed ? (
-                <div className="mx-3 mb-2 h-px bg-nexus-border/60" aria-hidden="true" />
-              ) : (
-                <div className="mb-2 px-3 text-[9px] font-medium uppercase tracking-[0.14em] text-nexus-faint">
-                  {group.label}
-                </div>
-              )}
-              <div className="space-y-[2px]">
-                {group.items.map((item) => (
-                  <SidebarLink
-                    key={item.id}
-                    item={item}
-                    active={isRouteActive(pathname, item.path)}
-                    collapsed={effectiveCollapsed}
-                  />
-                ))}
-              </div>
-            </div>
+        {/* Navigation — the working loop, nothing else. */}
+        <nav className="thin-scrollbar flex-1 space-y-[2px] overflow-y-auto px-2.5 pb-3">
+          {PRIMARY_ITEMS.map((item) => (
+            <SidebarLink
+              key={item.id}
+              item={item}
+              active={isRouteActive(pathname, item.path)}
+              collapsed={effectiveCollapsed}
+            />
           ))}
+
+          <div className="pt-1.5">
+            {effectiveCollapsed ? (
+              <div className="mx-3 mb-1 h-px bg-nexus-border/60" aria-hidden="true" />
+            ) : null}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setOverflowOpen((open) => !open)}
+                aria-expanded={overflowOpen}
+                title="Mais superfícies"
+                className={`group relative flex w-full items-center gap-3 rounded-xl border border-transparent text-[13px] text-nexus-muted transition-[transform,opacity,background-color,border-color,color] duration-100 ease-out hover:bg-white/[0.04] hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/70 ${
+                  effectiveCollapsed ? "justify-center px-0 py-2.5" : "px-3 py-2"
+                } ${overflowActive ? "text-nexus-text" : ""}`}
+              >
+                <span className={`shrink-0 ${overflowActive ? "text-nexus-accent-bright" : ""}`}>
+                  <MoreHorizontal className="h-4 w-4" />
+                </span>
+                {!effectiveCollapsed && <span className="truncate leading-tight">Mais</span>}
+                {effectiveCollapsed && (
+                  <span className="nx-elev-2 pointer-events-none absolute left-full top-1/2 z-50 ml-3 -translate-y-1/2 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs font-medium text-nexus-text opacity-0 transition-[opacity,transform] duration-[180ms] group-hover:opacity-100 group-focus-visible:opacity-100">
+                    Mais
+                  </span>
+                )}
+              </button>
+
+              {overflowOpen ? (
+                <>
+                  <div className="fixed inset-0 z-30" onClick={() => setOverflowOpen(false)} aria-hidden="true" />
+                  <div
+                    role="menu"
+                    aria-label="Mais superfícies"
+                    className={`nx-elev-2 absolute z-40 max-h-[60dvh] w-56 overflow-y-auto rounded-xl p-1.5 ${
+                      effectiveCollapsed ? "left-full top-0 ml-2" : "bottom-full left-0 mb-2"
+                    }`}
+                  >
+                    {OVERFLOW_ITEMS.map((item) => (
+                      <Link
+                        key={item.id}
+                        href={item.path as Route}
+                        role="menuitem"
+                        prefetch={false}
+                        onClick={() => setOverflowOpen(false)}
+                        className={`flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] transition-colors duration-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent ${
+                          isRouteActive(pathname, item.path)
+                            ? "bg-nexus-accent/10 text-nexus-accent-bright"
+                            : "text-nexus-muted hover:bg-white/[0.05] hover:text-nexus-text"
+                        }`}
+                      >
+                        <span className="shrink-0">{item.icon}</span>
+                        <span className="truncate">{item.label}</span>
+                      </Link>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+            </div>
+          </div>
         </nav>
 
-        {/* Definições — pinned below the topic groups */}
+        {/* Definições — pinned below the primary group */}
         <div className="border-t border-nexus-border/50 px-2.5 py-3">
           <SidebarLink
             item={SETTINGS_ITEM}

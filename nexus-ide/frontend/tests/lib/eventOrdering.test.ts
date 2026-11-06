@@ -58,6 +58,16 @@ describe("event ordering", () => {
     expect(buffer.events()).toHaveLength(1);
   });
 
+  it("rejects a conflicting event that reuses a run sequence", () => {
+    const buffer = new RunEventBuffer();
+    const original = makeEvent("token", 1, "first", "run-1", { content: "original" });
+    const conflicting = makeEvent("token", 1, "second", "run-1", { content: "duplicate" });
+
+    expect(buffer.push(original)).toBe(true);
+    expect(buffer.push(conflicting)).toBe(false);
+    expect(buffer.events()).toEqual([original]);
+  });
+
   it("refuses events from a different run", () => {
     const buffer = new RunEventBuffer();
     buffer.push(event(1));
@@ -234,6 +244,7 @@ describe("event ordering", () => {
       expect(buffer.events()).toEqual([]);
       expect(buffer.lastSeq).toBe(0);
       expect(buffer.currentRunId).toBeNull();
+    expect(buffer.push(makeEvent("token", 1, "new-e1"))).toBe(true);
     });
   });
 

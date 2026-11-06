@@ -33,6 +33,7 @@ from backend.runtime.primary import (
     SteeringChannel,
     VerificationRequest,
     VerificationResult,
+    _proposal_from_payload,
 )
 from backend.runtime.spawn_policy import SpawnPolicy
 
@@ -275,6 +276,36 @@ def deep_proposal(name: str, **extra) -> dict:
     return payload
 
 
+def test_spawn_task_tool_schema_maps_to_scheduler_agent_and_objective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEXUS_SPAWN_ESTIMATED_SECONDS", "120")
+    proposal = _proposal_from_payload(
+        {
+            "name": "review-pagination",
+            "agent": "ANALYZER",
+            "description": "Inspect pagination behavior and identify the defect.",
+            "definition_of_done": "Report the affected function and a reproduction.",
+        }
+    )
+
+    assert proposal is not None
+    assert proposal.name == "ANALYZER:review-pagination"
+    assert proposal.objective == "Inspect pagination behavior and identify the defect."
+    assert proposal.estimated_seconds >= SpawnPolicy().min_useful_seconds
+    assert SpawnPolicy().evaluate(proposal).allowed
+
+    default_agent = _proposal_from_payload(
+        {
+            "name": "review-style",
+            "description": "Inspect the formatting rules.",
+            "definition_of_done": "List the relevant formatting requirements.",
+        }
+    )
+    assert default_agent is not None
+    assert default_agent.name == "CODER:review-style"
+
+
 @pytest.mark.asyncio
 async def test_independent_subagents_run_in_parallel() -> None:
     live = 0
@@ -306,12 +337,140 @@ async def test_independent_subagents_run_in_parallel() -> None:
     elapsed = time.monotonic() - started
 
     assert peak == 2, "independent workers must overlap"
-    # Overlap is proven by ``peak == 2`` above; this elapsed bound is only a
-    # coarse guard against pathological scheduler overhead (Windows/CI noise
-    # measured 0.149s against the previous 0.14s bound and flapped).
-    assert elapsed < 0.45, "two 50ms workers took pathologically long"
+    # Overlap is proven by ``peak == 2`` above. Keep only a generous hang guard:
+    # on the shared Windows test host, concurrent suites can pause these 50ms
+    # workers for over a second without changing the scheduler's parallelism.
+    assert elapsed < 5.0, "subagent scheduler stalled for several seconds"
     assert {result.status for result in loop.outcome.subagents} == {"completed"}
     assert types_of(events).count("subagent_started") == 2
+    accepted = [event for event in events if event.type.value == "status_update"
+                and str(event.payload.get("label", "")).startswith("proposta de delegação aceite:")]
+    started_events = [event for event in events if event.type.value == "subagent_started"]
+    assert len(accepted) >= 2
+    assert all("a aguardar início" in event.payload["label"] for event in accepted)
+    assert max(event.seq for event in accepted[:2]) < min(event.seq for event in started_events)
+
+
+@pytest.mark.asyncio
+async def test_subagent_output_and_error_reach_verification_and_parent_turn() -> None:
+    observed_feedback: list[str] = []
+    turns: list[PrimaryTurn] = []
+
+    def stream(turn: PrimaryTurn) -> AsyncIterator[AgentSignal]:
+        turns.append(turn)
+        if turn.cycle == 1:
+            return signals(
+                delegate(**deep_proposal("RESEARCHER", write_scope=["docs/a.md"])),
+                delegate(**deep_proposal("ANALYZER", write_scope=["docs/b.md"])),
+                token("A análise está em curso."),
+            )(turn)
+        return signals(token("Resposta final com os resultados."))(turn)
+
+    async def subagent(proposal) -> str:
+        if proposal.name == "ANALYZER":
+            raise RuntimeError("child failed with useful diagnostic")
+        loop._changed_files.append("docs/a.md")
+        return "research found the requested evidence"
+
+    def verify(request: VerificationRequest) -> VerificationResult:
+        observed_feedback.append(request.turn.feedback)
+        return VerificationResult(ran=False, ok=True)
+
+    loop = PrimaryLoop(
+        run_id="run-child-context",
+        query="Investiga e conclui",
+        stream=stream,
+        verify=verify,
+        run_subagent=subagent,
+        max_cycles=1,
+        project_path="/tmp/project",
+    )
+    events = await collect(loop)
+
+    assert {result.status for result in loop.outcome.subagents} == {"completed", "failed"}
+    assert "research found the requested evidence" in observed_feedback[0]
+    assert "child failed with useful diagnostic" in observed_feedback[0]
+    assert "research found the requested evidence" in turns[1].feedback
+    assert "child failed with useful diagnostic" in turns[1].feedback
+    assert "JA CONCLUIRAM com sucesso" not in turns[1].feedback
+    assert turns[1].synthesis_only is False
+    # p42: a synthesis that does not name the subagents gets an attribution
+    # line for the files they changed.
+    assert "Resposta final com os resultados." in loop.outcome.answer
+    assert loop.outcome.answer.rstrip().endswith("`docs/a.md`.")
+    assert "Alterações feitas pelo(s) subagente(s)" in loop.outcome.answer
+    child_tool_results = [
+        event.payload
+        for event in events
+        if event.type in {RuntimeEventType.TOOL_COMPLETED, RuntimeEventType.TOOL_FAILED}
+        and event.payload.get("tool") == "spawn_task"
+    ]
+    assert any(
+        result.get("result", {}).get("output") == "research found the requested evidence"
+        for result in child_tool_results
+    )
+    assert any(
+        "child failed with useful diagnostic" in result.get("result", {}).get("error", "")
+        for result in child_tool_results
+    )
+
+
+@pytest.mark.asyncio
+async def test_delegated_write_without_verification_keeps_tools_available() -> None:
+    turns: list[PrimaryTurn] = []
+
+    def stream(turn: PrimaryTurn) -> AsyncIterator[AgentSignal]:
+        turns.append(turn)
+        if turn.cycle == 1:
+            return signals(delegate(**deep_proposal("CODER")))(turn)
+        return signals(token("Ainda vou verificar a alteração."))(turn)
+
+    async def subagent(_proposal) -> str:
+        loop._changed_files.append("src/change.py")
+        return "Alteração produzida"
+
+    loop = PrimaryLoop(
+        run_id="run-write-needs-verification", query="Edita e verifica", stream=stream,
+        run_subagent=subagent, max_cycles=1, project_path="/tmp/project",
+    )
+    await collect(loop)
+
+    assert len(turns) == 2
+    assert turns[1].synthesis_only is False
+    assert "todos os passos pedidos JÁ foram executados" not in turns[1].feedback
+    assert "verifica o que falta" in turns[1].feedback
+
+
+@pytest.mark.asyncio
+async def test_parent_cancellation_drains_subagent_scheduler() -> None:
+    started = asyncio.Event()
+    drained = asyncio.Event()
+
+    async def subagent(_proposal) -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            drained.set()
+
+    loop = PrimaryLoop(
+        run_id="run-child-cancel",
+        query="Cancela a tarefa",
+        stream=signals(
+            delegate(**deep_proposal("WORKER", write_scope=["docs/a.md"])),
+            token("A executar."),
+        ),
+        run_subagent=subagent,
+        max_cycles=1,
+        project_path="/tmp/project",
+    )
+    runner = asyncio.create_task(collect(loop))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+
+    assert drained.is_set()
 
 
 @pytest.mark.asyncio

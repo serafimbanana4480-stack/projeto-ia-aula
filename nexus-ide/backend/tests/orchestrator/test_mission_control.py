@@ -117,6 +117,51 @@ class TestMissionPlanner:
         # Sentence-cased, and the tail is preserved verbatim.
         assert fix[0].isupper() and fix.endswith(".")
 
+    def test_capability_question_does_not_create_an_implementation_mission(
+        self, py_project: Path
+    ) -> None:
+        objective = (
+            "verifica se tens memoria e se tudo funciona corretamente no sistema "
+            "diz me que funcionalidades tens skills mcp se serias capaz de criar "
+            "fala mais sobre as tuas capacidades e se funcionam corretamente"
+        )
+        planner = MissionPlanner(ProjectIntelligence(py_project).scan())
+        brief = planner.build_brief(objective)
+
+        assert "implementar funcionalidade nova" not in brief.objective_interpreted.lower()
+        assert "capacidades" in brief.objective_interpreted.lower()
+
+        phases = {phase.phase: phase for phase in planner.build_plan(brief).phases}
+        assert phases[MissionPhase.STABILISATION].skipped
+        assert phases[MissionPhase.IMPROVEMENT].skipped
+        assert not phases[MissionPhase.VERIFICATION].skipped
+
+        contracts = {
+            contract.name: contract
+            for wave in planner.build_waves(brief)
+            for contract in wave.contracts
+        }
+        assert contracts["Backend Agent"].state is ContractState.SKIPPED
+        assert contracts["Integration Agent"].state is ContractState.SKIPPED
+        assert contracts["Documentation Agent"].state is ContractState.SKIPPED
+        assert contracts["Test Agent"].state is ContractState.PROPOSED
+
+    def test_explicit_repair_request_keeps_implementation_phases(
+        self, py_project: Path
+    ) -> None:
+        planner = MissionPlanner(ProjectIntelligence(py_project).scan())
+        brief = planner.build_brief("verifica por que falha e corrige todas as falhas")
+        phases = {phase.phase: phase for phase in planner.build_plan(brief).phases}
+        contracts = {
+            contract.name: contract
+            for wave in planner.build_waves(brief)
+            for contract in wave.contracts
+        }
+
+        assert not phases[MissionPhase.STABILISATION].skipped
+        assert not phases[MissionPhase.IMPROVEMENT].skipped
+        assert contracts["Backend Agent"].state is ContractState.PROPOSED
+
     def test_unmatched_request_is_echoed_not_invented(self, py_project: Path) -> None:
         planner = MissionPlanner(ProjectIntelligence(py_project).scan())
         interpreted = planner.build_brief("zzz qqq").objective_interpreted

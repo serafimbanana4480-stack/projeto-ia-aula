@@ -1,7 +1,16 @@
 """Execution-mode classification and routing metadata contracts."""
 
+import importlib
+from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
 from backend.orchestrator.execution_contracts import ExecutionMode
 from backend.orchestrator.routes.chat import (
+    _ASSISTED_ALLOWED_TOOLS,
+    _ASSISTED_MAX_ITERATIONS,
     _needs_project_context,
     _normalise_autonomous_status,
     _should_persist_project_memory,
@@ -46,6 +55,40 @@ def test_action_only_requests_are_assisted() -> None:
         assert classify_execution_mode(message, "auto", "") is ExecutionMode.ASSISTED
 
 
+def test_explicit_tool_reads_are_assisted_instead_of_chat() -> None:
+    request = (
+        "Usa a ferramenta read_file para ler README.md no projeto ativo. "
+        "Não alteres ficheiros nem executes comandos."
+    )
+
+    assert classify_execution_mode(request, "auto", "C:/workspace") is ExecutionMode.ASSISTED
+    assert classify_execution_mode("ler README.md", "auto", "C:/workspace") is ExecutionMode.ASSISTED
+    # A conceptual question about reading files should stay in the lightweight
+    # chat lane even though it contains a read verb.
+    assert classify_execution_mode("Como posso ler um ficheiro?", "auto", "") is ExecutionMode.CHAT
+
+
+def test_assisted_task_can_update_its_plan_without_widening_project_access() -> None:
+    prompt = (
+        "Confirma se o ficheiro example.txt neste projeto contém exatamente COR-TESTE: azul. "
+        "Cria uma checklist de 3 passos com todo_write; mantém só um passo ativo, atualiza "
+        "o progresso depois de cada ação e conclui a verificação apenas após leres o ficheiro "
+        "com read_file. Não alteres ficheiros. No fim, responde com o resultado confirmado "
+        "e o caminho consultado."
+    )
+
+    assert classify_execution_mode(prompt, "auto", "C:/workspace") is ExecutionMode.ASSISTED
+    assert set(_ASSISTED_ALLOWED_TOOLS) == {
+        "read_file",
+        "search_in_files",
+        "run_tests",
+        "type_check",
+        "todo_write",
+        "todo_list",
+    }
+    assert _ASSISTED_MAX_ITERATIONS == 6
+
+
 def test_multi_phase_or_explicit_mission_is_mission() -> None:
     assert (
         classify_execution_mode(
@@ -78,6 +121,59 @@ def test_explicit_modes_are_honoured() -> None:
     assert classify_execution_mode("tell me about Python", "chat", "") is ExecutionMode.CHAT
     assert classify_execution_mode("fix this file", "assisted", "") is ExecutionMode.ASSISTED
     assert classify_execution_mode("summarize the repo", "mission", "") is ExecutionMode.MISSION
+
+
+@pytest.mark.asyncio
+async def test_armed_autonomous_profile_keeps_simple_tool_request_on_primary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    chat_routes = importlib.import_module("backend.orchestrator.routes.chat")
+    chat_primary = importlib.import_module("backend.orchestrator.routes.chat_primary")
+    advanced_modes = importlib.import_module("backend.orchestrator.advanced_modes")
+    monkeypatch.setattr(
+        advanced_modes,
+        "get_orchestrator",
+        lambda: SimpleNamespace(
+            build_active_execution_profile=lambda: {"force_autonomous": True}
+        ),
+    )
+    monkeypatch.setattr(chat_primary, "is_primary_enabled", lambda: True)
+    routed: list[str] = []
+
+    async def primary(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        routed.append("primary")
+        yield 'data: {"type":"done"}\n\n'
+
+    async def legacy(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        routed.append("legacy")
+        yield 'data: {"type":"done"}\n\n'
+
+    monkeypatch.setattr(chat_primary, "run_primary_chat", primary)
+    monkeypatch.setattr(chat_routes, "_run_pipeline", legacy)
+    request = SimpleNamespace(
+        session_id="session-tool-route",
+        message=(
+            "Usa a ferramenta read_file para ler README.md no projeto ativo; "
+            "não alteres ficheiros nem executes comandos."
+        ),
+        mode="auto",
+        project_path=str(tmp_path),
+    )
+
+    frames = [
+        frame
+        async for frame in chat_routes._select_pipeline(
+            request,
+            llm_client=object(),
+            registry={},
+            context=object(),
+            user_id="audit-user",
+        )
+    ]
+
+    assert routed == ["primary"]
+    assert frames[-1] == 'data: {"type":"done"}\n\n'
 
 
 def test_planning_blocked_never_becomes_success() -> None:

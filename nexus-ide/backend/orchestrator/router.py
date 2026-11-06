@@ -26,6 +26,7 @@ import logging
 from typing import Any
 
 from backend.cache_backends import NullCacheBackend, TTLCacheBackend
+from backend.llm.factory import create_llm_client
 from backend.config.settings import get_model_config, load_prompt
 from backend.models.api import AgentName, RoutingDecision
 from backend.orchestrator.router_engine import (
@@ -85,7 +86,7 @@ def _get_default_router() -> Router:
         _default_router = Router(
             strategies=[
                 KeywordRoutingStrategy(),
-                LLMRoutingStrategy(llm_client=None),
+                LLMRoutingStrategy(llm_client=create_llm_client()),
             ],
             cache=TTLCacheBackend(),
         )

@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from backend.runtime.spawn_policy import scopes_overlap
+
 logger = logging.getLogger(__name__)
 
 
@@ -274,10 +276,17 @@ class RuntimeScheduler:
         Admission is stable: ready tasks are considered in the order they
         became ready, so the observable start order is the scheduler's
         decision rather than a coroutine race.
+
+        The scope check compares *paths*, not raw strings. A task that owns
+        the directory ``src/`` and a task that writes ``src/a.py`` touch the
+        same bytes; the old set intersection (``task.write_scope & owned``)
+        said they were disjoint and let both run at once.
         """
-        owned: set[str] = set()
+        owned_write: set[str] = set()
+        owned_read: set[str] = set()
         for task in running:
-            owned |= task.write_scope
+            owned_write |= task.write_scope
+            owned_read |= task.read_scope
         candidates = sorted(
             (task for task in by_id.values() if task.status is RuntimeTaskStatus.READY),
             key=lambda task: (task.scheduled_at, task.queued_at, task.name),
@@ -285,10 +294,15 @@ class RuntimeScheduler:
         admitted: list[RuntimeTask] = []
         for task in candidates:
             # Serialise writer/writer and writer/reader overlaps.
-            if task.write_scope & owned or task.read_scope & owned:
+            if (
+                scopes_overlap(task.write_scope, owned_write)
+                or scopes_overlap(task.read_scope, owned_write)
+                or scopes_overlap(task.write_scope, owned_read)
+            ):
                 continue
             admitted.append(task)
-            owned |= task.write_scope
+            owned_write |= task.write_scope
+            owned_read |= task.read_scope
         return admitted
 
     async def _guarded(self, task: RuntimeTask) -> None:
@@ -324,21 +338,31 @@ class RuntimeScheduler:
     async def _with_watchdog(self, task: RuntimeTask) -> Any:
         """Fail a task that stops reporting progress, instead of hanging."""
         work = asyncio.create_task(task.run(task))
-        if task.heartbeat_timeout_seconds <= 0:
-            return await work
-        while True:
-            done, _ = await asyncio.wait({work}, timeout=self._poll_interval)
-            if done:
+        try:
+            if task.heartbeat_timeout_seconds <= 0:
                 return await work
-            silent_for = time.monotonic() - (task.last_heartbeat_at or task.started_at)
-            if silent_for > task.heartbeat_timeout_seconds:
-                work.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await work
-                raise _StalledError(
-                    f"no progress for {silent_for:.0f}s "
-                    f"(heartbeat timeout {task.heartbeat_timeout_seconds:.0f}s)"
-                )
+            while True:
+                done, _ = await asyncio.wait({work}, timeout=self._poll_interval)
+                if done:
+                    return await work
+                silent_for = time.monotonic() - (task.last_heartbeat_at or task.started_at)
+                if silent_for > task.heartbeat_timeout_seconds:
+                    work.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await work
+                    raise _StalledError(
+                        f"no progress for {silent_for:.0f}s "
+                        f"(heartbeat timeout {task.heartbeat_timeout_seconds:.0f}s)"
+                    )
+        except asyncio.CancelledError:
+            # Cancelling the scheduler's handle must cancel the work it is
+            # waiting for. Without this the subagent kept running after the
+            # parent stopped waiting for it: an orphaned agent that could
+            # still write files after the run was cancelled.
+            work.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await work
+            raise
 
     def _propagate_failure(
         self,

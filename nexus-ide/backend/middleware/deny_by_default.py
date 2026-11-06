@@ -15,9 +15,9 @@ isolation, is not a security posture.
 
 Deliberately *not* done here
 ----------------------------
-The middleware does **not** validate the token's signature, expiry, or
-subject.  It checks that *a* bearer credential is present and lets the real
-guard — ``require_auth`` / ``require_admin`` via
+For **HTTP**, the middleware does **not** validate the token's signature,
+expiry, or subject.  It checks that *a* bearer credential is present and
+lets the real guard — ``require_auth`` / ``require_admin`` via
 :func:`backend.middleware.auth.get_current_user` — do the cryptographic work.
 Two reasons:
 
@@ -27,14 +27,26 @@ Two reasons:
    the precise ``401 Could not validate credentials`` it already handles,
    rather than a second, differently-worded rejection path.
 
+For **WebSockets** the rule is different, and the difference is forced by the
+protocol.  A handshake has no dependency layer behind the edge: the route's
+own guard runs *after* the handshake was already accepted or closed, and a
+close sent before ``accept()`` is answered by a real ASGI server with an
+HTTP 403 and no close frame — the client cannot read the code and cannot
+tell "authenticate and retry" from "the server broke".  The edge therefore
+validates the handshake credential itself, with the *same* decoder the route
+guard uses (:func:`backend.middleware.auth.decode_access_token`), and refuses
+the handshake by **accepting it and closing it with ``4401``**.  One
+implementation of "is this token good" still; a close code the client can
+actually read.
+
 Why a pure ASGI middleware
 --------------------------
 ``BaseHTTPMiddleware`` runs the whole downstream stack inside a wrapper task
 and buffers: it breaks WebSocket scopes, it changes streaming semantics, and
 Starlette deprecates it for exactly this use.  Route resolution needs
 ``route.matches(scope)`` on the raw scope, and a WebSocket rejection has to
-happen *before* ``accept()`` — both are plain ASGI operations, so this is a
-plain ASGI middleware.
+happen in the ASGI message stream — both are plain ASGI operations, so this
+is a plain ASGI middleware.
 
 Placement in the stack (measured, see tests/contracts/
 test_route_auth_inventory.py)
@@ -82,6 +94,11 @@ UNAUTHORIZED_DETAIL = "Authentication required"
 #: WebSocket close code for a rejected handshake.  4401 is in the
 #: application-private range (4000-4999) and is the WS analogue of HTTP 401.
 WS_UNAUTHORIZED_CODE = 4401
+
+#: WebSocket close code for a handshake that authenticated but was refused on
+#: ownership grounds ("this mission is not yours").  Also in the
+#: application-private range; the frontend already treats it as final.
+WS_FORBIDDEN_CODE = 4403
 
 #: Methods that are always allowed through.
 #:
@@ -302,7 +319,18 @@ async def _send_unauthorized(send: Any) -> None:
 
 
 async def _close_unauthorized(send: Any) -> None:
-    """Refuse a WebSocket handshake **before** it is accepted."""
+    """Refuse a WebSocket handshake with the documented close code.
+
+    The handshake is **accepted first** and closed immediately afterwards.
+
+    A close sent *before* ``accept()`` is answered by a real ASGI server
+    with an HTTP 403 and no close frame at all, so the client never sees
+    the code and cannot tell "authenticate and retry" from "the server
+    broke".  Accepting and then closing hands the client the ``4401`` close
+    frame the contract documents, and no application data is exchanged
+    either way.
+    """
+    await send({"type": "websocket.accept", "subprotocol": None, "headers": []})
     await send({"type": "websocket.close", "code": WS_UNAUTHORIZED_CODE})
 
 
@@ -373,9 +401,9 @@ class DenyByDefaultMiddleware:
         for path_format in matched_path_formats(scope, routes):
             if is_public_ws_route("WS", path_format):
                 continue
-            if websocket_token(scope) is None:
+            if websocket_caller(scope) is None:
                 logger.debug(
-                    "deny-by-default: anonymous WS handshake blocked for %s",
+                    "deny-by-default: WS handshake without a valid credential blocked for %s",
                     scope.get("path"),
                 )
                 await _close_unauthorized(send)
@@ -407,6 +435,36 @@ def extract_websocket_token(websocket: WebSocket) -> str | None:
     return websocket_token(websocket.scope)
 
 
+def websocket_caller(scope: Any) -> dict[str, Any] | None:
+    """The caller a WebSocket handshake authenticated, or ``None``.
+
+    Unlike the HTTP edge -- which only checks that a bearer credential is
+    *present* and leaves the cryptographic work to ``get_current_user`` -- a
+    WebSocket handshake has no dependency layer behind it: the route's own
+    guard runs *after* the handshake was already accepted or closed, and a
+    close sent before ``accept()`` reaches the client as an HTTP 403 with no
+    close code.  So the edge validates the credential itself, using the very
+    same decoder the route guard uses
+    (:func:`backend.middleware.auth.decode_access_token`): there is still one
+    implementation of "is this token good", and a handshake without a valid
+    one is refused with the documented ``4401`` close.
+    """
+    from backend.middleware.auth import decode_access_token
+
+    for candidate in websocket_token_candidates(scope):
+        try:
+            payload = decode_access_token(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload.get("sub"):
+            return {
+                "user_id": payload.get("sub"),
+                "email": payload.get("email"),
+                "exp": payload.get("exp"),
+            }
+    return None
+
+
 async def require_websocket_token(websocket: WebSocket) -> dict[str, Any]:
     """FastAPI dependency for WebSocket routes: the caller, or a 4401 rejection.
 
@@ -421,20 +479,14 @@ async def require_websocket_token(websocket: WebSocket) -> dict[str, Any]:
     arbitrary request headers.  Every offered candidate is tried in order, so a
     client that negotiates a named subprotocol (``["nexus-v1", "<token>"]``)
     still authenticates.
-    """
-    from backend.middleware.auth import decode_access_token
 
-    for candidate in extract_websocket_tokens(websocket):
-        try:
-            payload = decode_access_token(candidate)
-        except Exception:
-            continue
-        if isinstance(payload, dict) and payload.get("sub"):
-            user: dict[str, Any] = {
-                "user_id": payload.get("sub"),
-                "email": payload.get("email"),
-                "exp": payload.get("exp"),
-            }
-            return user
+    This is the last-resort guard for a route served *without* the middleware.
+    With the middleware wired, the edge has already refused an invalid
+    credential with an accepted-then-closed ``4401`` -- the shape a real
+    client can actually read.
+    """
+    user = websocket_caller(websocket.scope)
+    if user is not None:
+        return user
 
     raise WebSocketException(code=WS_UNAUTHORIZED_CODE)

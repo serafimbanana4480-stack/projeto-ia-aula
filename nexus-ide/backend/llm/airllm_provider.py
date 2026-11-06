@@ -727,6 +727,12 @@ class AirLLMProvider:
         # Higher threshold because model download/split failures are common on first use
         self._circuit = CircuitBreaker(failure_threshold=10, reset_timeout=300.0)
         self._embed_fallback_dim = 384  # dimension for fallback zero embeddings
+        # The provider's own stop reason.  AirLLM generates locally and always
+        # stops on its own, so the value is "stop" — but the attribute has to
+        # exist: the runtime reads it to tell a normal stop from a
+        # token-limit truncation, and a missing attribute made the truncation
+        # undetectable for this provider.
+        self.last_finish_reason: str = ""
 
     async def aclose(self) -> None:
         """Unload all cached models and free memory."""
@@ -821,6 +827,7 @@ class AirLLMProvider:
         """
         await self._check_circuit()
         options = self._inject_thinking_disable(model, options)
+        self.last_finish_reason = ""
 
         # Normalize messages
         dict_messages = [
@@ -855,6 +862,7 @@ class AirLLMProvider:
             )
 
             self._circuit.record_success()
+            self.last_finish_reason = "stop"
         except TimeoutError:
             self._circuit.record_failure()
             logger.error("AirLLM stream timed out after %ds for model %s", timeout, model)
@@ -888,6 +896,7 @@ class AirLLMProvider:
         """Non-streaming chat completion with timeout."""
         await self._check_circuit()
         options = self._inject_thinking_disable(model, options)
+        self.last_finish_reason = ""
 
         dict_messages = [
             m if isinstance(m, dict) else {"role": m.role, "content": m.content} for m in messages
@@ -917,6 +926,7 @@ class AirLLMProvider:
                 timeout=timeout,
             )
             self._circuit.record_success()
+            self.last_finish_reason = "stop"
             return text
         except TimeoutError:
             self._circuit.record_failure()

@@ -168,6 +168,17 @@ describe("modeStore", () => {
     expect(useModeStore.getState().currentMode).toBe("auto");
   });
 
+  it("recupera os modos depois de uma falha inicial de ligação", async () => {
+    mockAuthenticatedFetch.mockRejectedValueOnce(new Error("ligação indisponível"));
+    await useModeStore.getState().loadModes();
+    expect(useModeStore.getState().modesError).not.toBeNull();
+    mockAuthenticatedFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ modes: { auto: { description: "Automático" }, deep: { description: "Análise detalhada" } } }) });
+    await useModeStore.getState().loadModes();
+    expect(useModeStore.getState().modes.map((mode) => mode.id)).toEqual(["auto", "deep"]);
+    expect(useModeStore.getState().modesError).toBeNull();
+    expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(2);
+  });
+
   it("loadModes maps mode fields with defaults", async () => {
     mockAuthenticatedFetch.mockResolvedValue({
       ok: true,

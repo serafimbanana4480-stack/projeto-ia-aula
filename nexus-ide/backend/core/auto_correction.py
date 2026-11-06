@@ -1057,13 +1057,32 @@ class AutoCorrectionLoop:
         return event
 
     async def replan_for(
-        self, artifact_id: str, original_objective: str, session_id: str
+        self,
+        artifact_id: str,
+        original_objective: str,
+        session_id: str,
+        *,
+        user_id: str = "",
     ) -> Any | None:
         """Re-purpose the orchestration engine for a self-heal re-plan.
 
+        ``user_id`` must come from the authenticated request or a trusted
+        service owner. It is never inferred from ``session_id`` or
+        ``artifact_id``. Without it the re-plan is skipped: an ownerless run
+        cannot be resumed by a user and must not be allowed to adopt another
+        user's durable run.
+
         Returns the new :class:`OrchestrationResult` on success, or ``None``
-        if the engine is not available.
+        if the owner or engine is unavailable.
         """
+        owner_id = str(user_id or "").strip()
+        if not owner_id:
+            logger.warning(
+                "Skipping self-heal replan for %s: authenticated owner is missing",
+                artifact_id,
+            )
+            return None
+
         try:
             from backend.orchestrator.engine import OrchestrationEngine
         except Exception:
@@ -1087,6 +1106,7 @@ class AutoCorrectionLoop:
             result = await engine.execute_autonomous(
                 objective=new_objective,
                 session_id=session_id,
+                user_id=owner_id,
             )
             logger.info(
                 "Self-heal replan complete | artifact_id=%s session_id=%s state=%s",

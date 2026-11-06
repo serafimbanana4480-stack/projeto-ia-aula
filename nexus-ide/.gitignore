@@ -56,6 +56,9 @@ nul
 # Misc
 *.tmp
 *.bak
+# PowerShell redirection typos (e.g. `cmd > =ro`)
+=
+=ro
 .playwright-mcp/
 project_directory/
 

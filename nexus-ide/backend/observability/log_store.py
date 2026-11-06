@@ -22,7 +22,48 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 RING_BUFFER_SIZE = 10_000
-DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "nexus.db"
+
+#: Where the structured logs live.
+#:
+#: The persistence layer resolves the database location once, when it is
+#: imported: ``NEXUS_DB_PATH`` when that variable is set, the repository copy
+#: of ``data/nexus.db`` otherwise.  This module used a hard-coded path, so a
+#: relocated database split the data in two: the sessions went to the
+#: configured file while the structured logs always went to the repository
+#: copy.
+#:
+#: The attribute is kept so the test suite can point the store at a scratch
+#: file; :func:`_db_path` resolves the *effective* location on every access.
+DB_PATH = Path(
+    os.environ.get("NEXUS_DB_PATH")
+    or Path(__file__).resolve().parent.parent.parent / "data" / "nexus.db"
+).expanduser().resolve()
+
+#: The value :data:`DB_PATH` had when this module was imported.  A difference
+#: means the attribute was overridden explicitly (the test suite does that).
+_INITIAL_DB_PATH = DB_PATH
+
+
+def _db_path() -> Path:
+    """Return the SQLite file the structured logs are written to.
+
+    The location is resolved on every call, so a database that is relocated
+    (or overridden by a test) is picked up without a restart.  The order is:
+
+    1. this module's :data:`DB_PATH` when it was overridden explicitly;
+    2. ``NEXUS_DB_PATH`` — the same override the persistence layer honours;
+    3. ``backend.persistence.db.DB_PATH`` — the database the rest of the
+       application uses, so the sessions and the structured logs never end up
+       in two different files.
+    """
+    if DB_PATH != _INITIAL_DB_PATH:
+        return Path(DB_PATH)
+    override = os.environ.get("NEXUS_DB_PATH")
+    if override:
+        return Path(override).expanduser().resolve()
+    from backend.persistence import db as persistence_db
+
+    return Path(persistence_db.DB_PATH)
 
 
 def _now_iso() -> str:
@@ -31,7 +72,7 @@ def _now_iso() -> str:
 
 @contextmanager
 def _get_db():
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn = sqlite3.connect(str(_db_path()), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     try:
@@ -432,3 +473,48 @@ def get_log_store() -> LogStore:
     if _log_store is None:
         _log_store = LogStore()
     return _log_store
+
+
+# ---------------------------------------------------------------------------
+# One-off maintenance
+# ---------------------------------------------------------------------------
+
+
+def remove_ghost_sessions() -> int:
+    """Delete the placeholder sessions fabricated by a tool audit.
+
+    A tool audit inserted a session row for an unknown session id and used
+    the id itself as the title.  Those rows are not conversations: they
+    carry no messages, they belong to no user, and they show up in the
+    session list and in ``count_active_sessions()``.
+
+    The cleanup is idempotent and deliberately conservative: a row is only
+    removed when its title is exactly its id AND it has no messages, so a
+    real session that happens to be titled like its id survives.  Rows that
+    depend on the session are removed with it (the foreign keys cascade).
+
+    Returns the number of rows removed.
+    """
+    path = _db_path()
+    try:
+        with _get_db() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM sessions
+                 WHERE id IN (
+                    SELECT s.id
+                      FROM sessions s
+                     WHERE s.title = s.id
+                       AND NOT EXISTS (
+                            SELECT 1 FROM messages m WHERE m.session_id = s.id
+                       )
+                 )
+                """
+            )
+            removed = int(cursor.rowcount or 0)
+    except sqlite3.Error as exc:
+        logger.warning("Ghost session cleanup failed: %s", exc)
+        return 0
+    if removed:
+        logger.info("Removed %d ghost session(s) from %s", removed, path)
+    return removed

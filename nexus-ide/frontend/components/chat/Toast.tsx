@@ -1,7 +1,15 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { AlertTriangle, X, Copy, Check } from "lucide-react";
+import {
+  AlertTriangle,
+  Info,
+  CheckCircle2,
+  XCircle,
+  X,
+  Copy,
+  Check,
+} from "lucide-react";
 
 export type ToastKind = "error" | "warning" | "info" | "success";
 
@@ -20,29 +28,37 @@ export interface Toast {
 
 const COLORS: Record<ToastKind, { bg: string; border: string; text: string; icon: string }> = {
   error: {
-    bg: "bg-rose-500/10",
-    border: "border-rose-500/40",
-    text: "text-rose-300",
-    icon: "text-rose-400",
+    bg: "bg-nexus-accent4/10",
+    border: "border-nexus-accent4/40",
+    text: "text-nexus-accent4",
+    icon: "text-nexus-accent4",
   },
   warning: {
-    bg: "bg-amber-500/10",
-    border: "border-amber-500/40",
-    text: "text-amber-300",
-    icon: "text-amber-400",
+    bg: "bg-nexus-accent3/10",
+    border: "border-nexus-accent3/40",
+    text: "text-nexus-accent3",
+    icon: "text-nexus-accent3",
   },
   info: {
-    bg: "bg-sky-500/10",
-    border: "border-sky-500/40",
-    text: "text-sky-300",
-    icon: "text-sky-400",
+    bg: "bg-nexus-cyan/10",
+    border: "border-nexus-cyan/40",
+    text: "text-nexus-cyan",
+    icon: "text-nexus-cyan",
   },
   success: {
-    bg: "bg-emerald-500/10",
-    border: "border-emerald-500/40",
-    text: "text-emerald-300",
-    icon: "text-emerald-400",
+    bg: "bg-nexus-accent2/10",
+    border: "border-nexus-accent2/40",
+    text: "text-nexus-accent2",
+    icon: "text-nexus-accent2",
   },
+};
+
+/** A success toast must not shout with a warning triangle. */
+const KIND_ICON: Record<ToastKind, React.ReactNode> = {
+  error: <XCircle className="h-4 w-4 shrink-0" />,
+  warning: <AlertTriangle className="h-4 w-4 shrink-0" />,
+  info: <Info className="h-4 w-4 shrink-0" />,
+  success: <CheckCircle2 className="h-4 w-4 shrink-0" />,
 };
 
 const DEFAULT_TIMEOUT_MS: Record<ToastKind, number> = {
@@ -117,7 +133,7 @@ export default function ToastHost() {
     <div
       role="region"
       aria-label="Notificações"
-      className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-full max-w-sm flex-col gap-2"
+      className="pointer-events-none fixed bottom-16 right-4 z-50 flex w-full max-w-sm flex-col gap-2"
     >
       <AnimatePresence initial={false}>
         {items.map((t) => {
@@ -138,16 +154,18 @@ export default function ToastHost() {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, x: 40, scale: 0.95 }}
               transition={{ duration: 0.2 }}
-              className={`pointer-events-auto flex gap-2 rounded-lg border ${c.border} ${c.bg} p-3 shadow-lg backdrop-blur-md`}
+              className={`pointer-events-auto flex gap-2 rounded-xl border ${c.border} ${c.bg} p-3 shadow-nx-2 backdrop-blur-md`}
             >
-              <AlertTriangle className={`mt-0.5 h-4 w-4 shrink-0 ${c.icon}`} />
+              <span className={`mt-0.5 ${c.icon}`} aria-hidden="true">
+                {KIND_ICON[t.kind]}
+              </span>
               <div className="min-w-0 flex-1">
                 <div className={`text-[12px] font-semibold ${c.text}`}>{t.title}</div>
                 {t.message && (
                   <div className="mt-0.5 text-[11px] leading-relaxed text-nexus-text/90">{t.message}</div>
                 )}
                 {t.details && (
-                  <pre className="mt-1.5 max-h-24 overflow-y-auto rounded bg-black/30 px-2 py-1 font-mono text-[10px] leading-relaxed text-nexus-muted thin-scrollbar">
+                  <pre className="mt-1.5 max-h-24 overflow-y-auto rounded bg-nexus-bg/60 px-2 py-1 font-mono text-[10px] leading-relaxed text-nexus-muted thin-scrollbar">
                     {t.details}
                   </pre>
                 )}
@@ -169,11 +187,11 @@ export default function ToastHost() {
                         try {
                           await navigator.clipboard.writeText(t.details || "");
                           setCopiedId(t.id);
-                          setTimeout(() => setCopiedId((c) => (c === t.id ? null : c)), 1200);
                         } catch {}
                       }}
                       className="rounded p-0.5 text-nexus-muted hover:bg-white/5 hover:text-nexus-text"
                       title="Copiar detalhes"
+                      aria-label="Copiar detalhes"
                     >
                       {copiedId === t.id ? (
                         <Check className="h-3 w-3" />
@@ -188,6 +206,7 @@ export default function ToastHost() {
                 onClick={() => dismissToast(t.id)}
                 className="rounded p-0.5 text-nexus-muted hover:bg-white/5 hover:text-nexus-text"
                 title="Fechar"
+                aria-label="Fechar notificação"
               >
                 <X className="h-3.5 w-3.5" />
               </button>

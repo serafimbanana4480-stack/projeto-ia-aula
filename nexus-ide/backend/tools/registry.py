@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import inspect
 import logging
 import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,6 +53,13 @@ class ToolSpec:
     timeout_seconds: float | None = None
     # --- Discovery metadata (used by AI agents and dashboard) ---
     category: str = ""  # file, web, code, git, docker, system, data, etc.
+    #: "context" when the tool's schema declares a ``session_id`` its handler
+    #: cannot accept. The registry then delivers the TRUSTED session id
+    #: through :func:`current_tool_session_id` instead of dropping it.
+    session_id_delivery: str = ""
+    #: The original handler, kept when the registry installed a session-aware
+    #: adapter around it.
+    inner_handler: Callable[..., Any] | None = None
 
     def __post_init__(self) -> None:
         if self.risk:
@@ -74,24 +83,42 @@ TOOL_MAX_CONSECUTIVE_FAILURES = int(os.environ.get("NEXUS_TOOL_MAX_FAILURES", "3
 _tool_failures: dict[tuple[str, str], int] = {}
 
 
-def _failure_key(name: str, session_id: str | None) -> tuple[str, str]:
-    return (session_id or "default", name)
+def _failure_key(
+    name: str,
+    session_id: str | None,
+    failure_scope: str | None = None,
+) -> tuple[str, str]:
+    # Plan tasks share a user session but must not share a circuit breaker:
+    # one agent's bad tool calls must not disable the same tool for a sibling.
+    return (failure_scope or session_id or "default", name)
 
 
-def _record_tool_success(name: str, session_id: str | None) -> None:
-    _tool_failures.pop(_failure_key(name, session_id), None)
+def _record_tool_success(
+    name: str,
+    session_id: str | None,
+    failure_scope: str | None = None,
+) -> None:
+    _tool_failures.pop(_failure_key(name, session_id, failure_scope), None)
 
 
-def _record_tool_failure(name: str, session_id: str | None) -> int:
-    key = _failure_key(name, session_id)
+def _record_tool_failure(
+    name: str,
+    session_id: str | None,
+    failure_scope: str | None = None,
+) -> int:
+    key = _failure_key(name, session_id, failure_scope)
     count = _tool_failures.get(key, 0) + 1
     _tool_failures[key] = count
     return count
 
 
-def tool_failure_count(name: str, session_id: str | None) -> int:
-    """Current consecutive-failure count for a tool in a session."""
-    return _tool_failures.get(_failure_key(name, session_id), 0)
+def tool_failure_count(
+    name: str,
+    session_id: str | None,
+    failure_scope: str | None = None,
+) -> int:
+    """Current consecutive-failure count for a tool in a session/task scope."""
+    return _tool_failures.get(_failure_key(name, session_id, failure_scope), 0)
 
 
 # --- Trust boundary ---------------------------------------------------------
@@ -221,21 +248,29 @@ def frame_external_result(name: str, payload: Any) -> Any:
         return _frame_external_text(payload, source)
     if not isinstance(payload, dict):
         return payload
+    # Keep our warning separate from file bytes.  Models editing a file can
+    # otherwise mistake the warning for source code and write it back to disk.
+    # The nonce-delimited untrusted boundary still surrounds the file itself.
     framed: dict[str, Any] = {}
     for key, value in payload.items():
         framed[key] = (
             _frame_external_tree(value, source) if key in _EXTERNAL_TEXT_FIELDS else value
         )
+    if name in {"read_file", "read_file_absolute"} and isinstance(payload.get("content"), str):
+        from backend.tools.sanitizer import PREAMBLE
+
+        framed["content"] = wrap_external_content(
+            payload["content"], source=source, include_preamble=False
+        )
+        framed["content_warning"] = PREAMBLE
     return framed
 
 
 def reset_tool_failures(session_id: str | None = None) -> None:
-    """Reset the failure circuit breaker (per session, or everything).
+    """Reset one session/task failure scope, or every scope when omitted.
 
-    MUST be called at the start of every plan task. The breaker is keyed by
-    ``(session_id, tool)`` and a session spans the whole mission, so without a
-    reset a failure streak in one task permanently disables the tool for every
-    later task and every other agent.
+    Plan execution passes a task-specific scope so parallel tasks in the same
+    session do not clear or inherit one another's failure streaks.
 
     Run 2026-08-03T21:53 session bf1e9435b9ec47c9 is the reference failure:
     ``run_shell`` tripped the breaker during the ANALYZER phase (three blocked
@@ -268,6 +303,192 @@ _UNAVAILABLE_MODULE_TOOLS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# ---------------------------------------------------------------------------
+# Optional dependencies behind a tool
+# ---------------------------------------------------------------------------
+# A tool whose third-party dependency is not installed cannot work: the call
+# fails at the first use of the missing package. The catalog used to report
+# those tools as ``available=True`` anyway, so the LLM was offered a tool that
+# could only ever fail (the audit found 4 ``db_*`` tools needing ``aiosqlite``
+# and 7 ``browser_*`` tools needing ``playwright``).
+#
+# The registry owns the truth: it probes the dependency when the spec is
+# registered and marks the spec unavailable, so ``get_tool_catalog()`` reports
+# ``missing_dependency`` and ``list_tools()`` stops offering the tool.
+#
+# The owning module is part of the entry on purpose: the entry describes the
+# REAL implementation. A stand-in registered under the same name (a test
+# double, an alternative backend) is not the browser tool and must not be
+# marked unavailable because Playwright is missing.
+_OPTIONAL_DEPENDENCY_TOOLS: dict[str, tuple[str, str, str]] = {
+    # tool name -> (owning module, importable module, how to install it)
+    "browser_navigate": (
+        "backend.tools.browser_automation",
+        "playwright",
+        "uv sync --extra browser",
+    ),
+    "browser_click": (
+        "backend.tools.browser_automation",
+        "playwright",
+        "uv sync --extra browser",
+    ),
+    "browser_fill": (
+        "backend.tools.browser_automation",
+        "playwright",
+        "uv sync --extra browser",
+    ),
+    "browser_extract_text": (
+        "backend.tools.browser_automation",
+        "playwright",
+        "uv sync --extra browser",
+    ),
+    "browser_screenshot": (
+        "backend.tools.browser_automation",
+        "playwright",
+        "uv sync --extra browser",
+    ),
+    "browser_get_links": (
+        "backend.tools.browser_automation",
+        "playwright",
+        "uv sync --extra browser",
+    ),
+    "browser_close": (
+        "backend.tools.browser_automation",
+        "playwright",
+        "uv sync --extra browser",
+    ),
+}
+
+
+def _module_is_importable(module_name: str) -> bool:
+    """Whether *module_name* can be imported (without importing it)."""
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _apply_optional_dependency_availability(spec: ToolSpec) -> None:
+    """Mark *spec* unavailable when its optional dependency is missing."""
+    requirement = _OPTIONAL_DEPENDENCY_TOOLS.get(spec.name)
+    if requirement is None:
+        return
+    owning_module, module_name, install_hint = requirement
+    handler_module = str(getattr(spec.handler, "__module__", "") or "")
+    if handler_module and handler_module != owning_module:
+        # A stand-in, not the real implementation: its availability is its own.
+        return
+    if _module_is_importable(module_name):
+        return
+    spec.available = False
+    spec.missing_dependency = module_name
+    spec.unavailable_reason = (
+        f"the optional dependency '{module_name}' is not installed; "
+        f"install it with: {install_hint}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool categories
+# ---------------------------------------------------------------------------
+# Every tool belongs to a category. Without one the LLM prompt rendered 111
+# tools under the heading of whatever tool happened to come before them, and
+# ``get_tools_for_agent("WEB")`` matched only the three tools whose *name*
+# contains "web" instead of the whole web category.
+#
+# The defaults are per module (the natural granularity: a module is one
+# capability) with a per-tool override for the tools a module registers that
+# belong somewhere else.
+_MODULE_CATEGORY_DEFAULTS: dict[str, str] = {
+    "backend.core.workspace": "file",
+    "backend.tools.advanced_templates": "code",
+    "backend.tools.agent_bus_tools": "task",
+    "backend.tools.agent_comm": "task",
+    "backend.tools.api_tester": "api",
+    "backend.tools.append_file": "file",
+    "backend.tools.browser_automation": "browser",
+    "backend.tools.code_executor": "code",
+    "backend.tools.cron_scheduler": "task",
+    "backend.tools.data_analysis": "data",
+    "backend.tools.db_client": "data",
+    "backend.tools.dependency_manager": "code",
+    "backend.tools.directory_tools": "file",
+    "backend.tools.doc_tools": "code",
+    "backend.tools.email_tools": "email",
+    "backend.tools.embeddings": "code",
+    "backend.tools.file_ops": "file",
+    "backend.tools.git_auto_commit": "git",
+    "backend.tools.git_tools": "git",
+    "backend.tools.memory_tools": "memory",
+    "backend.tools.notifications": "notification",
+    "backend.tools.profile_tools": "memory",
+    "backend.tools.project_analyzer": "project",
+    "backend.tools.quality_tools": "code",
+    "backend.tools.report_generator": "data",
+    "backend.tools.scaffold": "code",
+    "backend.tools.shell_runner": "code",
+    "backend.tools.task_spawner": "task",
+    "backend.tools.test_generator": "code",
+    "backend.tools.test_runner": "code",
+    "backend.tools.tts": "media",
+    "backend.tools.vision": "media",
+    "backend.tools.web_fetcher": "web",
+    "backend.tools.web_search": "web",
+    "backend.tools.web_search_v2": "web",
+}
+
+#: Tools whose category differs from their module's default.
+_TOOL_CATEGORY_OVERRIDES: dict[str, str] = {
+    # backend.core.workspace registers file, git, project and code tools.
+    "git_clone": "git",
+    "git_commit_all": "git",
+    "git_init": "git",
+    "git_status": "git",
+    "execute_python": "code",
+    "execute_script": "code",
+    "execute_shell": "code",
+    "restore_backup": "file",
+    "list_backups": "file",
+    "discover_projects": "project",
+    "get_project_info": "project",
+    # notifications registers a webhook, a desktop toast and an e-mail sender.
+    "send_email_notification": "email",
+}
+
+#: Capability aliases per category. ``get_tools_for_agent`` matches an agent
+#: name against these, so an agent named after a capability ("WEB", "GIT",
+#: "DATA") receives the whole category instead of a handful of name matches.
+_CATEGORY_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "api": ("api", "http", "rest"),
+    "browser": ("browser", "playwright"),
+    "code": ("code", "exec", "lint", "test", "quality", "scaffold", "docs"),
+    "data": ("data", "database", "db", "sql", "analysis", "report"),
+    "docker": ("docker", "container"),
+    "email": ("email", "imap", "smtp", "mail"),
+    "file": ("file", "fs", "io", "path", "directory"),
+    "git": ("git", "vcs", "commit"),
+    "knowledge": ("knowledge", "rag"),
+    "mcp": ("mcp",),
+    "media": ("media", "tts", "voice", "vision", "image", "ocr"),
+    "memory": ("memory", "recall", "profile"),
+    "notification": ("notification", "notify", "alert", "webhook"),
+    "project": ("project", "workspace"),
+    "system": ("system", "session", "todo", "skill", "health", "budget"),
+    "task": ("task", "schedule", "cron", "agent", "bus", "spawn"),
+    "web": ("web", "search", "fetch", "research"),
+}
+
+#: Fallback for a tool registered from a module nobody classified.
+_DEFAULT_CATEGORY = "system"
+
+
+def _default_category(tool_name: str, module_name: str) -> str:
+    """Return the category a tool gets when it does not declare one."""
+    override = _TOOL_CATEGORY_OVERRIDES.get(tool_name)
+    if override:
+        return override
+    return _MODULE_CATEGORY_DEFAULTS.get(module_name, _DEFAULT_CATEGORY)
+
 _CONFIRMATION_TOOLS = {
     "write_file_absolute",
     "delete_file",
@@ -289,6 +510,11 @@ _CONFIRMATION_TOOLS = {
     "git_pull",
     "git_init",
     "git_clone",
+    # The auto-commit hook writes history without a human decision, exactly
+    # like ``git_commit_safe``. It used to call the commit helper directly in
+    # Python, so the gate above was never consulted; registering it here is
+    # what makes the whole hook approval-gated.
+    "auto_commit_after_write",
     # Writes a SKILL.md into the user's project.
     "build_skill",
     "install_dependency",
@@ -557,6 +783,87 @@ def _path_is_within_project(
         return False
 
 
+def _apply_trusted_project_scope(
+    name: str,
+    spec: ToolSpec,
+    args: dict[str, Any],
+    project_path: str,
+) -> str | None:
+    """Replace model-selected roots and confine working directories.
+
+    Project identity comes from the request context. A provider argument may
+    select a subdirectory within that project, but it cannot switch the tool
+    to another checkout or an arbitrary host directory.
+    """
+    properties = spec.schema.get("properties", {})
+    if not isinstance(properties, dict):
+        return None
+
+    selected_root = str(project_path or "").strip()
+    if selected_root:
+        selected_root = os.path.realpath(
+            os.path.abspath(os.path.expanduser(selected_root))
+        )
+        if "project_path" in properties:
+            args["project_path"] = selected_root
+
+        if name == "execute_script" and "path" in properties:
+            requested_script = args.get("path")
+            if isinstance(requested_script, str) and requested_script.strip():
+                requested_script = requested_script.strip()
+                if not _path_is_within_project(
+                    requested_script, selected_root, relative_to_project=True
+                ):
+                    return "Script path is outside the selected project."
+                if not os.path.isabs(requested_script):
+                    requested_script = os.path.join(selected_root, requested_script)
+                args["path"] = os.path.realpath(os.path.abspath(requested_script))
+
+        if "cwd" in properties:
+            requested_cwd = args.get("cwd")
+            if not isinstance(requested_cwd, str) or not requested_cwd.strip():
+                args["cwd"] = selected_root
+            else:
+                requested_cwd = requested_cwd.strip()
+                if not _path_is_within_project(
+                    requested_cwd, selected_root, relative_to_project=True
+                ):
+                    return (
+                        f"Working directory '{requested_cwd}' is outside the selected project."
+                    )
+                if not os.path.isabs(requested_cwd):
+                    requested_cwd = os.path.join(selected_root, requested_cwd)
+                args["cwd"] = os.path.realpath(os.path.abspath(requested_cwd))
+    else:
+        # With no selected project, a provider-supplied path cannot establish
+        # project identity. Fail closed instead of letting the handler default
+        # to the server's current directory. A few session-scoped tools
+        # intentionally carry an empty trusted project_path.
+        if "project_path" in properties and name not in {
+            "store_memory",
+            "consult_agent",
+            "spawn_task",
+        }:
+            if isinstance(args.get("project_path"), str) and args["project_path"].strip():
+                return "A trusted project must be selected before using this tool."
+            args.pop("project_path", None)
+
+        if (
+            name == "execute_script"
+            and "path" in properties
+            and isinstance(args.get("path"), str)
+            and args["path"].strip()
+        ):
+            return "A trusted project must be selected before executing a script."
+
+        if "cwd" in properties:
+            if isinstance(args.get("cwd"), str) and args["cwd"].strip():
+                return "A trusted project must be selected before setting a working directory."
+            args.pop("cwd", None)
+
+    return None
+
+
 def _sentinel_paths_within_project(
     args: dict[str, Any], project_path: str, *keys: str
 ) -> bool:
@@ -578,6 +885,45 @@ def _sentinel_paths_within_project(
     )
 
 
+def _project_confinement_error(
+    name: str, args: dict[str, Any], project_path: str
+) -> str | None:
+    """Refuse a tool path that is not inside the selected project.
+
+    Absolute-path tools only applied the system-directory blocklist, so a
+    path under the user profile but outside the selected project was read or
+    written. An empty project is not an implicit root: the caller must select
+    one. Paths inside the selected project are unchanged.
+    """
+    keys = _PROJECT_CONFINED_PATH_KEYS.get(name)
+    if not keys or not isinstance(args, dict):
+        return None
+    supplied: list[str] = []
+    for key in keys:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            supplied.append(value.strip())
+        elif isinstance(value, (list, tuple)):
+            supplied.extend(
+                item.strip() for item in value if isinstance(item, str) and item.strip()
+            )
+    if not supplied:
+        return None
+    root = str(project_path or "").strip()
+    if not root:
+        return (
+            "A trusted project must be selected before this tool can use a path. "
+            "Select the project and send the request again."
+        )
+    for candidate in supplied:
+        if not _path_is_within_project(candidate, root, relative_to_project=True):
+            return (
+                f"Path '{candidate}' is outside the selected project and was not used. "
+                "Select that folder as the project if the task should work there."
+            )
+    return None
+
+
 _SENTINEL_PROJECT_READ_PATH_KEYS = {
     "read_file": ("path",),
     "read_multiple_files": ("paths",),
@@ -592,6 +938,43 @@ _SENTINEL_PROJECT_READ_PATH_KEYS = {
     "mcp_project_context": ("project_path",),
     "mcp_impact_analysis": ("project_path",),
     "mcp_project_status": ("project_path",),
+}
+
+_SENTINEL_ABSOLUTE_READ_PATH_KEYS = {
+    "read_file_absolute": ("path",),
+    "list_dir_absolute": ("path",),
+    "search_files_absolute": ("root_path",),
+    "read_multiple_files_absolute": ("paths",),
+    "get_file_info_absolute": ("path",),
+    "list_backups": ("path",),
+    "discover_projects": ("root_path",),
+    "get_project_info": ("path",),
+    "git_status": ("path",),
+}
+
+# Tools whose handlers honour an absolute path after only the system-path
+# blocklist. The selected project is the trust boundary: a path in the
+# arguments must not open another folder, and confirmation of that path is
+# not a substitute for selecting the project.
+_PROJECT_CONFINED_PATH_KEYS = {
+    "read_file_absolute": ("path",),
+    "list_dir_absolute": ("path",),
+    "search_files_absolute": ("root_path",),
+    "read_multiple_files_absolute": ("paths",),
+    "get_file_info_absolute": ("path",),
+    "list_backups": ("path",),
+    "create_dir_absolute": ("path",),
+    "delete_file_absolute": ("path",),
+    "delete_dir_absolute": ("path",),
+    "move_file_absolute": ("src", "dest"),
+    "copy_file_absolute": ("src", "dest"),
+    "write_file_absolute": ("path",),
+    "append_file": ("path",),
+    "generate_tests": ("file_path",),
+    "restore_backup": ("backup_path", "target_path"),
+    "discover_projects": ("root_path",),
+    "get_project_info": ("path",),
+    "git_status": ("path",),
 }
 
 _SENTINEL_EXTERNAL_READ_TOOLS = frozenset(
@@ -682,6 +1065,41 @@ def autonomous_confirmation_required(
 
 
 def register_tool(spec: ToolSpec) -> ToolSpec:
+    """Register *spec*, filling in the metadata the registry owns.
+
+    Three things are filled in here because they are facts about the tool that
+    only the registry can see:
+
+    * the **category** — a spec that does not declare one is classified from
+      the module that registered it (see
+      :data:`_MODULE_CATEGORY_DEFAULTS`), so every registered tool has a
+      category and the LLM prompt groups them correctly;
+    * the **availability** — a tool whose optional dependency is not installed
+      is marked unavailable (see :data:`_OPTIONAL_DEPENDENCY_TOOLS`), so the
+      catalog stops offering a tool that cannot work;
+    * the **session id** — a tool whose schema declares ``session_id`` but
+      whose handler cannot take it gets a session-aware adapter, so the
+      declared value is delivered instead of being dropped.
+    """
+    if not spec.category:
+        caller = inspect.currentframe()
+        module_name = ""
+        if caller is not None and caller.f_back is not None:
+            module_name = str(caller.f_back.f_globals.get("__name__", ""))
+        spec.category = _default_category(spec.name, module_name)
+    _apply_optional_dependency_availability(spec)
+    if (
+        spec.handler is not None
+        and _schema_declares_session_id(spec)
+        and not _handler_accepts_session_id(spec.handler)
+    ):
+        # The schema promises the caller a trusted session id and the handler
+        # cannot take it. Without the adapter the registry would have to drop
+        # the value (and, before that, reject the whole call), so the tool
+        # would never see the session its own schema advertises.
+        spec.inner_handler = spec.handler
+        spec.handler = _session_aware_handler(spec, spec.handler)
+        spec.session_id_delivery = "context"
     _registry[spec.name] = spec
     logger.info("Registered tool: %s", spec.name)
     return spec
@@ -843,24 +1261,44 @@ def search_tools(query: str, enabled_only: bool = True) -> list[ToolSpec]:
     return [t for _, t in scored]
 
 
+def _agent_tokens(agent_name: str) -> set[str]:
+    """Split an agent name into comparable upper-case tokens."""
+    return {part.upper() for part in re.split(r"[^A-Za-z0-9]+", agent_name) if part}
+
+
 def get_tools_for_agent(agent_name: str) -> list[ToolSpec]:
     """Return tools relevant to a given agent type.
 
-    Mapping is loose: the agent name is matched against tool tags, the category,
-    and the tool name. Returns the union of matches.
+    The agent name is matched against the tool's *capability* first: its
+    category and the capability aliases of that category (see
+    :data:`_CATEGORY_CAPABILITIES`). Matching is token based, so an agent
+    named "WEB" (or "WEB_RESEARCHER") gets the whole web category instead of
+    the three tools whose name happens to contain "web", and an agent named
+    "CODER" is not silently narrowed to the code category by a substring
+    coincidence.
+
+    Tags and tool names are still matched (loosely, as before) and the union
+    of all matches is returned. An agent name that matches nothing at all
+    still receives the full catalog: refusing to give an agent any tool is a
+    worse failure than a slightly wide selection.
     """
     if not agent_name:
         return list_tools()
     agent = agent_name.upper()
+    tokens = _agent_tokens(agent_name)
     matched: set[str] = set()
     for tool in list_tools():
         # Check tags
         for tag in tool.tags:
             if tag.upper() in agent or agent in tag.upper():
                 matched.add(tool.name)
-        # Check category
-        if tool.category and tool.category.upper() in agent:
+        # Check the category and the capabilities it stands for
+        category = (tool.category or "").lower()
+        if category and category.upper() in tokens:
             matched.add(tool.name)
+        for capability in _CATEGORY_CAPABILITIES.get(category, ()):
+            if capability.upper() in tokens:
+                matched.add(tool.name)
         # Check name
         if agent in tool.name.upper():
             matched.add(tool.name)
@@ -875,6 +1313,11 @@ def get_tool_descriptions_for_llm(
 ) -> str:
     """Return a formatted text block describing tools, suitable for system prompts.
 
+    The tools are grouped by category before rendering, so every category
+    heading appears exactly once. Rendering them in registration order instead
+    produced the same heading several times and left most tools under a
+    heading that had nothing to do with them.
+
     Args:
         agent_name: If provided, filter to tools relevant to that agent.
         include_examples: Include 1 example per tool.
@@ -887,38 +1330,51 @@ def get_tool_descriptions_for_llm(
     tools = get_tools_for_agent(agent_name) if agent_name else list_tools()
     if max_tools is not None:
         tools = tools[:max_tools]
-    lines: list[str] = ["# Available Tools", ""]
-    current_cat = None
+    grouped: dict[str, list[ToolSpec]] = {}
     for tool in tools:
-        if tool.category and tool.category != current_cat:
-            current_cat = tool.category
-            lines.append(f"## {current_cat.title()}")
-            lines.append("")
-        risk = f" [RISK: {tool.risk_level}]" if include_risk and tool.risk_level != "low" else ""
-        conf = " [requires confirmation]" if tool_requires_confirmation(tool) else ""
-        lines.append(f"- `{tool.name}`{risk}{conf} — {tool.description}")
-        if tool.when_to_use:
-            lines.append(f"  - When: {tool.when_to_use}")
-        if include_examples and tool.examples:
-            ex = tool.examples[0]
-            ex_args = ", ".join(f"{k}={v!r}" for k, v in ex.items())
-            lines.append(f"  - Example: `{tool.name}({ex_args})`")
+        grouped.setdefault(tool.category or _DEFAULT_CATEGORY, []).append(tool)
+    lines: list[str] = ["# Available Tools", ""]
+    for category, category_tools in grouped.items():
+        lines.append(f"## {category.title()}")
+        lines.append("")
+        for tool in category_tools:
+            risk = (
+                f" [RISK: {tool.risk_level}]" if include_risk and tool.risk_level != "low" else ""
+            )
+            conf = " [requires confirmation]" if tool_requires_confirmation(tool) else ""
+            lines.append(f"- `{tool.name}`{risk}{conf} — {tool.description}")
+            if tool.when_to_use:
+                lines.append(f"  - When: {tool.when_to_use}")
+            if include_examples and tool.examples:
+                ex = tool.examples[0]
+                ex_args = ", ".join(f"{k}={v!r}" for k, v in ex.items())
+                lines.append(f"  - Example: `{tool.name}({ex_args})`")
     return "\n".join(lines)
 
 
 def get_tool_stats() -> dict[str, Any]:
-    """Return summary statistics about the registered tools."""
-    tools = list_tools()
+    """Return summary statistics about the registered tools.
+
+    The counts cover EVERY registered tool, not only the ones on offer: the
+    catalog reports the unavailable ones too (with their missing dependency),
+    so the statistics and the catalog must describe the same population. The
+    ``available`` count says how many of them can actually be called.
+    """
+    tools = list_tools(enabled_only=False)
     by_cat: dict[str, int] = {}
     by_risk: dict[str, int] = {"low": 0, "medium": 0, "high": 0}
     confirmation_count = 0
+    available_count = 0
     for t in tools:
         by_cat[t.category or "uncategorised"] = by_cat.get(t.category or "uncategorised", 0) + 1
         by_risk[t.risk_level] = by_risk.get(t.risk_level, 0) + 1
         if tool_requires_confirmation(t):
             confirmation_count += 1
+        if t.enabled and t.available:
+            available_count += 1
     return {
         "total": len(tools),
+        "available": available_count,
         "by_category": by_cat,
         "by_risk": by_risk,
         "requires_confirmation": confirmation_count,
@@ -931,6 +1387,18 @@ def set_tool_enabled(name: str, enabled: bool) -> None:
         _registry[name].enabled = bool(enabled)
 
 
+#: Handler statuses that mean "the action did NOT happen".
+#:
+#: A preview is not a result: ``git_push`` and ``db_execute`` answer a call
+#: that was not confirmed with ``{"status": "preview", "message": "Push not
+#: executed. Pass confirm=True ..."}``. Scoring that as a success closed the
+#: runtime's verification gate with a call that did nothing, so the agent
+#: could claim the push or the write happened. These statuses are failures.
+_NOT_EXECUTED_STATUSES: frozenset[str] = frozenset(
+    {"preview", "not_executed", "pending_review", "dry_run"}
+)
+
+
 def _handler_result_failed(result: Any) -> str | None:
     """Return an error when a handler did not produce a successful result.
 
@@ -939,6 +1407,14 @@ def _handler_result_failed(result: Any) -> str | None:
     and leave every other key absent, so without this check a failed fetch was
     scored as a success — logged ``success=True``, counted as one by the circuit
     breaker, and handed to the model as ``ok: true``.
+
+    A handler that says the action was not executed (``status`` in
+    :data:`_NOT_EXECUTED_STATUSES`) is a failure for the same reason: the
+    evidence gate must not be closed by a call that did nothing.
+
+    The handler's own explanation (``reason``/``message``/``error``) is kept:
+    replacing it with a generic "Tool reported failure" threw away the only
+    actionable text the handler produced.
     """
     if not isinstance(result, dict):
         return None
@@ -949,16 +1425,29 @@ def _handler_result_failed(result: Any) -> str | None:
     if result.get("exit_code") not in (None, 0):
         return str(result.get("stderr") or f"Command exited with code {result['exit_code']}")
     if result.get("ok") is False or result.get("success") is False:
-        return str(result.get("error") or "Tool reported failure")
+        return str(
+            result.get("reason")
+            or result.get("error")
+            or result.get("message")
+            or "Tool reported failure"
+        )
     if result.get("written") is False:
         return str(result.get("error") or "Write operation failed")
     if result.get("deleted") is False:
         return str(result.get("error") or "Delete operation failed")
     if result.get("moved") is False:
         return str(result.get("error") or "Move operation failed")
-    if str(result.get("status") or "").strip().lower() == "error":
+    status = str(result.get("status") or "").strip().lower()
+    if status == "error":
         return str(
             result.get("summary") or result.get("message") or "Tool reported status=error"
+        )
+    if status in _NOT_EXECUTED_STATUSES:
+        return str(
+            result.get("reason")
+            or result.get("message")
+            or result.get("summary")
+            or f"Tool reported status={status} (the action was not executed)"
         )
     return None
 
@@ -991,6 +1480,27 @@ def validate_tool_args(spec: ToolSpec, args: dict[str, Any]) -> list[str]:
     if not isinstance(args, dict):
         return ["arguments must be an object"]
     errors: list[str] = []
+    # p34: free models often send scalars as strings ("timeout": "30"). Coerce
+    # unambiguous top-level numeric/boolean strings in place before validating
+    # (BUG_HUNTER_RUNTIME run_shell failed on this, 2026-10-29).
+    for _name, _rule in (schema.get("properties") or {}).items():
+        _val = args.get(_name)
+        if not isinstance(_val, str) or not isinstance(_rule, dict):
+            continue
+        _t = _rule.get("type")
+        _types = _t if isinstance(_t, list) else [_t]
+        if "string" in _types:
+            continue
+        _s = _val.strip()
+        try:
+            if "integer" in _types and re.fullmatch(r"-?\d+", _s):
+                args[_name] = int(_s)
+            elif "number" in _types and re.fullmatch(r"-?\d+(?:\.\d+)?", _s):
+                args[_name] = float(_s) if "." in _s else int(_s)
+            elif "boolean" in _types and _s.lower() in ("true", "false"):
+                args[_name] = _s.lower() == "true"
+        except ValueError:
+            pass
 
     def check(value: Any, rule: dict[str, Any], path: str) -> None:
         alternatives = rule.get("anyOf") or rule.get("oneOf")
@@ -1058,6 +1568,110 @@ def validate_tool_args(spec: ToolSpec, args: dict[str, Any]) -> list[str]:
 
     check(args, schema, "arguments")
     return errors
+
+
+def _validate_against_handler(spec: ToolSpec, args: dict[str, Any]) -> list[str]:
+    """Validate the arguments against the handler's own signature.
+
+    The JSON schema is the tool's *published* contract, but the handler
+    signature is the ground truth for everything the schema does not say: a
+    tool whose schema is missing (or wrong) must still reject a call that
+    omits a required argument, otherwise the handler raises a ``TypeError``
+    deep inside the call instead of the registry reporting ``invalid_args``.
+
+    An argument the schema already describes is left to the schema: the
+    schema is the contract the model was shown, so it wins.
+
+    Unknown arguments are NOT reported here: the registry drops them (a key
+    the handler cannot accept must not sink an otherwise valid call).
+    """
+    handler = getattr(spec, "handler", None)
+    if handler is None or not isinstance(args, dict):
+        return []
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return []
+
+    schema = spec.schema if isinstance(spec.schema, dict) else {}
+    properties = schema.get("properties")
+    described = set(properties) if isinstance(properties, dict) else set()
+
+    hints = _resolved_type_hints(handler)
+
+    errors: list[str] = []
+    for name, param in params.items():
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        if name in described:
+            # The schema already constrains this argument.
+            continue
+        if name not in args:
+            if param.default is inspect.Parameter.empty:
+                errors.append(f"arguments.{name} is required")
+            continue
+        expected = _annotation_type(hints.get(name, param.annotation))
+        if expected is None:
+            continue
+        value = args[name]
+        if value is None:
+            # ``None`` is accepted for an optional argument.
+            continue
+        if not isinstance(value, expected):
+            errors.append(
+                f"arguments.{name} has invalid type (expected {expected.__name__})"
+            )
+    return errors
+
+
+def _resolved_type_hints(handler: Callable[..., Any]) -> dict[str, Any]:
+    """Return the handler's resolved type hints (empty when unresolvable).
+
+    ``from __future__ import annotations`` turns every annotation into a
+    string, so the raw signature cannot be used to check a type.
+    """
+    import typing
+
+    try:
+        return typing.get_type_hints(handler)
+    except Exception:  # noqa: BLE001 - a broken hint must not break the call
+        return {}
+
+
+def _annotation_type(annotation: Any) -> type | None:
+    """Return the concrete type an annotation demands, or ``None``.
+
+    Only unambiguous annotations are checked: a union, a generic or a bare
+    ``Any`` says nothing the registry can enforce.
+    """
+    if annotation is inspect.Parameter.empty or annotation is Any:
+        return None
+    if isinstance(annotation, type):
+        return annotation
+    if isinstance(annotation, str):
+        # ``from __future__ import annotations`` turns the annotation into a
+        # string; only the plain builtin names can be resolved without the
+        # module namespace.
+        resolved = _BUILTIN_ANNOTATIONS.get(annotation.strip())
+        return resolved
+    return None
+
+
+#: The plain builtin annotations the registry can enforce from a string.
+_BUILTIN_ANNOTATIONS: dict[str, type] = {
+    "str": str,
+    "int": int,
+    "float": float,
+    "bool": bool,
+    "list": list,
+    "dict": dict,
+    "bytes": bytes,
+    "set": set,
+    "tuple": tuple,
+}
 
 
 def _typed_tool_response(
@@ -1209,18 +1823,8 @@ def _sentinel_assessment(
         risk_level = 3
     elif name in {"generate_project", "scaffold_project"}:
         risk_level = 2
-    elif name in {
-        "read_file_absolute", "list_dir_absolute", "search_files_absolute",
-        "read_multiple_files_absolute", "get_file_info_absolute", "list_backups",
-        "discover_projects", "get_project_info", "git_status",
-    }:
-        path_keys = {
-            "search_files_absolute": ("root_path",),
-            "discover_projects": ("root_path",),
-            "get_project_info": ("path",),
-            "git_status": ("path",),
-            "read_multiple_files_absolute": ("paths",),
-        }.get(name, ("path",))
+    elif name in _SENTINEL_ABSOLUTE_READ_PATH_KEYS:
+        path_keys = _SENTINEL_ABSOLUTE_READ_PATH_KEYS[name]
         risk_level = (
             0 if _sentinel_paths_within_project(args, project_path, *path_keys) else 3
         )
@@ -1392,6 +1996,13 @@ def _sentinel_assessment(
                 if isinstance(value, str) and value.strip()
             )
 
+    if name in _SENTINEL_PROJECT_READ_PATH_KEYS or name in _SENTINEL_ABSOLUTE_READ_PATH_KEYS:
+        # A read does not affect the target file. Treating read paths as
+        # affected files made any path containing a word such as "live" look
+        # like a production write and strand the agent behind an approval
+        # prompt, even when the file was inside the selected project.
+        files_affected = []
+
     from backend.orchestrator.advanced_modes import get_orchestrator
 
     return get_orchestrator().check_security_gate(
@@ -1506,6 +2117,370 @@ def record_run_tool_call(name: str) -> dict[str, Any] | None:
     }
 
 
+# --- Side-effect idempotency (Fase 1c) --------------------------------------
+# The budget hook above answers "may this run still spend a call?". The ledger
+# below answers a different question: "was this exact action already applied by
+# this run?". It is lane-agnostic by construction — primary, engine and swarm
+# all funnel through ``execute_tool`` — so a retried or resumed run cannot write
+# the same file or re-run the same command a second time through a lane the
+# primary tracker never sees.
+
+
+def _side_effect_task_id() -> str:
+    """The task the active run is executing, or ``""`` when none is published.
+
+    ``backend/runtime/run_context.py`` publishes only the run id today, so the
+    key is run-wide instead of per-task. The lookup is dynamic on purpose: the
+    day the context starts publishing ``get_current_task_id``, the key tightens
+    by itself with no change here.
+    """
+    from backend.runtime import run_context
+
+    getter = getattr(run_context, "get_current_task_id", None)
+    if not callable(getter):
+        return ""
+    try:
+        return str(getter() or "").strip()
+    except Exception:
+        logger.debug("[SIDE EFFECT] could not read the current task id", exc_info=True)
+        return ""
+
+
+def _side_effect_key(name: str, run_id: str, args: Any) -> str:
+    """Identity of one side effect, or ``""`` when it cannot be derived."""
+    from backend.runtime.primary import side_effect_idempotency_key
+
+    return side_effect_idempotency_key(run_id, _side_effect_task_id(), name, args)
+
+
+def side_effect_replay(name: str, args: Any) -> dict[str, Any] | None:
+    """Replay guard for side-effecting tools; ``None`` means "execute it".
+
+    Returns the tool's response when this exact action was already confirmed
+    for the active run, so the handler is not called a second time.
+
+    Every coordinator failure is fail-open **for the ledger only**: a tool whose
+    ledger cannot be read still runs, because refusing to work is worse than a
+    possible duplicate. Nothing here can weaken the budget block above, which
+    returns before this point.
+    """
+    from backend.runtime.primary import is_side_effecting_tool
+    from backend.runtime.run_context import get_current_run_id
+
+    run_id = get_current_run_id()
+    if not run_id or not is_side_effecting_tool(name):
+        return None
+    try:
+        key = _side_effect_key(name, run_id, args)
+    except Exception:
+        logger.debug("[SIDE EFFECT] could not derive the key for %s", name, exc_info=True)
+        return None
+    coordinator = _run_budget_coordinator()
+    if coordinator is None:
+        return None
+    try:
+        already = bool(coordinator.is_side_effect_confirmed(run_id, key))
+    except Exception as exc:
+        logger.warning(
+            "[SIDE EFFECT] could not check the ledger for %s in run %s: %s",
+            name,
+            run_id,
+            exc,
+        )
+        return None
+    if not already:
+        return None
+    logger.info(
+        "[SIDE EFFECT] %s already confirmed in run %s (%s); execution skipped",
+        name,
+        run_id,
+        key,
+    )
+    return _typed_tool_response(
+        name,
+        ok=True,
+        result={
+            "idempotent_replay": True,
+            "idempotency_key": key,
+            "message": "side effect already confirmed in this run; execution skipped",
+        },
+        idempotent_replay=True,
+        idempotency_key=key,
+        message="side effect already confirmed in this run; execution skipped",
+    )
+
+
+def record_side_effect(name: str, args: Any, result: Any) -> None:
+    """Record a completed side effect so a replay is recognised as done.
+
+    Called only after the handler reported success. The outcome is digested —
+    never stored — so the ledger row says *that* the action happened without
+    turning the database into a second copy of the tool's output.
+    """
+    from backend.runtime.primary import (
+        is_side_effecting_tool,
+        side_effect_result_digest,
+    )
+    from backend.runtime.run_context import get_current_run_id
+
+    run_id = get_current_run_id()
+    if not run_id or not is_side_effecting_tool(name):
+        return
+    try:
+        key = _side_effect_key(name, run_id, args)
+        payload = result.get("result") if isinstance(result, dict) else None
+        digest = side_effect_result_digest(payload if payload is not None else result)
+    except Exception:
+        logger.debug("[SIDE EFFECT] could not digest the result of %s", name, exc_info=True)
+        return
+    coordinator = _run_budget_coordinator()
+    if coordinator is None:
+        return
+    try:
+        coordinator.record_side_effect(run_id, key, kind=name, result_digest=digest)
+    except Exception as exc:
+        logger.warning(
+            "[SIDE EFFECT] could not record %s for run %s: %s", key, run_id, exc
+        )
+
+
+# ---------------------------------------------------------------------------
+# Handler invocation
+# ---------------------------------------------------------------------------
+# The registry accepts handlers of two shapes: a coroutine function and a
+# plain function. Both used to be awaited (``await spec.handler(...)``), which
+# raised ``TypeError: object dict can't be used in 'await' expression`` for
+# every synchronous handler — seven tools could therefore never succeed.
+#
+# A synchronous handler is run in a worker thread. Calling it directly on the
+# event loop blocked the loop for the handler's whole duration, so
+# ``asyncio.wait_for`` could never interrupt it: a handler that slept 60 s
+# blew through a 2 s timeout every time.
+
+
+def _is_async_handler(handler: Any) -> bool:
+    """Whether *handler* is a coroutine function (or a callable returning one)."""
+    if inspect.iscoroutinefunction(handler):
+        return True
+    call = getattr(handler, "__call__", None)  # noqa: B004 - bound __call__ probe
+    return call is not None and inspect.iscoroutinefunction(call)
+
+
+def _call_handler_sync(handler: Callable[..., Any], handler_args: dict[str, Any]) -> Any:
+    """Call a synchronous handler (used as the worker-thread body)."""
+    return handler(**handler_args)
+
+
+async def _invoke_handler(
+    handler: Callable[..., Any],
+    handler_args: dict[str, Any],
+    timeout_seconds: float,
+) -> Any:
+    """Run *handler* under a hard timeout and return its result.
+
+    * A coroutine handler is awaited directly.
+    * A synchronous handler runs in a worker thread, so the timeout can
+      actually interrupt the wait: the caller is released and the tool is
+      reported as timed out instead of blocking the whole agent loop.
+    * A handler that returns something that is not awaitable is taken at face
+      value — that value IS the result.
+    """
+    if _is_async_handler(handler):
+        outcome = handler(**handler_args)
+        if not inspect.isawaitable(outcome):
+            # Not a coroutine function after all: the plain value is the result.
+            return outcome
+        return await asyncio.wait_for(outcome, timeout=timeout_seconds)
+
+    result = await asyncio.wait_for(
+        asyncio.to_thread(_call_handler_sync, handler, handler_args),
+        timeout=timeout_seconds,
+    )
+    if inspect.isawaitable(result):
+        # A synchronous handler that returned an awaitable: await it here so
+        # the caller receives a real result instead of a coroutine object.
+        result = await result
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Trusted session id
+# ---------------------------------------------------------------------------
+# The trusted session id is the caller's session, never the model's argument.
+# It is injected into the tools that scope their state by session, and it is
+# published in a context variable so a handler that does not take the
+# ``session_id`` keyword can still read it.
+_SESSION_ID_REQUIRED_TOOLS: frozenset[str] = frozenset(
+    {"todo_write", "todo_list", "list_skills", "load_skill"}
+)
+
+#: Tools whose schema declares ``session_id`` and whose contract says the
+#: session is injected by NEXUS (so the model must not choose it), but whose
+#: handler cannot take the parameter directly. The registry replaces the
+#: model-supplied value with the trusted one and delivers it through the
+#: session-aware adapter installed at registration time.
+_SESSION_ID_OVERRIDDEN_TOOLS: frozenset[str] = frozenset({"build_skill", "consult_agent"})
+
+_current_tool_session: ContextVar[str] = ContextVar("nexus_tool_session_id", default="")
+
+
+def current_tool_session_id() -> str:
+    """The trusted session id of the tool call in flight ("" outside a call)."""
+    return _current_tool_session.get()
+
+
+def _schema_declares_session_id(spec: ToolSpec) -> bool:
+    """Whether the tool's schema declares a ``session_id`` property."""
+    schema = spec.schema if isinstance(spec.schema, dict) else {}
+    properties = schema.get("properties")
+    return isinstance(properties, dict) and "session_id" in properties
+
+
+def _handler_accepts_session_id(handler: Any) -> bool:
+    """Whether *handler* takes a ``session_id`` keyword argument."""
+    if handler is None:
+        return False
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return "session_id" in params
+
+
+def _inner_handler_parameters(handler: Any) -> tuple[set[str], bool]:
+    """Return (accepted parameter names, accepts-any-keyword) for *handler*."""
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return set(), True
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return set(), True
+    return {name for name in params}, False
+
+
+def _session_aware_handler(
+    spec: ToolSpec,
+    handler: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Wrap *handler* so it can receive a trusted ``session_id``.
+
+    A tool whose schema declares ``session_id`` promises the caller that the
+    session is injected. When the handler has no such parameter the promise
+    cannot be kept by calling it directly, so the registry would have to drop
+    the value (and, before that, reject the whole call). The wrapper accepts
+    the keyword, publishes it in :func:`current_tool_session_id` for the
+    duration of the call and forwards it to the inner handler when the inner
+    handler can take it.
+
+    The inner handler is resolved from ``spec`` at CALL time, so replacing it
+    (a test double, or a future implementation that really takes the
+    parameter) is picked up without re-registering the tool.
+    """
+    import functools
+
+    def _inner() -> Callable[..., Any]:
+        return getattr(spec, "inner_handler", None) or handler
+
+    def _clean(kwargs: dict[str, Any], inner: Callable[..., Any]) -> dict[str, Any]:
+        accepted, accepts_any = _inner_handler_parameters(inner)
+        if accepts_any:
+            return dict(kwargs)
+        return {key: value for key, value in kwargs.items() if key in accepted}
+
+    def _forward(
+        kwargs: dict[str, Any], inner: Callable[..., Any], session_id: str
+    ) -> dict[str, Any]:
+        """Build the keyword arguments the inner handler actually accepts."""
+        accepted, accepts_any = _inner_handler_parameters(inner)
+        forwarded = _clean(kwargs, inner)
+        if accepts_any or "session_id" in accepted:
+            forwarded["session_id"] = session_id
+        return forwarded
+
+    if _is_async_handler(handler):
+
+        @functools.wraps(handler)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            inner = _inner()
+            session_id = str(kwargs.pop("session_id", "") or "")
+            token = _current_tool_session.set(session_id)
+            try:
+                return await inner(*args, **_forward(kwargs, inner, session_id))
+            finally:
+                _current_tool_session.reset(token)
+
+        # ``functools.wraps`` copies ``__wrapped__``, which makes
+        # ``inspect.signature`` report the INNER signature. The wrapper must
+        # advertise the keyword it actually accepts.
+        _set_wrapper_signature(async_wrapper, handler, accepts_session_id=True)
+        return async_wrapper
+
+    @functools.wraps(handler)
+    def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+        inner = _inner()
+        session_id = str(kwargs.pop("session_id", "") or "")
+        token = _current_tool_session.set(session_id)
+        try:
+            return inner(*args, **_forward(kwargs, inner, session_id))
+        finally:
+            _current_tool_session.reset(token)
+
+    _set_wrapper_signature(sync_wrapper, handler, accepts_session_id=True)
+    return sync_wrapper
+
+
+def _set_wrapper_signature(
+    wrapper: Callable[..., Any],
+    inner: Callable[..., Any],
+    *,
+    accepts_session_id: bool,
+) -> None:
+    """Give *wrapper* the signature it really has (including ``session_id``)."""
+    try:
+        inner_signature = inspect.signature(inner)
+    except (TypeError, ValueError):
+        return
+    parameters = list(inner_signature.parameters.values())
+    if accepts_session_id and "session_id" not in inner_signature.parameters:
+        parameters.append(
+            inspect.Parameter(
+                "session_id",
+                inspect.Parameter.KEYWORD_ONLY,
+                default="",
+                annotation=str,
+            )
+        )
+    import contextlib
+
+    with contextlib.suppress(TypeError, ValueError):  # pragma: no cover - defensive
+        wrapper.__signature__ = inner_signature.replace(  # type: ignore[attr-defined]
+            parameters=parameters
+        )
+
+
+def _cache_scope_kwargs(cache: Any, method_name: str, **scope: Any) -> dict[str, Any]:
+    """Return the scoping keyword arguments *cache* actually accepts.
+
+    The result cache is best-effort: a stand-in (a test double, or a cache
+    implementation that predates the scoping parameters) must keep working, so
+    the registry asks the cache before it passes the scope.
+    """
+    method = getattr(cache, method_name, None)
+    if method is None:
+        return {}
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(scope)
+    if "session_id" in params and "project_root" in params:
+        return dict(scope)
+    return {}
+
+
 async def execute_tool(
     name: str,
     session_id: str | None,
@@ -1515,16 +2490,107 @@ async def execute_tool(
     enforce_confirmation: bool = False,
     retry_confirmation: bool = False,
     confirmation_user_id: str = "",
+    user_id: str = "",
     autonomous: bool = False,
     project_path: str = "",
     sentinel_enforced: bool = False,
     allowed_tools: Iterable[str] | None = None,
+    failure_scope: str | None = None,
 ) -> dict:
+    trusted_allowed_tools = (
+        frozenset(str(tool).strip() for tool in allowed_tools if str(tool).strip())
+        if allowed_tools is not None
+        else None
+    )
+    # The allowlist is the caller's boundary, enforced here.
+    #
+    # When the sentinel is enforced it plays a different role: it is the
+    # boundary FORWARDED to the delegate (the sentinel's trusted server
+    # context), and the sentinel's own risk assessment is the authority for
+    # the current call. Blocking the call here made the sentinel's own
+    # delegation path unreachable — the delegate could never be invoked with
+    # the very boundary it is meant to inherit.
+    if (
+        trusted_allowed_tools is not None
+        and name not in trusted_allowed_tools
+    ):
+        return _typed_tool_response(
+            name,
+            ok=False,
+            error=f"Tool '{name}' is not permitted by the caller's allowlist.",
+            error_category="tool_not_allowed",
+        )
+
     spec = get_tool(name)
     if not spec:
         return _typed_tool_response(
             name, ok=False, error=f"Tool '{name}' not found", error_category="unknown_tool"
         )
+    args = dict(args) if isinstance(args, dict) else {}
+    trusted_user_id = str(user_id or confirmation_user_id or "").strip()
+    if name == "mcp_builder":
+        if not trusted_user_id:
+            return _typed_tool_response(
+                name,
+                ok=False,
+                error=(
+                    "A trusted authenticated user context is required to create shared MCP "
+                    "connectors."
+                ),
+                error_category="auth_context_missing",
+            )
+        try:
+            from backend.middleware.auth import get_auth_service
+
+            is_admin = get_auth_service().is_admin(trusted_user_id)
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            return _typed_tool_response(
+                name,
+                ok=False,
+                error=(
+                    "Creating shared MCP connectors requires administrator privileges."
+                ),
+                error_category="forbidden",
+            )
+    user_scoped_tool = (
+        name in {"recall_context", "store_memory", "consult_agent", "spawn_task"}
+        or name.startswith("browser_")
+    )
+    if user_scoped_tool:
+        # Never accept a tenant identity from provider-produced arguments. Drop
+        # it before the public JSON schema is checked, then inject the trusted
+        # principal after schema filtering below.
+        args = dict(args) if isinstance(args, dict) else {}
+        args.pop("user_id", None)
+        if not trusted_user_id:
+            return _typed_tool_response(
+                name,
+                ok=False,
+                error="A trusted authenticated user context is required for this tool.",
+                error_category="auth_context_missing",
+            )
+    if name in {"store_memory", "consult_agent", "spawn_task"} and isinstance(args, dict):
+        # Project continuity writes and delegated agents may only target the
+        # project root selected by the authenticated chat request. A
+        # model-provided project_path must never choose a host path.
+        args = {**args, "project_path": project_path or ""}
+    if name.startswith("browser_") and isinstance(args, dict):
+        # Browser contexts are session-scoped; a model-supplied session id
+        # must not select another caller's context.
+        #
+        # The trusted id is only injected when the tool's own schema accepts
+        # it. A schema that forbids additional properties and does not declare
+        # `session_id` would otherwise reject the very call the injection is
+        # meant to protect.
+        schema = spec.schema if isinstance(spec.schema, dict) else {}
+        properties = schema.get("properties")
+        properties = properties if isinstance(properties, dict) else {}
+        allows_extra = schema.get("additionalProperties") is not False
+        if "session_id" in properties or allows_extra:
+            args = {**args, "session_id": str(session_id or "")}
+
     if not spec.available:
         reason = spec.unavailable_reason or spec.missing_dependency or "unavailable"
         return _typed_tool_response(
@@ -1539,24 +2605,23 @@ async def execute_tool(
         return _typed_tool_response(
             name, ok=False, error=f"Tool '{name}' has no handler", error_category="tool"
         )
-    if sentinel_enforced and project_path and isinstance(args, dict):
-        # A tool argument cannot replace the project chosen by the request.
-        # Project-relative handlers receive this trusted root before both the
-        # Sentinel assessment and the handler call.
-        properties = spec.schema.get("properties", {})
-        if isinstance(properties, dict):
-            trusted_args: dict[str, Any] = {}
-            if "project_path" in properties:
-                trusted_args["project_path"] = project_path
-            if "cwd" in properties:
-                trusted_args["cwd"] = project_path
-            if trusted_args:
-                args = {**args, **trusted_args}
+    scope_error = _apply_trusted_project_scope(name, spec, args, project_path)
+    if scope_error:
+        return _typed_tool_response(
+            name,
+            ok=False,
+            error=scope_error,
+            error_category="project_scope_denied",
+        )
     if name in {
         "todo_write",
         "todo_list",
         "list_skills",
         "load_skill",
+        "recall_context",
+        "store_memory",
+        "consult_agent",
+        "spawn_task",
     } and isinstance(args, dict):
         # Defense in depth: execute_tool's session_id comes from the caller's
         # trusted request context; the model-controlled argument is never a
@@ -1570,7 +2635,42 @@ async def execute_tool(
                 error_category="invalid_session",
             )
         args = {**args, "session_id": trusted_session_id}
+    elif name in _SESSION_ID_OVERRIDDEN_TOOLS and isinstance(args, dict):
+        # ``build_skill`` declares ``session_id`` in its schema ("Trusted
+        # session is injected by NEXUS; omit this field") but its handler had
+        # no such parameter, so the registry dropped the value and the tool
+        # never saw the session its own contract advertises. The trusted id
+        # replaces the model-supplied one; the model must not be able to
+        # select another session.
+        trusted_session_id = str(session_id or "").strip()
+        args = {**args, "session_id": trusted_session_id}
+
+    # Validate against the schema the tool PUBLISHED, before the unknown
+    # arguments are dropped. A schema that says ``additionalProperties: False``
+    # is making an explicit statement about extra keys and must keep it; a
+    # schema that leaves it unset (138 of the 148, which means "extra keys
+    # allowed") must not reject a call over one.
     arg_errors = validate_tool_args(spec, args)
+
+    # Drop the arguments the handler cannot accept. A key the handler cannot
+    # accept must not sink an otherwise valid call: the model was told the
+    # extra keys are allowed, and the handler simply ignores the ones it does
+    # not know. A missing REQUIRED property or a wrong type is still a hard
+    # failure (checked above and below).
+    args, dropped_args = _drop_unsupported_args(spec, args)
+    dropped_names = list(dropped_args.get("dropped", []))
+    if dropped_names:
+        logger.info(
+            "[TOOL ARGS] %s: dropped unsupported argument(s): %s",
+            name,
+            ", ".join(dropped_names),
+        )
+
+    if user_scoped_tool:
+        args["user_id"] = trusted_user_id
+
+    # The handler's own signature is the ground truth for what it requires.
+    arg_errors.extend(_validate_against_handler(spec, args))
     if arg_errors:
         return _typed_tool_response(
             name,
@@ -1581,7 +2681,7 @@ async def execute_tool(
 
     # Circuit breaker: a tool that failed N times in a row in this session is
     # short-circuited so the agent stops burning iterations retrying it.
-    failures = tool_failure_count(name, session_id)
+    failures = tool_failure_count(name, session_id, failure_scope)
     if failures >= TOOL_MAX_CONSECUTIVE_FAILURES:
         logger.warning(
             "[TOOL CIRCUIT] %s short-circuited after %d consecutive failures (session=%s)",
@@ -1661,22 +2761,18 @@ async def execute_tool(
             response["sentinel_gate"] = sentinel_gate
         return response
 
-    args, dropped_args = _drop_unsupported_args(spec, args)
-    dropped_names = list(dropped_args.get("dropped", []))
-    unsupported = [name for name in dropped_names if name != "confirm"]
-    if unsupported:
-        return _typed_tool_response(
-            name,
-            ok=False,
-            error=(
-                "Unsupported tool argument(s): "
-                + ", ".join(unsupported)
-                + ". Remove them and retry; no action was executed."
-            ),
-            error_category="invalid_args",
-            unsupported_arguments=unsupported,
-            valid_arguments=dropped_args.get("valid_arguments", []),
-        )
+    # A confirmed or unguarded call still cannot leave the selected project.
+    # Sentinel may ask for approval first; approval of a foreign path is not
+    # permission to open that folder.
+    if isinstance(args, dict):
+        confinement_error = _project_confinement_error(name, args, project_path)
+        if confinement_error:
+            return _typed_tool_response(
+                name,
+                ok=False,
+                error=confinement_error,
+                error_category="project_scope_denied",
+            )
 
     # Run budget accounting, before the cache: a cache hit is still a tool call
     # the agent spent a turn on, and a run past its limits must be told to stop
@@ -1693,11 +2789,27 @@ async def execute_tool(
             budget_usage=budget_block.get("usage", {}),
         )
 
-    # Check cache for idempotent tools (only after confirmation is satisfied)
+    # Side-effect idempotency, immediately before the handler runs and before
+    # the cache: a cached hit would hide the replay, and the whole point is that
+    # a second identical write inside one run is *reported* as a replay instead
+    # of being served from a previous execution. Every lane reaches this line,
+    # which is what makes the guarantee lane-agnostic.
+    replay = side_effect_replay(name, args)
+    if replay is not None:
+        return replay
+
+    # Check cache for idempotent tools (only after confirmation is satisfied).
+    # The cache is scoped by session (and by project root for the path
+    # tools): the result of a read depends on who asked and on which project
+    # was selected, so two sessions must never share an entry.
     if _HAVE_TOOL_CACHE:
         try:
             cache = get_tool_cache()
-            cached = cache.get(name, args)
+            scope = {
+                "session_id": str(session_id or ""),
+                "project_root": str(project_path or ""),
+            }
+            cached = cache.get(name, args, **_cache_scope_kwargs(cache, "get", **scope))
             if cached is not None:
                 logger.debug("[TOOL CACHE] Hit for %s: %s", name, cached.get("_cached_preview", ""))
                 return _typed_tool_response(
@@ -1726,19 +2838,21 @@ async def execute_tool(
             **args,
             "sentinel_enforced": sentinel_enforced,
             "allowed_tools": (
-                tuple(sorted({str(tool).strip() for tool in allowed_tools if str(tool).strip()}))
-                if allowed_tools is not None
+                tuple(sorted(trusted_allowed_tools))
+                if trusted_allowed_tools is not None
                 else None
             ),
         }
-        if project_path:
-            handler_args["project_path"] = project_path
+        handler_args["project_path"] = project_path or ""
     start = time.time()
+    session_token = _current_tool_session.set(str(session_id or ""))
     try:
-        result = await asyncio.wait_for(
-            spec.handler(**handler_args), timeout=timeout_seconds
-        )
+        # The handler may be synchronous or asynchronous; both are run under
+        # the tool timeout (a synchronous handler in a worker thread, so the
+        # timeout can interrupt it).
+        result = await _invoke_handler(spec.handler, handler_args, timeout_seconds)
         duration_ms = int((time.time() - start) * 1000)
+        raw_result = result if isinstance(result, dict) else {}
         # The failure verdict is read from the RAW handler payload. Framing
         # first would turn ``{"status": "error", "summary": "Error fetching
         # URL: ..."}`` into a quoted blob and the error text handed to the model
@@ -1750,16 +2864,16 @@ async def execute_tool(
         # framed, so the success/error schema is unchanged.
         framed_result = frame_external_result(name, result)
         if handler_error:
-            failure_count = _record_tool_failure(name, session_id)
+            failure_count = _record_tool_failure(name, session_id, failure_scope)
             response = _typed_tool_response(
                 name,
                 ok=False,
                 result=framed_result,
                 error=handler_error,
-                error_category="timeout" if result.get("timed_out") else "tool",
+                error_category="timeout" if raw_result.get("timed_out") else "tool",
                 duration_ms=duration_ms,
-                timed_out=bool(result.get("timed_out")),
-                exit_code=result.get("exit_code"),
+                timed_out=bool(raw_result.get("timed_out")),
+                exit_code=raw_result.get("exit_code"),
                 consecutive_failures=failure_count,
             )
             log_tool_execution(
@@ -1772,10 +2886,14 @@ async def execute_tool(
                 duration_ms=duration_ms,
             )
             return response
-        _record_tool_success(name, session_id)
+        _record_tool_success(name, session_id, failure_scope)
         response = _typed_tool_response(
             name, ok=True, result=framed_result, duration_ms=duration_ms
         )
+        if dropped_names:
+            # Transparency: the model gets told which of its arguments were
+            # ignored, so it can correct the call instead of wondering.
+            response["dropped_arguments"] = dropped_names
         if sentinel_gate:
             response["sentinel_gate"] = sentinel_gate
         log_tool_execution(
@@ -1786,17 +2904,31 @@ async def execute_tool(
             success=True,
             duration_ms=duration_ms,
         )
+        # Record the confirmed side effect only now that the handler really
+        # succeeded: a failed, timed-out or rejected call must not close the
+        # ledger entry a replay would be measured against.
+        record_side_effect(name, args, result)
         if _HAVE_TOOL_CACHE:
             try:
                 cache = get_tool_cache()
                 cache.invalidate_after_mutation(name)
-                cache.store(name, args, response)
+                cache.store(
+                    name,
+                    args,
+                    response,
+                    **_cache_scope_kwargs(
+                        cache,
+                        "store",
+                        session_id=str(session_id or ""),
+                        project_root=str(project_path or ""),
+                    ),
+                )
             except Exception:
                 pass
         return response
     except TimeoutError:
         duration_ms = int((time.time() - start) * 1000)
-        failure_count = _record_tool_failure(name, session_id)
+        failure_count = _record_tool_failure(name, session_id, failure_scope)
         error_msg = f"Tool '{name}' timed out after {timeout_seconds:.0f}s"
         logger.warning("[TOOL TIMEOUT] %s (session=%s)", error_msg, session_id)
         response = _typed_tool_response(
@@ -1821,7 +2953,7 @@ async def execute_tool(
         return response
     except Exception as exc:
         duration_ms = int((time.time() - start) * 1000)
-        failure_count = _record_tool_failure(name, session_id)
+        failure_count = _record_tool_failure(name, session_id, failure_scope)
         error_msg = str(exc)
         response = _typed_tool_response(
             name,
@@ -1841,3 +2973,8 @@ async def execute_tool(
             duration_ms=duration_ms,
         )
         return response
+    finally:
+        # The trusted session id is published for the duration of the call
+        # only: a handler that does not take ``session_id`` as a keyword can
+        # still read it, and no later call inherits it.
+        _current_tool_session.reset(session_token)

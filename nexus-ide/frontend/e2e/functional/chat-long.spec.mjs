@@ -64,10 +64,11 @@ function historyPage(sessionId, url) {
 function eventFrames() {
   // Deliberately deliver seq 2 before seq 1 to check that the timeline is
   // rendered in run_id/seq order rather than network arrival order.
+  const eventTimestamp = timestamp(historyTotal);
   return [
-    { type: "token", content: "segundo", run_id: runId, seq: 2, event_id: `${runId}:2` },
-    { type: "token", content: "primeiro ", run_id: runId, seq: 1, event_id: `${runId}:1` },
-    { type: "done", content: "", run_id: runId, seq: 3, event_id: `${runId}:3` },
+    { type: "token", content: "segundo", run_id: runId, seq: 2, event_id: `${runId}:2`, timestamp: eventTimestamp },
+    { type: "token", content: "primeiro ", run_id: runId, seq: 1, event_id: `${runId}:1`, timestamp: eventTimestamp },
+    { type: "done", content: "", run_id: runId, seq: 3, event_id: `${runId}:3`, timestamp: eventTimestamp },
   ];
 }
 
@@ -125,6 +126,9 @@ async function installLocalApi(page, state) {
         has_more: false,
         next_offset: 1,
       }), headers: cors });
+    }
+    if (/^\/api\/sessions\/[^/]+\/todos$/.test(pathname)) {
+      return route.fulfill({ ...jsonResponse({ session_id: pathname.split("/")[3], todos: [], counts: {} }), headers: cors });
     }
     if (/^\/api\/sessions\/[^/]+\/events$/.test(pathname)) {
       state.replayRequests.push(url.searchParams.get("run_id"));
@@ -214,11 +218,10 @@ test("histórico longo pagina, troca e restaura sem chamadas externas", async ({
   console.info(`[chat-long] history=${historyTotal}, cursor_pages=${historyPageCount}, initial_rendered<=${historyPageCount * 50}, expanded_rendered=${allRendered}, pagination_and_expand_ms=${Date.now() - startedAt}`);
 
   await page.getByRole("button", { name: "Abrir sessões" }).click();
-  await page.getByRole("button", { name: "Sessão alternativa · fixture" }).click();
+  await page.getByRole("button", { name: "Sessão alternativa · fixture", exact: true }).click();
   await expect(page.getByText("Conversa alternativa", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Fechar sessões" }).click();
   await page.getByRole("button", { name: "Abrir sessões" }).click();
-  await page.getByRole("button", { name: "Sessão longa · fixture" }).click();
+  await page.getByRole("button", { name: "Sessão longa · fixture", exact: true }).click();
   await expect(page.getByText("Resposta persistida ligada à execução restaurada.", { exact: true })).toBeVisible();
 
   await page.reload({ waitUntil: "domcontentloaded" });
@@ -235,7 +238,7 @@ test("resposta atrasada da sessão anterior não contamina a sessão selecionada
   await expect.poll(() => Boolean(state.releaseLongPage)).toBe(true);
 
   await page.getByRole("button", { name: "Abrir sessões" }).click();
-  await page.getByRole("button", { name: "Sessão alternativa · fixture" }).click();
+  await page.getByRole("button", { name: "Sessão alternativa · fixture", exact: true }).click();
   await expect(page.getByText("Conversa alternativa", { exact: true })).toBeVisible();
   state.releasedLongPage = true;
   state.releaseLongPage();
@@ -276,9 +279,9 @@ test("modelo concreto segue intacto no pedido e eventos chegam ordenados", async
   await composer.fill("Testar seleção concreta do modelo");
   await expect(submit).toBeEnabled();
 
-  await page.getByTestId("chat-header").getByRole("button", { name: "Automático" }).click();
-  await page.getByRole("button", { name: "Modelo fixture exato" }).click();
-  await expect(page.getByTestId("chat-header").getByRole("button", { name: "Modelo fixture exato" })).toBeVisible();
+  await page.getByRole("button", { name: "Automático", exact: true }).click();
+  await page.getByRole("button", { name: /Modelo fixture exato/ }).click();
+  await expect(page.getByRole("button", { name: /Modelo fixture exato/ })).toBeVisible();
   await submit.click();
 
   await expect.poll(() => state.chatBodies.length).toBe(1);

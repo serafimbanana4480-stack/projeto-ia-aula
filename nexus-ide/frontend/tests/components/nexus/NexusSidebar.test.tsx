@@ -25,25 +25,25 @@ describe("NexusSidebar", () => {
       "/nexus", "/nexus/hitl", "/dashboard/tasks", "/documents", "/search", "/editor",
       "/tools", "/models", "/analytics", "/settings",
     ]);
-    const links = screen.getAllByRole("link", { hidden: true });
+    const links = screen.getAllByRole("link");
     expect(links.length).toBeGreaterThan(0);
     for (const link of links) expect(validRoutes.has(link.getAttribute("href") ?? "")).toBe(true);
     expect(screen.getByText("NEXUS IDE")).toBeTruthy();
     expect(screen.getByText("Workspace")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Tarefas", hidden: true }).getAttribute("href")).toBe("/dashboard/tasks");
-    expect(screen.queryByRole("link", { name: "Agentes", hidden: true })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Fluxos", hidden: true })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Memória vetorial", hidden: true })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Browser Sessions", hidden: true })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Vector DB", hidden: true })).toBeNull();
+    expect(screen.getByRole("link", { name: "Tarefas" }).getAttribute("href")).toBe("/dashboard/tasks");
+    expect(screen.queryByRole("link", { name: "Agentes" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Fluxos" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Memória vetorial" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Browser Sessions" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Vector DB" })).toBeNull();
   });
 
   it("marca apenas a página atual e não confunde o dashboard com uma página irmã", () => {
     navigationState.pathname = "/nexus/hitl";
     render(<NexusSidebar />);
 
-    expect(screen.getByRole("link", { name: "Aprovações", hidden: true }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("link", { name: "Dashboard", hidden: true }).getAttribute("aria-current")).toBeNull();
+    expect(screen.getByRole("link", { name: "Aprovações" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("link", { name: "Dashboard" }).getAttribute("aria-current")).toBeNull();
   });
 
   it("abre o menu mobile, fecha com Escape e volta a fechar ao mudar de rota", () => {
@@ -54,7 +54,11 @@ describe("NexusSidebar", () => {
     const aside = document.getElementById("nexus-secondary-navigation");
     expect(aside).toBeTruthy();
     expect(menu.getAttribute("aria-expanded")).toBe("false");
-    expect(aside?.hasAttribute("inert")).toBe(true);
+    // `inert`/`aria-hidden` are now gated on a real mobile media query
+    // (`useMediaQuery("(max-width: 767px)")`) instead of being applied to every
+    // closed drawer: on desktop the navigation must stay focusable. jsdom
+    // reports no match for the query, i.e. desktop behaviour — not inert.
+    expect(aside?.hasAttribute("inert")).toBe(false);
 
     fireEvent.click(menu);
     expect(screen.getByRole("button", { name: "Fechar menu" }).getAttribute("aria-expanded")).toBe("true");
@@ -64,7 +68,7 @@ describe("NexusSidebar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Abrir menu" }));
     navigationState.pathname = "/dashboard/tasks";
     rerender(<NexusSidebar />);
-    expect(screen.getByRole("link", { name: "Tarefas", hidden: true }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("link", { name: "Tarefas" }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("button", { name: "Abrir menu" }).getAttribute("aria-expanded")).toBe("false");
   });
 });

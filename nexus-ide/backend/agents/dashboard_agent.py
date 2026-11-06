@@ -139,6 +139,7 @@ class DashboardAgent(AgentBase):
             max_iterations=request.max_iterations,
             enable_thinking=request.enable_thinking,
             project_path=request.project_path,
+            user_id=request.user_id,
         )
         async for token in self._run_react_loop(enriched_request):
             yield token

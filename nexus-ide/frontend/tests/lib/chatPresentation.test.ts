@@ -2,14 +2,37 @@ import { describe, expect, it } from "vitest";
 import {
   activityFromMissionEvent,
   activityFromProgress,
+  collapseDuplicateRunAnswers,
   sanitizeAssistantContent,
   summarizeApproachContent,
   agentActivity,
   groupAdjacentFileReads,
 } from "../../lib/chatPresentation";
-import type { StreamEvent } from "../../lib/types";
+import type { ChatMessage, StreamEvent } from "../../lib/types";
 
 describe("chat presentation", () => {
+  it("collapses identical assistant rows only within the same durable run", () => {
+    const message = (id: string, runId: string, content: string): ChatMessage => ({
+      id,
+      runId,
+      role: "assistant",
+      content,
+      timestamp: "2026-01-01T00:00:00Z",
+    });
+    const messages = [
+      message("first", "run-1", "HASH-888"),
+      message("retry", "run-1", "HASH-888"),
+      message("new-run", "run-2", "HASH-888"),
+      message("different-answer", "run-1", "Outra resposta"),
+    ];
+
+    expect(collapseDuplicateRunAnswers(messages).map(({ id }) => id)).toEqual([
+      "first",
+      "new-run",
+      "different-answer",
+    ]);
+  });
+
   it("agrega apenas leituras adjacentes com contagens reais e mantém eventos de atenção separados", () => {
     const read = (id: string, count: number) => ({
       id,
@@ -178,13 +201,12 @@ describe("chat presentation", () => {
       expect(result).toContain("normal");
     });
 
-    it("removes <thinking> and </thinking> tags but keeps inner content", () => {
+    it("removes the whole historical thinking block", () => {
       const input = "Visible <thinking>hidden</thinking> content";
       const result = sanitizeAssistantContent(input);
       expect(result).not.toContain("<thinking>");
       expect(result).not.toContain("</thinking>");
-      // Inner content is preserved (tags only are stripped)
-      expect(result).toContain("hidden");
+      expect(result).not.toContain("hidden");
       expect(result).toContain("Visible");
       expect(result).toContain("content");
     });
@@ -224,12 +246,11 @@ describe("chat presentation", () => {
       expect(result).toBe("hello world");
     });
 
-    it("handles content with both thinking tags and tool calls", () => {
+    it("removes thinking blocks without losing the actual answer", () => {
       const input = "<thinking>reasoning</thinking>Here is the answer <tool_call>data</tool_call>";
       const result = sanitizeAssistantContent(input);
-      // Thinking tags are removed but inner content stays
       expect(result).not.toContain("<thinking>");
-      expect(result).toContain("reasoning");
+      expect(result).not.toContain("reasoning");
       expect(result).not.toContain("tool_call");
       expect(result).toContain("Here is the answer");
     });

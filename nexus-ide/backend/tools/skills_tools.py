@@ -111,7 +111,8 @@ async def load_skill(
         name: Skill directory name (e.g. ``nexus-backend``).
 
     Returns:
-        Dict with the skill content under a ``### Skill: <name>`` header.
+        Dict with the skill content under a ``### Skill: <name> (v<version>)``
+        header.
     """
     wanted = str(name or "").strip()
     if not wanted:
@@ -125,9 +126,10 @@ async def load_skill(
     )
     if not loaded.get("ok"):
         return loaded
-    header = f"### Skill: {loaded['name']}"
+    # Keep the loader's header verbatim: it carries the skill version, which
+    # used to be dropped when the header was rebuilt here.
     content = str(loaded.get("content") or "")
-    body = content.partition("\n\n")[2]
+    header, _, body = content.partition("\n\n")
     if loaded.get("truncated"):
         body = body.removesuffix(
             "\n\n[... skill truncada; lê o ficheiro original para o resto ...]"

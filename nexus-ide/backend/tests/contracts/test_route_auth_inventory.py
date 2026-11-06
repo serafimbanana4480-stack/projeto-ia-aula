@@ -303,11 +303,18 @@ def test_the_inventory_walker_sees_the_same_paths_as_the_shared_walker() -> None
 def test_anonymous_websocket_handshakes_are_refused_with_4401(
     anonymous_client: TestClient,
 ) -> None:
-    """Both WebSocket routes must reject an anonymous handshake before accept.
+    """Both WebSocket routes must refuse an anonymous handshake with 4401.
 
-    Closing with 4401 (not 1008, not an accepted-then-immediately-closed
-    socket) is what lets the client distinguish "authenticate and retry" from
-    "server went away".
+    Closing with 4401 (not 1008, not a server error) is what lets the client
+    distinguish "authenticate and retry" from "server went away".
+
+    The close is sent *after* the handshake was accepted, and that is the
+    point: a close sent before ``accept()`` is answered by a real ASGI
+    server with an HTTP 403 and no close frame, so the client never saw the
+    code at all.  The TestClient surfaces both shapes differently, so the
+    behaviour against a real server is asserted in
+    ``backend/tests/middleware/test_deny_by_default_contracts.py``; here the
+    ASGI message sequence is what is checked.
     """
     ws_routes = [record.path_format for record in _inventory() if record.is_websocket]
     assert ws_routes, "no WebSocket routes found -- the walker lost them"
@@ -315,9 +322,9 @@ def test_anonymous_websocket_handshakes_are_refused_with_4401(
     for path_format in ws_routes:
         with (
             pytest.raises(WebSocketDisconnect) as excinfo,
-            anonymous_client.websocket_connect(_probe_path(path_format)),
+            anonymous_client.websocket_connect(_probe_path(path_format)) as websocket,
         ):
-            pass  # pragma: no cover - the handshake is refused before accept
+            websocket.receive_text()  # pragma: no cover - the close arrives here
         assert excinfo.value.code == 4401, (
             f"WS {path_format} closed with {excinfo.value.code} instead of 4401; "
             "an anonymous handshake must be refused by the deny-by-default middleware "

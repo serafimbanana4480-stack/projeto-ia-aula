@@ -77,7 +77,7 @@ export default function VirtualMessageList<TMessage>({
   const hasMore = messages.length > limit;
 
   const visibleMessages = messages.slice(-limit);
-  const hiddenCount = messages.length - limit;
+  const hiddenCount = Math.max(0, messages.length - limit);
 
   const handleLoadMore = () => {
     if (!hasMore) return;
@@ -115,7 +115,7 @@ export default function VirtualMessageList<TMessage>({
       )}
       <div className="space-y-4">
         {visibleMessages.map((message, index) =>
-          renderItem(message, messages.length - limit + index)
+          renderItem(message, hiddenCount + index)
         )}
       </div>
     </div>

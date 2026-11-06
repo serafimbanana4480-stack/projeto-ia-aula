@@ -175,7 +175,8 @@ describe("ChatPanel conversation history search and navigation", () => {
       target: { value: "lembrança antiga" },
     });
 
-    const result = await screen.findByRole("button", { name: /Tu: lembrança antiga que procurava/ });
+    // The result label is localised pt-PT ("Você", matching MessageBubble's user label), no longer "Tu:".
+    const result = await screen.findByRole("button", { name: /Você: lembrança antiga que procurava/ });
     expect(mocks.getSessionHistoryPage).toHaveBeenCalledWith("session-1", 100, "message-5");
     expect(mocks.getSessionHistoryPage).toHaveBeenCalledWith("session-1", 100, "message-3");
 

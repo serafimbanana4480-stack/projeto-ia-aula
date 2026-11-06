@@ -19,7 +19,7 @@ test-backend:
 	$(PYTHON) -m pytest backend/tests/ --cov=backend --cov-report=term-missing --cov-fail-under=5 -v
 
 test-frontend:
-	cd frontend && npm test
+	cd frontend && pnpm run test
 
 test-unit:
 	$(PYTHON) -m pytest backend/tests/ -m "not integration and not e2e" --cov=backend --cov-report=term-missing -v
@@ -28,7 +28,7 @@ test-integration:
 	$(PYTHON) -m pytest backend/tests/ -m "integration" -v
 
 test-e2e:
-	cd frontend && npx playwright test
+	cd frontend && pnpm exec playwright test
 
 test-agents:
 	$(PYTHON) -m pytest backend/tests/agents/ -v
@@ -54,7 +54,7 @@ lint-backend:
 	cd backend && ruff check . && $(PYTHON) -m mypy . --ignore-missing-imports
 
 lint-frontend:
-	cd frontend && npm run lint && npm run type-check
+	cd frontend && pnpm run lint && pnpm run type-check
 
 lint: lint-backend lint-frontend
 
@@ -96,7 +96,7 @@ backend-dev:
 		--reload-exclude "logs/*" --reload-exclude "*/__pycache__/*"
 
 frontend:
-	cd frontend && npm run dev
+	cd frontend && pnpm run dev
 
 setup:
 	bash scripts/setup.sh

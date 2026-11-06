@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, Bot, CheckCircle2, Circle, CircleAlert, Clock3, GitBranch, Loader2, Pause, XCircle } from "lucide-react";
 import type { ExecutionGraph, ExecutionGraphNode } from "../../lib/executionGraph";
 
 const STATUS_LABELS: Record<ExecutionGraphNode["status"], string> = {
@@ -20,6 +20,15 @@ function formatDuration(durationMs?: number): string | undefined {
   return `${(durationMs / 1000).toFixed(1)} s`;
 }
 
+function NodeStatus({ status }: { status: ExecutionGraphNode["status"] }) {
+  if (status === "running") return <Loader2 className="h-4 w-4 animate-spin text-nexus-accent-bright" />;
+  if (status === "success") return <CheckCircle2 className="h-4 w-4 text-nexus-accent2" />;
+  if (status === "error" || status === "warning") return <CircleAlert className="h-4 w-4 text-nexus-accent4" />;
+  if (status === "paused") return <Pause className="h-4 w-4 text-nexus-accent3" />;
+  if (status === "cancelled") return <XCircle className="h-4 w-4 text-nexus-muted" />;
+  return <Circle className="h-4 w-4 text-nexus-faint" />;
+}
+
 export default function AgentExecutionGraph({ graph }: { graph: ExecutionGraph }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const selected = graph.nodes.find((node) => node.taskId === selectedTaskId);
@@ -27,6 +36,8 @@ export default function AgentExecutionGraph({ graph }: { graph: ExecutionGraph }
   const selectedDependencies = selected?.dependsOn.map(
     (taskId) => nodesById.get(taskId)?.agent ?? taskId,
   ) ?? [];
+  const completed = graph.nodes.filter((node) => node.status === "success").length;
+  const running = graph.nodes.filter((node) => node.status === "running").length;
 
   return (
     <section
@@ -34,11 +45,12 @@ export default function AgentExecutionGraph({ graph }: { graph: ExecutionGraph }
       data-testid="execution-graph"
       className="border-t border-nexus-border/20 px-3 py-3"
     >
-      <p className="mb-3 text-[10px] leading-5 text-nexus-muted">
-        As ligações representam dependências de tarefas reportadas pelo scheduler. Não representam relações pai-filho entre agentes.
-      </p>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="flex items-center gap-2 text-xs font-semibold text-nexus-text"><Bot className="h-4 w-4 text-nexus-accent-bright" />Equipa desta execução</h3>
+        <span className="text-[10px] tabular-nums text-nexus-muted">{completed}/{graph.nodes.length} concluídas{running > 0 ? ` · ${running} em execução` : ""}</span>
+      </div>
 
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_240px]">
+      <div className={`grid gap-3 ${selected ? "lg:grid-cols-[minmax(0,1fr)_240px]" : ""}`}>
         <div className="space-y-3">
           <div className="grid gap-2 sm:grid-cols-2">
             {graph.nodes.map((node) => (
@@ -48,30 +60,32 @@ export default function AgentExecutionGraph({ graph }: { graph: ExecutionGraph }
                 data-testid="execution-graph-node"
                 aria-pressed={selectedTaskId === node.taskId}
                 onClick={() => setSelectedTaskId(node.taskId)}
-                className={`min-w-0 rounded-lg border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/60 ${
+                className={`nx-agent-card min-w-0 rounded-xl border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/60 ${
                   selectedTaskId === node.taskId
                     ? "border-nexus-accent/50 bg-nexus-accent/10"
                     : "border-nexus-border/30 bg-nexus-bg/30 hover:bg-nexus-card/50"
                 }`}
               >
-                <span className="flex items-center justify-between gap-2">
-                  <span className="truncate text-xs font-semibold text-nexus-text">{node.agent}</span>
-                  <span className="shrink-0 text-[10px] text-nexus-muted">{STATUS_LABELS[node.status]}</span>
+                <span className="flex items-center gap-2.5">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-nexus-bg/70"><NodeStatus status={node.status} /></span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-semibold text-nexus-text">{node.agent}</span>
+                    <span className="mt-0.5 block text-[10px] text-nexus-muted">{STATUS_LABELS[node.status]}</span>
+                  </span>
+                  {formatDuration(node.durationMs) && <span className="flex shrink-0 items-center gap-1 text-[10px] text-nexus-faint"><Clock3 className="h-3 w-3" />{formatDuration(node.durationMs)}</span>}
                 </span>
-                <span className="mt-1 block break-words text-[11px] leading-5 text-nexus-muted">
+                <span className="mt-2 block break-words text-[11px] leading-5 text-nexus-muted">
                   {node.objective || "Objetivo não informado pelo runtime"}
                 </span>
-                <span className="mt-1 block truncate font-mono text-[9px] text-nexus-muted/70">
-                  {node.taskId}
-                </span>
+                {node.model && <span className="mt-2 block truncate text-[10px] text-nexus-faint">{node.model}</span>}
               </button>
             ))}
           </div>
 
           {graph.edges.length > 0 ? (
             <div aria-label="Dependências reportadas" className="space-y-1.5">
-              <h4 className="text-[10px] font-semibold uppercase tracking-wide text-nexus-muted/70">
-                Dependências reportadas
+              <h4 className="flex items-center gap-1.5 text-[10px] font-medium text-nexus-muted">
+                <GitBranch className="h-3 w-3" />Dependências entre tarefas
               </h4>
               {graph.edges.map((edge) => {
                 const source = nodesById.get(edge.fromTaskId)!;
@@ -86,7 +100,6 @@ export default function AgentExecutionGraph({ graph }: { graph: ExecutionGraph }
                     <span className="truncate text-nexus-text/80">{source.agent}</span>
                     <ArrowRight className="h-3 w-3 shrink-0 text-nexus-accent" aria-hidden="true" />
                     <span className="min-w-0 truncate text-nexus-text/80">{target.agent}</span>
-                    <span className="ml-auto shrink-0 text-nexus-muted">depende de</span>
                   </div>
                 );
               })}
@@ -107,7 +120,7 @@ export default function AgentExecutionGraph({ graph }: { graph: ExecutionGraph }
         <aside
           aria-label="Inspector da tarefa"
           data-testid="execution-graph-inspector"
-          className="min-h-28 rounded-lg border border-nexus-border/25 bg-nexus-bg/25 p-3"
+          className={selected ? "min-h-28 rounded-xl border border-nexus-accent/20 bg-nexus-bg/25 p-3" : "sr-only"}
         >
           {selected ? (
             <>
@@ -122,7 +135,7 @@ export default function AgentExecutionGraph({ graph }: { graph: ExecutionGraph }
                 {selected.model && <><dt className="text-nexus-muted">Modelo</dt><dd className="text-nexus-text/80">{selected.model}</dd></>}
                 {formatDuration(selected.durationMs) && <><dt className="text-nexus-muted">Duração</dt><dd className="text-nexus-text/80">{formatDuration(selected.durationMs)}</dd></>}
                 {selectedDependencies.length > 0 && <><dt className="text-nexus-muted">Depende de</dt><dd className="break-words text-nexus-text/80">{selectedDependencies.join(", ")}</dd></>}
-                {selected.error && <><dt className="text-nexus-muted">Erro</dt><dd className="break-words text-rose-300">{selected.error}</dd></>}
+                {selected.error && <><dt className="text-nexus-muted">Erro</dt><dd className="break-words text-nexus-accent4">{selected.error}</dd></>}
               </dl>
               <p className="mt-2 text-[9px] text-nexus-muted/70">Atualização recebida: {selected.timestamp}</p>
             </>
@@ -131,6 +144,10 @@ export default function AgentExecutionGraph({ graph }: { graph: ExecutionGraph }
           )}
         </aside>
       </div>
+      <details className="mt-3 text-[10px] leading-5 text-nexus-faint">
+        <summary className="cursor-pointer rounded py-1 hover:text-nexus-text">Sobre as ligações</summary>
+        <p>As ligações representam dependências de tarefas reportadas pelo scheduler. Não representam relações pai-filho entre agentes.</p>
+      </details>
     </section>
   );
 }

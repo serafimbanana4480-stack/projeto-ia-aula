@@ -262,7 +262,7 @@ export default function SubagentsWidget() {
       : "neutral";
 
   return (
-    <Surface elevation={1} padding="lg" className="nx-dashboard-widget flex flex-col lg:col-span-2">
+    <Surface elevation={1} padding="lg" className="nx-dashboard-widget flex flex-col min-[1440px]:col-span-2">
       <SurfaceHeader
         icon={<Bot className="h-4 w-4" />}
         tone={headerTone}
@@ -283,18 +283,18 @@ export default function SubagentsWidget() {
             <span
               className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider shadow-rim ${
                 status.circuit_open
-                  ? "bg-[rgba(244,63,94,0.12)] text-rose-400"
+                  ? "bg-[rgba(244,63,94,0.12)] text-nexus-accent4"
                   : status.running
-                    ? "bg-[rgba(52,211,153,0.12)] text-emerald-400"
+                    ? "bg-[rgba(52,211,153,0.12)] text-nexus-accent2"
                     : "bg-[rgba(148,163,184,0.12)] text-nexus-muted"
               }`}
             >
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
                   status.circuit_open
-                    ? "bg-rose-400"
+                    ? "bg-nexus-accent4"
                     : status.running
-                      ? "bg-emerald-400 animate-pulse-subtle"
+                      ? "bg-nexus-accent2 animate-pulse-subtle"
                       : "bg-nexus-faint"
                 }`}
               />
@@ -317,7 +317,7 @@ export default function SubagentsWidget() {
 
       <div className="mt-2 flex min-h-4 items-center justify-between gap-2 text-[10px] text-nexus-faint" aria-live="polite">
         <span>{lastUpdated ? `Atualizado às ${lastUpdated.toLocaleTimeString("pt-PT", { hour: "2-digit", minute: "2-digit" })}` : ""}</span>
-        {failed && lastUpdated ? <span className="text-amber-300">A mostrar dados anteriores; atualização falhou.</span> : null}
+        {failed && lastUpdated ? <span className="text-nexus-accent3">A mostrar dados anteriores; atualização falhou.</span> : null}
       </div>
 
       {/* `consecutive_failures` is what the circuit breaker trips on, and it was
@@ -330,8 +330,8 @@ export default function SubagentsWidget() {
           role="status"
           className={`mt-3 flex items-center gap-2 rounded-lg px-3 py-2 text-[11px] ${
             status.circuit_open
-              ? "border border-[rgba(244,63,94,0.28)] bg-[rgba(244,63,94,0.08)] text-rose-300"
-              : "border border-[rgba(245,158,11,0.28)] bg-[rgba(245,158,11,0.08)] text-amber-300"
+              ? "border border-[rgba(244,63,94,0.28)] bg-[rgba(244,63,94,0.08)] text-nexus-accent4"
+              : "border border-[rgba(245,158,11,0.28)] bg-[rgba(245,158,11,0.08)] text-nexus-accent3"
           }`}
         >
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
@@ -402,9 +402,9 @@ export default function SubagentsWidget() {
                 >
                   <div className="flex min-w-0 flex-wrap items-center gap-2.5">
                     {run.success ? (
-                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-nexus-accent2" />
                     ) : (
-                      <XCircle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+                      <XCircle className="h-3.5 w-3.5 shrink-0 text-nexus-accent4" />
                     )}
                     <span
                       className="flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider"
@@ -422,19 +422,19 @@ export default function SubagentsWidget() {
                       </span>
                     ) : null}
                     {run.context_degraded ? (
-                      <span className="rounded-md bg-[rgba(245,158,11,0.12)] px-1.5 py-0.5 text-[10px] font-medium text-amber-400">
+                      <span className="rounded-md bg-[rgba(245,158,11,0.12)] px-1.5 py-0.5 text-[10px] font-medium text-nexus-accent3">
                         degradado
                       </span>
                     ) : null}
                     {run.error ? (
-                      <span className="min-w-0 flex-1 truncate text-[11px] text-rose-400" title={run.error}>
+                      <span className="min-w-0 flex-1 truncate text-[11px] text-nexus-accent4" title={run.error}>
                         {run.error}
                       </span>
                     ) : null}
                   </div>
                   <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[11px] tabular-nums text-nexus-muted sm:shrink-0">
                     {run.retries > 0 ? (
-                      <span className="flex items-center gap-1 text-amber-400">
+                      <span className="flex items-center gap-1 text-nexus-accent3">
                         <RotateCcw className="h-3 w-3" />
                         {run.retries}
                       </span>

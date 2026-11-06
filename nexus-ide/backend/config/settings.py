@@ -5,14 +5,17 @@ See ARCHITECTURE.md §7 (Backend stack) and `config/models.yaml` for the schema.
 
 from __future__ import annotations
 
+import contextlib
+import ipaddress
 import logging
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -26,59 +29,234 @@ logger = logging.getLogger(__name__)
 _DEFAULT_SECRET_KEY = "development-secret-key-change-in-production"
 _DEFAULT_JWT_SECRET = "development-jwt-secret-change-in-production"
 
+#: The ``JWT_SECRET`` value shipped in ``.env.example``.  It is published in
+#: the repository, so a token signed with it can be forged by anyone who can
+#: read the repository.
+_EXAMPLE_JWT_SECRET = "change-this-secret-in-production-use-env-var"
 
-def _bootstrap_secrets() -> None:
-    """Auto-generate SECRET_KEY / JWT_SECRET on first startup if still at defaults.
+#: Minimum length of a secret that signs or verifies tokens.
+MIN_SECRET_LENGTH = 32
 
-    Writes the generated values back to ``.env`` so they persist across restarts.
-    Does nothing if the values have already been overridden or if ``.env`` is
-    absent (the Settings class defaults will apply in that case).
+#: Substrings that mark a value as a placeholder instead of a real secret.
+_PLACEHOLDER_PATTERNS = (
+    "change",
+    "example",
+    "your-",
+    "changeme",
+    "dev-secret",
+    "placeholder",
+)
+
+#: ``backend/tests/conftest.py`` pins this exact secret for the whole test
+#: suite so that tokens are reproducible.  It is a public constant, so it is
+#: only tolerated while running under pytest; anywhere else it is rejected
+#: like any other published value.
+_SUITE_PINNED_JWT_SECRET = "test-jwt-secret-for-testing"
+
+
+def _generate_secret() -> str:
+    """A fresh, high-entropy secret value."""
+    import secrets as _secrets
+
+    return _secrets.token_urlsafe(48)
+
+
+def _read_env_value(content: str, name: str) -> str:
+    """The effective value of ``name`` in a dotenv body.
+
+    Mirrors python-dotenv: the last assignment wins and surrounding quotes
+    are stripped.  The last-wins rule matters because the bootstrap appends
+    to the file, and the appended value is the one in force.
     """
-    import secrets
-
-    env_path = REPO_ROOT / ".env"
-    if not env_path.exists():
-        return
-
-    try:
-        content = env_path.read_text(encoding="utf-8")
-    except OSError:
-        return
-
-    new_secret_key: str | None = None
-    new_jwt_secret: str | None = None
-
-    for line in content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#") or "=" not in stripped:
+    value = ""
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
             continue
-        key, _, value = stripped.partition("=")
-        key = key.strip()
-        value = value.strip().strip("\"'")
-        if key == "SECRET_KEY" and value == _DEFAULT_SECRET_KEY:
-            new_secret_key = secrets.token_urlsafe(48)
-        if key == "JWT_SECRET" and value == _DEFAULT_JWT_SECRET:
-            new_jwt_secret = secrets.token_urlsafe(48)
+        key, _, raw_value = line.partition("=")
+        if key.strip() != name:
+            continue
+        raw_value = raw_value.strip()
+        if len(raw_value) >= 2 and raw_value[0] == raw_value[-1] and raw_value[0] in "\"'":
+            raw_value = raw_value[1:-1]
+        value = raw_value
+    return value
 
-    if new_secret_key is None and new_jwt_secret is None:
+
+def _get_env_var(content: str, name: str) -> bool:
+    """Whether ``name`` carries a non-empty value in a dotenv body."""
+    return bool(_read_env_value(content, name))
+
+
+def _env_value_line_index(lines: list[str], name: str) -> int | None:
+    """Index of the line that assigns ``name`` (the last one), or ``None``."""
+    index: int | None = None
+    for position, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.partition("=")[0].strip() == name:
+            index = position
+    return index
+
+
+def _write_env_file(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` atomically.
+
+    A crash halfway through a rewrite must not leave the operator with a
+    truncated ``.env``, so the new content goes to a sibling temporary file
+    that replaces the original in one step.
+    """
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.nexus-tmp")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        os.replace(tmp_path, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise
+
+
+def _example_secret_values() -> frozenset[str]:
+    """Every secret value published in ``.env.example``, plus the defaults.
+
+    ``.env.example`` ships the values an operator is meant to replace, so any
+    of them is a *public* secret: a token signed with one of them is accepted
+    by the API, and anyone can produce one.
+    """
+    values = {_DEFAULT_SECRET_KEY, _DEFAULT_JWT_SECRET, _EXAMPLE_JWT_SECRET}
+    try:
+        example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    except OSError:
+        return frozenset(values)
+    for name in ("SECRET_KEY", "JWT_SECRET"):
+        value = _read_env_value(example, name)
+        if value:
+            values.add(value)
+    return frozenset(values)
+
+
+def is_placeholder_secret(value: str) -> bool:
+    """Whether ``value`` is a published placeholder instead of a real secret."""
+    if not value:
+        return True
+    if value in _example_secret_values():
+        return True
+    lowered = value.lower()
+    return any(pattern in lowered for pattern in _PLACEHOLDER_PATTERNS)
+
+
+def is_low_entropy_secret(value: str) -> bool:
+    """Whether ``value`` is too weak to be used as a signing secret."""
+    if not value:
+        return True
+    if value == _SUITE_PINNED_JWT_SECRET and "pytest" in sys.modules:
+        # The suite pins a public secret on purpose; see the constant.
+        return False
+    return len(value) < MIN_SECRET_LENGTH
+
+
+def describe_secret_problem(name: str, value: str) -> str | None:
+    """Why ``value`` cannot be used as the secret ``name`` (``None`` when fine).
+
+    The message is the one the operator sees, so it names the variable, says
+    why the value is refused, and gives the command that produces a real
+    secret.
+    """
+    generate = (
+        'generate one with python -c "import secrets; print(secrets.token_urlsafe(48))" '
+        f"and set {name} in {REPO_ROOT / '.env'}"
+    )
+    generate = generate[0].upper() + generate[1:]
+    if not value:
+        return f"{name} is not set. {generate}."
+    if value in _example_secret_values():
+        return (
+            f"{name} is set to the value published in .env.example. That value is "
+            f"public, so anyone can sign a token with it and be accepted as an "
+            f"admin. {generate}."
+        )
+    if is_placeholder_secret(value):
+        return (
+            f"{name} still looks like a placeholder ({value!r}). A placeholder is a "
+            f"public value, so tokens signed with it can be forged. "
+            f"{generate}."
+        )
+    if is_low_entropy_secret(value):
+        return (
+            f"{name} is too weak ({len(value)} characters, {MIN_SECRET_LENGTH} are "
+            f"required). {generate}."
+        )
+    return None
+
+
+def _bootstrap_secrets(env_path: Path | None = None) -> None:
+    """Make sure ``.env`` holds a strong, non-placeholder SECRET_KEY / JWT_SECRET.
+
+    A secret that is *missing* and a secret that still carries a *published
+    placeholder* are the same failure: the API is signing tokens with a value
+    that everybody can read in ``.env.example``.  Both are treated as absent,
+    so a fresh high-entropy value is generated -- a missing one is appended,
+    a placeholder is replaced where it stands.  The replacement is logged, so
+    the operator knows the file carries a generated secret and can set their
+    own.
+    """
+    path = env_path if env_path is not None else REPO_ROOT / ".env"
+    try:
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError:
         return
 
-    updated_lines: list[str] = []
-    for line in content.splitlines():
-        if line.startswith("SECRET_KEY=") and new_secret_key is not None:
-            updated_lines.append(f"SECRET_KEY={new_secret_key}")
-        elif line.startswith("JWT_SECRET=") and new_jwt_secret is not None:
-            updated_lines.append(f"JWT_SECRET={new_jwt_secret}")
+    lines = existing.splitlines(keepends=True)
+    appended: list[str] = []
+    replaced: list[tuple[int, str]] = []
+    replaced_names: list[str] = []
+
+    for name in ("SECRET_KEY", "JWT_SECRET"):
+        value = _read_env_value(existing, name)
+        if not value:
+            appended.append(f"{name}={_generate_secret()}")
+            continue
+        if not is_placeholder_secret(value):
+            continue
+        generated = _generate_secret()
+        index = _env_value_line_index(lines, name)
+        if index is None:
+            appended.append(f"{name}={generated}")
         else:
-            updated_lines.append(line)
+            replaced.append((index, f"{name}={generated}"))
+        replaced_names.append(name)
+
+    if not appended and not replaced:
+        return
+
+    for index, new_line in replaced:
+        ending = "\n" if lines[index].endswith("\n") else ""
+        lines[index] = new_line + ending
+    content = "".join(lines)
+
+    if appended:
+        if content and not content.endswith("\n"):
+            content += "\n"
+        content += "\n# Auto-generated by NEXUS IDE bootstrap\n"
+        content += "".join(f"{line}\n" for line in appended)
 
     try:
-        env_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
-        logger.info(
-            "Auto-generated SECRET_KEY and JWT_SECRET in .env (production must set explicit values)"
-        )
+        _write_env_file(path, content)
     except OSError:
-        logger.warning("Could not write auto-generated secrets to .env", exc_info=True)
+        logger.warning("Could not write auto-generated secrets to %s", path, exc_info=True)
+        return
+
+    if replaced_names:
+        logger.warning(
+            "%s carried a published placeholder in %s and was replaced with a "
+            "generated strong secret. Set your own value to silence this warning: "
+            'python -c "import secrets; print(secrets.token_urlsafe(48))"',
+            ", ".join(replaced_names),
+            path,
+        )
+    if appended:
+        logger.info("Auto-generated secrets in %s", path)
 
 
 _bootstrap_secrets()
@@ -200,7 +378,9 @@ class Settings(BaseSettings):
     brave_api_key: str = Field(default="")
 
     # Backend
-    backend_host: str = Field(default="0.0.0.0")
+    # The IDE is local-first: expose the API to this machine by default.
+    # Network deployments must opt in explicitly with BACKEND_HOST.
+    backend_host: str = Field(default="127.0.0.1")
     backend_port: int = Field(default=8000)
     backend_reload: bool = Field(default=False)
     log_level: str = Field(default="INFO")
@@ -213,7 +393,16 @@ class Settings(BaseSettings):
     enable_metrics: bool = Field(default=True)
 
     # Security
-    secret_key: str = Field(default="development-secret-key-change-in-production")
+    secret_key: str = Field(default="")
+
+    # Self-registration is a development convenience.  Outside development it
+    # is off unless an operator turns it on explicitly, because an open
+    # registration endpoint hands an account -- and with it the tool-execution
+    # endpoints -- to anyone who can reach the API.
+    #
+    # Tri-state on purpose: ``None`` means "not configured", and the effective
+    # value then follows the environment (see the model validator below).
+    allow_self_registration: bool | None = Field(default=None)
 
     # Content Security Policy
     #   csp_enabled: when false, the CSP header is omitted entirely (dev/debug).
@@ -225,7 +414,7 @@ class Settings(BaseSettings):
     allowed_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000")
 
     # JWT Authentication
-    jwt_secret: str = Field(default="development-jwt-secret-change-in-production")
+    jwt_secret: str = Field(default="")
     jwt_algorithm: str = Field(default="HS256")
     jwt_expiration_minutes: int = Field(default=30)
 
@@ -240,8 +429,9 @@ class Settings(BaseSettings):
     nexus_gc_interval_minutes: int = Field(default=60, description="Minutes between automatic garbage-collection runs")
 
     # Rate limiting
-    rate_limit_enabled: bool = Field(default=False)
-    rate_limit_requests_per_minute: int = Field(default=0)
+    rate_limit_enabled: bool = Field(default=True)
+    rate_limit_requests_per_minute: int = Field(default=60)
+    rate_limit_tokens_per_minute: int = Field(default=100000)
 
     @field_validator("environment")
     @classmethod
@@ -251,6 +441,23 @@ class Settings(BaseSettings):
         if v not in allowed:
             raise ValueError(f"environment must be one of {allowed}, got: {v}")
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_allow_self_registration(cls, data: Any) -> Any:
+        """Default self-registration to the development environment only.
+
+        Runs *before* the field validators so it can read the environment the
+        settings were actually resolved with (process env, ``.env`` or an
+        explicit constructor argument).  An explicit ``ALLOW_SELF_REGISTRATION``
+        always wins: this only fills in the value nobody configured.
+        """
+        if not isinstance(data, dict) or "allow_self_registration" in data:
+            return data
+        environment = data.get("environment") or "development"
+        values = dict(data)
+        values["allow_self_registration"] = str(environment).strip().lower() == "development"
+        return values
 
     @field_validator("log_level")
     @classmethod
@@ -266,6 +473,24 @@ class Settings(BaseSettings):
     def _auto_detect_device(cls, v: Any) -> Any:
         if v == "auto" or v is None or v == "":
             return _detect_device()
+        return v
+
+    @field_validator("secret_key", mode="after")
+    @classmethod
+    def validate_secret_key(cls, v: str) -> str:
+        if not v:
+            raise RuntimeError(
+                "SECRET_KEY is not set. Set the SECRET_KEY environment variable."
+            )
+        return v
+
+    @field_validator("jwt_secret", mode="after")
+    @classmethod
+    def validate_jwt_secret(cls, v: str) -> str:
+        if not v:
+            raise RuntimeError(
+                "JWT_SECRET is not set. Set the JWT_SECRET environment variable."
+            )
         return v
 
     def get_allowed_origins_list(self) -> list[str]:
@@ -536,30 +761,25 @@ def validate_configuration() -> list[str]:
     try:
         settings = get_settings()
 
-        if settings.environment == "production":
-            if settings.secret_key == _DEFAULT_SECRET_KEY:
-                errors.append(
-                    "SECRET_KEY is set to the development default. "
-                    "Set a strong random value in .env before starting in production. "
-                    "Example: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
-                )
-            if settings.jwt_secret == _DEFAULT_JWT_SECRET:
-                errors.append(
-                    "JWT_SECRET is set to the development default. "
-                    "Set a strong random value in .env before starting in production. "
-                    "Example: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
-                )
-        else:
-            if settings.secret_key == "development-secret-key-change-in-production":
-                warnings_list.append(
-                    "SECRET_KEY is set to default value. "
-                    "Change this before deploying to production."
-                )
-            if settings.jwt_secret == "development-jwt-secret-change-in-production":
-                warnings_list.append(
-                    "JWT_SECRET is set to default value. "
-                    "Change this before deploying to production."
-                )
+        if settings.allow_self_registration and not _is_loopback_host(settings.backend_host):
+            errors.append(
+                "Self-registration cannot be enabled when BACKEND_HOST is not loopback. "
+                "Set ALLOW_SELF_REGISTRATION=false before exposing the API to a network."
+            )
+
+        # Secret strength gate (security gate).
+        #
+        # A published or weak secret is not a misconfiguration to warn about:
+        # it is a key anybody can sign an admin token with, so the startup gate
+        # refuses to continue with one.  This check never rewrites ``.env`` --
+        # it tells the operator what to set.
+        for name, value in (
+            ("SECRET_KEY", settings.secret_key),
+            ("JWT_SECRET", settings.jwt_secret),
+        ):
+            problem = describe_secret_problem(name, value)
+            if problem:
+                errors.append(problem)
 
         if not MODELS_YAML.exists():
             errors.append(f"Required config file not found: {MODELS_YAML}")
@@ -594,6 +814,17 @@ def validate_configuration() -> list[str]:
         errors.append(f"Failed to validate configuration: {e}")
 
     return errors
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Whether a listener host is explicitly limited to this machine."""
+    normalized = host.strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 class ProjectContextError(ValueError):

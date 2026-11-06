@@ -24,6 +24,8 @@ import {
   PolarRadiusAxis,
 } from "recharts";
 
+import { useChartTokens, chartPalette } from "../hooks/useChartTokens";
+
 export type ChartKind = "line" | "area" | "bar" | "pie" | "radar";
 
 export interface ChartSeries {
@@ -51,33 +53,34 @@ export interface DashboardChartsProps {
   pieOuterRadius?: number;
 }
 
-// Nexus design system — color tokens aligned with tailwind.config.ts (nexus.*)
-const NEXUS = {
-  accent: "#7c6afb",
-  accent2: "#5eead4",
-  accent3: "#fbbf24",
-  accent4: "#f87171",
-  bg: "#0b0b14",
-  panel: "#13131f",
-  border: "#1e1e2d",
-  muted: "#8a8a9a",
-  text: "#e8e8ed",
-} as const;
+/**
+ * Resolved design tokens, re-read whenever the theme changes.
+ *
+ * Recharts writes these into SVG presentation attributes, where `var(--nx-*)`
+ * is not resolved — so a hardcoded fallback used to silently win. See
+ * `hooks/useChartTokens.ts`.
+ */
+function useChartTheme() {
+  const tokens = useChartTokens();
+  return { tokens, palette: chartPalette(tokens) };
+}
 
-// Chart palette anchored on the nexus accent ramp so every chart stays on-theme.
-export const CHART_COLORS = [
-  NEXUS.accent, // nexus.accent  #7c6afb
-  NEXUS.accent2, // nexus.accent2 #5eead4
-  NEXUS.accent3, // nexus.accent3 #fbbf24
-  NEXUS.accent4, // nexus.accent4 #f87171
-  "#a78bfa", // nexus gradient end
-  "#2dd4bf", // teal (complements accent2)
-  "#f472b6", // pink
-  "#fb923c", // orange
-] as const;
+/**
+ * Static ramp for callers outside React (legend swatches, series headers).
+ * Anchored on the dark-theme tokens — light-theme callers should prefer
+ * `useChartTokens()` so the swatch matches the chart.
+ */
+export const CHART_COLORS: readonly string[] = [
+  "#7c6afb",
+  "#22d3ee",
+  "#34d399",
+  "#fbbf24",
+  "#9b8cff",
+  "#fb7185",
+  "color-mix(in srgb, #7c6afb 55%, #22d3ee)",
+  "color-mix(in srgb, #fb7185 45%, #fbbf24)",
+];
 
-// Kept for backward-compat with any external callers importing the old name.
-const DEFAULT_COLORS = CHART_COLORS;
 
 function CustomTooltip({
   active,
@@ -91,27 +94,18 @@ function CustomTooltip({
   if (!active || !payload?.length) return null;
   return (
     <div
-      className="rounded-lg border px-3 py-2 shadow-lg"
-      style={{
-        background: NEXUS.panel,
-        borderColor: NEXUS.border,
-        color: NEXUS.text,
-      }}
+      className="nx-elev-2 rounded-lg px-3 py-2"
       role="status"
     >
-      <p className="mb-1 text-xs font-semibold" style={{ color: NEXUS.text }}>
-        {label}
-      </p>
+      <p className="mb-1 text-xs font-semibold text-nexus-text">{label}</p>
       {payload.map((entry, idx) => (
         <div key={idx} className="flex items-center gap-2 text-xs">
           <span
             className="inline-block h-2 w-2 rounded-full"
             style={{ background: entry.color }}
           />
-          <span style={{ color: NEXUS.muted }}>{entry.name}:</span>
-          <span className="font-mono" style={{ color: NEXUS.text }}>
-            {entry.value}
-          </span>
+          <span className="text-nexus-muted">{entry.name}:</span>
+          <span className="font-mono text-nexus-text">{entry.value}</span>
         </div>
       ))}
     </div>
@@ -133,6 +127,16 @@ export default function DashboardCharts({
   pieInnerRadius = 50,
   pieOuterRadius = 80,
 }: DashboardChartsProps) {
+  const { tokens, palette } = useChartTheme();
+  const finitePoints = Array.isArray(data)
+    ? data.filter(
+        (row) =>
+          row &&
+          typeof row === "object" &&
+          series.some((item) => typeof row[item.key] === "number" && Number.isFinite(row[item.key])),
+      ).length
+    : 0;
+  const minPoints = kind === "line" || kind === "area" ? 2 : 1;
   const chartContent = () => {
     const commonProps = {
       data,
@@ -144,14 +148,14 @@ export default function DashboardCharts({
         return (
           <LineChart {...commonProps}>
             {showGrid && (
-              <CartesianGrid strokeDasharray="3 3" stroke={NEXUS.border} />
+              <CartesianGrid strokeDasharray="3 3" stroke={tokens.border} />
             )}
-            <XAxis dataKey={xKey} tick={{ fill: NEXUS.muted, fontSize: 12 }} />
-            <YAxis tick={{ fill: NEXUS.muted, fontSize: 12 }} />
+            <XAxis dataKey={xKey} tick={{ fill: tokens.textFaint, fontSize: 12 }} />
+            <YAxis tick={{ fill: tokens.textFaint, fontSize: 12 }} />
             {showTooltip && <Tooltip content={<CustomTooltip />} />}
             {showLegend && (
               <Legend
-                wrapperStyle={{ color: NEXUS.muted, fontSize: 12 }}
+                wrapperStyle={{ color: tokens.textFaint, fontSize: 12 }}
               />
             )}
             {series.map((s, i) => (
@@ -160,7 +164,7 @@ export default function DashboardCharts({
                 type={s.type ?? "monotone"}
                 dataKey={s.key}
                 name={s.name}
-                stroke={s.color ?? DEFAULT_COLORS[i % DEFAULT_COLORS.length]}
+                stroke={s.color ?? palette[i % palette.length]}
                 strokeWidth={2}
                 dot={{ r: 3 }}
                 activeDot={{ r: 5 }}
@@ -173,16 +177,16 @@ export default function DashboardCharts({
         return (
           <AreaChart {...commonProps}>
             {showGrid && (
-              <CartesianGrid strokeDasharray="3 3" stroke={NEXUS.border} />
+              <CartesianGrid strokeDasharray="3 3" stroke={tokens.border} />
             )}
-            <XAxis dataKey={xKey} tick={{ fill: NEXUS.muted, fontSize: 12 }} />
-            <YAxis tick={{ fill: NEXUS.muted, fontSize: 12 }} />
+            <XAxis dataKey={xKey} tick={{ fill: tokens.textFaint, fontSize: 12 }} />
+            <YAxis tick={{ fill: tokens.textFaint, fontSize: 12 }} />
             {showTooltip && <Tooltip content={<CustomTooltip />} />}
             {showLegend && (
-              <Legend wrapperStyle={{ color: NEXUS.muted, fontSize: 12 }} />
+              <Legend wrapperStyle={{ color: tokens.textFaint, fontSize: 12 }} />
             )}
             {series.map((s, i) => {
-              const color = s.color ?? DEFAULT_COLORS[i % DEFAULT_COLORS.length];
+              const color = s.color ?? palette[i % palette.length];
               return (
                 <Area
                   key={s.key}
@@ -203,17 +207,17 @@ export default function DashboardCharts({
         return (
           <BarChart {...commonProps}>
             {showGrid && (
-              <CartesianGrid strokeDasharray="3 3" stroke={NEXUS.border} />
+              <CartesianGrid strokeDasharray="3 3" stroke={tokens.border} />
             )}
-            <XAxis dataKey={xKey} tick={{ fill: NEXUS.muted, fontSize: 12 }} />
-            <YAxis tick={{ fill: NEXUS.muted, fontSize: 12 }} />
+            <XAxis dataKey={xKey} tick={{ fill: tokens.textFaint, fontSize: 12 }} />
+            <YAxis tick={{ fill: tokens.textFaint, fontSize: 12 }} />
             {showTooltip && <Tooltip content={<CustomTooltip />} />}
             {showLegend && (
-              <Legend wrapperStyle={{ color: NEXUS.muted, fontSize: 12 }} />
+              <Legend wrapperStyle={{ color: tokens.textFaint, fontSize: 12 }} />
             )}
             {series.map((s, i) => {
               const baseColor =
-                s.color ?? CHART_COLORS[i % CHART_COLORS.length];
+                s.color ?? palette[i % palette.length];
               return (
                 <Bar
                   key={s.key}
@@ -240,7 +244,7 @@ export default function DashboardCharts({
           <PieChart>
             {showTooltip && <Tooltip content={<CustomTooltip />} />}
             {showLegend && (
-              <Legend wrapperStyle={{ color: NEXUS.muted, fontSize: 12 }} />
+              <Legend wrapperStyle={{ color: tokens.textFaint, fontSize: 12 }} />
             )}
             <Pie
               data={pieData}
@@ -259,7 +263,7 @@ export default function DashboardCharts({
               {pieData.map((_, i) => (
                 <Cell
                   key={i}
-                  fill={DEFAULT_COLORS[i % DEFAULT_COLORS.length]}
+                  fill={palette[i % palette.length]}
                 />
               ))}
             </Pie>
@@ -270,26 +274,26 @@ export default function DashboardCharts({
       case "radar":
         return (
           <RadarChart data={data} cx="50%" cy="50%" outerRadius="70%">
-            <PolarGrid stroke={NEXUS.border} />
+            <PolarGrid stroke={tokens.border} />
             <PolarAngleAxis
               dataKey={xKey}
-              tick={{ fill: NEXUS.muted, fontSize: 11 }}
+              tick={{ fill: tokens.textFaint, fontSize: 11 }}
             />
             <PolarRadiusAxis
-              tick={{ fill: NEXUS.muted, fontSize: 10 }}
-              stroke={NEXUS.border}
+              tick={{ fill: tokens.textFaint, fontSize: 10 }}
+              stroke={tokens.border}
             />
             {showTooltip && <Tooltip content={<CustomTooltip />} />}
             {showLegend && (
-              <Legend wrapperStyle={{ color: NEXUS.muted, fontSize: 12 }} />
+              <Legend wrapperStyle={{ color: tokens.textFaint, fontSize: 12 }} />
             )}
             {series.map((s, i) => (
               <Radar
                 key={s.key}
                 name={s.name}
                 dataKey={s.key}
-                stroke={s.color ?? DEFAULT_COLORS[i % DEFAULT_COLORS.length]}
-                fill={s.color ?? DEFAULT_COLORS[i % DEFAULT_COLORS.length]}
+                stroke={s.color ?? palette[i % palette.length]}
+                fill={s.color ?? palette[i % palette.length]}
                 fillOpacity={0.3}
               />
             ))}
@@ -320,9 +324,13 @@ export default function DashboardCharts({
           )}
         </div>
       )}
-      <ResponsiveContainer width="100%" height={height}>
-        {chartContent()}
-      </ResponsiveContainer>
+      {finitePoints < minPoints ? (
+        <p className="py-6 text-sm text-nexus-muted">Sem pontos nesta série.</p>
+      ) : (
+        <ResponsiveContainer width="100%" height={height}>
+          {chartContent()}
+        </ResponsiveContainer>
+      )}
     </div>
   );
 }

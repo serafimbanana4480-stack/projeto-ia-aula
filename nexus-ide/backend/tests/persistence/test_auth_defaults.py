@@ -1,10 +1,13 @@
+import os
 import sqlite3
 from pathlib import Path
 
 from backend.persistence import db
 
 
-def test_init_db_seeds_default_dev_user_when_users_table_is_empty(tmp_path: Path):
+def test_init_db_seeds_default_dev_user_when_users_table_is_empty(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("NEXUS_DEFAULT_EMAIL", "admin@nexus-ide.com")
+    monkeypatch.setenv("NEXUS_DEFAULT_PASSWORD", "admin123")
     db_path = tmp_path / "nexus.db"
     db.DB_PATH = db_path
     db.SCHEMA_PATH = Path("backend/persistence/schemas.sql")

@@ -387,7 +387,7 @@ def vision_status() -> dict[str, Any]:
         "ready": True,
         "supported_formats": [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"],
         "max_size": 2048,
-        "default_model": "llava:7b",
+        "default_model": _config.model,
         "tools": [
             "analyze_image",
             "extract_text_from_image",
@@ -397,10 +397,20 @@ def vision_status() -> dict[str, Any]:
     }
 
 
+async def vision_status_tool() -> dict[str, Any]:
+    """Coroutine wrapper around :func:`vision_status`.
+
+    The registry awaits every handler; a synchronous handler could therefore
+    never run ("object dict can't be used in 'await' expression").
+    """
+    return vision_status()
+
+
 register_tool(
     ToolSpec(
         name="analyze_image",
         description="Analyze an image using a vision-capable LLM (Ollama vision models).",
+        category="media",
         schema={
             "type": "object",
             "properties": {
@@ -421,6 +431,7 @@ register_tool(
     ToolSpec(
         name="analyze_screenshot",
         description="Analyze a software screenshot for bugs, UI issues, and errors.",
+        category="media",
         schema={
             "type": "object",
             "properties": {
@@ -440,6 +451,7 @@ register_tool(
     ToolSpec(
         name="compare_images",
         description="Compare two images and describe the differences.",
+        category="media",
         schema={
             "type": "object",
             "properties": {
@@ -456,7 +468,8 @@ register_tool(
     ToolSpec(
         name="vision_status",
         description="Get vision system status and configuration.",
+        category="media",
         schema={"type": "object", "properties": {}},
-        handler=vision_status,
+        handler=vision_status_tool,
     )
 )

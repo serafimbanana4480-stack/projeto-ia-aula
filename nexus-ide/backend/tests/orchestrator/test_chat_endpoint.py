@@ -61,9 +61,13 @@ def client_with_mocked_ollama(
             kwargs["timeout"] = timeout
         if limits is not None:
             kwargs["limits"] = limits
-        return original(self, base_url, **kwargs)
+        original(self, base_url, **kwargs)
+        # The route now fails closed when the selected provider does not
+        # advertise a model. This mock must declare the local model it serves.
+        self.default_model = "fixture-model:latest"
 
     monkeypatch.setattr(OllamaClient, "__init__", patched_init)
+    monkeypatch.setenv("NEXUS_ADVISOR_ENABLED", "0")
 
     # Force re-creation of the app's LLM client so a previously closed
     # singleton from another test module doesn't leak in.
@@ -122,6 +126,57 @@ class TestChatEndpoint:
         tokens = [e["content"] for e in events if e["type"] == "token"]
         # Chunks must compose to the provider answer without raw tool transport.
         assert "".join(tokens) == "Hello NEXUS"
+
+    def test_incomplete_agent_output_is_persisted_as_failed_not_completed(
+        self,
+        client_with_mocked_ollama: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from backend.orchestrator.routes import chat as chat_routes
+        from backend.persistence.db import get_session_run
+
+        class IncompleteAgent:
+            name = "MICRO"
+            model_key = "micro"
+            supported_actions: set = set()
+
+            def resolve_model_id(self, _request):
+                return "fixture-model"
+
+            def run(self, request):
+                async def stream():
+                    yield "[TAREFA NÃO CONCLUÍDA] O agente não chegou a responder."
+                    request.context["_agent_run_success"] = False
+
+                return stream()
+
+        monkeypatch.setenv("NEXUS_PRIMARY_ENABLED", "0")
+        monkeypatch.setattr(chat_routes, "resolve", lambda _registry, _name: IncompleteAgent())
+        response = client_with_mocked_ollama.post(
+            "/api/chat",
+            json={
+                "message": "O que é HTTP?",
+                "session_id": "t-incomplete-agent-result",
+                "mode": "ask",
+            },
+        )
+
+        assert response.status_code == 200
+        events = _iter_sse_events(response.content)
+        assert any(event.get("data", {}).get("reason") == "agent_incomplete" for event in events)
+        run_id = next(
+            (
+                str(event.get("run_id") or event.get("data", {}).get("run_id") or "")
+                for event in events
+                if event.get("run_id") or event.get("data", {}).get("run_id")
+            ),
+            "",
+        )
+        assert run_id
+        run = get_session_run(run_id)
+        assert run is not None
+        assert run["status"] == "failed"
+        assert run["phase"] == "agent_incomplete"
 
     def test_vibe_command_runs_and_keeps_a_session_worker(
         self, client_with_mocked_ollama: TestClient
@@ -546,7 +601,15 @@ class TestChatEndpoint:
 
         monkeypatch.setattr(chat_routes, "_sse", tracked_sse)
 
-        def legacy_pipeline(req, llm_client, registry, context, event_bus=None, request=None):
+        def legacy_pipeline(
+            req,
+            llm_client,
+            registry,
+            context,
+            event_bus=None,
+            request=None,
+            user_id="",
+        ):
             return chat_routes._run_pipeline(req, llm_client, registry, context, event_bus, request)
 
         monkeypatch.setattr(chat_routes, "_select_pipeline", legacy_pipeline)

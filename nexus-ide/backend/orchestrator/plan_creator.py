@@ -82,9 +82,16 @@ class PlanCreator:
     #: in the chain inherits the same 429.
     PLAN_RETRY_BACKOFF_SECONDS = (2.0, 6.0, 15.0)
 
-    def __init__(self, llm_client: Any, event_bus: Any) -> None:
+    def __init__(
+        self,
+        llm_client: Any,
+        event_bus: Any,
+        *,
+        model_override: str = "",
+    ) -> None:
         self._llm_client = llm_client
         self._events = event_bus
+        self._model_override = str(model_override or "").strip()
 
     async def create(
         self,
@@ -132,7 +139,11 @@ class PlanCreator:
         )
         planning_prompt = self._build_planning_prompt(objective, planning_context)
         planner_cfg = get_model_config("coder")
-        planner_models = self._eligible_planner_models(self._planner_model_chain(planner_cfg))
+        planner_models = (
+            [self._model_override]
+            if self._model_override
+            else self._eligible_planner_models(self._planner_model_chain(planner_cfg))
+        )
         system_prompt = load_prompt("planner")
         messages = [
             ChatMessage(role="system", content=system_prompt),

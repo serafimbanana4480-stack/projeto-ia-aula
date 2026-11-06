@@ -14,7 +14,7 @@ import logging
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.middleware.auth import require_auth
 
@@ -24,10 +24,51 @@ router = APIRouter()
 
 
 class ToolExecuteRequest(BaseModel):
+    #: Unknown fields are refused.  A request that carries something the
+    #: endpoint does not understand is a request the operator has to look at,
+    #: not one that is silently reinterpreted.
+    model_config = ConfigDict(extra="forbid")
+
     tool_name: str = Field(min_length=1, max_length=128)
     args: dict = Field(default_factory=dict)
     session_id: str = Field(min_length=1, max_length=128)
     confirmation_id: str | None = Field(default=None, min_length=1, max_length=128)
+    #: Accepted on the wire for compatibility with older clients, and
+    #: **never read**.  A client cannot approve its own tool call: the value
+    #: of this field has no effect whatsoever, and the approval that does
+    #: count is the ``confirmation_id`` the backend issued.
+    confirmed: bool | None = None
+
+
+#: Tools this endpoint may run **without** a human approval.
+#:
+#: The endpoint exists for one UI action — "run this tool call again" — and
+#: it is reachable by every registered user, so the default has to be the
+#: harmless case.  The tools listed here only read state that belongs to the
+#: caller: they take no path, no command and no session selector from the
+#: request, so running them again cannot change anything and cannot reach
+#: outside the caller's own session.
+#:
+#: The list only matters for the tools the registry itself considers
+#: *harmless to run* (no confirmation required).  A tool that the registry
+#: gates — a write, a delete, git, shell, code execution — always goes
+#: through the confirmation flow, whatever this list says.
+RETRY_SAFE_TOOLS: frozenset[str] = frozenset(
+    {
+        # --- pure state readers (no caller-supplied path or command) -------
+        "get_system_health",
+        "get_budget_report",
+        "check_context_size",
+        "list_tasks",
+        "index_stats",
+        "db_schema",
+        "db_tables",
+        "mcp_list_tools",
+        "mcp_recommend_tools",
+        # --- session-scoped (the registry injects the trusted session id) --
+        "todo_list",
+    }
+)
 
 
 class ToolConfirmationRequest(BaseModel):
@@ -89,13 +130,36 @@ async def toggle_tool(
 async def execute_tool_endpoint(
     req: ToolExecuteRequest, _user: dict = Depends(require_auth)
 ) -> dict:
-    """Execute one tool for a retry action from the UI."""
+    """Execute one tool for a retry action from the UI.
+
+    Two rules make this endpoint safe to expose to every registered user:
+
+    1. **The caller cannot assert approval.**  The request's ``confirmed``
+       field is never read: a client that sends it approves nothing.  The
+       approval that counts comes from the confirmation flow — a
+       ``confirmation_id`` the *backend* issued and a human resolved
+       through ``/api/tools/confirm`` — and that confirmation is bound to
+       this user, this session, this tool and these arguments, and is
+       consumed exactly once.
+    2. **A tool the registry does not gate may not run here.**  The tools
+       the registry marks as approval-worthy (writes, deletes, git, shell,
+       code execution) always go through the confirmation flow, so a retry
+       without an approval comes back as "confirmation required" and runs
+       nothing.  The tools it considers harmless would run *immediately* —
+       and any registered user could run any of them, including the
+       code-execution ones — so those are restricted to
+       :data:`RETRY_SAFE_TOOLS`.
+    """
     from backend.persistence.db import session_belongs_to_user
-    from backend.tools.registry import execute_tool
+    from backend.tools.registry import execute_tool, get_tool, tool_requires_confirmation
 
     user_id = str(_user.get("user_id") or "").strip()
     if not user_id or not session_belongs_to_user(req.session_id, user_id):
         raise HTTPException(status_code=404, detail="Session not found")
+
+    spec = get_tool(req.tool_name)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"Tool '{req.tool_name}' is not registered")
 
     approved_retry = False
     if req.confirmation_id:
@@ -110,11 +174,22 @@ async def execute_tool_endpoint(
         )
         if not approved_retry:
             raise HTTPException(status_code=409, detail="Confirmation is invalid, expired, or already used")
+    elif not tool_requires_confirmation(spec) and req.tool_name not in RETRY_SAFE_TOOLS:
+        # No approval, and the registry would run this tool straight away.
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Tool '{req.tool_name}' needs an explicit approval before it can be run "
+                "from this endpoint. Run it from the chat stream and approve the "
+                "confirmation prompt; the approval comes back as a confirmation_id."
+            ),
+        )
 
     return await execute_tool(
         req.tool_name,
         req.session_id,
         req.args,
+        user_id=user_id,
         confirmed=approved_retry,
         enforce_confirmation=True,
         retry_confirmation=True,

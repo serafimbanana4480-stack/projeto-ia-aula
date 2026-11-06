@@ -353,6 +353,7 @@ conflicts: [quick-audit]""",
                         verification="Keep command output",
                         tags=["python", "audit"],
                         auto_apply=True,
+                        status="active",
                         confidence=0.9,
                     )
                 ]

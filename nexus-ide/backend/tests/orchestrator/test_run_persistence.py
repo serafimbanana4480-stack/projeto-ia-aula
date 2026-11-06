@@ -88,6 +88,28 @@ def test_messages_retain_run_links_and_identical_assistant_answers() -> None:
     assert [message["run_id"] for message in answers] == ["run-answer-a", "run-answer-b"]
 
 
+def test_history_collapses_duplicate_assistant_answers_from_one_run() -> None:
+    from backend.persistence.db import (
+        add_message,
+        get_messages,
+        get_messages_page,
+        upsert_session_run,
+    )
+
+    session_id = _make_session()
+    upsert_session_run("run-answer-duplicate", session_id, execution_state="completed")
+    add_message(session_id, "assistant", "HASH-888", run_id="run-answer-duplicate")
+    add_message(session_id, "assistant", "HASH-888", run_id="run-answer-duplicate")
+
+    history = get_messages(session_id)
+    page, has_more, _ = get_messages_page(session_id, limit=10)
+    for rows in (history, page):
+        answers = [message for message in rows if message.get("role") == "assistant"]
+        assert len(answers) == 1
+        assert answers[0]["run_id"] == "run-answer-duplicate"
+    assert not has_more
+
+
 def test_primary_run_persists_user_prompt_before_stream_recovery() -> None:
     from types import SimpleNamespace
 

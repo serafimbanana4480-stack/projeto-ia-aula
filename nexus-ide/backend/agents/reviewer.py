@@ -387,19 +387,24 @@ class ReviewerAgent(AgentBase):
 
     async def _store_review_summary(self, request: AgentRequest) -> None:
         """Store a summary of the review in semantic memory for future reference."""
-        if not self.enable_memory:
+        if (
+            not self.enable_memory
+            or not request.context.get("_agent_run_success", False)
+            or not request.project_path
+        ):
             return
 
         try:
             from backend.knowledge.memory import MemoryType, get_memory_store
 
             mem_store = get_memory_store()
-            summary = f"Review session for query: {request.query[:200]}"
+            summary = f"Completed review on topic: {self._memory_topic(request.query)}"
             await mem_store.store(
                 content=summary,
                 memory_type=MemoryType.PROJECT,
                 session_id=request.session_id,
                 project_id=request.project_path or "",
+                user_id=request.user_id,
                 source=self.name,
                 tags=["review", "code_review", "auto_memory"],
                 importance=0.6,

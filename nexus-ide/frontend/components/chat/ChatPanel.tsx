@@ -23,6 +23,7 @@ import ModelSelector from "./ModelSelector";
 import VirtualMessageList from "./VirtualMessageList";
 import SessionList from "./SessionList";
 import AdvancedModeHeaderIndicator from "./AdvancedModeHeaderIndicator";
+import ComposerContextChip from "./ComposerContextChip";
 import { useAdvancedModeStore } from "../../stores/advancedModeStore";
 import {
   Sparkles,
@@ -59,16 +60,22 @@ import {
   Image as ImageIcon,
   FileText,
   Database,
+  ScanSearch,
+  ArrowDown,
+  ArrowUpRight,
+  Infinity as InfinityIcon,
 } from "lucide-react";
 import type { ChatMessage, StreamEvent } from "../../lib/types";
 import { log } from "../../lib/log";
 import { stripAnsiCodes } from "../../lib/utils";
 import { foldRun } from "../../lib/foldRun";
-import { sanitizeAssistantContent } from "../../lib/chatPresentation";
+import { deriveLivePhase, type LivePhase } from "../../lib/livePhase";
+import { collapseDuplicateRunAnswers, sanitizeAssistantContent } from "../../lib/chatPresentation";
 import { restoreRunTimelines } from "../../lib/sessionRecovery";
 import { dedupeAndOrder, type RuntimeEventLike } from "../../lib/eventOrdering";
 import { getChatComposerPlaceholder, isChatComposerSendDisabled } from "../../lib/chatComposer";
 import { useChatInput } from "../../hooks/useChatInput";
+import { usePopoverPosition } from "../../hooks/usePopoverPosition";
 import {
   composeChatMessageWithAttachments,
   getChatAttachmentRejection,
@@ -78,6 +85,8 @@ import {
 interface ChatPanelProps {
   rightOpen?: boolean;
   setRightOpen?: (open: boolean) => void;
+  inspectMode?: boolean;
+  onToggleInspect?: () => void;
 }
 
 function chunkHistory(messages: ChatMessage[], pageSize = 100): ChatMessage[][] {
@@ -137,12 +146,12 @@ interface ModeConfig {
 
 const MODE_CONFIG: Record<string, ModeConfig> = {
   auto: { icon: Sparkles, label: "Auto", color: "text-nexus-accent bg-nexus-accent/10 border-nexus-accent/40" },
-  coder: { icon: Code, label: "Coder", color: "text-emerald-400 bg-emerald-400/10 border-emerald-400/40" },
-  analyst: { icon: BarChart3, label: "Analyst", color: "text-amber-400 bg-amber-400/10 border-amber-400/40" },
+  coder: { icon: Code, label: "Coder", color: "text-nexus-accent2 bg-emerald-400/10 border-emerald-400/40" },
+  analyst: { icon: BarChart3, label: "Analyst", color: "text-nexus-accent3 bg-amber-400/10 border-amber-400/40" },
   reviewer: { icon: Check, label: "Review", color: "text-lime-400 bg-lime-400/10 border-lime-400/40" },
   fast: { icon: Zap, label: "Fast", color: "text-yellow-400 bg-yellow-400/10 border-yellow-400/40" },
   deep: { icon: Brain, label: "Deep", color: "text-purple-400 bg-purple-400/10 border-purple-400/40" },
-  plan: { icon: ListChecks, label: "Plano", color: "text-sky-400 bg-sky-400/10 border-sky-400/40" },
+  plan: { icon: ListChecks, label: "Plano", color: "text-nexus-cyan bg-sky-400/10 border-sky-400/40" },
   debug: { icon: Bug, label: "Debug", color: "text-red-400 bg-red-400/10 border-red-400/40" },
   ask: { icon: MessageCircle, label: "Ask", color: "text-blue-400 bg-blue-400/10 border-blue-400/40" },
   swarm: { icon: Users, label: "Swarm", color: "text-teal-400 bg-teal-400/10 border-teal-400/40" },
@@ -152,7 +161,7 @@ const MODE_CONFIG: Record<string, ModeConfig> = {
 const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon: React.ComponentType<{ className?: string }>; description: string }[] = [
   { value: "low", label: "Rápido", icon: Zap, description: "Low thinking" },
   { value: "medium", label: "Médio", icon: Brain, description: "Medium thinking" },
-  { value: "high", label: "Alto", icon: Sparkles, description: "High thinking" },
+  { value: "high", label: "Alto", icon: Sparkles, description: "Raciocínio profundo" },
 ];
 
 /* ── AI workspace conversation-first foundation ─────────────────────────── */
@@ -160,18 +169,25 @@ const THINKING_STRENGTH_OPTIONS: { value: ThinkingStrength; label: string; icon:
 export type ChatDensity = "minimal" | "standard" | "developer";
 
 const DENSITY_OPTIONS: { value: ChatDensity; label: string; hint: string }[] = [
-  { value: "minimal", label: "Minimal", hint: "Só resumo (ex. “Trabalhou 2m14s”)" },
-  { value: "standard", label: "Standard", hint: "Resumo + chips" },
-  { value: "developer", label: "Developer", hint: "Timeline completa + tokens + latência" },
+  { value: "minimal", label: "Simples", hint: "Resposta, estado da missão e resultados essenciais" },
+  { value: "standard", label: "Detalhado", hint: "Tarefas, agentes, ferramentas e progresso" },
+  { value: "developer", label: "Técnico", hint: "Eventos, identificadores, tempos e diagnóstico" },
 ];
 
+/** Human label for the status line. Never leak the raw storage key. */
+const DENSITY_LABEL: Record<ChatDensity, string> = {
+  minimal: "vista simples",
+  standard: "vista detalhada",
+  developer: "vista técnica",
+};
+
 function readDensity(): ChatDensity {
-  if (typeof window === "undefined") return "standard";
+  if (typeof window === "undefined") return "minimal";
   const stored = window.localStorage.getItem("nexus.density");
-  return stored === "minimal" || stored === "developer" ? stored : "standard";
+  return stored === "standard" || stored === "developer" ? stored : "minimal";
 }
 
-export const ChatDensityContext = createContext<ChatDensity>("standard");
+export const ChatDensityContext = createContext<ChatDensity>("minimal");
 
 export function useChatDensity(): ChatDensity {
   return useContext(ChatDensityContext);
@@ -185,75 +201,6 @@ export function toggleFocusMode() {
     new CustomEvent<{ focus: boolean }>("nexus:focus-toggle", { detail: { focus: next } }),
   );
   return next;
-}
-
-interface LivePhase {
-  /** Temporal status line shown above the list while streaming. */
-  line: string;
-  /** Distinct agents seen in this run (for the “●N agentes” centre chip). */
-  agents: string[];
-}
-
-function deriveLivePhases(streamEvents: StreamEvent[]): LivePhase {
-  const agents = new Set<string>();
-  let sawUnderstand = false;
-  let sawPlan = false;
-  let sawExplore = false;
-  let lastTool = "";
-  let lastAgent = "";
-  for (const e of streamEvents) {
-    switch (e.type) {
-      case "mission_brief":
-      case "routing":
-        sawUnderstand = true;
-        break;
-      case "mission_plan":
-      case "mission_wave":
-        sawPlan = true;
-        sawUnderstand = true;
-        break;
-      case "thinking":
-        sawUnderstand = true;
-        if (e.agent) {
-          agents.add(String(e.agent));
-          lastAgent = String(e.agent);
-        }
-        break;
-      case "agent_started":
-      case "agent_finished":
-      case "mission_agent":
-        sawUnderstand = true;
-        if (e.agent) {
-          agents.add(String(e.agent));
-          lastAgent = String(e.agent);
-        }
-        break;
-      case "tool_call":
-      case "tool_result":
-      case "tool_error":
-        sawExplore = true;
-        if (e.agent) agents.add(String(e.agent));
-        if (e.tool_name) lastTool = String(e.tool_name);
-        break;
-      case "mission_decision":
-      case "mission_verification":
-        sawPlan = true;
-        break;
-      case "progress":
-        sawExplore = true;
-        break;
-      default:
-        break;
-    }
-  }
-  const steps: string[] = [];
-  steps.push(sawUnderstand ? "A compreender pedido" : "A compreender pedido");
-  if (sawPlan || sawExplore || agents.size > 0) steps.push("A criar plano");
-  if (sawExplore) steps.push("A explorar");
-  if (lastTool) steps.push(`a usar ${lastTool}`);
-  else if (lastAgent) steps.push(`${lastAgent} a trabalhar`);
-  if (agents.size > 0) steps.push(`${agents.size} agente${agents.size === 1 ? "" : "s"}`);
-  return { line: steps.join("  →  "), agents: [...agents] };
 }
 
 const MENTION_GROUPS: { group: string; items: { name: string; hint: string }[] }[] = [
@@ -374,13 +321,16 @@ function AttachmentChip({ file, index, onRemove }: { file: File; index: number; 
   );
 }
 
+type ComposerMenuPlacement = "above" | "below";
+
 /** Compact single-button mode picker: one click opens every available mode. */
-export function ModeDropdown() {
+export function ModeDropdown({ menuPlacement = "below" }: { menuPlacement?: ComposerMenuPlacement }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const { currentMode, modes, modesLoaded, setMode } = useModeStore();
+  const popoverPosition = usePopoverPosition(open, triggerRef, menuPlacement, 288);
+  const { currentMode, modes, modesLoaded, modesLoading, modesError, loadModes, setMode } = useModeStore();
 
   useEffect(() => {
     if (!open) return;
@@ -432,6 +382,7 @@ export function ModeDropdown() {
     color: "text-nexus-accent bg-nexus-accent/10 border-nexus-accent/40",
   };
   const ActiveIcon = activeCfg.icon;
+  const menuAbove = menuPlacement === "above";
 
   return (
     <div ref={containerRef} className="relative">
@@ -445,6 +396,7 @@ export function ModeDropdown() {
             triggerRef.current?.focus();
           } else {
             setOpen(true);
+            if (modesError) void loadModes(true);
           }
         }}
         aria-haspopup="listbox"
@@ -469,19 +421,26 @@ export function ModeDropdown() {
         initial={false}
         animate={open
           ? { opacity: 1, y: 0, scale: 1 }
-          : { opacity: 0, y: -6, scale: 0.98 }}
+          : { opacity: 0, y: menuAbove ? 6 : -6, scale: 0.98 }}
         transition={{ duration: 0.16, ease: "easeOut" }}
         role={open ? "listbox" : undefined}
         aria-label="Modos disponíveis"
         aria-hidden={!open}
         inert={!open}
         data-testid="mode-dropdown-menu"
-        style={{ pointerEvents: open ? "auto" : "none", visibility: open ? "visible" : "hidden" }}
-        className="absolute right-0 top-full z-50 mt-1.5 max-h-80 w-64 overflow-y-auto thin-scrollbar rounded-xl border border-nexus-border bg-nexus-panel/95 p-1 shadow-xl backdrop-blur-md"
+        style={{ pointerEvents: open ? "auto" : "none", visibility: open ? "visible" : "hidden", ...popoverPosition }}
+        className="fixed overflow-y-auto thin-scrollbar rounded-xl border border-nexus-border bg-nexus-panel/95 p-1 shadow-xl backdrop-blur-md"
       >
           <div aria-hidden="true" className="px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
               Modo de raciocínio
             </div>
+            {modesLoading && list.length === 0 && <p role="status" className="px-3 py-3 text-xs text-nexus-muted">A carregar modos…</p>}
+            {!modesLoading && modesError && list.length === 0 && (
+              <div className="px-3 py-3 text-xs text-nexus-muted">
+                <p role="status">Não foi possível carregar os modos.</p>
+                <button type="button" onClick={() => void loadModes(true)} className="mt-2 rounded-md border border-nexus-accent/30 px-2 py-1.5 text-nexus-accent-bright">Tentar novamente</button>
+              </div>
+            )}
             {list.map((mode) => {
               const cfg = MODE_CONFIG[mode.id] || {
                 icon: Sparkles,
@@ -533,6 +492,8 @@ export function ModeDropdown() {
 export default function ChatPanel({
   rightOpen = true,
   setRightOpen,
+  inspectMode = false,
+  onToggleInspect,
 }: ChatPanelProps) {
   const [sessionId, setSessionId] = useState<string>("");
   const sessions = useChatSessions();
@@ -542,7 +503,7 @@ export default function ChatPanel({
   const toast = useToast();
   const { currentMode, modes, modesLoaded, loadModes, setMode } = useModeStore();
   const { activeModel, activeProvider, modelsLoaded, loadModels } = useModelStore();
-  const { currentProject } = useProjectStore();
+  const { currentProject, setCurrentProject } = useProjectStore();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -638,6 +599,7 @@ export default function ChatPanel({
   // Sessions are useful on demand, but should not compete with the chat for
   // horizontal space while the user is reading or writing.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const toggleSessionList = useCallback(() => setSidebarCollapsed((value) => !value), []);
   const [thinkingStrength, setThinkingStrength] = useState<ThinkingStrength>(() => {
     if (typeof window !== "undefined") {
       const stored = localStorage.getItem("nexus.thinkingStrength");
@@ -663,7 +625,19 @@ export default function ChatPanel({
         : [],
     [historyPages, historySessionId, sessionId, currentChatSessionId],
   );
-  const historyMessages = useMemo(() => historyPagesForSession.flat(), [historyPagesForSession]);
+  const historyMessages = useMemo(
+    () => collapseDuplicateRunAnswers(historyPagesForSession.flat()),
+    [historyPagesForSession],
+  );
+  const historyPagesForRender = useMemo(() => {
+    const visibleIds = new Set(historyMessages.map((message) => message.id));
+    return historyPagesForSession
+      .map((sourcePage) => ({
+        sourcePage,
+        page: sourcePage.filter((message) => visibleIds.has(message.id)),
+      }))
+      .filter(({ page }) => page.length > 0);
+  }, [historyMessages, historyPagesForSession]);
   const historyLoadedForSession =
     historyLoaded && historySessionId === sessionId && sessionId === currentChatSessionId;
   const [activePlan, setActivePlan] = useState<PlanCreateResult | null>(null);
@@ -981,7 +955,9 @@ export default function ChatPanel({
       // run timelines can require several journal requests, so enrich this
       // page after it is already visible instead of holding the conversation
       // behind that recovery work.
-      void restoreRunTimelines(firstPage, requestedSessionId)
+      void restoreRunTimelines(firstPage, requestedSessionId, {
+        hasCompleteHistory: page.hasCompleteHistory === true,
+      })
         .then((restored) => {
           if (
             restored === firstPage ||
@@ -1549,7 +1525,7 @@ export default function ChatPanel({
     [pendingUser, orderedEvents],
   );
   const messages = useMemo(
-    () => [...historyMessages, ...liveMessages],
+    () => collapseDuplicateRunAnswers([...historyMessages, ...liveMessages]),
     [historyMessages, liveMessages],
   );
 
@@ -1950,37 +1926,16 @@ export default function ChatPanel({
   const waitingForFirstToken =
     streaming &&
     !orderedEvents.some(
-      (e) => (e.type === "token" || e.type === "thinking") && e.content,
+      (e) =>
+        ((e.type === "token" || e.type === "thinking") && e.content) ||
+        e.type === "tool_call" ||
+        e.type === "agent_started",
     );
 
-  // Most recent meaningful streaming status, scanned from the end of the event list.
-  // Kept for the compact fallback pill; the temporal line below is the primary UI.
-  const streamStatus = useMemo<string | null>(() => {
-    if (!streaming) return null;
-    for (let i = orderedEvents.length - 1; i >= 0; i--) {
-      const e = orderedEvents[i];
-      switch (e.type) {
-        case "agent_started":
-          return `${e.agent ?? "IA"} a pensar…`;
-        case "thinking":
-          return `${e.agent ?? "IA"} a raciocinar…`;
-        case "tool_call":
-          return `A usar ferramenta: ${e.tool_name ?? ""}`;
-        case "tool_result":
-          return "Ferramenta concluída";
-        case "routing":
-          return "A encaminhar…";
-        default:
-          break;
-      }
-    }
-    return "A pensar…";
-  }, [streaming, orderedEvents]);
-
-  // Temporal live line derived from the whole run: understand → plan → explore → agents.
+  // Most recent reported activity, without implying a plan or an active tool.
   const livePhase = useMemo<LivePhase | null>(() => {
     if (!streaming) return null;
-    return deriveLivePhases(orderedEvents);
+    return deriveLivePhase(orderedEvents);
   }, [streaming, orderedEvents]);
   const liveAgentCount = livePhase?.agents.length ?? 0;
 
@@ -2034,7 +1989,12 @@ export default function ChatPanel({
     const isNearBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight < 120;
 
-    if (userScrolledUp.current || !isNearBottom) return;
+    // Stick-to-bottom: content growth fires no scroll event, so a big batch
+    // of new timeline rows used to push the viewer "out of range" and freeze
+    // the view mid-history while the run kept streaming below. Only an
+    // explicit scroll up by the user (tracked by the scroll listener) stops
+    // the follow.
+    if (userScrolledUp.current || (!isNearBottom && !streaming)) return;
     setShowScrollDown(false);
     if (!isNewMessageAdded) {
       container.scrollTop = container.scrollHeight;
@@ -2047,6 +2007,21 @@ export default function ChatPanel({
     }
     container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
   }, [historyLoadedForSession, messages, sessionId, streaming]);
+
+  // Sending a message always jumps to the live turn, even if the user had
+  // scrolled up to read history before pressing Enter.
+  const wasStreamingRef = useRef(streaming);
+  useEffect(() => {
+    if (streaming && !wasStreamingRef.current) {
+      userScrolledUp.current = false;
+      setShowScrollDown(false);
+      requestAnimationFrame(() => {
+        const container = messagesContainerRef.current;
+        if (container) container.scrollTop = container.scrollHeight;
+      });
+    }
+    wasStreamingRef.current = streaming;
+  }, [streaming]);
 
   useEffect(() => {
     const container = messagesContainerRef.current;
@@ -2189,6 +2164,7 @@ export default function ChatPanel({
       toast.error("Não foi possível criar a sessão", sessions.error ?? "Confirma a ligação ao backend e tenta novamente.");
       return;
     }
+    setCurrentProject(null);
     setPendingUsersBySession((current) => ({ ...current, [created.id]: [] }));
     sessions.setCurrentId(created.id);
     setSessionId(created.id);
@@ -2449,7 +2425,7 @@ export default function ChatPanel({
 
   return (
     <ChatDensityContext.Provider value={density}>
-    <div className="relative flex h-full min-w-0 bg-nexus-bg" data-testid="ai-cockpit" data-density={density}>
+    <div className="nx-chat-conversation relative flex h-full w-full min-w-0 bg-nexus-bg" data-testid="ai-cockpit" data-density={density}>
       {!sidebarCollapsed && (
         <button
           type="button"
@@ -2460,54 +2436,79 @@ export default function ChatPanel({
       )}
       <SessionList
         collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed((c) => !c)}
+        onToggle={toggleSessionList}
       />
       <div className="flex h-full min-w-0 flex-1 flex-col">
       {/* Chat header — minimal conversation-first: NEXUS/projeto · Auto/Modelo/agentes · ••• */}
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-nexus-border/60 bg-nexus-panel/70 px-3 py-3 sm:px-5" data-testid="chat-header">
+      <div className="nx-conversation-header flex min-h-[76px] shrink-0 items-center justify-between gap-3 border-b border-nexus-border/60 px-3 py-3 sm:px-6" data-testid="chat-header">
         <div className="flex min-w-0 items-center gap-2">
           <motion.button
             type="button"
             whileTap={{ scale: 0.95 }}
             onClick={() => setSidebarCollapsed(false)}
-            className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-2 py-1.5 text-xs font-medium text-nexus-muted transition-colors hover:border-nexus-accent/30 hover:text-nexus-text"
+            className="nx-chat-icon-button flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-nexus-muted transition-colors hover:bg-nexus-card hover:text-nexus-text"
             title="Abrir sessões"
             aria-label="Abrir sessões"
           >
-            <MessageSquare className="h-3.5 w-3.5" />
-            <span className="rounded-full bg-nexus-bg/70 px-1.5 py-0.5 font-mono text-[10px] tabular-nums">
-              {sessions.sessions.length}
-            </span>
+            <MessageSquare className="h-[18px] w-[18px]" />
           </motion.button>
           <div className="min-w-0 leading-tight">
-            <h1 className="truncate text-sm font-semibold tracking-tight text-nexus-text">
-              NEXUS <span className="font-normal text-nexus-faint">/</span>{" "}
-              <span className="font-medium text-nexus-muted">{currentProject?.name ?? "sem projeto"}</span>
+            <p className="mb-1 flex items-center gap-1.5 whitespace-nowrap text-[10px] font-medium tracking-[0.14em] text-nexus-faint">
+              <span className="h-1.5 w-1.5 rounded-full bg-nexus-accent" aria-hidden="true" />
+              NEXUS <span className="hidden normal-case tracking-normal min-[360px]:inline">/ Chat</span>
+            </p>
+            <h1 className="max-w-[min(32vw,360px)] truncate text-[13px] font-semibold tracking-tight text-nexus-text sm:text-sm">
+              {messages.length === 0 ? "Nova conversa" : sessions.sessions.find((session) => session.id === currentChatSessionId)?.title || "Conversa"}
             </h1>
           </div>
         </div>
 
-        <div className="chat-header-center hidden min-w-0 items-center gap-1.5 md:flex" aria-label="Modo, modelo e agentes">
-          {/* Mode selector — compact dropdown instead of one button per mode */}
-          <ModeDropdown />
-          {/* Model selector — search, provider grouping, price/context */}
-          <ModelSelector />
+        <div className="chat-header-center ml-auto hidden min-w-0 items-center gap-1.5 lg:flex" aria-label="Estado da conversa">
           <span
-            className="ml-1 hidden items-center gap-1.5 rounded-full border border-nexus-border bg-nexus-card px-2 py-1 text-[11px] text-nexus-muted lg:inline-flex"
+            className="inline-flex items-center gap-2 px-2 py-1 text-[11px] text-nexus-muted"
             title={streaming ? livePhase?.line ?? "A executar" : "Nenhuma execução ativa"}
-            aria-live={streaming ? "polite" : undefined}
           >
-            <span className={`h-1.5 w-1.5 rounded-full ${streaming ? "bg-emerald-400 animate-pulse-subtle" : "bg-nexus-faint"}`} />
-            {streaming ? `●${Math.max(1, liveAgentCount)} agentes` : "○ em espera"}
-          </span>
+            <span className={`h-1.5 w-1.5 rounded-full ${streaming ? "bg-nexus-accent2 animate-pulse-subtle" : "bg-nexus-faint"}`} />
+            {streaming ? (liveAgentCount > 0 ? `${liveAgentCount} ${liveAgentCount === 1 ? "agente envolvido" : "agentes envolvidos"}` : "A trabalhar…") : !currentChatSessionId ? (sessions.loading ? "A carregar sessão…" : "Sem sessão ativa") : currentProject?.name || "Pronto para conversar"}</span>
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => void handleNewChat()}
+            aria-label="Iniciar nova conversa"
+            title="Nova conversa"
+            className="nx-chat-icon-button flex h-9 items-center gap-1.5 rounded-xl border border-nexus-border/70 px-2 text-xs font-medium text-nexus-text transition-colors hover:border-nexus-accent/40 hover:bg-nexus-accent/10 sm:px-3"
+          >
+            <Plus className="h-4 w-4" />
+            <span className="hidden sm:inline">Novo chat</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSearchOpen(true)}
+            aria-label="Pesquisar conversa"
+            title="Pesquisar conversa (Ctrl/Cmd+F)"
+            className="nx-chat-icon-button flex h-9 w-9 items-center justify-center rounded-xl text-nexus-muted hover:bg-nexus-card hover:text-nexus-text"
+          >
+            <Search className="h-4 w-4" />
+          </button>
+          {setRightOpen && (
+            <button
+              type="button"
+              onClick={() => setRightOpen(!rightOpen)}
+              aria-label="Painel de contexto"
+              aria-expanded={rightOpen}
+              title={rightOpen ? "Recolher contexto" : "Abrir contexto"}
+              className={`nx-chat-icon-button flex h-9 w-9 items-center justify-center rounded-xl transition-colors hover:bg-nexus-card ${rightOpen ? "bg-nexus-accent/10 text-nexus-accent-bright" : "text-nexus-muted hover:text-nexus-text"}`}
+            >
+              {rightOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+            </button>
+          )}
           <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.9 }}
             onClick={handleShare}
-            className="rounded-lg border border-nexus-border bg-nexus-card p-1.5 text-nexus-muted hover:text-nexus-text transition-all duration-200 hover:border-nexus-accent/30"
+            className="nx-chat-icon-button hidden h-9 w-9 items-center justify-center rounded-xl text-nexus-muted hover:bg-nexus-card hover:text-nexus-text md:flex"
             title="Partilhar (copiar conversação)"
             aria-label="Partilhar conversa"
           >
@@ -2542,7 +2543,7 @@ export default function ChatPanel({
               toggleFocusMode();
               setFocusMode(document.body.classList.contains("nexus-focus"));
             }}
-            className={`rounded-lg border p-1.5 transition-all duration-200 hover:border-nexus-accent/30 hover:text-nexus-text ${focusMode ? "border-nexus-accent/50 bg-nexus-accent/15 text-nexus-accent" : "border-nexus-border bg-nexus-card text-nexus-muted"}`}
+            className={`nx-chat-icon-button hidden h-9 w-9 items-center justify-center rounded-xl transition-colors hover:bg-nexus-card hover:text-nexus-text sm:flex ${focusMode ? "bg-nexus-accent/15 text-nexus-accent" : "text-nexus-muted"}`}
             title="Focus Mode (Ctrl+Shift+F)"
             aria-label="Alternar Focus Mode"
             aria-pressed={focusMode}
@@ -2554,7 +2555,7 @@ export default function ChatPanel({
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.9 }}
               onClick={() => setHeaderMenuOpen((v) => !v)}
-              className="rounded-lg border border-nexus-border bg-nexus-card p-1.5 text-nexus-muted hover:text-nexus-text transition-all duration-200 hover:border-nexus-accent/30"
+              className="nx-chat-icon-button flex h-9 w-9 items-center justify-center rounded-xl text-nexus-muted hover:bg-nexus-card hover:text-nexus-text"
               title="Mais opções"
               aria-label="Mais opções"
               aria-haspopup="menu"
@@ -2638,10 +2639,46 @@ export default function ChatPanel({
                   <span className="font-medium">Painel direito</span>
                 </button>
                 <div className="mx-2 my-1 border-t border-nexus-border/60" />
+                {onToggleInspect && (
+                  <button
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={inspectMode}
+                    onClick={() => { onToggleInspect(); setHeaderMenuOpen(false); setRightOpen?.(true); }}
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-nexus-text hover:bg-nexus-bg/60"
+                  >
+                    <ScanSearch className="h-3.5 w-3.5" />
+                    <span className="flex-1">Detalhes da sessão</span>
+                    {inspectMode && <Check className="h-3.5 w-3.5 text-nexus-accent" />}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={focusMode}
+                  onClick={() => { toggleFocusMode(); setHeaderMenuOpen(false); }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-nexus-text hover:bg-nexus-bg/60"
+                >
+                  <Crosshair className="h-3.5 w-3.5" />
+                  <span className="flex-1">Modo de foco</span>
+                  {focusMode && <Check className="h-3.5 w-3.5 text-nexus-accent" />}
+                </button>
                 <div className="flex items-center justify-between px-2.5 py-1.5">
                   <span className="text-[11px] text-nexus-muted">Modo avançado</span>
                   <AdvancedModeHeaderIndicator />
                 </div>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setHeaderMenuOpen(false);
+                    document.querySelector<HTMLButtonElement>("[data-advanced-mode-toggle]")?.click();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-nexus-text hover:bg-nexus-bg/60"
+                >
+                  <InfinityIcon className="h-3.5 w-3.5 text-nexus-accent-bright" />
+                  Infinity Suite
+                </button>
               </div>
             )}
           </div>
@@ -2652,21 +2689,24 @@ export default function ChatPanel({
       <div
         ref={messagesContainerRef}
         data-testid="messages"
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions text"
         aria-label="Histórico da conversa"
-        className="min-h-0 flex-1 overflow-y-auto thin-scrollbar py-5 sm:py-7"
+        className="nx-conversation-scroll min-h-0 flex-1 overflow-y-auto thin-scrollbar py-5 sm:py-8"
         style={{
           background: "radial-gradient(ellipse at 50% 0%, color-mix(in srgb, var(--nx-accent) 5%, transparent), transparent 55%)",
         }}
       >
-      <div className="mx-auto w-full max-w-[960px] px-4 sm:px-7">
+      <div className="nx-conversation-column mx-auto w-full max-w-[860px] px-4 sm:px-8">
         {/* Live temporal status — above the list, not just a spinner */}
         {livePhase && (
           <div className="mb-3 flex justify-start" aria-live="polite" role="status" data-testid="live-phase-pill">
             <span
               className="nx-glass inline-flex max-w-full items-center gap-2 rounded-full px-3 py-1.5 text-[11px] text-nexus-text"
-              title={streamStatus ?? undefined}
-            >              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400 animate-pulse-subtle" aria-hidden="true" />
-              <span className="truncate">● {livePhase.line}…</span>
+              title={livePhase.line}
+            >              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-nexus-accent2 animate-pulse-subtle" aria-hidden="true" />
+              <span className="truncate">◝ {livePhase.line}…</span>
             </span>
           </div>
         )}
@@ -2680,7 +2720,7 @@ export default function ChatPanel({
           </div>
         )}
 
-        {!historyLoadedForSession && (
+        {!historyLoadedForSession && (sessionId || !sessions.initialized) && (
           <div className="flex h-full items-center justify-center">
             <div className="flex items-center gap-3 text-sm text-nexus-muted">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-nexus-accent border-t-transparent" />
@@ -2723,25 +2763,16 @@ export default function ChatPanel({
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="mx-auto flex h-full min-h-[360px] max-w-2xl flex-col items-center justify-center px-1 py-10 text-center"
+            className="nx-chat-welcome mx-auto flex min-h-[420px] max-w-2xl flex-col items-center justify-center px-1 py-10 text-center sm:py-14"
           >
             <div className="relative mb-6">
               <div className="absolute -inset-5 rounded-full bg-nexus-accent/10 blur-2xl" />
-              <motion.div
-                animate={{
-                  scale: [1, 1.06, 1],
-                }}
-                transition={{
-                  duration: 3,
-                  repeat: Infinity,
-                  ease: "easeInOut",
-                }}
-                className="relative flex h-14 w-14 items-center justify-center rounded-2xl border border-nexus-accent/20 bg-gradient-to-br from-nexus-accent/15 to-nexus-card text-nexus-accent shadow-sm"
-              >
-                <Sparkles className="h-8 w-8" />
-              </motion.div>
+              <div className="relative flex h-14 w-14 items-center justify-center rounded-[18px] border border-nexus-accent/25 bg-nexus-accent/10 text-nexus-accent-bright">
+                <Sparkles className="h-6 w-6" />
+              </div>
             </div>
-            <h2 className="mb-3 text-[26px] font-semibold leading-tight tracking-tight text-nexus-text sm:text-[32px]">
+            <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-nexus-accent-bright">Do primeiro passo à última linha</p>
+            <h2 className="mb-3 text-[28px] font-semibold leading-tight tracking-[-0.04em] text-nexus-text sm:text-[38px]">
               {currentProject?.name ? (
                 <>
                   Vamos trabalhar em{" "}
@@ -2751,35 +2782,39 @@ export default function ChatPanel({
                   ?
                 </>
               ) : (
-                "Como posso ajudar?"
+                "O que vamos construir?"
               )}
             </h2>
-            <p className="mb-8 max-w-sm text-sm leading-relaxed text-nexus-muted">
-              Uma ideia, um erro ou o próximo passo. Acompanha a execução, as ferramentas e os ficheiros numa só conversa.
+            <p className="mb-8 max-w-md text-[14px] leading-relaxed text-nexus-muted">
+              Traz uma ideia, faz uma pergunta ou resolve um problema.
+              O NEXUS e os teus agentes trabalham contigo, nesta conversa.
             </p>
             <div className="grid w-full max-w-lg grid-cols-1 gap-2.5 min-[420px]:grid-cols-2">
               {suggestions.map((s) => (
                 <motion.button
                   key={s.label}
-                  onClick={() => setInput(s.prompt)}
-                  whileHover={{ scale: 1.03, y: -2 }}
+                  onClick={() => { setInput(s.prompt); requestAnimationFrame(() => inputRef.current?.focus()); }}
+                  whileHover={{ y: -2 }}
                   whileTap={{ scale: 0.97 }}
                   transition={{ duration: 0.15 }}
-                  className="group flex items-center gap-3 rounded-2xl border border-nexus-border/70 bg-nexus-card/50 px-4 py-4 text-left text-xs text-nexus-muted transition-all duration-150 hover:border-nexus-accent/35 hover:bg-nexus-accent/5 hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/50"
+                  className="nx-chat-suggestion group flex items-start gap-3 rounded-2xl border border-nexus-border/70 px-4 py-4 text-left text-xs text-nexus-muted transition-colors hover:border-nexus-accent/35 hover:bg-nexus-accent/5 hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/50"
                 >
                   <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-nexus-accent/10 text-nexus-accent/70 transition-colors duration-150 group-hover:bg-nexus-accent/20 group-hover:text-nexus-accent">
                     {s.icon}
                   </span>
-                  <span className="min-w-0 flex-1 truncate font-medium">{s.label}</span>
-                  <span aria-hidden="true" className="shrink-0 text-nexus-faint opacity-0 transition-opacity duration-150 group-hover:opacity-100">→</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-semibold text-nexus-text">{s.label}</span>
+                    <span className="mt-1 block text-[11px] leading-relaxed text-nexus-faint">{s.prompt}</span>
+                  </span>
+                  <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-nexus-faint transition-colors group-hover:text-nexus-accent-bright" />
                 </motion.button>
               ))}
             </div>
-            {sessions.sessions.length > 0 && (
+            {sessions.sessions.some((session) => session.id !== currentChatSessionId) && (
               <div className="mt-6 w-full max-w-md text-left">
                 <div className="mb-1.5 px-1 text-[11px] font-medium text-nexus-faint">Recentes:</div>
                 <div className="flex flex-col gap-1">
-                  {sessions.sessions.slice(0, 3).map((s) => (
+                  {sessions.sessions.filter((session) => session.id !== currentChatSessionId).slice(0, 3).map((s) => (
                     <button
                       key={s.id}
                       type="button"
@@ -2870,7 +2905,7 @@ export default function ChatPanel({
             {olderHistoryError && (
               <div
                 role="alert"
-                className="mb-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+                className="mb-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-nexus-accent3"
               >
                 <span>Não foi possível carregar mensagens anteriores: {olderHistoryError}</span>
               </div>
@@ -2892,11 +2927,11 @@ export default function ChatPanel({
             )}
           </>
         )}
-        {historyPagesForSession.map((page, pageIndex) => {
-          const pageOffset = historyPagesForSession
+        {historyPagesForRender.map(({ page, sourcePage }, pageIndex) => {
+          const pageOffset = historyPagesForRender
             .slice(0, pageIndex)
-            .reduce((count, previousPage) => count + previousPage.length, 0);
-          const pageKey = page[0]?.id ?? pageIndex;
+            .reduce((count, previousPage) => count + previousPage.page.length, 0);
+          const pageKey = sourcePage?.[0]?.id ?? page[0]?.id ?? pageIndex;
           return (
             <div
               key={`${sessionId}-history-${page[0]?.id ?? pageIndex}`}
@@ -2930,6 +2965,9 @@ export default function ChatPanel({
             </div>
           );
         })}
+        {/* The live run renders inside its assistant bubble as one chronological
+            transcript (AgentTranscript); the old agent-status dashboard card
+            (LiveWorkCard) is intentionally gone from the main view. */}
         {liveMessages.length > 0 && (
           <div
             key={`${sessionId}-live`}
@@ -2962,6 +3000,7 @@ export default function ChatPanel({
             />
           </div>
         )}
+        {sessionId && <BackgroundAgentsPanel key={sessionId} sessionId={sessionId} onCompleted={loadHistory} />}
         <div ref={messagesEndRef} />
 
         {/* Reserved min-height while streaming — anti layout-shift: the list
@@ -2972,25 +3011,8 @@ export default function ChatPanel({
 
         {/* "Thinking / typing" placeholder shown while awaiting the first token */}
         {waitingForFirstToken && (
-          <div className="mb-4 flex justify-start">
-            <div className="rounded-2xl border border-nexus-border bg-nexus-card px-4 py-3">
-              <div className="flex items-center gap-1.5">
-                {[0, 1, 2].map((i) => (
-                  <motion.span
-                    key={i}
-                    className="h-2 w-2 rounded-full bg-nexus-muted"
-                    animate={{ y: [0, -5, 0] }}
-                    transition={{
-                      duration: 0.6,
-                      repeat: Infinity,
-                      ease: "easeInOut",
-                      delay: i * 0.15,
-                    }}
-                  />
-                ))}
-              </div>
-              <div className="mt-1 text-[10px] text-nexus-muted">a pensar…</div>
-            </div>
+          <div className="mb-4 flex justify-start py-1 text-[13px] text-nexus-faint" data-testid="waiting-first-frame">
+            <span className="nx-shimmer-text">A pensar…</span>
           </div>
         )}
       </div>
@@ -3007,14 +3029,13 @@ export default function ChatPanel({
             className="absolute -top-12 right-6 z-20 flex h-9 w-9 items-center justify-center rounded-full border border-nexus-border bg-nexus-panel/95 text-nexus-muted shadow-lg backdrop-blur-sm transition-all duration-150 hover:border-nexus-accent/40 hover:text-nexus-text hover:-translate-y-0.5"
             style={{ opacity: showScrollDown ? 1 : 0 }}
           >
-            <span aria-hidden="true" className="text-base leading-none">↓</span>
+            <ArrowDown className="h-4 w-4" aria-hidden="true" />
           </button>
         )}
-      <div className="mx-auto w-full max-w-[960px] px-3 sm:px-7">
-        {sessionId && <BackgroundAgentsPanel sessionId={sessionId} onCompleted={loadHistory} />}
+      <div className="mx-auto w-full max-w-[860px] px-3 sm:px-8">
         {sessions.initialized && !sessionId && (
           <div
-            className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+            className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-nexus-accent3"
             role="status"
             aria-live="polite"
           >
@@ -3045,11 +3066,11 @@ export default function ChatPanel({
 
         {/* DEMO-MODE warning banner (no LLM provider configured) */}
         {demoMode && (
-          <div className="mb-2 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300">
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-nexus-accent3">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
             <span>
-              ⚠️ MODO DEMO — nenhum provedor LLM configurado. A IA não gera respostas reais.{" "}
-              <Link href="/settings" className="text-amber-200 underline font-medium">
+              ⚠︝ MODO DEMO — nenhum provedor LLM configurado. A IA não gera respostas reais.{" "}
+              <Link href="/settings" className="text-nexus-accent3 underline font-medium">
                 Definições
               </Link>
             </span>
@@ -3058,11 +3079,13 @@ export default function ChatPanel({
 
         {/* Persistent error banner — stays until user dismisses or sends a new message */}
         {streamError && !streaming && (
-          <div className="mb-2 flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/15 px-3 py-2 text-xs text-red-300 shadow-sm">
-            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <div className="min-w-0 flex-1">
-              <div className="font-semibold text-red-200">Erro no chat</div>
-              <div className="mt-0.5 break-words leading-relaxed text-red-300/90">{streamError}</div>
+          // Compact one-line status: the full error is already rendered in the
+          // transcript, so the banner only flags it (full text on hover).
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-300" title={streamError}>
+            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+            <div className="flex min-w-0 flex-1 items-center gap-1.5">
+              <span className="shrink-0 font-semibold text-red-200">Erro no chat</span>
+              <span className="truncate text-red-300/80">{streamError}</span>
             </div>
             <button
               type="button"
@@ -3106,7 +3129,7 @@ export default function ChatPanel({
 
           {/* Composer novo — rounded-2xl nx-elev-2, duas linhas */}
           <motion.div
-            className={`nx-elev-2 relative flex flex-col gap-2 rounded-[22px] border border-nexus-border/80 bg-nexus-elevated px-3 pb-2.5 pt-3 shadow-[0_8px_32px_rgba(0,0,0,0.18)] transition-all focus-within:border-nexus-accent/45 focus-within:ring-2 focus-within:ring-nexus-accent/10 sm:px-4 ${
+            className={`nx-chat-composer relative flex flex-col gap-2 rounded-[20px] border border-nexus-border/80 bg-nexus-elevated px-3 pb-3 pt-3 transition-[border-color,box-shadow] focus-within:border-nexus-accent/50 focus-within:ring-2 focus-within:ring-nexus-accent/10 sm:px-4 ${
               isDraggingOver ? "border-nexus-accent" : ""
             }`}
             onDragOver={handleDragOver}
@@ -3124,6 +3147,7 @@ export default function ChatPanel({
             {/* Linha 1 — textarea auto-resize */}
             <textarea
               ref={inputRef}
+              aria-label="Mensagem para o NEXUS"
               className="max-h-[160px] min-h-[52px] w-full resize-none bg-transparent px-1 py-1 text-[14px] leading-relaxed text-nexus-text placeholder:text-nexus-muted/70 outline-none"
               value={input}
               onChange={handleInputChange}
@@ -3187,7 +3211,7 @@ export default function ChatPanel({
                 )}
                 {!commandsLoading && commandsError && filteredCommands.length === 0 && (
                   <div className="flex items-center justify-between gap-3 px-3 py-3">
-                    <span className="text-xs text-amber-300">{commandsError}</span>
+                    <span className="text-xs text-nexus-accent3">{commandsError}</span>
                     <button
                       type="button"
                       onClick={() => void advancedLoadCommands()}
@@ -3230,7 +3254,7 @@ export default function ChatPanel({
                               className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-bold text-white"
                               style={{ backgroundColor: mode?.color || "#8B5CF6" }}
                             >
-                              {mode?.icon === "infinity" ? "∞" : mode?.icon === "shield" ? "🛡" : mode?.icon === "hammer" ? "⚒" : mode?.icon === "layers" ? "◈" : mode?.icon === "git-branch" ? "↗" : mode?.icon === "check-circle" ? "✓" : mode?.icon === "flask" ? "⚗" : mode?.icon === "search" ? "🔍" : mode?.icon === "brain" ? "🧠" : mode?.icon === "eye" ? "👁" : mode?.icon?.[0]?.toUpperCase() || "∞"}
+                              {mode?.icon === "infinity" ? "∞" : mode?.icon === "shield" ? "🛡" : mode?.icon === "hammer" ? "⚒" : mode?.icon === "layers" ? "◈" : mode?.icon === "git-branch" ? "↗" : mode?.icon === "check-circle" ? "✓" : mode?.icon === "flask" ? "⚗" : mode?.icon === "search" ? "🔝" : mode?.icon === "brain" ? "🧠" : mode?.icon === "eye" ? "👝" : mode?.icon?.[0]?.toUpperCase() || "∞"}
                             </span>
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1.5">
@@ -3253,8 +3277,8 @@ export default function ChatPanel({
             )}
 
             {/* Linha 2 — [+][@][/][Auto▾][Modelo▾] · [🎙][↑] */}
-            <div className="flex items-center justify-between gap-2 border-t border-nexus-border/40 pt-2">
-              <div className="flex min-w-0 items-center gap-1">
+            <div className="nx-composer-toolbar grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 overflow-visible pt-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-1 overflow-visible">
                 <div ref={attachMenuRef} className="relative">
                   <button
                     type="button"
@@ -3318,9 +3342,9 @@ export default function ChatPanel({
                   /
                 </button>
                 <span className="mx-0.5 h-4 w-px bg-nexus-border/70" aria-hidden="true" />
-                <ModeDropdown />
-                <ModelSelector />
-                <span className="ml-1 hidden truncate text-[11px] text-nexus-faint xl:inline">/ para comandos · @ para ficheiros</span>
+                <ModeDropdown menuPlacement="above" />
+                <ModelSelector menuPlacement="above" />
+                <ComposerContextChip className="ml-1 hidden md:inline-flex" />
                 <button
                   type="button"
                   onClick={() => {
@@ -3332,7 +3356,7 @@ export default function ChatPanel({
                   disabled={!input.trim() || busyOtherSession}
                   className="rounded-lg p-1.5 text-nexus-muted transition-colors hover:bg-nexus-bg/60 hover:text-nexus-text disabled:cursor-not-allowed disabled:opacity-40"
                   title="Pesquisar na web"
-                  aria-label="Web Search"
+                  aria-label="Pesquisar na web"
                 >
                   <Search className="h-4 w-4" />
                 </button>
@@ -3347,7 +3371,7 @@ export default function ChatPanel({
                       : "text-nexus-muted hover:bg-nexus-bg/60 hover:text-nexus-text"
                   }`}
                   title={isListening ? "A ouvir... clica para parar" : "Input de voz (Web Speech API)"}
-                  aria-label="Voice input"
+                  aria-label="Ditado"
                 >
                   <Mic className="h-4 w-4" />
                 </button>
@@ -3393,7 +3417,7 @@ export default function ChatPanel({
 
         <div className="mt-2 flex items-center justify-between gap-2 px-1 text-[10px] text-nexus-faint">
           <span>
-            NEXUS IDE — Modo {currentMode} · {thinkingStrength === "low" ? "Rápido" : thinkingStrength === "medium" ? "Médio" : "Alto"} · {density}
+            <span className="hidden sm:inline">Raciocínio {thinkingStrength === "low" ? "rápido" : thinkingStrength === "medium" ? "médio" : "alto"} · </span>{DENSITY_LABEL[density]}
           </span>
           <span className="hidden lg:inline">Enter envia · Shift+Enter nova linha</span>
           <motion.button
@@ -3479,12 +3503,12 @@ export default function ChatPanel({
               )}
             </div>
             {searchError && (
-              <div role="alert" className="mt-2 rounded-md border border-amber-400/30 bg-amber-400/10 px-2 py-1.5 text-[11px] text-amber-200">
+              <div role="alert" className="mt-2 rounded-md border border-amber-400/30 bg-amber-400/10 px-2 py-1.5 text-[11px] text-nexus-accent3">
                 A pesquisa ficou incompleta: {searchError}
               </div>
             )}
             {searchNavigationError && (
-              <div role="alert" className="mt-2 rounded-md border border-rose-400/30 bg-rose-400/10 px-2 py-1.5 text-[11px] text-rose-200">
+              <div role="alert" className="mt-2 rounded-md border border-rose-400/30 bg-rose-400/10 px-2 py-1.5 text-[11px] text-nexus-accent4">
                 {searchNavigationError}
               </div>
             )}
@@ -3504,7 +3528,7 @@ export default function ChatPanel({
                       key={m.id}
                       onMouseEnter={() => setActiveSearchResultId(m.id)}
                       onClick={() => void navigateToSearchResult(result)}
-                      aria-label={`${m.role === "user" ? "Tu" : "NEXUS"}: ${snippet || "mensagem sem texto"}`}
+                      aria-label={`${m.role === "user" ? "Você" : "NEXUS"}: ${snippet || "mensagem sem texto"}`}
                       aria-pressed={active}
                       className={`block w-full rounded-md border px-2 py-1.5 text-left text-[11px] transition-colors ${
                         active
@@ -3513,7 +3537,7 @@ export default function ChatPanel({
                       }`}
                     >
                       <span className="mb-0.5 flex items-center justify-between gap-2 text-[9px] uppercase tracking-wide text-nexus-muted">
-                        <span>{m.role === "user" ? "Tu" : "NEXUS"}</span>
+                        <span>{m.role === "user" ? "Você" : "NEXUS"}</span>
                         <span>{resultIndex + 1}</span>
                       </span>
                       <span className="block line-clamp-2">{snippet || "(sem preview)"}</span>

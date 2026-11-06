@@ -267,3 +267,37 @@ async def test_primary_live_stream_replays_backlog_and_follows_new_events(
     assert second["seq"] == 2
     assert "replayed" not in second["data"]
     assert final["type"] == "done"
+
+
+def test_replay_of_run_completed_restores_usage_missing_from_the_journal() -> None:
+    """The journal has no usage block. The panel still has to show the counts
+    the run row already stored."""
+    from backend.persistence.db import create_session, upsert_session_run
+    from backend.runtime.events import RuntimeEvent, RuntimeEventType
+
+    create_session(session_id="sess-replay", title="replay")
+    upsert_session_run(
+        "run-replay",
+        "sess-replay",
+        status="completed",
+        agent="NEXUS",
+        usage={
+            "input_tokens": 12,
+            "output_tokens": 4,
+            "total_tokens": 16,
+            "source": "provider",
+            "cost_usd": 0,
+        },
+        finished=True,
+    )
+    event = RuntimeEvent(
+        run_id="run-replay",
+        seq=4,
+        type=RuntimeEventType.RUN_COMPLETED,
+        payload={"telemetry": {"tool_calls": 0}, "duration": 1.2},
+    )
+    raw = sessions_routes._runtime_event_to_chat_frames(event, replayed=True)
+    payload = json.loads(raw.split("data:", 1)[1].strip())
+    assert payload["type"] == "metric"
+    assert payload["data"]["usage"]["input_tokens"] == 12
+    assert payload["data"]["usage"]["output_tokens"] == 4

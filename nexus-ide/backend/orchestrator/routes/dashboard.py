@@ -117,6 +117,7 @@ async def dashboard_ask(
         session_id=req.session_id,
         query=req.question,
         client=llm_client,
+        user_id=str(_user.get("user_id") or ""),
     )
 
     parts: list[str] = []
@@ -157,6 +158,7 @@ async def dashboard_diagnose(
         session_id=req.session_id,
         query=diagnose_query,
         client=llm_client,
+        user_id=str(_user.get("user_id") or ""),
         context={
             "_system_addon": "Use your analysis tools if needed. Consult DEBUGGER for crash/root-cause issues."
         },

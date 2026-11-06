@@ -148,7 +148,7 @@ export default function CodeDiffView({
         </div>
         <div className="flex items-center gap-3 text-xs">
           {stats.added > 0 && (
-            <span className="text-emerald-400">+{stats.added}</span>
+            <span className="text-nexus-accent2">+{stats.added}</span>
           )}
           {stats.removed > 0 && (
             <span className="text-red-400">−{stats.removed}</span>

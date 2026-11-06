@@ -5,6 +5,16 @@ Provides endpoints for:
 - Response time and throughput metrics
 - Sentiment analysis of interactions
 - Usage statistics and reporting
+
+Tenant scope
+------------
+The usage summary is computed over the **caller's own** sessions.  The
+persistence helpers it used (``get_message_statistics()``,
+``count_active_sessions()``) aggregate over the whole table, so a freshly
+registered tenant received the administrator's numbers — every tenant's
+volume, token spend and cost.  The aggregate is recomputed here with the
+same ``sessions.user_id`` predicate the rest of the API uses; the response
+shape is unchanged.
 """
 
 from __future__ import annotations
@@ -193,28 +203,77 @@ async def get_sentiment_trend(
 # Usage statistics
 # ---------------------------------------------------------------------------
 
-@router.get("/analytics/usage/summary")
-async def get_usage_summary() -> dict[str, Any]:
-    """Return aggregate usage statistics.
+#: Message statistics restricted to one tenant.
+#:
+#: ``messages`` has no owner column; ``sessions.user_id`` is the owner column
+#: and every message hangs off a session, so the join is the tenant filter.
+#: Mirrors the shape of ``db.get_message_statistics()`` exactly, so the
+#: frontend contract does not change.
+_SCOPED_MESSAGE_STATS_SQL = """
+    SELECT
+        COUNT(*) AS total_messages,
+        COUNT(DISTINCT m.session_id) AS sessions_with_messages,
+        COALESCE(SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END), 0) AS user_messages,
+        COALESCE(SUM(CASE WHEN m.role = 'assistant' THEN 1 ELSE 0 END), 0) AS assistant_messages,
+        COALESCE(SUM(m.tokens_in), 0) AS tokens_in_total,
+        COALESCE(SUM(m.tokens_out), 0) AS tokens_out_total,
+        COALESCE(SUM(m.cost_usd), 0.0) AS cost_usd_total,
+        COALESCE(AVG(NULLIF(m.latency_ms, 0)), 0) AS avg_latency_ms,
+        COALESCE(MAX(m.created_at), '') AS last_message_at
+    FROM messages m
+    JOIN sessions s ON s.id = m.session_id
+    WHERE s.user_id = ?
+"""
 
-    Uses real message/session counts from the persistence layer when available;
-    falls back to zeroed values if the database is unreachable so the response
-    shape stays truthful (never fabricated).
-    """
+#: Live sessions of one tenant (``status = 'expired'`` are the soft-deleted
+#: ones and are excluded, exactly like ``db.count_active_sessions()``).
+_SCOPED_ACTIVE_SESSIONS_SQL = """
+    SELECT COUNT(*) AS cnt
+    FROM sessions
+    WHERE user_id = ?
+      AND (status IS NULL OR status != 'expired')
+"""
+
+
+def _scoped_usage(user_id: str) -> tuple[int, int, int, int]:
+    """``(sessions, messages, tokens, sessions_with_messages)`` of one tenant."""
+    from backend.persistence.db import get_db
+
     try:
-        from backend.persistence import db as _db
-
-        stats = _db.get_message_statistics()
-        total_sessions = _db.count_active_sessions()
-        total_messages = int(stats.get("total_messages", 0) or 0)
-        total_tokens = int(stats.get("tokens_in_total", 0) or 0) + int(stats.get("tokens_out_total", 0) or 0)
-        unique_sessions = int(stats.get("sessions_with_messages", 0) or 0)
-        avg_messages_per_conversation = round(total_messages / total_sessions, 1) if total_sessions else 0.0
-        avg_tokens_per_message = round(total_tokens / total_messages, 1) if total_messages else 0.0
+        with get_db() as conn:
+            stats = conn.execute(_SCOPED_MESSAGE_STATS_SQL, (user_id,)).fetchone()
+            sessions = conn.execute(_SCOPED_ACTIVE_SESSIONS_SQL, (user_id,)).fetchone()
     except Exception:
-        total_sessions = total_messages = total_tokens = unique_sessions = 0
-        avg_messages_per_conversation = 0.0
-        avg_tokens_per_message = 0.0
+        return 0, 0, 0, 0
+
+    if not stats:
+        return 0, 0, 0, 0
+    total_messages = int(stats["total_messages"] or 0)
+    total_tokens = int(stats["tokens_in_total"] or 0) + int(stats["tokens_out_total"] or 0)
+    unique_sessions = int(stats["sessions_with_messages"] or 0)
+    total_sessions = int(sessions["cnt"] or 0) if sessions else 0
+    return total_sessions, total_messages, total_tokens, unique_sessions
+
+
+@router.get("/analytics/usage/summary")
+async def get_usage_summary(user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Return aggregate usage statistics **for the authenticated user**.
+
+    Uses real message/session counts from the persistence layer, restricted
+    to the caller's own sessions; falls back to zeroed values if the database
+    is unreachable so the response shape stays truthful (never fabricated).
+
+    The global helpers this used to call (``get_message_statistics()`` and
+    ``count_active_sessions()``) aggregate the whole table, so they answered
+    "how much did *everybody* do" on a route every registered user can call.
+    """
+    user_id = str((user or {}).get("user_id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    total_sessions, total_messages, total_tokens, unique_sessions = _scoped_usage(user_id)
+    avg_messages_per_conversation = round(total_messages / total_sessions, 1) if total_sessions else 0.0
+    avg_tokens_per_message = round(total_tokens / total_messages, 1) if total_messages else 0.0
 
     return {
         "total_conversations": total_sessions,

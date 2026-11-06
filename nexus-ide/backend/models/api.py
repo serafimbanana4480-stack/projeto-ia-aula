@@ -316,6 +316,7 @@ class WorkspaceReadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(min_length=1, max_length=2000)
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceWriteRequest(BaseModel):
@@ -323,6 +324,7 @@ class WorkspaceWriteRequest(BaseModel):
 
     path: str = Field(min_length=1, max_length=2000)
     content: str
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceListRequest(BaseModel):
@@ -330,6 +332,7 @@ class WorkspaceListRequest(BaseModel):
 
     path: str = Field(default=".", min_length=1, max_length=2000)
     recursive: bool = False
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceDeleteRequest(BaseModel):
@@ -337,6 +340,7 @@ class WorkspaceDeleteRequest(BaseModel):
 
     path: str = Field(min_length=1, max_length=2000)
     move_to_trash: bool = True
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceDeleteDirRequest(BaseModel):
@@ -344,6 +348,7 @@ class WorkspaceDeleteDirRequest(BaseModel):
 
     path: str = Field(min_length=1, max_length=2000)
     move_to_trash: bool = True
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceMoveRequest(BaseModel):
@@ -351,6 +356,7 @@ class WorkspaceMoveRequest(BaseModel):
 
     src: str = Field(min_length=1, max_length=2000)
     dest: str = Field(min_length=1, max_length=2000)
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceCopyRequest(BaseModel):
@@ -358,18 +364,21 @@ class WorkspaceCopyRequest(BaseModel):
 
     src: str = Field(min_length=1, max_length=2000)
     dest: str = Field(min_length=1, max_length=2000)
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceFileInfoRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(min_length=1, max_length=2000)
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceListBackupsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(min_length=1, max_length=2000)
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceRestoreBackupRequest(BaseModel):
@@ -377,6 +386,7 @@ class WorkspaceRestoreBackupRequest(BaseModel):
 
     backup_path: str = Field(min_length=1, max_length=2000)
     target_path: str = Field(min_length=1, max_length=2000)
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceSearchRequest(BaseModel):
@@ -385,6 +395,7 @@ class WorkspaceSearchRequest(BaseModel):
     pattern: str = Field(min_length=1, max_length=500)
     root_path: str = Field(min_length=1, max_length=2000)
     max_results: int = Field(default=100, ge=1, le=1000)
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceShellRequest(BaseModel):
@@ -392,6 +403,7 @@ class WorkspaceShellRequest(BaseModel):
 
     command: str = Field(min_length=1, max_length=10_000)
     cwd: str | None = Field(default=None, max_length=2000)
+    project_path: str | None = Field(default=None, max_length=2000)
     timeout: int = Field(default=120, ge=1, le=600)
     env: dict[str, str] | None = None
 
@@ -401,6 +413,7 @@ class WorkspacePythonRequest(BaseModel):
 
     code: str = Field(min_length=1, max_length=50_000)
     cwd: str | None = Field(default=None, max_length=2000)
+    project_path: str | None = Field(default=None, max_length=2000)
     timeout: int = Field(default=120, ge=1, le=600)
 
 
@@ -410,6 +423,7 @@ class WorkspaceScriptRequest(BaseModel):
     path: str = Field(min_length=1, max_length=2000)
     args: list[str] = Field(default_factory=list)
     cwd: str | None = Field(default=None, max_length=2000)
+    project_path: str | None = Field(default=None, max_length=2000)
     timeout: int = Field(default=120, ge=1, le=600)
 
 
@@ -445,18 +459,21 @@ class WorkspaceGitStatusRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(min_length=1, max_length=2000)
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceDiscoverRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     root_path: str = Field(min_length=1, max_length=2000)
+    project_path: str = Field(default="", max_length=2000)
 
 
 class WorkspaceProjectInfoRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(min_length=1, max_length=2000)
+    project_path: str = Field(default="", max_length=2000)
 
 
 class UserPreferencesUpdateRequest(BaseModel):

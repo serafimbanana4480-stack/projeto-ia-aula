@@ -7,6 +7,8 @@ it can spawn new tasks that the orchestrator will then schedule.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 from typing import Any, get_args
@@ -25,11 +27,14 @@ async def spawn_task(
     context: str = "",
     parent_id: str | None = None,
     depends_on: list[str] | None = None,
+    write_scope: list[str] | None = None,
+    read_scope: list[str] | None = None,
     session_id: str = "",
     project_path: str = "",
     autonomous: bool = True,
     sentinel_enforced: bool = False,
     allowed_tools: tuple[str, ...] | None = None,
+    user_id: str = "",
 ) -> dict[str, Any]:
     """Spawn a new task dynamically in the active orchestration run.
 
@@ -43,7 +48,13 @@ async def spawn_task(
             and the primary agent keeps the work.
         context: Additional context to provide to the agent.
         parent_id: Optional ID of the parent task/phase.
-        depends_on: Optional list of task IDs this task depends on.
+        depends_on: Optional list of task IDs this task depends on. The
+            policy queues the delegation until those are complete, so an
+            unmet dependency is a real gate and not a comment.
+        write_scope: Paths this worker may write. Compared by path prefix
+            against the scopes the live workers own, so "src/" and
+            "src/app.py" are recognised as the same area.
+        read_scope: Paths this worker may read.
 
     Returns:
         Dict with the spawned task_id or an error.
@@ -70,7 +81,12 @@ async def spawn_task(
     # started (audit 2026-08-16, P10). The model cannot be honest with the
     # user if its own tools lie to it.
     decision_reason = ""
+    policy: Any = None
+    proposal: Any = None
+    decision: Any = None
+    registered = False
     try:
+        from backend.runtime.run_context import get_current_run_id
         from backend.runtime.spawn_policy import (
             SpawnPolicy,
             SpawnVerdict,
@@ -78,11 +94,23 @@ async def spawn_task(
         )
         from backend.runtime.spawn_registry import get_policy
 
-        policy = get_policy(session_id) or SpawnPolicy()
+        # The policy belongs to the RUN, not to the session: two runs of the
+        # same session have their own counters and their own write scopes.
+        run_id = get_current_run_id()
+        policy = get_policy(run_id)
+        if policy is None:
+            # No run published a policy (the legacy lane, or a tool call
+            # outside a run). The answer is still an honest one: the default
+            # policy applies, with its own cap and its own scopes.
+            policy = SpawnPolicy()
         proposal = SubagentProposal(
             name=name,
             objective=description or "",
             definition_of_done=str(definition_of_done or context or ""),
+            context=str(context or "")[:8_000],
+            write_scope=frozenset(str(item) for item in (write_scope or ())),
+            read_scope=frozenset(str(item) for item in (read_scope or ())),
+            depends_on=frozenset(str(item) for item in (depends_on or ())),
             estimated_seconds=float(
                 os.environ.get("NEXUS_SPAWN_ESTIMATED_SECONDS", "120") or 120
             ),
@@ -108,6 +136,7 @@ async def spawn_task(
                 "context": context,
                 "parent_id": parent_id,
                 "depends_on": depends_on or [],
+                "write_scope": list(write_scope or []),
                 "verdict": decision.verdict.value,
                 "reason": decision.reason,
                 "failed_conditions": list(decision.failed_conditions),
@@ -117,6 +146,14 @@ async def spawn_task(
                     "digas ao utilizador que um sub-agente ficou a trabalhar."
                 ),
             }
+        # The worker is live from here on: it owns its write scope and it
+        # counts against the parallel cap. Without this registration the
+        # cap was never approached and the conflict check never fired for
+        # tool-driven spawns.
+        register = getattr(policy, "register", None)
+        if callable(register):
+            register(proposal)
+            registered = True
     except ImportError:  # pragma: no cover - runtime without the phase-3 policy
         logger.debug("Spawn policy unavailable; falling back to lifecycle check")
 
@@ -128,9 +165,15 @@ async def spawn_task(
         "context": context,
         "parent_id": parent_id,
         "depends_on": depends_on or [],
+        "write_scope": list(write_scope or []),
     }
     if decision_reason:
         result["reason"] = decision_reason
+
+    # The project root is server-side context. A model that names another
+    # directory must not be able to move the worker outside the project the
+    # user selected, so the root published by the run wins over the argument.
+    trusted_project = _trusted_project_path(project_path)
 
     # In normal chat there is no active OrchestrationEngine to intercept the
     # old declarative result. Attach it to the real lifecycle manager so the
@@ -163,11 +206,13 @@ async def spawn_task(
                 agent_type=agent,
                 objective=description,
                 context={
-                    "project_path": project_path or ".",
+                    "project_path": trusted_project or ".",
                     "parent_context": context,
                     "depends_on": depends_on or [],
+                    "write_scope": list(write_scope or []),
                     "autonomous": autonomous,
                     "_sentinel_enforced": sentinel_enforced,
+                    "_authenticated_user_id": user_id,
                     **(
                         {"_allowed_tools": tuple(allowed_tools)}
                         if allowed_tools is not None
@@ -186,6 +231,8 @@ async def spawn_task(
     if not instance_id:
         # No instance means no subagent. Saying "spawned" here is exactly the
         # lie the audit caught; report the truth so the model does the work.
+        if registered:
+            _release_worker(policy, name)
         result.update(
             {
                 "status": "not_started",
@@ -211,7 +258,93 @@ async def spawn_task(
         }
     )
 
+    # The worker is running in the background: free its slot and its write
+    # scope when it finishes, otherwise the parallel cap would saturate
+    # after N spawns and every later delegation would be queued forever.
+    _watch_worker_completion(policy, name, instance_id)
+
     return result
+
+
+def _trusted_project_path(supplied: str) -> str:
+    """The project root the run trusts, ignoring any model-supplied root.
+
+    The registry publishes the root of the live run; a model that named a
+    different directory in the tool call does not get to widen the sandbox.
+    """
+    try:
+        from backend.runtime.run_context import get_current_run_id
+        from backend.runtime.spawn_registry import get_run_project
+
+        run_id = get_current_run_id()
+        trusted = get_run_project(run_id) if run_id else ""
+    except Exception:  # pragma: no cover - defensive
+        trusted = ""
+    if trusted:
+        if supplied and str(supplied).strip() and str(supplied).strip() != trusted:
+            logger.warning(
+                "spawn_task ignored a model-supplied project path | task=%s | trusted=%s",
+                supplied,
+                trusted,
+            )
+        return trusted
+    return str(supplied or "").strip()
+
+
+def _release_worker(policy: Any, name: str) -> None:
+    """Give the worker's slot back to the policy (best effort)."""
+    release = getattr(policy, "release", None)
+    if not callable(release):
+        return
+    try:
+        release(name, completed=False)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("Could not release the spawn policy slot for %s", name, exc_info=True)
+
+
+def _watch_worker_completion(policy: Any, name: str, instance_id: str) -> None:
+    """Release the policy slot when the background worker reaches a terminal state."""
+    if policy is None or not callable(getattr(policy, "release", None)):
+        return
+    try:
+        from backend.orchestrator.main import app
+
+        lifecycle = getattr(app.state, "agent_lifecycle", None)
+        get_status = getattr(lifecycle, "get_status", None)
+        if not callable(get_status):
+            return
+    except Exception:  # pragma: no cover - defensive
+        return
+
+    async def _watch() -> None:
+        # Bounded: a worker that never reports a terminal state must not keep
+        # a task alive for the whole process.
+        for _ in range(1800):  # 2s apart -> 1h
+            await asyncio.sleep(2.0)
+            try:
+                instance = get_status(instance_id)
+            except Exception:  # pragma: no cover - defensive
+                return
+            if instance is None:
+                return
+            if bool(getattr(instance, "is_terminal", False)):
+                completed = str(getattr(instance, "status", "") or "") == "completed"
+                try:
+                    policy.release(name, completed=completed)
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug("Could not release the spawn policy slot", exc_info=True)
+                return
+
+    def _consume(finished: asyncio.Task[Any]) -> None:
+        # Retrieve the outcome so asyncio does not report it as unhandled.
+        with contextlib.suppress(Exception):
+            finished.exception()
+
+    try:
+        task = asyncio.get_running_loop().create_task(_watch())
+        task.add_done_callback(_consume)
+    except RuntimeError:  # pragma: no cover - no running loop
+        return
 
 
 register_tool(
@@ -273,6 +406,25 @@ register_tool(
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional list of task IDs this task depends on",
+                },
+                "write_scope": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Paths this worker may write (files or directories, "
+                        "relative to the project or absolute). The spawn "
+                        "policy serialises the delegation when another live "
+                        "worker already owns one of these paths."
+                    ),
+                },
+                "read_scope": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Paths this worker may read. Used by the spawn policy "
+                        "to avoid running a reader and a writer of the same "
+                        "path at the same time."
+                    ),
                 },
             },
             "required": ["name", "description", "definition_of_done"],

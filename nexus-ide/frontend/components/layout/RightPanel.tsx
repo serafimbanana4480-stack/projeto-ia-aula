@@ -39,7 +39,8 @@ import { Surface } from "../ui/Surface";
 import { CardEmpty } from "../ui/Card";
 import ContextUsagePanel from "./ContextUsagePanel";
 import SessionTaskPanel from "../chat/SessionTaskPanel";
-import { deriveContextUsage, loadedSkillsFromEvents } from "../../lib/contextTelemetry";
+import { deriveContextUsage, loadedSkillsFromEvents, runAgentsFromEvents } from "../../lib/contextTelemetry";
+import type { StreamEvent } from "../../lib/types";
 import AgentActivity from "../dashboard/AgentActivity";
 import {
   EMPTY,
@@ -52,6 +53,7 @@ import {
 } from "../../lib/format";
 
 const DEFAULT_MODEL_COLOR = "var(--nx-accent-bright)";
+const EMPTY_TELEMETRY_EVENTS: StreamEvent[] = [];
 
 function sessionCost(
   inputTokens: number,
@@ -63,6 +65,18 @@ function sessionCost(
   const input = ((inputPricePer1M ?? 0) * inputTokens) / 1_000_000;
   const output = ((outputPricePer1M ?? 0) * outputTokens) / 1_000_000;
   return input + output;
+}
+
+/**
+ * The catalogue reports an unknown price class as the literal string
+ * "unknown". Rendering that verbatim put the word "unknown" in the session
+ * panel, which reads as a value instead of as missing information.
+ */
+function formatPriceClass(pricing: string | null | undefined): string {
+  const value = (pricing ?? "").trim();
+  if (!value) return "";
+  if (["unknown", "n/a", "na", "undefined", "null"].includes(value.toLowerCase())) return "";
+  return value;
 }
 
 function formatRunDuration(startedAt: number | null, completedAt: number | null, now: number): string {
@@ -143,6 +157,8 @@ export interface RightPanelProps {
 }
 
 export default function RightPanel({ deep = false, onClose }: RightPanelProps) {
+  const [railView, setRailView] = useState<"session" | "metrics">("session");
+  const railId = useId();
   const { activeModel, models } = useModelStore();
   const { tools, toolsError, loadTools } = useToolsStore();
   const metrics = useMetricsStore((state) => state.metrics);
@@ -151,10 +167,14 @@ export default function RightPanel({ deep = false, onClose }: RightPanelProps) {
   const currentMode = useModeStore((state) => state.currentMode);
   const streaming = useChatTelemetryStore((state) => state.streaming);
   const usage = useChatTelemetryStore((state) => state.usage);
-  const events = useChatTelemetryStore((state) => state.events);
+  const events = useChatTelemetryStore((state) =>
+    Array.isArray(state.events) ? state.events : EMPTY_TELEMETRY_EVENTS,
+  );
   const startedAt = useChatTelemetryStore((state) => state.startedAt);
   const completedAt = useChatTelemetryStore((state) => state.completedAt);
   const sessionId = useChatTelemetryStore((state) => state.sessionId);
+  const resolvedModel = useChatTelemetryStore((state) => state.resolvedModel);
+  const resolvedProvider = useChatTelemetryStore((state) => state.resolvedProvider);
   const loadedSkills = useMemo(() => loadedSkillsFromEvents(events), [events]);
 
   const [now, setNow] = useState(() => Date.now());
@@ -169,11 +189,17 @@ export default function RightPanel({ deep = false, onClose }: RightPanelProps) {
     return () => window.clearInterval(timer);
   }, [streaming, startedAt]);
 
-  const selectedModelId = usage?.provider?.model || activeModel;
+  // The model that actually served the run. During a live run this comes from
+  // the usage block; after a refresh it comes from the per-session cache, so
+  // the panel can still answer "which model is working?".
+  const selectedModelId = usage?.provider?.model || resolvedModel || activeModel;
   const selectedModel = models.find((model) => model.id === selectedModelId);
   const modelName =
     selectedModel?.name ||
-    (selectedModelId && selectedModelId !== "none" ? selectedModelId : EMPTY);
+    (selectedModelId && selectedModelId !== "none"
+      ? selectedModelId
+      // No concrete id yet: the router picks per turn. Say so instead of a dash.
+      : "Automático (router)");
   const modelColor = selectedModel?.color || DEFAULT_MODEL_COLOR;
 
   const contextWindow =
@@ -185,7 +211,7 @@ export default function RightPanel({ deep = false, onClose }: RightPanelProps) {
   const outputTokens = usage?.output_tokens ?? 0;
   const totalTokens = usage?.total_tokens ?? inputTokens + outputTokens;
 
-  const cost = useMemo(
+  const catalogCost = useMemo(
     () =>
       usage ? sessionCost(
         inputTokens,
@@ -195,38 +221,48 @@ export default function RightPanel({ deep = false, onClose }: RightPanelProps) {
       ) : null,
     [inputTokens, outputTokens, selectedModel, usage],
   );
+  const reportedCost = usage && typeof usage.cost_usd === "number" && Number.isFinite(usage.cost_usd) && usage.cost_usd >= 0
+    ? usage.cost_usd
+    : null;
+  const cost = catalogCost ?? reportedCost;
 
-  const outputRate =
-    streaming && usage?.output_tokens && startedAt
+  // While the reply is streaming, a system rate of 0 is an empty collector
+  // window, not a measurement of this answer. Show the run's own rate, or a
+  // dash until the runtime has output tokens to divide.
+  const outputRate = streaming
+    ? usage?.output_tokens && startedAt
       ? usage.output_tokens / Math.max((now - startedAt) / 1_000, 1)
-      : metrics?.tokens_per_second;
+      : null
+    : metrics?.tokens_per_second;
 
   const enabledTools = tools.filter((tool) => tool.enabled).length;
 
   const contextUsage = deriveContextUsage(usage, contextWindow ?? 0);
   const reportedWindow = contextUsage.window ?? 0;
 
-  const activeAgents = metrics?.agent_activity?.filter((agent) => agent.status === "active").length ?? 0;
+  const runAgents = useMemo(() => runAgentsFromEvents(events, streaming), [events, streaming]);
+  const systemActive = metrics?.agent_activity?.filter((agent) => agent.status === "active").length ?? 0;
+  const activeAgents = Math.max(systemActive, runAgents.filter((agent) => agent.status === "active").length);
 
   const runDuration = formatRunDuration(startedAt, completedAt, now);
 
   return (
-    <div className="thin-scrollbar flex h-full min-w-0 flex-col overflow-y-auto">
-      <Surface elevation={0} padding="sm" live={streaming} className="m-3 !border-transparent">
+    <div className="nx-chat-context thin-scrollbar flex h-full min-w-0 flex-col overflow-y-auto">
+      <Surface elevation={0} padding="sm" live={streaming} className="m-3 !border-transparent !bg-transparent !shadow-none">
         {/* ── Header: single title, live state, close ── */}
         <div className="flex items-center gap-2">
           <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[rgba(124,106,251,0.13)] text-nexus-accent-bright">
             <Gauge className="h-3.5 w-3.5" />
           </span>
           <div className="min-w-0 flex-1 leading-tight">
-            <h2 className="truncate text-[13px] font-semibold tracking-tight text-nexus-text">Contexto</h2>
+            <h2 className="truncate text-[13px] font-semibold tracking-tight text-nexus-text">Na conversa</h2>
             <p className="truncate text-[10px] text-nexus-faint">
               {streaming ? "A gerar resposta…" : backendOnline ? "Sessão atual" : "Offline"}
             </p>
           </div>
           <span
             className={`h-1.5 w-1.5 shrink-0 rounded-full transition-opacity duration-[180ms] ${
-              streaming ? "animate-pulse-subtle bg-nexus-accent" : backendOnline ? "bg-emerald-400" : "bg-nexus-faint"
+              streaming ? "animate-pulse-subtle bg-nexus-accent" : backendOnline ? "bg-nexus-accent2" : "bg-nexus-faint"
             }`}
             aria-hidden="true"
           />
@@ -243,6 +279,33 @@ export default function RightPanel({ deep = false, onClose }: RightPanelProps) {
           ) : null}
         </div>
 
+        <div className="my-4 grid grid-cols-2 gap-1 rounded-xl border border-nexus-border/60 bg-nexus-bg/60 p-1" role="tablist" aria-label="Painel de contexto">
+          {([{ id: "session", label: "Sessão" }, { id: "metrics", label: "Métricas" }] as const).map((view) => (
+            <button
+              key={view.id}
+              id={`${railId}-${view.id}-tab`}
+              type="button"
+              role="tab"
+              aria-selected={railView === view.id}
+              aria-controls={`${railId}-${view.id}-panel`}
+              tabIndex={railView === view.id ? 0 : -1}
+              onClick={() => setRailView(view.id)}
+              onKeyDown={(event) => {
+                if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+                  event.preventDefault();
+                  const next = event.key === "Home" ? "session" : event.key === "End" ? "metrics" : railView === "session" ? "metrics" : "session";
+                  setRailView(next);
+                  document.getElementById(`${railId}-${next}-tab`)?.focus();
+                }
+              }}
+              className={`rounded-lg px-3 py-2 text-[11px] font-medium transition-colors ${railView === view.id ? "bg-nexus-elevated text-nexus-text shadow-sm" : "text-nexus-muted hover:text-nexus-text"}`}
+            >
+              {view.label}
+            </button>
+          ))}
+        </div>
+
+        <div role="tabpanel" id={`${railId}-session-panel`} aria-labelledby={`${railId}-session-tab`} hidden={railView !== "session" && !deep}>
         <ContextUsagePanel contextWindow={reportedWindow} />
 
         <div className="mt-3">
@@ -272,7 +335,11 @@ export default function RightPanel({ deep = false, onClose }: RightPanelProps) {
               <div className="min-w-0 flex-1">
                 <div className="truncate text-xs font-medium text-nexus-text">{modelName}</div>
                 <div className="truncate text-[10px] text-nexus-faint">
-                  {selectedModel?.provider || EMPTY}
+                  {/* The provider that actually served the turn, not the one
+                      the catalog associates with the model id: with a local
+                      provider serving a cloud-tier model id, the catalog
+                      answer would name a provider that never ran. */}
+                  {usage?.provider?.name || resolvedProvider || selectedModel?.provider || EMPTY}
                   {reportedWindow > 0 ? ` · ${formatContext(reportedWindow)}` : ""}
                 </div>
               </div>
@@ -288,7 +355,11 @@ export default function RightPanel({ deep = false, onClose }: RightPanelProps) {
               <MetricRow label="Projeto" value={currentProject?.name || EMPTY} hint={currentProject?.path} />
               <MetricRow
                 label="Custo"
-                value={selectedModel?.free ? "gratuito" : selectedModel?.pricing || EMPTY}
+                value={
+                  selectedModel?.free
+                    ? "gratuito"
+                    : formatPriceClass(selectedModel?.pricing) || EMPTY
+                }
                 hint={
                   selectedModel?.free
                     ? "Modelo sem custo por token"
@@ -324,6 +395,20 @@ export default function RightPanel({ deep = false, onClose }: RightPanelProps) {
             ) : null}
           </RailSection>
 
+        </div>
+        </div>
+
+        <div role="tabpanel" id={`${railId}-metrics-panel`} aria-labelledby={`${railId}-metrics-tab`} hidden={railView !== "metrics" && !deep} className="mt-3">
+          <div className="mb-4 grid grid-cols-2 gap-2">
+            <div className="rounded-xl border border-nexus-border/60 bg-nexus-bg/30 p-3">
+              <span className="text-[10px] text-nexus-faint">Duração</span>
+              <p className="mt-1 font-mono text-[16px] font-semibold text-nexus-text">{runDuration}</p>
+            </div>
+            <div className="rounded-xl border border-nexus-border/60 bg-nexus-bg/30 p-3">
+              <span className="text-[10px] text-nexus-faint">Tokens</span>
+              <p className="mt-1 font-mono text-[16px] font-semibold text-nexus-text">{usage ? formatCompact(totalTokens) : EMPTY}</p>
+            </div>
+          </div>
           <RailSection
             icon={<Bot className="h-3.5 w-3.5" />}
             title="Agentes do sistema"
@@ -331,6 +416,18 @@ export default function RightPanel({ deep = false, onClose }: RightPanelProps) {
             defaultOpen={false}
             forceOpen={deep}
           >
+            {runAgents.length > 0 ? (
+              <ul className="mb-2 space-y-1">
+                {runAgents.map((agent) => (
+                  <li key={agent.name} className="flex items-center justify-between gap-2 rounded-lg bg-white/[0.02] px-2 py-1.5 text-[11px]">
+                    <span className="truncate text-nexus-text">{agent.name}</span>
+                    <span className="shrink-0 font-mono text-[10px] text-nexus-faint">
+                      {agent.status === "active" ? "a gerar" : "nesta execução"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             <AgentActivity />
           </RailSection>
 
@@ -517,9 +614,16 @@ export function ContextMiniRail({ onOpen }: { onOpen: () => void }) {
   const { activeModel, models } = useModelStore();
   const metrics = useMetricsStore((state) => state.metrics);
   const usage = useChatTelemetryStore((state) => state.usage);
-  const events = useChatTelemetryStore((state) => state.events);
+  const resolvedModel = useChatTelemetryStore((state) => state.resolvedModel);
+  const events = useChatTelemetryStore((state) =>
+    Array.isArray(state.events) ? state.events : EMPTY_TELEMETRY_EVENTS,
+  );
+  const streaming = useChatTelemetryStore((state) => state.streaming);
 
-  const selectedModelId = usage?.provider?.model || activeModel;
+  // The model that actually served the run. During a live run this comes from
+  // the usage block; after a refresh it comes from the per-session cache, so
+  // the panel can still answer "which model is working?".
+  const selectedModelId = usage?.provider?.model || resolvedModel || activeModel;
   const selectedModel = models.find((model) => model.id === selectedModelId);
   const modelColor = selectedModel?.color || DEFAULT_MODEL_COLOR;
   const modelInitial = (selectedModel?.name || selectedModelId || "AI").slice(0, 2).toUpperCase() || "AI";
@@ -530,14 +634,20 @@ export function ContextMiniRail({ onOpen }: { onOpen: () => void }) {
   const percent = contextUsage.percent;
 
 
-  const cost = usage ? sessionCost(
+  const catalogCost = usage ? sessionCost(
     inputTokens,
     outputTokens,
     selectedModel?.inputPricePer1M,
     selectedModel?.outputPricePer1M,
   ) : null;
+  const reportedCost = usage && typeof usage.cost_usd === "number" && Number.isFinite(usage.cost_usd) && usage.cost_usd >= 0
+    ? usage.cost_usd
+    : null;
+  const cost = catalogCost ?? reportedCost;
 
-  const activeAgents = metrics?.agent_activity?.filter((agent) => agent.status === "active").length ?? 0;
+  const runAgents = runAgentsFromEvents(events, streaming);
+  const systemActive = metrics?.agent_activity?.filter((agent) => agent.status === "active").length ?? 0;
+  const activeAgents = Math.max(systemActive, runAgents.filter((agent) => agent.status === "active").length);
 
   const cells = [
     {

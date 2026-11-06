@@ -30,6 +30,10 @@ def test_contract_rejects_unknown_model_and_tool() -> None:
     assert any("tool" in error for error in errors)
 
 
+def test_contract_accepts_explicit_local_model_tag() -> None:
+    assert validate_agent_contract("ANALYZER", "scripted:latest", []) == []
+
+
 def test_same_scope_lock_has_one_owner() -> None:
     locks = FileLockRegistry()
     assert locks.acquire("src/app.py", "run-1")

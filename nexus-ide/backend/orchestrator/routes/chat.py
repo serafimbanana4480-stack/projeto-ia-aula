@@ -43,7 +43,6 @@ from backend.agents.event_protocol import (
     split_stream,
 )
 from backend.config.settings import (
-    REPO_ROOT,
     get_mode_config,
 )
 from backend.core.disk_guard import DiskPressureError
@@ -65,10 +64,17 @@ from backend.persistence.db import (
     create_session,
     get_session,
     get_session_for_user,
+    get_session_run,
     interrupt_active_session_runs,
     upsert_session_run,
 )
-from backend.runtime.reasoning import bound_reasoning_text
+from backend.runtime.events import JournalWriteError
+from backend.runtime.reasoning import (
+    FULL_CAP,
+    ReasoningVisibility,
+    bound_reasoning_text,
+    reasoning_visibility,
+)
 from backend.runtime.triage import RequestClass, TriageDecision
 from backend.token_management import count_tokens
 from backend.tools.ollama_client import ChatMessage
@@ -193,6 +199,49 @@ def _sse(event: StreamEvent) -> str:
     return f"data: {event.model_dump_json()}\n\n"
 
 
+#: Tool arguments that select the filesystem root of an operation. They are
+#: server-side context: the model may ask for a file, never for a different
+#: project. A model that names another directory in a tool call used to widen
+#: the sandbox (``read_file`` with ``project_path=C:\\Users\\rodri`` read a
+#: file outside the project).
+UNTRUSTED_ROOT_ARGUMENTS = ("project_path", "cwd", "root_path", "workspace_path")
+
+
+def strip_untrusted_project_path(args: Any, trusted_project_path: str = "") -> Any:
+    """Remove a model-supplied filesystem root from a tool's arguments.
+
+    The project root is chosen by the request, not by the model. Whatever
+    root the model named is dropped and the trusted one takes its place, so
+    the tool, the transcript and the run all agree on where the work
+    happens.
+    """
+    if not isinstance(args, dict):
+        return args
+    if not any(key in args for key in UNTRUSTED_ROOT_ARGUMENTS):
+        return args
+    cleaned = {key: value for key, value in args.items() if key not in UNTRUSTED_ROOT_ARGUMENTS}
+    trusted = str(trusted_project_path or "").strip()
+    if trusted:
+        cleaned["project_path"] = trusted
+    return cleaned
+
+
+def _is_sse_frame(frame: str) -> bool:
+    """True when the frame is an SSE ``data:`` frame of this pipeline."""
+    return isinstance(frame, str) and frame.startswith("data:")
+
+
+def _frame_type(frame: str) -> str:
+    """The ``type`` of an SSE frame, or ``""`` when it cannot be read."""
+    if not _is_sse_frame(frame):
+        return ""
+    try:
+        payload = json.loads(frame.split("data:", 1)[1].strip())
+    except (TypeError, ValueError):
+        return ""
+    return str(payload.get("type") or "") if isinstance(payload, dict) else ""
+
+
 async def _tier_for_model_id(model_id: str) -> str:
     """Best-effort tier for a concrete model id, for agent selection only.
 
@@ -289,6 +338,80 @@ def _demo_agent(req: "ChatRequest") -> AgentName:
     }.get(mode, "CODER")  # type: ignore[return-value]
 
 
+def _legacy_usage_metric(req: "ChatRequest", llm_client: Any) -> str | None:
+    """Build the usage metric for the legacy chat lane.
+
+    The legacy lane reports token usage on a single branch of a pipeline that
+    has more than twenty terminal points. Every PLANNED run that took another
+    branch therefore reached the session panel with no model, no token counts
+    and no cost — the panel showed "—" for a run that had really used a
+    model. This helper reports what the provider actually measured, and says
+    so honestly when nothing was measured.
+    """
+    provider = (
+        getattr(llm_client, "last_provider", None)
+        or getattr(llm_client, "active_provider", None)
+        or llm_client
+    )
+    raw_usage = getattr(provider, "last_usage", {})
+    raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
+
+    def _as_int(*keys: str) -> int:
+        for key in keys:
+            value = raw_usage.get(key)
+            if isinstance(value, int | float) and value > 0:
+                return int(value)
+        return 0
+
+    input_tokens = _as_int("input_tokens", "prompt_tokens")
+    output_tokens = _as_int("output_tokens", "completion_tokens")
+    total_tokens = _as_int("total_tokens") or (input_tokens + output_tokens)
+    if not (input_tokens or output_tokens or total_tokens):
+        # Nothing was measured: report nothing rather than a fabricated zero.
+        return None
+
+    provider_name = str(
+        getattr(provider, "provider_name", "")
+        or getattr(llm_client, "provider_name", "")
+        or provider.__class__.__name__.removesuffix("Provider").lower()
+    )
+    model = str(
+        getattr(provider, "last_model", "")
+        or getattr(llm_client, "last_model", "")
+        or getattr(req, "model", "")
+        or ""
+    )
+    return _sse(
+        StreamEvent(
+            type="metric",
+            agent=getattr(req, "agent", "") or "NEXUS",
+            data={
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "reasoning_tokens": _as_int("reasoning_tokens", "thinking_tokens"),
+                    "total_tokens": total_tokens,
+                    "source": "provider",
+                    "cache_read_tokens": None,
+                    "cache_write_tokens": None,
+                    "cache_status": "not_reported",
+                    "provider": {
+                        "name": provider_name,
+                        "model": model or None,
+                        "simulation": bool(getattr(provider, "simulation", False)),
+                        "source": "legacy_dispatch",
+                        "finish_reason": str(
+                            getattr(provider, "last_finish_reason", "") or ""
+                        )
+                        or None,
+                        "complete": True,
+                    },
+                }
+            },
+        )
+    )
+
+
 async def _demo_response(req: "ChatRequest", agent_name: AgentName) -> AsyncIterator[str]:
     """Emit a clearly-labelled simulated chat response (demo fallback).
 
@@ -363,20 +486,59 @@ class _IncrementalResponseParser:
     #: frame can never swallow the rest of a reply.
     _MAX_PENDING_EVENT_CHARS = 262144
 
-    def __init__(self, agent: str) -> None:
+    def __init__(self, agent: str, trusted_project_path: str = "") -> None:
         self.agent = agent
+        #: The project root the request selected. Tool arguments may not
+        #: choose a different one.
+        self.trusted_project_path = str(trusted_project_path or "").strip()
         self.buffer = ""
         self.in_thinking = False
+        self.reasoning_visibility = reasoning_visibility()
+        self._thinking_label_emitted = False
+        self._thinking_visible_chars = 0
         # Tool markup is an implementation detail. The ReAct loop emits
         # structured tool_call/tool_result events after parsing it, so showing
         # the raw provider syntax in the conversation is both noisy and makes
         # an unsuccessful parse look like a completed action.
         self.tool_delimiter: str | None = None
 
+    def _thinking_events(self, text: str) -> list[StreamEvent]:
+        """Surface only a safe progress label unless FULL was operator-enabled."""
+        if not text.strip():
+            return []
+        cap: int | None = None
+        if self.reasoning_visibility is ReasoningVisibility.FULL:
+            remaining = FULL_CAP - self._thinking_visible_chars
+            if remaining <= 0:
+                return []
+            cap = remaining
+        elif self._thinking_label_emitted:
+            return []
+
+        visible = bound_reasoning_text(
+            text,
+            visibility=self.reasoning_visibility,
+            cap=cap,
+        )
+        if not visible:
+            return []
+        if self.reasoning_visibility is ReasoningVisibility.FULL:
+            self._thinking_visible_chars += len(visible)
+        else:
+            self._thinking_label_emitted = True
+        return [
+            StreamEvent(
+                type="thinking",
+                agent=self.agent,
+                content=visible,
+                data={"visibility": self.reasoning_visibility.value},
+            )
+        ]
+
     def _text_events(self, text: str) -> list[StreamEvent]:
         if not text:
             return []
-        return _parse_inline_events(text, self.agent)
+        return _parse_inline_events(text, self.agent, self.trusted_project_path)
 
     @staticmethod
     def _partial_tag_suffix_length(text: str, tags: tuple[str, ...]) -> int:
@@ -473,10 +635,7 @@ class _IncrementalResponseParser:
                 close = _THINK_CLOSE_RE.search(self.buffer)
                 if close:
                     content = self.buffer[: close.start()]
-                    if content.strip():
-                        events.append(
-                            StreamEvent(type="thinking", agent=self.agent, content=content)
-                        )
+                    events.extend(self._thinking_events(content))
                     self.buffer = self.buffer[close.end() :]
                     self.in_thinking = False
                     continue
@@ -486,10 +645,7 @@ class _IncrementalResponseParser:
                 )
                 if safe_length:
                     content = self.buffer[:safe_length]
-                    if content.strip():
-                        events.append(
-                            StreamEvent(type="thinking", agent=self.agent, content=content)
-                        )
+                    events.extend(self._thinking_events(content))
                     self.buffer = self.buffer[safe_length:]
                 break
 
@@ -529,11 +685,7 @@ class _IncrementalResponseParser:
             return self._text_events(head) if head.strip() else []
         if self.in_thinking:
             self.in_thinking = False
-            return (
-                [StreamEvent(type="thinking", agent=self.agent, content=text)]
-                if text.strip()
-                else []
-            )
+            return self._thinking_events(text)
         return self._text_events(text)
 
 
@@ -553,7 +705,9 @@ except ValueError:
     TOKEN_TIMEOUT_SECONDS = None
 
 
-def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
+def _parse_inline_events(
+    token: str, agent: str, trusted_project_path: str = ""
+) -> list[StreamEvent]:
     """Parse <event>...</event> tags produced by agents into structured events.
 
     Also extracts ``<think>...</think>`` blocks (e.g. from DeepSeek / Qwen)
@@ -561,6 +715,10 @@ def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
 
     Returns a list of StreamEvents. Any non-event text is returned as a token
     event. Multiple inline events in one token are supported.
+
+    ``trusted_project_path`` is the project root the request selected. A
+    model-supplied root in a tool call is stripped here: the sandbox is the
+    server's boundary, not the model's choice.
     """
     events: list[StreamEvent] = []
     last_end = 0
@@ -605,9 +763,25 @@ def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
                         type="tool_call",
                         agent=agent,
                         tool_name=tool_name,
-                        tool_args=args if isinstance(args, dict) else {"raw": args},
+                        tool_args=strip_untrusted_project_path(
+                            args if isinstance(args, dict) else {"raw": args},
+                            trusted_project_path,
+                        ),
                     )
                 )
+        elif event_type == "tool_output":
+            if "|" in payload:
+                tool_name, raw_output = payload.split("|", 1)
+                try:
+                    output = json.loads(raw_output)
+                except json.JSONDecodeError:
+                    output = {}
+                if isinstance(output, dict) and output.get("stream") in {"stdout", "stderr"}:
+                    events.append(StreamEvent(
+                        type="progress", agent=agent, tool_name=tool_name,
+                        data={"kind": "command_output", "stream": output["stream"],
+                              "text": str(output.get("text") or "")},
+                    ))
         elif event_type == "tool_result":
             # payload: tool_name|json_result
             if "|" in payload:
@@ -624,6 +798,19 @@ def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
                         tool_result=result,
                     )
                 )
+        elif event_type == "tool_error_detail":
+            if "|" in payload:
+                tool_name, raw_detail = payload.split("|", 1)
+                try:
+                    detail = json.loads(raw_detail)
+                except json.JSONDecodeError:
+                    detail = {"message": "A ferramenta falhou sem detalhes válidos."}
+                if isinstance(detail, dict):
+                    events.append(StreamEvent(
+                        type="tool_error", agent=agent, tool_name=tool_name,
+                        tool_error=str(detail.get("message") or "A ferramenta falhou."),
+                        tool_result=detail,
+                    ))
         elif event_type == "tool_error":
             tool_name = None
             error_payload = payload
@@ -652,32 +839,31 @@ def _parse_inline_events(token: str, agent: str) -> list[StreamEvent]:
                     type="tool_confirmation",
                     agent=agent,
                     tool_name=confirmation.get("tool_name"),
-                    tool_args=confirmation.get("tool_args"),
+                    tool_args=strip_untrusted_project_path(
+                        confirmation.get("tool_args"), trusted_project_path
+                    ),
                     data=confirmation,
                 )
             )
         elif event_type == "thinking":
-            # The ReAct loop emits an iteration marker before asking the model
-            # for its next response.  It is progress metadata, not private
-            # chain-of-thought; expose a short status so the UI does not look
-            # stalled while tools are being planned.
-            #
-            # A NON-iteration payload is different: that is the provider's own
-            # approach text, already bounded by
-            # ``AgentBase._publish_reasoning``. Replacing it with the generic
-            # "A analisar a tarefa…" (which is what this branch used to do for
-            # every payload) is what made the reasoning panel useless: the
-            # user saw a generic label instead of what the model was doing. It
-            # is surfaced verbatim, re-bounded here because this is the frame
-            # that leaves the process.
-            iteration_match = re.fullmatch(r"iteration:(\d+)", payload.strip())
-            if iteration_match:
-                label = f"A analisar a tarefa (passo {iteration_match.group(1)})…"
-            else:
-                label = bound_reasoning_text(decode_payload(payload).strip())
-                if not label:
-                    label = "A analisar a tarefa…"
-            events.append(StreamEvent(type="thinking", agent=agent, content=label))
+            visibility = reasoning_visibility()
+            if visibility is not ReasoningVisibility.OFF:
+                iteration_match = re.fullmatch(r"iteration:(\d+)", payload.strip())
+                if iteration_match:
+                    label = f"A analisar a tarefa (passo {iteration_match.group(1)})…"
+                else:
+                    label = bound_reasoning_text(
+                        decode_payload(payload).strip(), visibility=visibility
+                    )
+                if label:
+                    events.append(
+                        StreamEvent(
+                            type="thinking",
+                            agent=agent,
+                            content=label,
+                            data={"visibility": visibility.value},
+                        )
+                    )
         elif event_type == "warning":
             events.append(
                 StreamEvent(
@@ -906,6 +1092,18 @@ _ACTIONABLE_QUESTION_INTENT_RE = _compile_marker_pattern(
         "verificar",
         "validar",
         "usar",
+        "confirma",
+        "confirme",
+        "verifica",
+        "verifique",
+        "atualiza",
+        "atualize",
+        "cria",
+        "crie",
+        "conclui",
+        "conclua",
+        "marca",
+        "marque",
     )
 )
 
@@ -953,13 +1151,49 @@ def _is_informational_question(query: str) -> bool:
 
 _ASSISTED_ACTION_RE = _compile_marker_pattern(
     (
+        "read",
+        "open",
+        "search",
+        "inspect",
+        "use",
+        "usa",
+        "usar",
+        "utiliza",
+        "utilizar",
+        "ler",
+        "lê",
+        "le",
+        "abre",
+        "abrir",
+        "procura",
+        "procurar",
+        "pesquisa",
+        "pesquisar",
+        "inspeciona",
+        "inspecionar",
+        "confirma",
+        "confirmar",
+        "confirme",
+        "verifica",
+        "verificar",
+        "verifique",
         "create",
         "build",
         "write",
         "change",
         "update",
+        "atualiza",
         "remove",
         "modify",
+        "cria",
+        "crie",
+        "atualize",
+        "conclui",
+        "concluir",
+        "conclua",
+        "marca",
+        "marcar",
+        "marque",
         "criar",
         "construir",
         "escrever",
@@ -1038,6 +1272,19 @@ def _reclassify_no_project_content_request(
         force_verification=False,
         needs_clarification=False,
     )
+
+
+_ASSISTED_ALLOWED_TOOLS = (
+    "read_file",
+    "search_in_files",
+    "run_tests",
+    "type_check",
+    # Per-session planning is safe in assisted mode and is required by the
+    # agent contract for multi-step work. It does not widen project writes.
+    "todo_write",
+    "todo_list",
+)
+_ASSISTED_MAX_ITERATIONS = 6
 
 
 def _needs_project_context(message: str) -> bool:
@@ -1125,6 +1372,26 @@ def _is_complex_task(query: str) -> bool:
 
 _FAST_CHAT_ACTION_RE = _compile_marker_pattern(
     (
+        "read",
+        "open",
+        "search",
+        "inspect",
+        "use",
+        "usa",
+        "usar",
+        "utiliza",
+        "utilizar",
+        "ler",
+        "lê",
+        "le",
+        "abre",
+        "abrir",
+        "procura",
+        "procurar",
+        "pesquisa",
+        "pesquisar",
+        "inspeciona",
+        "inspecionar",
         "create",
         "build",
         "implement",
@@ -1735,6 +2002,77 @@ def _normalise_autonomous_status(state: str, failed_tasks: int = 0, blocked_task
     return "completed"
 
 
+class _RunScopedEventBus:
+    """Give this engine's events the chat run identity at their source."""
+
+    def __init__(self, event_bus: Any, run_id: str) -> None:
+        self._event_bus = event_bus
+        self._run_id = run_id
+
+    async def publish(self, event: Any) -> None:
+        if not event.run_id:
+            event.run_id = self._run_id
+        await self._event_bus.publish(event)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._event_bus, name)
+
+
+class _AutonomousStreamConflict(RuntimeError):
+    """A run already owns a stream or journal; never overwrite its history."""
+
+
+async def _ordered_autonomous_frames(
+    frames: AsyncIterator[str], run_id: str
+) -> AsyncIterator[str]:
+    """Journal the exact public frames once, in the order the chat receives them."""
+    if not run_id:
+        async for raw in frames:
+            yield raw
+        return
+
+    from backend.orchestrator.routes.chat_primary import (
+        _primary_journal_path,
+        runtime_event_to_stream_events,
+    )
+    from backend.runtime.events import RunEventStream, RuntimeEventType, get_active_run_event_stream
+
+    journal_path = _primary_journal_path(run_id)
+    if get_active_run_event_stream(run_id) is not None or (
+        journal_path is not None and journal_path.exists() and journal_path.stat().st_size
+    ):
+        raise _AutonomousStreamConflict(f"A execução {run_id} já tem um histórico de eventos.")
+    stream = RunEventStream(run_id, journal_path=journal_path)
+    stream.start_journal()
+    try:
+        async with contextlib.aclosing(frames):
+            async for raw in frames:
+                if not raw.startswith("data: "):
+                    yield raw
+                    continue
+                frame = StreamEvent.model_validate_json(raw[6:].strip())
+                task_id = frame.task_id or str(frame.data.get("task_id") or "")
+                # A bus event can produce several UI frames. Its identity is
+                # provenance, not the unique ordering identity of each frame.
+                source_event_id = frame.event_id or frame.data.get("event_id")
+                source_seq = frame.seq or frame.data.get("seq")
+                if source_event_id:
+                    frame.data["source_event_id"] = source_event_id
+                if source_seq:
+                    frame.data["source_seq"] = source_seq
+                event = stream.emit(
+                    RuntimeEventType.CHAT_FRAME,
+                    agent_id=str(frame.agent or "ORCHESTRATOR"),
+                    task_id=task_id,
+                    frame=frame.model_dump(mode="json"),
+                )
+                await stream.wait_persisted(event.seq)
+                for rendered in runtime_event_to_stream_events(event):
+                    yield _sse(rendered)
+    finally:
+        await stream.aclose()
+
+
 async def _stream_autonomous_execution(
     objective: str,
     session_id: str,
@@ -1750,6 +2088,8 @@ async def _stream_autonomous_execution(
     cancellation_request_id: str = "",
     checkpoint_callback: Callable[..., None] | None = None,
     run_id: str = "",
+    user_id: str = "",
+    model_override: str = "",
 ) -> AsyncIterator[str]:
     """Run execute_autonomous() and convert Engine EventBus events to SSE tokens.
 
@@ -1773,9 +2113,10 @@ async def _stream_autonomous_execution(
     engine = OrchestrationEngine(
         llm_client=llm_client,
         registry=registry,
-        event_bus=event_bus,
+        event_bus=_RunScopedEventBus(event_bus, run_id) if event_bus and run_id else event_bus,
         max_parallel=3,
         default_timeout=autonomous_step_timeout,
+        model_override=model_override,
     )
 
     event_stream: AsyncGenerator[str, None] | None = None
@@ -1802,7 +2143,7 @@ async def _stream_autonomous_execution(
     if cancellation_request_id:
         cancellation_watch_task = asyncio.create_task(_cancel_stream_on_request())
 
-    yield _sse(StreamEvent(type="agent_started", agent="ARCHITECT"))
+    yield _sse(StreamEvent(type="agent_started", agent="ORCHESTRATOR"))
 
     # ── Mission Control: understand before spawning ────────────────────────
     #
@@ -1895,19 +2236,11 @@ async def _stream_autonomous_execution(
     except Exception:
         logger.warning("Mission Control pre-flight failed; continuing", exc_info=True)
 
-    yield _sse(
-        StreamEvent(
-            type="thinking",
-            agent="ARCHITECT",
-            content="Vou analisar o pedido, dividir o trabalho e validar o resultado.",
-        )
-    )
-
     async def _consume_events() -> AsyncGenerator[str, None]:
         """Subscribe to event_bus and yield SSE frames until it is closed."""
         if event_bus is None:
             return
-        response_parsers: dict[str, _IncrementalResponseParser] = {}
+        response_parsers: dict[tuple[str, str], _IncrementalResponseParser] = {}
 
         def ui_agent(source: str) -> AgentName:
             """Keep infrastructure component names out of the public agent field."""
@@ -1945,6 +2278,10 @@ async def _stream_autonomous_execution(
 
         try:
             async for evt in event_bus.stream_events(event_types=["*"], session_id=session_id):
+                # Multiple runs can share a session. Unscoped or foreign events
+                # cannot truthfully be attributed to this run.
+                if run_id and evt.run_id != run_id:
+                    continue
                 et_value = (
                     evt.event_type.value
                     if hasattr(evt.event_type, "value")
@@ -2021,7 +2358,8 @@ async def _stream_autonomous_execution(
 
                 if et == EventType.TOKEN and content:
                     parser = response_parsers.setdefault(
-                        str(agent), _IncrementalResponseParser(str(agent))
+                        (str(agent), str(evt.task_id or "")),
+                        _IncrementalResponseParser(str(agent), project_path),
                     )
                     for parsed in parser.feed(content):
                         yield _event_sse(_stamped(parsed))
@@ -2173,7 +2511,10 @@ async def _stream_autonomous_execution(
                                 type=et_value,  # type: ignore[arg-type]
                                 agent=agent,
                                 tool_name=str(tool_name or "tool"),
-                                tool_args=args if isinstance(args, dict) else {"raw": args},
+                                tool_args=strip_untrusted_project_path(
+                                    args if isinstance(args, dict) else {"raw": args},
+                                    project_path,
+                                ),
                                 tool_result=result if et == EventType.TOOL_RESULT else None,
                                 tool_error=error if et == EventType.TOOL_ERROR else None,
                                 data={**data, **event_metadata},
@@ -2197,9 +2538,16 @@ async def _stream_autonomous_execution(
                             )
                         )
                     )
-            for parser in response_parsers.values():
+            for (_, parser_task_id), parser in response_parsers.items():
                 for parsed in parser.flush():
-                    yield _event_sse(_stamped(parsed))
+                    yield _event_sse(
+                        parsed.model_copy(
+                            update={
+                                "task_id": parser_task_id,
+                                "data": {**parsed.data, "task_id": parser_task_id},
+                            }
+                        )
+                    )
         except Exception as exc:
             # WARNING, not DEBUG: a dead bridge is exactly the "modelo não
             # responde" symptom and must be visible in production logs.
@@ -2232,6 +2580,7 @@ async def _stream_autonomous_execution(
                 context=execution_context,
                 history=list(history) if history else [],
                 project_path=project_path or ".",
+                user_id=user_id,
                 max_verify_iterations=2,
             )
         )
@@ -2299,6 +2648,7 @@ async def _stream_autonomous_execution(
                             event_type=EventType.HEARTBEAT,
                             source="ORCHESTRATOR",
                             session_id=session_id,
+                            run_id=run_id,
                             task_id=run_id,
                             content=heartbeat_text,
                             data=heartbeat_event_data,
@@ -2323,6 +2673,20 @@ async def _stream_autonomous_execution(
 
             if engine_result_future in done:
                 result = engine_result_future.result()
+                # The producer has returned, but its final lifecycle events
+                # can still be queued in the SSE bridge. Drain those already
+                # available before closing the subscription.
+                while next_event_task is not None:
+                    await asyncio.sleep(0)
+                    if not next_event_task.done():
+                        break
+                    try:
+                        frame = next_event_task.result()
+                    except StopAsyncIteration:
+                        next_event_task = None
+                        break
+                    yield frame
+                    next_event_task = asyncio.create_task(anext(event_stream))
                 break
     except asyncio.CancelledError:
         _cancelled = True
@@ -2526,14 +2890,20 @@ async def _stream_autonomous_execution(
 
     summary = "\n".join(summary_lines)
     for line in summary.split("\n"):
-        yield _sse(StreamEvent(type="token", agent="ARCHITECT", content=line + "\n"))
+        yield _sse(StreamEvent(type="token", agent="ORCHESTRATOR", content=line + "\n"))
 
     await context.append_message(
-        session_id, ChatMessage(role="assistant", content=summary, timestamp=now)
+        session_id, ChatMessage(role="assistant", content=summary, timestamp=now, run_id=run_id or None)
     )
-    add_message(session_id, "assistant", summary, tier_used="ORCHESTRATOR")
+    add_message(
+        session_id,
+        "assistant",
+        summary,
+        tier_used="ORCHESTRATOR",
+        run_id=run_id or None,
+    )
 
-    yield _sse(StreamEvent(type="agent_finished", agent="ARCHITECT"))
+    yield _sse(StreamEvent(type="agent_finished", agent="ORCHESTRATOR"))
     yield _sse(StreamEvent(type="done"))
 
 
@@ -2621,6 +2991,68 @@ async def chat(
                 raise HTTPException(status_code=404, detail="Session not found") from None
     req.session_id = session_id
 
+    # Session ownership and the persisted profile, not client-supplied model,
+    # mode or project, define a bot turn. A hidden profile stays non-runnable.
+    from backend.persistence.bots import bot_for_session
+
+    bot_profile = bot_for_session(user_id, session_id)
+    if bot_profile is not None:
+        if bot_profile["deleted"]:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        if not bot_profile["provider"] or not bot_profile["model"]:
+            raise HTTPException(status_code=409, detail="Configura o provedor e o modelo do bot")
+        req.provider = bot_profile["provider"]
+        req.model = bot_profile["model"]
+        req.model_is_concrete = True
+        # Bots may inspect only the project explicitly selected by the user.
+        # Resolve it through the same registered-project boundary as file APIs;
+        # never let a bot request choose an arbitrary host directory.
+        requested_project = str(getattr(req, "project_path", "") or "").strip()
+        if requested_project and requested_project not in {".", "./", ".\\"}:
+            from backend.orchestrator.routes.files import _resolve_project_root
+
+            req.project_path = str(
+                _resolve_project_root(requested_project, session_id, user_id)
+            )
+        else:
+            req.project_path = ""
+        req.mode = "chat"
+        req.autonomous = False
+        req.swarm_agents = []
+        req.thinking_strength = ""
+        request.state.nexus_bot_profile = bot_profile
+
+    idempotency_key = _request_idempotency_key(request, req, user_id=user_id)
+    request.state.nexus_idempotency_key = idempotency_key
+    request.state.nexus_user_id = user_id
+    existing_run = _find_idempotent_primary_run(
+        session_id=session_id,
+        user_id=user_id,
+        idempotency_key=idempotency_key,
+    )
+    if existing_run is not None and _should_replay_idempotent_primary_run(existing_run):
+        logger.info(
+            "Replaying existing chat run %s for an idempotent retry (session=%s)",
+            existing_run.run_id,
+            session_id,
+        )
+        return StreamingResponse(
+            _replay_idempotent_primary_run(session_id, existing_run),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+                "X-Nexus-Replayed": "true",
+            },
+        )
+    if existing_run is not None:
+        logger.info(
+            "Re-entering recovered chat run %s after restart (session=%s)",
+            existing_run.run_id,
+            session_id,
+        )
+
     llm_client = request.app.state.llm_client
     registry = get_registry(request.app)
     context = request.app.state.context
@@ -2639,8 +3071,42 @@ async def chat(
         generic ``NetworkError``. Convert late pipeline failures into the
         same structured error/done events used by the normal error paths.
         """
-        pipeline = _select_pipeline(req, llm_client, registry, context, event_bus, request)
-        next_chunk: asyncio.Task[str] | None = asyncio.create_task(anext(pipeline))
+        pipeline = _select_pipeline(
+            req, llm_client, registry, context, event_bus, request, user_id=user_id
+        )
+        # The pipeline is consumed by ONE task, not by one task per chunk.
+        #
+        # The primary runtime publishes the id of the run it belongs to in a
+        # context variable, and a context variable set inside a task is
+        # invisible to the task that comes next. With a task per chunk, the
+        # tool calls of a run could not see the run they belong to: the spawn
+        # policy of the run was unreachable and the tool budget was charged
+        # to no run at all. One task keeps the whole run inside one context.
+        frames: asyncio.Queue[str | BaseException | None] = asyncio.Queue(maxsize=64)
+
+        async def _pump() -> None:
+            try:
+                async for frame in pipeline:
+                    await frames.put(frame)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # The failure travels through the queue so the consumer sees
+                # it exactly as it used to see the exception of ``anext()``.
+                with contextlib.suppress(Exception):
+                    await frames.put(exc)
+            finally:
+                task = asyncio.current_task()
+                if task is None or not task.cancelling():
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await frames.put(None)
+                close = getattr(pipeline, "aclose", None)
+                if callable(close):
+                    with contextlib.suppress(asyncio.CancelledError, GeneratorExit, Exception):
+                        await close()
+
+        pump = asyncio.create_task(_pump())
+        getter: asyncio.Task[str | BaseException | None] | None = None
         terminal_done_seen = False
         terminal_error_seen = False
         terminal_error_category = ""
@@ -2667,49 +3133,29 @@ async def chat(
             )
             infinity_finalized = True
 
+        def _request_was_cancelled() -> bool:
+            request_id = str(
+                getattr(getattr(request, "state", None), "nexus_request_id", "") or ""
+            )
+            return bool(
+                request_id and get_cancellation_registry().is_cancelled(request_id)
+            )
+
         try:
-            while next_chunk is not None:
-                ready, _ = await asyncio.wait({next_chunk}, timeout=15.0)
+            while True:
+                if getter is None:
+                    getter = asyncio.create_task(frames.get())
+                ready, _ = await asyncio.wait({getter}, timeout=15.0)
                 if not ready:
                     # A comment frame keeps browsers and reverse proxies from
                     # treating a long provider/tool pause as a dead stream.
+                    # The pending getter is kept alive: cancelling it could
+                    # drop the frame it was about to hand over.
                     yield ": nexus-heartbeat\n\n"
                     continue
-                try:
-                    frame = next_chunk.result()
-                    if frame.startswith("data:"):
-                        try:
-                            payload = json.loads(frame.split("data:", 1)[1].strip())
-                            frame_type = payload.get("type")
-                            frame_data = payload.get("data")
-                            if frame_type in {"error", "execution_error"}:
-                                terminal_error_seen = True
-                                if isinstance(frame_data, dict):
-                                    terminal_error_category = str(
-                                        frame_data.get("error_category") or ""
-                                    )
-                                    if frame_data.get("state") == "cancelled":
-                                        terminal_error_category = ErrorCategory.CANCELLATION.value
-                                terminal_error_message = str(
-                                    payload.get("content") or payload.get("error") or ""
-                                )[:600]
-                            if isinstance(frame_data, dict):
-                                measured = frame_data.get("verification")
-                                if isinstance(measured, dict):
-                                    infinity_verification = dict(measured)
-                                elif frame_data.get("ran") is not None:
-                                    infinity_verification = {
-                                        key: frame_data.get(key)
-                                        for key in ("ran", "ok", "summary", "command")
-                                        if key in frame_data
-                                    }
-                            terminal_done_seen = frame_type == "done"
-                            if terminal_done_seen:
-                                _finish_infinity("completed")
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            pass
-                    yield frame
-                except StopAsyncIteration:
+                item = getter.result()
+                getter = None
+                if item is None:
                     if not terminal_done_seen:
                         logger.error(
                             "Chat pipeline ended without terminal done event | session=%s",
@@ -2731,7 +3177,49 @@ async def chat(
                         )
                         yield _sse(StreamEvent(type="done"))
                     break
-                next_chunk = asyncio.create_task(anext(pipeline))
+                if isinstance(item, BaseException):
+                    raise item
+                frame = item
+                if frame.startswith("data:"):
+                    try:
+                        payload = json.loads(frame.split("data:", 1)[1].strip())
+                        frame_type = payload.get("type")
+                        frame_data = payload.get("data")
+                        if frame_type in {"error", "execution_error"}:
+                            terminal_error_seen = True
+                            if isinstance(frame_data, dict):
+                                terminal_error_category = str(
+                                    frame_data.get("error_category") or ""
+                                )
+                                if frame_data.get("state") == "cancelled":
+                                    terminal_error_category = ErrorCategory.CANCELLATION.value
+                            terminal_error_message = str(
+                                payload.get("content") or payload.get("error") or ""
+                            )[:600]
+                        if isinstance(frame_data, dict):
+                            measured = frame_data.get("verification")
+                            if isinstance(measured, dict):
+                                infinity_verification = dict(measured)
+                            elif frame_data.get("ran") is not None:
+                                infinity_verification = {
+                                    key: frame_data.get(key)
+                                    for key in ("ran", "ok", "summary", "command")
+                                    if key in frame_data
+                                }
+                        terminal_done_seen = frame_type == "done"
+                        if terminal_done_seen:
+                            _finish_infinity("completed")
+                            # The legacy lane reports its token usage on
+                            # one branch only, so most PLANNED runs reached
+                            # the session panel with no model, no tokens
+                            # and no cost. One metric frame before the
+                            # terminal frame covers every branch.
+                            usage_frame = _legacy_usage_metric(req, llm_client)
+                            if usage_frame is not None:
+                                yield usage_frame
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
+                yield frame
         except asyncio.CancelledError:
             # The browser/client intentionally disconnected, or an explicit
             # cancellation was requested. Emit the terminal SSE event before
@@ -2759,18 +3247,25 @@ async def chat(
         finally:
             if not infinity_finalized:
                 _finish_infinity(
-                    "blocked"
+                    "cancelled"
+                    if _request_was_cancelled()
+                    else "blocked"
                     if terminal_error_category == ErrorCategory.DISK_PRESSURE.value
                     else "failed"
                     if terminal_error_seen or not terminal_done_seen
                     else "completed"
                 )
-            if next_chunk is not None and not next_chunk.done():
-                next_chunk.cancel()
+            if getter is not None and not getter.done():
+                getter.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
-                    await next_chunk
+                    await getter
+            if not pump.done():
+                pump.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pump
             with contextlib.suppress(Exception):
                 await pipeline.aclose()
+            _persist_cancelled_chat_run(request, req.session_id)
             await release_llm_client(request.app, llm_client)
 
     return StreamingResponse(
@@ -2787,26 +3282,227 @@ async def chat(
 _IDEMPOTENCY_HEADERS = ("Idempotency-Key", "X-Idempotency-Key", "X-Nexus-Idempotency-Key")
 
 
-def _request_idempotency_key(request: Request | None, req: ChatRequest) -> str:
+def _request_idempotency_key(
+    request: Request | None,
+    req: ChatRequest,
+    *,
+    user_id: str = "",
+) -> str:
     """Identify a request so a client retry reuses the run already in flight.
 
     An explicit ``Idempotency-Key`` (or one of its accepted spellings) wins: it
     is the only signal that carries the client's own intent across a retry.
-    Without one, the fallback is the hash of ``session_id + message`` — the
-    same request text in the same conversation, which is what a retried POST
-    looks like when the client had no key to send. A *different* message never
-    collides, and a finished run is terminal, so this cannot resurrect old
-    work: it only stops one in-flight run from being duplicated.
+    Both forms are scoped to the authenticated user and session. Without an
+    explicit key, the fallback also includes the request text, so a retry of
+    the same POST is recognized while another user's or session's request
+    cannot adopt its run.
     """
     if request is not None:
+        existing = str(
+            getattr(getattr(request, "state", None), "nexus_idempotency_key", "") or ""
+        ).strip()
+        if existing:
+            return existing
+        user_id = user_id or str(
+            getattr(getattr(request, "state", None), "nexus_user_id", "") or ""
+        )
         for header in _IDEMPOTENCY_HEADERS:
             value = str(request.headers.get(header) or "").strip()
             if value:
-                return f"h-{value[:200]}"
+                identity = f"{user_id}\n{getattr(req, 'session_id', '') or ''}\n{value}"
+                scoped = hashlib.sha256(identity.encode()).hexdigest()[:40]
+                return f"h-{scoped}"
     digest = hashlib.sha256(
-        f"{getattr(req, 'session_id', '') or ''}\n{getattr(req, 'message', '') or ''}".encode()
+        f"{user_id}\n{getattr(req, 'session_id', '') or ''}\n"
+        f"{getattr(req, 'message', '') or ''}".encode()
     ).hexdigest()[:32]
     return f"sq-{digest}"
+
+
+def _persist_cancelled_chat_run(request: Request | None, session_id: str) -> None:
+    """Make an explicit SSE cancellation durable if a nested iterator exits early."""
+    state = getattr(request, "state", None)
+    request_id = str(getattr(state, "nexus_request_id", "") or "")
+    run_id = str(getattr(state, "nexus_run_id", "") or "")
+    if not request_id or not run_id or not get_cancellation_registry().is_cancelled(request_id):
+        return
+
+    try:
+        current = get_session_run(run_id)
+        if not current or current.get("status") != "running":
+            return
+        upsert_session_run(
+            run_id,
+            session_id,
+            status="cancelled",
+            phase="cancelled",
+            partial_output=str(current.get("partial_output") or ""),
+            error="Client or server cancelled the stream",
+            error_category=ErrorCategory.CANCELLATION.value,
+            execution_state="cancelled",
+            finished=True,
+        )
+    except Exception:
+        logger.exception("Could not persist cancellation for chat run %s", run_id)
+
+
+def _find_idempotent_primary_run(
+    *, session_id: str, user_id: str, idempotency_key: str
+) -> Any | None:
+    """Find the run a repeated HTTP chat request must reconnect to.
+
+    The search is scoped by both owner and session. The idempotency key is a
+    request identity, never an authority to attach to another user's run.
+    Terminal runs are included so a late retry returns the original result
+    instead of starting the same operation again.
+    """
+    try:
+        from backend.runtime.primary import find_run_for_identity
+
+        run = find_run_for_identity(
+            session_id=session_id,
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            include_terminal=True,
+        )
+    except Exception:
+        logger.debug("Could not resolve an idempotent chat retry", exc_info=True)
+        return None
+    if run is None:
+        return None
+    if str(getattr(run, "session_id", "") or "") != session_id:
+        return None
+    if str(getattr(run, "user_id", "") or "") != user_id:
+        return None
+    return run
+
+
+def _should_replay_idempotent_primary_run(run: Any) -> bool:
+    """Whether a repeated chat POST should attach/replay or re-enter a run.
+
+    A live run is replayed from its in-process stream, and a terminal run is
+    replayed from its durable journal/transcript. A ``RECOVERING`` run with no
+    live stream belongs to a process that has already stopped; let the primary
+    runtime adopt its checkpoint instead of waiting for a stream that cannot
+    appear in this process.
+    """
+    state = getattr(run, "state", "")
+    state = str(getattr(state, "value", state)).strip().lower()
+    if state == "recovering":
+        from backend.runtime.events import get_active_run_event_stream
+
+        run_id = str(getattr(run, "run_id", "") or "")
+        return bool(run_id and get_active_run_event_stream(run_id) is not None)
+    return True
+
+
+async def _replay_idempotent_primary_run(
+    session_id: str,
+    run: Any,
+) -> AsyncIterator[str]:
+    """Replay the durable timeline for a duplicate chat POST without rerunning it."""
+    if str(getattr(run, "session_id", "") or "") != session_id:
+        yield _sse(
+            StreamEvent(type="error", content="A execução pertence a outra conversa.")
+        )
+        yield _sse(StreamEvent(type="done"))
+        return
+    run_id = str(getattr(run, "run_id", "") or "")
+    if not run_id:
+        yield _sse(
+            StreamEvent(type="error", content="A execução existente não tem um identificador recuperável.")
+        )
+        yield _sse(StreamEvent(type="done"))
+        return
+
+    from backend.orchestrator.routes.chat_primary import runtime_event_to_stream_events
+    from backend.runtime.events import (
+        RunEventStream,
+        get_active_run_event_stream,
+        run_event_journal_path,
+    )
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 60.0
+    next_heartbeat = loop.time() + 15.0
+    state = getattr(run, "state", "")
+    state = str(getattr(state, "value", state)).strip().lower()
+    runtime_stream = get_active_run_event_stream(run_id)
+    while (
+        runtime_stream is None
+        and state not in {"completed", "failed", "cancelled", "expired"}
+        and loop.time() < deadline
+    ):
+        await asyncio.sleep(0.1)
+        runtime_stream = get_active_run_event_stream(run_id)
+        now = loop.time()
+        if runtime_stream is None and now >= next_heartbeat:
+            yield ": nexus-heartbeat\n\n"
+            next_heartbeat = now + 15.0
+
+    if runtime_stream is not None:
+        async for runtime_event in runtime_stream.subscribe(after_seq=0):
+            for frame in runtime_event_to_stream_events(runtime_event):
+                yield _sse(frame)
+        yield _sse(StreamEvent(type="done", run_id=run_id))
+        return
+
+    journal_path = run_event_journal_path(run_id)
+    journal_events = []
+    if journal_path is not None and journal_path.is_file():
+        journal_events = RunEventStream.load_journal(journal_path)
+        for runtime_event in journal_events:
+            for frame in runtime_event_to_stream_events(runtime_event):
+                yield _sse(frame)
+
+    if state in {"completed", "failed", "cancelled", "expired"}:
+        if not any(event.type.value == "message_delta" for event in journal_events):
+            # Event journals may be disabled. Recover the final assistant text
+            # from the durable transcript rather than asking the model again.
+            try:
+                from backend.persistence.db import get_messages
+
+                for row in get_messages(session_id, limit=200):
+                    if (
+                        isinstance(row, dict)
+                        and str(row.get("run_id") or "") == run_id
+                        and str(row.get("role") or "") == "assistant"
+                    ):
+                        answer = str(row.get("content") or "")
+                        if answer:
+                            yield _sse(
+                                StreamEvent(
+                                    type="token",
+                                    agent="NEXUS",
+                                    content=answer,
+                                    data={"replayed": True},
+                                    run_id=run_id,
+                                    event_id=f"{run_id}-replayed-answer",
+                                )
+                            )
+                        break
+            except Exception:
+                logger.debug(
+                    "Could not recover the assistant answer for run %s", run_id, exc_info=True
+                )
+        yield _sse(StreamEvent(type="done", run_id=run_id))
+        return
+
+    # Do not silently create another run when the first worker disappeared or
+    # its event journal is unavailable. A visible recovery error is safer than
+    # repeating tools that may already have changed files.
+    yield _sse(
+        StreamEvent(
+            type="error",
+            content=(
+                "A execução anterior foi encontrada, mas a timeline não está disponível. "
+                "Não iniciei o pedido outra vez para evitar repetir alterações."
+            ),
+            data={"error_category": "recovery", "run_id": run_id},
+            run_id=run_id,
+        )
+    )
+    yield _sse(StreamEvent(type="done", run_id=run_id))
 
 
 async def _select_pipeline(
@@ -2816,6 +3512,7 @@ async def _select_pipeline(
     context,
     event_bus=None,
     request: Request | None = None,
+    user_id: str = "",
 ) -> AsyncIterator[str]:
     """Decide who owns this turn — and keep a fallback that actually works.
 
@@ -2872,12 +3569,66 @@ async def _select_pipeline(
         yield _sse(StreamEvent(type="done"))
         return
 
+    selected = (getattr(req, "project_path", "") or "").strip()
+    mentioned = _existing_directory_from_message(req.message or "")
+    if selected and selected not in {".", "./", ".\\"} and mentioned:
+        selected_root = Path(selected).resolve()
+        mentioned_root = Path(mentioned).resolve()
+        if mentioned_root != selected_root and not mentioned_root.is_relative_to(selected_root):
+            yield _sse(StreamEvent(type="error", content=(
+                "O caminho indicado está fora do projeto selecionado. "
+                "Seleciona o projeto certo antes de continuar."
+            )))
+            yield _sse(StreamEvent(type="done"))
+            return
+
+    # Bots start in a strictly tool-free lane. Never fall back to legacy or
+    # interpret slash commands, since either could widen that policy.
+    bot_profile = getattr(getattr(request, "state", None), "nexus_bot_profile", None)
+    if bot_profile is not None:
+        from backend.orchestrator.routes import chat_primary
+
+        if not chat_primary.is_primary_enabled():
+            yield _sse(StreamEvent(type="error", content="O runtime de conversação não está ativo."))
+            yield _sse(StreamEvent(type="done"))
+            return
+        decision = TriageDecision(RequestClass.CONVERSATIONAL, "bot sem ferramentas")
+        primary = chat_primary.run_primary_chat(
+            req, llm_client, registry, context, decision=decision, owner_id=user_id,
+            event_bus=event_bus, request=request,
+            idempotency_key=_request_idempotency_key(request, req),
+        )
+        # The middleware's body task and the pipeline pump are different
+        # tasks. Interrupting only the former can leave model inference running
+        # after the browser has stopped. Retain the entry itself so unregister
+        # in the middleware cannot erase a cancellation before the pump sees it.
+        request_id = str(getattr(getattr(request, "state", None), "nexus_request_id", "") or "")
+        entry = get_cancellation_registry().get(request_id) if request_id else None
+        pump_task = asyncio.current_task()
+
+        async def cancel_bot_pump() -> None:
+            assert entry is not None
+            await entry.event.wait()
+            if pump_task is not None and not pump_task.done():
+                pump_task.cancel()
+
+        watcher = asyncio.create_task(cancel_bot_pump()) if entry is not None else None
+        try:
+            async with contextlib.aclosing(primary) as stream:
+                async for frame in stream:
+                    yield frame
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watcher
+        return
+
     # Slash commands are executable strategies owned by the legacy adapter.
     # Deterministic triage used to send short /forge and /sentinel requests to
     # PrimaryLoop before that adapter could resolve them.
-    advanced_profile: dict[str, Any] = {}
     try:
-        from backend.orchestrator.advanced_modes import get_orchestrator, resolve_command
+        from backend.orchestrator.advanced_modes import resolve_command
         from backend.orchestrator.infinity.terminal_protocol import parse_vibe_control
 
         command = (req.message or "").lstrip().split(None, 1)
@@ -2885,10 +3636,10 @@ async def _select_pipeline(
             parse_vibe_control(req.message or "") is not None
             or (command and command[0].startswith("/") and resolve_command(command[0]))
         ):
-            async for frame in legacy():
-                yield frame
+            async with contextlib.aclosing(legacy()) as stream:
+                async for frame in stream:
+                    yield frame
             return
-        advanced_profile = get_orchestrator().build_active_execution_profile()
     except Exception:
         logger.exception("Could not inspect advanced-mode routing")
 
@@ -2896,13 +3647,15 @@ async def _select_pipeline(
         from backend.orchestrator.routes import chat_primary
     except Exception:
         logger.exception("NEXUS primary runtime unavailable; using the legacy pipeline")
-        async for frame in legacy():
-            yield frame
+        async with contextlib.aclosing(legacy()) as stream:
+            async for frame in stream:
+                yield frame
         return
 
     if not chat_primary.is_primary_enabled():
-        async for frame in legacy():
-            yield frame
+        async with contextlib.aclosing(legacy()) as stream:
+            async for frame in stream:
+                yield frame
         return
 
     decision = None
@@ -2921,13 +3674,28 @@ async def _select_pipeline(
             project_path=selected_project_path,
         )
         use_primary = chat_primary.should_use_primary(decision)
-        if (
-            advanced_profile.get("force_autonomous")
-            and selected_project_path
-            and decision.request_class is not RequestClass.CONVERSATIONAL
-            and not _is_fast_chat_turn(req.message)
-        ):
-            use_primary = False
+        if use_primary and decision.request_class is not RequestClass.CONVERSATIONAL:
+            try:
+                from backend.orchestrator.advanced_modes import get_orchestrator
+
+                active_profile = get_orchestrator().build_active_execution_profile()
+            except Exception:
+                # The selected runtime still applies the profile fail-closed.
+                # If it cannot be inspected here, do not invent a composite
+                # strategy or force a legacy run.
+                active_profile = {}
+                logger.exception("Could not inspect the active Infinity profile for routing")
+            # The primary runtime already runs autonomously (spawn_task, tools,
+            # tests). Forcing the legacy planner here made multi-step edit+test
+            # requests end in a tools-disabled synthesis with no edit, so the
+            # Infinity ``force_autonomous`` legacy hop is now opt-in only.
+            if (
+                active_profile.get("force_autonomous")
+                and _is_complex_task(req.message)
+                and os.environ.get("NEXUS_LEGACY_PLANNED", "").strip().lower()
+                in {"1", "true", "yes", "on"}
+            ):
+                use_primary = False
     except Exception:
         logger.exception("Triage failed; using the legacy pipeline")
         use_primary = False
@@ -2939,8 +3707,9 @@ async def _select_pipeline(
                 req.session_id,
                 decision.request_class.value,
             )
-        async for frame in legacy():
-            yield frame
+        async with contextlib.aclosing(legacy()) as stream:
+            async for frame in stream:
+                yield frame
         return
 
     logger.info(
@@ -2955,16 +3724,22 @@ async def _select_pipeline(
         registry,
         context,
         decision=decision,
+        owner_id=user_id,
         event_bus=event_bus,
         request=request,
         idempotency_key=_request_idempotency_key(request, req),
     )
     frames = 0
+    saw_done = False
+    saw_sse_frame = False
     try:
         async for frame in primary:
             frames += 1
+            if _is_sse_frame(frame):
+                saw_sse_frame = True
+                if _frame_type(frame) == "done":
+                    saw_done = True
             yield frame
-        return
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -2985,8 +3760,22 @@ async def _select_pipeline(
         with contextlib.suppress(Exception):
             await primary.aclose()
 
+    if frames:
+        # The primary already reached the client, so the run is being
+        # rendered: the legacy lane must not be replayed on top of it. The
+        # only thing missing may be the terminal frame, and the client is
+        # promised one.
+        if saw_sse_frame and not saw_done:
+            yield _sse(StreamEvent(type="done"))
+        return
+
     # Nothing reached the client, so restarting on the legacy pipeline is
     # still invisible to the user. This is the only automatic fallback.
+    #
+    # It used to be unreachable: the ``return`` inside the ``try`` above
+    # skipped it whenever the primary generator completed normally, so a
+    # primary that produced zero frames ended the request with an EMPTY
+    # body — no error frame, no done frame, nothing for the client.
     _finalize_infinity_execution(
         request,
         outcome="failed",
@@ -2994,15 +3783,32 @@ async def _select_pipeline(
         error_category=ErrorCategory.INTERNAL.value,
     )
     logger.warning("NEXUS primary path produced no frames; falling back")
-    async for frame in legacy():
-        yield frame
+    async with contextlib.aclosing(legacy()) as stream:
+        async for frame in stream:
+            if _is_sse_frame(frame):
+                saw_sse_frame = True
+                if _frame_type(frame) == "done":
+                    saw_done = True
+            yield frame
+    if saw_sse_frame and not saw_done:
+        # The client reads until a "done" event. Whatever the legacy lane
+        # did, the turn ends with the terminal frame it is waiting for.
+        yield _sse(StreamEvent(type="done"))
 
 
 async def _run_pipeline(
-    req: ChatRequest, llm_client, registry, context, event_bus=None, request: Request | None = None
+    req: ChatRequest,
+    llm_client,
+    registry,
+    context,
+    event_bus=None,
+    request: Request | None = None,
 ) -> AsyncIterator[str]:
     """The core chat pipeline, extracted for testability (keeps the route tiny)."""
     started_at = time.time()
+    continuity_owner_id = str(
+        getattr(getattr(request, "state", None), "nexus_user_id", "") or ""
+    )
     run_id = f"run-{uuid.uuid4().hex}"
     goal_id = f"goal-{uuid.uuid4().hex[:12]}"
     correlation_id = uuid.uuid4().hex[:16]
@@ -3034,7 +3840,7 @@ async def _run_pipeline(
                     session_id=req.session_id,
                 )
             interrupt_active_session_runs(req.session_id, except_run_id=run_id)
-            add_message(req.session_id, "user", req.message)
+            add_message(req.session_id, "user", req.message, run_id=run_id)
             upsert_session_run(
                 run_id,
                 req.session_id,
@@ -3049,6 +3855,8 @@ async def _run_pipeline(
                 model=getattr(req, "model", "") or None,
             )
             run_started = True
+            if request is not None:
+                request.state.nexus_run_id = run_id
         except Exception:
             # The stream remains usable if an old database is read-only or is
             # being migrated; the failure is visible in logs and the normal
@@ -3143,7 +3951,7 @@ async def _run_pipeline(
         try:
             await context.append_message(
                 req.session_id,
-                ChatMessage(role="user", content=req.message, timestamp=now),
+                ChatMessage(role="user", content=req.message, timestamp=now, run_id=run_id),
             )
             await context.append_message(
                 req.session_id,
@@ -3151,6 +3959,7 @@ async def _run_pipeline(
                     role="assistant",
                     content=f"⚠️ {error_text}",
                     timestamp=now,
+                    run_id=run_id,
                 ),
             )
             add_message(
@@ -3158,6 +3967,7 @@ async def _run_pipeline(
                 "assistant",
                 f"⚠️ {error_text}",
                 tier_used=agent,
+                run_id=run_id,
             )
         except Exception:
             logger.debug("Failed to persist terminal chat error", exc_info=True)
@@ -3289,12 +4099,12 @@ async def _run_pipeline(
         yield _sse(StreamEvent(type="routing", routing=help_decision, data=run_context.to_dict()))
         now = datetime.now(UTC).isoformat()
         await context.append_message(
-            req.session_id, ChatMessage(role="user", content=req.message, timestamp=now)
+            req.session_id, ChatMessage(role="user", content=req.message, timestamp=now, run_id=run_id)
         )
         await context.append_message(
-            req.session_id, ChatMessage(role="assistant", content=help_text, timestamp=now)
+            req.session_id, ChatMessage(role="assistant", content=help_text, timestamp=now, run_id=run_id)
         )
-        add_message(req.session_id, "assistant", help_text, tier_used="ROUTER")
+        add_message(req.session_id, "assistant", help_text, tier_used="ROUTER", run_id=run_id)
         _checkpoint(
             status="completed",
             phase="command_help",
@@ -3339,34 +4149,11 @@ async def _run_pipeline(
     project_path_defaulted = False
 
     if not project_path and not fast_candidate:
-        try:
-            from backend.persistence.db import get_connection_pool
-
-            pool = get_connection_pool()
-            conn = pool.get_connection()
-            try:
-                row = conn.execute(
-                    "SELECT path FROM projects ORDER BY updated_at DESC, created_at DESC LIMIT 1"
-                ).fetchone()
-                candidate = str(row["path"]) if row and row["path"] else ""
-                if candidate and os.path.isdir(candidate):
-                    project_path = str(Path(candidate).resolve())
-                    logger.info("Using most recent project from database: %s", project_path)
-            finally:
-                # The connection came from the shared pool; return it instead
-                # of closing it so repeated chat requests cannot exhaust it.
-                pool.return_connection(conn)
-        except Exception as exc:
-            logger.warning("Could not read project from database: %s", exc)
-
-    if not project_path and not fast_candidate:
-        project_path_defaulted = True
-        project_path = str(REPO_ROOT)
-        logger.warning(
-            "No project found — using root: %s | session=%s",
-            project_path,
-            req.session_id,
-        )
+        yield _sse(StreamEvent(type="error", content=(
+            "Não há projeto selecionado. Seleciona a pasta do projeto antes de executar esta tarefa."
+        )))
+        yield _sse(StreamEvent(type="done"))
+        return
 
     # Create/read the compact project bootstrap on first use.  This is kept
     # outside the semantic memory store so the project can carry a small,
@@ -3405,9 +4192,12 @@ async def _run_pipeline(
                 session_id=req.session_id,
                 run_id=run_id,
                 model=str(getattr(req, "model", "") or ""),
+                owner_id=continuity_owner_id,
             )
             project_memory = combine_project_context(project_memory, continuity)
-            continuity_store = await asyncio.to_thread(ProjectContinuityStore, project_path)
+            continuity_store = await asyncio.to_thread(
+                ProjectContinuityStore, project_path, owner_id=continuity_owner_id
+            )
         except Exception:
             logger.warning("Could not load project continuity for %s", project_path, exc_info=True)
 
@@ -3689,6 +4479,13 @@ async def _run_pipeline(
         goal_id=goal_id,
     )
     history = await context.get_history(req.session_id)
+    # A turn that is still running is not history. Two turns of the same
+    # session must not see each other's user message, or the second one
+    # answers the first one's request as well.
+    with contextlib.suppress(Exception):
+        from backend.orchestrator.routes.chat_primary import _history_snapshot
+
+        history = _history_snapshot(history, session_id=req.session_id)
     # Persist the current user turn only after taking the pre-turn snapshot;
     # otherwise the same prompt would be fed back as part of its own history.
     _start_durable_run()
@@ -3871,13 +4668,13 @@ async def _run_pipeline(
         # Auto mode: for COMPLEX tasks, use the full Plan→Execute→Verify pipeline
         # via OrchestrationEngine.execute_autonomous(). For simple tasks, fall
         # through to the normal smart-routed single-agent ReAct loop.
-        # Keep the default ``auto`` lane principal-first. The synchronous
-        # Plan->Execute->Verify path is reserved for an explicitly activated
-        # advanced autonomous mode; otherwise a complex request is handled by
-        # the principal, which may use ``spawn_task`` for independent work.
+        # Keep ordinary ``auto`` work principal-first. An armed autonomous
+        # profile uses Plan->Execute->Verify only for mission-sized requests;
+        # direct tool requests stay on the single-agent ReAct path so a simple
+        # file read does not incur a planner and multi-agent cycle.
         if (
             execution_mode is ExecutionMode.MISSION
-            or (_advanced_force_autonomous and not fast_candidate)
+            or (_advanced_force_autonomous and _is_complex_task(effective_message))
         ) and event_bus is not None:
             logger.info(
                 "Auto mode: complex task detected, routing to execute_autonomous | session=%s | query=%.80s",
@@ -3904,10 +4701,52 @@ async def _run_pipeline(
                         cancellation_entry = get_cancellation_registry().get(request_id)
                         if cancellation_entry is not None:
                             inner_cancellation_event = cancellation_entry.event
-                async for chunk in _stream_autonomous_execution(
+                autonomous_llm_client = llm_client
+                if req.provider or model_override:
+                    try:
+                        from backend.orchestrator.routes import chat_primary
+
+                        autonomous_llm_client, provider_error = (
+                            await chat_primary._request_provider_client(req, llm_client)
+                        )
+                    except Exception as exc:  # noqa: BLE001 - fail closed on selection errors
+                        logger.warning(
+                            "Could not resolve the provider for the autonomous run",
+                            exc_info=True,
+                        )
+                        autonomous_llm_client = None
+                        provider_error = f"Provider selection failed: {type(exc).__name__}"
+                    if provider_error or autonomous_llm_client is None:
+                        message = provider_error or (
+                            "O fornecedor selecionado não está disponível; "
+                            "o pedido foi interrompido sem trocar de modelo."
+                        )
+                        await _persist_terminal_error(
+                            message,
+                            agent="ORCHESTRATOR",
+                            error_category=ErrorCategory.PROVIDER.value,
+                            phase="provider_selection",
+                            checkpoint={"model_override": model_override or None},
+                        )
+                        yield _sse(
+                            StreamEvent(
+                                type="error",
+                                agent="ORCHESTRATOR",
+                                content=message,
+                                data={
+                                    "error_category": ErrorCategory.PROVIDER.value,
+                                    "run_id": run_id,
+                                    "provider": req.provider or None,
+                                    "model": model_override or None,
+                                },
+                            )
+                        )
+                        yield _sse(StreamEvent(type="done", data=run_context.to_dict()))
+                        return
+                autonomous_frames = _stream_autonomous_execution(
                     objective=effective_message,
                     session_id=req.session_id,
-                    llm_client=llm_client,
+                    llm_client=autonomous_llm_client,
                     registry=registry,
                     event_bus=event_bus,
                     project_path=project_path,
@@ -3923,8 +4762,18 @@ async def _run_pipeline(
                         checkpoint=checkpoint,
                     ),
                     run_id=run_id,
-                ):
-                    yield chunk
+                    user_id=continuity_owner_id,
+                    model_override=model_override,
+                )
+                terminal_chunk: str | None = None
+                async for chunk in _ordered_autonomous_frames(autonomous_frames, run_id):
+                    # Persist the terminal run status before the original POST
+                    # sends done; otherwise an immediate refresh can see it
+                    # incorrectly still running.
+                    if chunk.startswith("data: ") and json.loads(chunk[6:]).get("type") == "done":
+                        terminal_chunk = chunk
+                    else:
+                        yield chunk
                 outcome_status = str(autonomous_outcome["status"])
                 _checkpoint(
                     status=outcome_status,
@@ -3953,6 +4802,29 @@ async def _run_pipeline(
                     ),
                     finished=True,
                 )
+                if terminal_chunk is not None:
+                    yield terminal_chunk
+                return
+            except JournalWriteError:
+                message = "Não foi possível gravar o histórico de eventos desta execução."
+                await _persist_terminal_error(
+                    message, agent="ORCHESTRATOR", error_category="journal_write",
+                    phase="autonomous_journal_failure",
+                )
+                yield _sse(StreamEvent(type="error", agent="ORCHESTRATOR", content=message,
+                                       data={"error_category": "journal_write", "run_id": run_id}))
+                yield _sse(StreamEvent(type="done", run_id=run_id))
+                return
+            except _AutonomousStreamConflict as exc:
+                message = str(exc)
+                await _persist_terminal_error(
+                    message,
+                    agent="ORCHESTRATOR",
+                    error_category=ErrorCategory.VALIDATION.value,
+                    phase="autonomous_stream_conflict",
+                )
+                yield _sse(StreamEvent(type="error", agent="ORCHESTRATOR", content=message))
+                yield _sse(StreamEvent(type="done", data=run_context.to_dict()))
                 return
             except DiskPressureError as exc:
                 detail = exc.to_dict()
@@ -3986,7 +4858,13 @@ async def _run_pipeline(
                     req.session_id,
                     ChatMessage(role="assistant", content=blocked_message, timestamp=now),
                 )
-                add_message(req.session_id, "assistant", blocked_message, tier_used="ORCHESTRATOR")
+                add_message(
+                    req.session_id,
+                    "assistant",
+                    blocked_message,
+                    tier_used="ORCHESTRATOR",
+                    run_id=run_id or None,
+                )
                 yield _sse(
                     StreamEvent(
                         type="error",
@@ -4005,7 +4883,7 @@ async def _run_pipeline(
 
         elif (
             execution_mode is ExecutionMode.MISSION
-            or (_advanced_force_autonomous and not fast_candidate)
+            or (_advanced_force_autonomous and _is_complex_task(effective_message))
         ) and event_bus is None:
             logger.warning(
                 "Auto mode: complex task detected but event_bus is unavailable — "
@@ -4197,10 +5075,10 @@ async def _run_pipeline(
             full = result.final_answer
             now = datetime.now(UTC).isoformat()
             await context.append_message(
-                req.session_id, ChatMessage(role="user", content=req.message, timestamp=now)
+                req.session_id, ChatMessage(role="user", content=req.message, timestamp=now, run_id=run_id)
             )
             await context.append_message(
-                req.session_id, ChatMessage(role="assistant", content=full, timestamp=now)
+                req.session_id, ChatMessage(role="assistant", content=full, timestamp=now, run_id=run_id)
             )
             latency_ms = int((time.time() - started_at) * 1000)
 
@@ -4211,7 +5089,8 @@ async def _run_pipeline(
                     session_id=req.session_id,
                 )
 
-            add_message(req.session_id, "assistant", full, tier_used="SWARM", latency_ms=latency_ms)
+            add_message(req.session_id, "assistant", full, tier_used="SWARM", latency_ms=latency_ms,
+                        run_id=run_id)
             _checkpoint(
                 status="completed",
                 phase="swarm_completed",
@@ -4225,21 +5104,21 @@ async def _run_pipeline(
                 from backend.knowledge.memory import MemoryType, get_memory_store
 
                 mem_store = get_memory_store()
-                await mem_store.store(
-                    content=f"User: {req.message}",
-                    memory_type=MemoryType.CONVERSATION,
-                    session_id=req.session_id,
-                    source="SWARM",
-                    tags=["user_query", "swarm"],
-                    importance=0.6,
-                )
                 if full.strip():
+                    from backend.agents.base import AgentBase
+
                     await mem_store.store(
-                        content=f"Assistant (SWARM): {full[:2000]}",
+                        content=(
+                            f"Completed SWARM conversation (topic: "
+                            f"{AgentBase._memory_topic(req.message)}).\n"
+                            f"Assistant outcome: {full[:2000]}"
+                        ),
                         memory_type=MemoryType.CONVERSATION,
                         session_id=req.session_id,
+                        project_id=project_path,
+                        user_id=continuity_owner_id,
                         source="SWARM",
-                        tags=["assistant_response", "swarm"],
+                        tags=["conversation_outcome", "swarm"],
                         importance=0.5,
                     )
             except Exception as exc:
@@ -4373,13 +5252,28 @@ async def _run_pipeline(
         if selected_client is not None:
             effective_client = selected_client
 
+    if not isinstance(effective_client, MultiLLMManager):
+        # The single-provider factory has legacy branches that return a raw
+        # adapter, and selecting from MultiLLMManager also returns its raw
+        # adapter. Put either behind the same budget/free-policy wrapper before
+        # the agent can call it.
+        from backend.llm.factory import ensure_cost_governed_provider
+
+        effective_client = ensure_cost_governed_provider(
+            effective_client,
+            free_only=bool(getattr(llm_client, "free_only", False)),
+        )
+
     # A concrete provider selection is an assertion, not a hint. Never send a
     # request to the default provider when the selected provider is absent;
     # that makes the UI lie about which service handled the message.
     requested_client_provider = getattr(effective_client, "provider_name", "")
-    provider_missing = bool(req.provider) and (
-        effective_client is llm_client and requested_client_provider != req.provider
+    provider_was_selected = bool(req.provider) or bool(model_override and effective_provider)
+    provider_missing = provider_was_selected and (
+        str(requested_client_provider or "").strip().lower()
+        != str(effective_provider or "").strip().lower()
     )
+    provider_label = str(req.provider or effective_provider or "(provider desconhecido)")
     if provider_missing and not (
         _structured_mode_action or _structured_mode_parse_error or _vibe_control_local_only
     ):
@@ -4389,18 +5283,18 @@ async def _run_pipeline(
             source="chat_routing",
             extra={
                 "event": "chat_provider_unavailable",
-                "requested_provider": req.provider,
+                "requested_provider": provider_label,
                 "model": model_override or "",
             },
         )
         _checkpoint(
             status="failed",
             phase="provider_error",
-            error=f"Provider '{req.provider}' is not configured",
+            error=f"Provider '{provider_label}' is not configured",
             error_category=ErrorCategory.PROVIDER.value,
             checkpoint={
                 "reason": "provider_unavailable",
-                "provider": req.provider,
+                "provider": provider_label,
                 "model": model_override or user_model or None,
             },
             finished=True,
@@ -4409,14 +5303,14 @@ async def _run_pipeline(
             StreamEvent(
                 type="error",
                 content=(
-                    f"Provider '{req.provider}' não está configurado/ativo; "
+                    f"Provider '{provider_label}' não está configurado/ativo; "
                     "o pedido foi interrompido para não trocar silenciosamente de provider."
                 ),
                 data={
                     "error_category": ErrorCategory.PROVIDER.value,
                     "run_id": run_context.run_id,
                     "correlation_id": run_context.correlation_id,
-                    "provider": req.provider,
+                    "provider": provider_label,
                     "model": model_override or user_model or None,
                 },
             )
@@ -4506,6 +5400,10 @@ async def _run_pipeline(
     # more precise than the routing tier and lets persisted metrics rank real
     # model ids even when the user leaves model selection on Auto.
     resolved_model_id = model_override or ""
+    # Keep the request-scoped completion verdict beside each invocation.
+    # Agent instances are shared across sessions, so their compatibility
+    # ``_last_run_success`` field cannot safely decide this run's durable state.
+    agent_requests: dict[str, AgentRequest] = {}
 
     def make_invocation(agent_name: str):
         async def invoke() -> AsyncIterator[str]:
@@ -4547,13 +5445,7 @@ async def _run_pipeline(
                 agent_context["_fast_chat_lane"] = True
                 agent_context["_allowed_tools"] = ()
             elif execution_mode is ExecutionMode.ASSISTED:
-                agent_context["_assisted_tool_budget"] = 3
-                agent_context["_allowed_tools"] = (
-                    "read_file",
-                    "search_in_files",
-                    "run_tests",
-                    "type_check",
-                )
+                agent_context["_allowed_tools"] = _ASSISTED_ALLOWED_TOOLS
                 agent_context["_tool_evidence_requirement"] = (
                     _direct_runtime_evidence_requirement(effective_message) or "substantive"
                 )
@@ -4623,7 +5515,7 @@ async def _run_pipeline(
             request_max_iterations = (
                 2
                 if execution_mode is ExecutionMode.CHAT
-                else 3
+                else _ASSISTED_MAX_ITERATIONS
                 if execution_mode is ExecutionMode.ASSISTED
                 else mode_max_iterations
             )
@@ -4640,6 +5532,7 @@ async def _run_pipeline(
                 history=history,
                 project_path=project_path,
                 context=agent_context,
+                user_id=continuity_owner_id,
                 max_iterations=request_max_iterations,
                 enable_thinking=(
                     mode_enable_thinking
@@ -4653,6 +5546,7 @@ async def _run_pipeline(
                     and execution_mode in {ExecutionMode.ASSISTED, ExecutionMode.MISSION}
                 ),
             )
+            agent_requests[agent_name] = agent_req
             resolved_model_id = agent.resolve_model_id(agent_req)
             if _structured_mode_parse_error:
                 async def invalid_structured_action() -> AsyncIterator[str]:
@@ -4715,6 +5609,7 @@ async def _run_pipeline(
                         history=worker_history,
                         project_path=project_path,
                         context=worker_context,
+                        user_id=continuity_owner_id,
                         max_iterations=agent_req.max_iterations,
                         enable_thinking=agent_req.enable_thinking,
                         autonomous=True,
@@ -4920,7 +5815,7 @@ async def _run_pipeline(
         MAX_RESPONSE_LENGTH = max(0, int(os.environ.get("NEXUS_MAX_RESPONSE_LENGTH", "0")))
     except ValueError:
         MAX_RESPONSE_LENGTH = 0
-    response_parser = _IncrementalResponseParser(str(outcome.used_agent))
+    response_parser = _IncrementalResponseParser(str(outcome.used_agent), project_path)
     model_for_counting = outcome.used_agent
     stream_aborted = False
     token_iter = token_stream.__aiter__()
@@ -5051,7 +5946,7 @@ async def _run_pipeline(
             elif evt.type == "thinking" and evt.content:
                 thinking_parts.append(evt.content)
             yield _sse(evt)
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, GeneratorExit):
         _checkpoint(
             status="cancelled",
             phase="cancelled",
@@ -5061,6 +5956,10 @@ async def _run_pipeline(
             error="Client or server cancelled the stream",
             finished=True,
         )
+        close = getattr(token_stream, "aclose", None)
+        if callable(close):
+            with contextlib.suppress(asyncio.CancelledError, GeneratorExit, Exception):
+                await close()
         raise
     except Exception as exc:
         logger.exception("Stream interrupted: %s", exc)
@@ -5085,13 +5984,13 @@ async def _run_pipeline(
         try:
             err_now = datetime.now(UTC).isoformat()
             await context.append_message(
-                req.session_id, ChatMessage(role="user", content=req.message, timestamp=err_now)
+                req.session_id, ChatMessage(role="user", content=req.message, timestamp=err_now, run_id=run_id)
             )
             await context.append_message(
                 req.session_id,
-                ChatMessage(role="assistant", content=f"⚠ {err_text}", timestamp=err_now),
+                ChatMessage(role="assistant", content=f"⚠ {err_text}", timestamp=err_now, run_id=run_id),
             )
-            add_message(req.session_id, "assistant", f"⚠ {err_text}")
+            add_message(req.session_id, "assistant", f"⚠ {err_text}", run_id=run_id)
             _checkpoint(
                 status="interrupted",
                 phase="stream_error",
@@ -5114,6 +6013,30 @@ async def _run_pipeline(
     full = "".join(parts)
     if MAX_RESPONSE_LENGTH > 0:
         full = full[:MAX_RESPONSE_LENGTH]
+    completed_request = agent_requests.get(str(outcome.used_agent))
+    agent_run_verdict = (
+        completed_request.context.get("_agent_run_success")
+        if completed_request is not None
+        else None
+    )
+    agent_incomplete = agent_run_verdict is False
+    if agent_incomplete:
+        # Some agents end their stream with an explicit incomplete-answer
+        # notice rather than raising. Preserve that answer, but don't persist
+        # the run or project continuity as completed and don't learn it as a
+        # successful semantic memory.
+        yield _sse(
+            StreamEvent(
+                type="progress",
+                agent=outcome.used_agent,
+                content="O agente terminou sem concluir a tarefa; a execução ficou marcada como falhada.",
+                data={
+                    "status": "failed",
+                    "reason": "agent_incomplete",
+                    "run_id": run_context.run_id,
+                },
+            )
+        )
     if not full.strip():
         empty_response_error = (
             "O provider terminou a execução sem conteúdo visível. "
@@ -5251,20 +6174,29 @@ async def _run_pipeline(
     yield _sse(StreamEvent(type="metric", agent=outcome.used_agent, data={"usage": usage_data}))
     now = datetime.now(UTC).isoformat()
     await context.append_message(
-        req.session_id, ChatMessage(role="user", content=req.message, timestamp=now)
+        req.session_id, ChatMessage(role="user", content=req.message, timestamp=now, run_id=run_id)
     )
     await context.append_message(
-        req.session_id, ChatMessage(role="assistant", content=full, timestamp=now)
+        req.session_id, ChatMessage(role="assistant", content=full, timestamp=now, run_id=run_id)
     )
     latency_ms = int((time.time() - started_at) * 1000)
 
+    terminal_status = (
+        "interrupted"
+        if stream_aborted
+        else "failed"
+        if agent_incomplete
+        else "completed"
+    )
     _checkpoint(
-        status="interrupted" if stream_aborted else "completed",
+        status=terminal_status,
         phase=(
             "provider_output_truncated"
             if output_truncated
             else "stream_timeout"
             if stream_aborted
+            else "agent_incomplete"
+            if agent_incomplete
             else "completed"
         ),
         agent=str(outcome.used_agent),
@@ -5275,6 +6207,7 @@ async def _run_pipeline(
             "output_truncated": output_truncated,
         },
         usage=usage_data,
+        error="Agent reported an incomplete run" if agent_incomplete else None,
         provider_name=actual_provider_name,
         model_name=actual_model_name or None,
         finished=True,
@@ -5296,19 +6229,24 @@ async def _run_pipeline(
         tokens_out=output_tokens,
         cost_usd=cost_usd,
         latency_ms=latency_ms,
+        run_id=run_id,
     )
 
     # 7. Store in semantic memory for future recall (best-effort, non-blocking).
     try:
+        from backend.agents.base import AgentBase
         from backend.knowledge.memory import get_memory_store
 
         mem_store = get_memory_store()
-        if full.strip() and not fast_chat_turn:
+        if full.strip() and not fast_chat_turn and not agent_incomplete:
             await mem_store.remember_conversation(
-                user_message=req.message,
+                # Store inert subject keywords instead of replayable raw
+                # instructions from the user prompt.
+                user_message=AgentBase._memory_topic(req.message),
                 assistant_message=full,
                 session_id=req.session_id,
                 project_id=project_path,
+                user_id=continuity_owner_id,
                 source=outcome.used_agent,
                 importance=0.6,
             )
@@ -5325,7 +6263,7 @@ async def _run_pipeline(
             record_session(
                 project_path,
                 session_id=req.session_id,
-                status="completed" if not stream_aborted else "interrupted",
+                status=terminal_status,
                 topic=AgentBase._memory_topic(req.message),
                 evidence=(f"agent={outcome.used_agent}; tools={','.join(tool_names[-8:])}"),
             )

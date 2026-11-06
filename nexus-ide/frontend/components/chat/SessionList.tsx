@@ -32,6 +32,7 @@ interface SessionListProps {
  * - selection
  */
 export default function SessionList({ collapsed = false, onToggle }: SessionListProps) {
+  const panelRef = useRef<HTMLElement>(null);
   const {
     sessions,
     currentId,
@@ -61,6 +62,31 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
   // after the await — so every rename was sent twice (two PATCH requests
   // racing to write the same title). This latch makes the commit single-shot.
   const commitInFlightRef = useRef(false);
+
+  useEffect(() => {
+    if (collapsed) return;
+    const previousFocus = document.activeElement;
+    const panel = panelRef.current;
+    panel?.querySelector<HTMLInputElement>('input[aria-label="Filtrar sessões"]')?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onToggle?.();
+      }
+      if (event.key !== "Tab" || !panel) return;
+      const controls = Array.from(panel.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [tabindex="0"]'))
+        .filter((element) => element.getClientRects().length > 0);
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first && last) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last && first) { event.preventDefault(); first.focus(); }
+    };
+    panel?.addEventListener("keydown", onKey);
+    return () => {
+      panel?.removeEventListener("keydown", onKey);
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
+    };
+  }, [collapsed, onToggle]);
 
   const visible = sessions.filter(
     (s) =>
@@ -168,7 +194,13 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
 
   const handleNew = useCallback(async () => {
     await create(`Sessão ${new Date().toLocaleString("pt-PT")}`, "auto");
-  }, [create]);
+    onToggle?.();
+  }, [create, onToggle]);
+
+  const selectSession = (id: string) => {
+    setCurrentId(id);
+    onToggle?.();
+  };
 
   if (collapsed) {
     return null;
@@ -176,6 +208,9 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
 
   return (
     <aside
+      ref={panelRef}
+      role="dialog"
+      aria-modal="true"
       className="absolute inset-y-0 left-0 z-50 flex w-[min(19rem,calc(100%-1rem))] flex-col border-r border-nexus-border/80 bg-nexus-panel shadow-2xl shadow-black/30"
       aria-label="Sessões de chat"
     >
@@ -194,6 +229,8 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
           <button
             onClick={handleNew}
             title="Nova sessão"
+            aria-label="Nova sessão"
+            type="button"
             className="rounded-lg border border-nexus-accent/15 bg-nexus-accent/10 p-2 text-nexus-accent transition-colors hover:bg-nexus-accent/20"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -201,7 +238,9 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
           {onToggle && (
             <button
               onClick={onToggle}
-              title="Recolher"
+              title="Recolher sessões"
+              aria-label="Recolher sessões"
+              type="button"
               className="rounded-lg p-2 text-nexus-muted transition-colors hover:bg-nexus-card hover:text-nexus-text"
             >
               <X className="h-3.5 w-3.5" />
@@ -218,6 +257,7 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             placeholder="Filtrar..."
+            aria-label="Filtrar sessões"
             className="min-w-0 flex-1 bg-transparent text-xs text-nexus-text outline-none placeholder:text-nexus-faint"
           />
         </div>
@@ -274,7 +314,7 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
                         />
                       ) : (
                         <button
-                          onClick={() => setCurrentId(s.id)}
+                          onClick={() => selectSession(s.id)}
                           onDoubleClick={() => startEdit(s)}
                           className="flex-1 truncate text-left text-[12px] font-medium text-nexus-text"
                           title={`${s.title}\n${s.mode} · ${s.message_count ?? 0} mensagens`}
@@ -283,10 +323,12 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
                         </button>
                       )}
                       {!isEditing && (
-                        <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                        <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-70">
                           <button
                             onClick={() => startEdit(s)}
-                            title="Renomear"
+                            title="Renomear sessão"
+                            aria-label={`Renomear sessão ${s.title}`}
+                            type="button"
                             className="rounded p-0.5 text-nexus-muted hover:bg-nexus-bg/60 hover:text-nexus-text"
                           >
                             <Edit3 className="h-3 w-3" />
@@ -295,8 +337,10 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
                             onClick={() => {
                               if (confirm(`Apagar "${s.title}"?`)) void remove(s.id);
                             }}
-                            title="Apagar"
-                            className="rounded p-0.5 text-nexus-muted hover:bg-rose-500/15 hover:text-rose-400"
+                            title="Apagar sessão"
+                            aria-label={`Apagar sessão ${s.title}`}
+                            type="button"
+                            className="rounded p-0.5 text-nexus-muted hover:bg-nexus-accent4/15 hover:text-nexus-accent4"
                           >
                             <Trash2 className="h-3 w-3" />
                           </button>
@@ -336,11 +380,11 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
             <>
               <div className="flex items-center gap-2 px-3 pt-3 text-[10px] font-semibold uppercase tracking-wide text-nexus-faint">
                 <span className="flex-1">Todas as conversas</span>
-                {searching && <Loader2 className="h-3 w-3 animate-spin" aria-label="A pesquisar" />}
+                {searching && <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />}
                 {!searching && remoteTotal > 0 && <span>{remoteVisible.length} visíveis · {remoteTotal} resultados</span>}
               </div>
               {searchError ? (
-                <div className="px-3 py-2 text-[10px] text-rose-400" role="status">
+                <div className="px-3 py-2 text-[10px] text-nexus-accent4" role="alert">
                   Pesquisa indisponível: {searchError}
                 </div>
               ) : remoteVisible.length > 0 ? (
@@ -349,7 +393,7 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
                     <li key={`${match.id}-${match.match_type}-${match.match_message_id ?? ""}`}>
                       <button
                         type="button"
-                        onClick={() => setCurrentId(match.id)}
+                        onClick={() => selectSession(match.id)}
                         className={`flex w-full flex-col gap-1 px-3 py-2 text-left transition-colors ${
                           match.id === currentId ? "bg-nexus-accent/10" : "hover:bg-nexus-bg/40"
                         }`}
@@ -404,17 +448,23 @@ export default function SessionList({ collapsed = false, onToggle }: SessionList
 
       {/* Footer / error banner */}
       {error && (
-        <div className="flex items-center gap-1.5 border-t border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[10px] text-rose-400">
-          <AlertCircle className="h-3 w-3 shrink-0" />
+        <div
+          role="alert"
+          className="flex items-center gap-1.5 border-t border-nexus-accent4/30 bg-nexus-accent4/10 px-2.5 py-1.5 text-[10px] text-nexus-accent4"
+        >
+          <AlertCircle className="h-3 w-3 shrink-0" aria-hidden="true" />
           <span className="truncate" title={error}>
             {error}
           </span>
           <button
             onClick={refresh}
-            className="ml-auto rounded p-0.5 hover:bg-rose-500/20"
+            className="ml-auto rounded p-0.5 transition-colors hover:bg-nexus-accent4/20 disabled:opacity-50"
             title="Tentar novamente"
+            aria-label="Tentar novamente"
+            type="button"
+            disabled={loading}
           >
-            <Loader2 className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
+            <Loader2 className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />
           </button>
         </div>
       )}

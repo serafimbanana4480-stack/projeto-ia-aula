@@ -157,7 +157,7 @@ export default function RequestFlow() {
               <div className="flex items-center gap-2" aria-label={`Taxa de sucesso: ${successRate.toFixed(1)} por cento, ${successLabel}`}>
                 <Meter value={successRate} tone={successTone} showThresholds={false} height={5} className="w-16" />
                 <span className="flex items-center gap-1 text-[10px] font-medium text-nexus-muted">
-                  <CheckCircle2 className="h-3 w-3 text-emerald-400" aria-hidden />
+                  <CheckCircle2 className="h-3 w-3 text-nexus-accent2" aria-hidden />
                   <AnimatedNumber value={successRate} decimals={1} />%
                 </span>
               </div>
@@ -169,7 +169,7 @@ export default function RequestFlow() {
           <div
             role="status"
             aria-live="polite"
-            className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
+            className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-nexus-accent3"
           >
             <Power className="h-3.5 w-3.5 shrink-0" aria-hidden />
             <span>Backend offline — os dados apresentados podem estar desatualizados.</span>
@@ -309,7 +309,7 @@ export default function RequestFlow() {
                 {idleCount} perfil(is) sem execução
               </span>
               {profilesWithSessionErrors.length > 0 && (
-                <span className="flex items-center gap-1 text-rose-400">
+                <span className="flex items-center gap-1 text-nexus-accent4">
                   <XCircle className="h-3 w-3" aria-hidden />
                   {profilesWithSessionErrors.length} perfil(is) em sessão com falha
                 </span>
@@ -333,8 +333,8 @@ interface FlowNodeProps {
 }
 
 const FLOW_BADGE_TONE: Record<"success" | "warning" | "neutral", string> = {
-  success: "text-emerald-400 border-emerald-400/40",
-  warning: "text-amber-300 border-amber-400/40",
+  success: "text-nexus-accent2 border-emerald-400/40",
+  warning: "text-nexus-accent3 border-amber-400/40",
   neutral: "text-nexus-faint border-[var(--nx-line-strong)]",
 };
 
@@ -373,7 +373,7 @@ interface FlowLinkProps {
 function FlowLink({ active }: FlowLinkProps) {
   return (
     <div className="flex shrink-0 items-center self-center text-nexus-faint" aria-hidden>
-      <span className={`flex items-center transition-colors duration-300 ${active ? "text-emerald-400" : "text-nexus-faint/50"}`}>
+      <span className={`flex items-center transition-colors duration-300 ${active ? "text-nexus-accent2" : "text-nexus-faint/50"}`}>
         <ArrowRight className={`h-4 w-4 ${active ? "animate-pulse" : ""}`} aria-hidden />
       </span>
     </div>
@@ -389,8 +389,8 @@ interface MetricItemProps {
 }
 
 const METRIC_VALUE_TONE: Record<"success" | "danger" | "neutral", string> = {
-  success: "text-emerald-400",
-  danger: "text-rose-400",
+  success: "text-nexus-accent2",
+  danger: "text-nexus-accent4",
   neutral: "text-nexus-text",
 };
 

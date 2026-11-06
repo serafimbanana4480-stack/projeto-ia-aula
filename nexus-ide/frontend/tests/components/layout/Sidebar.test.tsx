@@ -31,9 +31,9 @@ describe("Sidebar", () => {
     render(<Sidebar />);
 
     const validRoutes = new Set([
-      "/", "/dashboard", "/dashboard/tasks", "/editor", "/projects", "/swarm", "/analysis",
+      "/", "/dashboard", "/bots", "/dashboard/tasks", "/editor", "/projects", "/swarm", "/analysis",
       "/analytics", "/models", "/mcp", "/tools", "/database", "/documents", "/pdf",
-      "/search", "/scraping", "/settings",
+      "/search", "/scraping", "/settings", "/nexus",
     ]);
     for (const link of screen.getAllByRole("link", { hidden: true })) {
       expect(validRoutes.has(link.getAttribute("href") ?? "")).toBe(true);
@@ -45,7 +45,7 @@ describe("Sidebar", () => {
     const { rerender } = render(<Sidebar />);
 
     expect(screen.getByRole("link", { name: "Tarefas", hidden: true }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("link", { name: "Dashboard", hidden: true }).getAttribute("aria-current")).toBeNull();
+    expect(screen.getByRole("link", { name: "Chat", hidden: true }).getAttribute("aria-current")).toBeNull();
     expect(screen.getByRole("button", { name: "Abrir menu" }).getAttribute("aria-expanded")).toBe("false");
 
     fireEvent.click(screen.getByRole("button", { name: "Abrir menu" }));

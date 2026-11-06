@@ -2,9 +2,16 @@
 
 Identical prompts repeated inside a short window (agent retries, UI refreshes,
 multi-agent fan-out over the same context) paid full price on every call.
-This module caches the *exact* request: same provider + model + normalized
-messages + serializable params → same cached answer. Streaming is never
-cached (partial output cannot be replayed safely).
+This module caches the *exact* request: same provider + model + same session
+scope + normalized messages + serializable params → same cached answer.
+Streaming is never cached (partial output cannot be replayed safely).
+
+Scoping (audit D8):
+    The key carries the session/user that owns the request.  Two different
+    sessions may legitimately ask the same question; without the scope one
+    session could be served the other session's answer verbatim.  When the
+    caller cannot establish a scope it must not use the cache at all —
+    ``MultiLLMManager.chat_complete`` skips it in that case.
 
 Ordering vs. the cost governor (deliberate):
     A cache hit performs no dispatch and therefore costs $0 — the lookup runs
@@ -23,7 +30,7 @@ Usage:
     from backend.llm.response_cache import get_response_cache
 
     cache = get_response_cache()
-    key = cache.cache_key(provider, model, messages, options)
+    key = cache.cache_key(provider, model, messages, options, session_scope=session_id)
     hit = cache.get(key)
     ...
     cache.store(key, result)
@@ -154,14 +161,24 @@ class ResponseCache:
         model: str,
         messages: list[Any],
         options: dict[str, Any] | None = None,
+        *,
+        session_scope: str = "",
         **kwargs: Any,
     ) -> str:
-        """Stable hash of provider+model+normalized messages+params."""
+        """Stable hash of provider+model+scope+normalized messages+params.
+
+        The session/user scope is part of the key on purpose.  Without it two
+        different sessions that happen to send the same prompt could be served
+        each other's answer verbatim — a cross-session data leak.  An empty
+        scope means the owner of the request is unknown; callers must then not
+        use the cache at all (``MultiLLMManager`` skips it).
+        """
         normalized = [_normalize_message(message) for message in (messages or [])]
         content = "\x1f".join(
             (
                 str(provider or ""),
                 str(model or ""),
+                str(session_scope or ""),
                 json.dumps(normalized, sort_keys=True, ensure_ascii=False),
                 _normalize_params(options, kwargs),
             )

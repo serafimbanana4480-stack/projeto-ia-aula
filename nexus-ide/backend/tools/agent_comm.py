@@ -56,6 +56,7 @@ async def consult_agent(
     context: str = "",
     timeout_seconds: int = 60,
     project_path: str = "",
+    user_id: str = "",
     autonomous: bool = False,
     sentinel_enforced: bool = False,
     allowed_tools: tuple[str, ...] | None = None,
@@ -147,6 +148,7 @@ async def consult_agent(
         extra_context: dict[str, Any] = {
             "a2a_message_id": a2a_msg.message_id,
             "_sentinel_enforced": sentinel_enforced,
+            "_authenticated_user_id": user_id,
         }
         if allowed_tools is not None:
             extra_context["_allowed_tools"] = tuple(allowed_tools)
@@ -158,6 +160,7 @@ async def consult_agent(
             query=question,
             client=client,
             project_path=project_path,
+            user_id=user_id,
             context=extra_context,
             autonomous=autonomous,
         )

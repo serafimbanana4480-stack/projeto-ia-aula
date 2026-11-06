@@ -6,6 +6,7 @@ import type {
   MetricsData,
   Project,
   SessionHistoryResponse,
+  StreamEvent,
   TerminalExecutionResult,
   Tool,
 } from "./types";
@@ -87,6 +88,7 @@ export async function postChat(
   cancellationRequestId?: string,
   provider?: string,
   modelIsConcrete = false,
+  idempotencyKey?: string,
 ): Promise<Response> {
   try {
     const normalisedProjectPath =
@@ -117,6 +119,9 @@ export async function postChat(
     };
     if (cancellationRequestId) {
       headers["X-Nexus-Request-Id"] = cancellationRequestId;
+    }
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
     }
 
     const response = await fetch(apiUrl("/api/chat"), {
@@ -211,6 +216,8 @@ export interface SessionHistoryPage {
   count: number;
   has_more: boolean;
   next_cursor: string | null;
+  /** True only when the server explicitly says this initial page is complete. */
+  hasCompleteHistory?: boolean;
 }
 
 export async function getSessionHistoryPage(
@@ -249,6 +256,7 @@ export async function getSessionHistoryPage(
     count: Number(page?.count ?? normalized.length),
     has_more: page?.has_more === true,
     next_cursor: typeof page?.next_cursor === "string" ? page.next_cursor : null,
+    hasCompleteHistory: !beforeId && page?.has_more === false,
   };
 }
 
@@ -256,6 +264,7 @@ export interface SessionRun {
   id: string;
   session_id: string;
   status: string;
+  prompt?: string;
   phase?: string;
   updated_at?: string;
   started_at?: string;
@@ -268,6 +277,8 @@ export interface SessionRunPage {
   runs: SessionRun[];
   has_more: boolean;
   next_offset: number;
+  /** Older servers may omit pagination metadata; do not infer completeness. */
+  paginationKnown?: boolean;
 }
 
 export async function getSessionRunsPage(
@@ -298,7 +309,37 @@ export async function getSessionRunsPage(
     runs,
     has_more: data.has_more === true,
     next_offset: nextOffset,
+    paginationKnown: typeof data.has_more === "boolean",
   };
+}
+
+/** One child's durable conversation (its own session), read from the parent run journal. */
+export interface SubagentActivityPage {
+  child_session_id: string;
+  child_run_id: string;
+  parent_run_id: string;
+  task_id: string;
+  status: string;
+  parent_status?: string | null;
+  live: boolean;
+  durable: boolean;
+  events: StreamEvent[];
+  next_after_seq: number;
+  has_more: boolean;
+}
+
+export async function getSubagentActivity(
+  childSessionId: string,
+  afterSeq = 0,
+  signal?: AbortSignal,
+): Promise<SubagentActivityPage> {
+  const after = Math.max(0, Math.floor(afterSeq));
+  return readJson<SubagentActivityPage>(
+    await authenticatedFetch(
+      apiUrl(`/api/sessions/${encodeURIComponent(childSessionId)}/subagent-activity?after_seq=${after}&limit=500`),
+      { signal },
+    ),
+  );
 }
 
 export async function getSessionRuns(id: string, limit = 20): Promise<SessionRun[]> {
@@ -1487,8 +1528,12 @@ export async function getRuntimeSkills(projectPath = ""): Promise<RuntimeSkill[]
 export interface SessionTodo {
   id: number | string;
   content: string;
-  status: "pending" | "in_progress" | "completed" | "cancelled";
+  status: "pending" | "in_progress" | "completed" | "cancelled" | "failed" | "blocked";
   priority?: string;
+  parent_id?: number | null;
+  type?: "objective" | "category" | "task";
+  rules?: string[];
+  criteria?: string[];
 }
 
 export interface SessionTodoSnapshot {
@@ -1500,6 +1545,45 @@ export interface SessionTodoSnapshot {
 export async function getSessionTodos(sessionId: string): Promise<SessionTodoSnapshot> {
   return readJson<SessionTodoSnapshot>(
     await authenticatedFetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/todos`)),
+  );
+}
+
+export async function createSessionTodo(
+  sessionId: string,
+  payload: { content: string; priority?: string },
+): Promise<SessionTodoSnapshot> {
+  return readJson<SessionTodoSnapshot>(
+    await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/todos`), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function updateSessionTodo(
+  sessionId: string,
+  todoId: string,
+  payload: { content?: string; priority?: string; status?: string },
+): Promise<SessionTodoSnapshot> {
+  return readJson<SessionTodoSnapshot>(
+    await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/todos/${encodeURIComponent(todoId)}`), {
+      method: "PUT",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function deleteSessionTodo(
+  sessionId: string,
+  todoId: string,
+): Promise<SessionTodoSnapshot> {
+  return readJson<SessionTodoSnapshot>(
+    await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/todos/${encodeURIComponent(todoId)}`), {
+      method: "DELETE",
+      headers: authHeaders(),
+    }),
   );
 }
 

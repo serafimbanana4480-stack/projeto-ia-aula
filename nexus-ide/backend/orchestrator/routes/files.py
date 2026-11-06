@@ -1,17 +1,38 @@
-"""File routes for real local project file operations."""
+"""File routes for real local project file operations.
+
+Project boundary
+----------------
+The client does not choose the filesystem root this API works in.
+
+``project_path`` used to be taken at face value, and an **absolute** request
+path skipped the project sandbox entirely (only the global blocklist
+applied), so any registered user could read and write anywhere under the
+host user's home directory.
+
+The root is now chosen by the server:
+
+* a ``project_path`` that names a project the instance knows — a row in
+  ``projects`` — is accepted, because the file explorer legitimately works
+  on a project the user picked;
+* anything else is refused with ``400``: the client cannot point the API at
+  an arbitrary directory;
+* without a ``project_path`` the caller's own session project is used, then
+  the instance's default project, then the backend's working directory.
+
+Whatever the root is, every path the request touches has to resolve **inside**
+it — the same rule the tool registry applies to a tool's path arguments.  The
+``*_absolute`` helpers, which bypass the project sandbox by design, are
+therefore not used here any more.
+"""
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
-from backend.core.workspace_fs import (
-    list_dir_absolute,
-    read_file_absolute,
-    write_file_absolute,
-)
 from backend.core.workspace_security import _is_blocked_path
 from backend.middleware.auth import require_auth
 from backend.models.api import FileListRequest, FileReadRequest, FileTreeEntry, FileWriteRequest
@@ -185,26 +206,168 @@ def _build_tree(root: Path, items: list[dict]) -> list[FileTreeEntry]:
     return entries
 
 
+# ---------------------------------------------------------------------------
+# Project boundary
+# ---------------------------------------------------------------------------
+
+
+def _resolve(path: Path) -> Path:
+    """The canonical form of *path* (symlinks resolved, ``~`` expanded)."""
+    try:
+        return path.expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Path cannot be resolved: {path}") from exc
+
+
+def _known_project(path: Path) -> dict | None:
+    """The registered project containing *path*, when the instance knows it."""
+    from backend.persistence.db import get_project_by_path, list_projects
+
+    try:
+        project = get_project_by_path(str(path))
+        if project is not None:
+            return project
+        target = os.path.normcase(str(path))
+        for candidate in list_projects():
+            try:
+                resolved = os.path.normcase(str(_resolve(Path(candidate["path"]))))
+            except (OSError, RuntimeError, ValueError, HTTPException):
+                continue
+            try:
+                common = os.path.commonpath((target, resolved))
+            except ValueError:
+                continue
+            if common == resolved:
+                return candidate
+    except Exception:
+        logger.warning("Could not look up the project for %s", path, exc_info=True)
+    return None
+
+
+def _session_project(session_id: str | None, user_id: str) -> dict | None:
+    """The project of the caller's own session."""
+    from backend.persistence.db import get_project, get_session_for_user
+
+    if not session_id or not user_id:
+        return None
+    try:
+        session = get_session_for_user(session_id, user_id)
+        if not session:
+            return None
+        project_id = session.get("project_id")
+        if not project_id:
+            return None
+        return get_project(project_id)
+    except Exception:
+        logger.warning("Could not read the project of session %s", session_id, exc_info=True)
+        return None
+
+
+def _default_project() -> dict | None:
+    """The instance's default project (the first one registered)."""
+    from backend.persistence.db import list_projects
+
+    try:
+        projects = list_projects()
+    except Exception:
+        logger.warning("Could not list the projects", exc_info=True)
+        return None
+    return projects[0] if projects else None
+
+
+def _resolve_project_root(
+    requested: str,
+    session_id: str | None = None,
+    user_id: str = "",
+) -> Path:
+    """The project root this request may work in — chosen by the server.
+
+    A ``project_path`` inside a project this instance knows is honoured. This
+    also allows the editor's frontend/backend/config presets to use a
+    subdirectory as their working root. Anything outside registered roots is
+    refused: the client cannot choose an arbitrary filesystem location.
+    """
+    text = (requested or "").strip()
+    if text and text not in {".", "./", ".\\"}:
+        candidate = _resolve(Path(text))
+        if _known_project(candidate) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "project_path must be inside a project this instance knows. Register it "
+                    "with POST /api/projects first — the API will not operate on an "
+                    "arbitrary directory."
+                ),
+            )
+        return candidate
+
+    project = _session_project(session_id, user_id) or _default_project()
+    if project and project.get("path"):
+        return _resolve(Path(project["path"]))
+    return _resolve(Path.cwd())
+
+
+def _relative_inside(root: Path, path: str) -> str | None:
+    """*path* relative to *root*, or ``None`` when it escapes the project.
+
+    Mirrors the tool registry's project rule: a relative path is resolved
+    against the project root, an absolute one is accepted only when it is
+    inside the root, and ``..`` cannot climb out of it.
+    """
+    raw = Path(path).expanduser()
+    if ".." in raw.parts:
+        return None
+    try:
+        target = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        return None
+    return str(relative) if str(relative) != "." else "."
+
+
+def _outside_project_error(root: Path, path: str) -> dict:
+    """The error body for a path that is not inside the project root."""
+    return {
+        "error": (
+            f"Access not allowed — path {path} is outside the project root {root}. "
+            "The project root is chosen by the server, not by the request."
+        )
+    }
+
+
 @router.post("/files/read")
 async def read_file_endpoint(req: FileReadRequest, _user: dict = Depends(require_auth)) -> dict:
-    if Path(req.path).is_absolute():
-        return await read_file_absolute(req.path)
-    return await read_file(path=req.path, project_path=req.project_path)
+    """Read a file from the caller's project.
+
+    The project root is chosen by the server and the path has to resolve
+    inside it; an absolute path outside the project is refused instead of
+    being read.
+    """
+    root = _resolve_project_root(req.project_path, None, str(_user.get("user_id") or ""))
+    relative = _relative_inside(root, req.path)
+    if relative is None:
+        return _outside_project_error(root, req.path)
+    return await read_file(path=relative, project_path=str(root))
 
 
 @router.post("/files/list")
 async def list_files_endpoint(req: FileListRequest, _user: dict = Depends(require_auth)) -> dict:
-    if Path(req.path).is_absolute():
-        result = await list_dir_absolute(req.path, recursive=req.recursive, max_results=5_000)
-    else:
-        result = await list_dir(
-            path=req.path, project_path=req.project_path, recursive=req.recursive
-        )
+    """List a directory of the caller's project."""
+    root = _resolve_project_root(req.project_path, None, str(_user.get("user_id") or ""))
+    relative = _relative_inside(root, req.path)
+    if relative is None:
+        return _outside_project_error(root, req.path)
+    result = await list_dir(
+        path=relative, project_path=str(root), recursive=req.recursive
+    )
     if "error" in result:
         return result
 
-    root = Path(result["path"])
-    tree = _build_tree(root, result.get("items", [])) if req.recursive else []
+    tree_root = Path(result["path"])
+    tree = _build_tree(tree_root, result.get("items", [])) if req.recursive else []
     return {
         "path": result["path"],
         "count": result.get("count", 0),
@@ -215,12 +378,16 @@ async def list_files_endpoint(req: FileListRequest, _user: dict = Depends(requir
 
 @router.post("/files/write")
 async def write_file_endpoint(req: FileWriteRequest, _user: dict = Depends(require_auth)) -> dict:
-    if Path(req.path).is_absolute():
-        return await write_file_absolute(req.path, req.content, overwrite=req.overwrite)
+    """Write a file inside the caller's project."""
+    user_id = str(_user.get("user_id") or "")
+    root = _resolve_project_root(req.project_path, req.session_id, user_id)
+    relative = _relative_inside(root, req.path)
+    if relative is None:
+        return _outside_project_error(root, req.path)
     return await write_file(
-        path=req.path,
+        path=relative,
         content=req.content,
-        project_path=req.project_path,
+        project_path=str(root),
         session_id=req.session_id,
         project_id=req.project_id,
     )
@@ -236,14 +403,17 @@ async def upload_file(
     """Upload a file to the project workspace.
 
     Files are validated against an extension allowlist, size limit and
-    (for binary formats) magic-byte signatures before being written.
+    (for binary formats) magic-byte signatures before being written, and
+    the destination directory is the project root the server resolved — not
+    a directory the request names.
     """
     try:
-        blocked, reason = _is_blocked_path(project_path)
+        root = _resolve_project_root(project_path, session_id, str(_user.get("user_id") or ""))
+        blocked, reason = _is_blocked_path(str(root))
         if blocked:
             return {"error": reason}
 
-        target_dir = Path(project_path).resolve()
+        target_dir = root
         target_path = target_dir / (file.filename or "unnamed")
 
         # Path traversal guard. We must compare the *resolved* paths so the
@@ -255,7 +425,10 @@ async def upload_file(
         except ValueError:
             return {"error": "Invalid file path — outside project directory"}
 
-        content = await file.read()
+        # Read at most one byte past the accepted limit. This lets the
+        # existing validator reject oversized uploads without materializing
+        # an unbounded request body in process memory.
+        content = await file.read(_MAX_UPLOAD_BYTES + 1)
 
         # Security validation
         ok, reason = _validate_upload(file, content)
@@ -272,6 +445,8 @@ async def upload_file(
             "size": len(content),
             "content_type": file.content_type,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Upload failed for %r", getattr(file, "filename", None))
         return {"error": f"Upload failed: {e}"}

@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useModelStore, type Model } from "../../stores/modelStore";
 import { formatContext, formatPricePer1M } from "../../lib/format";
+import { usePopoverPosition } from "../../hooks/usePopoverPosition";
 
 /**
  * Model picker for the chat header.
@@ -94,7 +95,9 @@ function passesFilter(model: Model, filter: Filter): boolean {
   }
 }
 
-export default function ModelSelector() {
+type MenuPlacement = "above" | "below";
+
+export default function ModelSelector({ menuPlacement = "below" }: { menuPlacement?: MenuPlacement }) {
   const {
     activeModel,
     models,
@@ -114,6 +117,7 @@ export default function ModelSelector() {
   const containerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const popoverPosition = usePopoverPosition(open, containerRef, menuPlacement, 400);
 
   useEffect(() => {
     void loadModels();
@@ -211,6 +215,8 @@ export default function ModelSelector() {
     (p) => p.error && p.configured && p.error.includes("Sem chave API configurada"),
   );
 
+  const menuAbove = menuPlacement === "above";
+
   return (
     <div className="relative" ref={containerRef}>
         <button
@@ -222,24 +228,31 @@ export default function ModelSelector() {
             // first transient connection error until the whole page reloads.
             if (nextOpen && modelsError) void loadModels(true);
           }}
-        className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-2.5 py-1.5 text-[11px] font-medium text-nexus-muted transition-colors hover:border-nexus-accent/30 hover:text-nexus-text"
-        title={activeModel || "Automático — o router escolhe o modelo"}
-      >
-        {activeModel ? (
-          <span
-            className="h-2 w-2 shrink-0 rounded-full"
-            style={{ backgroundColor: selected?.color ?? "#7c6afb" }}
-          />
-        ) : (
-          <Sparkles className="h-3.5 w-3.5 text-nexus-accent/70" />
-        )}
-        <span className="hidden max-w-[140px] truncate sm:inline">{buttonLabel}</span>
-        <ChevronDown className="h-3 w-3" />
-      </button>
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-2.5 py-1.5 text-[11px] font-medium text-nexus-muted transition-colors hover:border-nexus-accent/30 hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/70"
+          title={activeModel || "Automático — o router escolhe o modelo"}
+        >
+          {activeModel ? (
+            <span
+              className="h-2 w-2 shrink-0 rounded-full"
+              style={{ backgroundColor: selected?.color ?? "var(--nx-accent)" }}
+            />
+          ) : (
+            <Sparkles className="h-3.5 w-3.5 text-nexus-accent/70" aria-hidden="true" />
+          )}
+          <span className="hidden max-w-[140px] truncate sm:inline">{buttonLabel}</span>
+          <ChevronDown className="h-3 w-3" aria-hidden="true" />
+        </button>
 
       {open ? (
         <div
-          className="absolute right-0 top-full z-50 mt-1.5 w-[400px] overflow-hidden rounded-xl border border-nexus-border bg-nexus-card shadow-2xl shadow-black/40"
+          // Clamped to the viewport: a fixed 400px popup overflows when the
+          // chat is docked into a narrow column.
+          style={popoverPosition}
+          className="fixed flex flex-col overflow-hidden rounded-xl border border-nexus-border bg-nexus-card shadow-nx-3"
+          role="dialog"
+          aria-label="Selecionar modelo"
           onKeyDown={onKeyDown}
         >
           {/* Search */}
@@ -250,15 +263,17 @@ export default function ModelSelector() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Procurar modelo ou provider…"
+              aria-label="Procurar modelo ou provider"
               className="min-w-0 flex-1 bg-transparent text-xs text-nexus-text outline-none placeholder:text-nexus-muted"
             />
             <button
               type="button"
               onClick={() => void loadModels(true)}
               title="Recarregar catálogo dos providers"
+              aria-label="Recarregar catálogo dos providers"
               className="shrink-0 rounded p-1 text-nexus-muted transition-colors hover:text-nexus-text"
             >
-              <RefreshCw className={`h-3 w-3 ${modelsLoading ? "animate-spin" : ""}`} />
+              <RefreshCw className={`h-3 w-3 ${modelsLoading ? "animate-spin" : ""}`} aria-hidden="true" />
             </button>
           </div>
 
@@ -283,7 +298,12 @@ export default function ModelSelector() {
             </span>
           </div>
 
-          <div ref={listRef} className="max-h-[340px] overflow-y-auto thin-scrollbar">
+          <div
+            ref={listRef}
+            className={`min-h-0 overflow-y-auto thin-scrollbar ${
+              menuAbove ? "max-h-[min(280px,calc(100dvh-14rem))]" : "max-h-[340px]"
+            }`}
+          >
             {/* Auto option — always first, always available. */}
             <button
               type="button"
@@ -314,7 +334,7 @@ export default function ModelSelector() {
             ) : null}
 
             {modelsError ? (
-              <div className="mx-2.5 my-2 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[10px] text-amber-300">
+              <div className="mx-2.5 my-2 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[10px] text-nexus-accent3">
                 <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
                 <span className="min-w-0">{modelsError}</span>
               </div>
@@ -372,7 +392,7 @@ export default function ModelSelector() {
                             {model.name || model.id}
                           </span>
                           {model.free ? (
-                            <span className="shrink-0 rounded bg-emerald-500/15 px-1 py-px text-[9px] font-semibold text-emerald-400">
+                            <span className="shrink-0 rounded bg-emerald-500/15 px-1 py-px text-[9px] font-semibold text-nexus-accent2">
                               GRÁTIS
                             </span>
                           ) : null}

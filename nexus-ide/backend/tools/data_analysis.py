@@ -20,6 +20,25 @@ from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
 
+#: Marker the generated script prints when pandas is not installed in the
+#: resolved interpreter. The parent then runs the pure-Python analysis.
+_NO_PANDAS_MARKER = "__NEXUS_NO_PANDAS__"
+
+
+def _resolve_interpreter(project_path: str = ".") -> str:
+    """Return the Python interpreter used to run the analysis script.
+
+    Resolution order: the ``NEXUS_PYTHON`` override, the project's own
+    virtualenv (``.venv/Scripts/python.exe`` on Windows, ``.venv/bin/python``
+    elsewhere) and finally the interpreter running the backend
+    (``sys.executable``). The previous code only knew the POSIX layout and
+    fell back to the literal command ``python3``, which does not exist on
+    Windows — the tool could never find Python there.
+    """
+    from backend.tools.interpreters import resolve_python_interpreter
+
+    return resolve_python_interpreter(project_path)
+
 
 async def analyze_data(
     data_path: str = "",
@@ -75,22 +94,33 @@ async def analyze_data(
 
             ext = full_path.suffix.lower()
             if ext == ".csv":
-                script_parts.append(f"df = pd.read_csv({repr(str(full_path))})")
-                script_parts.append('print("Shape:", df.shape)')
-                script_parts.append('print("\\nColumns:", list(df.columns))')
-                script_parts.append('print("\\nDtypes:\\n", df.dtypes)')
-                script_parts.append('print("\\nDescribe:\\n", df.describe().to_string())')
-                script_parts.append('print("\\nHead:\\n", df.head(10).to_string())')
+                # The pandas branch is guarded: pandas is NOT a project
+                # dependency, and the old script used ``pd`` unconditionally,
+                # so a missing pandas raised ``NameError: name 'pd' is not
+                # defined`` — which the fallback below did not recognise, and
+                # the tool could not analyse a CSV at all.
+                script_parts.append("if HAS_PANDAS:")
+                script_parts.append(f"    df = pd.read_csv({repr(str(full_path))})")
+                script_parts.append('    print("Shape:", df.shape)')
+                script_parts.append('    print("\\nColumns:", list(df.columns))')
+                script_parts.append('    print("\\nDtypes:\\n", df.dtypes)')
+                script_parts.append('    print("\\nDescribe:\\n", df.describe().to_string())')
+                script_parts.append('    print("\\nHead:\\n", df.head(10).to_string())')
+                script_parts.append("else:")
+                script_parts.append(f"    print({_NO_PANDAS_MARKER!r})")
                 if query:
                     script_parts.append(f"# Query: {query}")
                     script_parts.append(f"print('Query:', {repr(query)})")
             elif ext == ".json":
                 script_parts.append(f"with open({repr(str(full_path))}) as f: data = json.load(f)")
                 script_parts.append("if isinstance(data, list) and len(data) > 0:")
-                script_parts.append("    df = pd.DataFrame(data)")
-                script_parts.append('    print("Shape:", df.shape)')
-                script_parts.append('    print("\\nColumns:", list(df.columns))')
-                script_parts.append('    print("\\nDescribe:\\n", df.describe().to_string())')
+                script_parts.append("    if HAS_PANDAS:")
+                script_parts.append("        df = pd.DataFrame(data)")
+                script_parts.append('        print("Shape:", df.shape)')
+                script_parts.append('        print("\\nColumns:", list(df.columns))')
+                script_parts.append('        print("\\nDescribe:\\n", df.describe().to_string())')
+                script_parts.append("    else:")
+                script_parts.append(f"        print({_NO_PANDAS_MARKER!r})")
                 script_parts.append("else:")
                 script_parts.append("    print(json.dumps(data, indent=2)[:2000])")
             else:
@@ -107,12 +137,11 @@ async def analyze_data(
 
         script = "\n".join(script_parts)
 
-        # Execute with the venv Python
-        venv_python = os.environ.get("NEXUS_PYTHON", "python3")
-        # Try to find the project's venv
-        project_venv = Path(project_path).resolve() / ".venv" / "bin" / "python"
-        if project_venv.exists():
-            venv_python = str(project_venv)
+        # Execute with the interpreter that is actually running the backend.
+        # The old code shelled out to "python3" and probed the POSIX venv
+        # layout (".venv/bin/python"), so on Windows it never found a Python
+        # at all and the tool could not work.
+        venv_python = _resolve_interpreter(project_path)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write(script)
@@ -135,6 +164,11 @@ async def analyze_data(
                 if "No module named 'pandas'" in error or "HAS_PANDAS" in error:
                     return await _analyze_without_pandas(data_path, query, project_path)
                 return {"error": f"Analysis failed: {error[:500]}", "output": output[:500]}
+            if _NO_PANDAS_MARKER in output:
+                # pandas is not installed in the resolved interpreter: the
+                # pure-Python analysis gives the caller a real answer instead
+                # of a NameError.
+                return await _analyze_without_pandas(data_path, query, project_path)
         finally:
             os.unlink(tmp_path)
 
@@ -209,6 +243,7 @@ register_tool(
     ToolSpec(
         name="data_analysis",
         description="Analyze CSV/JSON data files with statistics and insights. Supports pandas-based analysis.",
+        category="data",
         schema={
             "type": "object",
             "properties": {

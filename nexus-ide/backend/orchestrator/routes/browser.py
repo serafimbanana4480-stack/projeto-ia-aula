@@ -61,34 +61,53 @@ class BrowserCloseRequest(BaseModel):
 
 @router.post("/browser/navigate")
 async def navigate(req: BrowserNavigateRequest, _user: dict = Depends(require_auth)) -> dict:
-    return await browser_navigate(url=req.url, session_id=req.session_id)
+    return await browser_navigate(
+        url=req.url, session_id=req.session_id, user_id=str(_user.get("user_id") or "")
+    )
 
 
 @router.post("/browser/click")
 async def click(req: BrowserClickRequest, _user: dict = Depends(require_auth)) -> dict:
-    return await browser_click(selector=req.selector, session_id=req.session_id)
+    return await browser_click(
+        selector=req.selector, session_id=req.session_id, user_id=str(_user.get("user_id") or "")
+    )
 
 
 @router.post("/browser/fill")
 async def fill(req: BrowserFillRequest, _user: dict = Depends(require_auth)) -> dict:
-    return await browser_fill(selector=req.selector, text=req.text, session_id=req.session_id)
+    return await browser_fill(
+        selector=req.selector,
+        text=req.text,
+        session_id=req.session_id,
+        user_id=str(_user.get("user_id") or ""),
+    )
 
 
 @router.post("/browser/extract")
 async def extract(req: BrowserExtractRequest, _user: dict = Depends(require_auth)) -> dict:
-    return await browser_extract_text(selector=req.selector, session_id=req.session_id)
+    return await browser_extract_text(
+        selector=req.selector, session_id=req.session_id, user_id=str(_user.get("user_id") or "")
+    )
 
 
 @router.post("/browser/screenshot")
 async def screenshot(req: BrowserScreenshotRequest, _user: dict = Depends(require_auth)) -> dict:
-    return await browser_screenshot(session_id=req.session_id, full_page=req.full_page)
+    return await browser_screenshot(
+        session_id=req.session_id,
+        full_page=req.full_page,
+        user_id=str(_user.get("user_id") or ""),
+    )
 
 
 @router.post("/browser/get_links")
 async def get_links(req: BrowserCloseRequest, _user: dict = Depends(require_auth)) -> dict:
-    return await browser_get_links(session_id=req.session_id)
+    return await browser_get_links(
+        session_id=req.session_id, user_id=str(_user.get("user_id") or "")
+    )
 
 
 @router.post("/browser/close")
 async def close(req: BrowserCloseRequest, _user: dict = Depends(require_auth)) -> dict:
-    return await browser_close(session_id=req.session_id)
+    return await browser_close(
+        session_id=req.session_id, user_id=str(_user.get("user_id") or "")
+    )

@@ -76,14 +76,14 @@ function MessageBubble({ msg, agents }: { msg: AgentMessage; agents: Record<stri
         <div className="flex items-center gap-3">
           {msg.confidence !== undefined && (
             <span className="text-[9px] text-slate-500">
-              confidence: <span className={`font-semibold ${msg.confidence > 0.8 ? "text-emerald-400" : msg.confidence > 0.5 ? "text-amber-400" : "text-red-400"}`}>
+              confidence: <span className={`font-semibold ${msg.confidence > 0.8 ? "text-nexus-accent2" : msg.confidence > 0.5 ? "text-nexus-accent3" : "text-red-400"}`}>
                 {(msg.confidence * 100).toFixed(1)}%
               </span>
             </span>
           )}
           <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold border ${
-            msg.type === "delegation" ? "bg-amber-500/15 border-amber-500/40 text-amber-300" :
-            msg.type === "result" ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300" :
+            msg.type === "delegation" ? "bg-amber-500/15 border-amber-500/40 text-nexus-accent3" :
+            msg.type === "result" ? "bg-emerald-500/15 border-emerald-500/40 text-nexus-accent2" :
             msg.type === "error" ? "bg-red-500/15 border-red-500/40 text-red-300" :
             msg.type === "help_request" ? "bg-pink-500/15 border-pink-500/40 text-pink-300" :
             "bg-slate-700/50 border-slate-600/60 text-slate-400"
@@ -116,7 +116,7 @@ export default function MultiAgentChat() {
       {/* Header */}
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/70 px-4 py-3">
         <div className="flex items-center gap-2">
-          <MessageSquare size={13} className="text-cyan-400" />
+          <MessageSquare size={13} className="text-nexus-cyan" />
           <h2 className="text-xs font-semibold text-slate-100">Mensagens entre agentes</h2>
           <span className="flex items-center gap-1 text-[10px] text-slate-500" aria-label={`${messages.length} mensagens`}>
             <Hash size={10} />{messages.length}

@@ -10,6 +10,7 @@ import {
   isAuthenticated,
   isTokenValid,
   authHeaders,
+  refreshAuth,
 } from "../../lib/auth";
 import { webSearch } from "../../lib/api";
 
@@ -32,6 +33,7 @@ describe("lib/auth", () => {
 
   afterEach(() => {
     localStorage.clear();
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -218,5 +220,75 @@ describe("lib/auth", () => {
     expect(fetchSpy.mock.calls[2][0]).toBe("http://localhost:8000/api/web_search");
     expect(new Headers(fetchSpy.mock.calls[2][1]?.headers).get("Authorization"))
       .toBe("Bearer fresh-access-token");
+  });
+
+  it("retries a transient refresh failure after 15 seconds with the same request key", async () => {
+    vi.useFakeTimers();
+    setAccessToken("expired-access-token");
+    setRefreshToken("refresh-token-1");
+    localStorage.setItem("nexus.refresh.request_id", "stable-refresh-request-id");
+    const user = {
+      id: "u1",
+      email: "test@test.com",
+      full_name: "Test User",
+      is_active: true,
+      created_at: "2025",
+    };
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("temporary outage", { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "fresh-access-token",
+        refresh_token: "refresh-token-2",
+        token_type: "bearer",
+        user,
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+
+    const refresh = refreshAuth();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(getRefreshToken()).toBe("refresh-token-1");
+
+    await vi.advanceTimersByTimeAsync(14999);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(refresh).resolves.toBe(true);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const firstInit = fetchSpy.mock.calls[0][1];
+    const secondInit = fetchSpy.mock.calls[1][1];
+    expect(JSON.parse(String(firstInit?.body))).toEqual({ refresh_token: "refresh-token-1" });
+    expect(JSON.parse(String(secondInit?.body))).toEqual({ refresh_token: "refresh-token-1" });
+    expect(new Headers(firstInit?.headers).get("Idempotency-Key"))
+      .toBe("stable-refresh-request-id");
+    expect(new Headers(secondInit?.headers).get("Idempotency-Key"))
+      .toBe("stable-refresh-request-id");
+    expect(getAccessToken()).toBe("fresh-access-token");
+    expect(getRefreshToken()).toBe("refresh-token-2");
+    expect(localStorage.getItem("nexus.refresh.request_id")).toBeNull();
+  });
+
+  it("stops after ten transient refresh attempts without clearing the session", async () => {
+    vi.useFakeTimers();
+    setAccessToken("expired-access-token");
+    setRefreshToken("refresh-token-1");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response("temporary outage", { status: 503 }),
+    );
+
+    const refresh = refreshAuth();
+    const rejected = expect(refresh).rejects.toThrow("Refresh failed after 10 attempts");
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(9 * 15000);
+
+    await rejected;
+    expect(fetchSpy).toHaveBeenCalledTimes(10);
+    expect(getAccessToken()).toBe("expired-access-token");
+    expect(getRefreshToken()).toBe("refresh-token-1");
+    expect(localStorage.getItem("nexus.refresh.request_id")).toBeTruthy();
   });
 });

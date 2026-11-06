@@ -31,7 +31,7 @@ TODOS_DIR: Path = Path(
     or Path(__file__).resolve().parent.parent.parent / "data" / "todos"
 ).expanduser().resolve()
 
-STATUSES = ("pending", "in_progress", "completed", "cancelled")
+STATUSES = ("pending", "in_progress", "completed", "cancelled", "blocked", "failed")
 PRIORITIES = ("low", "normal", "high")
 _PRIORITY_ALIASES = {"medium": "normal", "med": "normal", "1": "low", "2": "normal", "3": "high"}
 _STATUS_MARKERS = {
@@ -39,6 +39,8 @@ _STATUS_MARKERS = {
     "in_progress": "[~]",
     "completed": "[x]",
     "cancelled": "[-]",
+    "blocked": "[!]",
+    "failed": "[!]",
 }
 _MAX_CONTENT_CHARS = 2000
 _MAX_SESSION_CHARS = 120
@@ -154,6 +156,8 @@ def _load_state(session_key: str) -> dict[str, Any]:
         normalised_items.append(item)
         known_ids.add(item["id"])
 
+    _validate_hierarchy(normalised_items)
+
     minimum_next_id = max(known_ids, default=0) + 1
     raw_next_id = data.get("next_id", minimum_next_id)
     if isinstance(raw_next_id, bool) or not isinstance(raw_next_id, (int, str)):
@@ -216,7 +220,7 @@ def _normalise_item(raw: Any) -> dict[str, Any]:
     if not isinstance(created_at, str) or not isinstance(updated_at, str):
         raise TodoStateError("timestamps must be strings")
 
-    return {
+    item = {
         "id": item_id,
         "content": content,
         "priority": priority,
@@ -224,6 +228,33 @@ def _normalise_item(raw: Any) -> dict[str, Any]:
         "created_at": created_at,
         "updated_at": updated_at,
     }
+    for field in ("parent_id", "type", "rules", "criteria"):
+        if field in raw:
+            item[field] = raw[field]
+    return item
+
+
+def _validate_hierarchy(items: list[dict[str, Any]]) -> None:
+    by_id = {item["id"]: item for item in items}
+    for item in items:
+        kind = item.get("type", "task")
+        if kind not in ("task", "category", "objective"):
+            raise TodoStateError("unsupported item type")
+        for field in ("rules", "criteria"):
+            value = item.get(field, [])
+            if not isinstance(value, list) or any(not isinstance(x, str) or len(x) > 2000 for x in value):
+                raise TodoStateError(f"{field} must be a list of strings")
+        seen = {item["id"]}
+        parent = item.get("parent_id")
+        while parent is not None:
+            if isinstance(parent, bool) or not isinstance(parent, int) or parent not in by_id:
+                raise TodoStateError("parent_id must identify an existing item")
+            if parent in seen:
+                raise TodoStateError("todo hierarchy contains a cycle")
+            seen.add(parent)
+            if by_id[parent].get("type", "task") == "task":
+                raise TodoStateError("a task cannot contain children")
+            parent = by_id[parent].get("parent_id")
 
 
 def _state_error_result(session_key: str, exc: TodoStateError) -> dict[str, Any]:
@@ -246,10 +277,12 @@ def _save_state(session_key: str, state: dict[str, Any]) -> None:
 
 
 def _counts(items: list[dict[str, Any]]) -> dict[str, int]:
-    counts = {status: 0 for status in STATUSES}
+    counts = {status: 0 for status in ("pending", "in_progress", "completed", "cancelled")}
     for item in items:
-        counts[item["status"]] += 1
-    counts["total"] = len(items)
+        if item.get("type", "task") != "task":
+            continue
+        counts[item["status"]] = counts.get(item["status"], 0) + 1
+    counts["total"] = sum(counts.values())
     return counts
 
 
@@ -274,6 +307,10 @@ async def todo_write(
     status: str = "",
     items: Any = None,
     session_id: str = "",
+    parent_id: int | None = None,
+    type: str = "",
+    rules: list[str] | None = None,
+    criteria: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create, update, replace, remove, or clear todos for this session.
 
@@ -284,7 +321,8 @@ async def todo_write(
         priority: ``low`` | ``normal`` | ``high`` (``add`` defaults to ``normal``;
             ``update`` only changes it when provided).
         status: New status for ``update``: ``pending`` | ``in_progress`` |
-            ``completed`` | ``cancelled``.
+            ``completed`` | ``cancelled``. Setting ``in_progress`` moves any
+            previous active item back to ``pending`` so the plan has one focus.
         items: Replacement list for ``set_all`` (``[{"content": ..., "priority": ...}]``).
         session_id: Required session that scopes the list; ``default`` is reserved.
 
@@ -330,6 +368,18 @@ async def todo_write(
                 "created_at": _now_iso(),
                 "updated_at": _now_iso(),
             }
+            if parent_id is not None:
+                item["parent_id"] = parent_id
+            if type:
+                item["type"] = type
+            if rules is not None:
+                item["rules"] = rules
+            if criteria is not None:
+                item["criteria"] = criteria
+            try:
+                _validate_hierarchy([*todo_items, item])
+            except TodoStateError as exc:
+                return {"ok": False, "error": str(exc)}
             state["next_id"] += 1
             todo_items.append(item)
             state["items"] = todo_items
@@ -340,7 +390,23 @@ async def todo_write(
             target = _find(todo_items, id)
             if target is None:
                 return {"ok": False, "error": f"Todo {id!r} not found."}
-            changed = False
+            # Work on a copy: validation failures must never persist partial edits.
+            todo_items = [dict(item) for item in todo_items]
+            target = _find(todo_items, id)
+            assert target is not None
+            if parent_id is not None:
+                target["parent_id"] = parent_id
+            if type:
+                target["type"] = type
+            if rules is not None:
+                target["rules"] = rules
+            if criteria is not None:
+                target["criteria"] = criteria
+            try:
+                _validate_hierarchy(todo_items)
+            except TodoStateError as exc:
+                return {"ok": False, "error": str(exc)}
+            changed = parent_id is not None or bool(type) or rules is not None or criteria is not None
             if str(content or "").strip():
                 target["content"] = str(content).strip()[:_MAX_CONTENT_CHARS]
                 changed = True
@@ -365,6 +431,13 @@ async def todo_write(
                     }
                 target["status"] = new_status
                 changed = True
+                if new_status == "in_progress":
+                    # The plan has one active focus. Re-queue the previous item
+                    # instead of leaving stale parallel "current" tasks behind.
+                    for item in todo_items:
+                        if item is not target and item["status"] == "in_progress":
+                            item["status"] = "pending"
+                            item["updated_at"] = _now_iso()
             if changed:
                 target["updated_at"] = _now_iso()
             state["items"] = todo_items
@@ -387,7 +460,12 @@ async def todo_write(
                         "updated_at": _now_iso(),
                     }
                 )
+                state["items"][-1].update({key: entry[key] for key in ("parent_id", "type", "rules", "criteria") if key in entry})
                 state["next_id"] += 1
+            try:
+                _validate_hierarchy(state["items"])
+            except TodoStateError as exc:
+                return {"ok": False, "error": str(exc)}
             _save_state(key, state)
             return {"ok": True, "operation": op, "session_id": key, "todos": state["items"], **_summary(state["items"])}
 
@@ -395,6 +473,8 @@ async def todo_write(
             target = _find(todo_items, id)
             if target is None:
                 return {"ok": False, "error": f"Todo {id!r} not found."}
+            if any(item.get("parent_id") == target["id"] for item in todo_items):
+                return {"ok": False, "error": "Remove or move child items first."}
             todo_items.remove(target)
             state["items"] = todo_items
             _save_state(key, state)
@@ -419,7 +499,7 @@ def _items_from_set_all(items: Any) -> list[dict[str, Any]] | str:
         prio = _priority_of(entry.get("priority") or "normal")
         if prio not in PRIORITIES:
             return f"Invalid priority {entry.get('priority')!r}; use one of: {', '.join(PRIORITIES)}."
-        parsed.append({"content": text[:_MAX_CONTENT_CHARS], "priority": prio})
+        parsed.append({"content": text[:_MAX_CONTENT_CHARS], "priority": prio, **{key: entry[key] for key in ("parent_id", "type", "rules", "criteria") if key in entry}})
     return parsed
 
 
@@ -484,9 +564,14 @@ def get_session_todos_compact(session_id: str, max_items: int = 8) -> str:
         return ""
     limit = max(0, int(max_items))
     lines: list[str] = []
-    for item in items[:limit]:
+    hierarchical = any(item.get("type") in ("objective", "category") or item.get("parent_id") is not None for item in items)
+    ordered = sorted(items, key=lambda item: (0 if item["status"] == "in_progress" else 1 if item.get("type") in ("objective", "category") else 2)) if hierarchical else items
+    for item in ordered[:limit]:
         marker = _STATUS_MARKERS.get(item["status"], "[ ]")
-        lines.append(f"{marker} #{item['id']} ({item['priority']}) {item['content']}")
+        parent = f" pai=#{item['parent_id']}" if item.get("parent_id") is not None else ""
+        kind = item.get("type", "task")
+        label = f"{kind}, {item['priority']}{parent}" if hierarchical else item["priority"]
+        lines.append(f"{marker} #{item['id']} ({label}) {item['content']}")
     remaining = len(items) - len(lines)
     if remaining > 0:
         lines.append(f"... e mais {remaining} itens (usa todo_list para ver tudo)")
@@ -498,21 +583,24 @@ register_tool(
         name="todo_write",
         description=(
             "Write to the persistent per-session todo list (add / update / "
-            "set_all / remove / clear). The list survives restarts; use it to "
-            "plan multi-step work and track progress across a long run."
+            "set_all / remove / clear). For multi-step work, keep one active "
+            "task, update it at each real milestone, and only complete it after "
+            "the work and its required checks have succeeded. The list survives restarts."
         ),
         tags=["todo", "plan", "task", "persistence"],
         category="system",
         risk_level="low",
-        when_to_use="At the start of a multi-step task to lay out the plan, and whenever "
-        "a step starts, finishes, or the plan changes.",
+        when_to_use="For multi-step work: create or resume a plan before substantial work, "
+        "mark the current task in_progress, update each transition as it happens, "
+        "and replan when the user's objective changes.",
         schema={
             "type": "object",
             "properties": {
                 "operation": {
                     "type": "string",
                     "enum": ["add", "update", "set_all", "remove", "clear"],
-                    "description": "add: new pending task; update: change id's content/priority/status; "
+                    "description": "add: new pending task; update: change id's content/priority/status "
+                    "(in_progress is kept unique; the previous active task returns to pending); "
                     "set_all: replace the whole list; remove: delete id; clear: empty the list.",
                 },
                 "content": {"type": "string", "description": "Task text (operation add, or new text in update)."},
@@ -528,15 +616,23 @@ register_tool(
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["pending", "in_progress", "completed", "cancelled"],
+                    "enum": list(STATUSES),
                     "description": "New status for operation update.",
                 },
+                "parent_id": {"type": "integer", "description": "Existing category or objective ID."},
+                "type": {"type": "string", "enum": ["objective", "category", "task"]},
+                "rules": {"type": "array", "items": {"type": "string"}},
+                "criteria": {"type": "array", "items": {"type": "string"}},
                 "items": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
                             "content": {"type": "string", "description": "Task text."},
+                            "parent_id": {"type": "integer", "description": "1-based position of parent item in this replacement list."},
+                            "type": {"type": "string", "enum": ["objective", "category", "task"]},
+                            "rules": {"type": "array", "items": {"type": "string"}},
+                            "criteria": {"type": "array", "items": {"type": "string"}},
                             "priority": {
                                 "type": "string",
                                 "enum": ["low", "normal", "high"],
@@ -576,7 +672,7 @@ register_tool(
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["pending", "in_progress", "completed", "cancelled"],
+                    "enum": list(STATUSES),
                     "description": "Optional filter by status.",
                 },
                 "session_id": {

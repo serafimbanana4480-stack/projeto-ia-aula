@@ -95,6 +95,34 @@ class Memory:
         }
 
 
+def _matches_memory_scope(
+    memory: Memory,
+    *,
+    user_id: str | None,
+    session_id: str | None,
+    project_id: str | None,
+) -> bool:
+    """Keep recall inside the owner, active project, and true session memories.
+
+    Conversation and project memories are meant to survive a new session.
+    Session and tool-result memories remain tied to the session that created
+    them. Project-bound entries never bleed into another (or unselected)
+    project for the same user.
+    """
+    if user_id is not None and memory.user_id != user_id:
+        return False
+    if (
+        session_id
+        and memory.session_id
+        and memory.session_id != session_id
+        and memory.memory_type in {MemoryType.SESSION, MemoryType.TOOL_RESULT}
+    ):
+        return False
+    return not (
+        project_id is not None and memory.project_id and memory.project_id != project_id
+    )
+
+
 class EmbeddingService:
     """Generates vector embeddings using local AirLLM / sentence-transformers.
 
@@ -296,12 +324,12 @@ class MemoryStore:
 
         results: list[tuple[Memory, float]] = []
         for mem_id, mem in self._memories.items():
-            if user_id is not None and mem.user_id != user_id:
-                continue
-            # Filter by session/type/project
-            if session_id and mem.session_id and mem.session_id != session_id:
-                continue
-            if project_id and mem.project_id and mem.project_id != project_id:
+            if not _matches_memory_scope(
+                mem,
+                user_id=user_id,
+                session_id=session_id,
+                project_id=project_id,
+            ):
                 continue
             if memory_type and mem.memory_type != memory_type:
                 continue
@@ -337,7 +365,10 @@ class MemoryStore:
             query,
             user_id=user_id,
             session_id=session_id or None,
-            project_id=project_id or None,
+            # Keep an explicit empty project scope distinct from no scope:
+            # chat without a selected project must not recall another project's
+            # memories, while administrative search may omit the filter.
+            project_id=project_id if project_id is not None else None,
             top_k=top_k,
         )
 
@@ -353,11 +384,12 @@ class MemoryStore:
             for mem in self._memories.values():
                 if mem.memory_id in seen_ids:
                     continue
-                if user_id is not None and mem.user_id != user_id:
-                    continue
-                if session_id and mem.session_id and mem.session_id != session_id:
-                    continue
-                if project_id and mem.project_id and mem.project_id != project_id:
+                if not _matches_memory_scope(
+                    mem,
+                    user_id=user_id,
+                    session_id=session_id,
+                    project_id=project_id,
+                ):
                     continue
                 content_terms = set(__import__("re").findall(r"[A-Za-z0-9_]+", mem.content.lower()))
                 overlap = len(query_terms & content_terms)
@@ -520,14 +552,14 @@ class MemoryStore:
             "embedding": self._embeddings.status(),
         }
 
-    def _evict_least_important(self) -> None:
-        """Evict the least valuable memory to stay under the limit.
+    def _evict_least_important(self) -> str | None:
+        """Evict and return the least valuable memory to stay under the limit.
 
         We maximise a retention score: important + recently accessed + recent
         memories are kept. The memory with the lowest score is evicted first.
         """
         if not self._memories:
-            return
+            return None
 
         now = time.time()
         scored = []
@@ -546,6 +578,7 @@ class MemoryStore:
             del self._memories[evict_id]
             self._index.pop(evict_id, None)
             logger.debug("Evicted memory %s (low importance/access)", evict_id)
+            return evict_id
 
 
 # Global singleton

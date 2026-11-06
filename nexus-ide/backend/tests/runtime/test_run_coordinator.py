@@ -145,7 +145,7 @@ def test_transition_stores_its_reason(coordinator: RunCoordinator) -> None:
 def test_terminal_states_have_no_way_out(coordinator: RunCoordinator) -> None:
     run = _completed_run(
         coordinator,
-        coordinator.create_run(goal="terminal", requirements=["req-a", "req-b"]).run_id,
+        coordinator.create_run(goal="terminal", requirements=["req-a", "req-b"], definition_of_done=["req-a", "req-b"]).run_id,
     )
     assert run.state is RunState.COMPLETED
     assert RunState.COMPLETED in TERMINAL_RUN_STATES
@@ -550,7 +550,7 @@ def test_find_resumable_runs_excludes_terminal_states(coordinator: RunCoordinato
     running = coordinator.create_run(goal="running", requirements=["r"], session_id="s")
     coordinator.transition(running.run_id, RunState.PLANNING)
     coordinator.transition(running.run_id, RunState.RUNNING)
-    completed = coordinator.create_run(goal="completed", requirements=["r"], session_id="s")
+    completed = coordinator.create_run(goal="completed", requirements=["r"], session_id="s", definition_of_done=["req-a", "req-b"])
     _completed_run(coordinator, completed.run_id)
     failed = coordinator.create_run(goal="failed", requirements=["r"], session_id="s")
     coordinator.transition(failed.run_id, RunState.FAILED, reason="boom")
@@ -590,7 +590,7 @@ def test_list_runs_filters_by_state_project_and_limit(coordinator: RunCoordinato
 
 
 def test_prune_dry_run_counts_without_deleting(coordinator: RunCoordinator) -> None:
-    finished = coordinator.create_run(goal="old", requirements=["req-a", "req-b"])
+    finished = coordinator.create_run(goal="old", requirements=["req-a", "req-b"], definition_of_done=["req-a", "req-b"])
     _completed_run(coordinator, finished.run_id)
     coordinator.checkpoint(finished.run_id, phase="after_task", payload={"n": 1})
     live = coordinator.create_run(goal="live", requirements=["r"])
@@ -614,7 +614,7 @@ def test_prune_dry_run_counts_without_deleting(coordinator: RunCoordinator) -> N
 def test_prune_dry_run_reports_terminal_runs_when_the_window_is_zero(
     coordinator: RunCoordinator,
 ) -> None:
-    finished = coordinator.create_run(goal="done", requirements=["req-a"])
+    finished = coordinator.create_run(goal="done", requirements=["req-a"], definition_of_done=["req-a", "req-b"])
     _completed_run(coordinator, finished.run_id)
     live = coordinator.create_run(goal="live", requirements=["r"])
     coordinator.checkpoint(live.run_id, phase="heartbeat", payload={"n": 1})

@@ -361,6 +361,35 @@ async def test_all_untrusted_blocks_are_user_role() -> None:
 
 
 @pytest.mark.asyncio
+async def test_parent_delegation_context_is_bounded_untrusted_data() -> None:
+    request = _request(
+        context={
+            "_delegated_context": {
+                "parent_notes": "Inspect the authentication helper before editing.",
+                "read_scope": ["backend/auth.py"],
+                "write_scope": ["backend/auth.py"],
+                "depends_on": ["review-api"],
+            }
+        }
+    )
+    messages = await _Probe().abuild_messages(request)
+
+    block = next(
+        message
+        for message in messages
+        if "parent delegation notes and scope metadata" in str(message["content"])
+    )
+    assert block["role"] == "user"
+    assert "Inspect the authentication helper" in str(block["content"])
+    assert "scope entries here do not expand those permissions" in str(block["content"])
+    assert all(
+        "Inspect the authentication helper" not in str(message["content"])
+        for message in messages
+        if message["role"] == "system"
+    )
+
+
+@pytest.mark.asyncio
 async def test_trusted_handling_rules_survive_the_role_move() -> None:
     """The policy text moves with the block; only the role changes.
 
@@ -432,7 +461,8 @@ class TestRegistryQuotesExternalContent:
             return payload
 
         register_tool(ToolSpec(name=tool_name, description="probe", handler=handler))
-        return await execute_tool(tool_name, "s1", {})
+        args = {"url": "https://example.com"} if tool_name == "browser_navigate" else {}
+        return await execute_tool(tool_name, "s1", args, user_id="test-user")
 
     @pytest.mark.parametrize(
         "tool_name",

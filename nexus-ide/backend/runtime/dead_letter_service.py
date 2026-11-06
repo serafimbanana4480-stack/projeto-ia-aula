@@ -56,6 +56,13 @@ RECOVERABILITY_PERMANENT = "permanent"
 RECOVERABILITY_UNKNOWN = "unknown"
 
 #: Error classes that mean "the world said not now" — retrying later works.
+#: ``ContextOverflowError`` is here on purpose: an overflowing context is not a
+#: defect in the work (its base ``ValueError`` is, and stays classified as
+#: permanent — class-name matching is exact, so the subclass keeps this verdict
+#: without disturbing the base one). The agent answers an overflow with an
+#: emergency-shrink and the run continues on the reduced context, which is
+#: exactly what "retry later, with less input" means. A context overflow the
+#: agent *cannot* shrink past is a different (judgment) failure.
 _TRANSIENT_CLASS_NAMES = frozenset(
     {
         "apierror",
@@ -63,6 +70,7 @@ _TRANSIENT_CLASS_NAMES = frozenset(
         "apitimeouterror",
         "connectionerror",
         "connecttimeout",
+        "contextoverflowerror",
         "readtimeout",
         "timeouterror",
         "timeout",
@@ -149,27 +157,38 @@ def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def classify_error(error: Any) -> dict[str, Any]:
+def classify_error(error: Any, *, traceback_text: str = "") -> dict[str, Any]:
     """Classify a failure as retryable or not, with the delay to retry after.
 
     Returns ``{"recoverability": ..., "retry_after": ..., "error_class": ...,
     "reason": ...}``:
 
     * ``transient`` — the failure is about the world, not the work: a rate
-      limit, a 5xx, a timeout, a connection reset. Retrying later is the correct
-      response, and ``retry_after`` says how much later.
-    * ``permanent`` — the failure is about the work: a schema/type/value error,
-      an illegal transition, a missing handler. A retry reproduces it exactly,
-      so the entry needs a human (``replan``/``abandon``/``escalate``).
+      limit, a 5xx, a timeout, a connection reset, a context overflow the
+      agent can shrink out of. Retrying later is the correct response, and
+      ``retry_after`` says how much later.
+    * ``permanent`` — the failure is about the work: a schema/type/value
+      error, an illegal transition, a missing handler. A retry reproduces it
+      exactly, so the entry needs a human (``replan``/``abandon``/``escalate``).
     * ``unknown`` — nothing recognisable. Treated as needing a human, but
       ``retry_after`` is still populated so an operator can re-arm it.
 
     ``error`` may be an exception, an exception *class*, an error-class name or
     a plain message: a caller reading a dead-letter row back off disk has no
     exception object any more, only the ``error_class`` string it stored.
+
+    ``traceback_text`` is extra evidence about the *same* failure — an entry's
+    ``sanitized_traceback``, which is often the only place the status code
+    survives, because a provider adapter that maps HTTP statuses onto a
+    generic type still writes the "429" into the traceback. It is appended to
+    the text evidence only: the class name is still decided first, so a class
+    beats its message (``ValueError`` with "503" in the traceback stays
+    permanent) and the precedence never inverts.
     """
     class_name = _error_class_name(error)
-    text = _error_text(error)
+    text = " ".join(
+        part for part in (_error_text(error), str(traceback_text or "").strip()) if part
+    )
 
     if class_name in _PERMANENT_CLASS_NAMES:
         return _verdict(
@@ -222,11 +241,15 @@ def format_dead_letter(entry: Mapping[str, Any]) -> dict[str, Any]:
 
     ``recoverability`` is the *effective* answer: the stored value when the
     entry was parked by :meth:`DeadLetterService.park`, otherwise what the
-    stored ``error_class`` classifies as now. An entry parked by another
+    stored ``error_class`` — together with the ``sanitized_traceback`` still
+    holding the status text — classifies as now. An entry parked by another
     producer without a classification must not read as unexplained.
     """
     payload = dict(entry)
-    classification = classify_error(str(payload.get("error_class") or ""))
+    classification = classify_error(
+        str(payload.get("error_class") or ""),
+        traceback_text=str(payload.get("sanitized_traceback") or ""),
+    )
     stored = str(payload.get("recoverability") or "").strip().lower()
     if stored in {"", RECOVERABILITY_UNKNOWN}:
         stored = str(classification["recoverability"])
@@ -380,11 +403,18 @@ class DeadLetterService:
         Fills in ``recoverability``/``retry_after`` from :func:`classify_error`
         when the caller did not, so a parked failure always carries an answer
         to "why is this here and can it be retried?".
+
+        The classification reads ``error_class`` *and* ``sanitized_traceback``:
+        a 429 that a provider adapter mapped onto a generic type survives only
+        in the traceback text, and parking it by class name alone would file a
+        retryable failure as ``unknown`` — handed to a human instead of retried.
         """
         payload = dict(entry)
         error_class = str(payload.get("error_class") or "")
+        traceback_text = str(payload.get("sanitized_traceback") or "")
         if not payload.get("recoverability"):
-            payload["recoverability"] = classify_error(error_class)["recoverability"]
+            classification = classify_error(error_class, traceback_text=traceback_text)
+            payload["recoverability"] = classification["recoverability"]
         if "retry_after" not in payload and payload["recoverability"] == RECOVERABILITY_TRANSIENT:
             payload["retry_after"] = _iso(
                 datetime.now(UTC) + timedelta(seconds=DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS)
@@ -547,7 +577,10 @@ class DeadLetterService:
             run_id=str(entry.get("run_id") or ""),
             detail=detail,
             task_result=task_result,
-            classification=classify_error(str(entry.get("error_class") or "")),
+            classification=classify_error(
+                str(entry.get("error_class") or ""),
+                traceback_text=str(entry.get("sanitized_traceback") or ""),
+            ),
         )
 
 

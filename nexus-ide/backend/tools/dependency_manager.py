@@ -19,9 +19,18 @@ _SUPPORTED_MANAGERS = {"pip", "npm", "cargo", "poetry"}
 
 
 def _get_install_command(package: str, manager: str, project_path: Path) -> list[str]:
-    """Build the install command for the given package manager."""
+    """Build the install command for the given package manager.
+
+    For pip the command targets an explicit interpreter (``<python> -m pip``)
+    instead of the bare ``pip`` on PATH. The bare command installs into
+    whichever environment happens to be first on PATH, which on a developer
+    machine is frequently NOT the project's virtualenv — so the dependency
+    "was installed" and the project still could not import it. The project's
+    own venv is preferred; otherwise the interpreter running the backend is
+    used, exactly as ``backend/tools/code_executor.py`` already does.
+    """
     if manager == "pip":
-        return ["pip", "install", package]
+        return [_pip_interpreter(project_path), "-m", "pip", "install", package]
     elif manager == "npm":
         return ["npm", "install", package, "--save"]
     elif manager == "cargo":
@@ -30,6 +39,13 @@ def _get_install_command(package: str, manager: str, project_path: Path) -> list
         return ["poetry", "add", package]
     else:
         raise ValueError(f"Unsupported manager: {manager}")
+
+
+def _pip_interpreter(project_path: Path) -> str:
+    """Return the interpreter whose ``pip`` installs the dependency."""
+    from backend.tools.interpreters import resolve_python_interpreter
+
+    return resolve_python_interpreter(str(project_path))
 
 
 def _update_requirements_file(package: str, project_path: Path, manager: str) -> dict:
@@ -228,6 +244,7 @@ register_tool(
             "Install a dependency using pip, npm, cargo, or poetry. "
             "Runs in a subprocess with timeout and updates requirements/package files."
         ),
+        category="code",
         schema={
             "type": "object",
             "properties": {
@@ -262,6 +279,7 @@ register_tool(
     ToolSpec(
         name="list_dependencies",
         description="List all dependencies found in the project",
+        category="code",
         schema={
             "type": "object",
             "properties": {

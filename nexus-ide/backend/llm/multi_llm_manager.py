@@ -22,6 +22,7 @@ from backend.llm.free_policy import (
     FreeModelPolicy,
     FreeModelRequirement,
     ProviderUnavailableError,
+    is_simulation_provider,
 )
 from backend.llm.response_cache import get_response_cache
 
@@ -31,6 +32,21 @@ logger = logging.getLogger(__name__)
 # de failover (audit 2026-08-24, B5). Ver ProviderHTTPStatusError.
 _TERMINAL_AUTH_STATUSES = {401, 402, 403}
 _TERMINAL_AUTH_OPEN_SECONDS = 900.0
+
+#: Failure categories that are NOT provider failures.
+#:
+#: ``eligibility`` — the model never reached the provider (not free, not
+#: validated).  ``breaker_open`` — the provider was already excluded, counting
+#: it again would double-count.  ``simulation`` — a simulated provider is not
+#: evidence about the provider's health.  ``budget_exceeded`` — the run's own
+#: budget, not the provider.
+#:
+#: Everything else — an HTTP error, a timeout, a malformed answer — is a real
+#: provider failure and MUST be counted, otherwise a permanently broken
+#: provider is re-dispatched on every single request (audit D4).
+_NON_FAILURE_CATEGORIES = frozenset(
+    {"eligibility", "breaker_open", "simulation", "budget_exceeded"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +282,8 @@ class MultiLLMManager:
         self._selected_provider: str | None = None
 
         self._selected_model: str | None = None
+        # Name of the provider that served the most recent successful call.
+        self._last_provider_name: str | None = None
     def register_provider(self, name: str, provider: Any, priority: int = 1) -> None:
         """Register a provider with priority (lower = higher priority)."""
         self.providers[name] = provider
@@ -406,6 +424,47 @@ class MultiLLMManager:
         except Exception:  # pragma: no cover - accounting must not break chat
             logger.exception("Cost governor recording failed")
 
+    @staticmethod
+    def _cache_scope(run_id: str, kwargs: dict[str, Any]) -> str:
+        """Return the session/user scope a cached answer belongs to.
+
+        The response cache is exact-match, but two *different* sessions can
+        legitimately ask the same question with the same context.  Serving
+        session A's answer to session B is a data leak, so every cache key
+        carries the scope of the session that produced it.  An empty scope
+        means "unknown owner" — the caller must then not use the cache at all.
+        """
+        for key in ("run_id", "session_id", "mission_id", "trace_id", "user_id"):
+            value = kwargs.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        context = kwargs.get("context")
+        if isinstance(context, dict):
+            for key in ("run_id", "session_id", "mission_id", "user_id"):
+                value = context.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return str(run_id or "").strip()
+
+    @property
+    def last_finish_reason(self) -> str:
+        """Stop reason of the provider that served the most recent call.
+
+        The runtime uses it to mark a run as interrupted when the provider
+        stopped because it ran out of output tokens.  Providers that do not
+        report one simply contribute an empty string.
+        """
+        provider = self.providers.get(self._last_provider_name or "")
+        if provider is not None:
+            reason = str(getattr(provider, "last_finish_reason", "") or "")
+            if reason:
+                return reason
+        for name in reversed(list(self.providers)):
+            reason = str(getattr(self.providers.get(name), "last_finish_reason", "") or "")
+            if reason:
+                return reason
+        return ""
+
     def get_best_provider(self) -> str:
         """Return the healthiest provider based on latency and success rate."""
         candidates = [
@@ -432,7 +491,7 @@ class MultiLLMManager:
 
     def _ensure_dispatch_allowed(self, name: str, model: str, run_id: str = "") -> None:
         provider = self.providers[name]
-        if getattr(provider, "simulation", False):
+        if is_simulation_provider(provider):
             raise ProviderUnavailableError(
                 f"Provider '{name}' is simulation-only; no real completion was produced",
                 category="simulation",
@@ -497,6 +556,25 @@ class MultiLLMManager:
             if not exc.category:
                 exc.category = "provider_unavailable"
             return exc
+        # A typed HTTP status is the strongest signal available: it says what
+        # the provider actually answered instead of guessing from the message.
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int):
+            if status_code in (401, 403):
+                category = "auth"
+            elif status_code == 402:
+                category = "quota"
+            elif status_code == 429:
+                category = "rate_limit"
+            else:
+                category = "provider_unavailable"
+            return ProviderUnavailableError(
+                str(exc) or exc.__class__.__name__,
+                category=category,
+                provider=provider,
+                model=model,
+                retry_after=getattr(exc, "retry_after", None),
+            )
         text = str(exc).lower()
         category = "provider_unavailable"
         if "quota" in text or "rate limit" in text or "429" in text:
@@ -510,6 +588,37 @@ class MultiLLMManager:
             model=model,
             retry_after=getattr(exc, "retry_after", None),
         )
+
+    async def _record_provider_failure(
+        self,
+        breaker: Any,
+        name: str,
+        model: str,
+        exc: BaseException,
+    ) -> ProviderUnavailableError:
+        """Type the failure, count it on the breaker and return the typed error.
+
+        The breaker used to skip almost every failure because the typed
+        category was nearly always ``provider_unavailable`` — so a provider
+        that answered 401 on every request was re-dispatched forever.  Real
+        provider failures are now counted, and a terminal HTTP status opens
+        the breaker for a long period instead of failing over.
+        """
+        typed = self._typed_provider_error(exc, name, model)
+        status_code = getattr(exc, "status_code", None)
+        if status_code in _TERMINAL_AUTH_STATUSES:
+            breaker.force_open(_TERMINAL_AUTH_OPEN_SECONDS)
+            if typed.retry_after is None:
+                typed.retry_after = _TERMINAL_AUTH_OPEN_SECONDS
+            logger.critical(
+                "Provider '%s' terminal status %s — breaker aberto %ss",
+                name,
+                status_code,
+                _TERMINAL_AUTH_OPEN_SECONDS,
+            )
+        if typed.category not in _NON_FAILURE_CATEGORIES:
+            await breaker.record_failure()
+        return typed
 
     def _attempt_names(self, target: str) -> list[str]:
         seen: set[int] = set()
@@ -628,14 +737,24 @@ class MultiLLMManager:
             )
         # Response cache lookup BEFORE cost governor — a hit costs $0 and
         # must never be blocked by a budget limit.
+        #
+        # The cache is scoped to the session/user that owns the request: an
+        # unscoped key would let one session be served another session's
+        # answer verbatim.  When no scope can be established the cache is
+        # simply not used (audit D8).
         cache = get_response_cache()
         cache_key = ""
-        if cache.enabled:
-            cache_key = cache.cache_key(target, model, messages, options, **kwargs)
+        cache_scope = self._cache_scope(run_id, kwargs)
+        if cache.enabled and cache_scope:
+            cache_key = cache.cache_key(
+                target, model, messages, options, session_scope=cache_scope, **kwargs
+            )
             cached = cache.get(cache_key)
             if cached is not None:
                 logger.info("Response cache HIT for chat_complete")
                 return cached
+        elif cache.enabled:
+            logger.debug("Response cache disabled for this request: no session scope")
         last_error: ProviderUnavailableError | None = None
         names_to_try = self._attempt_names(target)
         for name in names_to_try:
@@ -669,38 +788,36 @@ class MultiLLMManager:
                 result = await self.providers[name].chat_complete(
                     model=model, messages=messages, options=options, **kwargs
                 )
-                if getattr(self.providers[name], "simulation", False):
+                if is_simulation_provider(self.providers[name]):
                     raise ProviderUnavailableError(
                         "Simulation output cannot complete a real run",
                         category="simulation",
                         provider=name,
                         model=model,
                     )
+                # An empty answer is not a successful completion: it used to be
+                # returned as a blank, successful answer while the run was
+                # persisted as completed.  ``chat_stream`` already refuses an
+                # empty stream, so both paths now behave the same.
+                if not isinstance(result, str) or not result.strip():
+                    raise RuntimeError(
+                        f"Provider '{name}' returned an empty completion"
+                    )
                 await breaker.record_success()
+                self._last_provider_name = name
                 self._update_health(name, True, (time.time() - started) * 1000)
                 self._record_usage(
                     provider_name=name, model=model, messages=messages,
                     output_text=result, run_id=run_id,
                 )
-                if cache.enabled:
+                if cache.enabled and cache_key:
                     cache.store(cache_key, result)
                 logger.info("Provider '%s' succeeded for chat_complete", name)
                 return result
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                typed = self._typed_provider_error(exc, name, model)
-                status_code = getattr(exc, "status_code", None)
-                if status_code in _TERMINAL_AUTH_STATUSES:
-                    breaker.force_open(_TERMINAL_AUTH_OPEN_SECONDS)
-                    logger.critical(
-                        "Provider '%s' terminal status %s — breaker aberto %ss",
-                        name,
-                        status_code,
-                        _TERMINAL_AUTH_OPEN_SECONDS,
-                    )
-                if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
-                    await breaker.record_failure()
+                typed = await self._record_provider_failure(breaker, name, model, exc)
                 last_error = typed
                 self._update_health(
                     name,
@@ -789,6 +906,7 @@ class MultiLLMManager:
                 if not emitted_output:
                     raise RuntimeError(f"Provider '{name}' returned an empty stream")
                 await breaker.record_success()
+                self._last_provider_name = name
                 self._update_health(name, True, (time.time() - started) * 1000)
                 self._record_usage(
                     provider_name=name,
@@ -801,21 +919,20 @@ class MultiLLMManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                typed = self._typed_provider_error(exc, name, model)
-                status_code = getattr(exc, "status_code", None)
-                if status_code in _TERMINAL_AUTH_STATUSES:
-                    breaker.force_open(_TERMINAL_AUTH_OPEN_SECONDS)
-                    logger.critical(
-                        "Provider '%s' terminal status %s — breaker aberto %ss",
-                        name,
-                        status_code,
-                        _TERMINAL_AUTH_OPEN_SECONDS,
-                    )
-                if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
-                    await breaker.record_failure()
+                typed = await self._record_provider_failure(breaker, name, model, exc)
                 last_error = typed
                 self._update_health(name, False, (time.time() - started) * 1000)
                 if emitted_output:
+                    # The provider billed this call and the user already saw
+                    # part of the answer: the spend has to be recorded even
+                    # though the stream failed half-way (audit D7).
+                    self._record_usage(
+                        provider_name=name,
+                        model=model,
+                        messages=messages,
+                        output_text="".join(chunks),
+                        run_id=run_id,
+                    )
                     raise
         raise last_error or ProviderUnavailableError(
             "All providers failed for chat_stream",
@@ -871,18 +988,7 @@ class MultiLLMManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                typed = self._typed_provider_error(exc, name, model)
-                status_code = getattr(exc, "status_code", None)
-                if status_code in _TERMINAL_AUTH_STATUSES:
-                    breaker.force_open(_TERMINAL_AUTH_OPEN_SECONDS)
-                    logger.critical(
-                        "Provider '%s' terminal status %s — breaker aberto %ss",
-                        name,
-                        status_code,
-                        _TERMINAL_AUTH_OPEN_SECONDS,
-                    )
-                if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
-                    await breaker.record_failure()
+                typed = await self._record_provider_failure(breaker, name, model, exc)
                 last_error = typed
                 self._update_health(name, False, (time.time() - started) * 1000)
         raise last_error or ProviderUnavailableError(
@@ -942,7 +1048,7 @@ class MultiLLMManager:
                 result = await candidate.batch_complete(
                     messages_list, model=model, options=options, **kwargs
                 )
-                if getattr(candidate, "simulation", False):
+                if is_simulation_provider(candidate):
                     raise ProviderUnavailableError(
                         "Simulation output cannot complete a real run",
                         category="simulation",
@@ -965,9 +1071,7 @@ class MultiLLMManager:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            typed = self._typed_provider_error(exc, target, model)
-            if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
-                await breaker.record_failure()
+            typed = await self._record_provider_failure(breaker, target, model, exc)
             raise typed from exc
 
     async def parallel_completion(
@@ -1011,7 +1115,7 @@ class MultiLLMManager:
                 result = await self.providers[name].chat_complete(
                     model=model, messages=messages, options=options, **kwargs
                 )
-                if getattr(self.providers[name], "simulation", False):
+                if is_simulation_provider(self.providers[name]):
                     raise ProviderUnavailableError(
                         "Simulation output cannot complete a real run",
                         category="simulation",
@@ -1022,18 +1126,7 @@ class MultiLLMManager:
                 self._update_health(name, True, 0.0)
                 return name, result
             except Exception as exc:
-                typed = self._typed_provider_error(exc, name, model)
-                status_code = getattr(exc, "status_code", None)
-                if status_code in _TERMINAL_AUTH_STATUSES:
-                    breaker.force_open(_TERMINAL_AUTH_OPEN_SECONDS)
-                    logger.critical(
-                        "Provider '%s' terminal status %s — breaker aberto %ss",
-                        name,
-                        status_code,
-                        _TERMINAL_AUTH_OPEN_SECONDS,
-                    )
-                if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
-                    await breaker.record_failure()
+                typed = await self._record_provider_failure(breaker, name, model, exc)
                 raise typed from exc
 
         tasks = {asyncio.create_task(_call(name)): name for name in valid_providers}
@@ -1102,7 +1195,7 @@ class MultiLLMManager:
                 result = await self.providers[name].chat_complete(
                     model=model, messages=messages, options=options, **kwargs
                 )
-                if getattr(self.providers[name], "simulation", False):
+                if is_simulation_provider(self.providers[name]):
                     raise ProviderUnavailableError(
                         "Simulation output cannot complete a real run",
                         category="simulation",
@@ -1113,18 +1206,7 @@ class MultiLLMManager:
                 self._update_health(name, True, 0.0)
                 results[name] = result
             except Exception as exc:
-                typed = self._typed_provider_error(exc, name, model)
-                status_code = getattr(exc, "status_code", None)
-                if status_code in _TERMINAL_AUTH_STATUSES:
-                    breaker.force_open(_TERMINAL_AUTH_OPEN_SECONDS)
-                    logger.critical(
-                        "Provider '%s' terminal status %s — breaker aberto %ss",
-                        name,
-                        status_code,
-                        _TERMINAL_AUTH_OPEN_SECONDS,
-                    )
-                if typed.category not in {"eligibility", "breaker_open", "provider_unavailable"}:
-                    await breaker.record_failure()
+                typed = await self._record_provider_failure(breaker, name, model, exc)
                 self._update_health(name, False, 0.0)
                 logger.warning("Consensus provider '%s' failed: %s", name, typed)
         await asyncio.gather(*(_call(name) for name in valid_providers))
@@ -1159,7 +1241,7 @@ class MultiLLMManager:
                     and str(cb.get("state", "")).lower() not in {"open", "half_open"}
                 ),
                 "free_only": self.free_only,
-                "simulation": bool(getattr(provider, "simulation", False)),
+                "simulation": bool(is_simulation_provider(provider)),
                 "eligibility_reason": reason,
                 "quota_available": quota,
                 "validation_timestamp": validated_at,

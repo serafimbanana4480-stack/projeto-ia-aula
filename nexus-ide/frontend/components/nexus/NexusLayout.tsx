@@ -53,13 +53,15 @@ export default function NexusLayout({ children }: { children: React.ReactNode })
   }, [fetchTasks, fetchWorkflows]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-transparent">
+    // `h-dvh` rather than `h-screen`: 100vh overflows by the browser chrome on
+    // mobile, which pushed the bottom row out of reach.
+    <div className="nx-ambient flex h-dvh overflow-hidden bg-nexus-bg text-nexus-text">
       <NexusSidebar />
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <NexusTopBar />
-        <main className="flex-1 overflow-y-auto bg-slate-900/20 backdrop-blur-sm">
-          {children}
-        </main>
+        {/* No backdrop-blur on the scroll container: it re-rasterises on every
+            scroll tick and the page background is opaque anyway. */}
+        <main className="min-w-0 flex-1 overflow-y-auto">{children}</main>
       </div>
     </div>
   );

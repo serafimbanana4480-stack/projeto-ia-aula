@@ -60,7 +60,7 @@ export default function NexusTopBar() {
         </div>
         <span className={`flex items-center gap-1.5 rounded-full border px-2 py-1 text-[9px] font-semibold uppercase ${
           backendOnline
-            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+            ? "border-emerald-500/40 bg-emerald-500/10 text-nexus-accent2"
             : "border-slate-600 bg-slate-800/50 text-slate-400"
         }`}>
           {backendOnline ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}

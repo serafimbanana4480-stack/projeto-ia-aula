@@ -287,14 +287,11 @@ async def speak_async(text: str, provider: str | None = None) -> dict[str, Any]:
             await _speak_edge_tts(text, config)
         elif provider == "pyttsx3":
             # pyttsx3 is synchronous, run in thread
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _speak_pyttsx3, text, config)
+            await asyncio.to_thread(_speak_pyttsx3, text, config)
         elif provider == "gtts":
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _speak_gtts, text, config)
+            await asyncio.to_thread(_speak_gtts, text, config)
         elif provider == "elevenlabs":
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _speak_elevenlabs, text, config)
+            await asyncio.to_thread(_speak_elevenlabs, text, config)
 
         return {"success": True, "provider": provider, "text": text[:100]}
     except Exception as exc:
@@ -315,9 +312,13 @@ def tts_status() -> dict[str, Any]:
         voices = []
     return {
         "provider": config.provider,
-        "rate": config.rate,
-        "volume": config.volume,
+        # ``TTSConfig`` defines ``speed``; it has no ``rate`` and no
+        # ``volume``. Reading the old names raised AttributeError, so the
+        # status tool could never report anything.
+        "speed": config.speed,
+        "language": config.language,
         "voice_id": config.voice_id,
+        "enabled": config.enabled,
         "available_providers": ["pyttsx3", "gtts", "elevenlabs"],
         "voices": voices,
         "ready": bool(voices),
@@ -329,7 +330,7 @@ def get_available_voices() -> list[dict[str, str]]:
     config = TTSConfig()
     provider = config.provider
 
-    voices = []
+    voices: list[dict[str, str]] = []
     if provider == "pyttsx3":
         engine = _get_provider("pyttsx3")
         if engine:
@@ -355,6 +356,25 @@ def get_available_voices() -> list[dict[str, str]]:
             {"id": "fr-FR-HenriNeural", "name": "Henri (French)"},
             {"id": "de-DE-KatjaNeural", "name": "Katja (German)"},
         ]
+    # gtts and elevenlabs expose no enumerable voice list here.
+    return voices
+
+
+async def speak_tool(text: str, provider: str | None = None) -> dict[str, Any]:
+    """Tool handler for ``speak``.
+
+    The registry awaits every handler, so the registered handler must be a
+    coroutine function: the plain synchronous ``speak`` used to be registered
+    and every call died with "object dict can't be used in 'await'
+    expression". The blocking providers (pyttsx3) are executed in a worker
+    thread so the event loop is not blocked while the audio plays.
+    """
+    return await speak_async(text, provider)
+
+
+async def tts_status_tool() -> dict[str, Any]:
+    """Tool handler for ``tts_status`` (coroutine: the registry awaits it)."""
+    return tts_status()
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +390,7 @@ register_tool(
             "Convert text to speech using the configured TTS provider. "
             "Supports pyttsx3 (local), edge-tts (online), gTTS (Google), and elevenlabs (premium)."
         ),
+        category="media",
         schema={
             "type": "object",
             "properties": {
@@ -384,7 +405,7 @@ register_tool(
             },
             "required": ["text"],
         },
-        handler=speak,
+        handler=speak_tool,
     )
 )
 
@@ -392,10 +413,11 @@ register_tool(
     ToolSpec(
         name="tts_status",
         description="Get TTS status and available voices.",
+        category="media",
         schema={
             "type": "object",
             "properties": {},
         },
-        handler=tts_status,
+        handler=tts_status_tool,
     )
 )

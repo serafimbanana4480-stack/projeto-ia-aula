@@ -17,6 +17,102 @@ describe("restoreRunTimelines", () => {
     mocks.replayRunEvents.mockReset().mockResolvedValue([]);
   });
 
+  const legacyHistory: ChatMessage[] = [
+    { id: "user-1", role: "user", content: "Analisa o projeto", timestamp: "2026-10-27T21:39:00.797Z" },
+    { id: "assistant-1", role: "assistant", content: "Resultado final guardado", timestamp: "2026-10-27T21:42:49.451Z" },
+  ];
+  const legacyRun = {
+    id: "run-legacy",
+    session_id: "session-1",
+    status: "failed",
+    prompt: "Analisa o projeto",
+    started_at: "2026-10-27T21:39:00.919Z",
+    finished_at: "2026-10-27T21:42:49.473Z",
+  };
+  const journal = [
+    { type: "agent_started", agent: "ARCHITECT", timestamp: "2026-10-27T21:39:01.000Z" },
+    { type: "token", agent: "ARCHITECT", content: "Vou começar a análise.", timestamp: "2026-10-27T21:39:02.000Z" },
+  ];
+
+  it("restores a uniquely corroborated legacy run even when its streamed text differs from the saved answer", async () => {
+    mocks.getSessionRunsPage.mockResolvedValue({
+      runs: [legacyRun], has_more: false, next_offset: 1, paginationKnown: true,
+    });
+    mocks.replayRunEvents.mockResolvedValue(journal);
+
+    const restored = await restoreRunTimelines(legacyHistory, "session-1", { hasCompleteHistory: true });
+
+    expect(restored[1].content).toBe("Resultado final guardado");
+    expect(restored[1].steps?.length).toBeGreaterThan(0);
+    expect(restored[1].metadata?.timelineAssociation).toBe("inferred_prompt_and_time");
+    expect(restored[1].runId).toBeUndefined();
+    expect(mocks.replayRunEvents).toHaveBeenCalledWith("session-1", "run-legacy", expect.any(AbortSignal));
+  });
+
+  it("does not infer a legacy association when another run overlaps the turn", async () => {
+    mocks.getSessionRunsPage.mockResolvedValue({
+      runs: [legacyRun, { ...legacyRun, id: "run-overlap", prompt: "Outra tarefa" }],
+      has_more: false, next_offset: 2, paginationKnown: true,
+    });
+    mocks.replayRunEvents.mockResolvedValue(journal);
+
+    expect(await restoreRunTimelines(legacyHistory, "session-1", { hasCompleteHistory: true })).toEqual(legacyHistory);
+    expect(mocks.replayRunEvents).not.toHaveBeenCalled();
+  });
+
+  it("does not infer from a partial message page, unknown pagination, or an active run", async () => {
+    const page = { runs: [legacyRun], has_more: false, next_offset: 1, paginationKnown: true };
+    mocks.getSessionRunsPage.mockResolvedValue(page);
+    mocks.replayRunEvents.mockResolvedValue(journal);
+    expect(await restoreRunTimelines(legacyHistory, "session-1")).toEqual(legacyHistory);
+
+    mocks.getSessionRunsPage.mockResolvedValue({ ...page, paginationKnown: false });
+    expect(await restoreRunTimelines(legacyHistory, "session-1", { hasCompleteHistory: true })).toEqual(legacyHistory);
+
+    mocks.getSessionRunsPage.mockResolvedValue({ ...page, runs: [legacyRun, { ...legacyRun, id: "active", status: "running", finished_at: null }] });
+    expect(await restoreRunTimelines(legacyHistory, "session-1", { hasCompleteHistory: true })).toEqual(legacyHistory);
+    expect(mocks.replayRunEvents).not.toHaveBeenCalled();
+  });
+
+  it("checks all run pages before inferring and only replays the matching run", async () => {
+    mocks.getSessionRunsPage
+      .mockResolvedValueOnce({
+        runs: [{ ...legacyRun, id: "unrelated", prompt: "Outra tarefa", started_at: "2026-10-28T10:00:00Z", finished_at: "2026-10-28T10:01:00Z" }],
+        has_more: true, next_offset: 1, paginationKnown: true,
+      })
+      .mockResolvedValueOnce({ runs: [legacyRun], has_more: false, next_offset: 2, paginationKnown: true });
+    mocks.replayRunEvents.mockResolvedValue(journal);
+
+    const restored = await restoreRunTimelines(legacyHistory, "session-1", { hasCompleteHistory: true });
+
+    expect(mocks.getSessionRunsPage).toHaveBeenCalledTimes(2);
+    expect(mocks.replayRunEvents).toHaveBeenCalledTimes(1);
+    expect(restored[1].metadata?.timelineAssociation).toBe("inferred_prompt_and_time");
+  });
+
+  it("keeps legacy answers separate when either the timestamps or the prompt do not corroborate the run", async () => {
+    for (const run of [
+      { ...legacyRun, prompt: "Um pedido diferente" },
+      { ...legacyRun, started_at: "2026-10-27T21:39:00.919" },
+      { ...legacyRun, finished_at: "2026-10-27T21:45:00Z" },
+    ]) {
+      mocks.getSessionRunsPage.mockResolvedValue({ runs: [run], has_more: false, next_offset: 1, paginationKnown: true });
+      mocks.replayRunEvents.mockResolvedValue(journal);
+      expect(await restoreRunTimelines(legacyHistory, "session-1", { hasCompleteHistory: true })).toEqual(legacyHistory);
+    }
+  });
+
+  it("does not use matching text to assign one of several indistinguishable runs", async () => {
+    mocks.getSessionRunsPage.mockResolvedValue({
+      runs: [{ ...legacyRun, prompt: undefined }, { ...legacyRun, id: "run-other", prompt: undefined }],
+      has_more: false, next_offset: 2, paginationKnown: true,
+    });
+    mocks.replayRunEvents.mockResolvedValue([{ type: "token", content: "Resultado final guardado", timestamp: "2026-10-27T21:42:49Z" }]);
+
+    expect(await restoreRunTimelines(legacyHistory, "session-1", { hasCompleteHistory: true })).toEqual(legacyHistory);
+    expect(mocks.replayRunEvents).not.toHaveBeenCalled();
+  });
+
   it("restores identical answers by run id and uses durable file evidence without a journal", async () => {
     mocks.getSessionRunsPage.mockResolvedValue({ runs: [
       {

@@ -110,7 +110,7 @@ export function InfinityModeTools({ mode }: { mode: AdvancedMode }) {
       <div className="space-y-2">{CRITERIA.map(([criterion, label]) => <div key={criterion} className="grid grid-cols-[minmax(0,1fr)_3.5rem_3.5rem] items-center gap-2"><span className="text-[11px]">{label}</span>{scores.map((entry, index) => <input key={index} type="number" required min={0} max={100} step="any" aria-label={`${label} da alternativa ${index + 1}`} value={entry[criterion] ?? ""} onChange={(event) => { setScores((current) => current.map((value, item) => item === index ? { ...value, [criterion]: event.target.value } : value)); setResult(null); }} className={`${INPUT} !px-1.5`} />)}</div>)}</div>
       <button type="submit" disabled={busy} className={BUTTON}>{busy && <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />}Comparar pontuações</button>
     </form>}
-    {error && <p role="alert" className="text-xs text-amber-300">{error}</p>}
+    {error && <p role="alert" className="text-xs text-nexus-accent3">{error}</p>}
     {result && <div role="status" className="space-y-1 rounded-lg border border-nexus-border bg-nexus-bg/40 p-3 text-xs">
       <p className="font-semibold text-nexus-text">{mode.mode_id === "sentinel" ? result.requires_approval ? "Aprovação necessária" : "Sem bloqueio identificado nesta análise estática" : mode.mode_id === "advisor-infinity" ? result.verdict === "BLOCKED" ? "Conclusão bloqueada" : "Revisão pendente de validação" : result.winner_name ? `Melhor pontuação: ${result.winner_name} (${result.winner_score}/100)` : result.status === "TIE" ? "Empate nas pontuações submetidas" : "Sem vencedor determinado"}</p>
       {result.findings?.map((finding, index) => <p key={index} className="break-words text-nexus-muted">{finding}</p>)}

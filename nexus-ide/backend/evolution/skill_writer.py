@@ -26,7 +26,7 @@ DEFAULT_PROPOSALS_DIR = Path(".opencode") / "skills" / "_proposed"
 MAX_FILE_LINES = 60
 MAX_NAME_LEN = 60
 MAX_EVIDENCE_LINES = 6
-_TEMPLATE_OVERHEAD_LINES = 14
+_TEMPLATE_OVERHEAD_LINES = 15
 
 
 def _kebab(name: str) -> str:
@@ -125,6 +125,7 @@ class SkillWriter:
         lines.append("---")
         lines.append(f"name: {_yaml_quote(proposal.name)}")
         lines.append(f"description: {_yaml_quote(proposal.description)}")
+        lines.append("status: draft")
         lines.append("---")
         lines.append("")
         lines.append(f"# {_kebab(proposal.name)}")

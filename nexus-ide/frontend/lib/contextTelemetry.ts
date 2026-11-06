@@ -59,6 +59,54 @@ function record(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown> : null;
 }
 
+export interface RunAgent {
+  name: string;
+  status: "active" | "finished";
+}
+
+/**
+ * Agents this run actually named.
+ *
+ * The system activity feed only lists profiles that already wrote an assistant
+ * row, so a live generation showed "—" while every event already carried the
+ * agent. Subagents come from their own start/finish frames.
+ */
+export function runAgentsFromEvents(events: StreamEvent[], streaming: boolean): RunAgent[] {
+  let runId = "";
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const id = events[index].run_id;
+    if (typeof id === "string" && id) {
+      runId = id;
+      break;
+    }
+  }
+  let first = -1;
+  if (runId) first = events.findIndex((event) => event.run_id === runId);
+  else if (streaming) first = 0;
+  if (first < 0) return [];
+  const runEvents = events.slice(first).filter((event) => !runId || !event.run_id || event.run_id === runId);
+  const status = new Map<string, RunAgent["status"]>();
+  for (const event of runEvents) {
+    const name = typeof event.agent === "string" ? event.agent.trim() : "";
+    const rawName = event.data?.name;
+    const named = (event.type === "agent_started" || event.type === "agent_finished")
+      && typeof rawName === "string"
+      ? rawName.trim()
+      : "";
+    if (named) {
+      const subFinished = !streaming || event.type === "agent_finished";
+      status.set(named, subFinished ? "finished" : "active");
+    }
+    if (name && name !== named) {
+      // A subagent's finish frame is stamped with the parent agent. That must
+      // not mark the parent as finished while the run is still streaming.
+      const parentFinished = !streaming || event.type === "done" || (event.type === "agent_finished" && !named);
+      status.set(name, parentFinished ? "finished" : "active");
+    }
+  }
+  return [...status.entries()].map(([name, agentStatus]) => ({ name, status: agentStatus }));
+}
+
 /** Only successful load_skill results count as loaded instructions. */
 export function loadedSkillsFromEvents(events: StreamEvent[]): string[] {
   const skills = new Set<string>();

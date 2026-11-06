@@ -33,7 +33,8 @@ const VARIANT: Record<Variant, string> = {
   default: "nx-elev-1",
   subtle: "nx-elev-0",
   raised: "nx-elev-2",
-  accent: "nx-elev-2 !border-[rgba(124,106,251,0.28)] shadow-nx-accent",
+  accent:
+    "nx-elev-2 !border-[color-mix(in_srgb,var(--nx-accent)_28%,transparent)] shadow-nx-accent",
 };
 
 export interface CardProps {
@@ -60,7 +61,7 @@ export function Card({
       onClick={onClick}
       type={onClick ? "button" : undefined}
       className={[
-        "min-w-0 rounded-2xl",
+        "min-w-0 rounded-nx-lg",
         VARIANT[variant],
         // Specular sheen. Without it a dark fill reads as a hole, not an object.
         "nx-surface",
@@ -135,7 +136,7 @@ export function CardStat({
   hint?: string;
 }) {
   return (
-    <div className="min-w-0 rounded-xl bg-nexus-bg/40 px-3 py-2.5" title={hint}>
+    <div className="nx-inset min-w-0 rounded-xl px-3 py-2.5" title={hint}>
       <div className="text-[10px] uppercase tracking-wider text-nexus-faint">{label}</div>
       <div className="mt-0.5 truncate text-[13px] font-semibold tabular-nums text-nexus-text">
         {value}

@@ -104,7 +104,7 @@ describe("swarmReasoningText", () => {
     expect(text).toContain("sem título nenhum");
   });
 
-  it("remove a marcação <thinking> do razo, mantendo o texto", () => {
+  it("descarta o bloco privado de raciocínio e mantém a decisão pública", () => {
     // `backend/swarm/core/orchestrator.py:589` only sets
     // `enable_thinking=False`; it never strips the tags. Only the LEGACY lane
     // (`backend/orchestrator/swarm.py:958`) calls `_strip_thinking_markup`.
@@ -116,7 +116,7 @@ describe("swarmReasoningText", () => {
 
     expect(text).not.toContain("<thinking>");
     expect(text).not.toContain("</thinking>");
-    expect(text).toContain("Vou ler o schema primeiro.");
+    expect(text).not.toContain("Vou ler o schema primeiro.");
     expect(text).toContain("Escolho B.");
   });
 
@@ -174,7 +174,8 @@ describe("sanitizeSwarmAnswer", () => {
       final_answer: "<thinking>passo 1</thinking>\n<thinking>passo 2</thinking>Resposta",
     });
     expect(answer).not.toMatch(/<\/?thinking>/);
-    expect(answer).toContain("passo 1");
+    expect(answer).not.toContain("passo 1");
+    expect(answer).not.toContain("passo 2");
     expect(answer).toContain("Resposta");
   });
 });

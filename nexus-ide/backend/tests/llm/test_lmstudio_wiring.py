@@ -146,6 +146,8 @@ def test_resolve_model_maps_tiers_to_configured_ids() -> None:
         assert provider.resolve_model("micro") == "default-id"
         assert provider.resolve_model("fast") == "fast-id"
         assert provider.resolve_model("coder") == "coder-id"
+        assert provider.resolve_model("FAST") == "fast-id"
+        assert provider.resolve_model("Publisher/My-Model-GGUF") == "Publisher/My-Model-GGUF"
         # Concrete ids are used verbatim.
         assert provider.resolve_model("lfm2.5-2.6b-heretic-abliterated") == (
             "lfm2.5-2.6b-heretic-abliterated"

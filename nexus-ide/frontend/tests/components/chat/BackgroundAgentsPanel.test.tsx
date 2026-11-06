@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import BackgroundAgentsPanel from "../../../components/chat/BackgroundAgentsPanel";
@@ -51,7 +51,7 @@ describe("BackgroundAgentsPanel", () => {
     fireEvent.click(card);
 
     expect(screen.getByRole("region", { name: "Inspector de ARCHITECT" })).toBeTruthy();
-    expect(screen.getByText("Inspecionar o projeto")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "Inspector de ARCHITECT" })).getByText("Inspecionar o projeto")).toBeTruthy();
     expect(screen.getByText("task-actual-7")).toBeTruthy();
     expect(screen.queryByText(/Modelo|CPU|Memória|Tokens/)).toBeNull();
     expect(getAgentInstances).toHaveBeenCalledWith({ sessionId: "session-1", includeTerminal: true });
@@ -142,7 +142,7 @@ describe("BackgroundAgentsPanel", () => {
       })]);
     });
     expect(await screen.findByRole("button", { name: /CODER.*Em execução/ })).toBeTruthy();
-    expect(screen.queryByText("Inspecionar o projeto")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Inspector de ARCHITECT" })).toBeNull();
   });
 
   it("não deixa um pedido pendente de uma sessão bloquear a seguinte", async () => {
@@ -203,5 +203,73 @@ describe("BackgroundAgentsPanel", () => {
     const view = render(<BackgroundAgentsPanel sessionId="session-1" />);
 
     await waitFor(() => expect(view.container.querySelector('section[aria-label="Agentes desta sessão"]')).toBeNull());
+  });
+
+  it("filtra a equipa sem misturar agentes ativos e resultados terminados", async () => {
+    getAgentInstances.mockResolvedValue([
+      agent(),
+      agent({ id: "done", instance_id: "done", agent_type: "REVIEWER", status: "completed" }),
+      agent({ id: "failed", instance_id: "failed", agent_type: "TESTER", status: "failed" }),
+      agent({ id: "pending", instance_id: "pending", agent_type: "CODER", status: "pending" }),
+    ]);
+    render(<BackgroundAgentsPanel sessionId="session-1" />);
+    await screen.findByRole("button", { name: /ARCHITECT.*Em execução/ });
+    fireEvent.click(screen.getByRole("button", { name: /^Ativos/ }));
+    expect(screen.getByRole("button", { name: /CODER.*Na fila/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /REVIEWER/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /TESTER/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Concluídos/ }));
+    expect(screen.getByRole("button", { name: /REVIEWER.*Concluído/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /ARCHITECT/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Com erro/ }));
+    expect(screen.getByRole("button", { name: /TESTER.*Falhou/ })).toBeTruthy();
+  });
+
+  it("distingue os agentes em execução, em pausa, em espera e com problemas", async () => {
+    getAgentInstances.mockResolvedValue([
+      agent(),
+      agent({ id: "paused", instance_id: "paused", agent_type: "REVIEWER", status: "paused" }),
+      agent({ id: "waiting", instance_id: "waiting", agent_type: "CODER", status: "pending" }),
+      agent({ id: "failed", instance_id: "failed", agent_type: "TESTER", status: "failed" }),
+    ]);
+    render(<BackgroundAgentsPanel sessionId="session-1" />);
+    await screen.findByRole("button", { name: /ARCHITECT.*Em execução/ });
+    const heading = screen.getByRole("button", { name: "Recolher subagentes" });
+    expect(heading.textContent).toContain("1 em execução");
+    expect(heading.textContent).toContain("1 em pausa");
+    expect(heading.textContent).toContain("1 em espera");
+    expect(heading.textContent).toContain("1 com erro / parados");
+    expect(heading.textContent).not.toContain("2 em segundo plano");
+  });
+
+  it("recolhe a equipa e recupera a seleção ao expandir", async () => {
+    getAgentInstances.mockResolvedValue([agent()]);
+    render(<BackgroundAgentsPanel sessionId="session-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /ARCHITECT.*Em execução/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Recolher subagentes" }));
+    expect(screen.queryByRole("region", { name: "Inspector de ARCHITECT" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Expandir subagentes" }));
+    expect(screen.getByRole("region", { name: "Inspector de ARCHITECT" })).toBeTruthy();
+  });
+
+  it("regista todas as conclusões do mesmo refresh sem repetir callbacks no seguinte", async () => {
+    vi.useFakeTimers();
+    try {
+      const onCompleted = vi.fn();
+      const second = agent({ id: "second", instance_id: "second", agent_type: "CODER" });
+      const third = agent({ id: "third", instance_id: "third", agent_type: "TESTER" });
+      getAgentInstances.mockResolvedValueOnce([agent(), second, third]).mockResolvedValue([
+        agent({ status: "completed" }), { ...second, status: "completed" }, third,
+      ]);
+      const view = render(<BackgroundAgentsPanel sessionId="session-1" onCompleted={onCompleted} />);
+      await act(async () => {});
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+      expect(onCompleted).toHaveBeenCalledTimes(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+      expect(onCompleted).toHaveBeenCalledTimes(1);
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

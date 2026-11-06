@@ -219,11 +219,62 @@ async def send_email_notification(
 # ---------------------------------------------------------------------------
 # Desktop notification
 # ---------------------------------------------------------------------------
+#: Environment variables used to hand the notification text to the helper
+#: processes. The text is NEVER part of a command line or a script body: the
+#: previous implementation interpolated the model-controlled ``title`` and
+#: ``message`` straight into a single-quoted PowerShell string, so a payload
+#: like ``x' + (Set-Content -Path '<marker>' -Value 'PWNED') + '`` closed the
+#: quote and executed arbitrary PowerShell. Passing the values through the
+#: environment keeps them data: nothing the model writes is ever parsed as
+#: code.
+_NOTIFY_TITLE_ENV = "NEXUS_NOTIFY_TITLE"
+_NOTIFY_MESSAGE_ENV = "NEXUS_NOTIFY_MESSAGE"
+_NOTIFY_APP_ENV = "NEXUS_NOTIFY_APP"
+
+#: The Windows helper. It shows a *toast* (a tray balloon), not a modal
+#: dialog: the modal ``MessageBox`` waited for a human click, so the call
+#: always burned the tool timeout and reported an error. The toast is
+#: fire-and-forget: the script returns immediately and the notification
+#: disappears on its own.
+#:
+#: The script body is a CONSTANT: the notification text is read from the
+#: environment, so no model-controlled character can ever be parsed as
+#: PowerShell.
+_WINDOWS_TOAST_SCRIPT = (
+    "Add-Type -AssemblyName System.Windows.Forms;"
+    "Add-Type -AssemblyName System.Drawing;"
+    "$notify = New-Object System.Windows.Forms.NotifyIcon;"
+    "$notify.Icon = [System.Drawing.SystemIcons]::Information;"
+    "$notify.BalloonTipTitle = $env:NEXUS_NOTIFY_TITLE;"
+    "$notify.BalloonTipText = $env:NEXUS_NOTIFY_MESSAGE;"
+    "$notify.Visible = $true;"
+    "$notify.ShowBalloonTip(5000);"
+    "Start-Sleep -Milliseconds 600;"
+    "$notify.Dispose();"
+)
+
+
+def _windows_toast_env(title: str, message: str, app_name: str) -> dict[str, str]:
+    """Return the environment for the Windows toast helper."""
+    import os
+
+    env = dict(os.environ)
+    env[_NOTIFY_TITLE_ENV] = title
+    env[_NOTIFY_MESSAGE_ENV] = message
+    env[_NOTIFY_APP_ENV] = app_name
+    return env
+
+
 async def show_desktop_notification(title: str, message: str, app_name: str = "NEXUS IDE") -> dict:
     """Show a native desktop notification.
 
     Cross-platform via ``plyer`` (best-effort). If plyer is not available,
     falls back to platform-specific commands.
+
+    The notification text is passed to the helper process as *data* (an
+    environment variable), never interpolated into a shell command or a script
+    body, so model-controlled text cannot be executed. The Windows fallback
+    shows a non-modal toast, so the call does not wait for a human click.
 
     Args:
         title: Notification title.
@@ -245,29 +296,49 @@ async def show_desktop_notification(title: str, message: str, app_name: str = "N
             pass
         # Fallback: platform-specific
         if sys.platform == "win32":
-            # PowerShell BurntToast / Windows.UI.Notifications (simplest: msg.exe)
-            ps_script = f"""
-Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.MessageBox]::Show('{message}', '{title}')
-"""
             try:
+                # ``-EncodedCommand`` takes base64-encoded UTF-16LE, so the
+                # script body itself needs no quoting either. The values live
+                # in the environment, so they are never parsed as PowerShell.
+                import base64
+
+                encoded = base64.b64encode(_WINDOWS_TOAST_SCRIPT.encode("utf-16-le")).decode(
+                    "ascii"
+                )
                 subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", ps_script],
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-EncodedCommand",
+                        encoded,
+                    ],
                     check=True,
                     capture_output=True,
                     timeout=10,
+                    env=_windows_toast_env(title, message, app_name),
                 )
-                return True, "winforms"
+                return True, "winforms-toast"
             except Exception as e:  # noqa: BLE001
                 return False, f"Windows fallback failed: {e}"
         if sys.platform == "darwin":
             if shutil.which("osascript"):
                 try:
+                    # The text is passed as an argument, never interpolated
+                    # into the AppleScript source.
                     subprocess.run(
                         [
                             "osascript",
                             "-e",
-                            f'display notification "{message}" with title "{title}"',
+                            'on run argv',
+                            "-e",
+                            'display notification (item 1 of argv) with title (item 2 of argv)',
+                            "-e",
+                            'end run',
+                            message,
+                            title,
                         ],
                         check=True,
                         capture_output=True,
@@ -337,6 +408,7 @@ register_tool(
             "required": ["url"],
         },
         handler=send_webhook,
+        category="notification",
         # An outbound POST with a caller-supplied body and an attacker-chosen
         # destination is not a low-risk read. "medium" is the truthful floor;
         # raising it to "high" would additionally require human confirmation,
@@ -368,6 +440,7 @@ register_tool(
             "required": ["to", "subject", "body"],
         },
         handler=send_email_notification,
+        category="email",
     )
 )
 
@@ -376,9 +449,11 @@ register_tool(
         name="show_desktop_notification",
         description=(
             "Show a native desktop notification. Uses plyer if available; "
-            "falls back to platform-specific commands (powershell MessageBox on Windows, "
-            "osascript on macOS, notify-send on Linux)."
+            "falls back to platform-specific commands (a non-modal toast on "
+            "Windows, osascript on macOS, notify-send on Linux). The text is "
+            "passed as data, never interpolated into a shell command."
         ),
+        category="notification",
         schema={
             "type": "object",
             "properties": {

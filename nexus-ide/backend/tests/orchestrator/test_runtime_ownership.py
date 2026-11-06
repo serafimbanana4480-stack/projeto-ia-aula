@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from backend.core.disk_guard import WorkerOwnershipGuard
 from backend.llm.circuit_breaker import get_breaker, reset_all_breakers
 from backend.observability.routes.health import health_check, readiness_check
-from backend.orchestrator.main import _cleanup_failed_lifespan
+from backend.orchestrator.main import _cleanup_failed_lifespan, _safe_shutdown
 
 
 def test_worker_ownership_rejects_duplicate_and_releases() -> None:
@@ -62,3 +62,16 @@ async def test_failed_startup_releases_claims_even_when_shutdown_fails() -> None
 async def test_mounted_health_payloads_include_disk_pressure() -> None:
     assert "disk_pressure" in await health_check()
     assert "disk_pressure" in await readiness_check()
+
+
+async def test_safe_shutdown_accepts_sync_results_and_awaitables(caplog) -> None:
+    completed: list[str] = []
+
+    async def async_stop() -> None:
+        completed.append("async")
+
+    await _safe_shutdown("sync watchdog stop", None)
+    await _safe_shutdown("async service stop", async_stop())
+
+    assert completed == ["async"]
+    assert "Runtime shutdown failed" not in caplog.text

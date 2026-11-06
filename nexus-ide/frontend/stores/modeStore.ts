@@ -25,7 +25,7 @@ interface ModeStore {
   usingFallback: boolean;
   setMode: (mode: string) => void;
   setModes: (modes: Mode[]) => void;
-  loadModes: () => Promise<void>;
+  loadModes: (refresh?: boolean) => Promise<void>;
 }
 
 export const useModeStore = create<ModeStore>((set, get) => ({
@@ -42,8 +42,8 @@ export const useModeStore = create<ModeStore>((set, get) => ({
     set({ currentMode: mode });
   },
   setModes: (modes) => set({ modes }),
-  loadModes: async () => {
-    if (get().modesLoaded || get().modesLoading) return;
+  loadModes: async (refresh = false) => {
+    if (get().modesLoading || (!refresh && get().modesLoaded && !get().modesError)) return;
     set({ modesLoading: true, modesError: null });
     try {
       const res = await authenticatedFetch(`${API_BASE}/api/modes`);

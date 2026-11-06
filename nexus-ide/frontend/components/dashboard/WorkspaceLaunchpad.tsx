@@ -1,13 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowUpRight, BookOpen, ListTodo, Workflow, Wrench } from "lucide-react";
+import { ArrowUpRight, BookOpen, Brain, Cpu, ListTodo, Plug, Workflow, Wrench } from "lucide-react";
 
 const DESTINATIONS = [
   { href: "/?mode=plan", title: "Planear trabalho", detail: "Define passos, dependências e validação antes de executar.", Icon: Workflow, label: "Plano" },
   { href: "/dashboard/tasks", title: "Acompanhar tarefas", detail: "Consulta estado, progresso e trabalho que ficou pendente.", Icon: ListTodo, label: "Execução" },
   { href: "/tools", title: "Explorar ferramentas", detail: "Pesquisa capacidades, parâmetros e disponibilidade.", Icon: Wrench, label: "Recursos" },
   { href: "/tools#skills", title: "Usar uma skill", detail: "Encontra instruções do projeto e prepara o próximo pedido.", Icon: BookOpen, label: "Conhecimento" },
+  { href: "/models", title: "Escolher modelos", detail: "Consulta os modelos e a configuração dos providers.", Icon: Cpu, label: "Modelos" },
+  { href: "/mcp", title: "Gerir conectores MCP", detail: "Configura servidores e consulta os últimos testes.", Icon: Plug, label: "Integrações" },
+  { href: "/nexus", title: "Explorar memória", detail: "Consulta os recursos de conhecimento e contexto do NEXUS.", Icon: Brain, label: "Contexto" },
 ] as const;
 
 export default function WorkspaceLaunchpad() {

@@ -1,10 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Maximize2, Minimize2, ScanSearch } from "lucide-react";
+import { Minimize2, ScanSearch } from "lucide-react";
 import Sidebar from "../components/layout/Sidebar";
-import ChatPanel from "../components/chat/ChatPanel";
+import ChatPanel, { toggleFocusMode } from "../components/chat/ChatPanel";
 import RightPanel, { ContextMiniRail } from "../components/layout/RightPanel";
+import ChatContextDrawer from "../components/chat/ChatContextDrawer";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 
 const FOCUS_KEY = "nexus:focus-mode";
 const INSPECT_KEY = "nexus:inspect-mode";
@@ -22,17 +24,23 @@ const RIGHT_KEY = "nexus:right-open";
  *   a minimal floating pill. Toggle via button or Ctrl+Shift+F.
  * - Inspect mode (`nexus-inspect`) is the deep view: widens the rail and
  *   forces every Context Rail module open.
- * - Mobile hides both rails; the rail reappears at xl.
+ * - On mobile, context opens in a modal drawer; the desktop rail appears at xl.
  */
 export default function HomePage() {
   const [rightOpen, setRightOpen] = useState(true);
   const [focusMode, setFocusMode] = useState(false);
   const [inspectMode, setInspectMode] = useState(false);
+  const [mobileRightOpen, setMobileRightOpen] = useState(false);
+  const wideScreen = useMediaQuery("(min-width: 1280px)");
   const hydratedRef = useRef(false);
 
   useEffect(() => {
     try {
-      if (window.localStorage.getItem(FOCUS_KEY) === "true") setFocusMode(true);
+      if (window.localStorage.getItem(FOCUS_KEY) === "true") {
+        document.body.classList.add("nexus-focus");
+        setFocusMode(true);
+        window.dispatchEvent(new CustomEvent("nexus:focus-toggle", { detail: { focus: true } }));
+      }
       if (window.localStorage.getItem(INSPECT_KEY) === "true") setInspectMode(true);
       if (window.localStorage.getItem(RIGHT_KEY) === "false") setRightOpen(false);
     } catch {
@@ -68,20 +76,29 @@ export default function HomePage() {
     }
   }, [rightOpen]);
 
-  const toggleFocus = useCallback(() => setFocusMode((v) => !v), []);
+  const toggleFocus = useCallback(() => { toggleFocusMode(); }, []);
   const toggleInspect = useCallback(() => setInspectMode((v) => !v), []);
+  const contextOpen = wideScreen ? rightOpen : mobileRightOpen;
+  const setContextOpen = useCallback((open: boolean) => {
+    if (wideScreen) setRightOpen(open);
+    else setMobileRightOpen(open);
+  }, [wideScreen]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.shiftKey && (e.key === "F" || e.key === "f")) {
-        e.preventDefault();
+      if (e.key === "Escape" && focusMode) {
         toggleFocus();
-      } else if (e.key === "Escape" && focusMode) {
-        setFocusMode(false);
       }
     };
+    const onFocusToggle = (event: Event) => {
+      setFocusMode((event as CustomEvent<{ focus: boolean }>).detail.focus);
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("nexus:focus-toggle", onFocusToggle);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("nexus:focus-toggle", onFocusToggle);
+    };
   }, [toggleFocus, focusMode]);
 
   return (
@@ -94,46 +111,16 @@ export default function HomePage() {
 
       {/* Centre column — owns the conversation width */}
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {!focusMode ? (
-          <div className="flex h-11 shrink-0 items-center justify-between border-b border-nexus-border/60 bg-nexus-panel/40 px-3 sm:px-5">
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={toggleFocus}
-                aria-pressed={focusMode}
-                title="Focus mode (Ctrl+Shift+F)"
-                className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-nexus-muted transition-[transform,opacity,background-color,color] duration-[180ms] hover:bg-white/[0.05] hover:text-nexus-text"
-              >
-                <Maximize2 className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Foco</span>
-              </button>
-              <button
-                type="button"
-                onClick={toggleInspect}
-                aria-pressed={inspectMode}
-                title="Inspect — modo profundo do Context Rail"
-                className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition-[transform,opacity,background-color,color] duration-[180ms] hover:bg-white/[0.05] hover:text-nexus-text ${
-                  inspectMode ? "text-nexus-accent-bright" : "text-nexus-muted"
-                }`}
-              >
-                <ScanSearch className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Detalhes</span>
-              </button>
-            </div>
-            <div className="hidden items-center gap-2 text-[10px] text-nexus-faint md:flex">
-              <kbd className="rounded-md border border-nexus-border bg-white/[0.03] px-1.5 py-0.5 font-mono">
-                Ctrl+Shift+F
-              </kbd>
-              <span>para focar</span>
-            </div>
-          </div>
-        ) : null}
-
         <div className="flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden">
           <div
             className="mx-auto flex min-h-0 w-full min-w-0 max-w-[1280px] flex-1 flex-col"
           >
-            <ChatPanel rightOpen={rightOpen} setRightOpen={setRightOpen} />
+            <ChatPanel
+              rightOpen={contextOpen}
+              setRightOpen={setContextOpen}
+              inspectMode={inspectMode}
+              onToggleInspect={toggleInspect}
+            />
           </div>
         </div>
       </div>
@@ -150,6 +137,11 @@ export default function HomePage() {
         </aside>
       ) : null}
       {!focusMode && !rightOpen ? <ContextMiniRail onOpen={() => setRightOpen(true)} /> : null}
+      {!focusMode && !wideScreen && mobileRightOpen ? (
+        <ChatContextDrawer onClose={() => setMobileRightOpen(false)}>
+          <RightPanel deep={inspectMode} onClose={() => setMobileRightOpen(false)} />
+        </ChatContextDrawer>
+      ) : null}
 
       {/* Focus mode — minimal floating pill */}
       {focusMode ? (

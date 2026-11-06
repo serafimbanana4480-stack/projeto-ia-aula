@@ -1,17 +1,14 @@
 ﻿"""Browser automation tool using Playwright async API.
 
-Maintains a simple context pool keyed by session_id so multiple
-conversations can drive independent browser sessions.
+Maintains a tenant-scoped context pool so multiple conversations have
+independent browser sessions even when their session ids match.
 
 Two hardening notes for this module:
 
-* ``url`` arguments are screened with
-  :func:`backend.tools.safe_http.normalize_public_http_url` before they reach
-  Playwright, so ``file://``, ``chrome://`` and literal private/loopback/link-local
-  addresses are refused. Playwright performs the navigation's own DNS resolution
-  and does not expose a per-hop connect hook, so redirects and subresource loads
-  inside the page are *not* covered by that check — see the residual-risk note
-  in the security audit.
+* Every HTTP request, redirect and subresource is screened before Playwright
+  continues it. Playwright resolves the hostname again after the check, so DNS
+  rebinding remains a residual race until the browser socket can be pinned.
+  WebSocket connections receive the same URL and DNS check.
 * ``session_id`` is model/REST supplied and is used both as a pool key and as
   part of a screenshot filename, so it is constrained to a conservative
   character set by :func:`_normalize_session_id` before either use.
@@ -19,15 +16,17 @@ Two hardening notes for this module:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit, urlunsplit
 
 from backend.observability.optional_deps import optional_attribute
 from backend.tools.registry import ToolSpec, register_tool
-from backend.tools.safe_http import normalize_public_http_url
+from backend.tools.safe_http import normalize_public_http_url, validate_public_http_url
 
 # Playwright is an optional extra (``uv sync --extra browser``) because it also
 # requires a ~150 MB browser download, and no path in main.py reaches this tool.
@@ -57,12 +56,7 @@ _USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
-# In-memory pool: session_id -> {"context": BrowserContext, "page": Page, "playwright": Playwright, "browser": Browser}
-# RESIDUAL RISK (not fixed here): the key is only ``session_id``, and the tool
-# signature carries no user/tenant identity, so two callers that both pass
-# session_id="default" share one BrowserContext and can read each other's pages,
-# cookies and storage state. Fixing it needs a trusted user_id plumbed into the
-# signature by the caller, which is out of scope for the SSRF work.
+# In-memory pool: opaque tenant-specific key -> browser handles.
 _pool: dict[str, dict[str, Any]] = {}
 
 #: Matches the REST layer's ``session_id`` bound in
@@ -122,13 +116,24 @@ def _normalize_session_id(session_id: str | None) -> str:
     return value
 
 
+def _browser_pool_key(session_id: str | None, user_id: str) -> str:
+    """Build a stable, tenant-specific key without exposing user identifiers."""
+    owner = str(user_id or "").strip()
+    if not owner:
+        raise ValueError("A trusted authenticated user context is required")
+    safe_session = _normalize_session_id(session_id)
+    owner_key = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:16]
+    session_key = hashlib.sha256(safe_session.encode("utf-8")).hexdigest()[:32]
+    return f"{owner_key}_{session_key}"
+
+
 def _screenshot_dir() -> Path:
     path = Path(__file__).resolve().parent.parent.parent / "data" / "screenshots"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def _screenshot_path(session_id: str | None) -> Path:
+def _screenshot_path(session_id: str | None, owner_key: str = "unscoped") -> Path:
     """Build a screenshot path that is confined to the screenshot directory.
 
     Safe by construction: the only interpolated value is the output of
@@ -138,8 +143,10 @@ def _screenshot_path(session_id: str | None) -> Path:
     write anywhere on the host's filesystem, so it is checked rather than assumed.
     """
     safe_id = _normalize_session_id(session_id)
+    if not re.fullmatch(r"[A-Fa-f0-9]{1,32}|unscoped", owner_key):
+        raise ValueError("owner_key must be a short hexadecimal tenant digest")
     directory = _screenshot_dir()
-    candidate = directory / f"screenshot_{safe_id}_{int(time.time())}.png"
+    candidate = directory / f"screenshot_{owner_key}_{safe_id}_{int(time.time())}.png"
     resolved_dir = directory.resolve()
     resolved = candidate.resolve()
     if resolved.parent != resolved_dir:
@@ -155,9 +162,36 @@ async def _get_or_create_session(session_id: str) -> dict[str, Any]:
 
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(headless=True)
-    context = await browser.new_context(user_agent=_USER_AGENT)
-    page = await context.new_page()
-    await page.set_default_timeout(_DEFAULT_TIMEOUT)
+    context = None
+    try:
+        context = await browser.new_context(
+            user_agent=_USER_AGENT,
+            service_workers="block",
+        )
+        await context.route("**/*", _guard_browser_route)
+        route_web_socket = getattr(context, "route_web_socket", None)
+        if not callable(route_web_socket):
+            raise RuntimeError(
+                "Safe browser sessions require Playwright 1.48 or newer for WebSocket routing"
+            )
+        await route_web_socket("**/*", _guard_browser_websocket)
+        page = await context.new_page()
+        await page.set_default_timeout(_DEFAULT_TIMEOUT)
+    except BaseException:
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:
+                logger.debug("Could not close partial browser context", exc_info=True)
+        try:
+            await browser.close()
+        except Exception:
+            logger.debug("Could not close partial browser process", exc_info=True)
+        try:
+            await pw.stop()
+        except Exception:
+            logger.debug("Could not stop partial Playwright instance", exc_info=True)
+        raise
 
     session = {
         "playwright": pw,
@@ -168,6 +202,45 @@ async def _get_or_create_session(session_id: str) -> dict[str, Any]:
     _pool[safe_id] = session
     logger.info("Browser session created: %s", safe_id)
     return session
+
+
+async def _guard_browser_route(route: Any, request: Any) -> None:
+    """Validate each browser network request before it reaches the socket.
+
+    Playwright invokes the context route for navigation, redirects and page
+    subresources. Service workers are disabled when the context is created so
+    they cannot bypass this request hook. ``data:``, ``blob:`` and ``about:``
+    are browser-local schemes and make no network connection.
+    """
+    request_url = str(getattr(request, "url", "") or "")
+    scheme = request_url.split(":", 1)[0].lower()
+    if scheme in {"data", "blob", "about"}:
+        await route.continue_()
+        return
+    try:
+        await validate_public_http_url(request_url)
+    except Exception as exc:
+        logger.warning("Blocked browser request to %r: %s", request_url, exc)
+        await route.abort("blockedbyclient")
+        return
+    await route.continue_()
+
+
+async def _guard_browser_websocket(websocket: Any) -> None:
+    """Apply the public-host and DNS guard to a page-created WebSocket."""
+    raw_url = str(getattr(websocket, "url", "") or "")
+    try:
+        parsed = urlsplit(raw_url)
+        scheme = {"ws": "http", "wss": "https"}.get(parsed.scheme.lower())
+        if not scheme:
+            raise ValueError("Only ws:// and wss:// WebSocket URLs are allowed")
+        checked_url = urlunsplit((scheme, parsed.netloc, parsed.path, parsed.query, ""))
+        await validate_public_http_url(checked_url)
+    except Exception as exc:
+        logger.warning("Blocked browser WebSocket to %r: %s", raw_url, exc)
+        await websocket.close(code=1008, reason="destination is not public")
+        return
+    await websocket.connect_to_server()
 
 
 async def _ensure_page(session_id: str) -> Page:
@@ -186,7 +259,9 @@ def _result(**kwargs: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def browser_navigate(url: str, session_id: str = "default") -> dict[str, Any]:
+async def browser_navigate(
+    url: str, session_id: str = "default", user_id: str = ""
+) -> dict[str, Any]:
     """Navigate to a URL in the given browser session.
 
     The URL is screened first: only absolute http/https URLs on the standard
@@ -202,10 +277,11 @@ async def browser_navigate(url: str, session_id: str = "default") -> dict[str, A
         return _result(success=False, error=f"Blocked URL: {exc}", url=url, session_id=session_id)
     try:
         safe_session_id = _normalize_session_id(session_id)
+        pool_key = _browser_pool_key(safe_session_id, user_id)
     except ValueError as exc:
         return _result(success=False, error=str(exc), url=target_url, session_id=session_id)
     try:
-        page = await _ensure_page(safe_session_id)
+        page = await _ensure_page(pool_key)
         response = await page.goto(target_url, wait_until="domcontentloaded")
         title = await page.title()
         current_url = page.url
@@ -224,34 +300,41 @@ async def browser_navigate(url: str, session_id: str = "default") -> dict[str, A
         )
 
 
-async def browser_click(selector: str, session_id: str = "default") -> dict[str, Any]:
+async def browser_click(
+    selector: str, session_id: str = "default", user_id: str = ""
+) -> dict[str, Any]:
     """Click an element identified by a CSS selector."""
     try:
-        page = await _ensure_page(session_id)
+        safe_session_id = _normalize_session_id(session_id)
+        page = await _ensure_page(_browser_pool_key(safe_session_id, user_id))
         await page.click(selector)
-        return _result(success=True, selector=selector, session_id=session_id)
+        return _result(success=True, selector=selector, session_id=safe_session_id)
     except Exception as exc:
         logger.error("browser_click failed for %s: %s", selector, exc)
         return _result(success=False, error=str(exc), selector=selector, session_id=session_id)
 
 
-async def browser_fill(selector: str, text: str, session_id: str = "default") -> dict[str, Any]:
+async def browser_fill(
+    selector: str, text: str, session_id: str = "default", user_id: str = ""
+) -> dict[str, Any]:
     """Fill a form field identified by a CSS selector."""
     try:
-        page = await _ensure_page(session_id)
+        safe_session_id = _normalize_session_id(session_id)
+        page = await _ensure_page(_browser_pool_key(safe_session_id, user_id))
         await page.fill(selector, text)
-        return _result(success=True, selector=selector, text=text, session_id=session_id)
+        return _result(success=True, selector=selector, text=text, session_id=safe_session_id)
     except Exception as exc:
         logger.error("browser_fill failed for %s: %s", selector, exc)
         return _result(success=False, error=str(exc), selector=selector, session_id=session_id)
 
 
 async def browser_extract_text(
-    selector: str | None = None, session_id: str = "default"
+    selector: str | None = None, session_id: str = "default", user_id: str = ""
 ) -> dict[str, Any]:
     """Extract text from the page or from a specific CSS selector."""
     try:
-        page = await _ensure_page(session_id)
+        safe_session_id = _normalize_session_id(session_id)
+        page = await _ensure_page(_browser_pool_key(safe_session_id, user_id))
         if selector:
             elements = await page.query_selector_all(selector)
             texts = []
@@ -264,7 +347,7 @@ async def browser_extract_text(
                 selector=selector,
                 texts=texts,
                 count=len(texts),
-                session_id=session_id,
+                session_id=safe_session_id,
             )
         else:
             body = await page.query_selector("body")
@@ -272,7 +355,7 @@ async def browser_extract_text(
             return _result(
                 success=True,
                 text=(text or "").strip(),
-                session_id=session_id,
+                session_id=safe_session_id,
             )
     except Exception as exc:
         logger.error("browser_extract_text failed: %s", exc)
@@ -280,13 +363,15 @@ async def browser_extract_text(
 
 
 async def browser_screenshot(
-    session_id: str = "default", full_page: bool = False
+    session_id: str = "default", full_page: bool = False, user_id: str = ""
 ) -> dict[str, Any]:
     """Take a screenshot and save it to data/screenshots/."""
     try:
         safe_session_id = _normalize_session_id(session_id)
-        page = await _ensure_page(safe_session_id)
-        path = _screenshot_path(safe_session_id)
+        pool_key = _browser_pool_key(safe_session_id, user_id)
+        page = await _ensure_page(pool_key)
+        owner_key = pool_key.split("_", 1)[0]
+        path = _screenshot_path(safe_session_id, owner_key)
         await page.screenshot(path=str(path), full_page=full_page)
         return _result(
             success=True, path=str(path), full_page=full_page, session_id=safe_session_id
@@ -296,10 +381,11 @@ async def browser_screenshot(
         return _result(success=False, error=str(exc), session_id=session_id)
 
 
-async def browser_get_links(session_id: str = "default") -> dict[str, Any]:
+async def browser_get_links(session_id: str = "default", user_id: str = "") -> dict[str, Any]:
     """Return all unique links (href + text) on the current page."""
     try:
-        page = await _ensure_page(session_id)
+        safe_session_id = _normalize_session_id(session_id)
+        page = await _ensure_page(_browser_pool_key(safe_session_id, user_id))
         links = await page.eval_on_selector_all(
             "a[href]",
             """elements => elements.map(el => ({
@@ -314,19 +400,20 @@ async def browser_get_links(session_id: str = "default") -> dict[str, Any]:
             if href and href not in seen:
                 seen.add(href)
                 unique.append({"href": href, "text": link.get("text", "")})
-        return _result(success=True, links=unique, count=len(unique), session_id=session_id)
+        return _result(success=True, links=unique, count=len(unique), session_id=safe_session_id)
     except Exception as exc:
         logger.error("browser_get_links failed: %s", exc)
         return _result(success=False, error=str(exc), session_id=session_id)
 
 
-async def browser_close(session_id: str = "default") -> dict[str, Any]:
+async def browser_close(session_id: str = "default", user_id: str = "") -> dict[str, Any]:
     """Close the browser context for a session and remove it from the pool."""
     try:
         safe_session_id = _normalize_session_id(session_id)
+        pool_key = _browser_pool_key(safe_session_id, user_id)
     except ValueError as exc:
         return _result(success=False, error=str(exc), session_id=session_id)
-    session = _pool.pop(safe_session_id, None)
+    session = _pool.pop(pool_key, None)
     if not session:
         return _result(
             success=True, message="Session not found, nothing to close", session_id=safe_session_id

@@ -996,6 +996,16 @@ register_tool(
             "Generates a conventional commit message using LLM analysis of the diff. "
             "Respects AUTO_COMMIT_ENABLED and AUTO_COMMIT_STRATEGY environment settings."
         ),
+        tags=["git", "commit"],
+        category="git",
+        # This tool writes git history. It used to be registered with the
+        # default low risk and no confirmation, and it called
+        # ``git_commit_safe(...)`` directly in Python — so the registry's
+        # confirmation gate for the commit was never consulted and the agent
+        # could rewrite history unattended. The tool is now itself
+        # approval-gated, which is the same contract ``git_commit_safe`` has.
+        risk_level="high",
+        requires_confirmation=True,
         schema={
             "type": "object",
             "properties": {
@@ -1052,6 +1062,7 @@ register_tool(
     ToolSpec(
         name="approve_pending_commit",
         description="Approve a pending commit and execute it in git.",
+        risk_level="high",
         schema={
             "type": "object",
             "properties": {

@@ -32,5 +32,5 @@ docker build -t nexus-sandbox -f docker/sandbox.Dockerfile . || echo "⚠️  sa
 
 echo ""
 echo "✅ Setup complete!"
-echo "   Start backend:  uvicorn backend.orchestrator.main:app --reload"
-echo "   Start frontend: cd frontend && npm run dev"
+echo "   Start backend:  uvicorn backend.orchestrator.main:app"
+echo "   Start frontend: cd frontend && pnpm run dev"

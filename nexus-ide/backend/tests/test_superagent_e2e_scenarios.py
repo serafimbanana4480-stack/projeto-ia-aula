@@ -6,6 +6,7 @@ from __future__ import annotations
 def test_scripted_primary_chat_scenarios_pass_in_isolation(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "scripted-e2e")
     monkeypatch.setenv("NEXUS_FREE_ONLY", "false")
+    monkeypatch.setenv("NEXUS_PRIMARY_ENABLED", "1")
     monkeypatch.setenv("NEXUS_BACKGROUND_SERVICES", "off")
     monkeypatch.setenv("NEXUS_ENABLE_BACKGROUND_WORKERS", "false")
     monkeypatch.setenv("NEXUS_ENABLE_DASHBOARD_AGENT", "false")
@@ -20,6 +21,8 @@ def test_scripted_primary_chat_scenarios_pass_in_isolation(tmp_path, monkeypatch
     monkeypatch.setenv("NEXUS_ENABLE_SESSION_GC", "false")
     monkeypatch.setenv("NEXUS_EVENT_JOURNAL", "1")
     monkeypatch.setenv("NEXUS_EXPERIENCE_OFF", "1")
+    monkeypatch.setenv("NEXUS_VIBE_STATE_ROOT", str(tmp_path / "vibe-state"))
+    monkeypatch.setenv("NEXUS_ADVANCED_STATE_ROOT", str(tmp_path / "advanced-state"))
 
     import backend.config.settings as settings_module
 
@@ -29,14 +32,35 @@ def test_scripted_primary_chat_scenarios_pass_in_isolation(tmp_path, monkeypatch
 
     import backend.llm as llm_package
     from backend.observability import logging_config
+    from backend.orchestrator import advanced_modes
+    from backend.orchestrator import events as orchestrator_events
     from backend.orchestrator import main as main_module
+    from backend.orchestrator.infinity import advisor_engine
     from backend.runtime import events as runtime_events
     from backend.tools.ollama_client import OllamaClient
 
     previous_ollama_init = OllamaClient.__init__
     previous_factory = llm_package.create_llm_client
     previous_setup_logging = logging_config.setup_logging
+    previous_main_settings = main_module.settings
+    previous_app_state = dict(main_module.app.state._state)
     monkeypatch.setattr(logging_config, "setup_logging", lambda **_kwargs: None)
+    main_module.settings = settings_module.get_settings()
+    monkeypatch.setattr(
+        orchestrator_events,
+        "get_event_store",
+        lambda: orchestrator_events.EventStore(store_dir=tmp_path / "event-store"),
+    )
+    monkeypatch.setattr(advisor_engine, "NOTES_DIR", tmp_path / "advisor-notes")
+
+    class _NoActiveModes:
+        def build_active_execution_profile(self) -> dict[str, object]:
+            return {}
+
+        def prepare_active_execution_profile(self, _message: str) -> dict[str, object]:
+            return {}
+
+    monkeypatch.setattr(advanced_modes, "get_orchestrator", lambda: _NoActiveModes())
     journal_root = tmp_path / "run-journals"
     journal_root.mkdir(parents=True, exist_ok=True)
     # Patch the single owner of the helper. It used to also patch
@@ -51,27 +75,20 @@ def test_scripted_primary_chat_scenarios_pass_in_isolation(tmp_path, monkeypatch
         "run_event_journal_path",
         lambda run_id: journal_root / f"{run_id}.jsonl",
     )
-    state_attrs = {
-        name: (hasattr(main_module.app.state, name), getattr(main_module.app.state, name, None))
-        for name in ("ollama", "llm_client")
-    }
-
     from backend.tests import e2e_audit_scenarios
 
     e2e_audit_scenarios.RESULTS.clear()
     try:
         result = e2e_audit_scenarios.main(results_path=tmp_path / "e2e_audit_results.json")
         assert result == 0
-        assert len(e2e_audit_scenarios.RESULTS) == 16
+        assert len(e2e_audit_scenarios.RESULTS) == 17
         assert all(scenario["ok"] for scenario in e2e_audit_scenarios.RESULTS)
     finally:
         OllamaClient.__init__ = previous_ollama_init
         llm_package.create_llm_client = previous_factory
         logging_config.setup_logging = previous_setup_logging
-        for name, (existed, value) in state_attrs.items():
-            if existed:
-                setattr(main_module.app.state, name, value)
-            elif hasattr(main_module.app.state, name):
-                delattr(main_module.app.state, name)
+        main_module.settings = previous_main_settings
+        main_module.app.state._state.clear()
+        main_module.app.state._state.update(previous_app_state)
         settings_module.get_settings.cache_clear()
         settings_module._settings_instance = previous_settings
