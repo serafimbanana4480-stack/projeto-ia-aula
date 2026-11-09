@@ -53,18 +53,22 @@ export default function MetricsGrid() {
 
   const displayValues = useMemo(() => {
     if (!metrics) return {} as Record<string, string>;
+    const num = (value: number | null | undefined, digits: number, suffix = "") =>
+      typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : "—";
+    const count = (value: number | null | undefined) =>
+      typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "—";
     return {
-      tokens_per_second: metrics.tokens_per_second.toFixed(1),
-      active_model: metrics.active_model || "nenhum",
-      active_sessions: metrics.active_sessions.toLocaleString(),
-      queue_depth: metrics.queue_depth.toString(),
-      ram_used: `${(metrics.ram_used_bytes / 1e9).toFixed(2)} GB`,
-      ram_percent: `${metrics.ram_percent.toFixed(1)}%`,
-      cpu_percent: `${metrics.cpu_percent.toFixed(1)}%`,
-      disk_percent: `${metrics.disk_percent.toFixed(1)}%`,
-      uptime: formatUptime(metrics.uptime_seconds),
-      requests_total: metrics.requests_total.toLocaleString(),
-      avg_latency: `${metrics.avg_latency_ms.toFixed(0)} ms`,
+      tokens_per_second: num(metrics.tokens_per_second, 1),
+      active_model: metrics.active_model || "não observado",
+      active_sessions: count(metrics.active_sessions),
+      queue_depth: count(metrics.queue_depth),
+      ram_used: typeof metrics.ram_used_bytes === "number" ? `${(metrics.ram_used_bytes / 1e9).toFixed(2)} GB` : "—",
+      ram_percent: num(metrics.ram_percent, 1, "%"),
+      cpu_percent: num(metrics.cpu_percent, 1, "%"),
+      disk_percent: num(metrics.disk_percent, 1, "%"),
+      uptime: typeof metrics.uptime_seconds === "number" ? formatUptime(metrics.uptime_seconds) : "—",
+      requests_total: count(metrics.requests_total),
+      avg_latency: typeof metrics.avg_latency_ms === "number" ? `${metrics.avg_latency_ms.toFixed(0)} ms` : "—",
     };
   }, [metrics]);
 

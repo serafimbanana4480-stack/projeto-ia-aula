@@ -1,5 +1,4 @@
 import { Suspense } from "react";
-import AppShell from "../../../components/layout/AppShell";
 import EvolutionClient from "./EvolutionClient";
 export const metadata = {
   title: "Evolution Engine | NEXUS IDE",
@@ -41,10 +40,10 @@ function EvolutionSkeleton() {
 
 export default function EvolutionPage() {
   return (
-    <AppShell title="Evolution Engine" noPadding>
+    <>
       <Suspense fallback={<EvolutionSkeleton />}>
         <EvolutionClient />
       </Suspense>
-    </AppShell>
+    </>
   );
 }

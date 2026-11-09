@@ -1,7 +1,6 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import type { Route } from "next";
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
@@ -20,7 +19,6 @@ import { useAuth } from "../../lib/auth-context";
 import { useProjectStore } from "../../stores/projectStore";
 import { useMetricsStore } from "../../stores/metricsStore";
 import { useThemeStore } from "../../stores/themeStore";
-import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import { StatusDot } from "../ui/Primitives";
 
 export default function TopBar({ title }: { title?: string }) {
@@ -40,23 +38,7 @@ export default function TopBar({ title }: { title?: string }) {
     setMounted(true);
   }, []);
 
-  // Global search affordance. No command palette exists yet, so Ctrl/Cmd+K
-  // opens the closest real equivalent (Web Search) rather than being a dead
-  // shortcut — same hook every other keyboard shortcut in the app uses.
-  useKeyboardShortcuts([
-    {
-      key: "k",
-      ctrlKey: true,
-      callback: () => router.push("/search" as Route),
-      description: "Abrir pesquisa",
-    },
-    {
-      key: "k",
-      metaKey: true,
-      callback: () => router.push("/search" as Route),
-      description: "Abrir pesquisa",
-    },
-  ]);
+  const openPalette = () => window.dispatchEvent(new Event("nexus:command-palette"));
 
   // Evita hydration mismatch: só mostra dados reais após montar no cliente
   const projectName = mounted ? (currentProject?.name ?? "Sem projeto") : "Sem projeto";
@@ -86,7 +68,7 @@ export default function TopBar({ title }: { title?: string }) {
     <motion.header
       initial={{ y: -12, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
-      className="nx-glass relative z-20 flex h-14 min-w-0 shrink-0 items-center justify-between gap-2 border-b border-nexus-border/60 pl-12 pr-3 md:pl-5 md:pr-5"
+      className="nx-glass relative z-20 flex h-14 min-w-0 shrink-0 items-center justify-between gap-2 border-b border-nexus-border/60 pl-12 pr-3 lg:pl-5 lg:pr-5"
     >
       {/* Left: Logo + Project selector */}
       <div className="flex min-w-0 items-center gap-2.5 lg:gap-4">
@@ -162,12 +144,13 @@ export default function TopBar({ title }: { title?: string }) {
       {/* Center: global search / command affordance */}
       <div className="hidden min-w-0 flex-1 items-center justify-center px-4 2xl:flex">
         <button
-          onClick={() => router.push("/search" as Route)}
-          title="Pesquisar (Ctrl+K)"
+          onClick={openPalette}
+          title="Paleta de comandos (Ctrl+K)"
+          aria-label="Abrir paleta de comandos"
           className="flex w-full max-w-sm items-center gap-2 rounded-xl border border-nexus-border/60 bg-nexus-bg/40 px-3 py-2 text-left text-nexus-muted transition-colors hover:border-nexus-accent/30 hover:text-nexus-text"
         >
           <Search className="h-3.5 w-3.5 shrink-0" />
-          <span className="flex-1 text-xs">Pesquisar...</span>
+          <span className="flex-1 text-xs">Ir para…</span>
           <kbd className="rounded border border-nexus-border-strong bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-medium text-nexus-faint">
             Ctrl K
           </kbd>
@@ -186,7 +169,7 @@ export default function TopBar({ title }: { title?: string }) {
           title="Modelo ativo"
         >
           <Cpu className={`h-3.5 w-3.5 ${hasActiveModel ? "text-nexus-accent-bright" : "text-nexus-faint"}`} />
-          <span className="max-w-[120px] truncate font-mono">{hasActiveModel ? activeModel : "Auto"}</span>
+          <span className="max-w-[120px] truncate font-mono">{hasActiveModel ? activeModel : "Sem modelo observado"}</span>
         </div>
 
         <button

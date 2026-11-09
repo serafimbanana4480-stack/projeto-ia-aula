@@ -8,6 +8,7 @@ import ErrorBoundary from "../components/ErrorBoundary";
 import AuthGuard from "../components/auth/AuthGuard";
 import InfrastructureProviders from "../components/InfrastructureProviders";
 import PersistentShell from "../components/layout/PersistentShell";
+import CommandPalette from "../components/layout/CommandPalette";
 
 export const metadata: Metadata = {
   title: "NEXUS IDE - Inteligência Artificial Local",
@@ -35,6 +36,7 @@ export default function RootLayout({
                   <DataInitProvider>
                     <InfrastructureProviders>
                       <PersistentShell>{children}</PersistentShell>
+                      <CommandPalette />
                     </InfrastructureProviders>
                   </DataInitProvider>
                 </ThemeProvider>

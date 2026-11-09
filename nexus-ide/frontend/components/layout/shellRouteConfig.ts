@@ -3,14 +3,14 @@ import type { AppShellProps } from "./AppShell";
 type ShellConfig = Pick<AppShellProps, "title" | "noPadding" | "mainAs" | "showTopBar" | "showBottomHUD">;
 
 /** Routes that ship their own full chrome (chat, nexus, legacy analytics sub-pages). */
-const SHELL_EXCLUDED_PREFIXES = ["/login", "/nexus", "/analytics/history", "/analytics/reports"];
+const SHELL_EXCLUDED_PREFIXES = ["/login", "/analytics/history", "/analytics/reports"];
 
 const EXACT: Record<string, ShellConfig> = {
   "/dashboard": { title: "Dashboard", noPadding: true },
   "/bots": { title: "Bots", noPadding: true, showTopBar: false, showBottomHUD: false },
   "/dashboard/tasks": { title: "Tarefas", noPadding: true },
-  "/dashboard/evolution": { title: "Evolution Engine", noPadding: true },
-  "/dashboard/agents": { title: "Agents", noPadding: true },
+  "/dashboard/evolution": { title: "Evolução", noPadding: true },
+  "/dashboard/agents": { title: "Agentes", noPadding: true },
   "/analysis": { title: "Métricas", noPadding: true },
   "/analytics": { title: "Métricas", noPadding: true },
   "/database": { title: "Base de Dados" },
@@ -18,14 +18,16 @@ const EXACT: Record<string, ShellConfig> = {
   "/search": { title: "Pesquisa" },
   "/settings": { title: "Definições" },
   "/swarm": { title: "SWARM", noPadding: true },
-  "/mcp": { title: "MCP Control Center" },
+  "/mcp": { title: "MCP" },
   "/projects": { title: "Projetos" },
   "/scraping": { title: "Scraping" },
   "/editor": { title: "Editor", noPadding: true },
   "/documents": { title: "Documentos", noPadding: true },
   "/pdf": { title: "Leitor PDF" },
-  "/mission-control": { title: "Mission Control", noPadding: true },
+  "/mission-control": { title: "Controlo de missão", noPadding: true },
   "/models": { title: "Modelos IA" },
+  "/nexus": { title: "Agentes", noPadding: true },
+  "/nexus/hitl": { title: "Aprovações", noPadding: true },
 };
 
 function titleFromPath(pathname: string): string {
@@ -54,6 +56,13 @@ export function resolveShellConfig(pathname: string): ShellConfig | null {
 
   if (pathname.startsWith("/dashboard/")) {
     return { title: titleFromPath(pathname), noPadding: true };
+  }
+
+  if (pathname.startsWith("/nexus/agents/")) {
+    return { title: "Agente", noPadding: true };
+  }
+  if (pathname.startsWith("/nexus/")) {
+    return { title: "Agentes", noPadding: true };
   }
 
   // Legacy one-off pages (e.g. simple-dashboard) keep their own layout.

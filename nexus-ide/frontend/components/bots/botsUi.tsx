@@ -1,10 +1,10 @@
 ﻿"use client";
 
-import { lazy, Suspense, useState } from "react";
-import Image from "next/image";
+import { useState } from "react";
 import { Check, Copy } from "lucide-react";
-import ReactMarkdown from "react-markdown";
 import type { ChatMessage } from "../../lib/types";
+import { AssistantMarkdown } from "../chat/MessageBubble";
+import { useThemeStore } from "../../stores/themeStore";
 
 export const BOT_INPUT =
   "w-full rounded-xl border border-[color:var(--nx-line-strong)] bg-[color:var(--nx-surface-1)] px-3 py-2.5 text-sm text-[color:var(--nx-text)] outline-none placeholder:text-[color:var(--nx-text-faint)] transition-[border-color,box-shadow] duration-[var(--nx-dur-fast)] focus:border-[color:var(--nx-accent)] focus:shadow-[0_0_0_3px_color-mix(in_srgb,var(--nx-accent)_18%,transparent)]";
@@ -38,25 +38,21 @@ export function BotAvatar({
   compact?: boolean;
 }) {
   const hue = hueFromId(id);
-  const size = large ? 112 : compact ? 32 : 44;
+  const initial = name.trim().charAt(0).toUpperCase() || "?";
   return (
     <span
       aria-hidden="true"
-      className={`nx-bots-avatar relative flex shrink-0 items-center justify-center overflow-hidden border bg-[radial-gradient(circle_at_50%_35%,rgba(255,255,255,.16),rgba(255,255,255,.03)_62%,rgba(0,0,0,.28))] shadow-[inset_0_1px_0_rgba(255,255,255,.14),0_8px_24px_rgba(0,0,0,.28)] ${
+      className={`nx-bots-avatar relative flex shrink-0 items-center justify-center overflow-hidden border font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,.14)] ${
         thinking ? "nx-bots-avatar-live border-cyan-300/60" : "border-white/10"
-      } ${large ? "h-28 w-28 rounded-[1.75rem] p-1" : compact ? "h-8 w-8 rounded-lg p-0.5" : "h-11 w-11 rounded-xl p-0.5"}`}
-      style={{ borderColor: thinking ? undefined : `hsla(${hue}, 78%, 68%, .34)` }}
+      } ${large ? "h-28 w-28 rounded-[1.75rem] text-4xl" : compact ? "h-8 w-8 rounded-lg text-xs" : "h-11 w-11 rounded-xl text-sm"}`}
+      style={{
+        borderColor: thinking ? undefined : `hsla(${hue}, 70%, 68%, .45)`,
+        background: `hsl(${hue} 32% 22%)`,
+        color: `hsl(${hue} 80% 86%)`,
+      }}
     >
       {thinking && <span className="absolute inset-0 animate-pulse rounded-[inherit] bg-cyan-300/10" />}
-      <Image
-        src="/images/bot-pet-skull-v2.png"
-        alt=""
-        width={size}
-        height={size}
-        draggable={false}
-        className="relative h-full w-full object-contain transition-transform duration-300 hover:rotate-[-7deg] hover:scale-110"
-        style={{ filter: `hue-rotate(${hue}deg) saturate(1.18) drop-shadow(0 4px 8px hsla(${hue}, 85%, 58%, .32))` }}
-      />
+      <span className="relative">{initial}</span>
     </span>
   );
 }
@@ -82,10 +78,9 @@ export function BotStatusPill({
   );
 }
 
-const MessageCodeBlock = lazy(() => import("../chat/MessageCodeBlock"));
-
 export function BotMessageBubble({ message, author }: { message: ChatMessage; author?: string }) {
   const [copied, setCopied] = useState(false);
+  const theme = useThemeStore((state) => state.theme);
   const mine = message.role === "user";
   return (
     <div className={`group flex ${mine ? "justify-end" : "justify-start"}`}>
@@ -97,23 +92,8 @@ export function BotMessageBubble({ message, author }: { message: ChatMessage; au
         }`}
       >
         {!mine && author && <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-violet-300/90">{author}</p>}
-        <div className="nx-prose min-w-0 break-words [&_pre]:max-w-full [&_pre]:overflow-x-auto">
-          <ReactMarkdown
-            components={{
-              code({ className, children, node: _node, ...props }) {
-                const language = /language-([\w-]+)/.exec(className || "")?.[1];
-                return language ? (
-                  <Suspense fallback={<code className={className}>{children}</code>}>
-                    <MessageCodeBlock language={language} code={String(children).replace(/\n$/, "")} theme="dark" />
-                  </Suspense>
-                ) : (
-                  <code className={className} {...props}>{children}</code>
-                );
-              },
-            }}
-          >
-            {message.content}
-          </ReactMarkdown>
+        <div className="min-w-0 break-words">
+          <AssistantMarkdown text={message.content} theme={theme === "light" ? "light" : "dark"} />
         </div>
         <div className="mt-1.5 flex items-center justify-end gap-2 text-[10px] text-zinc-500">
           <time>{formatBotTime(message.timestamp)}</time>

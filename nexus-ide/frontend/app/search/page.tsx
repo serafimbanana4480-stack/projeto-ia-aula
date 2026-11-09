@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
-import AppShell from "../../components/layout/AppShell";
 import {
   AlertCircle,
   ArrowUpRight,
@@ -185,7 +184,7 @@ export default function SearchPage() {
   const canOpenImageSettings = imageErrorCode === "not_configured" || imageErrorCode === "invalid_credentials";
 
   return (
-    <AppShell title="Pesquisa">
+    <>
       <motion.div
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
@@ -443,6 +442,6 @@ export default function SearchPage() {
           </section>
         )}
       </motion.div>
-    </AppShell>
+    </>
   );
 }

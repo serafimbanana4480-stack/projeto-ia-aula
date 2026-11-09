@@ -15,7 +15,9 @@ import { useProjectStore } from "../../stores/projectStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { initMetricsStream } from "../../stores/metricsStore";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
-import MessageBubble from "./MessageBubble";
+import StudioMessage from "./studio/StudioMessage";
+import StudioEmpty from "./studio/StudioEmpty";
+import { studioDayKey, studioDayLabel } from "./studio/studioDay";
 import BackgroundAgentsPanel from "./BackgroundAgentsPanel";
 import PlanExecutionPanel from "./PlanExecutionPanel";
 import RuntimeReadinessBanner from "../dashboard/RuntimeReadinessBanner";
@@ -62,7 +64,6 @@ import {
   Database,
   ScanSearch,
   ArrowDown,
-  ArrowUpRight,
   Infinity as InfinityIcon,
 } from "lucide-react";
 import type { ChatMessage, StreamEvent } from "../../lib/types";
@@ -489,6 +490,21 @@ export function ModeDropdown({ menuPlacement = "below" }: { menuPlacement?: Comp
   );
 }
 
+function composerAvailability(
+  activeModel: string,
+  activeProvider: string,
+  providers: { provider: string; label: string; configured: boolean; error: string | null }[],
+  modelsError: string | null,
+): string {
+  if (modelsError) return "Catálogo de modelos indisponível";
+  if (!activeModel) return "Automático · o router escolhe o modelo";
+  const provider = providers.find((item) => item.provider === activeProvider);
+  if (!provider) return "Fornecedor do modelo selecionado sem estado conhecido";
+  if (!provider.configured) return `${provider.label} · sem chave configurada`;
+  if (provider.error) return `${provider.label} · ${provider.error}`;
+  return `${provider.label} · catálogo carregado, inferência não verificada`;
+}
+
 export default function ChatPanel({
   rightOpen = true,
   setRightOpen,
@@ -502,7 +518,7 @@ export default function ChatPanel({
   const ensureCurrentChatSession = sessions.ensureCurrentSession;
   const toast = useToast();
   const { currentMode, modes, modesLoaded, loadModes, setMode } = useModeStore();
-  const { activeModel, activeProvider, modelsLoaded, loadModels } = useModelStore();
+  const { activeModel, activeProvider, modelsLoaded, loadModels, providerStatus, modelsError } = useModelStore();
   const { currentProject, setCurrentProject } = useProjectStore();
   const router = useRouter();
   const pathname = usePathname();
@@ -2423,6 +2439,50 @@ export default function ChatPanel({
     },
   ];
 
+  const quoteIntoComposer = (excerpt: string) => {
+    const quote = excerpt
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 4)
+      .map((line) => `> ${line}`)
+      .join("\n");
+    if (!quote) return;
+    setInput((prev) => (prev.trim() ? `${quote}\n\n${prev}` : `${quote}\n\n`));
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const renderTurn = (message: ChatMessage, previous: ChatMessage | undefined, messageIndex: number) => {
+    const day = studioDayKey(message.timestamp);
+    const showDay = Boolean(day) && day !== studioDayKey(previous?.timestamp);
+    return (
+      <div key={message.id}>
+        {showDay && (
+          <div className="mb-3 flex items-center gap-3 pt-1 text-[11px] font-medium uppercase tracking-[0.16em] text-nexus-faint">
+            <span>{studioDayLabel(message.timestamp)}</span>
+            <span className="h-px flex-1 bg-nexus-border/70" />
+          </div>
+        )}
+      <div
+        data-chat-message-id={message.id}
+        className={`nx-msg-enter rounded-xl transition-shadow ${searchHighlightMessageId === message.id ? "ring-2 ring-nexus-accent/70 shadow-lg shadow-nexus-accent/10" : ""}`}
+      >
+        <StudioMessage
+          message={message}
+          sessionId={sessionId || "default"}
+          isStreaming={streaming && messageIndex === messages.length - 1}
+          onRetry={handleRetryFromError}
+          onEdit={handleEditMessage}
+          onRegenerate={handleRegenerateMessage}
+          onReply={quoteIntoComposer}
+        />
+      </div>
+      </div>
+    );
+  };
+
+  const conversationTitle = sessions.sessions.find((session) => session.id === currentChatSessionId)?.title || "Conversa";
+
   return (
     <ChatDensityContext.Provider value={density}>
     <div className="nx-chat-conversation relative flex h-full w-full min-w-0 bg-nexus-bg" data-testid="ai-cockpit" data-density={density}>
@@ -2693,12 +2753,9 @@ export default function ChatPanel({
         aria-live="polite"
         aria-relevant="additions text"
         aria-label="Histórico da conversa"
-        className="nx-conversation-scroll min-h-0 flex-1 overflow-y-auto thin-scrollbar py-5 sm:py-8"
-        style={{
-          background: "radial-gradient(ellipse at 50% 0%, color-mix(in srgb, var(--nx-accent) 5%, transparent), transparent 55%)",
-        }}
+        className="nx-conversation-scroll min-h-0 flex-1 overflow-y-auto thin-scrollbar bg-nexus-bg py-6 sm:py-8"
       >
-      <div className="nx-conversation-column mx-auto w-full max-w-[860px] px-4 sm:px-8">
+      <div className="nx-conversation-column mx-auto w-full max-w-[760px] px-4 sm:px-6">
         {/* Live temporal status — above the list, not just a spinner */}
         {livePhase && (
           <div className="mb-3 flex justify-start" aria-live="polite" role="status" data-testid="live-phase-pill">
@@ -2760,111 +2817,24 @@ export default function ChatPanel({
         )}
 
         {messages.length === 0 && historyLoadedForSession && !historyError && (
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="nx-chat-welcome mx-auto flex min-h-[420px] max-w-2xl flex-col items-center justify-center px-1 py-10 text-center sm:py-14"
-          >
-            <div className="relative mb-6">
-              <div className="absolute -inset-5 rounded-full bg-nexus-accent/10 blur-2xl" />
-              <div className="relative flex h-14 w-14 items-center justify-center rounded-[18px] border border-nexus-accent/25 bg-nexus-accent/10 text-nexus-accent-bright">
-                <Sparkles className="h-6 w-6" />
-              </div>
-            </div>
-            <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-nexus-accent-bright">Do primeiro passo à última linha</p>
-            <h2 className="mb-3 text-[28px] font-semibold leading-tight tracking-[-0.04em] text-nexus-text sm:text-[38px]">
-              {currentProject?.name ? (
-                <>
-                  Vamos trabalhar em{" "}
-                  <span className="bg-gradient-to-r from-nexus-accent to-nexus-accent-bright bg-clip-text text-transparent">
-                    {currentProject.name}
-                  </span>
-                  ?
-                </>
-              ) : (
-                "O que vamos construir?"
-              )}
-            </h2>
-            <p className="mb-8 max-w-md text-[14px] leading-relaxed text-nexus-muted">
-              Traz uma ideia, faz uma pergunta ou resolve um problema.
-              O NEXUS e os teus agentes trabalham contigo, nesta conversa.
-            </p>
-            <div className="grid w-full max-w-lg grid-cols-1 gap-2.5 min-[420px]:grid-cols-2">
-              {suggestions.map((s) => (
-                <motion.button
-                  key={s.label}
-                  onClick={() => { setInput(s.prompt); requestAnimationFrame(() => inputRef.current?.focus()); }}
-                  whileHover={{ y: -2 }}
-                  whileTap={{ scale: 0.97 }}
-                  transition={{ duration: 0.15 }}
-                  className="nx-chat-suggestion group flex items-start gap-3 rounded-2xl border border-nexus-border/70 px-4 py-4 text-left text-xs text-nexus-muted transition-colors hover:border-nexus-accent/35 hover:bg-nexus-accent/5 hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/50"
-                >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-nexus-accent/10 text-nexus-accent/70 transition-colors duration-150 group-hover:bg-nexus-accent/20 group-hover:text-nexus-accent">
-                    {s.icon}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block font-semibold text-nexus-text">{s.label}</span>
-                    <span className="mt-1 block text-[11px] leading-relaxed text-nexus-faint">{s.prompt}</span>
-                  </span>
-                  <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-nexus-faint transition-colors group-hover:text-nexus-accent-bright" />
-                </motion.button>
-              ))}
-            </div>
-            {sessions.sessions.some((session) => session.id !== currentChatSessionId) && (
-              <div className="mt-6 w-full max-w-md text-left">
-                <div className="mb-1.5 px-1 text-[11px] font-medium text-nexus-faint">Recentes:</div>
-                <div className="flex flex-col gap-1">
-                  {sessions.sessions.filter((session) => session.id !== currentChatSessionId).slice(0, 3).map((s) => (
-                    <button
-                      key={s.id}
-                      type="button"
-                      onClick={() => sessions.setCurrentId(s.id)}
-                      className="group flex min-w-0 items-center gap-2 rounded-lg border border-transparent px-2.5 py-1.5 text-left text-xs text-nexus-muted transition-colors duration-150 hover:border-nexus-border hover:bg-nexus-card/60 hover:text-nexus-text"
-                      title={s.title}
-                    >
-                      <MessageSquare className="h-3.5 w-3.5 shrink-0 text-nexus-faint" />
-                      <span className="min-w-0 flex-1 truncate font-medium">{s.title || "Sem título"}</span>
-                      <span className="shrink-0 text-[10px] text-nexus-faint">{formatRecente(s.last_active_at)}</span>
-                      <span aria-hidden="true" className="shrink-0 text-nexus-faint opacity-0 transition-opacity duration-150 group-hover:opacity-100">→</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            <div className="mt-8 flex flex-wrap items-center justify-center gap-2 text-[11px] text-nexus-faint">
-              <button
-                type="button"
-                onClick={() => setShowCommands(true)}
-                className="rounded-full border border-nexus-border/70 px-2.5 py-1 transition-colors hover:border-nexus-accent/40 hover:text-nexus-text"
-              >
-                <span className="font-mono text-nexus-muted">/</span> comandos
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setInput("@");
-                  requestAnimationFrame(() => inputRef.current?.focus());
-                }}
-                className="rounded-full border border-nexus-border/70 px-2.5 py-1 transition-colors hover:border-nexus-accent/40 hover:text-nexus-text"
-              >
-                <span className="font-mono text-nexus-muted">@</span> agentes
-              </button>
-              <button
-                type="button"
-              onClick={() => setSearchOpen(true)}
-                className="rounded-full border border-nexus-border/70 px-2.5 py-1 transition-colors hover:border-nexus-accent/40 hover:text-nexus-text"
-              >
-                <span className="font-mono text-nexus-muted">Ctrl/Cmd+F</span> procurar nesta conversa
-              </button>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="rounded-full border border-nexus-border/70 px-2.5 py-1 transition-colors hover:border-nexus-accent/40 hover:text-nexus-text"
-              >
-                anexar ficheiros
-              </button>
-            </div>
-          </motion.div>
+          <StudioEmpty
+            projectName={currentProject?.name}
+            suggestions={suggestions}
+            recents={sessions.sessions
+              .filter((session) => session.id !== currentChatSessionId)
+              .slice(0, 3)
+              .map((session) => ({
+                id: session.id,
+                title: session.title || "Sem título",
+                when: formatRecente(session.last_active_at),
+              }))}
+            onSuggest={(prompt) => { setInput(prompt); requestAnimationFrame(() => inputRef.current?.focus()); }}
+            onRecent={(id) => sessions.setCurrentId(id)}
+            onCommands={() => setShowCommands(true)}
+            onMention={() => { setInput("@"); requestAnimationFrame(() => inputRef.current?.focus()); }}
+            onSearch={() => setSearchOpen(true)}
+            onAttach={() => fileInputRef.current?.click()}
+          />
         )}
 
         {currentMode === "plan" && planCreating && (
@@ -2927,6 +2897,15 @@ export default function ChatPanel({
             )}
           </>
         )}
+        {messages.length > 0 && historyLoadedForSession && (
+          <div className="mb-6 flex items-end justify-between gap-4 border-b border-nexus-border/70 pb-4">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-nexus-faint">Conversa</p>
+              <h2 className="mt-1 truncate text-[22px] font-semibold tracking-[-0.03em] text-nexus-text">{conversationTitle}</h2>
+            </div>
+            <p className="shrink-0 text-[12px] tabular-nums text-nexus-muted">{messages.length} {messages.length === 1 ? "mensagem" : "mensagens"}</p>
+          </div>
+        )}
         {historyPagesForRender.map(({ page, sourcePage }, pageIndex) => {
           const pageOffset = historyPagesForRender
             .slice(0, pageIndex)
@@ -2940,27 +2919,14 @@ export default function ChatPanel({
               <VirtualMessageList
                 messages={page}
                 resetKey={`${sessionId}:${historySnapshotRevision}:${pageKey}`}
-                renderItem={(message, pageIndex) => {
-                  const messageIndex = pageOffset + pageIndex;
-                  return (
-                    <div
-                      key={message.id}
-                      data-chat-message-id={message.id}
-                      className={`nx-msg-enter rounded-xl transition-shadow ${searchHighlightMessageId === message.id ? "ring-2 ring-nexus-accent/70 shadow-lg shadow-nexus-accent/10" : ""}`}
-                    >
-                      <MessageBubble
-                        message={message}
-                        sessionId={sessionId}
-                        isStreaming={streaming && messageIndex === messages.length - 1}
-                        onRetry={handleRetryFromError}
-                        onEdit={handleEditMessage}
-                        onRegenerate={handleRegenerateMessage}
-                      />
-                    </div>
-                  );
+                renderItem={(message, indexInPage) => {
+                  const previous = indexInPage > 0
+                    ? page[indexInPage - 1]
+                    : historyPagesForRender[pageIndex - 1]?.page.at(-1);
+                  return renderTurn(message, previous, pageOffset + indexInPage);
                 }}
                 initialLimit={50}
-                className="mb-4 space-y-4"
+                className="mb-6 space-y-6"
               />
             </div>
           );
@@ -2977,26 +2943,13 @@ export default function ChatPanel({
               messages={liveMessages}
               resetKey={`${sessionId}:${liveMessages[0]?.id ?? "empty"}`}
               renderItem={(message, liveIndex) => {
-                const messageIndex = historyMessages.length + liveIndex;
-                return (
-                  <div
-                    key={message.id}
-                    data-chat-message-id={message.id}
-                    className={`nx-msg-enter rounded-xl transition-shadow ${searchHighlightMessageId === message.id ? "ring-2 ring-nexus-accent/70 shadow-lg shadow-nexus-accent/10" : ""}`}
-                  >
-                    <MessageBubble
-                      message={message}
-                      sessionId={sessionId}
-                      isStreaming={streaming && messageIndex === messages.length - 1}
-                      onRetry={handleRetryFromError}
-                      onEdit={handleEditMessage}
-                      onRegenerate={handleRegenerateMessage}
-                    />
-                  </div>
-                );
+                const previous = liveIndex > 0
+                  ? liveMessages[liveIndex - 1]
+                  : historyMessages.at(-1);
+                return renderTurn(message, previous, historyMessages.length + liveIndex);
               }}
               initialLimit={50}
-              className="space-y-4"
+              className="space-y-6"
             />
           </div>
         )}
@@ -3019,7 +2972,7 @@ export default function ChatPanel({
       </div>
 
       {/* Input area — fixed at bottom, mesma coluna central */}
-      <div className="relative shrink-0 bg-gradient-to-t from-nexus-bg via-nexus-bg to-nexus-bg/90 pb-3 pt-3">
+      <div className="relative shrink-0 border-t border-nexus-border/60 bg-nexus-bg pb-3 pt-3">
         {showScrollDown && messages.length > 3 && (
           <button
             type="button"
@@ -3032,7 +2985,7 @@ export default function ChatPanel({
             <ArrowDown className="h-4 w-4" aria-hidden="true" />
           </button>
         )}
-      <div className="mx-auto w-full max-w-[860px] px-3 sm:px-8">
+      <div className="mx-auto w-full max-w-[760px] px-3 sm:px-6">
         {sessions.initialized && !sessionId && (
           <div
             className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-nexus-accent3"
@@ -3090,8 +3043,9 @@ export default function ChatPanel({
             <button
               type="button"
               onClick={reset}
-              className="rounded p-0.5 text-red-300/70 hover:bg-red-500/20 hover:text-red-200"
+              className="rounded p-0.5 text-red-300/70 hover:bg-red-500/20 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
               title="Fechar erro"
+              aria-label="Fechar erro do chat"
             >
               <X className="h-3.5 w-3.5" />
             </button>
@@ -3129,7 +3083,7 @@ export default function ChatPanel({
 
           {/* Composer novo — rounded-2xl nx-elev-2, duas linhas */}
           <motion.div
-            className={`nx-chat-composer relative flex flex-col gap-2 rounded-[20px] border border-nexus-border/80 bg-nexus-elevated px-3 pb-3 pt-3 transition-[border-color,box-shadow] focus-within:border-nexus-accent/50 focus-within:ring-2 focus-within:ring-nexus-accent/10 sm:px-4 ${
+            className={`nx-chat-composer relative flex flex-col gap-2 rounded-[22px] border border-nexus-border bg-nexus-panel px-2.5 pb-2.5 pt-2.5 shadow-[0_18px_50px_-36px_rgba(0,0,0,0.85)] transition-[border-color,box-shadow] focus-within:border-nexus-accent/45 sm:px-3 ${
               isDraggingOver ? "border-nexus-accent" : ""
             }`}
             onDragOver={handleDragOver}
@@ -3144,11 +3098,16 @@ export default function ChatPanel({
                 </div>
               </div>
             )}
+            <div className="flex items-center justify-between gap-3 px-1">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-nexus-faint">Mensagem</span>
+              <span className="min-w-0 truncate text-right text-[11px] text-nexus-muted" data-testid="composer-availability">{composerAvailability(activeModel, activeProvider, providerStatus, modelsError)}</span>
+            </div>
             {/* Linha 1 — textarea auto-resize */}
             <textarea
               ref={inputRef}
               aria-label="Mensagem para o NEXUS"
-              className="max-h-[160px] min-h-[52px] w-full resize-none bg-transparent px-1 py-1 text-[14px] leading-relaxed text-nexus-text placeholder:text-nexus-muted/70 outline-none"
+              aria-keyshortcuts="Enter Shift+Enter"
+              className="max-h-[160px] min-h-[64px] w-full resize-none rounded-xl border border-nexus-border/70 bg-nexus-bg/70 px-3 py-2.5 text-[15px] leading-relaxed text-nexus-text placeholder:text-nexus-muted/70 outline-none focus-visible:border-nexus-accent/40"
               value={input}
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
@@ -3365,9 +3324,9 @@ export default function ChatPanel({
                 <button
                   type="button"
                   onClick={startListening}
-                  className={`rounded-lg p-2 transition-colors ${
+                    className={`rounded-lg p-2 transition-colors ${
                     isListening
-                      ? "bg-red-500/10 text-red-400 animate-pulse"
+                      ? "bg-red-500/10 text-red-400 motion-safe:animate-pulse"
                       : "text-nexus-muted hover:bg-nexus-bg/60 hover:text-nexus-text"
                   }`}
                   title={isListening ? "A ouvir... clica para parar" : "Input de voz (Web Speech API)"}
@@ -3381,7 +3340,7 @@ export default function ChatPanel({
                     onClick={handleCancel}
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
-                    className="shrink-0 rounded-xl bg-gradient-to-br from-red-500/20 to-red-500/10 p-2 text-red-400 hover:from-red-500/30 hover:to-red-500/20 transition-all duration-200 shadow-sm hover:shadow-red-500/20"
+                    className="shrink-0 rounded-xl border border-red-400/40 bg-red-500/10 p-2 text-red-300 hover:bg-red-500/20"
                     aria-label="Parar execução"
                     title="Parar execução"
                   >
@@ -3400,15 +3359,16 @@ export default function ChatPanel({
                   })}
                   whileHover={{ scale: input.trim() ? 1.05 : 1 }}
                   whileTap={{ scale: 0.92 }}
-                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white transition-all duration-200 shadow-sm ${
+                  className={`flex h-9 shrink-0 items-center justify-center gap-1 rounded-full px-3 text-white transition-colors ${
                     input.trim()
-                      ? "bg-gradient-to-br from-nexus-accent to-nexus-accent/80 hover:shadow-nexus-accent/40 hover:from-nexus-accent hover:to-nexus-accent/90"
-                      : "bg-nexus-accent/50 cursor-not-allowed opacity-40"
+                      ? "bg-nexus-accent hover:bg-nexus-accent-bright"
+                      : "cursor-not-allowed bg-nexus-accent/40 opacity-40"
                   }`}
                   aria-label={streaming ? "Enviar orientação" : "Enviar mensagem"}
                   title={streaming ? "Enviar orientação ao run ativo (Enter)" : "Enviar mensagem (Enter · Shift+Enter newline)"}
                 >
                   <ArrowUp className="h-4 w-4 pointer-events-none" />
+                  <span className="pointer-events-none hidden text-[12px] font-semibold sm:inline">{streaming ? "Guiar" : "Enviar"}</span>
                 </motion.button>
               </div>
             </div>

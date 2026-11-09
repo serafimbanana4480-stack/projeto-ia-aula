@@ -2,7 +2,6 @@
 import { useCallback, useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { apiUrl, authHeaders, createProject, getProjects } from "../../lib/api";
-import AppShell from "../../components/layout/AppShell";
 import { FolderKanban, Plus, Settings, Trash2, Clock, FolderOpen, AlertTriangle } from "lucide-react";
 import type { Project } from "../../lib/types";
 import { useProjectStore } from "../../stores/projectStore";
@@ -146,7 +145,7 @@ export default function ProjectsPage() {
     } catch {
       // Network-level failure only (backend unreachable): keep the edit locally
       // so the page stays usable, and say so.
-      setEditError("Backend unreachable — change applied locally only, not saved.");
+        setEditError("Backend inacessível — a alteração ficou só neste ecrã e não foi gravada.");
       const localProject: Project = {
         ...editingProject,
         name: editForm.name,
@@ -273,26 +272,29 @@ export default function ProjectsPage() {
   }
 
   return (
-    <AppShell title="Projetos">
+    <>
       <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
         <div className="mb-6 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <FolderKanban className="h-6 w-6 text-nexus-accent" />
-            <h1 className="text-2xl font-bold">Projects</h1>
+            <div>
+              <h1 className="text-2xl font-bold">Projetos</h1>
+              <p className="mt-1 text-sm text-nexus-muted">Pastas ligadas a conversas e agentes.</p>
+            </div>
           </div>
           <button
             onClick={() => setShowCreateModal(true)}
             className="flex items-center gap-2 rounded bg-nexus-accent px-4 py-2 text-sm font-medium text-black hover:bg-nexus-accent/80"
           >
             <Plus className="h-4 w-4" />
-            New Project
+            Novo projeto
           </button>
         </div>
 
         {hasDuplicatePaths && (
           <div className="mb-4 flex items-center gap-2 rounded border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-300">
             <AlertTriangle className="h-4 w-4" />
-            <span>Some projects share the same folder path. Duplicates have been hidden to avoid conflicts.</span>
+            <span>Há projetos com a mesma pasta. Os duplicados foram ocultados para evitar conflitos.</span>
           </div>
         )}
 
@@ -317,6 +319,7 @@ export default function ProjectsPage() {
                       e.stopPropagation();
                       handleOpenEditModal(project);
                     }}
+                    aria-label={`Editar ${project.name}`}
                     className="rounded p-1 text-gray-400 hover:bg-nexus-border hover:text-gray-300"
                   >
                     <Settings className="h-3 w-3" />
@@ -324,10 +327,11 @@ export default function ProjectsPage() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (confirm(`Delete project "${project.name}"?`)) {
+                      if (confirm(`Eliminar o projeto "${project.name}"?`)) {
                         handleDeleteProject(project.id);
                       }
                     }}
+                    aria-label={`Eliminar ${project.name}`}
                     className="rounded p-1 text-gray-400 hover:bg-red-500/20 hover:text-red-400"
                   >
                     <Trash2 className="h-3 w-3" />
@@ -363,7 +367,7 @@ export default function ProjectsPage() {
           <div className="flex h-64 items-center justify-center">
             <div className="flex items-center gap-3 text-sm text-nexus-muted">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-nexus-accent border-t-transparent" />
-              <span>Loading projects...</span>
+              <span>A carregar projetos…</span>
             </div>
           </div>
         )}
@@ -375,8 +379,8 @@ export default function ProjectsPage() {
           >
             <div className="text-center">
               <FolderKanban className="mx-auto mb-3 h-12 w-12 text-nexus-border" />
-              <p className="text-sm">No projects yet</p>
-              <p className="text-xs">Create your first project to get started</p>
+              <p className="text-sm">Ainda não há projetos</p>
+              <p className="text-xs">Cria o primeiro para o associares ao chat e aos agentes</p>
             </div>
           </motion.div>
         )}
@@ -389,12 +393,12 @@ export default function ProjectsPage() {
             animate={{ opacity: 1, scale: 1 }}
             className="w-full max-w-lg rounded border border-nexus-border bg-nexus-panel p-5"
           >
-            <h2 className="mb-4 text-lg font-semibold">Create Project</h2>
+            <h2 className="mb-4 text-lg font-semibold">Criar projeto</h2>
             <div className="space-y-3">
               <input
                 value={form.name}
                 onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
-                placeholder="Project name (auto-filled from folder)"
+                placeholder="Nome do projeto (preenchido a partir da pasta)"
                 className="w-full rounded bg-nexus-border px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-nexus-accent"
               />
 
@@ -410,23 +414,23 @@ export default function ProjectsPage() {
                 <button
                   onClick={handleBrowseFolder}
                   className="flex items-center gap-1.5 rounded bg-nexus-border px-3 py-2 text-sm text-gray-300 hover:bg-nexus-border/80 hover:text-white transition-colors"
-                  title="Browse for folder"
+                  title="Escolher pasta"
                 >
                   <FolderOpen className="h-4 w-4" />
-                  Browse
+                  Escolher
                 </button>
               </div>
 
               <textarea
                 value={form.description}
                 onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
-                placeholder="Description (optional)"
+                placeholder="Descrição (opcional)"
                 className="min-h-20 w-full rounded bg-nexus-border px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-nexus-accent resize-none"
               />
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="mb-1 block text-xs text-gray-500">Mode</label>
+                  <label className="mb-1 block text-xs text-gray-500">Modo</label>
                   <select
                     value={form.mode}
                     onChange={(e) => setForm((prev) => ({ ...prev, mode: e.target.value }))}
@@ -439,13 +443,13 @@ export default function ProjectsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs text-gray-500">Preferred Model</label>
+                  <label className="mb-1 block text-xs text-gray-500">Modelo preferido</label>
                   <select
                     value={form.preferred_model}
                     onChange={(e) => setForm((prev) => ({ ...prev, preferred_model: e.target.value }))}
                     className="w-full rounded bg-nexus-border px-3 py-2 text-sm outline-none"
                   >
-                    <option value="">Default</option>
+                    <option value="">Predefinição</option>
                     <option value="qwen2.5-coder:7b">qwen2.5-coder:7b</option>
                     <option value="qwen2.5:3b">qwen2.5:3b</option>
                     <option value="deepseek-r1:8b">deepseek-r1:8b</option>
@@ -462,7 +466,7 @@ export default function ProjectsPage() {
                   className="rounded border-nexus-border"
                 />
                 <label htmlFor="trust-create" className="text-xs text-gray-400">
-                  Trust project (allow file writes without confirmation)
+                  Confiar no projeto (permite escrita de ficheiros sem confirmação)
                 </label>
               </div>
 
@@ -471,14 +475,14 @@ export default function ProjectsPage() {
                   onClick={() => setShowCreateModal(false)}
                   className="flex-1 rounded border border-nexus-border px-3 py-2 text-sm hover:bg-nexus-border/50"
                 >
-                  Cancel
+                  Cancelar
                 </button>
                 <button
                   onClick={handleCreateProject}
                   disabled={!form.name && !form.path}
                   className="flex-1 rounded bg-nexus-accent px-3 py-2 text-sm font-medium text-black disabled:opacity-50"
                 >
-                  Create
+                  Criar
                 </button>
               </div>
             </div>
@@ -493,12 +497,12 @@ export default function ProjectsPage() {
             animate={{ opacity: 1, scale: 1 }}
             className="w-full max-w-lg rounded border border-nexus-border bg-nexus-panel p-5"
           >
-            <h2 className="mb-4 text-lg font-semibold">Edit Project</h2>
+            <h2 className="mb-4 text-lg font-semibold">Editar projeto</h2>
             <div className="space-y-3">
               <input
                 value={editForm.name}
                 onChange={(e) => setEditForm((prev) => ({ ...prev, name: e.target.value }))}
-                placeholder="Project name"
+                placeholder="Nome do projeto"
                 className="w-full rounded bg-nexus-border px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-nexus-accent"
               />
 
@@ -513,23 +517,23 @@ export default function ProjectsPage() {
                 <button
                   onClick={handleBrowseEditFolder}
                   className="flex items-center gap-1.5 rounded bg-nexus-border px-3 py-2 text-sm text-gray-300 hover:bg-nexus-border/80 hover:text-white transition-colors"
-                  title="Browse for folder"
+                  title="Escolher pasta"
                 >
                   <FolderOpen className="h-4 w-4" />
-                  Browse
+                  Escolher
                 </button>
               </div>
 
               <textarea
                 value={editForm.description}
                 onChange={(e) => setEditForm((prev) => ({ ...prev, description: e.target.value }))}
-                placeholder="Description (optional)"
+                placeholder="Descrição (opcional)"
                 className="min-h-20 w-full rounded bg-nexus-border px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-nexus-accent resize-none"
               />
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="mb-1 block text-xs text-gray-500">Mode</label>
+                  <label className="mb-1 block text-xs text-gray-500">Modo</label>
                   <select
                     value={editForm.mode}
                     onChange={(e) => setEditForm((prev) => ({ ...prev, mode: e.target.value }))}
@@ -542,13 +546,13 @@ export default function ProjectsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs text-gray-500">Preferred Model</label>
+                  <label className="mb-1 block text-xs text-gray-500">Modelo preferido</label>
                   <select
                     value={editForm.preferred_model}
                     onChange={(e) => setEditForm((prev) => ({ ...prev, preferred_model: e.target.value }))}
                     className="w-full rounded bg-nexus-border px-3 py-2 text-sm outline-none"
                   >
-                    <option value="">Default</option>
+                    <option value="">Predefinição</option>
                     <option value="qwen2.5-coder:7b">qwen2.5-coder:7b</option>
                     <option value="qwen2.5:3b">qwen2.5:3b</option>
                     <option value="deepseek-r1:8b">deepseek-r1:8b</option>
@@ -565,7 +569,7 @@ export default function ProjectsPage() {
                   className="rounded border-nexus-border"
                 />
                 <label htmlFor="trust-edit" className="text-xs text-gray-400">
-                  Trust project (allow file writes without confirmation)
+                  Confiar no projeto (permite escrita de ficheiros sem confirmação)
                 </label>
               </div>
 
@@ -584,20 +588,20 @@ export default function ProjectsPage() {
                   }}
                   className="flex-1 rounded border border-nexus-border px-3 py-2 text-sm hover:bg-nexus-border/50"
                 >
-                  Cancel
+                  Cancelar
                 </button>
                 <button
                   onClick={handleUpdateProject}
                   disabled={!editForm.name && !editForm.path}
                   className="flex-1 rounded bg-nexus-accent px-3 py-2 text-sm font-medium text-black disabled:opacity-50"
                 >
-                  Save
+                  Guardar
                 </button>
               </div>
             </div>
           </motion.div>
         </div>
       )}
-    </AppShell>
+    </>
   );
 }

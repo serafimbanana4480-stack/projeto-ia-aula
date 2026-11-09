@@ -1,7 +1,6 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
-import AppShell from "../../components/layout/AppShell";
 import { FileText, Upload, Link2, X } from "lucide-react";
 
 function formatBytes(bytes: number): string {
@@ -74,7 +73,7 @@ export default function PdfPage() {
   };
 
   return (
-    <AppShell title="Leitor PDF">
+    <>
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -163,6 +162,6 @@ export default function PdfPage() {
           </div>
         )}
       </motion.div>
-    </AppShell>
+    </>
   );
 }

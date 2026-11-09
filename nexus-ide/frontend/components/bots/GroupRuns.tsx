@@ -8,6 +8,48 @@ type Task = { id: string; bot_name: string; provider: string; model: string; sta
 type RecordItem = { id: string; task_id: string; kind: string; payload: Record<string, unknown> };
 type Run = { id: string; status: string; request: string; project_root: string; file_path: string; tasks: Task[]; records: RecordItem[] };
 
+const recordLabel: Record<string, string> = {
+  tool_call: "Chamada de ferramenta",
+  tool_result: "Resultado da ferramenta",
+  handoff: "Passagem ao participante seguinte",
+};
+
+function recordDetail(record: RecordItem): string {
+  const payload = record.payload;
+  if (record.kind === "tool_call") {
+    const tool = typeof payload.tool === "string" ? payload.tool : "ferramenta";
+    const path = typeof payload.path === "string" ? payload.path : "";
+    return path ? `${tool} · ${path}` : tool;
+  }
+  if (record.kind === "tool_result") {
+    return typeof payload.error === "string" ? payload.error : "Sem erro registado";
+  }
+  if (record.kind === "handoff") return "As análises anteriores seguem como dados não verificados";
+  return "Evento sem descrição específica";
+}
+
+function ActivityList({ records }: { records: RecordItem[] }) {
+  if (records.length === 0) {
+    return <p className="mt-2 text-xs text-zinc-500">Sem eventos de ferramenta nesta etapa.</p>;
+  }
+  return (
+    <ol className="mt-2 space-y-2" aria-label="Eventos desta etapa">
+      {records.map((record, index) => (
+        <li key={record.id} className="rounded border border-white/10 px-2 py-1.5">
+          <p className="text-xs font-medium text-zinc-200">
+            {index + 1}. {recordLabel[record.kind] ?? record.kind}
+          </p>
+          <p className="text-xs text-zinc-400">{recordDetail(record)}</p>
+          <details className="mt-1">
+            <summary className="cursor-pointer text-[11px] text-zinc-500">{record.kind} · {record.id}</summary>
+            <pre className="whitespace-pre-wrap break-all text-xs text-zinc-300">{JSON.stringify(record.payload, null, 2)}</pre>
+          </details>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 const statusLabel: Record<string, string> = {
   pending: "Pendente",
   running: "Em curso",
@@ -19,7 +61,7 @@ const statusLabel: Record<string, string> = {
   skipped: "Não correu",
 };
 
-export default function GroupRuns({ groupId }: { groupId: string }) {
+export default function GroupRuns({ groupId, embedded = false }: { groupId: string; embedded?: boolean }) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [message, setMessage] = useState("");
   const [file, setFile] = useState("");
@@ -75,7 +117,7 @@ export default function GroupRuns({ groupId }: { groupId: string }) {
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Não foi possível pedir a paragem."); }
     finally { setStopping(""); }
   }
-  return <section className="border-b border-white/10 p-4 text-sm" aria-label="Execuções persistentes">
+  return <section className={embedded ? "text-sm" : "border-b border-white/10 p-4 text-sm"} aria-label="Execuções persistentes">
     <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="font-semibold text-violet-300">Execuções de equipa com leitura de ficheiro{open ? ` (${runs.length})` : ""}</button>
     {open && <div className="mt-3 max-h-96 space-y-4 overflow-y-auto">
       <p className="text-xs text-zinc-400">Todos os bots do grupo trabalham por ordem sobre o ficheiro: o primeiro lê e analisa; os seguintes contribuem; o último revê criticamente. A execução continua se fechares o browser; podes pará-la a qualquer momento.</p>
@@ -93,7 +135,7 @@ export default function GroupRuns({ groupId }: { groupId: string }) {
         {run.tasks.map((task) => <div key={task.id} className="mt-3 border-t border-white/10 pt-2"><p className="font-medium">{task.bot_name} · {statusLabel[task.status] ?? task.status}</p><p className="text-xs text-zinc-400">{task.provider} · {task.model}</p>
           {task.error && <p className="whitespace-pre-wrap text-red-300">{task.error}</p>}
           {task.result && <pre className="mt-2 whitespace-pre-wrap break-words">{task.result}</pre>}
-          {run.records.filter((record) => record.task_id === task.id).map((record) => <details key={record.id} className="mt-2"><summary>{record.kind} · {record.id}</summary><pre className="whitespace-pre-wrap break-all text-xs text-zinc-300">{JSON.stringify(record.payload, null, 2)}</pre></details>)}
+          <ActivityList records={run.records.filter((record) => record.task_id === task.id)} />
         </div>)}
       </details>)}
     </div>}

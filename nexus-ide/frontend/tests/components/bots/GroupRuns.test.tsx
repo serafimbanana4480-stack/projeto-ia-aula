@@ -12,7 +12,7 @@ it("starts a run and displays durable task evidence", async () => {
     .mockResolvedValueOnce({ ok: true, json: async () => ({ id: "r1" }) })
     .mockResolvedValueOnce({ ok: true, json: async () => ({ runs: [run] }) });
   render(<GroupRuns groupId="g1" />);
-  fireEvent.click(screen.getByRole("button", { name: /Execuções com leitura/ }));
+  fireEvent.click(screen.getByRole("button", { name: /Execuções de equipa com leitura/ }));
   fireEvent.change(screen.getByLabelText("Ficheiro a ler"), { target: { value: "x.py" } });
   fireEvent.change(screen.getByLabelText("Pedido da execução"), { target: { value: "Rever" } });
   fireEvent.click(screen.getByRole("button", { name: "Iniciar execução" }));

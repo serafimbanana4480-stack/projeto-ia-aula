@@ -33,7 +33,6 @@ import {
   YAxis,
 } from "recharts";
 
-import AppShell from "../../components/layout/AppShell";
 import { apiUrl, authHeaders } from "../../lib/api";
 import { formatRelativeTime } from "../../lib/format";
 
@@ -266,7 +265,7 @@ export default function AnalyticsPage() {
   const currentTps = data?.current?.tokens_per_second ?? 0;
 
   return (
-    <AppShell title="Métricas" noPadding>
+    <>
       <div className="min-h-full bg-nexus-bg pb-10">
         <header className="relative overflow-hidden border-b border-nexus-border/70 px-6 py-7 sm:px-8">
           <div className="pointer-events-none absolute inset-0 bg-nx-mesh opacity-60" />
@@ -361,6 +360,6 @@ export default function AnalyticsPage() {
           <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-nexus-border/60 pt-4 text-[10px] text-nexus-faint"><span>As médias usam apenas respostas com latência registada.</span><span>Retenção visual: 30 dias · total acumulado: desde sempre</span></footer>
         </main>
       </div>
-    </AppShell>
+    </>
   );
 }

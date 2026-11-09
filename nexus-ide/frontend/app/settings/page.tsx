@@ -1,7 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import AppShell from "../../components/layout/AppShell";
 import {
   Settings as SettingsIcon,
   Save,
@@ -149,16 +148,16 @@ export default function SettingsPage() {
 
   if (loading) {
     return (
-      <AppShell title="Definições">
+      <>
         <div className="flex h-full items-center justify-center text-gray-500">
           A carregar definições...
         </div>
-      </AppShell>
+      </>
     );
   }
 
   return (
-    <AppShell title="Definições">
+    <>
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -262,6 +261,6 @@ export default function SettingsPage() {
           </section>
         </div>
       </motion.div>
-    </AppShell>
+    </>
   );
 }
