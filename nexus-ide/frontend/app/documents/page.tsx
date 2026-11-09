@@ -1,7 +1,6 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
-import AppShell from "../../components/layout/AppShell";
 import {
   FileText,
   Folder,
@@ -170,7 +169,7 @@ export default function DocumentsPage() {
 
 
   return (
-    <AppShell title="Documentos" noPadding>
+    <>
       <div className="flex h-full flex-col">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-nexus-border px-6 py-3">
@@ -296,6 +295,6 @@ export default function DocumentsPage() {
           </div>
         </div>
       </div>
-    </AppShell>
+    </>
   );
 }

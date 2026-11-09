@@ -1,7 +1,6 @@
 "use client";
 import { useState } from "react";
 import { motion } from "framer-motion";
-import AppShell from "../../components/layout/AppShell";
 import {
   Globe,
   Search,
@@ -50,7 +49,7 @@ export default function ScrapingPage() {
   };
 
   return (
-    <AppShell title="Scraping">
+    <>
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -177,6 +176,6 @@ export default function ScrapingPage() {
           </motion.div>
         )}
       </motion.div>
-    </AppShell>
+    </>
   );
 }

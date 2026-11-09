@@ -19,7 +19,7 @@ const statusLabel: Record<string, string> = {
   skipped: "Não correu",
 };
 
-export default function GroupRuns({ groupId }: { groupId: string }) {
+export default function GroupRuns({ groupId, embedded = false }: { groupId: string; embedded?: boolean }) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [message, setMessage] = useState("");
   const [file, setFile] = useState("");
@@ -75,7 +75,7 @@ export default function GroupRuns({ groupId }: { groupId: string }) {
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Não foi possível pedir a paragem."); }
     finally { setStopping(""); }
   }
-  return <section className="border-b border-white/10 p-4 text-sm" aria-label="Execuções persistentes">
+  return <section className={embedded ? "text-sm" : "border-b border-white/10 p-4 text-sm"} aria-label="Execuções persistentes">
     <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="font-semibold text-violet-300">Execuções de equipa com leitura de ficheiro{open ? ` (${runs.length})` : ""}</button>
     {open && <div className="mt-3 max-h-96 space-y-4 overflow-y-auto">
       <p className="text-xs text-zinc-400">Todos os bots do grupo trabalham por ordem sobre o ficheiro: o primeiro lê e analisa; os seguintes contribuem; o último revê criticamente. A execução continua se fechares o browser; podes pará-la a qualquer momento.</p>

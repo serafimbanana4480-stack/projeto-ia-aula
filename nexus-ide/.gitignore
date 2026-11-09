@@ -86,6 +86,9 @@ test_*.png
 *.png
 !nexus-ide-screenshot.png
 !nexus-ide-ui.png
+# Evidência do overhaul UI (antes/depois). A regra *.png acima ignora-os
+# sem esta exceção.
+!frontend/output/playwright/overhaul-2026-11-09/**/*.png
 
 # Runtime logs
 logs/

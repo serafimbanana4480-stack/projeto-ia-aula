@@ -2,7 +2,6 @@
 
 import { useEffect, useCallback, useState, Suspense } from "react";
 import dynamic from "next/dynamic";
-import AppShell from "../../components/layout/AppShell";
 import { useMissionStore } from "../../stores/missionStore";
 import { useMissionWebSocket } from "../../hooks/useMissionWebSocket";
 import {
@@ -115,7 +114,7 @@ export default function MissionControlPage() {
   }, [fetchAll]);
 
   return (
-    <AppShell title="Mission Control" noPadding>
+    <>
       {/* ── Header ─────────────────────────────────────────────── */}
       <div className="sticky top-0 z-10 border-b border-nexus-border bg-nexus-panel/90 px-4 py-2 backdrop-blur">
         <div className="flex items-center justify-between">
@@ -181,6 +180,6 @@ export default function MissionControlPage() {
           <SystemHealthPanel />
         </Suspense>
       </div>
-    </AppShell>
+    </>
   );
 }

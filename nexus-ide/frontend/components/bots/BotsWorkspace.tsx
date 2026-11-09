@@ -1,9 +1,7 @@
 "use client";
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import Image from "next/image";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { Activity, Archive, ArrowDown, ArrowLeft, Bot as BotIcon, Check, ChevronRight, Copy, Info, Loader2, Plus, Search, Send, Settings2, Square, Trash2, Users, X } from "lucide-react";
-import ReactMarkdown from "react-markdown";
 import { getProviderCatalog, getProviderModels, getSessionHistoryPage, type ProviderSpec } from "../../lib/api";
 import { createBot, listBots, removeBot, updateBot, type Bot, type BotSettings } from "../../lib/bots";
 import { foldRun } from "../../lib/foldRun";
@@ -11,8 +9,9 @@ import type { ChatMessage } from "../../lib/types";
 import { useAgentStream } from "../../hooks/useAgentStream";
 import { useProjectStore } from "../../stores/projectStore";
 import GroupWorkspace from "./GroupWorkspace";
-
-const MessageCodeBlock = lazy(() => import("../chat/MessageCodeBlock"));
+import { AssistantMarkdown } from "../chat/MessageBubble";
+import { useThemeStore } from "../../stores/themeStore";
+import { BotStatusPill } from "./botsUi";
 
 const TEMPLATES = [
   { name: "Personalizado", description: "Um assistente à tua medida", instructions: "" },
@@ -37,13 +36,13 @@ const selectedKey = "nexus:bots:selected";
 const inputClass = "w-full rounded-xl border border-white/10 bg-[#15171d] px-3 py-2.5 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-violet-400/60 focus:ring-2 focus:ring-violet-400/10";
 
 function Avatar({ name, id = name, large = false, thinking = false }: { name: string; id?: string; large?: boolean; thinking?: boolean }) {
-  // Keep a stable identity tint per bot without adding presentation data to the API.
   let hash = 0;
   for (const character of id) hash = (hash * 31 + character.charCodeAt(0)) | 0;
-  const hue = [0, 42, 105, 168, 225, 285][Math.abs(hash) % 6];
-  return <span aria-hidden="true" className={`relative flex shrink-0 items-center justify-center overflow-hidden rounded-2xl border bg-[radial-gradient(circle_at_50%_35%,rgba(255,255,255,.14),rgba(255,255,255,.025)_62%,rgba(0,0,0,.24))] shadow-[inset_0_1px_0_rgba(255,255,255,.12),0_8px_24px_rgba(0,0,0,.28)] transition duration-300 ${thinking ? "border-cyan-300/60 shadow-[0_0_26px_rgba(34,211,238,.24)]" : "border-white/10"} ${large ? "h-28 w-28 rounded-[1.75rem] p-1" : "h-11 w-11 rounded-xl p-0.5"}`} style={{ borderColor: thinking ? undefined : `hsla(${hue}, 78%, 68%, .3)` }}>
+  const hue = [262, 198, 168, 42, 12, 320][Math.abs(hash) % 6];
+  const initial = name.trim().charAt(0).toUpperCase() || "?";
+  return <span aria-hidden="true" className={`relative flex shrink-0 items-center justify-center overflow-hidden border font-semibold ${thinking ? "border-cyan-300/60" : "border-white/10"} ${large ? "h-28 w-28 rounded-[1.75rem] text-4xl" : "h-11 w-11 rounded-xl text-sm"}`} style={{ background: `hsl(${hue} 32% 22%)`, color: `hsl(${hue} 80% 86%)`, borderColor: thinking ? undefined : `hsla(${hue}, 70%, 68%, .4)` }}>
     {thinking && <span className="absolute inset-0 animate-pulse rounded-[inherit] bg-cyan-300/10" />}
-    <Image src="/images/bot-pet-skull-v2.png" alt="" width={large ? 112 : 44} height={large ? 112 : 44} draggable={false} className="relative h-full w-full object-contain transition-transform duration-300 hover:rotate-[-7deg] hover:scale-110" style={{ filter: `hue-rotate(${hue}deg) saturate(1.15) drop-shadow(0 4px 8px hsla(${hue}, 85%, 58%, .3))` }} />
+    <span className="relative">{initial}</span>
   </span>;
 }
 
@@ -142,6 +141,7 @@ function BotEditor({ bot, close, saved }: { bot: Bot | null; close: () => void; 
 
 function Message({ message }: { message: ChatMessage }) {
   const [copied, setCopied] = useState(false);
+  const theme = useThemeStore((state) => state.theme);
   const mine = message.role === "user";
   const tools = message.toolCalls ?? [];
   if (!message.content && tools.length === 0) return null;
@@ -149,11 +149,8 @@ function Message({ message }: { message: ChatMessage }) {
     <div className={`max-w-[92%] min-w-0 rounded-2xl px-4 py-3 text-sm leading-6 sm:max-w-[78%] ${mine ? "rounded-br-md bg-[#393154] text-zinc-100" : "rounded-bl-md border border-white/[0.06] bg-[#1a1c23] text-zinc-200"}`}>
       {tools.length > 0 && <details className="mb-3 rounded-xl border border-white/[0.07] bg-black/10 text-xs text-zinc-400"><summary className="cursor-pointer px-3 py-2 font-medium text-violet-200">Atividade · {tools.length} {tools.length === 1 ? "chamada" : "chamadas"}</summary><ul className="space-y-2 border-t border-white/[0.06] px-3 py-3">{tools.map((tool) => <li key={tool.id} className="flex items-start justify-between gap-3"><span className="break-all text-zinc-300">{tool.name}</span><span className={tool.status === "error" ? "shrink-0 text-red-300" : "shrink-0 text-zinc-400"}>{tool.status === "running" ? "Em curso" : tool.status === "success" ? "Concluída" : tool.status === "error" ? "Falhou" : tool.status === "awaiting_confirmation" ? "A aguardar confirmação" : "Resultado desconhecido"}</span></li>)}</ul></details>}
       {message.content && <>
-      <div className="nx-prose min-w-0 break-words [&_pre]:max-w-full [&_pre]:overflow-x-auto">
-        <ReactMarkdown components={{ code({ className, children, node: _node, ...props }) {
-          const language = /language-([\w-]+)/.exec(className || "")?.[1];
-          return language ? <Suspense fallback={<code className={className}>{children}</code>}><MessageCodeBlock language={language} code={String(children).replace(/\n$/, "")} theme="dark" /></Suspense> : <code className={className} {...props}>{children}</code>;
-        } }}>{message.content}</ReactMarkdown>
+      <div className="min-w-0 break-words">
+        <AssistantMarkdown text={message.content} theme={theme === "light" ? "light" : "dark"} />
       </div>
       <div className="mt-1 flex items-center justify-end gap-2 text-[10px] text-zinc-500"><time>{formatTime(message.timestamp)}</time><button type="button" aria-label="Copiar mensagem" onClick={() => void navigator.clipboard.writeText(message.content).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1200); })} className="rounded p-1 text-zinc-500 hover:text-zinc-200">{copied ? <Check size={12} /> : <Copy size={12} />}</button></div>
       </>}
@@ -316,11 +313,17 @@ export default function BotsWorkspace() {
     catch (reason) { setError(reason instanceof Error ? reason.message : "Não foi possível remover o bot."); }
   };
 
-  if (showGroups) return <GroupWorkspace bots={bots} onBack={() => setShowGroups(false)} />;
+  if (showGroups) return <GroupWorkspace bots={bots} onBack={() => setShowGroups(false)} onOpenBot={(id) => {
+    const item = bots.find((bot) => bot.id === id);
+    setShowGroups(false);
+    if (!item) return;
+    choose(item);
+    setEditor(item);
+  }} />;
 
   return <div className="relative flex h-full min-h-0 overflow-hidden bg-[#101116] text-zinc-100">
-    <section aria-label="Lista de conversas" className={`${mobileChat ? "hidden md:flex" : "flex"} w-full shrink-0 flex-col border-r border-white/[0.07] bg-[#13141a] md:w-[320px] xl:w-[350px]`}>
-      <div className="px-4 pb-4 pl-14 pt-[max(1.1rem,env(safe-area-inset-top))] md:pl-5">
+    <section aria-label="Lista de conversas" className={`${mobileChat ? "hidden lg:flex" : "flex"} w-full shrink-0 flex-col border-r border-white/[0.07] bg-[#13141a] lg:w-[300px] xl:w-[320px]`}>
+      <div className="px-4 pb-4 pl-14 pt-[max(1.1rem,env(safe-area-inset-top))] lg:pl-5">
         <div className="flex items-center justify-between"><div><p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-300/80">NEXUS</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">Bots</h1><p className="mt-1 text-xs text-zinc-400">O teu espaço de assistentes</p></div><button type="button" onClick={() => setEditor("new")} aria-label="Criar bot" className="flex h-10 w-10 items-center justify-center rounded-xl border border-violet-300/25 bg-violet-500/15 text-violet-200 transition hover:bg-violet-500/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300"><Plus size={19} /></button></div>
         <button type="button" disabled={streaming || busyOtherSession} onClick={() => setShowGroups(true)} className="mt-4 flex w-full items-center gap-3 rounded-xl border border-violet-400/20 bg-violet-400/[0.07] px-3 py-3 text-left text-sm text-violet-200 hover:bg-violet-400/10 disabled:opacity-40"><Users size={17} /> Conversas de grupo <ChevronRight size={15} className="ml-auto" /></button>
         <label className="relative mt-5 block"><Search size={16} className="pointer-events-none absolute left-3 top-3 text-zinc-500" /><input aria-label="Pesquisar conversas" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Pesquisar conversas" className={`${inputClass} h-10 pl-9`} /></label>
@@ -333,9 +336,9 @@ export default function BotsWorkspace() {
       <div className="border-t border-white/[0.07] px-5 py-4 text-[11px] leading-5 text-zinc-500">Histórico guardado na tua instalação NEXUS.</div>
     </section>
 
-    <section aria-label="Conversa" className={`${mobileChat ? "flex" : "hidden md:flex"} relative min-w-0 flex-1 flex-col bg-[#101116]`}>
+    <section aria-label="Conversa" className={`${mobileChat ? "flex" : "hidden lg:flex"} relative min-w-0 flex-1 flex-col bg-[#101116]`}>
       {bot ? <>
-        <header className="flex min-h-[80px] items-center gap-3 border-b border-white/[0.07] bg-[#15161d] px-4 pl-14 pt-[env(safe-area-inset-top)] md:pl-6"><button type="button" aria-label="Voltar às conversas" onClick={() => setMobileChat(false)} className="rounded-lg p-1 text-zinc-400 hover:text-white md:hidden"><ArrowLeft size={19} /></button><Avatar name={bot.name} id={bot.id} thinking={streaming} /><div className="min-w-0 flex-1"><h2 className="truncate text-sm font-semibold">{bot.name}</h2><p className="mt-1 truncate text-xs text-zinc-400">{streaming ? "A responder…" : bot.description || (bot.provider && bot.model ? `${bot.provider} · ${bot.model}` : "Configura o provedor e o modelo")}</p></div><button type="button" onClick={() => setEditor(bot)} className="hidden rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300 hover:bg-white/5 sm:block">Editar bot</button><button type="button" aria-label="Informações do bot" aria-pressed={details} onClick={() => setDetails((open) => !open)} className="rounded-xl p-2.5 text-zinc-400 hover:bg-white/5 hover:text-white"><Info size={19} /></button></header>
+        <header className="flex min-h-[80px] items-center gap-3 border-b border-white/[0.07] bg-[#15161d] px-4 pl-14 pt-[env(safe-area-inset-top)] lg:pl-6"><button type="button" aria-label="Voltar às conversas" onClick={() => setMobileChat(false)} className="inline-flex items-center gap-1 rounded-lg px-1 py-1 text-xs text-zinc-300 hover:text-white lg:hidden"><ArrowLeft size={16} /> Bots</button><Avatar name={bot.name} id={bot.id} thinking={streaming} /><div className="min-w-0 flex-1"><h2 className="truncate text-sm font-semibold">{bot.name}</h2><p className="mt-1 truncate text-xs text-zinc-400">{streaming ? "A responder…" : bot.description || "Função não descrita"}{bot.provider && bot.model ? ` · ${bot.provider} · ${bot.model}` : ""}</p><div className="mt-1"><BotStatusPill tone={streaming ? "live" : bot.provider && bot.model ? "neutral" : "warn"}>{streaming ? "A responder" : bot.provider && bot.model ? "Inferência não verificada" : "Configuração em falta"}</BotStatusPill></div></div><button type="button" onClick={() => setEditor(bot)} className="hidden rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300 hover:bg-white/5 sm:block">Editar bot</button><button type="button" aria-label="Informações do bot" aria-pressed={details} onClick={() => setDetails((open) => !open)} className="rounded-xl p-2.5 text-zinc-400 hover:bg-white/5 hover:text-white"><Info size={19} /></button></header>
         <div ref={scrollRegion} aria-label="Mensagens da conversa" onScroll={(event) => { const el = event.currentTarget; followMessages.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; setAwayFromBottom(!followMessages.current); }} className="min-h-0 flex-1 overflow-y-auto bg-[radial-gradient(ellipse_at_top,rgba(139,92,246,0.06),transparent_55%)] px-4 py-6 sm:px-8"><div className="mx-auto flex max-w-3xl flex-col gap-4">
           {historyPages[session]?.hasMore && <button type="button" onClick={() => void loadOlder()} disabled={olderLoading || streaming} className="self-center rounded-lg px-3 py-2 text-xs text-violet-300 hover:bg-white/5 disabled:opacity-50">{olderLoading ? "A carregar…" : "Carregar mensagens anteriores"}</button>}
           {historyLoading ? <p role="status" className="text-sm text-zinc-400">A carregar conversa…</p> : historyErrors[session] ? <div role="alert" className="rounded-xl border border-red-400/30 bg-red-400/5 p-4 text-sm text-red-200"><p>Não foi possível carregar o histórico: {historyErrors[session]}</p><button type="button" onClick={() => setHistoryAttempt((attempt) => attempt + 1)} className="mt-3 rounded-lg border border-red-300/30 px-3 py-2 font-medium hover:bg-red-300/10">Tentar novamente</button></div> : messages.length === 0 ? <div className="flex min-h-[45vh] flex-col items-center justify-center text-center"><Avatar name={bot.name} id={bot.id} large /><h3 className="mt-5 text-lg font-semibold">Olá, sou {bot.name}</h3><p className="mt-2 max-w-sm text-sm leading-6 text-zinc-500">{bot.description || "Envia uma mensagem para começar."}</p><p className="mt-4 text-xs text-zinc-400">{currentProject ? `Leitura e análise limitadas a ${currentProject.name}.` : "Seleciona um projeto na barra lateral para permitir leitura e análise dos seus ficheiros."} As ferramentas de leitura disponíveis dependem da configuração; escrita e execução estão desligadas.</p>{(!bot.provider || !bot.model) && <button type="button" onClick={() => setEditor(bot)} className="mt-5 rounded-xl border border-amber-300/30 bg-amber-300/10 px-4 py-2.5 text-sm font-medium text-amber-200 hover:bg-amber-300/20">Configurar modelo</button>}</div> : messages.map((message, index) => <Message key={`${message.id}-${index}`} message={message} />)}
@@ -348,7 +351,7 @@ export default function BotsWorkspace() {
       </> : <div className="flex flex-1 items-center justify-center overflow-y-auto px-6 py-10"><div className="w-full max-w-2xl"><div className="rounded-3xl border border-violet-300/15 bg-gradient-to-br from-violet-400/[0.12] via-[#191923] to-[#14151b] p-7 sm:p-10"><span className="inline-flex rounded-2xl border border-violet-300/15 bg-violet-400/10 p-3 text-violet-200"><BotIcon size={25} /></span><p className="mt-6 text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-300">O teu espaço de trabalho</p><h2 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">As tuas conversas, num só lugar</h2><p className="mt-3 max-w-md text-sm leading-6 text-zinc-400">Cria assistentes para tarefas diferentes, retoma uma conversa ou junta perspetivas num grupo.</p><div className="mt-6 flex flex-wrap gap-3"><button type="button" onClick={() => setEditor("new")} className="flex items-center gap-2 rounded-xl bg-violet-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-violet-400"><Plus size={16} /> Criar bot</button><button type="button" disabled={streaming || busyOtherSession} onClick={() => setShowGroups(true)} className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm text-zinc-200 hover:bg-white/10 disabled:opacity-40"><Users size={16} /> Abrir grupos</button></div></div><div className="mt-4 grid grid-cols-2 gap-3"><div className="rounded-2xl border border-white/[0.07] bg-white/[0.025] p-4"><p className="text-xs text-zinc-400">Bots ativos</p><p className="mt-2 text-2xl font-semibold">{loading || error ? "—" : activeCount}</p></div><div className="rounded-2xl border border-white/[0.07] bg-white/[0.025] p-4"><p className="text-xs text-zinc-400">Por configurar</p><p className="mt-2 text-2xl font-semibold">{loading || error ? "—" : unconfiguredCount}</p><p className="mt-1 text-xs text-zinc-500">Sem provedor ou modelo</p></div></div></div></div>}
     </section>
 
-    {bot && details && <aside aria-label="Informações do bot" className="absolute inset-y-0 right-0 z-20 flex w-[min(100%,350px)] flex-col border-l border-white/10 bg-[#17181e] shadow-2xl md:relative md:shadow-none">
+    {bot && details && <aside aria-label="Informações do bot" className="absolute inset-y-0 right-0 z-20 flex w-[min(100%,350px)] flex-col border-l border-white/10 bg-[#17181e] shadow-2xl xl:relative xl:shadow-none">
       <div className="flex items-center justify-between border-b border-white/[0.07] px-5 py-5"><div><h2 className="text-sm font-semibold">Informações do bot</h2><p className="mt-1 text-xs text-zinc-500">Perfil e configuração</p></div><button type="button" onClick={() => setDetails(false)} aria-label="Fechar informações" className="rounded-lg p-2 text-zinc-400 hover:bg-white/5 hover:text-white"><X size={18} /></button></div>
       <div className="flex-1 overflow-y-auto p-5">
         <div className="flex flex-col items-center pb-6 text-center"><Avatar name={bot.name} id={bot.id} large /><h3 className="mt-4 text-lg font-semibold">{bot.name}</h3><p className="mt-1 max-w-full break-words text-sm leading-5 text-zinc-400">{bot.description || "Adiciona uma descrição para identificares a função deste bot."}</p><span className={`mt-3 rounded-full border px-2.5 py-1 text-[11px] font-medium ${bot.provider && bot.model ? "border-violet-300/20 bg-violet-400/10 text-violet-200" : "border-amber-300/20 bg-amber-400/10 text-amber-200"}`}>{bot.provider && bot.model ? "Modelo configurado" : "Configuração em falta"}</span></div>

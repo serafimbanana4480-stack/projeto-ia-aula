@@ -718,8 +718,8 @@ function CopyMessageButton({ text, className = "" }: { text: string; className?:
 
 export default memo(MessageBubbleComponent);
 
-/** The assistant Markdown renderer (shared by the bubble and AgentTranscript segments). */
-function AssistantMarkdown({ text, theme }: { text: string; theme: Parameters<typeof FencedCodeBlock>[0]["theme"] }) {
+/** The assistant Markdown renderer (shared by the main chat, bots and groups). */
+export function AssistantMarkdown({ text, theme }: { text: string; theme: Parameters<typeof FencedCodeBlock>[0]["theme"] }) {
   return (
     <ReactMarkdown
       className="nx-prose text-nexus-text prose-headings:font-semibold prose-headings:text-nexus-text prose-h1:text-[24px] prose-h2:text-[20px] prose-h2:mt-5 prose-h1:mt-5 prose-p:my-2.5 prose-p:leading-[1.65] prose-li:leading-[1.65]"

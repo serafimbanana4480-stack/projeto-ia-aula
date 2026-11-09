@@ -1,7 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import AppShell from "../../components/layout/AppShell";
 import {
   Database,
   Table2,
@@ -153,7 +152,7 @@ export default function DatabasePage() {
     : [];
 
   return (
-    <AppShell title="Base de Dados">
+    <>
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -442,6 +441,6 @@ export default function DatabasePage() {
           </>
         )}
       </motion.div>
-    </AppShell>
+    </>
   );
 }

@@ -27,9 +27,7 @@ import {
   LayoutDashboard,
   ListTodo,
   Brain,
-  Layers,
   MoreHorizontal,
-  PenLine,
 } from "lucide-react";
 
 /**
@@ -236,7 +234,7 @@ export default function Sidebar() {
   }, [collapsed]);
 
   useEffect(() => {
-    const mq = window.matchMedia("(min-width: 768px)");
+    const mq = window.matchMedia("(min-width: 1024px)");
     setIsDesktop(mq.matches);
     const handler = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
     mq.addEventListener("change", handler);
@@ -270,7 +268,7 @@ export default function Sidebar() {
       {/* Mobile hamburger toggle */}
       <button
         onClick={() => setMobileOpen(!mobileOpen)}
-        className="fixed left-3 top-3 z-50 flex h-8 w-8 items-center justify-center rounded-xl border border-nexus-border/60 bg-nexus-panel transition-[transform,opacity] duration-[180ms] focus-visible:ring-2 focus-visible:ring-nexus-accent md:hidden"
+        className="fixed left-3 top-3 z-[70] flex h-8 w-8 items-center justify-center rounded-xl border border-nexus-border/60 bg-nexus-panel transition-[transform,opacity] duration-[180ms] focus-visible:ring-2 focus-visible:ring-nexus-accent lg:hidden"
         aria-label={mobileOpen ? "Fechar menu" : "Abrir menu"}
         aria-controls="nexus-primary-navigation"
         aria-expanded={mobileOpen}
@@ -280,16 +278,16 @@ export default function Sidebar() {
 
       {mobileOpen && (
         <div
-          className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm transition-opacity duration-[180ms] md:hidden"
+          className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm transition-opacity duration-[180ms] lg:hidden"
           onClick={() => setMobileOpen(false)}
         />
       )}
 
       <aside
         id="nexus-primary-navigation"
-        className={`fixed inset-y-0 left-0 z-40 flex w-[248px] shrink-0 flex-col border-r border-nexus-border/60 bg-nexus-panel pt-14 transition-[width,transform] duration-[180ms] ease-[cubic-bezier(0.22,1,0.36,1)] md:relative md:translate-x-0 md:pt-0 ${
-          mobileOpen ? "translate-x-0" : "-translate-x-full"
-        } ${collapsed ? "md:w-[68px]" : "md:w-[248px]"}`}
+        className={`fixed inset-y-0 left-0 z-[65] flex w-[248px] shrink-0 flex-col border-r border-nexus-border/60 bg-nexus-panel pt-14 max-lg:transition-none lg:relative lg:z-auto lg:translate-x-0 lg:pt-0 lg:transition-[width,transform] lg:duration-[180ms] lg:ease-[cubic-bezier(0.22,1,0.36,1)] ${
+          mobileOpen ? "translate-x-0" : "-translate-x-full max-lg:invisible"
+        } ${collapsed ? "lg:w-[68px]" : "lg:w-[248px]"}`}
         aria-label="Navegação principal"
         aria-hidden={mobileNavigationHidden || undefined}
         inert={mobileNavigationHidden}
@@ -310,7 +308,7 @@ export default function Sidebar() {
           </button>
           <button
             onClick={() => setCollapsed((c) => !c)}
-            className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nexus-faint transition-[transform,opacity,background-color,color] duration-100 hover:bg-white/[0.06] hover:text-nexus-text md:flex"
+            className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg text-nexus-faint transition-[transform,opacity,background-color,color] duration-100 hover:bg-white/[0.06] hover:text-nexus-text lg:flex"
             title={collapsed ? "Expandir barra lateral" : "Colapsar barra lateral"}
             aria-label={collapsed ? "Expandir barra lateral" : "Colapsar barra lateral"}
             aria-pressed={collapsed}

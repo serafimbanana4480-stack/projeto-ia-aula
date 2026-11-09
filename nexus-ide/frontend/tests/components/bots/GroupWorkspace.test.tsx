@@ -11,10 +11,13 @@ const group = { id: "g1", name: "Equipa", bot_ids: ["b0", "b1"], last_message: n
 const json = (body: unknown) => ({ ok: true, json: async () => body });
 
 describe("GroupWorkspace", () => {
-  beforeEach(() => request.mockReset());
+  beforeEach(() => {
+    request.mockReset();
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  });
 
   it("cria grupo com os bots escolhidos", async () => {
-    request.mockResolvedValueOnce(json({ groups: [] })).mockResolvedValueOnce(json(group)).mockResolvedValueOnce(json({ messages: [] }));
+    request.mockResolvedValueOnce(json({ groups: [] })).mockResolvedValueOnce(json(group)).mockResolvedValueOnce(json({ messages: [] })).mockResolvedValueOnce(json({ runs: [] }));
     render(<GroupWorkspace bots={bots} onBack={vi.fn()} />);
     await screen.findByText("Ainda não tens grupos. Cria um para começar.");
     fireEvent.click(screen.getAllByRole("button", { name: "Criar grupo" })[0]);
@@ -32,7 +35,7 @@ describe("GroupWorkspace", () => {
     const second = { id: "m2", role: "assistant", content: "Resposta partilhada", bot_id: "b0", bot_name: "Pixel", created_at: "now" };
     const frames = [ { type: "user_message", message: first }, { type: "agent_started", bot_id: "b0", bot_name: "Pixel" }, { type: "token", content: "Resposta partilhada" }, { type: "agent_message", message: second }, { type: "done", status: "completed" } ].map((item) => `data: ${JSON.stringify(item)}\n\n`).join("");
     const stream = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(frames)); controller.close(); } });
-    request.mockResolvedValueOnce(json({ groups: [group] })).mockResolvedValueOnce(json({ messages: [] })).mockResolvedValueOnce({ ok: true, body: stream }).mockResolvedValueOnce(json({ messages: [first, second] })).mockResolvedValueOnce(json({ groups: [group] }));
+    request.mockResolvedValueOnce(json({ groups: [group] })).mockResolvedValueOnce(json({ messages: [] })).mockResolvedValueOnce(json({ runs: [] })).mockResolvedValueOnce({ ok: true, body: stream }).mockResolvedValueOnce(json({ messages: [first, second] })).mockResolvedValueOnce(json({ groups: [group] }));
     render(<GroupWorkspace bots={bots} onBack={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /Equipa/ }));
     const input = await screen.findByRole("textbox", { name: "Mensagem para o grupo" });
@@ -42,7 +45,7 @@ describe("GroupWorkspace", () => {
     expect(await screen.findByText("Resposta partilhada")).toBeTruthy();
     await waitFor(() => expect(screen.getAllByText("Resposta partilhada")).toHaveLength(1));
     expect(screen.getByText("Pixel", { selector: "p" })).toBeTruthy();
-    expect(request.mock.calls[2][1].body).not.toContain('"max_turns"');
+    expect(request.mock.calls[3][1].body).not.toContain('"max_turns"');
   });
 
   it("recupera páginas anteriores sem repetir mensagens", async () => {
@@ -50,12 +53,13 @@ describe("GroupWorkspace", () => {
     const older = { id: "m1", role: "user", content: "Pergunta anterior", bot_id: null, bot_name: null, created_at: "then" };
     request.mockResolvedValueOnce(json({ groups: [group] }))
       .mockResolvedValueOnce(json({ messages: [newer], has_more: true, next_before: "m2" }))
+      .mockResolvedValueOnce(json({ runs: [] }))
       .mockResolvedValueOnce(json({ messages: [older, newer], has_more: false, next_before: null }));
     render(<GroupWorkspace bots={bots} onBack={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /Equipa/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Carregar mensagens anteriores" }));
     await screen.findByText("Pergunta anterior");
     expect(screen.getAllByText("Resposta recente")).toHaveLength(1);
-    expect(request.mock.calls[2][0]).toContain("before=m2");
+    expect(request.mock.calls[3][0]).toContain("before=m2");
   });
 });

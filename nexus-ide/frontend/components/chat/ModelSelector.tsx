@@ -152,11 +152,13 @@ export default function ModelSelector({ menuPlacement = "below" }: { menuPlaceme
     () => chatModels.filter((m) => matches(m, query) && passesFilter(m, filter)),
     [chatModels, query, filter],
   );
+  const MODEL_RENDER_CAP = 80;
+  const rendered = useMemo(() => visible.slice(0, MODEL_RENDER_CAP), [visible]);
 
   /** Flat list mirroring render order, so arrow keys and Enter agree. */
   const grouped = useMemo(() => {
     const byProvider = new Map<string, Model[]>();
-    for (const model of visible) {
+    for (const model of rendered) {
       const key = model.provider ?? "outros";
       const bucket = byProvider.get(key);
       if (bucket) bucket.push(model);
@@ -165,7 +167,7 @@ export default function ModelSelector({ menuPlacement = "below" }: { menuPlaceme
     return [...byProvider.entries()].sort((a, b) =>
       providerLabel(a[0]).localeCompare(providerLabel(b[0])),
     );
-  }, [visible]);
+  }, [rendered]);
 
   const flat = useMemo(() => grouped.flatMap(([, list]) => list), [grouped]);
 
@@ -280,7 +282,7 @@ export default function ModelSelector({ menuPlacement = "below" }: { menuPlaceme
 
           <div className="flex items-center justify-between gap-2 border-b border-nexus-border bg-nexus-accent/5 px-3 py-2 text-[10px] text-nexus-muted">
             <span className="flex items-center gap-1.5"><Sparkles className="h-3 w-3 text-nexus-accent" /> Escolhe o modelo e o fornecedor</span>
-            <span>{modelsLoading ? "A verificar…" : `${providerStatus.filter((p) => p.configured && !p.error).length} catálogos atualizados`}</span>
+            <span>{modelsLoading ? "A verificar…" : `${providerStatus.filter((p) => p.configured && !p.error).length} catálogos carregados`}</span>
           </div>
 
           {/* Filters */}
@@ -451,6 +453,11 @@ export default function ModelSelector({ menuPlacement = "below" }: { menuPlaceme
                 })}
               </div>
             ))}
+            {visible.length > rendered.length ? (
+              <p className="px-3 py-2 text-[10px] text-nexus-muted">
+                A mostrar {rendered.length} de {visible.length}. Refina a pesquisa para ver os restantes.
+              </p>
+            ) : null}
           </div>
 
           {failedProviders.length > 0 ? (
