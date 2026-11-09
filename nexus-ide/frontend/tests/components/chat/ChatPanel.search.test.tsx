@@ -66,7 +66,10 @@ vi.mock("../../../stores/modelStore", () => {
   return { useModelStore: () => state };
 });
 vi.mock("../../../stores/projectStore", () => ({ useProjectStore: () => ({ currentProject: null }) }));
-vi.mock("../../../stores/themeStore", () => ({ useThemeStore: () => ({ toggleTheme: vi.fn() }) }));
+vi.mock("../../../stores/themeStore", () => {
+  const state = { theme: "dark" as const, toggleTheme: vi.fn() };
+  return { useThemeStore: (selector?: (value: typeof state) => unknown) => (typeof selector === "function" ? selector(state) : state) };
+});
 vi.mock("../../../stores/advancedModeStore", () => {
   const state = {
     loadCommands: vi.fn(),
@@ -88,6 +91,10 @@ vi.mock("../../../components/chat/Toast", () => {
   return { useToast: () => toast };
 });
 vi.mock("../../../components/chat/MessageBubble", () => ({
+  default: ({ message }: { message: { content: string } }) => <article>{message.content}</article>,
+  AssistantMarkdown: ({ text }: { text: string }) => <div>{text}</div>,
+}));
+vi.mock("../../../components/chat/studio/StudioMessage", () => ({
   default: ({ message }: { message: { content: string } }) => <article>{message.content}</article>,
 }));
 vi.mock("../../../components/chat/BackgroundAgentsPanel", () => ({ default: () => null }));

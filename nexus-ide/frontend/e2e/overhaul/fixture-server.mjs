@@ -205,10 +205,24 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (id === "sess-chat") {
+      const answer = "## Parser\n\n- valida a entrada\n- devolve texto limpo\n\n```ts\nparse(text)\n```";
       send(res, 200, {
         messages: [
-          { id: "c1", role: "user", content: "Explica o parser em markdown.", timestamp: "2026-11-09T08:10:00Z" },
-          { id: "c2", role: "assistant", content: "## Parser\n\n- valida a entrada\n- devolve texto limpo\n\n```ts\nparse(text)\n```", timestamp: "2026-11-09T08:10:05Z", agent: "NEXUS" },
+          { id: "c1", role: "user", content: "Explica o parser em markdown.", timestamp: "2026-11-08T18:40:00Z" },
+          {
+            id: "c2",
+            role: "assistant",
+            content: answer,
+            timestamp: "2026-11-09T08:10:05Z",
+            agent: "NEXUS",
+            events: [
+              { type: "tool_call", tool_name: "read_file", tool_args: { path: "parser.ts" }, data: { call_id: "read-parser" }, timestamp: "2026-11-09T08:10:01Z", run_id: "run-parser", seq: 1, event_id: "e1" },
+              { type: "tool_result", tool_name: "read_file", tool_result: "export function parse(input: string) { return input.trim(); }", data: { call_id: "read-parser" }, timestamp: "2026-11-09T08:10:02Z", run_id: "run-parser", seq: 2, event_id: "e2" },
+              { type: "token", content: answer, timestamp: "2026-11-09T08:10:04Z", run_id: "run-parser", seq: 3, event_id: "e3" },
+              { type: "metric", data: { kind: "run_completed", duration_ms: 1000 }, timestamp: "2026-11-09T08:10:05Z", run_id: "run-parser", seq: 4, event_id: "e4" },
+              { type: "done", timestamp: "2026-11-09T08:10:05Z", run_id: "run-parser", seq: 5, event_id: "e5" },
+            ],
+          },
         ],
         has_more: false,
         next_cursor: null,

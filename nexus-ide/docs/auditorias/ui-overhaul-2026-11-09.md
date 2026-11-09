@@ -111,3 +111,50 @@ Comandos desta passagem, a partir de `nexus-ide/frontend` salvo o arranque da AP
 - O catálogo cresce de 80 em 80. Não há virtualização medida do histórico.
 - `prefers-reduced-motion` foi medido no botão de enviar (transição efetiva ~0,01 ms). Não houve leitor de ecrã nem medição de contraste com ferramenta. Ordem de foco: Tab sai do compositor; não foi auditada a página inteira.
 - O seletor «Automático» continua a ser o router (string vazia). É um modo real, diferente de «sem modelo observado».
+
+## Chat principal, terceira passagem
+
+O chat de bots e o de grupos ficaram com outro agente. Esta passagem não altera `BotsWorkspace`, `GroupWorkspace`, `botsUi` nem os componentes desses ecrãs. `AssistantMarkdown` em `MessageBubble.tsx` mantém-se: bots e grupos continuam a importá-lo.
+
+O chat principal (`/`) passou a renderizar componentes novos em `components/chat/studio/`:
+
+- `StudioMessage` — pedido à direita, resposta com marca geométrica derivada do nome do agente, papel, estado «A escrever», erro distinto, copiar, regenerar, responder (a citação entra no composer) e editar. O texto continua a passar por `AssistantMarkdown`. Execuções com eventos continuam em `AgentTranscript`; sem eventos, `RunTimeline`.
+- `StudioEmpty` — estado vazio em coluna de leitura, com as mesmas sugestões, recentes e atalhos.
+- Separadores de dia («Ontem», «Hoje») e cabeçalho da conversa com o título real da sessão e a contagem de mensagens carregadas.
+- Composer em doca: rótulo «Mensagem», disponibilidade do fornecedor no mesmo sítio (`data-testid="composer-availability"`), campo insetado e botão «Enviar».
+
+A fixture `sess-chat` passou a incluir a leitura real de `parser.ts` (eventos `tool_call`, `tool_result`, `metric` de conclusão e `done`) para a captura mostrar a ferramenta. Não há métricas inventadas no código de produção.
+
+### Comandos desta passagem
+
+A partir de `nexus-ide/frontend`.
+
+| Comando | Resultado |
+| --- | --- |
+| `pnpm exec tsc --noEmit` | ok |
+| `pnpm exec vitest run` | ok: 116 ficheiros, 1300 testes |
+| `pnpm exec eslint` nos ficheiros do chat alterados, `--max-warnings 0` | ok |
+| `pnpm exec playwright test e2e/overhaul/chat-v2.spec.ts e2e/overhaul/ui.spec.ts -c playwright.overhaul.config.ts` | 5 testes ok, 41,3s, sem `pageerror` |
+| `pnpm exec playwright test e2e/overhaul/chat-v2.spec.ts -c playwright.overhaul.config.ts` | 1 teste ok, 16,5s, após o scroll ao início da transcrição |
+| `pnpm exec next build` | ok. Compilou em 11,1s, 38 páginas, exit 0. O lint do build continua desligado. |
+
+### Capturas do chat principal
+
+Antes (o ecrã desta branch, antes dos componentes novos) e depois, fixture, sem chamada a modelos:
+
+`frontend/output/playwright/overhaul-2026-11-09/chat-v2/before/` e `.../chat-v2/after/`
+
+- `main-chat-390x844.png`
+- `main-chat-768x1024.png`
+- `main-chat-1440x900.png`
+- `main-chat-1920x1080.png`
+- `main-chat-empty-1440x900.png`
+
+As capturas «depois» da conversa estão no início do histórico, para o pedido, o dia e a ferramenta caberem no enquadramento. A 390px e a 768px a barra principal está fechada e não há scroll horizontal.
+
+### Pendente desta passagem
+
+- O chat de bots e de grupos não foi redesenhado aqui.
+- Não foi enviado um chat ao FastAPI nem a um modelo.
+- Não houve leitor de ecrã nem medição de contraste. O compositor mantém o nome acessível «Mensagem para o NEXUS», Enter / Shift+Enter e o botão «Enviar mensagem».
+- A equipa de agentes da sessão continua a mostrar HTTP 404 na fixture: esse endpoint não existe no servidor de fixture. O aviso de prontidão do runtime também é real (a fixture não confirma o runtime).
