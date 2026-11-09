@@ -2,7 +2,7 @@
 
 Branch: `cursor/ui-ux-overhaul-22ef`, baseada em `feat/agentic-chat-timeline` (`781ab38`).
 
-O trabalho foi validado no browser com Playwright e um servidor de fixtures local. O orchestrator FastAPI real **não** foi arrancado nesta VM (dependências pesadas e risco de chamadas a providers). Nenhum provider pago foi contactado.
+A primeira passagem foi validada com fixtures. A segunda arrancou o FastAPI real nesta VM, sem chaves de providers e com `NEXUS_BACKGROUND_SERVICES=off`. Nenhum provider pago foi contactado (não há linhas de OpenRouter, Kilo, OpenAI, Anthropic, DeepSeek ou Groq no log do processo).
 
 ## Páginas e componentes
 
@@ -72,15 +72,42 @@ Cenários Playwright: navegação e shell único em Projetos, paleta até Defini
 
 Há depois para Dashboard, chat, bot, grupo idle / em execução / com falha, Projetos, Tarefas, Definições, e o grupo com falha a 1920, 1440, 1024, 768 e 390. Não há capturas «depois» separadas de Swarm, MCP, memória, scraping, pesquisa, documentos, modelos ou base de dados.
 
+## Segunda passagem
+
+O FastAPI correu em `127.0.0.1:8000` com `LLM_PROVIDER=ollama`, `MULTI_LLM_ENABLED=false`, `OLLAMA_HOST` apontado a uma porta fechada e orçamento diário de 0,01 USD. O login de desenvolvimento usa `dev@example.com` (o validador de email rejeita `.local`). A base ficou em `nexus-ide/data/`, que o git ignora. O `.env` local também fica de fora do commit.
+
+Validação no browser (`playwright.backend.config.ts`, Next em `:3011` contra essa API): uma navegação principal em Dashboard, Projetos, Tarefas, Definições, Bots, MCP, Recolha, Aprovações, Documentos, Pesquisa, SWARM, Ferramentas, Métricas, Editor e no chat. O composer não enviou mensagem. O seletor de modelo abre e fecha. A 390px a barra fechada fica fora do ecrã e não há scroll horizontal nas aprovações. 1 teste, 33,4s, sem `pageerror`.
+
+Alterações desta passagem:
+
+- Composer do chat: disponibilidade do fornecedor (catálogo indisponível, sem chave, erro, ou «inferência não verificada»), atalho `aria-keyshortcuts`, botões de enviar/parar sem gradiente, pulso do microfone só com `motion-safe`.
+- Seletor de modelos: filtros com `aria-pressed` e «Mostrar mais 80», para um catálogo de centenas não ficar cortado na pesquisa.
+- Execuções de grupo: os registos reais (`tool_call`, `tool_result`, `handoff`) aparecem como etapas, com o JSON técnico por baixo. A conversa de grupo continua sem plano/ferramentas porque esse SSE não os emite.
+- Aprovações (`/nexus/hitl`) e agentes (`/nexus`) entram no shell único. O `NexusLayout` deixou de montar uma segunda barra e um segundo cabeçalho; continua a pedir os dados reais.
+- MCP: totais ausentes mostram «—». O título deixa de dizer que uma ligação configurada está saudável.
+- Recolha web em português.
+- Playwright: reduced motion (duração de transição < 50ms no botão de enviar), Tab sai do compositor, filtro de modelos, páginas secundárias, e a suíte contra o FastAPI.
+
+Comandos desta passagem, a partir de `nexus-ide/frontend` salvo o arranque da API:
+
+| Comando | Resultado |
+| --- | --- |
+| `python3 -m venv` + `pip install -e nexus-ide` | ok, em `/tmp/nexus-venv` |
+| `uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8000` | ok, «Application startup complete», provider=ollama |
+| `tsc --noEmit` | ok |
+| Vitest nos ficheiros de grupo, seletor, sidebar | 7 testes ok |
+| `playwright test -c playwright.overhaul.config.ts` | 4 testes ok na execução final (a anterior falhou só na asserção de `0.01ms` vs `1e-05s`, que é o mesmo valor) |
+| `playwright test -c playwright.backend.config.ts` | 1 teste ok, 33,4s |
+
 ## Pendente ou limitado
 
-- O backend FastAPI real não foi executado. Contratos foram lidos e os fluxos de grupo/bot cobertos por testes e pela fixture; o resto da API pode divergir.
-- Dashboard, chat principal, tarefas e definições não foram redesenhados de raiz. O chat principal já tinha markdown, composer e seletor; ficou com o renderer partilhado e a paleta.
-- Páginas secundárias (Swarm, MCP, memória, scraping, pesquisa, documentos, PDF, base de dados, modelos, mission control) só perderam o shell duplicado quando o tinham. Não houve passagem visual página a página.
-- Não há estágios de colaboração que o backend não envia. Não há tool calls no chat de grupo porque essa conversa não as emite.
-- O avatar ilustrado não está no repositório; usam-se iniciais. Não foi inventada uma imagem.
-- Virtualização do histórico e do catálogo além do limite de 80 modelos: não medida, portanto não declarada.
-- `prefers-reduced-motion` já existia em `globals.css` e no `MotionConfig`. Não foi revalidado com o media query ligado no browser.
-- Acessibilidade: foco visível, labels e diálogos nos fluxos novos; não houve auditoria WCAG completa com leitor de ecrã.
-- Métricas de CPU/RAM na barra inferior, quando a fixture responde, vêm de `os` da máquina de teste. Pedidos, latência, tokens/s e disco ausentes aparecem como «—» na grelha. Outros widgets que ainda coagulem ausência para zero não foram todos revistos.
-- O seletor «Automático» do chat continua a ser o router (string vazia). Isso é um modo real, diferente de «sem modelo observado».
+- O FastAPI real foi usado para navegação, login e leitura. Não foi enviado um chat nem uma execução de grupo, para não disparar Ollama nem qualquer fallback. Redis não está instalado; o bus de eventos regista a falha de ligação e continua.
+- O dashboard já era um centro de controlo (estado, modelo, atividade, atalhos). Não foi reescrito. Continua denso.
+- Tarefas mostram etapas de plano em lista ordenada. A API não traz pais/filhos, por isso não há árvore.
+- O chat de grupo não recebe estágios nem tool calls. Só as execuções com leitura de ficheiro é que os têm, e essas é que passaram a mostrá-los.
+- Memória, PDF, base de dados, modelos e mission control não tiveram passagem visual própria. Swarm, ferramentas, métricas e editor foram abertos contra a API real (shell único, sem `pageerror`) mas não redesenhados.
+- O editor avisa `Can't resolve <dynamic>` no worker do Monaco. É anterior a esta passagem e o ecrã abre na mesma.
+- O avatar ilustrado não está no repositório; usam-se iniciais.
+- O catálogo cresce de 80 em 80. Não há virtualização medida do histórico.
+- `prefers-reduced-motion` foi medido no botão de enviar (transição efetiva ~0,01 ms). Não houve leitor de ecrã nem medição de contraste com ferramenta. Ordem de foco: Tab sai do compositor; não foi auditada a página inteira.
+- O seletor «Automático» continua a ser o router (string vazia). É um modo real, diferente de «sem modelo observado».

@@ -3,7 +3,7 @@ import type { AppShellProps } from "./AppShell";
 type ShellConfig = Pick<AppShellProps, "title" | "noPadding" | "mainAs" | "showTopBar" | "showBottomHUD">;
 
 /** Routes that ship their own full chrome (chat, nexus, legacy analytics sub-pages). */
-const SHELL_EXCLUDED_PREFIXES = ["/login", "/nexus", "/analytics/history", "/analytics/reports"];
+const SHELL_EXCLUDED_PREFIXES = ["/login", "/analytics/history", "/analytics/reports"];
 
 const EXACT: Record<string, ShellConfig> = {
   "/dashboard": { title: "Dashboard", noPadding: true },
@@ -26,6 +26,8 @@ const EXACT: Record<string, ShellConfig> = {
   "/pdf": { title: "Leitor PDF" },
   "/mission-control": { title: "Controlo de missão", noPadding: true },
   "/models": { title: "Modelos IA" },
+  "/nexus": { title: "Agentes", noPadding: true },
+  "/nexus/hitl": { title: "Aprovações", noPadding: true },
 };
 
 function titleFromPath(pathname: string): string {
@@ -54,6 +56,13 @@ export function resolveShellConfig(pathname: string): ShellConfig | null {
 
   if (pathname.startsWith("/dashboard/")) {
     return { title: titleFromPath(pathname), noPadding: true };
+  }
+
+  if (pathname.startsWith("/nexus/agents/")) {
+    return { title: "Agente", noPadding: true };
+  }
+  if (pathname.startsWith("/nexus/")) {
+    return { title: "Agentes", noPadding: true };
   }
 
   // Legacy one-off pages (e.g. simple-dashboard) keep their own layout.

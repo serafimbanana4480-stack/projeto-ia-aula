@@ -114,6 +114,7 @@ export default function ModelSelector({ menuPlacement = "below" }: { menuPlaceme
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [highlight, setHighlight] = useState(0);
+  const [renderLimit, setRenderLimit] = useState(80);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -152,8 +153,10 @@ export default function ModelSelector({ menuPlacement = "below" }: { menuPlaceme
     () => chatModels.filter((m) => matches(m, query) && passesFilter(m, filter)),
     [chatModels, query, filter],
   );
-  const MODEL_RENDER_CAP = 80;
-  const rendered = useMemo(() => visible.slice(0, MODEL_RENDER_CAP), [visible]);
+  useEffect(() => {
+    setRenderLimit(80);
+  }, [query, filter]);
+  const rendered = useMemo(() => visible.slice(0, renderLimit), [visible, renderLimit]);
 
   /** Flat list mirroring render order, so arrow keys and Enter agree. */
   const grouped = useMemo(() => {
@@ -233,6 +236,7 @@ export default function ModelSelector({ menuPlacement = "below" }: { menuPlaceme
           }}
           aria-haspopup="dialog"
           aria-expanded={open}
+          aria-label={`Modelo: ${buttonLabel}`}
           className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-2.5 py-1.5 text-[11px] font-medium text-nexus-muted transition-colors hover:border-nexus-accent/30 hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/70"
           title={activeModel || "Automático — o router escolhe o modelo"}
         >
@@ -292,6 +296,7 @@ export default function ModelSelector({ menuPlacement = "below" }: { menuPlaceme
                 key={f.id}
                 type="button"
                 onClick={() => setFilter(f.id)}
+                aria-pressed={filter === f.id}
                 className={`shrink-0 rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${
                   filter === f.id
                     ? "bg-nexus-accent/15 text-nexus-accent"
@@ -454,9 +459,18 @@ export default function ModelSelector({ menuPlacement = "below" }: { menuPlaceme
               </div>
             ))}
             {visible.length > rendered.length ? (
-              <p className="px-3 py-2 text-[10px] text-nexus-muted">
-                A mostrar {rendered.length} de {visible.length}. Refina a pesquisa para ver os restantes.
-              </p>
+              <div className="flex items-center justify-between gap-2 px-3 py-2">
+                <p className="text-[10px] text-nexus-muted">
+                  A mostrar {rendered.length} de {visible.length}.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setRenderLimit((limit) => limit + 80)}
+                  className="shrink-0 rounded-md border border-nexus-border px-2 py-1 text-[10px] text-nexus-text hover:border-nexus-accent/40"
+                >
+                  Mostrar mais 80
+                </button>
+              </div>
             ) : null}
           </div>
 

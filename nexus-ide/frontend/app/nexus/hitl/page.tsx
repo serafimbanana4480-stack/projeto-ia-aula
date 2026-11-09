@@ -1,12 +1,11 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import Link from "next/link";
 import NexusLayout from "../../../components/nexus/NexusLayout";
 import {
   UserCheck, XCircle, RotateCcw, AlertTriangle,
-  ChevronRight, Clock, Bot, Shield, Edit3,
-  CheckCircle2, ArrowUp, ArrowDown, Minus,
+  Clock, Bot, Shield, Edit3,
+  CheckCircle2,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -40,10 +39,10 @@ const HITL_ACTION_TO_BACKEND: Record<string, OverseerInterveneAction> = {
 };
 
 const RISK_CONFIG = {
-  low: { color: "#10b981", label: "Low Risk", bg: "rgba(16,185,129,0.1)", border: "rgba(16,185,129,0.3)" },
-  medium: { color: "#f59e0b", label: "Medium Risk", bg: "rgba(245,158,11,0.1)", border: "rgba(245,158,11,0.3)" },
-  high: { color: "#ef4444", label: "High Risk", bg: "rgba(239,68,68,0.1)", border: "rgba(239,68,68,0.3)" },
-  critical: { color: "#dc2626", label: "Critical Risk", bg: "rgba(220,38,38,0.1)", border: "rgba(220,38,38,0.3)" },
+  low: { color: "#10b981", label: "Risco baixo", bg: "rgba(16,185,129,0.1)", border: "rgba(16,185,129,0.3)" },
+  medium: { color: "#f59e0b", label: "Risco médio", bg: "rgba(245,158,11,0.1)", border: "rgba(245,158,11,0.3)" },
+  high: { color: "#ef4444", label: "Risco alto", bg: "rgba(239,68,68,0.1)", border: "rgba(239,68,68,0.3)" },
+  critical: { color: "#dc2626", label: "Risco crítico", bg: "rgba(220,38,38,0.1)", border: "rgba(220,38,38,0.3)" },
 };
 
 function ApprovalCard({ req, onAction }: { req: ApprovalRequest; onAction: (id: string, action: string) => void }) {
@@ -190,9 +189,9 @@ export default function HumanInTheLoopPage() {
       setRequests([...conflictRequests, ...stuckRequests]);
     } catch (e) {
       if (e instanceof ApiError) {
-        setError(`Failed to load approval requests: ${e.message}`);
+        setError(`Não foi possível carregar as aprovações: ${e.message}`);
       } else {
-        setError("Failed to load approval requests from the overseer.");
+        setError("Não foi possível carregar as aprovações do supervisor.");
       }
       setRequests([]);
     } finally {
@@ -219,9 +218,9 @@ export default function HumanInTheLoopPage() {
       await fetchRequests();
     } catch (e) {
       if (e instanceof ApiError) {
-        setError(`Action failed (${action}): ${e.message}`);
+        setError(`A ação falhou (${action}): ${e.message}`);
       } else {
-        setError(`Action failed (${action}).`);
+        setError(`A ação falhou (${action}).`);
       }
     }
   }
@@ -238,14 +237,14 @@ export default function HumanInTheLoopPage() {
               <UserCheck size={22} className="text-nexus-accent3" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-slate-100">Human-in-the-Loop</h1>
-              <p className="text-sm text-slate-400">Supervise, approve, and intervene in autonomous agent decisions</p>
+              <h1 className="text-xl font-bold text-slate-100">Aprovações</h1>
+              <p className="text-sm text-slate-400">Conflitos de ficheiro e agentes bloqueados que o supervisor realmente reporta.</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/60 border border-slate-700/60">
               <span className="w-2 h-2 rounded-full bg-nexus-accent3 animate-pulse" />
-              <span className="text-[11px] text-slate-300">{pending.length} pending requests</span>
+              <span className="text-[11px] text-slate-300">{error ? "Pedidos indisponíveis" : loading ? "A carregar" : `${pending.length} pedidos pendentes`}</span>
             </div>
           </div>
         </div>
@@ -260,10 +259,10 @@ export default function HumanInTheLoopPage() {
         {/* Stats */}
         <div className="grid grid-cols-4 gap-3">
           {[
-            { label: "Pending", value: requests.filter(r => r.status === "pending").length, color: "#f59e0b" },
-            { label: "Approved", value: history.filter(h => h.action === "approve").length, color: "#10b981" },
-            { label: "Rejected", value: history.filter(h => h.action === "reject").length, color: "#ef4444" },
-            { label: "Modified", value: history.filter(h => h.action === "modify").length, color: "#3b82f6" },
+            { label: "Pendentes", value: error || loading ? "—" : requests.filter(r => r.status === "pending").length, color: "#f59e0b" },
+            { label: "Aprovadas", value: history.filter(h => h.action === "approve").length, color: "#10b981" },
+            { label: "Rejeitadas", value: history.filter(h => h.action === "reject").length, color: "#ef4444" },
+            { label: "Alteradas", value: history.filter(h => h.action === "modify").length, color: "#3b82f6" },
           ].map(({ label, value, color }) => (
             <div key={label} className="nexus-card p-3 flex items-center gap-3">
               <div className="w-3 h-3 rounded-full" style={{ background: color, boxShadow: `0 0 8px ${color}` }} />
@@ -281,19 +280,19 @@ export default function HumanInTheLoopPage() {
           <div className="xl:col-span-2 space-y-3">
             <h2 className="text-[11px] uppercase tracking-widest font-bold text-slate-400 flex items-center gap-2">
               <Shield size={12} className="text-nexus-accent3" />
-              Pending Approvals
+              Aprovações pendentes
             </h2>
               <AnimatePresence mode="popLayout">
                 {loading ? (
                   <div className="nexus-card flex flex-col items-center justify-center h-48 text-slate-500">
                     <Clock size={32} className="mb-3 opacity-20" />
-                    <p className="text-sm">Loading approval requests…</p>
+                    <p className="text-sm">A carregar pedidos…</p>
                   </div>
                 ) : pending.length === 0 ? (
                   <div className="nexus-card flex flex-col items-center justify-center h-48 text-slate-500">
                     <UserCheck size={32} className="mb-3 opacity-20" />
-                    <p className="text-sm">No pending approval requests</p>
-                    <p className="text-[11px] mt-1">Agent decisions requiring human review will appear here</p>
+                    <p className="text-sm">{error ? "Lista indisponível" : "Sem pedidos pendentes"}</p>
+                    <p className="text-[11px] mt-1">{error ? "O contador não é zero: a leitura falhou." : "Conflitos e agentes bloqueados aparecem aqui quando o supervisor os reporta."}</p>
                   </div>
                 ) : (
                 pending.map(req => <ApprovalCard key={req.id} req={req} onAction={handleAction} />)
@@ -303,13 +302,13 @@ export default function HumanInTheLoopPage() {
 
           {/* History */}
           <div className="space-y-3">
-            <h2 className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Decision History</h2>
+            <h2 className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Decisões desta sessão</h2>
             <div className="nexus-card flex-1 overflow-hidden flex flex-col">
               <div className="flex-1 overflow-y-auto divide-y divide-slate-800/40">
                 {history.length === 0 ? (
                   <div className="flex flex-col items-center justify-center h-40 text-slate-600">
                     <Clock size={20} className="mb-2 opacity-20" />
-                    <p className="text-xs">No decisions yet</p>
+                    <p className="text-xs">Ainda sem decisões nesta sessão</p>
                   </div>
                 ) : (
                   history.map(({ req, action }, i) => (

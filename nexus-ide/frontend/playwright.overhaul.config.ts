@@ -5,6 +5,7 @@ const apiPort = process.env.OVERHAUL_API_PORT || "8765";
 
 export default defineConfig({
   testDir: "./e2e/overhaul",
+  testIgnore: "**/backend.spec.ts",
   timeout: 90_000,
   expect: { timeout: 20_000 },
   fullyParallel: false,

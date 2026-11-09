@@ -132,4 +132,63 @@ test.describe("overhaul UI", () => {
     await expect(page.getByText("Envia uma mensagem para iniciar")).toBeVisible();
     await shot(page, "group-idle-1440x900");
   });
+
+  test("composer, modelos, páginas secundárias e reduced motion", async ({ browser }) => {
+    const context = await browser.newContext({
+      reducedMotion: "reduce",
+      viewport: { width: 1440, height: 900 },
+    });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+
+    await page.goto("/");
+    const composer = page.getByRole("textbox", { name: "Mensagem para o NEXUS" });
+    await expect(composer).toBeVisible();
+    await expect(page.getByTestId("composer-availability")).toContainText(/Automático|Catálogo|Fornecedor|sem chave|inferência/);
+    const duration = await page.getByRole("button", { name: "Enviar mensagem" }).evaluate((el) => getComputedStyle(el).transitionDuration);
+    const seconds = duration.endsWith("ms") ? Number.parseFloat(duration) / 1000 : Number.parseFloat(duration);
+    expect(seconds).toBeLessThan(0.05);
+    await composer.focus();
+    await page.keyboard.press("Tab");
+    const leftBody = await page.evaluate(() => document.activeElement?.tagName !== "BODY");
+    expect(leftBody).toBeTruthy();
+
+    await page.getByRole("button", { name: /^Modelo:/ }).click();
+    const dialog = page.getByRole("dialog", { name: "Selecionar modelo" });
+    await expect(dialog).toBeVisible();
+    const freeFilter = dialog.getByRole("button", { name: "Grátis", exact: true });
+    await freeFilter.click();
+    await expect(freeFilter).toHaveAttribute("aria-pressed", "true");
+    await dialog.getByLabel("Procurar modelo ou provider").fill("fixture");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await shot(page, "chat-composer-1440x900");
+
+    const routes: Array<[string, string, RegExp | string]> = [
+      ["/scraping", "scraping-1440x900", "Recolha web"],
+      ["/mcp", "mcp-1440x900", "Ligações MCP"],
+      ["/nexus/hitl", "approvals-1440x900", "Aprovações"],
+      ["/documents", "documents-1440x900", "Documentos"],
+      ["/search", "search-1440x900", "Pesquisa"],
+    ];
+    for (const [route, name, heading] of routes) {
+      await page.goto(route);
+      await expect(page.locator('aside[aria-label="Navegação principal"]')).toHaveCount(1);
+      await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
+      await shot(page, name);
+    }
+
+    for (const [width, height] of [[390, 844], [768, 1024], [1024, 768], [1440, 900], [1920, 1080]] as const) {
+      await page.setViewportSize({ width, height });
+      await page.goto("/dashboard");
+      await expect(page.getByRole("heading", { name: "Painel de Operações" })).toBeVisible();
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+      expect(overflow).toBeFalsy();
+      await shot(page, `dashboard-${width}x${height}`);
+    }
+
+    expect(errors, errors.join("\n")).toEqual([]);
+    await context.close();
+  });
 });

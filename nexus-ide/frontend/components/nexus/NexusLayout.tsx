@@ -1,8 +1,6 @@
 "use client";
 
 import React, { useEffect } from "react";
-import NexusSidebar from "./NexusSidebar";
-import NexusTopBar from "./NexusTopBar";
 import { useEventBus } from "../../stores/useEventBus";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useSystemStore } from "../../stores/useSystemStore";
@@ -52,17 +50,5 @@ export default function NexusLayout({ children }: { children: React.ReactNode })
     return () => clearInterval(refreshInterval);
   }, [fetchTasks, fetchWorkflows]);
 
-  return (
-    // `h-dvh` rather than `h-screen`: 100vh overflows by the browser chrome on
-    // mobile, which pushed the bottom row out of reach.
-    <div className="nx-ambient flex h-dvh overflow-hidden bg-nexus-bg text-nexus-text">
-      <NexusSidebar />
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <NexusTopBar />
-        {/* No backdrop-blur on the scroll container: it re-rasterises on every
-            scroll tick and the page background is opaque anyway. */}
-        <main className="min-w-0 flex-1 overflow-y-auto">{children}</main>
-      </div>
-    </div>
-  );
+  return <div className="min-h-full">{children}</div>;
 }

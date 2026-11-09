@@ -57,7 +57,7 @@ export default function ScrapingPage() {
       >
         <div className="mb-6 flex items-center gap-3">
           <Globe className="h-6 w-6 text-nexus-accent" />
-          <h1 className="text-2xl font-bold">AI Web Scraping</h1>
+          <h1 className="text-2xl font-bold">Recolha web</h1>
         </div>
 
         {/* Search Input */}
@@ -68,7 +68,8 @@ export default function ScrapingPage() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyPress={(e) => e.key === "Enter" && handleSearch()}
-              placeholder="Enter search query..."
+              placeholder="O que queres recolher?"
+              aria-label="Consulta de recolha web"
               className="flex-1 rounded bg-black/30 px-4 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-nexus-accent"
               disabled={loading}
             />
@@ -82,7 +83,7 @@ export default function ScrapingPage() {
               ) : (
                 <Search className="h-4 w-4" />
               )}
-              Search
+              Recolher
             </button>
           </div>
 
@@ -116,7 +117,7 @@ export default function ScrapingPage() {
             className="space-y-3"
           >
             <div className="text-sm text-gray-400">
-              Found {results.length} results
+              {results.length} {results.length === 1 ? "resultado" : "resultados"}
             </div>
             {results.map((result, index) => (
               <motion.div
@@ -157,8 +158,8 @@ export default function ScrapingPage() {
             className="text-center py-12 text-gray-500"
           >
             <Globe className="mx-auto mb-3 h-12 w-12 text-nexus-border" />
-            <p className="text-sm">No results found</p>
-            <p className="text-xs">Try a different search query</p>
+            <p className="text-sm">Sem resultados</p>
+            <p className="text-xs">Tenta outra consulta</p>
           </motion.div>
         )}
 
@@ -169,9 +170,9 @@ export default function ScrapingPage() {
             className="text-center py-12 text-gray-500"
           >
             <Globe className="mx-auto mb-3 h-12 w-12 text-nexus-accent" />
-            <p className="text-sm">AI-Powered Web Scraping</p>
+            <p className="text-sm">Recolha a partir da pesquisa web</p>
             <p className="text-xs">
-              Search the web using DuckDuckGo with AI analysis
+              A pesquisa usa o serviço configurado. Sem resposta, o resultado fica vazio — não é simulado.
             </p>
           </motion.div>
         )}

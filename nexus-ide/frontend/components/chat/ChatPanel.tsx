@@ -489,6 +489,21 @@ export function ModeDropdown({ menuPlacement = "below" }: { menuPlacement?: Comp
   );
 }
 
+function composerAvailability(
+  activeModel: string,
+  activeProvider: string,
+  providers: { provider: string; label: string; configured: boolean; error: string | null }[],
+  modelsError: string | null,
+): string {
+  if (modelsError) return "Catálogo de modelos indisponível";
+  if (!activeModel) return "Automático · o router escolhe o modelo";
+  const provider = providers.find((item) => item.provider === activeProvider);
+  if (!provider) return "Fornecedor do modelo selecionado sem estado conhecido";
+  if (!provider.configured) return `${provider.label} · sem chave configurada`;
+  if (provider.error) return `${provider.label} · ${provider.error}`;
+  return `${provider.label} · catálogo carregado, inferência não verificada`;
+}
+
 export default function ChatPanel({
   rightOpen = true,
   setRightOpen,
@@ -502,7 +517,7 @@ export default function ChatPanel({
   const ensureCurrentChatSession = sessions.ensureCurrentSession;
   const toast = useToast();
   const { currentMode, modes, modesLoaded, loadModes, setMode } = useModeStore();
-  const { activeModel, activeProvider, modelsLoaded, loadModels } = useModelStore();
+  const { activeModel, activeProvider, modelsLoaded, loadModels, providerStatus, modelsError } = useModelStore();
   const { currentProject, setCurrentProject } = useProjectStore();
   const router = useRouter();
   const pathname = usePathname();
@@ -3090,8 +3105,9 @@ export default function ChatPanel({
             <button
               type="button"
               onClick={reset}
-              className="rounded p-0.5 text-red-300/70 hover:bg-red-500/20 hover:text-red-200"
+              className="rounded p-0.5 text-red-300/70 hover:bg-red-500/20 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
               title="Fechar erro"
+              aria-label="Fechar erro do chat"
             >
               <X className="h-3.5 w-3.5" />
             </button>
@@ -3148,6 +3164,7 @@ export default function ChatPanel({
             <textarea
               ref={inputRef}
               aria-label="Mensagem para o NEXUS"
+              aria-keyshortcuts="Enter Shift+Enter"
               className="max-h-[160px] min-h-[52px] w-full resize-none bg-transparent px-1 py-1 text-[14px] leading-relaxed text-nexus-text placeholder:text-nexus-muted/70 outline-none"
               value={input}
               onChange={handleInputChange}
@@ -3365,9 +3382,9 @@ export default function ChatPanel({
                 <button
                   type="button"
                   onClick={startListening}
-                  className={`rounded-lg p-2 transition-colors ${
+                    className={`rounded-lg p-2 transition-colors ${
                     isListening
-                      ? "bg-red-500/10 text-red-400 animate-pulse"
+                      ? "bg-red-500/10 text-red-400 motion-safe:animate-pulse"
                       : "text-nexus-muted hover:bg-nexus-bg/60 hover:text-nexus-text"
                   }`}
                   title={isListening ? "A ouvir... clica para parar" : "Input de voz (Web Speech API)"}
@@ -3381,7 +3398,7 @@ export default function ChatPanel({
                     onClick={handleCancel}
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
-                    className="shrink-0 rounded-xl bg-gradient-to-br from-red-500/20 to-red-500/10 p-2 text-red-400 hover:from-red-500/30 hover:to-red-500/20 transition-all duration-200 shadow-sm hover:shadow-red-500/20"
+                    className="shrink-0 rounded-xl border border-red-400/40 bg-red-500/10 p-2 text-red-300 hover:bg-red-500/20"
                     aria-label="Parar execução"
                     title="Parar execução"
                   >
@@ -3400,10 +3417,10 @@ export default function ChatPanel({
                   })}
                   whileHover={{ scale: input.trim() ? 1.05 : 1 }}
                   whileTap={{ scale: 0.92 }}
-                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white transition-all duration-200 shadow-sm ${
+                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white transition-colors ${
                     input.trim()
-                      ? "bg-gradient-to-br from-nexus-accent to-nexus-accent/80 hover:shadow-nexus-accent/40 hover:from-nexus-accent hover:to-nexus-accent/90"
-                      : "bg-nexus-accent/50 cursor-not-allowed opacity-40"
+                      ? "bg-nexus-accent hover:bg-nexus-accent-bright"
+                      : "cursor-not-allowed bg-nexus-accent/40 opacity-40"
                   }`}
                   aria-label={streaming ? "Enviar orientação" : "Enviar mensagem"}
                   title={streaming ? "Enviar orientação ao run ativo (Enter)" : "Enviar mensagem (Enter · Shift+Enter newline)"}
@@ -3419,6 +3436,7 @@ export default function ChatPanel({
           <span>
             <span className="hidden sm:inline">Raciocínio {thinkingStrength === "low" ? "rápido" : thinkingStrength === "medium" ? "médio" : "alto"} · </span>{DENSITY_LABEL[density]}
           </span>
+          <span className="min-w-0 flex-1 truncate text-right" data-testid="composer-availability">{composerAvailability(activeModel, activeProvider, providerStatus, modelsError)}</span>
           <span className="hidden lg:inline">Enter envia · Shift+Enter nova linha</span>
           <motion.button
             type="button"
