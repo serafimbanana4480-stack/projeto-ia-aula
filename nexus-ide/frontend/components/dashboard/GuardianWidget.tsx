@@ -99,11 +99,11 @@ function HealthStat({
 }) {
   const TONE_TEXT: Record<Tone, string> = {
     neutral: "text-nexus-text",
-    info: "text-cyan-400",
+    info: "text-nexus-cyan",
     accent: "text-[var(--nx-accent-bright)]",
-    success: "text-emerald-400",
-    warning: "text-amber-400",
-    danger: "text-rose-400",
+    success: "text-nexus-accent2",
+    warning: "text-nexus-accent3",
+    danger: "text-nexus-accent4",
   };
   return (
     <div className="nx-inset rounded-lg p-2 text-center">
@@ -264,7 +264,7 @@ export default function GuardianWidget() {
       {!backendOnline && (
         <div
           role="alert"
-          className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300"
+          className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-nexus-accent3"
         >
           <AlertTriangle className="h-3 w-3" aria-hidden="true" />
           Backend offline — guardião indisponível
@@ -274,7 +274,7 @@ export default function GuardianWidget() {
       {guardianError && guardian && guardian.running === undefined && (
         <div
           role="alert"
-          className="mt-3 flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300"
+          className="mt-3 flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-nexus-accent4"
         >
           <AlertTriangle className="h-3 w-3" aria-hidden="true" />
           Falha ao carregar: {guardianError}
@@ -284,7 +284,7 @@ export default function GuardianWidget() {
       {applyError && (
         <div
           role="alert"
-          className="mt-3 flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300"
+          className="mt-3 flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-nexus-accent4"
         >
           <AlertTriangle className="h-3 w-3" aria-hidden="true" />
           {applyError}

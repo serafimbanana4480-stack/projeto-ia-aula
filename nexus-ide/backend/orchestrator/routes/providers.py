@@ -15,7 +15,7 @@ import logging
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from backend.config.settings import get_settings, load_models_config
@@ -23,9 +23,11 @@ from backend.llm.factory import create_llm_client
 from backend.llm.model_catalog import (
     PROVIDER_SPECS,
     aggregate_models,
+    apply_catalog_to_llm_client,
     discover_models,
     invalidate_cache,
     list_provider_specs,
+    load_validated_models,
     validate_api_key,
 )
 from backend.llm.multi_llm_manager import MultiLLMManager
@@ -35,21 +37,99 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _check_provider_health(base_url: str, provider: str) -> dict:
-    """Quick health check for a provider."""
+async def _check_provider_health(
+    base_url: str, provider: str, api_key: str | None = None
+) -> dict[str, Any]:
+    """Check a provider and report what was actually observed.
+
+    The previous implementation issued a bare ``GET {base_url}`` and reported
+    ``reachable`` for *any* HTTP status. A provider with an invalid key
+    answers 401, a dead endpoint answers 404, and both were presented to the
+    user as a working connection — so the model selector happily listed
+    models that could not answer a single prompt.
+
+    The check now measures the thing that actually decides whether the
+    provider can serve a chat turn:
+      * local providers ask for their real model list;
+      * OpenAI-compatible providers call ``{base_url}/models`` with the
+        configured key and map the status code to a specific reason.
+
+    The result is a typed status the UI can explain instead of a bare
+    "reachable".
+    """
     try:
         if provider == "ollama":
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(f"{base_url}/api/tags")
                 if resp.status_code == 200:
                     models = resp.json().get("models", [])
-                    return {"status": "healthy", "models_available": len(models)}
-                return {"status": "unhealthy", "error": f"HTTP {resp.status_code}"}
-        else:
-            # Cloud providers — just check if the URL is reachable
+                    return {
+                        "status": "healthy",
+                        "models_available": len(models),
+                        "detail": "Servidor local a responder",
+                    }
+                return {
+                    "status": "unhealthy",
+                    "error": f"HTTP {resp.status_code}",
+                    "detail": "O servidor local respondeu, mas sem uma lista de modelos.",
+                }
+        if provider in {"lmstudio", "local"}:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(base_url)
-                return {"status": "reachable", "http_status": resp.status_code}
+                resp = await client.get(f"{base_url.rstrip('/')}/models")
+                if resp.status_code == 200:
+                    try:
+                        models = resp.json().get("data", [])
+                    except Exception:  # pragma: no cover - malformed body
+                        models = []
+                    return {
+                        "status": "healthy",
+                        "models_available": len(models),
+                        "detail": "Servidor local a responder",
+                    }
+                return {
+                    "status": "unhealthy",
+                    "error": f"HTTP {resp.status_code}",
+                    "detail": "O servidor local não devolveu a lista de modelos.",
+                }
+
+        # Cloud / OpenAI-compatible providers: ask for the catalog with the
+        # key that would actually be used.
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(f"{base_url.rstrip('/')}/models", headers=headers)
+        if resp.status_code == 200:
+            try:
+                models = resp.json().get("data", [])
+            except Exception:  # pragma: no cover - malformed body
+                models = []
+            return {
+                "status": "healthy",
+                "models_available": len(models),
+                "detail": "Credenciais aceites",
+            }
+        if resp.status_code in (401, 403):
+            return {
+                "status": "unauthenticated",
+                "error": f"HTTP {resp.status_code}",
+                "detail": "A chave da API foi recusada. Configura-a em Definições.",
+            }
+        if resp.status_code == 402:
+            return {
+                "status": "no_credit",
+                "error": f"HTTP {resp.status_code}",
+                "detail": "A conta não tem crédito disponível.",
+            }
+        if resp.status_code == 429:
+            return {
+                "status": "rate_limited",
+                "error": f"HTTP {resp.status_code}",
+                "detail": "O fornecedor limitou o ritmo de pedidos. Tenta mais tarde.",
+            }
+        return {
+            "status": "unhealthy",
+            "error": f"HTTP {resp.status_code}",
+            "detail": "O fornecedor respondeu com um erro inesperado.",
+        }
     except Exception as exc:
         return {"status": "unreachable", "error": str(exc)}
 
@@ -63,10 +143,23 @@ async def list_providers(_user: dict = Depends(require_auth)) -> dict:
 
     active_provider = settings.llm_provider.lower()
 
-    # Check health in parallel
+    # Use the same provider-specific endpoints and live credentials as discovery.
+    async def catalog_health(provider: str) -> dict[str, Any]:
+        result = await validate_api_key(provider)
+        if result.get("valid"):
+            return {"status": "healthy", "models_available": result.get("models_count", 0),
+                    "detail": "Catálogo consultado; disponibilidade no chat ainda não testada."}
+        return {"status": "unhealthy", "error": result.get("error"), "detail": result.get("error")}
+
     health_tasks = []
     for key, pcfg in providers_cfg.items():
-        health_tasks.append(_check_provider_health(pcfg.get("base_url", ""), key))
+        requires_key = bool(pcfg.get("requires_api_key", False))
+        key_attr = f"{key}_api_key"
+        api_key = getattr(settings, key_attr, "") if requires_key else None
+        health_tasks.append(
+            catalog_health(key) if key in PROVIDER_SPECS
+            else _check_provider_health(pcfg.get("base_url", ""), key, api_key)
+        )
 
     health_results = await asyncio.gather(*health_tasks, return_exceptions=True)
 
@@ -77,6 +170,9 @@ async def list_providers(_user: dict = Depends(require_auth)) -> dict:
         if requires_key:
             key_attr = f"{key}_api_key"
             api_key_set = bool(getattr(settings, key_attr, ""))
+            if key in PROVIDER_SPECS:
+                from backend.llm.model_catalog import resolve_credentials
+                api_key_set = bool(resolve_credentials(key)[0])
 
         health_data = (
             health if isinstance(health, dict) else {"status": "error", "error": str(health)}
@@ -146,14 +242,64 @@ async def providers_status(_user: dict = Depends(require_auth)) -> dict[str, Any
         prov = await list_providers(_user)
     except Exception:
         prov = {"providers": [], "active_provider": ""}
+    provider_entries = prov.get("providers", [])
+    llm_available = (
+        not is_demo
+        and blocked is None
+        and _has_usable_provider(provider_entries, runtime)
+    )
     return {
-        "providers": prov.get("providers", []),
+        "providers": provider_entries,
         "active_provider": prov.get("active_provider", ""),
         "runtime": runtime,
         "blocked": blocked,
-        "llm_available": not is_demo and blocked is None,
+        "llm_available": llm_available,
         "demo_mode": is_demo,
     }
+
+
+def _has_usable_provider(
+    providers: list[dict[str, Any]], runtime: dict[str, Any]
+) -> bool:
+    """Only report LLM readiness when a provider has a usable model now.
+
+    A constructed client is not evidence of a working provider. Require a
+    healthy provider response with at least one model, and honor runtime
+    simulation, circuit-breaker, and free-only eligibility state.
+    """
+    local_providers = {"local", "lmstudio", "ollama"}
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = str(provider.get("id") or "").strip().lower()
+        health = provider.get("health")
+        if not provider_id or not isinstance(health, dict):
+            continue
+        if str(health.get("status") or "").strip().lower() != "healthy":
+            continue
+        try:
+            model_count = int(health.get("models_available") or 0)
+        except (TypeError, ValueError):
+            continue
+        if model_count < 1:
+            continue
+        if provider.get("requires_api_key") and not provider.get("api_key_set"):
+            continue
+
+        state = runtime.get(provider_id, {})
+        if not isinstance(state, dict) or state.get("simulation") is True:
+            continue
+        if state.get("healthy") is False:
+            continue
+        if state.get("healthy") is True or state.get("free_only") is not True:
+            return True
+        if provider_id in local_providers:
+            return True
+
+        validated_at = state.get("validated_at") or state.get("validation_timestamp")
+        if state.get("quota_available") is True and validated_at is not None:
+            return True
+    return False
 
 
 # ─────────────────── live model discovery ───────────────────
@@ -191,16 +337,27 @@ async def providers_catalog(_user: dict = Depends(require_auth)) -> dict[str, An
 
 @router.get("/providers/models")
 async def all_provider_models(
+    request: Request,
     refresh: bool = False,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """Union of every configured provider's catalog, plus per-provider status."""
-    return await aggregate_models(refresh=refresh)
+    result = await aggregate_models(refresh=refresh)
+    client = getattr(request.app.state, "llm_client", None)
+    if client is not None:
+        for entry in result.get("providers", []):
+            if isinstance(entry, dict) and not entry.get("error"):
+                provider = str(entry.get("provider") or "")
+                models = load_validated_models(provider)
+                if models:
+                    apply_catalog_to_llm_client(client, provider, models)
+    return result
 
 
 @router.get("/providers/{provider_id}/models")
 async def provider_models(
     provider_id: str,
+    request: Request,
     refresh: bool = False,
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
@@ -212,6 +369,11 @@ async def provider_models(
     """
     normalized = _require_known_provider(provider_id)
     result = await discover_models(normalized, refresh=refresh)
+    client = getattr(request.app.state, "llm_client", None)
+    # A successful discovery already validated these entries. Publish them to
+    # the live adapter; stale/error fallback entries must never authorise it.
+    if client is not None and result.models and not result.error:
+        apply_catalog_to_llm_client(client, normalized, result.models)
     return result.to_dict()
 
 

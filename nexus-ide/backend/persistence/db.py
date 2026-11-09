@@ -18,9 +18,13 @@ from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any
+from typing import Any, TypeVar, cast
 
 logger = logging.getLogger(__name__)
+
+#: Type variable for the lock-retry helpers (the retried call returns
+#: whatever the underlying statement returns).
+_T = TypeVar("_T")
 
 # Import cache for performance optimization
 from backend.redis_cache import (  # noqa: E402
@@ -329,6 +333,28 @@ def _ensure_current_schema() -> None:
     try:
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
         with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
+            whiteboard_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(whiteboard_entries)").fetchall()
+            }
+            if whiteboard_columns and "user_id" not in whiteboard_columns:
+                # The previous whiteboard schema was global. Keep old rows
+                # ownerless; authenticated reads will only return scoped rows.
+                conn.execute(
+                    "ALTER TABLE whiteboard_entries ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"
+                )
+            bot_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(bot_profiles)").fetchall()
+            }
+            if bot_columns and "capabilities" not in bot_columns:
+                # Historical bot profiles predate per-bot tool capabilities.
+                # Default grants read/research/tasks/memory and denies write;
+                # the backend re-applies the same policy on every execution
+                # (fail-closed) regardless of the stored JSON.
+                conn.execute(
+                    "ALTER TABLE bot_profiles ADD COLUMN capabilities TEXT NOT NULL DEFAULT "
+                    '\'{"read": true, "research": true, "tasks": true, "memory": true, "write": false}\''
+                )
             conn.executescript(schema)
             conn.commit()
     except Exception as exc:
@@ -414,8 +440,14 @@ def _ensure_execution_envelope_schema() -> None:
 
 def init_db(run_migrations: bool = True) -> None:
     """Initialize the database and make its schema ready before use."""
+    global _SESSION_GC_SCHEMA_MIGRATED
+
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     is_fresh_db = not DB_PATH.exists()
+    # The session-GC columns are checked against the database that is being
+    # initialized, so the "already migrated" shortcut must not survive a
+    # change of DB_PATH (tests point it at a fresh file every time).
+    _SESSION_GC_SCHEMA_MIGRATED = False
 
     if is_fresh_db:
         logger.info("Fresh database, applying initial schema")
@@ -424,6 +456,7 @@ def init_db(run_migrations: bool = True) -> None:
             conn.executescript(schema)
             conn.commit()
         _ensure_execution_envelope_schema()
+        _ensure_session_gc_schema()
         logger.info("DB initialized at %s", DB_PATH)
         _seed_default_user()
         _seed_default_rbac()
@@ -439,9 +472,11 @@ def init_db(run_migrations: bool = True) -> None:
         _ensure_current_schema()
         _ensure_execution_envelope_schema()
         _ensure_git_commits_table()
+        _ensure_session_gc_schema()
         if run_migrations:
             _run_alembic_migrations()
             _ensure_execution_envelope_schema()
+            _ensure_session_gc_schema()
         _seed_default_user()
         _seed_default_rbac()
 
@@ -644,8 +679,33 @@ def _alembic_available() -> bool:
     return True
 
 
-def _stamp_alembic() -> None:
-    """Stamp a fresh database with the current Alembic head."""
+def _alembic_config() -> Any:
+    """Build an Alembic ``Config`` that works from any working directory.
+
+    ``backend/alembic.ini`` carries a *relative* ``script_location =
+    backend/migrations``. Alembic resolves that against the current working
+    directory, so ``init_db()`` only worked when the process happened to run
+    from the repository root: from anywhere else it died with
+    ``CommandError: Path doesn't exist: backend\\migrations``.
+
+    The absolute migrations directory is therefore written back into the
+    config before the command runs. ``%`` is escaped because ConfigParser
+    would otherwise treat it as an interpolation marker.
+    """
+    from alembic.config import Config
+
+    alembic_dir = Path(__file__).resolve().parent.parent / "migrations"
+    alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
+    if not alembic_dir.exists() or not alembic_ini.exists():
+        raise RuntimeError("Alembic configuration is unavailable")
+    config = Config(str(alembic_ini))
+    config.set_main_option("script_location", str(alembic_dir).replace("%", "%%"))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
+    return config
+
+
+def _stamp_alembic(revision: str = "head") -> None:
+    """Stamp the database with ``revision`` (the Alembic head by default)."""
     try:
         # Inside the try on purpose: a present-but-unimportable Alembic must
         # surface as the same documented RuntimeError as a failed stamp, not as
@@ -654,34 +714,132 @@ def _stamp_alembic() -> None:
             logger.warning(ALEMBIC_UNAVAILABLE_MESSAGE)
             return
         from alembic import command
-        from alembic.config import Config
 
-        alembic_dir = Path(__file__).resolve().parent.parent / "migrations"
-        alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
-        if not alembic_dir.exists() or not alembic_ini.exists():
-            raise RuntimeError("Alembic configuration is unavailable")
-        logger.info("Stamping database with initial migration")
-        config = Config(str(alembic_ini))
-        config.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
-        command.stamp(config, "head")
+        logger.info("Stamping database with revision %s", revision)
+        config = _alembic_config()
+        command.stamp(config, revision)
         logger.info("Database stamped successfully")
     except Exception as exc:
         logger.exception("Failed to stamp database with Alembic")
         raise RuntimeError("Database migration stamp failed") from exc
 
 
+#: The objects every revision creates, in chain order (oldest first). A
+#: database that contains all of them is at (or past) that revision, which is
+#: what an untracked database has to be stamped with.
+_ALEMBIC_REVISION_MARKERS: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]], ...] = (
+    (
+        "001_initial",
+        (
+            "projects",
+            "sessions",
+            "messages",
+            "tool_executions",
+            "routing_decisions",
+            "proposed_changes",
+        ),
+        (),
+    ),
+    (
+        "002_add_rbac",
+        ("users", "roles", "permissions", "user_roles", "role_permissions"),
+        (),
+    ),
+    ("003_user_profile", ("user_profiles", "user_routines", "user_memories"), ()),
+    ("004_email_config", ("email_accounts",), ()),
+    ("005_add_token_tracking", (), (("messages", "cost_usd"),)),
+    ("006_execution_envelope", ("session_runs",), ()),
+    (
+        "007_schemas_sql_parity",
+        (
+            "agent_states",
+            "git_commits",
+            "peer_review_requests",
+            "peer_review_results",
+            "persistent_memories",
+            "whiteboard_entries",
+            "whiteboard_entry_links",
+        ),
+        (),
+    ),
+    ("008_message_run_link", (), (("messages", "run_id"),)),
+    (
+        "008_run_state",
+        ("run_state", "run_checkpoints", "run_side_effects", "run_dead_letters"),
+        (),
+    ),
+    (
+        "009_todos_scheduled_tasks",
+        ("todos", "scheduled_tasks"),
+        (("sessions", "user_id"),),
+    ),
+    (
+        "010_session_gc_and_observability",
+        ("structured_logs", "usage_ledger"),
+        (("sessions", "status"), ("sessions", "expired_at")),
+    ),
+)
+
+
+def _detect_alembic_revision(conn: sqlite3.Connection) -> str | None:
+    """Return the revision whose schema the database already has.
+
+    Used to adopt an untracked database: it was built from ``schemas.sql``
+    (or by an older release) and therefore matches one of the revisions, but
+    nothing ever wrote ``alembic_version`` for it. Without this, the next
+    ``alembic upgrade head`` replayed the whole chain and died at revision
+    005 with "duplicate column name: cost_usd".
+
+    The chain is walked in order and stops at the first revision whose
+    objects are missing: that revision is the one the database still has to
+    be migrated, so the database is stamped at its predecessor.
+    """
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    matched: str | None = None
+    for revision, required_tables, required_columns in _ALEMBIC_REVISION_MARKERS:
+        if not all(table in tables for table in required_tables):
+            break
+        satisfied = True
+        for table, column in required_columns:
+            if table not in tables:
+                satisfied = False
+                break
+            columns = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if column not in columns:
+                satisfied = False
+                break
+        if not satisfied:
+            break
+        matched = revision
+    return matched
+
+
 def _run_alembic_migrations() -> None:
-    """Run pending Alembic migrations on an existing tracked database."""
+    """Run pending Alembic migrations on an existing database."""
     with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
         tracked = conn.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type='table' AND name='alembic_version'"
         ).fetchone()
-    if tracked is None:
-        # Pre-Alembic databases are repaired by the compatibility schema
-        # path; replaying the initial migration would be unsafe.
-        logger.info("Untracked database repaired without Alembic replay")
-        return
+        if tracked is None:
+            # An untracked database is not "pre-Alembic", it is a database
+            # whose schema was never recorded. Adopt it: stamp the revision
+            # its schema already matches so the *remaining* migrations apply
+            # instead of the whole chain being replayed.
+            revision = _detect_alembic_revision(conn)
+            if revision is None:
+                # Nothing recognisable: repairing it is the compatibility
+                # schema path's job, and replaying the chain would be unsafe.
+                logger.info("Untracked database repaired without Alembic replay")
+                return
+            logger.info("Adopting untracked database at revision %s", revision)
+            _stamp_alembic(revision)
 
     try:
         # Same contract as _stamp_alembic: absence warns, breakage raises the
@@ -691,15 +849,9 @@ def _run_alembic_migrations() -> None:
             return
 
         from alembic import command
-        from alembic.config import Config
 
-        alembic_dir = Path(__file__).resolve().parent.parent / "migrations"
-        alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
-        if not alembic_dir.exists() or not alembic_ini.exists():
-            raise RuntimeError("Alembic configuration is unavailable")
         logger.info("Running database migrations")
-        config = Config(str(alembic_ini))
-        config.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
+        config = _alembic_config()
         command.upgrade(config, "head")
         logger.info("Migrations completed successfully")
     except Exception as exc:
@@ -721,44 +873,251 @@ def close_pool() -> None:
         logger.info("Connection pool closed")
 
 
+# ───── SQLITE LOCK HANDLING ──────────────────────────────────────────────
+
+#: How many times a statement is attempted when SQLite reports a transient
+#: lock ("database is locked" / "database is busy"). The statement never ran,
+#: so running it again is safe.
+DB_LOCK_ATTEMPTS = 3
+
+#: Seconds to wait before the first lock retry. The wait grows linearly with
+#: the attempt number, so a lock that clears quickly costs almost nothing.
+DB_LOCK_RETRY_DELAY = 0.05
+
+
+def _is_transient_lock_error(exc: BaseException) -> bool:
+    """Return whether ``exc`` is a transient SQLite lock/busy failure.
+
+    ``sqlite3.OperationalError`` covers a lot of unrelated problems ("no such
+    table", "attempt to write a readonly database", ...). Only the lock/busy
+    family is worth retrying: the statement did not run, so running it again
+    is safe. Everything else is a real error and must reach the caller.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
+def _safe_rollback(connection: sqlite3.Connection) -> None:
+    """Roll back ``connection`` without ever raising."""
+    try:
+        connection.rollback()
+    except sqlite3.Error:
+        logger.debug("Rollback failed while releasing a connection", exc_info=True)
+
+
+class _LockRetryingConnection:
+    """A ``sqlite3.Connection`` stand-in that retries transient lock errors.
+
+    Why this exists
+    ---------------
+    ``get_db`` used to catch ``sqlite3.OperationalError`` inside a generator
+    based context manager and tried to "retry" by yielding a second time.
+    ``contextlib`` refuses that: it raises
+    ``RuntimeError("generator didn't stop after throw()")``, so the caller
+    never saw the real ``sqlite3.OperationalError("database is locked")`` and
+    every ``except sqlite3.OperationalError`` handler in the codebase was
+    dead code. The connection was also closed and never returned to the pool,
+    which leaked the pool until it died with
+    ``TimeoutError("Connection pool exhausted after 30s")``.
+
+    A context manager cannot re-run the caller's block, so the retry has to
+    live one level down, on the statement that actually failed. This wrapper
+    re-runs *that statement* while SQLite reports a lock and lets every other
+    error through untouched.
+
+    Every attribute that is not overridden here is delegated to the wrapped
+    connection, so the object behaves like the connection it wraps.
+    """
+
+    __slots__ = ("_connection", "_attempts", "_delay")
+
+    #: The wrapped connection. Declared for the type checker; the value is
+    #: installed in ``__init__``.
+    _connection: sqlite3.Connection
+    _attempts: int
+    _delay: float
+
+    #: Attribute names owned by the wrapper itself (everything else is
+    #: forwarded to the wrapped connection).
+    _OWN_ATTRIBUTES = frozenset({"_connection", "_attempts", "_delay"})
+
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        attempts: int = DB_LOCK_ATTEMPTS,
+        delay: float = DB_LOCK_RETRY_DELAY,
+    ) -> None:
+        object.__setattr__(self, "_connection", connection)
+        object.__setattr__(self, "_attempts", max(1, int(attempts)))
+        object.__setattr__(self, "_delay", max(0.0, float(delay)))
+
+    # ── delegation ─────────────────────────────────────────────────────
+
+    def __getattr__(self, name: str) -> Any:
+        # ``__getattr__`` only runs for attributes the wrapper does not have.
+        # Guard the slot lookup so a half-initialised wrapper cannot recurse.
+        if name == "_connection":
+            raise AttributeError(name)
+        return getattr(self._connection, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in self._OWN_ATTRIBUTES:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._connection, name, value)
+
+    # ── retried statements ─────────────────────────────────────────────
+
+    def execute(self, sql: str, parameters: Any = ()) -> sqlite3.Cursor:
+        """Run one statement, retrying it while SQLite reports a lock."""
+        return self._run_with_lock_retry(lambda: self._connection.execute(sql, parameters))
+
+    def executemany(self, sql: str, parameters: Any) -> sqlite3.Cursor:
+        """Run one statement for every parameter set, retrying on a lock."""
+        return self._run_with_lock_retry(lambda: self._connection.executemany(sql, parameters))
+
+    def _run_with_lock_retry(self, operation: Callable[[], _T]) -> _T:
+        """Run ``operation``, re-running it while SQLite reports a lock.
+
+        The original :class:`sqlite3.OperationalError` is re-raised once the
+        attempts are exhausted, so the caller sees the real failure.
+        """
+        attempt = 0
+        while True:
+            try:
+                return operation()
+            except sqlite3.OperationalError as exc:
+                attempt += 1
+                if attempt >= self._attempts or not _is_transient_lock_error(exc):
+                    raise
+                logger.debug("Retrying statement after a SQLite lock error: %s", exc)
+                time.sleep(self._delay * attempt)
+
+
+def _commit_with_lock_retry(
+    connection: sqlite3.Connection,
+    *,
+    attempts: int = DB_LOCK_ATTEMPTS,
+    delay: float = DB_LOCK_RETRY_DELAY,
+) -> None:
+    """Commit ``connection``, retrying while SQLite reports a lock."""
+    attempt = 0
+    while True:
+        try:
+            connection.commit()
+            return
+        except sqlite3.OperationalError as exc:
+            attempt += 1
+            if attempt >= attempts or not _is_transient_lock_error(exc):
+                raise
+            logger.debug("Retrying commit after a SQLite lock error: %s", exc)
+            time.sleep(delay * attempt)
+
+
 @contextmanager
 def get_db() -> Iterator[sqlite3.Connection]:
     """Context manager yielding a sqlite connection from the pool.
 
     Uses the connection pool for better performance instead of creating
-    a new connection every time. Retries on Windows SQLite locking
-    errors since WAL/shm file handles may be held briefly by the OS
-    after a previous connection closes.
+    a new connection every time.
+
+    Lock handling
+    -------------
+    SQLite can still fail a statement with ``database is locked`` when the
+    busy timeout expires (Windows holds WAL locks briefly after a previous
+    connection closes). The yielded connection re-runs a statement that hit
+    such a lock (:class:`_LockRetryingConnection`); when the retries are
+    exhausted the original :class:`sqlite3.OperationalError` propagates to
+    the caller unchanged.
+
+    The connection is returned to the pool on *every* path — success, error
+    and cancellation — so a failing statement can never leak pool capacity.
     """
     pool = get_connection_pool()
-    last_exc: Exception | None = None
-    for attempt in range(3):
-        conn = pool.get_connection()
-        try:
-            yield conn
-            conn.commit()
-            pool.return_connection(conn)
-            return
-        except sqlite3.OperationalError as exc:
-            last_exc = exc
-            conn.rollback()
-            # Retry on locked/busy errors — Windows holds WAL locks briefly
-            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
-                try:
-                    conn.close()
-                except sqlite3.Error:
-                    pass
-                continue
-            pool.return_connection(conn)
-            raise
-        except Exception:
-            conn.rollback()
-            pool.return_connection(conn)
-            raise
-    raise last_exc if last_exc else RuntimeError("get_db exhausted retries")
+    connection = pool.get_connection()
+    try:
+        yield cast(
+            "sqlite3.Connection",
+            _LockRetryingConnection(
+                connection,
+                attempts=DB_LOCK_ATTEMPTS,
+                delay=DB_LOCK_RETRY_DELAY,
+            ),
+        )
+        _commit_with_lock_retry(connection, attempts=DB_LOCK_ATTEMPTS, delay=DB_LOCK_RETRY_DELAY)
+    except Exception:
+        _safe_rollback(connection)
+        raise
+    finally:
+        pool.return_connection(connection)
 
 
 # ───── PROJECTS ─────────────────────────────────────────────────────────
+
+
+def get_auth_refresh_exchange(refresh_jti: str) -> dict[str, Any] | None:
+    """Return a persisted idempotent refresh exchange, if one exists."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT refresh_jti, idempotency_key_hash, response_ciphertext, expires_at "
+            "FROM auth_refresh_exchanges WHERE refresh_jti = ?",
+            (refresh_jti,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_auth_refresh_exchange(
+    refresh_jti: str,
+    idempotency_key_hash: str,
+    response_ciphertext: str,
+    expires_at: float,
+) -> None:
+    """Persist one encrypted refresh result, atomically claiming its old JTI."""
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM auth_refresh_exchanges WHERE expires_at <= ?",
+            (time.time(),),
+        )
+        conn.execute(
+            "INSERT INTO auth_refresh_exchanges "
+            "(refresh_jti, idempotency_key_hash, response_ciphertext, expires_at) "
+            "VALUES (?, ?, ?, ?)",
+            (refresh_jti, idempotency_key_hash, response_ciphertext, expires_at),
+        )
+
+
+def save_auth_revocation(revocation_type: str, credential_hash: str, expires_at: float) -> None:
+    """Persist a hashed token or session revocation until its credential expires."""
+    if revocation_type not in {"token", "session"}:
+        raise ValueError("Unsupported auth revocation type")
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM auth_revocations WHERE expires_at <= ?",
+            (time.time(),),
+        )
+        conn.execute(
+            "INSERT INTO auth_revocations (revocation_type, credential_hash, expires_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(revocation_type, credential_hash) DO UPDATE SET "
+            "expires_at = MAX(auth_revocations.expires_at, excluded.expires_at)",
+            (revocation_type, credential_hash, expires_at),
+        )
+
+
+def is_auth_revoked(revocation_type: str, credential_hash: str) -> bool:
+    """Check a hashed token or session revocation in persistent storage."""
+    if revocation_type not in {"token", "session"}:
+        raise ValueError("Unsupported auth revocation type")
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM auth_revocations "
+            "WHERE revocation_type = ? AND credential_hash = ? AND expires_at > ?",
+            (revocation_type, credential_hash, time.time()),
+        ).fetchone()
+    return row is not None
 
 
 @sync_cache_invalidate_pattern("project:*")
@@ -813,8 +1172,13 @@ def list_projects() -> list[dict]:
 
 
 def count_active_sessions() -> int:
+    """Count the sessions that are still live (soft-deleted ones excluded)."""
+    _ensure_session_gc_schema()
     with get_db() as conn:
-        row = conn.execute("SELECT COUNT(*) AS count FROM sessions").fetchone()
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM sessions "
+            "WHERE status IS NULL OR status != 'expired'"
+        ).fetchone()
         return int(row["count"] if row else 0)
 
 
@@ -870,6 +1234,97 @@ def create_session(
     return dict(row) if row else None
 
 
+def create_subagent_execution(
+    *, parent_session_id: str, parent_run_id: str, task_id: str, user_id: str,
+    agent: str, objective: str, model: str = "",
+) -> dict[str, Any]:
+    """Create a child session/run and its parent link in one transaction."""
+    if not all((parent_session_id, parent_run_id, task_id, user_id)):
+        raise ValueError("A subagent requires a parent run, task and authenticated owner")
+    with get_db() as conn:
+        parent = conn.execute(
+            """SELECT s.project_id FROM sessions s JOIN session_runs r ON r.session_id = s.id
+               WHERE s.id = ? AND s.user_id = ? AND r.id = ?""",
+            (parent_session_id, user_id, parent_run_id),
+        ).fetchone()
+        if parent is None:
+            raise ValueError("Parent session or run is not owned by this user")
+        existing = conn.execute(
+            "SELECT * FROM subagent_executions WHERE parent_run_id = ? AND task_id = ?",
+            (parent_run_id, task_id),
+        ).fetchone()
+        if existing is not None:
+            return dict(existing)
+        child_session_id = f"child-{uuid.uuid4().hex}"
+        child_run_id = f"childrun-{uuid.uuid4().hex}"
+        conn.execute(
+            "INSERT INTO sessions (id, user_id, project_id, title, mode) VALUES (?, ?, ?, ?, ?)",
+            (child_session_id, user_id, parent["project_id"], agent[:200], "__subagent__"),
+        )
+        conn.execute(
+            """INSERT INTO session_runs (id, session_id, status, agent, phase, prompt, model)
+               VALUES (?, ?, 'running', ?, 'delegated', ?, ?)""",
+            (child_run_id, child_session_id, agent, objective, model),
+        )
+        conn.execute(
+            """INSERT INTO subagent_executions
+               (parent_session_id, parent_run_id, task_id, child_session_id, child_run_id)
+               VALUES (?, ?, ?, ?, ?)""",
+            (parent_session_id, parent_run_id, task_id, child_session_id, child_run_id),
+        )
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, run_id) VALUES (?, ?, 'user', ?, ?)",
+            (_new_id(), child_session_id, objective, child_run_id),
+        )
+        row = conn.execute(
+            "SELECT * FROM subagent_executions WHERE parent_run_id = ? AND task_id = ?",
+            (parent_run_id, task_id),
+        ).fetchone()
+        return dict(row)
+
+
+def finish_subagent_execution(
+    *, child_session_id: str, child_run_id: str, status: str, output: str = "", error: str = "",
+) -> None:
+    """Persist a child's observed result or failure without changing its parent."""
+    if status not in {"completed", "failed", "cancelled", "interrupted"}:
+        raise ValueError("Invalid child run status")
+    now = _now_iso()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """UPDATE session_runs SET status = ?, phase = ?, error = ?,
+               updated_at = ?, finished_at = ? WHERE id = ? AND session_id = ?""",
+            (status, status, error or None, now, now, child_run_id, child_session_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("Child run no longer exists")
+        if output and not conn.execute(
+            "SELECT 1 FROM messages WHERE session_id = ? AND run_id = ? AND role = 'assistant'",
+            (child_session_id, child_run_id),
+        ).fetchone():
+            conn.execute(
+                """INSERT INTO messages (id, session_id, role, content, run_id)
+                   VALUES (?, ?, 'assistant', ?, ?)""",
+                (_new_id(), child_session_id, output, child_run_id),
+            )
+        conn.execute("UPDATE sessions SET last_active_at = ? WHERE id = ?", (now, child_session_id))
+
+
+def get_subagent_execution(child_session_id: str, user_id: str) -> dict[str, Any] | None:
+    """Return the child link only when both conversations belong to the caller."""
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT e.*, r.status, r.error, r.agent, r.model
+               FROM subagent_executions e
+               JOIN sessions p ON p.id = e.parent_session_id
+               JOIN sessions c ON c.id = e.child_session_id
+               JOIN session_runs r ON r.id = e.child_run_id
+               WHERE e.child_session_id = ? AND p.user_id = ? AND c.user_id = ?""",
+            (child_session_id, user_id, user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 @sync_cache_result("session:", ttl=SHORT_TTL)
 def get_session(session_id: str) -> dict | None:
     with get_db() as conn:
@@ -896,8 +1351,18 @@ def list_sessions(
     offset: int = 0,
     user_id: str | None = None,
 ) -> list[dict]:
+    """List the live sessions, newest activity first.
+
+    Soft-deleted sessions (``status = 'expired'``) are excluded: the garbage
+    collector expired them on purpose and the listing must not show them as
+    ordinary conversations.
+    """
+    _ensure_session_gc_schema()
     with get_db() as conn:
-        clauses: list[str] = []
+        clauses: list[str] = [
+            "(status IS NULL OR status != 'expired')",
+            "(mode IS NULL OR mode != '__subagent__')",
+        ]
         params: list[Any] = []
         if project_id:
             clauses.append("project_id = ?")
@@ -905,7 +1370,7 @@ def list_sessions(
         if user_id is not None:
             clauses.append("user_id = ?")
             params.append(user_id)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        where = f" WHERE {' AND '.join(clauses)}"
         params.extend((limit, offset))
         rows = conn.execute(
             "SELECT * FROM sessions" + where
@@ -1015,9 +1480,17 @@ def get_session_message_count(session_id: str) -> int:
 
 
 def count_sessions(project_id: str | None = None, *, user_id: str | None = None) -> int:
-    """Count sessions without loading the complete history into the API."""
+    """Count the live sessions without loading the complete history into the API.
+
+    Uses the same filter as :func:`list_sessions`, so the count always agrees
+    with the listing.
+    """
+    _ensure_session_gc_schema()
     with get_db() as conn:
-        clauses: list[str] = []
+        clauses: list[str] = [
+            "(status IS NULL OR status != 'expired')",
+            "(mode IS NULL OR mode != '__subagent__')",
+        ]
         params: list[Any] = []
         if project_id:
             clauses.append("project_id = ?")
@@ -1025,7 +1498,7 @@ def count_sessions(project_id: str | None = None, *, user_id: str | None = None)
         if user_id is not None:
             clauses.append("user_id = ?")
             params.append(user_id)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        where = f" WHERE {' AND '.join(clauses)}"
         row = conn.execute(
             "SELECT COUNT(*) AS cnt FROM sessions" + where,
             params,
@@ -1033,28 +1506,46 @@ def count_sessions(project_id: str | None = None, *, user_id: str | None = None)
     return int(row["cnt"]) if row else 0
 
 
-def _decorate_session_rows(sessions: list[dict]) -> list[dict]:
+def _session_display_status(session: Mapping[str, Any]) -> str:
+    """Return the status shown for one session row.
+
+    A soft-deleted session keeps the status the garbage collector wrote:
+    ``expired``. Reporting it as ``idle``/``closed`` would make a deleted
+    conversation look like a live one. Every other session reports its live
+    liveness, derived from ``last_active_at``:
+
+    * ``active`` — last activity within the last 5 minutes
+    * ``idle``   — last activity 5 min to 24 h ago
+    * ``closed`` — last activity more than 24 h ago
+    """
+    persisted = session.get("status")
+    if persisted == "expired":
+        return "expired"
     now = datetime.now(UTC)
+    last = session.get("last_active_at")
+    if not last:
+        return "closed"
+    try:
+        last_dt = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=UTC)
+        age = now - last_dt
+    except (TypeError, ValueError):
+        return "closed"
+    if age < timedelta(minutes=5):
+        return "active"
+    if age < timedelta(hours=24):
+        return "idle"
+    return "closed"
+
+
+def _decorate_session_rows(sessions: list[dict]) -> list[dict]:
     for session in sessions:
         try:
             session["message_count"] = get_session_message_count(session["id"])
         except Exception:
             session["message_count"] = 0
-        try:
-            last = session.get("last_active_at")
-            if last:
-                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
-                age = now - last_dt
-                if age < timedelta(minutes=5):
-                    session["status"] = "active"
-                elif age < timedelta(hours=24):
-                    session["status"] = "idle"
-                else:
-                    session["status"] = "closed"
-            else:
-                session["status"] = "closed"
-        except Exception:
-            session["status"] = "closed"
+        session["status"] = _session_display_status(session)
     return sessions
 
 
@@ -1066,7 +1557,8 @@ def list_sessions_with_counts(
 ) -> list[dict]:
     """Same as ``list_sessions`` but with a ``message_count`` and ``status`` column attached.
 
-    ``status`` is derived from ``last_active_at``:
+    ``status`` is the persisted soft-delete marker when the session was
+    expired, and otherwise derived from ``last_active_at``:
       * ``active``  — last activity within the last 5 minutes
       * ``idle``    — last activity 5 min to 24 h ago
       * ``closed``  — last activity more than 24 h ago
@@ -1091,7 +1583,10 @@ def search_sessions(
     Message text currently uses SQLite's built-in LIKE so this remains
     compatible with existing databases and needs no schema migration. The
     result includes a short snippet and the kind of match for the UI.
+
+    Soft-deleted sessions are excluded, exactly like in :func:`list_sessions`.
     """
+    _ensure_session_gc_schema()
     needle = query.strip()[:200]
     if not needle:
         return [], 0
@@ -1110,6 +1605,8 @@ def search_sessions(
                   AND lower(mm.content) LIKE ? ESCAPE '\\'
             )
         ){project_filter}{user_filter}
+        AND (s.status IS NULL OR s.status != 'expired')
+        AND (s.mode IS NULL OR s.mode != '__subagent__')
     """
     with get_db() as conn:
         count_params: tuple[Any, ...] = (pattern, pattern, pattern)
@@ -1247,21 +1744,35 @@ def get_messages(session_id: str, limit: int = 200) -> list[dict]:
 
 
 def _collapse_legacy_duplicate_messages(rows: list[dict]) -> list[dict]:
-    """Collapse legacy duplicate user writes without changing stored data."""
+    """Collapse exact duplicate turns in returned history without changing SQLite.
+
+    Old retries could write a user turn twice; a few also wrote the assistant
+    answer twice under the same durable run id. Keep the first row's identity
+    and timestamp so pagination and timeline links remain stable.
+    """
     messages: list[dict] = []
     for row in rows:
         row.pop("_rowid", None)
+        previous = messages[-1] if messages else None
+        same_run_and_content = bool(
+            previous
+            and row.get("role") == previous.get("role")
+            and row.get("content") == previous.get("content")
+            and row.get("run_id") == previous.get("run_id")
+        )
+        duplicate_user = same_run_and_content and row.get("role") == "user"
+        duplicate_assistant = (
+            same_run_and_content
+            and row.get("role") == "assistant"
+            and bool(row.get("run_id"))
+        )
         if (
-            messages
-            and row.get("role") == "user"
-            and row.get("role") == messages[-1].get("role")
-            and row.get("content") == messages[-1].get("content")
-            and row.get("run_id") == messages[-1].get("run_id")
+            previous is not None
+            and (duplicate_user or duplicate_assistant)
         ):
-            # Older chat runs persisted the user turn once when execution
-            # started and again when it completed. Keep one logical turn
-            # without destructively rewriting the user's SQLite history.
-            first = messages[-1]
+            # A history read reports one logical message without destructively
+            # rewriting the user's stored transcript.
+            first = previous
             merged = {**first, **row}
             merged["id"] = first.get("id")
             merged["created_at"] = first.get("created_at")
@@ -1676,6 +2187,46 @@ def get_token_usage_overview() -> dict[str, Any]:
             )
         return total
 
+    #: The grouping key used by ``model_stats``. Kept as a single literal so
+    #: the GROUP BY expression and the per-group cost lookup can never drift
+    #: apart. They did once: the query aliased the key to ``name`` while the
+    #: Python side still read a non-existent ``model_used`` column, which
+    #: raised IndexError and 500'd the whole usage-overview endpoint.
+    model_group_key = (
+        "COALESCE(NULLIF(model_used, ''), NULLIF(tier_used, ''), 'Não identificado')"
+    )
+
+    def _compute_missing_costs_for_group(conn: sqlite3.Connection, group: str) -> float:
+        """Compute the not-yet-priced cost of one model group.
+
+        The group key is the same COALESCE expression the GROUP BY uses, so a
+        row is counted against exactly the group it appears in. Rows whose
+        ``cost_usd`` was never written are priced from their token counts.
+        """
+        try:
+            from backend.llm.multi_llm_manager import _compute_cost
+        except ImportError:
+            return 0.0
+        rows = conn.execute(
+            f"""
+            SELECT model_used, tokens_in, tokens_out
+            FROM messages
+            WHERE cost_usd = 0
+              AND (tokens_in > 0 OR tokens_out > 0)
+              AND {model_group_key} = ?
+            """,
+            (group,),
+        ).fetchall()
+        total = 0.0
+        for row in rows:
+            total += _compute_cost(
+                model=row["model_used"] or "",
+                input_tokens=int(row["tokens_in"] or 0),
+                output_tokens=int(row["tokens_out"] or 0),
+                conservative_unknown=True,
+            )
+        return total
+
     def period_stats(conn: sqlite3.Connection, start: str | None) -> dict[str, Any]:
         where = "WHERE created_at >= ?" if start else ""
         params: tuple[Any, ...] = (start,) if start else ()
@@ -1710,9 +2261,9 @@ def get_token_usage_overview() -> dict[str, Any]:
 
     def model_stats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         rows = conn.execute(
-            """
+            f"""
             SELECT
-                COALESCE(NULLIF(model_used, ''), NULLIF(tier_used, ''), 'Não identificado') AS name,
+                {model_group_key} AS name,
                 COALESCE(SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)), 0) AS total_tokens,
                 COALESCE(SUM(COALESCE(tokens_in, 0)), 0) AS tokens_in,
                 COALESCE(SUM(COALESCE(tokens_out, 0)), 0) AS tokens_out,
@@ -1740,7 +2291,7 @@ def get_token_usage_overview() -> dict[str, Any]:
                     "requests": int(row["requests"] or 0),
                     "cost": round(
                         float(row["cost"] or 0.0)
-                        + _compute_missing_costs(conn, None, str(row["model_used"]) if row["model_used"] else ""),
+                        + _compute_missing_costs_for_group(conn, model_name),
                         6,
                     ),
                     "avg_tokens_per_second": round(generated / (latency_ms / 1000), 2) if latency_ms > 0 else 0.0,
@@ -1822,24 +2373,32 @@ def log_tool_execution(
     error: str | None = None,
     duration_ms: int = 0,
 ) -> str:
+    """Record one tool execution.
+
+    ``tool_executions.session_id`` is a *nullable* foreign key: an execution
+    that belongs to no known session is stored with a NULL session id.
+
+    It used to be "fixed" by inserting a placeholder ``sessions`` row for an
+    unknown session id, which fabricated user-visible sessions (the live
+    database had 26 of them) and made them show up in the session list and in
+    ``count_active_sessions()``.
+    """
     eid = _new_id()
     with get_db() as conn:
-        # Ensure session exists to satisfy FK constraint
+        resolved_session_id = session_id
         if session_id:
-            try:
-                conn.execute(
-                    "INSERT OR IGNORE INTO sessions (id, title, mode) VALUES (?, ?, ?)",
-                    (session_id, session_id, "auto"),
-                )
-            except Exception:
-                logger.debug("Failed to ensure session for tool execution", exc_info=True)
+            known = conn.execute(
+                "SELECT 1 FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if known is None:
+                resolved_session_id = None
         conn.execute(
             """INSERT INTO tool_executions
                (id, session_id, tool_name, args_json, result_json, success, error, duration_ms)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 eid,
-                session_id,
+                resolved_session_id,
                 tool_name,
                 json.dumps(args, default=str),
                 json.dumps(result, default=str) if result is not None else None,
@@ -1915,6 +2474,47 @@ def get_agent_activity(minutes: int = 30) -> list[dict[str, Any]]:
                 "last_activity": last or now.isoformat(),
             }
         )
+    # A live run has a session_runs row before it writes the assistant message.
+    # The query above only sees agents that already answered, so the panel
+    # showed "—" for the whole generation.
+    cutoff = now - timedelta(minutes=minutes)
+    with get_db() as conn:
+        running_rows = conn.execute(
+            """
+            SELECT agent, MAX(updated_at) AS last_activity
+            FROM session_runs
+            WHERE LOWER(status) = 'running'
+              AND agent IS NOT NULL
+              AND TRIM(agent) <> ''
+            GROUP BY agent
+            """
+        ).fetchall()
+    by_name = {str(item["agent"]).upper(): item for item in activity}
+    for row in running_rows:
+        last = str(row["last_activity"] or "")
+        try:
+            last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=UTC)
+        except (TypeError, ValueError):
+            continue
+        if last_dt < cutoff:
+            continue
+        name = str(row["agent"])
+        current = by_name.get(name.upper())
+        if current is not None:
+            current["status"] = "active"
+            continue
+        entry = {
+            "agent": name,
+            "status": "active",
+            "tasks_completed": 0,
+            "tasks_failed": 0,
+            "avg_latency_ms": 0.0,
+            "last_activity": last or now.isoformat(),
+        }
+        activity.append(entry)
+        by_name[name.upper()] = entry
     return activity
 
 
@@ -1996,10 +2596,10 @@ def get_change_statistics() -> dict[str, Any]:
             SELECT
                 COUNT(*) AS total_changes,
                 COUNT(DISTINCT file_path) AS files_modified,
-                SUM(CASE
+                COALESCE(SUM(CASE
                         WHEN new_content IS NULL OR new_content = '' THEN 0
                         ELSE 1 + LENGTH(new_content) - LENGTH(REPLACE(new_content, char(10), ''))
-                    END) AS lines_written
+                    END), 0) AS lines_written
             FROM proposed_changes
             """
         ).fetchone()
@@ -2091,6 +2691,17 @@ def verify_user_password(email: str, password_hash: str) -> dict | None:
     return None
 
 
+#: Columns ``update_user`` is allowed to write. It matches the real
+#: ``users`` table: ``id``, ``password_hash`` and ``created_at`` are not
+#: updatable. The previous whitelist also named ``role`` and
+#: ``preferences``, which do not exist in the table, so those writes were
+#: silently dropped (and would have raised "no such column" if they had not
+#: been filtered out first).
+USER_UPDATE_ALLOWED_COLS: frozenset[str] = frozenset(
+    {"username", "email", "full_name", "is_active", "updated_at"}
+)
+
+
 def update_user(user_id: str, **fields: Any) -> dict | None:
     """Update user fields."""
     if not fields:
@@ -2099,8 +2710,7 @@ def update_user(user_id: str, **fields: Any) -> dict | None:
     # Don't allow updating password_hash through this method
     fields.pop("password_hash", None)
     # Whitelist allowed columns
-    ALLOWED_COLS = {"email", "full_name", "is_active", "role", "preferences", "updated_at"}
-    safe_fields = {k: v for k, v in fields.items() if k in ALLOWED_COLS}
+    safe_fields = {k: v for k, v in fields.items() if k in USER_UPDATE_ALLOWED_COLS}
     if not safe_fields:
         return get_user(user_id)
     cols = ", ".join(f"{k} = ?" for k in safe_fields)
@@ -2442,6 +3052,25 @@ def list_email_accounts(user_id: str | None = None, active_only: bool = True) ->
         return result
 
 
+#: Columns ``update_email_account`` is allowed to write. It matches the real
+#: ``email_accounts`` table (``label, host, port, username,
+#: password_encrypted, use_ssl, active`` plus ``updated_at``). The previous
+#: whitelist named seven columns that do not exist (``email``,
+#: ``display_name``, ``imap_server``, ...) so every update was a no-op.
+EMAIL_ACCOUNT_UPDATE_ALLOWED_COLS: frozenset[str] = frozenset(
+    {
+        "label",
+        "host",
+        "port",
+        "username",
+        "password_encrypted",
+        "use_ssl",
+        "active",
+        "updated_at",
+    }
+)
+
+
 def update_email_account(account_id: str, **fields: Any) -> dict | None:
     """Update email account fields."""
     if not fields:
@@ -2449,8 +3078,9 @@ def update_email_account(account_id: str, **fields: Any) -> dict | None:
     fields["updated_at"] = _now_iso()
     fields.pop("id", None)
     # Whitelist allowed columns
-    ALLOWED_COLS = {"email", "display_name", "imap_server", "imap_port", "smtp_server", "smtp_port", "use_ssl", "is_active", "updated_at"}
-    safe_fields = {k: v for k, v in fields.items() if k in ALLOWED_COLS}
+    safe_fields = {
+        k: v for k, v in fields.items() if k in EMAIL_ACCOUNT_UPDATE_ALLOWED_COLS
+    }
     if not safe_fields:
         return get_email_account(account_id)
     cols = ", ".join(f"{k} = ?" for k in safe_fields)
@@ -2588,16 +3218,25 @@ def _ensure_session_gc_schema() -> None:
 
     Idempotent — safe to call multiple times.  Uses PRAGMA table_info to
     check column existence before ALTER TABLE so it works on SQLite.
+
+    A short-lived raw connection is used on purpose: ``init_db`` calls this
+    before the pool exists, and a pooled connection would pin the pool to
+    whichever database was configured at that moment.
     """
     global _SESSION_GC_SCHEMA_MIGRATED
     if _SESSION_GC_SCHEMA_MIGRATED:
         return
     try:
-        with get_db() as conn:
+        with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             existing = {
-                row["name"]
+                str(row[1])
                 for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
             }
+            if not existing:
+                # No sessions table yet: nothing to repair. The next
+                # init_db() creates it with the columns already declared.
+                _SESSION_GC_SCHEMA_MIGRATED = True
+                return
             if "status" not in existing:
                 conn.execute(
                     "ALTER TABLE sessions ADD COLUMN status TEXT "
@@ -2610,6 +3249,7 @@ def _ensure_session_gc_schema() -> None:
                     "ALTER TABLE sessions ADD COLUMN expired_at TEXT"
                 )
                 logger.info("Added 'expired_at' column to sessions table")
+            conn.commit()
             _SESSION_GC_SCHEMA_MIGRATED = True
     except Exception as exc:
         logger.warning("Session GC schema migration failed: %s", exc)
@@ -2656,8 +3296,12 @@ def mark_session_expired(session_id: str) -> bool:
 
 
 def delete_session_related_data(session_id: str) -> dict[str, int]:
-    """Delete all FK-referenced data for a session (messages, tool executions,
-    routing decisions, proposed changes).
+    """Delete all data that belongs to a session.
+
+    Covers the FK-referenced tables (messages, tool executions, routing
+    decisions, proposed changes, git commits, agent states) and the todos:
+    ``todos.session_id`` carries no foreign key, so the todo rows would
+    otherwise be orphaned by the deletion.
 
     Returns a dict with counts of deleted rows per table.
     """
@@ -2687,6 +3331,10 @@ def delete_session_related_data(session_id: str) -> dict[str, int]:
             "DELETE FROM agent_states WHERE session_id = ?", (session_id,)
         )
         counts["agent_states"] = cursor.rowcount
+        cursor = conn.execute(
+            "DELETE FROM todos WHERE session_id = ?", (session_id,)
+        )
+        counts["todos"] = cursor.rowcount
     _invalidate_session_cache(session_id)
     return counts
 
@@ -2716,13 +3364,19 @@ def get_session_stats() -> dict[str, int]:
 
     Returns:
         ``{"active": N, "expired": N, "total": N}``
+
+    ``active`` counts exactly the sessions the session list shows (the
+    soft-deleted ones are excluded), ``expired`` counts the soft-deleted
+    sessions, and ``total`` is every session row, so ``active + expired ==
+    total``. The list and the stats therefore always agree about the same
+    rows instead of contradicting each other.
     """
     _ensure_session_gc_schema()
     with get_db() as conn:
         total_row = conn.execute("SELECT COUNT(*) AS c FROM sessions").fetchone()
         total = int(total_row["c"]) if total_row else 0
         active_row = conn.execute(
-            "SELECT COUNT(*) AS c FROM sessions WHERE status IS NULL OR status = 'active' OR status = 'idle'"
+            "SELECT COUNT(*) AS c FROM sessions WHERE status IS NULL OR status != 'expired'"
         ).fetchone()
         active = int(active_row["c"]) if active_row else 0
         expired_row = conn.execute(
@@ -2836,23 +3490,71 @@ def load_scheduled_tasks(source: str = "custom") -> list[dict]:
         return []
 
 
+#: Columns ``update_scheduled_task_status`` may write besides ``status`` and
+#: ``updated_at``. They match the real ``scheduled_tasks`` table; the column
+#: names used to be interpolated straight into the SQL, so a caller passing
+#: an unknown key crashed the whole update (and the swallowed exception also
+#: lost the status change).
+SCHEDULED_TASK_UPDATE_ALLOWED_COLS: frozenset[str] = frozenset(
+    {
+        "name",
+        "task_type",
+        "priority",
+        "handler",
+        "parameters_json",
+        "dependencies_json",
+        "retry_count",
+        "max_retries",
+        "timeout",
+        "interval",
+        "auto_retry",
+        "result_json",
+        "error",
+        "execution_time",
+        "scheduled_at",
+        "started_at",
+        "completed_at",
+        "source",
+        "metadata_json",
+    }
+)
+
+
 def update_scheduled_task_status(task_id: str, status: str, **fields: Any) -> None:
-    """Update status and optional fields on a scheduled task."""
-    try:
-        sets = ["status = ?", "updated_at = ?"]
-        values: list[Any] = [status, _now_iso()]
-        for k, v in fields.items():
-            if v is not None:
-                sets.append(f"{k} = ?")
-                values.append(v)
-        values.append(task_id)
-        with get_db() as conn:
-            conn.execute(
-                f"UPDATE scheduled_tasks SET {', '.join(sets)} WHERE id = ?",
-                values,
+    """Update the status (and optional fields) of a scheduled task.
+
+    The status is written first, in its own transaction, so a later failure
+    can never lose it. The extra fields are whitelisted: an unknown column is
+    reported and ignored instead of being interpolated into the SQL. A real
+    failure is re-raised so the caller sees it instead of it being swallowed.
+    """
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE scheduled_tasks SET status = ?, updated_at = ? WHERE id = ?",
+            (status, _now_iso(), task_id),
+        )
+
+    sets: list[str] = []
+    values: list[Any] = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if key not in SCHEDULED_TASK_UPDATE_ALLOWED_COLS:
+            logger.warning(
+                "Ignoring unknown scheduled task column %r for task %s", key, task_id
             )
-    except Exception as e:
-        logger.warning("Failed to update scheduled task %s: %s", task_id, e)
+            continue
+        sets.append(f"{key} = ?")
+        values.append(value)
+    if not sets:
+        return
+
+    values.append(task_id)
+    with get_db() as conn:
+        conn.execute(
+            f"UPDATE scheduled_tasks SET {', '.join(sets)} WHERE id = ?",
+            values,
+        )
 
 
 def prune_scheduled_tasks(

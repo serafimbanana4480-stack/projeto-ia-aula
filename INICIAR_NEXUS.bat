@@ -33,7 +33,7 @@ echo       portas livres
 echo.
 
 echo [4/6] Arrancar o backend (127.0.0.1:8000)...
-start "NEXUS Backend" cmd /k "cd /d %IDE% && .venv\Scripts\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8000"
+start "NEXUS Backend" cmd /k "cd /d %IDE% && set BACKEND_HOST=127.0.0.1&& .venv\Scripts\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8000"
 echo       a aguardar que o backend responda...
 set /a tent=0
 :esperar
@@ -47,12 +47,15 @@ goto esperar
 echo       backend a responder em http://127.0.0.1:8000/health
 goto seguir
 :backend_lento
-echo       backend ainda nao respondeu (ve a janela "NEXUS Backend")
+echo       ERRO: backend nao respondeu; ve a janela "NEXUS Backend".
+echo       O frontend nao sera iniciado enquanto o backend estiver em baixo.
+pause
+exit /b 1
 :seguir
 echo.
 
 echo [5/6] Arrancar o frontend (localhost:3000)...
-start "NEXUS Frontend" cmd /k "cd /d %IDE%\frontend && pnpm run dev"
+start "NEXUS Frontend" cmd /k "cd /d %IDE%\frontend && set NEXT_PUBLIC_API_URL=http://127.0.0.1:8000&& pnpm run dev"
 timeout /t 15 /nobreak >nul
 echo       ok
 echo.

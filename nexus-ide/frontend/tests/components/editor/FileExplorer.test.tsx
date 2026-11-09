@@ -48,14 +48,16 @@ describe("FileExplorer", () => {
   it("mostra o estado de carregamento e não a árvore", () => {
     renderExplorer({ loading: true });
 
-    expect(screen.getByText("Loading files...")).toBeTruthy();
+    // The product language is pt-PT (with the typographic ellipsis).
+    expect(screen.getByText("A carregar ficheiros…")).toBeTruthy();
     expect(screen.queryByText("README.md")).toBeNull();
   });
 
   it("mostra o estado vazio quando não há ficheiros", () => {
     renderExplorer({ tree: [] });
 
-    expect(screen.getByText("No files found.")).toBeTruthy();
+    // The product language is pt-PT; the message now says which folder.
+    expect(screen.getByText("Nenhum ficheiro encontrado nesta pasta.")).toBeTruthy();
   });
 
   it("renderiza a raiz da árvore", () => {

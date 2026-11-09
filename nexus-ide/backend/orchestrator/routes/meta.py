@@ -8,6 +8,19 @@ Endpoints:
     POST /api/missions/{id}/abort     — Abort mission
     GET  /api/missions/{id}/agents    — List active agents
     WS   /ws/missions/{id}            — Real-time event stream
+
+Ownership
+---------
+A mission belongs to the user who created it.  The owner is recorded in
+``mission.metadata["user_id"]`` when the mission is created, and every route
+that reads or mutates a mission — the WebSocket included — checks it.
+
+The WebSocket used to authenticate the token and nothing else: any
+registered user could complete the handshake on ``/ws/missions/<id>`` and
+receive the mission's event stream, which carries the objective, the agent
+tasks and the token counters of somebody else's work.  The ownership check
+now happens *before* ``accept()``, so a handshake that is not allowed never
+becomes a connection.
 """
 
 # NOTE: `from __future__ import annotations` is intentionally NOT enabled
@@ -28,13 +41,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.core.disk_guard import DiskPressureError, require_disk_headroom
 from backend.middleware.auth import require_auth
-from backend.middleware.deny_by_default import require_websocket_token
+from backend.middleware.deny_by_default import (
+    WS_FORBIDDEN_CODE,
+    require_websocket_token,
+)
 from backend.orchestrator.meta import MetaOrchestrator, Mission
 from backend.orchestrator.registry import get_registry
 from backend.runtime.run_coordinator import RunState
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+#: Key of the mission owner inside ``Mission.metadata``.
+MISSION_OWNER_KEY = "user_id"
 
 
 # ── Request/response models ─────────────────────────────────────────────────
@@ -156,6 +175,17 @@ def _run_to_dict(record: Any) -> dict[str, Any]:
     }
 
 
+def _run_belongs_to(record: Any | None, user_id: str) -> bool:
+    """Return whether an authenticated user owns a durable run.
+
+    Legacy rows without an owner are deliberately inaccessible. A durable run
+    contains the user's objective, project path, checkpoint, and changed-file
+    list, so authentication alone is not enough to expose it.
+    """
+    owner = str(getattr(record, "user_id", "") or "").strip()
+    return bool(record is not None and user_id and owner and owner == user_id)
+
+
 def _resume_mission_runs(request: Request, mission_id: str) -> list[str]:
     """Mark the runs a mission left behind as ``RECOVERING`` and list them.
 
@@ -212,8 +242,23 @@ def _resume_mission_runs(request: Request, mission_id: str) -> list[str]:
 
 def _get_meta(request: Request) -> MetaOrchestrator:
     """Retrieve or lazily initialise the MetaOrchestrator from app state."""
-    app = request.app
-    if not hasattr(app.state, "meta_orchestrator"):
+    meta = _meta_orchestrator(request.app)
+    if meta is None:  # pragma: no cover - the app always has these
+        raise HTTPException(status_code=503, detail="MetaOrchestrator is unavailable")
+    return meta
+
+
+def _meta_orchestrator(app: Any) -> MetaOrchestrator | None:
+    """The MetaOrchestrator of *app*, or ``None`` when it cannot be built.
+
+    Split out of :func:`_get_meta` because the WebSocket has to answer
+    *before* it accepts the handshake: it needs the mission (and therefore
+    the orchestrator that holds it) while the connection is still pending.
+    """
+    existing = getattr(app.state, "meta_orchestrator", None)
+    if existing is not None:
+        return existing
+    try:
         from backend.orchestrator.engine import OrchestrationEngine
 
         registry = get_registry(app)
@@ -222,13 +267,62 @@ def _get_meta(request: Request) -> MetaOrchestrator:
             registry=registry,
             event_bus=app.state.event_bus,
         )
-        app.state.meta_orchestrator = MetaOrchestrator(
+        orchestrator = MetaOrchestrator(
             engine=engine,
             event_bus=app.state.event_bus,
             llm_client=app.state.llm_client,
             registry=registry,
         )
-    return app.state.meta_orchestrator
+        app.state.meta_orchestrator = orchestrator
+        return orchestrator
+    except Exception:
+        logger.warning("Could not build the MetaOrchestrator", exc_info=True)
+        return None
+
+
+def _mission_owner(mission: Mission | None) -> str:
+    """The user id that owns *mission* (``""`` when it has no owner)."""
+    if mission is None:
+        return ""
+    metadata = getattr(mission, "metadata", None) or {}
+    return str(metadata.get(MISSION_OWNER_KEY) or "").strip()
+
+
+def _mission_belongs_to(mission: Mission | None, user_id: str) -> bool:
+    """Whether *user_id* owns *mission*.
+
+    A mission with no recorded owner is owned by nobody, so it is not
+    reachable by anybody: the fail-closed answer is the only safe one for a
+    resource that streams a user's objective and token counters.
+    """
+    owner = _mission_owner(mission)
+    if not owner or not user_id:
+        return False
+    return owner == user_id
+
+
+def _caller_id(user: dict[str, Any] | None) -> str:
+    """The authenticated caller's user id."""
+    return str((user or {}).get("user_id") or "").strip()
+
+
+async def _refuse_websocket(websocket: WebSocket, code: int) -> None:
+    """Close a WebSocket handshake with *code*, without accepting it.
+
+    The handshake is accepted first and closed immediately afterwards, so a
+    real client reads the close code instead of an opaque HTTP 403 (see
+    ``backend/middleware/deny_by_default.py``).  No application data is
+    exchanged either way.
+    """
+    try:
+        await websocket.accept()
+    except Exception:  # pragma: no cover - already accepted/closed
+        logger.debug("Could not accept the WebSocket before refusing it", exc_info=True)
+        return
+    try:
+        await websocket.close(code=code)
+    except Exception:  # pragma: no cover - the socket is already gone
+        logger.debug("Could not close the refused WebSocket", exc_info=True)
 
 
 def _mission_to_status_dict(mission: Mission) -> dict[str, Any]:
@@ -263,10 +357,16 @@ def _mission_to_status_dict(mission: Mission) -> dict[str, Any]:
 
 
 @router.get("/missions")
-async def list_missions(request: Request, _auth: None = Depends(require_auth)) -> dict[str, Any]:
-    """List all active missions."""
+async def list_missions(request: Request, _auth: dict = Depends(require_auth)) -> dict[str, Any]:
+    """List the caller's own active missions.
+
+    Scoped: the mission store is process-wide, so listing *all* missions
+    handed every tenant the objective and the token counters of everybody
+    else's work.
+    """
+    user_id = _caller_id(_auth)
     meta = _get_meta(request)
-    missions = meta.list_all_missions()
+    missions = [m for m in meta.list_all_missions() if _mission_belongs_to(m, user_id)]
     return {
         "missions": [_mission_to_status_dict(m) for m in missions],
         "count": len(missions),
@@ -275,7 +375,7 @@ async def list_missions(request: Request, _auth: None = Depends(require_auth)) -
 
 @router.post("/missions")
 async def create_mission(
-    req: CreateMissionRequest, request: Request, _auth: None = Depends(require_auth)
+    req: CreateMissionRequest, request: Request, _auth: dict = Depends(require_auth)
 ) -> CreateMissionResponse:
     """Create a new dynamic mission."""
     try:
@@ -289,6 +389,14 @@ async def create_mission(
         time_budget_seconds=req.time_budget_seconds,
         project_path=req.project_path,
     )
+    # The owner is recorded with the mission: it is what every later read of
+    # this mission (REST and WebSocket) is checked against.  It is persisted
+    # as well, so a mission restored after a restart keeps its owner.
+    mission.metadata[MISSION_OWNER_KEY] = _caller_id(_auth)
+    try:
+        await meta._persist_mission(mission)
+    except Exception:  # pragma: no cover - persistence is best effort
+        logger.warning("Could not persist the owner of mission %s", mission.id, exc_info=True)
     # Launch mission asynchronously so the endpoint returns immediately
     asyncio.create_task(meta.run_mission(mission.id))
     return CreateMissionResponse(
@@ -301,12 +409,15 @@ async def create_mission(
 
 @router.get("/missions/{mission_id}")
 async def get_mission(
-    request: Request, mission_id: str, _auth: None = Depends(require_auth)
+    request: Request, mission_id: str, _auth: dict = Depends(require_auth)
 ) -> MissionStatusResponse:
     """Retrieve current mission status."""
+    user_id = _caller_id(_auth)
     meta = _get_meta(request)
     mission = meta.get_mission(mission_id)
-    if mission is None:
+    if mission is None or not _mission_belongs_to(mission, user_id):
+        # "Not found" for a mission that exists but belongs to somebody else:
+        # the answer must not disclose that it exists.
         return JSONResponse(
             status_code=404,
             content={"detail": f"Mission {mission_id} not found"},
@@ -317,10 +428,17 @@ async def get_mission(
 
 @router.post("/missions/{mission_id}/pause")
 async def pause_mission(
-    request: Request, mission_id: str, _auth: None = Depends(require_auth)
+    request: Request, mission_id: str, _auth: dict = Depends(require_auth)
 ) -> MissionActionResponse:
     """Pause all agents in the mission."""
+    user_id = _caller_id(_auth)
     meta = _get_meta(request)
+    mission = meta.get_mission(mission_id)
+    if mission is None or not _mission_belongs_to(mission, user_id):
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"Mission {mission_id} not found"},
+        )
     mission = await meta.pause(mission_id)
     if mission is None:
         return JSONResponse(
@@ -338,7 +456,7 @@ async def pause_mission(
 async def resume_mission(
     request: Request,
     mission_id: str,
-    _auth: None = Depends(require_auth),
+    _auth: dict = Depends(require_auth),
 ) -> MissionActionResponse:
     """Resume a paused or failed mission.
 
@@ -347,9 +465,10 @@ async def resume_mission(
     redoing the work. Runs that cannot be associated with the mission are
     logged and left untouched.
     """
+    user_id = _caller_id(_auth)
     meta = _get_meta(request)
-    mission = meta.resume(mission_id) if meta.get_mission(mission_id) else None
-    if mission is None:
+    mission = meta.get_mission(mission_id)
+    if mission is None or not _mission_belongs_to(mission, user_id):
         raise HTTPException(status_code=404, detail=f"Mission {mission_id} not found")
     resumed_runs = _resume_mission_runs(request, mission_id)
     mission = meta.resume(mission_id)
@@ -363,7 +482,7 @@ async def resume_mission(
 @router.get("/runs/resumable")
 async def list_resumable_runs(
     request: Request,
-    _auth: None = Depends(require_auth),
+    _auth: dict = Depends(require_auth),
 ) -> ResumableRunsResponse:
     """List the durable runs that still own work (i.e. can be resumed).
 
@@ -373,7 +492,14 @@ async def list_resumable_runs(
     coordinator = _get_run_coordinator(request)
     if coordinator is None:
         return ResumableRunsResponse(runs=[], count=0)
-    runs = coordinator.find_resumable_runs()
+    user_id = _caller_id(_auth)
+    if not user_id:
+        return ResumableRunsResponse(runs=[], count=0)
+    runs = [
+        record
+        for record in coordinator.find_resumable_runs(user_id=user_id)
+        if _run_belongs_to(record, user_id)
+    ]
     return ResumableRunsResponse(
         runs=[_run_to_dict(record) for record in runs], count=len(runs)
     )
@@ -383,7 +509,7 @@ async def list_resumable_runs(
 async def resume_run(
     request: Request,
     run_id: str,
-    _auth: None = Depends(require_auth),
+    _auth: dict = Depends(require_auth),
 ) -> ResumeRunResponse:
     """Restore one durable run from its last checkpoint.
 
@@ -397,6 +523,17 @@ async def resume_run(
         raise HTTPException(
             status_code=503, detail="Durable run coordinator is unavailable."
         )
+    user_id = _caller_id(_auth)
+    try:
+        owned_record = coordinator.get_run(run_id) if user_id else None
+    except Exception:
+        logger.warning("Could not check owner for run %s", run_id, exc_info=True)
+        raise HTTPException(
+            status_code=503, detail="Durable run coordinator failed to load the run."
+        ) from None
+    if not _run_belongs_to(owned_record, user_id):
+        # Keep unknown and cross-tenant run ids indistinguishable.
+        raise HTTPException(status_code=404, detail="Run not found")
     try:
         checkpoint = coordinator.restore(run_id)
     except ValueError as exc:
@@ -435,10 +572,17 @@ async def resume_run(
 
 @router.post("/missions/{mission_id}/abort")
 async def abort_mission(
-    request: Request, mission_id: str, _auth: None = Depends(require_auth)
+    request: Request, mission_id: str, _auth: dict = Depends(require_auth)
 ) -> MissionActionResponse:
     """Abort the mission and cancel all its agents."""
+    user_id = _caller_id(_auth)
     meta = _get_meta(request)
+    mission = meta.get_mission(mission_id)
+    if mission is None or not _mission_belongs_to(mission, user_id):
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"Mission {mission_id} not found"},
+        )
     mission = await meta.abort(mission_id)
     if mission is None:
         return JSONResponse(
@@ -454,10 +598,17 @@ async def abort_mission(
 
 @router.get("/missions/{mission_id}/agents")
 async def list_active_agents(
-    request: Request, mission_id: str, _auth: None = Depends(require_auth)
+    request: Request, mission_id: str, _auth: dict = Depends(require_auth)
 ) -> ActiveAgentsResponse:
     """List all active (non-terminal) agents in the mission."""
+    user_id = _caller_id(_auth)
     meta = _get_meta(request)
+    mission = meta.get_mission(mission_id)
+    if mission is None or not _mission_belongs_to(mission, user_id):
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"Mission {mission_id} not found"},
+        )
     agents = meta.list_active_agents(mission_id)
     return ActiveAgentsResponse(
         mission_id=mission_id,
@@ -485,28 +636,32 @@ async def mission_websocket(
     ``?token=`` or in ``Sec-WebSocket-Protocol``, and a missing or invalid one
     raises ``WebSocketException(4401)`` -- a close before ``accept()``, so no
     event is ever sent to an anonymous subscriber.
+
+    **Ownership is checked before the handshake is accepted.**  The token says
+    *who* is asking; it does not say *what* they may watch.  A mission
+    belongs to the user who created it, and its event stream carries that
+    user's objective, agent tasks and token counters, so a handshake for
+    somebody else's mission is refused with ``4403`` (forbidden) instead of
+    being turned into a live connection.
     """
+    caller_id = _caller_id(user)
+    if not caller_id:
+        await _refuse_websocket(websocket, WS_FORBIDDEN_CODE)
+        return
+
+    app = websocket.app
+    meta = _meta_orchestrator(app)
+    mission = meta.get_mission(mission_id) if meta is not None else None
+    if meta is None or mission is None or not _mission_belongs_to(mission, caller_id):
+        logger.info(
+            "Refused a mission WebSocket for %s: the mission is not owned by the caller",
+            mission_id,
+        )
+        await _refuse_websocket(websocket, WS_FORBIDDEN_CODE)
+        return
+
     await websocket.accept()
-    meta: MetaOrchestrator | None = None
     try:
-        app = websocket.app
-        if not hasattr(app.state, "meta_orchestrator"):
-            from backend.orchestrator.engine import OrchestrationEngine
-
-            registry = get_registry(app)
-            engine = OrchestrationEngine(
-                llm_client=app.state.llm_client,
-                registry=registry,
-                event_bus=app.state.event_bus,
-            )
-            app.state.meta_orchestrator = MetaOrchestrator(
-                engine=engine,
-                event_bus=app.state.event_bus,
-                llm_client=app.state.llm_client,
-                registry=registry,
-            )
-        meta = app.state.meta_orchestrator
-
         async def _stream() -> AsyncIterator[str]:
             async for event in meta.stream_events(mission_id):
                 payload = {

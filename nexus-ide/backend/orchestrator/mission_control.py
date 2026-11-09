@@ -1282,6 +1282,64 @@ class MissionPlanner:
     def __init__(self, snapshot: ProjectSnapshot) -> None:
         self.snapshot = snapshot
 
+    _CAPABILITY_TOPIC_RE = re.compile(
+        r"\b(?:capabilit\w*|capacidades?|funcionalidades?|features?|skills?|mcp|"
+        r"mem[oó]ria|memory)\b",
+        re.IGNORECASE,
+    )
+    _CAPABILITY_ACTION_RE = re.compile(
+        r"\b(?:(?:seria|serias|és|e)\s+capaz\s+de|"
+        r"are\s+you\s+able\s+to|could\s+you|can\s+you)\s+"
+        r"(?:criar|create|build|implementar|implement|adicionar|add)\b",
+        re.IGNORECASE,
+    )
+    _CHANGE_REQUEST_RE = re.compile(
+        r"\b(?:corrig\w*|fix\w*|repair\w*|resolve\w*|repar\w*|"
+        r"implemen\w*|adicion\w*|add|cria\w*|create\w*|build|"
+        r"modify|modifica\w*|altera\w*|update|atualiza\w*|"
+        r"delete|apag\w*|remove|remov\w*)\b",
+        re.IGNORECASE,
+    )
+    _INSPECTION_REQUEST_RE = re.compile(
+        r"\b(?:verific\w*|check|test\w*|valid\w*|audit\w*|audita\w*|"
+        r"analisa\w*|analis\w*|review|rever|inspect|inspecion\w*|"
+        r"explain|explica\w*|describe|descrev\w*|tell\s+me|diz(?:-me|\s+me)|"
+        r"fala\s+mais|what|quais|funcion\w*|works?|working|health|integrity|"
+        r"estado|status|capabilit\w*|capacidades?|funcionalidades?|features?|skills?|mcp|"
+        r"mem[oó]ria|memory)\b",
+        re.IGNORECASE,
+    )
+    _VERIFICATION_REQUEST_RE = re.compile(
+        r"\b(?:verific\w*|test\w*|valid\w*|check|audit\w*|audita\w*|"
+        r"funcion\w*|works?|working|health|integrity)\b",
+        re.IGNORECASE,
+    )
+    _SECURITY_REQUEST_RE = re.compile(
+        r"\b(?:security|seguran\w*|vulnerab\w*|pentest|threat)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_read_only_request(cls, objective: str) -> bool:
+        """Distinguish inspection/questions from explicit requests to change code."""
+        text = str(objective or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        capability_question = bool(cls._CAPABILITY_TOPIC_RE.search(lowered))
+        actionable_text = (
+            cls._CAPABILITY_ACTION_RE.sub(" ", lowered)
+            if capability_question
+            else lowered
+        )
+        if cls._CHANGE_REQUEST_RE.search(actionable_text):
+            return False
+        return bool(cls._INSPECTION_REQUEST_RE.search(lowered))
+
+    @classmethod
+    def _asks_for_verification(cls, objective: str) -> bool:
+        return bool(cls._VERIFICATION_REQUEST_RE.search(str(objective or "")))
+
     # ── brief ─────────────────────────────────────────────────────────────
     def build_brief(self, objective: str, interpreted: str | None = None) -> MissionBrief:
         snap = self.snapshot
@@ -1323,8 +1381,8 @@ class MissionPlanner:
             ],
         )
 
-    @staticmethod
-    def _interpret(objective: str) -> str:
+    @classmethod
+    def _interpret(cls, objective: str) -> str:
         """Restate the request in terms of intent.
 
         Keyword-based on purpose: this runs before any model call so the user
@@ -1332,6 +1390,17 @@ class MissionPlanner:
         obvious to spot and cheap to correct.
         """
         low = objective.lower()
+        if cls._is_read_only_request(objective):
+            if cls._CAPABILITY_TOPIC_RE.search(low):
+                return (
+                    "Verificar o estado atual e descrever capacidades, memória, "
+                    "skills e integrações MCP disponíveis, sem alterar o projeto."
+                )
+            if cls._SECURITY_REQUEST_RE.search(low):
+                return "Rever a segurança atual e reportar evidência sem alterar o projeto."
+            if cls._asks_for_verification(objective):
+                return "Verificar o estado atual e reportar evidência sem alterar o projeto."
+            return "Analisar o estado atual e reportar evidência sem alterar o projeto."
         intents: list[str] = []
         table = [
             (("corrig", "fix", "bug", "erro", "falha"), "corrigir defeitos existentes"),
@@ -1358,6 +1427,8 @@ class MissionPlanner:
     # ── plan ──────────────────────────────────────────────────────────────
     def build_plan(self, brief: MissionBrief) -> MissionPlan:
         snap = self.snapshot
+        read_only = self._is_read_only_request(brief.objective_raw)
+        verification_requested = self._asks_for_verification(brief.objective_raw)
         phases: list[PhasePlan] = []
 
         phases.append(PhasePlan(
@@ -1373,26 +1444,46 @@ class MissionPlanner:
         crit = [f for f in snap.findings if f.severity in (Severity.CRITICAL, Severity.HIGH)]
         phases.append(PhasePlan(
             phase=MissionPhase.STABILISATION,
-            steps=[
+            steps=[] if read_only else [
                 f"Corrigir {len(crit)} problemas de severidade alta ou crítica" if crit
                 else "Confirmar que não existem falhas críticas por corrigir",
                 "Resolver dependências quebradas",
                 "Validar configuração e variáveis de ambiente",
             ],
-            rationale="Estabilizar antes de melhorar: melhorias sobre uma base instável não são mensuráveis.",
+            rationale=(
+                "Estabilizar antes de melhorar: melhorias sobre uma base instável não são mensuráveis."
+                if not read_only
+                else "Pedido de inspeção: não foram solicitadas alterações nem reparações."
+            ),
+            skipped=read_only,
+            skip_reason=(
+                "O pedido é informativo/de diagnóstico e não autoriza alterações ao projeto."
+                if read_only
+                else ""
+            ),
         ))
 
         phases.append(PhasePlan(
             phase=MissionPhase.IMPROVEMENT,
-            steps=[
+            steps=[] if read_only else [
                 "Melhorar o sistema de agentes e a sua observabilidade",
                 "Otimizar caminhos com custo desproporcional",
                 "Completar funcionalidades declaradas como incompletas",
             ],
-            rationale="Trabalho opcional — só avança se a fase de estabilização terminar limpa.",
+            rationale=(
+                "Trabalho opcional — só avança se a fase de estabilização terminar limpa."
+                if not read_only
+                else "Não há pedido explícito para implementar funcionalidades."
+            ),
+            skipped=read_only,
+            skip_reason=(
+                "O pedido é informativo/de diagnóstico; implementação fica fora do âmbito."
+                if read_only
+                else ""
+            ),
         ))
 
-        can_verify = bool(snap.test_frameworks)
+        can_verify = bool(snap.test_frameworks) and (not read_only or verification_requested)
         phases.append(PhasePlan(
             phase=MissionPhase.VERIFICATION,
             steps=[
@@ -1404,18 +1495,28 @@ class MissionPlanner:
             skipped=not can_verify,
             skip_reason=(
                 "" if can_verify
-                else "Nenhum runner de testes detetado — a verificação automática não pode ser executada."
+                else (
+                    "O pedido não solicitou execução de verificações." if read_only
+                    else "Nenhum runner de testes detetado — a verificação automática não pode ser executada."
+                )
             ),
         ))
 
         phases.append(PhasePlan(
             phase=MissionPhase.DELIVERY,
-            steps=[
+            steps=([
+                "Rever a evidência recolhida",
+                "Gerar relatório final em reports/",
+            ] if read_only else [
                 "Rever o diff completo das alterações",
                 "Atualizar documentação afetada",
                 "Gerar relatório final em reports/",
-            ],
-            rationale="Uma missão sem relatório é indistinguível de uma missão que não aconteceu.",
+            ]),
+            rationale=(
+                "Uma missão sem relatório é indistinguível de uma missão que não aconteceu."
+                if not read_only
+                else "Entregar conclusões e limites da evidência sem alterar o projeto."
+            ),
         ))
 
         return MissionPlan(phases=phases, concurrency_limit=self._concurrency())
@@ -1456,6 +1557,24 @@ class MissionPlanner:
             "Test Discovery Agent": (has_tests, "Não existem ficheiros de teste para inventariar."),
             "Documentation Analyzer": (has_docs, "Não existe documentação markdown para comparar."),
         }
+
+        if self._is_read_only_request(brief.objective_raw):
+            skip_rules.update({
+                "Backend Agent": (False, "Pedido sem autorização para alterar o backend."),
+                "Frontend Agent": (False, "Pedido sem autorização para alterar o frontend."),
+                "Integration Agent": (False, "Validação de integração com capacidade de edição fora do âmbito."),
+                "Test Agent": (
+                    has_tests and self._asks_for_verification(brief.objective_raw),
+                    "Não foi pedida uma verificação executável." if has_tests
+                    else "Não existem ficheiros de teste para executar.",
+                ),
+                "Security Reviewer": (
+                    bool(self._SECURITY_REQUEST_RE.search(brief.objective_raw)),
+                    "O pedido não inclui uma revisão de segurança.",
+                ),
+                "Regression Agent": (False, "Não há alterações autorizadas para comparar por regressão."),
+                "Documentation Agent": (False, "Atualizar documentação alteraria o projeto; só foi pedida inspeção."),
+            })
 
         waves: list[Wave] = []
         previous_names: list[str] = []

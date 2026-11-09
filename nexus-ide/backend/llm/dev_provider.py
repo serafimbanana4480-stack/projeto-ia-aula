@@ -24,6 +24,9 @@ class DevProvider:
     eligibility_reason = "deterministic simulation only"
     # Internal — estimated usage (tokens are counted from text length)
     _last_usage: dict[str, int] = {}
+    # Uniform provider contract: every provider exposes the stop reason of its
+    # last call, even a simulated one.
+    last_finish_reason: str = ""
 
     @property
     def last_usage(self) -> dict[str, int]:

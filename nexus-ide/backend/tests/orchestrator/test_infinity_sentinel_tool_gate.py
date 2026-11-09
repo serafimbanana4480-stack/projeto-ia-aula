@@ -218,6 +218,11 @@ def test_sentinel_requires_approval_for_unclassified_side_effects(
             key: {"type": "boolean" if isinstance(value, bool) else "string"}
             for key, value in args.items()
         }
+        if name in {"consult_agent", "spawn_task"}:
+            properties["session_id"] = {"type": "string"}
+            properties["project_path"] = {"type": "string"}
+        elif name.startswith("browser_"):
+            properties["session_id"] = {"type": "string"}
         spec = _spec(name, handler, properties=properties)
         monkeypatch.setitem(registry._registry, name, spec)
         result = asyncio.run(
@@ -226,9 +231,17 @@ def test_sentinel_requires_approval_for_unclassified_side_effects(
                 f"sentinel-risk-{name}",
                 args,
                 sentinel_enforced=True,
-                allowed_tools=("read_file",),
+                # This test exercises Sentinel's risk policy after the caller
+                # has authorized the action. A separate registry regression
+                # proves Sentinel cannot bypass the caller's allowlist.
+                allowed_tools=(name,),
                 project_path=(
                     "C:/selected-project" if name == "run_tests" else ""
+                ),
+                user_id=(
+                    "test-user"
+                    if name in {"consult_agent", "spawn_task"} or name.startswith("browser_")
+                    else ""
                 ),
             )
         )
@@ -342,19 +355,44 @@ def test_consult_agent_receives_sentinel_as_trusted_server_context(
 
     async def handler(
         question: str,
+        session_id: str = "",
+        project_path: str = "",
         sentinel_enforced: bool = False,
         allowed_tools: tuple[str, ...] | None = None,
+        user_id: str = "",
     ) -> dict[str, bool]:
         received.append(sentinel_enforced)
-        assert allowed_tools == ("read_file",)
+        assert session_id == "sentinel-consult-agent"
+        assert project_path == ""
+        assert user_id == "test-user"
+        assert allowed_tools == ("consult_agent", "read_file")
         return {"ok": True, "question_received": bool(question)}
 
     spec = _spec(
         "consult_agent",
         handler,
-        properties={"question": {"type": "string"}},
+        properties={
+            "question": {"type": "string"},
+            "session_id": {"type": "string"},
+            "project_path": {"type": "string"},
+        },
     )
     monkeypatch.setitem(registry._registry, spec.name, spec)
+
+    denied = asyncio.run(
+        registry.execute_tool(
+            spec.name,
+            "sentinel-consult-agent",
+            {"question": "review this plan"},
+            confirmed=True,
+            sentinel_enforced=True,
+            allowed_tools=("read_file",),
+            user_id="test-user",
+        )
+    )
+    assert denied["ok"] is False
+    assert denied["error_category"] == "tool_not_allowed"
+    assert received == []
 
     result = asyncio.run(
         registry.execute_tool(
@@ -363,7 +401,8 @@ def test_consult_agent_receives_sentinel_as_trusted_server_context(
             {"question": "review this plan"},
             confirmed=True,
             sentinel_enforced=True,
-            allowed_tools=("read_file",),
+            allowed_tools=("consult_agent", "read_file"),
+            user_id="test-user",
         )
     )
 
@@ -393,6 +432,7 @@ def test_consult_agent_forwards_mode_allowlist_to_subagent(monkeypatch: Any) -> 
             source_agent="NEXUS",
             session_id="sentinel-consult-context",
             project_path=".",
+            user_id="test-user",
             sentinel_enforced=True,
             allowed_tools=("read_file", "search_codebase"),
         )
@@ -401,6 +441,7 @@ def test_consult_agent_forwards_mode_allowlist_to_subagent(monkeypatch: Any) -> 
     assert result["response"] == "reviewed"
     assert captured[0]["_sentinel_enforced"] is True
     assert captured[0]["_allowed_tools"] == ("read_file", "search_codebase")
+    assert captured[0]["_authenticated_user_id"] == "test-user"
 
 
 def test_spawn_task_passes_sentinel_contract_to_background_lifecycle(
@@ -438,6 +479,7 @@ def test_spawn_task_passes_sentinel_contract_to_background_lifecycle(
             definition_of_done="Return a review",
             session_id="sentinel-background",
             project_path="C:/selected-project",
+            user_id="test-user",
             sentinel_enforced=True,
             allowed_tools=("read_file", "search_codebase"),
         )
@@ -447,6 +489,7 @@ def test_spawn_task_passes_sentinel_contract_to_background_lifecycle(
     assert captured["context"]["project_path"] == "C:/selected-project"
     assert captured["context"]["_sentinel_enforced"] is True
     assert captured["context"]["_allowed_tools"] == ("read_file", "search_codebase")
+    assert captured["context"]["_authenticated_user_id"] == "test-user"
 
 
 def test_primary_subagent_inherits_sentinel_guard(monkeypatch: Any) -> None:
@@ -469,13 +512,27 @@ def test_primary_subagent_inherits_sentinel_guard(monkeypatch: Any) -> None:
         sentinel_enforced=True,
         allowed_tools=("read_file", "search_codebase"),
     )
-    proposal = SubagentProposal(name="CODER", objective="inspect", definition_of_done="report")
+    proposal = SubagentProposal(
+        name="CODER",
+        objective="inspect",
+        definition_of_done="report",
+        context="Inspect the auth helper before editing.",
+        read_scope=frozenset({"backend/auth.py"}),
+        write_scope=frozenset({"backend/auth.py"}),
+        depends_on=frozenset({"review-api"}),
+    )
 
     result = asyncio.run(runner(proposal))
 
     assert result == "result"
     assert seen_contexts[0]["_sentinel_enforced"] is True
     assert seen_contexts[0]["_allowed_tools"] == ("read_file", "search_codebase")
+    assert seen_contexts[0]["_delegated_context"] == {
+        "parent_notes": "Inspect the auth helper before editing.",
+        "read_scope": ["backend/auth.py"],
+        "write_scope": ["backend/auth.py"],
+        "depends_on": ["review-api"],
+    }
 
 
 def test_sentinel_requires_approval_for_an_unclassified_tool(monkeypatch: Any) -> None:
@@ -549,3 +606,55 @@ def test_sentinel_scopes_read_tools_to_the_selected_project(
     from backend.tools.confirmations import discard_confirmation
 
     discard_confirmation(str(outside["confirmation_id"]))
+
+
+def test_sentinel_does_not_require_approval_for_project_read_path_containing_live(
+    tmp_path: Any,
+) -> None:
+    _ensure_tools_registered()
+    project = tmp_path / "nexus-live-self-audit"
+    project.mkdir()
+    target = project / "audit-result.txt"
+    target.write_text("read-only evidence", encoding="utf-8")
+
+    result = asyncio.run(
+        registry.execute_tool(
+            "read_file_absolute",
+            "sentinel-read-live-named-project",
+            {"path": str(target)},
+            enforce_confirmation=True,
+            project_path=str(project),
+            sentinel_enforced=True,
+        )
+    )
+
+    assert result["ok"] is True
+    assert "read-only evidence" in result["result"]["content"]
+    assert result["sentinel_gate"]["risk_level"] == 0
+    assert result["sentinel_gate"]["requires_approval"] is False
+
+
+def test_sentinel_keeps_approval_for_write_under_live_named_project(
+    tmp_path: Any,
+) -> None:
+    _ensure_tools_registered()
+    project = tmp_path / "nexus-live-self-audit"
+    project.mkdir()
+
+    result = asyncio.run(
+        registry.execute_tool(
+            "write_file_absolute",
+            "sentinel-write-live-named-project",
+            {"path": str(project / "production-config.py"), "content": "value = 1\n"},
+            enforce_confirmation=True,
+            autonomous=True,
+            project_path=str(project),
+            sentinel_enforced=True,
+        )
+    )
+
+    assert result["confirmation_required"] is True
+    assert result["sentinel_gate"]["requires_approval"] is True
+    from backend.tools.confirmations import discard_confirmation
+
+    discard_confirmation(str(result["confirmation_id"]))

@@ -139,3 +139,49 @@ def test_output_reserve_is_clamped_consistently(
 
     assert reserve <= tm.get_context_limit("deep", model_id="openrouter/small")
     assert reserve >= 1
+
+
+def test_untrimmable_messages_reject_concrete_model_overflow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The last validation must not fall back to the larger tier window."""
+    from backend.agents import base
+
+    _write_catalog(monkeypatch, tmp_path, [{"id": "openrouter/tiny", "context_window": 8_192}])
+    monkeypatch.setattr(base, "count_tokens", lambda text, _tier: {"system": 7_500, "query": 1_000}[text])
+    agent = base.AgentBase()
+    agent.name = "BUDGET_TEST"
+    agent.model_key = "deep"
+
+    with pytest.raises(tm.ContextOverflowError, match="8192"):
+        agent._fit_messages_to_budget(["system", "query"], 100, model_id="openrouter/tiny")
+
+
+def test_react_context_trim_uses_the_concrete_model_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The structured compactor must not keep the larger tier's budget."""
+    from backend.agents import base
+
+    model_id = "openrouter/tiny"
+    _write_catalog(monkeypatch, tmp_path, [{"id": model_id, "context_window": 8_192}])
+    def token_count(text: str, _model: str) -> int:
+        return max(1, len(text) // 4)
+
+    monkeypatch.setattr(base, "count_tokens", token_count)
+    monkeypatch.setattr(tm, "count_tokens", token_count)
+
+    agent = base.AgentBase()
+    agent.name = "TRIM_TEST"
+    agent.model_key = "deep"
+    context = "".join(
+        f"\nTool read_file returned: file-{index}\n" + ("x" * 6_000)
+        for index in range(8)
+    )
+    budget = tm.dynamic_threshold("deep", model_id=model_id)
+
+    assert token_count(context, "deep") > budget
+    trimmed = agent._trim_context(context, iteration=8, model_id=model_id)
+
+    assert len(trimmed) < len(context)
+    assert token_count(trimmed, "deep") <= budget

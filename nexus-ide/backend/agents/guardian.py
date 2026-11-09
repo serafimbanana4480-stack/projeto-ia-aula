@@ -105,7 +105,12 @@ class NexusGuardianAgent:
             try:
                 await self._check_system_health()
                 await self._analyze_recent_logs()
-                await self._check_project_health()
+                _now = time.monotonic()
+                if _now - getattr(self, "_last_project_scan", -1e9) >= float(
+                    os.environ.get("NEXUS_GUARDIAN_PROJECT_SCAN_SECONDS", "600")
+                ):
+                    self._last_project_scan = _now
+                    await self._check_project_health()
                 await self._generate_suggestions()
             except Exception as exc:
                 logger.error("Guardian monitor loop error: %s", exc)

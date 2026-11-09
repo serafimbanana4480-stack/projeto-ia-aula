@@ -73,13 +73,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setToken(refreshed);
         response = await requestMe();
       }
-      if (!response.ok) throw new Error("Session expired");
+      if (response.status === 401 || response.status === 403) {
+        clearAuth();
+        setToken(null);
+        setUser(ANONYMOUS);
+        return;
+      }
+      if (!response.ok) throw new Error("Não foi possível verificar a sessão");
       const data = (await response.json()) as Record<string, unknown>;
       setUser(toLegacyUser(data));
     } catch {
-      clearAuth();
-      setToken(null);
-      setUser(ANONYMOUS);
+      setError("Não foi possível ligar ao servidor para verificar a sessão.");
     } finally {
       setIsLoading(false);
     }

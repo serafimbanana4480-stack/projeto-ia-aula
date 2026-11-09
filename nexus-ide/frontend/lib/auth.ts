@@ -5,7 +5,12 @@ import { apiUrl, ApiError } from "./api";
 const TOKEN_KEY = "nexus.access_token";
 const REFRESH_TOKEN_KEY = "nexus.refresh_token";
 const USER_KEY = "nexus.user";
+const REFRESH_REQUEST_ID_KEY = "nexus.refresh.request_id";
 const AUTH_REQUEST_TIMEOUT_MS = 10000;
+const REFRESH_MAX_ATTEMPTS = 10;
+const REFRESH_RETRY_DELAY_MS = 15000;
+
+let refreshInFlight: Promise<boolean> | null = null;
 
 async function fetchAuth(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const controller = new AbortController();
@@ -84,6 +89,7 @@ export function clearAuth(): void {
   window.localStorage.removeItem(TOKEN_KEY);
   window.localStorage.removeItem(REFRESH_TOKEN_KEY);
   window.localStorage.removeItem(USER_KEY);
+  window.localStorage.removeItem(REFRESH_REQUEST_ID_KEY);
 }
 
 export function isAuthenticated(): boolean {
@@ -148,6 +154,7 @@ export async function authenticatedFetch(
     if (!(await refreshAuth())) return response;
     return request();
   } catch (error) {
+    if (error instanceof ApiError) throw error;
     throw new ApiError(
       "Failed to connect to the server",
       0,
@@ -212,28 +219,138 @@ export async function logout(): Promise<void> {
  * token is missing or rejected by the server. On failure the auth state is
  * cleared so the caller can redirect to login.
  */
-export async function refreshAuth(): Promise<boolean> {
+function getOrCreateRefreshRequestId(): string {
+  try {
+    const existing = window.localStorage.getItem(REFRESH_REQUEST_ID_KEY);
+    if (existing) return existing;
+  } catch {
+    // The in-memory ID still keeps this invocation's retries idempotent when
+    // storage is unavailable; it simply cannot survive a page reload.
+  }
+
+  const generated = window.crypto.randomUUID();
+  try {
+    window.localStorage.setItem(REFRESH_REQUEST_ID_KEY, generated);
+    return window.localStorage.getItem(REFRESH_REQUEST_ID_KEY) || generated;
+  } catch {
+    return generated;
+  }
+}
+
+function clearRefreshRequestId(): void {
+  try {
+    window.localStorage.removeItem(REFRESH_REQUEST_ID_KEY);
+  } catch {
+    // A stale key is harmless: the server scopes it to the refresh-token JTI.
+  }
+}
+
+function waitForRefreshRetry(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, REFRESH_RETRY_DELAY_MS));
+}
+
+function isTransientRefreshStatus(status: number): boolean {
+  return status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+async function performRefreshAuth(): Promise<boolean> {
   const refreshToken = getRefreshToken();
   if (!refreshToken) return false;
-  try {
-    const response = await fetchAuth(apiUrl("/api/auth/refresh"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    });
-    if (!response.ok) {
+
+  const requestId = getOrCreateRefreshRequestId();
+  let lastError: ApiError | null = null;
+  for (let attempt = 1; attempt <= REFRESH_MAX_ATTEMPTS; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetchAuth(apiUrl("/api/auth/refresh"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": requestId,
+        },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+    } catch (error) {
+      if (!(error instanceof ApiError) || !isTransientRefreshStatus(error.status)) {
+        throw error;
+      }
+      lastError = error;
+      if (attempt === REFRESH_MAX_ATTEMPTS) break;
+      await waitForRefreshRetry();
+      continue;
+    }
+
+    if (response.ok) {
+      const result = (await response.json()) as LoginResult;
+      if (!result.access_token || !result.refresh_token) {
+        throw new ApiError("The server returned an incomplete refresh response", response.status);
+      }
+      setAccessToken(result.access_token);
+      setRefreshToken(result.refresh_token);
+      if (result.user) setUser(result.user);
+      clearRefreshRequestId();
+      return true;
+    }
+
+    if (isTransientRefreshStatus(response.status)) {
+      let responseText = "";
+      try {
+        responseText = await response.text();
+      } catch {
+        responseText = "Unable to read refresh error response";
+      }
+      lastError = new ApiError(
+        `HTTP ${response.status}: ${response.statusText}`,
+        response.status,
+        responseText,
+      );
+      if (attempt === REFRESH_MAX_ATTEMPTS) break;
+      await waitForRefreshRetry();
+      continue;
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      // Another tab may have rotated the shared refresh token while this tab
+      // was waiting. Reuse that fresh session instead of clearing it.
+      const currentRefreshToken = getRefreshToken();
+      if (currentRefreshToken && currentRefreshToken !== refreshToken && getAccessToken()) {
+        clearRefreshRequestId();
+        return true;
+      }
+      clearRefreshRequestId();
       clearAuth();
       return false;
     }
-    const result = (await response.json()) as LoginResult;
-    setAccessToken(result.access_token);
-    if (result.refresh_token) setRefreshToken(result.refresh_token);
-    if (result.user) setUser(result.user);
-    return true;
-  } catch {
-    clearAuth();
-    return false;
+
+    let responseText = "";
+    try {
+      responseText = await response.text();
+    } catch {
+      responseText = "Unable to read refresh error response";
+    }
+    throw new ApiError(
+      `HTTP ${response.status}: ${response.statusText}`,
+      response.status,
+      responseText,
+    );
   }
+
+  // Keep both tokens and the stable request key. A later API call can resume
+  // this exchange and recover a response that the server may already have
+  // committed.
+  throw new ApiError(
+    `Refresh failed after ${REFRESH_MAX_ATTEMPTS} attempts`,
+    lastError?.status ?? 0,
+    lastError?.responseText,
+  );
+}
+
+export function refreshAuth(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = performRefreshAuth().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,8 +384,12 @@ export async function autoLoginDev(): Promise<boolean> {
         headers: { Authorization: `Bearer ${getAccessToken()}` },
       });
       if (response.ok) return true;
-    } catch {
-      // Fall through to a fresh local test login below.
+      if (response.status !== 401 && response.status !== 403) {
+        throw new ApiError("Não foi possível verificar a sessão", response.status);
+      }
+    } catch (error) {
+      // A temporary backend failure must not erase a potentially valid session.
+      throw error;
     }
     clearAuth();
   }

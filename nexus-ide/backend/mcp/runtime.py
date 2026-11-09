@@ -13,13 +13,24 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from backend.mcp.store import MCPConnector, mcp_store
+import httpx
+
+from backend.mcp.store import MCPConnector, mcp_store, redact_connector_secrets
+from backend.mcp.validation import (
+    is_valid_input_schema,
+    is_valid_tool_name,
+    root_boundary_violations,
+    validate_arguments,
+)
+
+logger = logging.getLogger(__name__)
 
 SESSION_IDLE_TTL = float(os.environ.get("NEXUS_MCP_SESSION_TTL", "120"))
 _MAX_TIMEOUT = 60.0
@@ -49,15 +60,49 @@ def _exception_text(exc: BaseException) -> str:
 
 def _redact_connector_secrets(connector: MCPConnector, text: str) -> str:
     """Remove configured credentials from process and transport error details."""
-    secrets = [value for value in connector.env.values() if value]
-    secrets.extend(
-        connector.args[index]
-        for index in connector.secret_arg_indexes
-        if 0 <= index < len(connector.args) and connector.args[index]
-    )
-    for secret in sorted(secrets, key=len, reverse=True):
-        text = text.replace(secret, "[REDACTED]")
-    return text
+    return redact_connector_secrets(connector, text)
+
+
+def _public_remote_url(url: str) -> str:
+    """Validate a remote MCP URL against the public-address policy.
+
+    The rest of NEXUS refuses to talk to loopback, private, link-local, or
+    otherwise non-public addresses (``backend/tools/safe_http.py``). A remote
+    MCP connector is an outbound request too, so it follows the same policy:
+    otherwise a connector could be pointed at the NEXUS backend itself or at
+    the cloud metadata service.
+    """
+    from backend.tools.safe_http import normalize_public_http_url
+
+    try:
+        return normalize_public_http_url(url)
+    except ValueError as exc:
+        raise MCPRuntimeError(
+            f"URL MCP remoto rejeitada pela política de endereços públicos: {exc}"
+        ) from exc
+
+
+def _validated_tools(result: Any) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """Split a ``tools/list`` answer into usable tools and rejected ones.
+
+    A tool whose name is not an identifier, or whose ``inputSchema`` is not a
+    JSON-Schema object, cannot be called safely: NEXUS would have to forward
+    model-supplied arguments to a contract it cannot check. Those tools are
+    refused (and reported) instead of being listed, stored, and called.
+    """
+    tools: dict[str, dict[str, Any]] = {}
+    rejected: dict[str, str] = {}
+    for tool in getattr(result, "tools", ()):
+        payload = _tool_payload(tool)
+        name = payload["name"]
+        if not is_valid_tool_name(name):
+            rejected[name] = "nome de tool inválido"
+            continue
+        if not is_valid_input_schema(payload["inputSchema"]):
+            rejected[name] = "inputSchema não é um JSON Schema válido"
+            continue
+        tools[name] = payload
+    return tools, rejected
 
 
 def _tool_payload(tool: Any) -> dict[str, Any]:
@@ -183,17 +228,32 @@ class _PersistentSession:
                     await self._closed.wait()
 
             if self.connector.transport == "http":
-                from mcp.client.streamable_http import streamablehttp_client
+                from mcp.client.streamable_http import streamable_http_client
 
+                from backend.tools.safe_http import PublicAddressHTTPTransport
+
+                # The remote URL is re-validated on every handshake: a
+                # connector persisted before this policy existed must not be
+                # able to reach a local or metadata address.
+                url = _public_remote_url(self.connector.url)
                 headers: dict[str, str] = {}
                 token = self.connector.env.get("AUTH_TOKEN", "")
                 if token:
                     headers["Authorization"] = f"Bearer {token}"
-                async with streamablehttp_client(
-                    self.connector.url,
+                # PublicAddressHTTPTransport pins every connection (including
+                # redirects) to a public address, so the connector cannot be
+                # used as an SSRF pivot into the NEXUS host or the cloud
+                # metadata service.
+                client = httpx.AsyncClient(
+                    transport=PublicAddressHTTPTransport(),
                     headers=headers,
-                    timeout=10.0,
-                    sse_read_timeout=30.0,
+                    timeout=httpx.Timeout(10.0, read=30.0),
+                    follow_redirects=True,
+                    trust_env=False,
+                )
+                async with client, streamable_http_client(
+                    url,
+                    http_client=client,
                     terminate_on_close=True,
                 ) as (read_stream, write_stream, _session_id):
                     await run_session(read_stream, write_stream)
@@ -206,11 +266,9 @@ class _PersistentSession:
                     await run_session(read_stream, write_stream)
         except BaseException as exc:  # noqa: BLE001 — must always unblock waiters
             if not self._closed.is_set() and self._failure is None:
-                detail = _redact_connector_secrets(self.connector, _exception_text(exc))
-                stderr_tail = self._stderr_tail()
-                if stderr_tail:
-                    detail = f"{detail}; {_redact_connector_secrets(self.connector, stderr_tail)}"
-                self._failure = MCPRuntimeError(f"Falha no MCP {self.connector.name}: {detail[:800]}")
+                self._failure = MCPRuntimeError(
+                    f"Falha no MCP {self.connector.name}: {self._failure_detail(exc)[:800]}"
+                )
         finally:
             self._ready.set()
             self.session = None
@@ -219,14 +277,38 @@ class _PersistentSession:
                     self._errlog.close()
                 self._errlog = None
 
+    def _failure_detail(self, exc: BaseException) -> str:
+        """Build the redacted detail of a failed handshake.
+
+        This runs inside an ``except`` block: it must never raise, because an
+        exception here would leave ``self._failure`` unset and the caller
+        would only see "Handshake MCP de X falhou sem detalhe" — exactly the
+        case (missing module, ``npx: not found``, ``spawn ENOENT``) the user
+        needs the detail for.
+        """
+        try:
+            detail = _exception_text(exc)
+        except Exception:  # pragma: no cover - defensive
+            detail = type(exc).__name__
+        try:
+            stderr_tail = self._stderr_tail()
+        except Exception:  # pragma: no cover - defensive
+            stderr_tail = ""
+        if stderr_tail:
+            detail = f"{detail}; {stderr_tail}"
+        return _redact_connector_secrets(self.connector, detail)
+
     def _stderr_tail(self, lines: int = 3) -> str:
+        """Return the last *lines* lines the MCP child wrote to stderr."""
         if self._errlog is None:
             return ""
         try:
             self._errlog.flush()
             self._errlog.seek(0)
             content = self._errlog.read().strip().splitlines()
-            return content[-lines] if content else ""
+            # A slice, not an index: with one or two lines of stderr an index
+            # raises IndexError and destroys the real error message.
+            return "\n".join(content[-lines:]) if content else ""
         except (OSError, ValueError, AttributeError):  # pragma: no cover
             return ""
 
@@ -338,14 +420,30 @@ async def _with_session(connector: MCPConnector, operation: Callable[[Any], Awai
             if attempt == 1 and (not entry.is_alive() or _is_transport_failure(exc)):
                 await _discard_session(entry)
                 continue
-            detail = _exception_text(exc)
+            # The transport can echo the connector's credentials (an
+            # "Unauthorized: <token>" body, a command line in the error),
+            # so the detail is redacted before it reaches the model.
+            detail = _redact_connector_secrets(connector, _exception_text(exc))
             raise MCPRuntimeError(f"Falha no MCP {connector.name}: {detail[:800]}") from exc
     raise MCPRuntimeError(f"Falha no MCP {connector.name}: sessão indisponível")
 
 
 async def list_connector_tools(connector: MCPConnector, *, timeout: float = 35.0) -> list[dict[str, Any]]:
+    """Return the usable tools advertised by a connector.
+
+    Tools with an illegal name or a malformed ``inputSchema`` are refused:
+    NEXUS could not validate the arguments it forwards for them.
+    """
     result = await _with_session(connector, lambda session: session.list_tools(), timeout=timeout)
-    return [_tool_payload(tool) for tool in getattr(result, "tools", ())]
+    tools, rejected = _validated_tools(result)
+    if rejected:
+        logger.warning(
+            "MCP connector %s advertised %d invalid tool(s): %s",
+            connector.name,
+            len(rejected),
+            "; ".join(f"{name}: {reason}" for name, reason in list(rejected.items())[:5]),
+        )
+    return list(tools.values())
 
 
 async def call_connector_tool(
@@ -386,11 +484,48 @@ async def call_connector_tool(
             parts.append("structured keys: " + ", ".join(structured_keys))
         return "; ".join(parts)[:200]
 
+    def _error_detail(payload: dict[str, Any]) -> str:
+        """Extract the server's own error text from a tool result.
+
+        Without this, every failing MCP tool looks the same ("isError=true")
+        and the reason never reaches the model or the activity log.
+        """
+        parts: list[str] = []
+        for item in payload.get("content") or []:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        if not parts:
+            structured = payload.get("structuredContent")
+            if isinstance(structured, dict) and structured:
+                parts.append(str(structured))
+        return "; ".join(parts)[:600]
+
     async def operation(session: Any) -> Any:
         tools = await session.list_tools()
-        available = {str(getattr(tool, "name", "")) for tool in getattr(tools, "tools", ())}
+        available, rejected = _validated_tools(tools)
+        if tool_name in rejected:
+            raise MCPRuntimeError(
+                f"Tool MCP '{tool_name}' foi rejeitada pelo NEXUS: {rejected[tool_name]}"
+            )
         if tool_name not in available:
             raise MCPRuntimeError(f"Tool MCP '{tool_name}' não está disponível em {connector.name}")
+        # The model-supplied arguments are validated against the schema the
+        # server is advertising right now, exactly like NEXUS' own tools.
+        violations = validate_arguments(available[tool_name]["inputSchema"], args)
+        if violations:
+            raise MCPRuntimeError(
+                f"Argumentos inválidos para a tool MCP '{tool_name}': {'; '.join(violations[:5])}"
+            )
+        # A connector built for one directory must not be able to reach
+        # outside it, even if the server itself would allow it.
+        root_violations = root_boundary_violations(connector.source_root, tool_name, args)
+        if root_violations:
+            raise MCPRuntimeError(
+                f"Argumentos inválidos para a tool MCP '{tool_name}': {'; '.join(root_violations[:5])}"
+            )
         return await session.call_tool(tool_name, arguments=args)
 
     recorded = False
@@ -403,32 +538,45 @@ async def call_connector_tool(
             "structuredContent": getattr(result, "structuredContent", None),
         }
         ok = not payload["isError"]
+        error_detail = "" if ok else _redact_connector_secrets(connector, _error_detail(payload))
+        if ok:
+            call_detail = "Resultado MCP recebido"
+        elif error_detail:
+            call_detail = f"O servidor devolveu isError=true: {error_detail}"
+        else:
+            call_detail = "O servidor devolveu isError=true"
         mcp_store.record_tool_call(
             connector_id,
             tool_name,
             elapsed_ms,
             success=ok,
             activity_id=activity_id,
-            detail="Resultado MCP recebido" if ok else "O servidor devolveu isError=true",
+            detail=call_detail,
             result_shape=_result_shape(payload),
         )
         recorded = True
         if not ok:
+            if error_detail:
+                raise MCPRuntimeError(
+                    f"Tool MCP '{tool_name}' devolveu isError=true: {error_detail}"
+                )
             raise MCPRuntimeError(f"Tool MCP '{tool_name}' devolveu isError=true")
         return {"connector_id": connector_id, "connector": connector.name, "tool": tool_name, "latency_ms": round(elapsed_ms, 1), "result": payload}
     except BaseException as exc:  # noqa: BLE001 - persist cancellation before propagating
         elapsed_ms = (asyncio.get_running_loop().time() - started) * 1000
         if not recorded:
+            if isinstance(exc, asyncio.CancelledError):
+                failure_detail = "Chamada cancelada pelo utilizador/runtime"
+            elif isinstance(exc, MCPRuntimeError):
+                failure_detail = _redact_connector_secrets(connector, str(exc))[:300]
+            else:
+                failure_detail = f"Falha na chamada MCP ({type(exc).__name__})"
             mcp_store.record_tool_call(
                 connector_id,
                 tool_name,
                 elapsed_ms,
                 success=False,
                 activity_id=activity_id,
-                detail=(
-                    "Chamada cancelada pelo utilizador/runtime"
-                    if isinstance(exc, asyncio.CancelledError)
-                    else f"Falha na chamada MCP ({type(exc).__name__})"
-                ),
+                detail=failure_detail,
             )
         raise

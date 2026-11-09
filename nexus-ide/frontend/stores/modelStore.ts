@@ -93,6 +93,7 @@ export const useModelStore = create<ModelStore>((set, get) => ({
       }
 
       if (!catalog) throw lastError ?? new Error("Catálogo de modelos indisponível");
+      if (catalog.error) throw new Error(catalog.error);
       const mapped: Model[] = (catalog.models ?? []).map((m) => ({
         id: m.id,
         name: m.name || m.id,
@@ -103,7 +104,7 @@ export const useModelStore = create<ModelStore>((set, get) => ({
         size_gb: 0,
         provider: m.provider,
         description: m.description,
-        status: "available" as const,
+        status: m.reason === "stale catalog validation" ? "error" as const : "available" as const,
         free: m.free ?? false,
         color: m.color ?? "#64748b",
         inputPricePer1M: m.input_price_per_1m ?? null,

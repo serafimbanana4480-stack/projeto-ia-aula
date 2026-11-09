@@ -13,6 +13,45 @@ code-execution) are scheduled for later tiers.
 from __future__ import annotations
 
 import asyncio
+import sys as _sys
+
+
+def _harden_windows_accept() -> None:
+    """Keep the listening socket alive on transient Windows accept errors.
+
+    CPython's proactor ``_start_serving`` closes the *listening* socket when an
+    accept completes with WinError 64 (ERROR_NETNAME_DELETED: client gave up
+    before accept), leaving the process alive but deaf on its port. Retry those
+    errors inside the accept future so the serve loop never sees them.
+    """
+    if _sys.platform != "win32":
+        return
+    from asyncio import windows_events
+
+    proactor = windows_events.IocpProactor
+    if getattr(proactor, "_nexus_accept_hardened", False):
+        return
+    original = proactor.accept
+    transient = {64, 121, 1236}
+
+    def accept(self, listener):  # type: ignore[no-untyped-def]
+        async def _retry():  # type: ignore[no-untyped-def]
+            while True:
+                try:
+                    return await original(self, listener)
+                except OSError as exc:
+                    if getattr(exc, "winerror", None) in transient and listener.fileno() != -1:
+                        continue
+                    raise
+
+        return asyncio.ensure_future(_retry())
+
+    proactor.accept = accept  # type: ignore[method-assign]
+    proactor._nexus_accept_hardened = True  # type: ignore[attr-defined]
+
+
+_harden_windows_accept()
+import inspect
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -77,6 +116,8 @@ from backend.orchestrator.chat_cancellation import chat_cancellation_middleware
 from backend.orchestrator.routes.autonomous_tasks import router as autonomous_tasks_router
 from backend.orchestrator.routes.cancellation_routes import router as cancellation_router
 from backend.orchestrator.routes.chat import router as chat_router
+from backend.orchestrator.routes.bots import router as bots_router
+from backend.orchestrator.routes.bot_groups import router as bot_groups_router
 from backend.orchestrator.routes.collaboration import router as collaboration_router
 from backend.orchestrator.routes.dashboard import router as dashboard_router
 from backend.orchestrator.routes.email import router as email_router
@@ -292,7 +333,8 @@ async def _cancel_owned_task(task: asyncio.Task[Any] | None) -> None:
     await asyncio.gather(task, return_exceptions=True)
 async def _safe_shutdown(label: str, operation: Any) -> None:
     try:
-        await operation
+        if inspect.isawaitable(operation):
+            await operation
     except BaseException:
         logger.exception("Runtime shutdown failed for %s", label)
 
@@ -428,6 +470,8 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info("Configuration validated successfully for environment: %s", settings.environment)
     init_db()
+    from backend.persistence.bot_group_runs import interrupt_unfinished as interrupt_group_runs
+    interrupt_group_runs()
     recovered_runs = recover_interrupted_runs()
     slog.info(
         "Recovered stale execution runs",
@@ -961,7 +1005,12 @@ app.add_middleware(
     allow_origins=settings.get_allowed_origins_list(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Nexus-Request-Id"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Idempotency-Key",
+        "X-Nexus-Request-Id",
+    ],
     expose_headers=["X-Nexus-Request-Id"],
 )
 
@@ -1015,6 +1064,8 @@ app.include_router(admin_router)
 if _BROWSER_AVAILABLE:
     app.include_router(browser_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
+app.include_router(bots_router, prefix="/api")
+app.include_router(bot_groups_router, prefix="/api")
 app.include_router(cancellation_router)
 app.include_router(dashboard_router, prefix="/api")
 app.include_router(email_router, prefix="/api")
@@ -1059,8 +1110,9 @@ app.include_router(logs_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(neural_dashboard_router, prefix="/api")
 app.include_router(omega_router, prefix="/api")
-app.include_router(tasks_router, prefix="/api")
+# Register fixed autonomous-task paths before the dashboard's /tasks/{task_id} catch-all.
 app.include_router(autonomous_tasks_router, prefix="/api")
+app.include_router(tasks_router, prefix="/api")
 app.include_router(mission_router, prefix="/api")
 app.include_router(knowledge_router, prefix="/api")
 app.include_router(errors_router, prefix="/api")

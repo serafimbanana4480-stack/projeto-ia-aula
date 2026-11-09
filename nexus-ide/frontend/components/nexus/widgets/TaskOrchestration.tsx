@@ -65,7 +65,7 @@ function TaskRow({ task }: { task: Task }) {
         <div className="flex items-start justify-between gap-2 mb-1">
           <p className="text-[12px] font-semibold text-slate-200 leading-tight">{task.title}</p>
           {(task.retries ?? 0) > 0 && (
-            <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 font-semibold">
+            <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-nexus-accent3 font-semibold">
               tentativa {task.retries}
             </span>
           )}
@@ -76,7 +76,7 @@ function TaskRow({ task }: { task: Task }) {
         {task.kind === "plan" && task.completedSteps !== undefined && task.totalSteps !== undefined && (
           <p className="mb-2 text-[10px] tabular-nums text-slate-400">
             {task.completedSteps}/{task.totalSteps} etapas
-            {task.approvalStatus === "awaiting_approval" && <span className="ml-2 text-amber-300">Rever no chat</span>}
+            {task.approvalStatus === "awaiting_approval" && <span className="ml-2 text-nexus-accent3">Rever no chat</span>}
           </p>
         )}
         <div className="flex items-center gap-3 flex-wrap">
@@ -171,11 +171,11 @@ export default function TaskOrchestration() {
       <div className="border-b border-slate-800/60 px-3 py-3 sm:px-4">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <ListChecks size={13} className="text-amber-400" />
+            <ListChecks size={13} className="text-nexus-accent3" />
             <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Tarefas</span>
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]">
-            <span className="flex items-center gap-1 text-amber-400"><ArrowUp size={10} /> {displayCount(byStatus.running.length)} em curso</span>
+            <span className="flex items-center gap-1 text-nexus-accent3"><ArrowUp size={10} /> {displayCount(byStatus.running.length)} em curso</span>
             <span className="flex items-center gap-1 text-slate-400"><Clock size={10} /> {displayCount(byStatus.queued.length + byStatus.approved.length + byStatus.awaiting_approval.length)} na fila</span>
             <span className="flex items-center gap-1 text-slate-400"><AlertTriangle size={10} /> {displayCount(byStatus.blocked.length)} bloqueadas</span>
           </div>
@@ -207,14 +207,14 @@ export default function TaskOrchestration() {
       {/* Task groups */}
       <div className="flex-1 overflow-y-auto">
         {error && (
-          <p role="status" className="border-b border-rose-500/20 px-4 py-2 text-[10px] text-rose-300">
+          <p role="status" className="border-b border-rose-500/20 px-4 py-2 text-[10px] text-nexus-accent4">
             {allTasks.length > 0
               ? "Não foi possível atualizar as tarefas. A mostrar o último estado recebido."
               : "Não foi possível obter as tarefas agora."}
           </p>
         )}
         {warnings.length > 0 && (
-          <p role="status" className="border-b border-amber-500/20 px-4 py-2 text-[10px] text-amber-200">
+          <p role="status" className="border-b border-amber-500/20 px-4 py-2 text-[10px] text-nexus-accent3">
             Parte dos dados está desatualizada: {warnings.join(" ")}
           </p>
         )}

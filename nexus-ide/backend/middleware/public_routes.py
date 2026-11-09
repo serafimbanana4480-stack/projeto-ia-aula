@@ -52,6 +52,12 @@ PUBLIC_HTTP_ROUTES: frozenset[tuple[str, str]] = frozenset(
         # every other route requires.  ``/api/auth/me`` and
         # ``/api/auth/logout`` are deliberately absent: they act on an
         # authenticated session.
+        #
+        # ``/api/auth/register`` stays public even though self-registration
+        # is disabled outside development (``allow_self_registration`` in
+        # backend/config/settings.py): the route has to be reachable to
+        # answer 403 with that reason.  A 401 from the edge would say
+        # "you need a token", which is not what is wrong with the request.
         ("POST", "/api/auth/login"),
         ("POST", "/api/auth/register"),
         ("POST", "/api/auth/refresh"),

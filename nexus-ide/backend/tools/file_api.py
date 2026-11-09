@@ -1,8 +1,8 @@
 """Unified file API — read, write, list, delete, search.
 
-Supports both relative paths (resolved against *project_path* and validated
-via sandbox rules) and absolute paths (validated via
-``backend.core.workspace_security``).
+Supports relative and absolute paths, both confined to *project_path* and
+validated against the global workspace security rules. Dedicated absolute
+file tools call ``backend.core.workspace_fs`` directly.
 
 This module is the **single source of truth** for filesystem operations
 inside the NEXUS tool layer.  Legacy modules such as
@@ -98,10 +98,14 @@ async def read(
 ) -> dict[str, Any]:
     """Read a file. Supports absolute and relative paths."""
     if _is_absolute(path):
-        blocked, reason = _is_blocked_path(_path_for_security_check(path))
+        try:
+            full_path = _validate_relative_path(project_path, path)
+        except PermissionError as exc:
+            return {"error": str(exc)}
+        blocked, reason = _is_blocked_path(_path_for_security_check(str(full_path)))
         if blocked:
             return {"error": reason}
-        return await read_file_absolute(path)
+        return await read_file_absolute(str(full_path))
 
     # Relative path — sandbox + lock
     try:
@@ -130,9 +134,8 @@ async def read_multiple(
 ) -> dict[str, Any]:
     """Read multiple files in one call. Supports absolute and relative paths.
 
-    Relative paths are resolved against *project_path* and validated against
-    the project sandbox.  Absolute paths are validated against the global
-    allowed-base security rules.
+    All paths are resolved against *project_path* and validated against the
+    project sandbox. Absolute-path tools use ``workspace_fs`` directly.
     """
     if not paths:
         return {
@@ -147,7 +150,17 @@ async def read_multiple(
     project_root = Path(project_path).expanduser().resolve()
     for path in paths:
         if _is_absolute(path):
-            blocked, reason = _is_blocked_path(_path_for_security_check(path))
+            try:
+                full_path = _validate_relative_path_under(project_root, path)
+            except PermissionError as exc:
+                return {
+                    "files": {},
+                    "errors": {path: str(exc)},
+                    "read_count": 0,
+                    "skipped_count": len(paths) - 1,
+                    "total_bytes": 0,
+                }
+            blocked, reason = _is_blocked_path(_path_for_security_check(str(full_path)))
             if blocked:
                 return {
                     "files": {},
@@ -156,7 +169,7 @@ async def read_multiple(
                     "skipped_count": len(paths) - 1,
                     "total_bytes": 0,
                 }
-            resolved_paths.append(path)
+            resolved_paths.append(str(full_path))
         else:
             try:
                 full_path = _validate_relative_path_under(project_root, path)
@@ -199,7 +212,10 @@ async def write(
     those extras.
     """
     if _is_absolute(path):
-        full_path = path
+        try:
+            full_path = str(_validate_relative_path(project_path, path))
+        except PermissionError as exc:
+            return {"error": str(exc)}
     else:
         try:
             full_path = str(_validate_relative_path(project_path, path))
@@ -222,16 +238,16 @@ async def write(
         logger.warning("Failed to record rollback snapshot: %s", exc)
 
     if _is_absolute(path):
-        blocked, reason = _is_blocked_path(_path_for_security_check(path))
+        blocked, reason = _is_blocked_path(_path_for_security_check(full_path))
         if blocked:
             return {"error": reason}
-        if Path(path).suffix.lower() in _BLOCKED_EXTENSIONS:
+        if Path(full_path).suffix.lower() in _BLOCKED_EXTENSIONS:
             return {
                 "error": (
-                    f"Writing files with extension '{Path(path).suffix}' is blocked for security"
+                    f"Writing files with extension '{Path(full_path).suffix}' is blocked for security"
                 )
             }
-        return await write_file_absolute(path, content)
+        return await write_file_absolute(full_path, content)
 
     # Relative path — sandbox + lock + blocked ext
     if Path(full_path).suffix.lower() in _BLOCKED_EXTENSIONS:
@@ -259,10 +275,14 @@ async def list_files(
 ) -> dict[str, Any]:
     """List directory contents. Supports absolute and relative paths."""
     if _is_absolute(path):
-        blocked, reason = _is_blocked_path(_path_for_security_check(path))
+        try:
+            full_path = _validate_relative_path(project_path, path)
+        except PermissionError as exc:
+            return {"error": str(exc)}
+        blocked, reason = _is_blocked_path(_path_for_security_check(str(full_path)))
         if blocked:
             return {"error": reason}
-        return await list_dir_absolute(path, recursive=recursive)
+        return await list_dir_absolute(str(full_path), recursive=recursive)
 
     # Relative path — sandbox
     try:
@@ -281,10 +301,16 @@ async def delete(
 ) -> dict[str, Any]:
     """Delete a file. Supports absolute and relative paths."""
     if _is_absolute(path):
-        blocked, reason = _is_blocked_path(_path_for_security_check(path))
+        try:
+            full_path = _validate_relative_path(project_path, path)
+        except PermissionError as exc:
+            return {"error": str(exc)}
+        blocked, reason = _is_blocked_path(_path_for_security_check(str(full_path)))
         if blocked:
             return {"error": reason}
-        return await delete_file_absolute(path, move_to_trash=move_to_trash, auth_token=auth_token)
+        return await delete_file_absolute(
+            str(full_path), move_to_trash=move_to_trash, auth_token=auth_token
+        )
 
     # Relative path — sandbox
     try:
@@ -314,10 +340,14 @@ async def search(
     For absolute paths the cleaner ``workspace_fs`` format is returned.
     """
     if _is_absolute(path):
-        blocked, reason = _is_blocked_path(_path_for_security_check(path))
+        try:
+            full_path = _validate_relative_path(project_path, path)
+        except PermissionError as exc:
+            return {"error": str(exc)}
+        blocked, reason = _is_blocked_path(_path_for_security_check(str(full_path)))
         if blocked:
             return {"error": reason}
-        return await search_files_absolute(query, path, max_results=max_results)
+        return await search_files_absolute(query, str(full_path), max_results=max_results)
 
     # Relative path — use WorkspaceManager for legacy result format
     manager = WorkspaceManager(project_path)

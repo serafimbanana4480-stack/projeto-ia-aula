@@ -246,6 +246,16 @@ class TestIdempotency:
         assert second is not None
         assert second.run_id == first.run_id
 
+    def test_new_explicit_key_does_not_adopt_same_goal(self, temp_db: None) -> None:
+        first = RunLifecycle.begin(
+            goal="Mesma pergunta", session_id="s", idempotency_key="request-1"
+        )
+        second = RunLifecycle.begin(
+            goal="Mesma pergunta", session_id="s", idempotency_key="request-2"
+        )
+        assert first is not None and second is not None
+        assert first.run_id != second.run_id
+
     def test_different_message_creates_a_new_run(self, temp_db: None) -> None:
         first = RunLifecycle.begin(goal="Uma coisa", session_id="s")
         second = RunLifecycle.begin(goal="Outra coisa", session_id="s")
@@ -253,9 +263,22 @@ class TestIdempotency:
         assert first.run_id != second.run_id
 
     def test_finished_run_is_not_resurrected(self, temp_db: None) -> None:
-        first = RunLifecycle.begin(goal="Já acabou", session_id="s", idempotency_key="k")
+        first = RunLifecycle.begin(
+            goal="Já acabou",
+            session_id="s",
+            idempotency_key="k",
+            definition_of_done=["resposta entregue"],
+        )
         assert first is not None
-        first.finish([{"requirement": "resposta", "verdict": "PASS", "evidence": {}}])
+        first.finish(
+            [
+                {
+                    "requirement": "resposta entregue",
+                    "verdict": "PASS",
+                    "evidence": {"source": "assistant_response"},
+                }
+            ]
+        )
         assert _coordinator().get_run(first.run_id).state is RunState.COMPLETED
 
         second = RunLifecycle.begin(goal="Já acabou", session_id="s", idempotency_key="k")
@@ -276,7 +299,13 @@ class TestClosingTheRun:
         assert _coordinator().get_run(lifecycle.run_id).state is not RunState.COMPLETED
 
         assert lifecycle.finish(
-            [{"requirement": "resposta entregue ao utilizador", "verdict": "PASS", "evidence": {}}]
+            [
+                {
+                    "requirement": "resposta entregue ao utilizador",
+                    "verdict": "PASS",
+                    "evidence": {"source": "verified_response"},
+                }
+            ]
         )
         assert _coordinator().get_run(lifecycle.run_id).state is RunState.COMPLETED
 
@@ -301,6 +330,69 @@ class TestClosingTheRun:
 class TestPrimaryLaneHooks:
     """The chat_primary wrappers that translate run facts into checkpoints."""
 
+    def test_successful_write_keeps_target_path_for_later_verification(self) -> None:
+        from backend.runtime.events import RuntimeEvent
+        from backend.runtime.primary import (
+            AgentSignal,
+            AgentSignalKind,
+            PrimaryLoop,
+            PrimaryTurn,
+        )
+
+        loop = PrimaryLoop(run_id="r", query="cria uma nota", stream=None)
+        turn = PrimaryTurn(query="cria uma nota")
+
+        def emit(event_type: Any, **payload: Any) -> RuntimeEvent:
+            return loop.events.emit(event_type, agent_id="NEXUS", **payload)
+
+        loop._handle_signal(
+            AgentSignal(
+                AgentSignalKind.TOOL_CALL,
+                tool_name="write_file",
+                payload={"path": "notas.txt", "content": "nota"},
+            ),
+            turn,
+            emit,
+            [],
+        )
+        loop._handle_signal(
+            AgentSignal(
+                AgentSignalKind.TOOL_RESULT,
+                tool_name="write_file",
+                payload={"result": "ficheiro escrito"},
+                ok=True,
+            ),
+            turn,
+            emit,
+            [],
+        )
+
+        assert loop._changed_files == ["notas.txt"]
+
+    @pytest.mark.asyncio
+    async def test_non_code_artifact_does_not_run_the_project_test_suite(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from backend.orchestrator.routes import chat_primary
+        from backend.runtime.primary import PrimaryTurn, VerificationRequest
+
+        async def unexpected_test_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("a text artifact must not start the project test suite")
+
+        monkeypatch.setattr(chat_primary, "execute_tool", unexpected_test_run)
+        result = await chat_primary._verify(
+            VerificationRequest(
+                turn=PrimaryTurn(query="cria uma nota"),
+                changed_files=("notas.txt",),
+            ),
+            session_id="non-code-verification",
+            project_path=".",
+        )
+
+        assert result.ran is False
+        assert result.ok is True
+        assert "não aplicáveis" in result.summary
+
     def test_dod_results_require_an_answer(self, temp_db: None) -> None:
         from backend.orchestrator.routes.chat_primary import _primary_dod_results
         from backend.runtime.primary import PrimaryLoop, VerificationResult
@@ -311,7 +403,38 @@ class TestPrimaryLaneHooks:
 
         results = {item["requirement"]: item for item in _primary_dod_results(loop)}
         assert results["resposta entregue ao utilizador"]["verdict"] == "FAIL"
-        assert results["verificação sem falhas reportada"]["verdict"] == "PASS"
+        assert results["verificação sem falhas reportada"]["verdict"] == "N/A"
+
+    def test_changed_code_without_test_evidence_fails_dod(self, temp_db: None) -> None:
+        from backend.orchestrator.routes.chat_primary import _primary_dod_results
+        from backend.runtime.primary import PrimaryLoop, VerificationResult
+
+        loop = PrimaryLoop(run_id="r", query="corrige", stream=None)
+        loop.outcome.answer = "Corrigi o ficheiro."
+        loop.outcome.changed_files = ("backend/app.py",)
+        loop.outcome.verification = VerificationResult(
+            ran=False, ok=True, summary="nenhum teste executado"
+        )
+
+        results = {item["requirement"]: item for item in _primary_dod_results(loop)}
+        assert results["verificação sem falhas reportada"]["verdict"] == "FAIL"
+
+    def test_non_code_artifact_without_test_evidence_is_not_failed_dod(
+        self, temp_db: None
+    ) -> None:
+        from backend.orchestrator.routes.chat_primary import _primary_dod_results
+        from backend.runtime.primary import PrimaryLoop, VerificationResult
+
+        loop = PrimaryLoop(run_id="r", query="cria uma nota", stream=None)
+        loop.outcome.answer = "Criei notas.txt."
+        loop.outcome.changed_files = ("notas.txt",)
+        loop.telemetry.files_changed = 1
+        loop.outcome.verification = VerificationResult(
+            ran=False, ok=True, summary="testes automáticos não aplicáveis"
+        )
+
+        results = {item["requirement"]: item for item in _primary_dod_results(loop)}
+        assert results["verificação sem falhas reportada"]["verdict"] == "N/A"
 
     def test_red_verification_blocks_completion(self, temp_db: None) -> None:
         from backend.orchestrator.routes.chat_primary import _primary_dod_results

@@ -120,30 +120,34 @@ export default function MissionControlPage() {
       <div className="sticky top-0 z-10 border-b border-nexus-border bg-nexus-panel/90 px-4 py-2 backdrop-blur">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <h1 className="text-sm font-bold tracking-wide">Mission Control</h1>
-            <span className="rounded bg-nexus-accent/10 px-1.5 py-0.5 text-[10px] text-nexus-accent">
-              Fase 6
-            </span>
+            <h1 className="text-sm font-bold tracking-wide text-nexus-text">Controlo de missões</h1>
           </div>
           <div className="flex items-center gap-3 text-xs text-nexus-muted">
             <button
               onClick={fetchAll}
-              className="rounded border border-nexus-border bg-nexus-card px-2 py-1 text-[10px] hover:border-nexus-accent/30 transition-colors"
+              className="rounded border border-nexus-border bg-nexus-card px-2 py-1 text-[10px] text-nexus-text transition-colors hover:border-nexus-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent"
             >
-              Refresh
+              Atualizar
             </button>
-            <span className="hidden sm:inline">Updated {lastUpdate}</span>
+            <span className="hidden sm:inline">
+              Atualizado {new Date(lastUpdate).toLocaleTimeString("pt-PT")}
+            </span>
           </div>
         </div>
       </div>
 
       {/* Backend offline banner */}
       {!backendOnline && (
-        <div className="mx-4 mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2">
-          <div className="flex items-center gap-2 text-xs text-red-400">
-            <WifiOff className="h-3.5 w-3.5" />
-            <span className="font-medium">Backend Offline</span>
-            <span className="text-red-300">— Dados em tempo real indisponíveis. Tentando reconectar...</span>
+        <div
+          role="alert"
+          className="mx-4 mt-4 rounded-lg border border-nexus-accent4/30 bg-nexus-accent4/10 px-3 py-2"
+        >
+          <div className="flex items-center gap-2 text-xs text-nexus-accent4">
+            <WifiOff className="h-3.5 w-3.5" aria-hidden="true" />
+            <span className="font-medium">Backend offline</span>
+            <span className="text-nexus-accent4/80">
+              Dados em tempo real indisponíveis. A tentar restabelecer a ligação…
+            </span>
           </div>
         </div>
       )}

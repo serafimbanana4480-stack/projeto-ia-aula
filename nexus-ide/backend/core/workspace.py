@@ -517,7 +517,7 @@ async def get_system_info() -> dict[str, Any]:
             "percent_used": disk.percent,
         }
 
-        info["cpu_percent"] = psutil.cpu_percent(interval=0.5)
+        info["cpu_percent"] = await asyncio.to_thread(psutil.cpu_percent, 0.5)
     except ImportError:
         info["ram"] = "psutil not installed"
         info["disk"] = "psutil not installed"
@@ -675,30 +675,14 @@ class WorkspaceManager:
     def __init__(self, project_path: str = "."):
         self.project_path = Path(project_path).resolve()
 
-    def _resolve(self, path: str) -> str:
-        """Resolve *path* relative to ``project_path`` if it is not absolute."""
-        if Path(path).is_absolute():
-            blocked, reason = _is_blocked_path(path)
-            if blocked:
-                raise PermissionError(f"Blocked path: {reason}")
-            return str(Path(path).expanduser().resolve())
-        resolved = (self.project_path / path).expanduser().resolve()
-        try:
-            resolved.relative_to(self.project_path)
-        except ValueError:
-            raise PermissionError(
-                f"Access not allowed — path {resolved} is outside project root {self.project_path}"
-            ) from None
-        return str(resolved)
+    def _confine_resolved(self, resolved: Path) -> Path:
+        """Reject a resolved path that leaves the project this manager is bound to.
 
-    def _resolve_path(self, path: str) -> Path:
-        """Return a :class:`Path` resolved relative to ``project_path``."""
-        if Path(path).is_absolute():
-            blocked, reason = _is_blocked_path(path)
-            if blocked:
-                raise PermissionError(f"Blocked path: {reason}")
-            return Path(path).expanduser().resolve()
-        resolved = (self.project_path / path).expanduser().resolve()
+        An absolute path used to skip this check and was accepted whenever it
+        was not a blocked system directory. That let a model-supplied path
+        under the user profile read or write a folder that was not the
+        selected project.
+        """
         try:
             resolved.relative_to(self.project_path)
         except ValueError:
@@ -706,6 +690,27 @@ class WorkspaceManager:
                 f"Access not allowed — path {resolved} is outside project root {self.project_path}"
             ) from None
         return resolved
+
+    def _resolve(self, path: str) -> str:
+        """Resolve *path* relative to ``project_path`` if it is not absolute."""
+        if Path(path).is_absolute():
+            blocked, reason = _is_blocked_path(path)
+            if blocked:
+                raise PermissionError(f"Blocked path: {reason}")
+            resolved = self._confine_resolved(Path(path).expanduser().resolve())
+            return str(resolved)
+        resolved = (self.project_path / path).expanduser().resolve()
+        return str(self._confine_resolved(resolved))
+
+    def _resolve_path(self, path: str) -> Path:
+        """Return a :class:`Path` resolved relative to ``project_path``."""
+        if Path(path).is_absolute():
+            blocked, reason = _is_blocked_path(path)
+            if blocked:
+                raise PermissionError(f"Blocked path: {reason}")
+            return self._confine_resolved(Path(path).expanduser().resolve())
+        resolved = (self.project_path / path).expanduser().resolve()
+        return self._confine_resolved(resolved)
 
     def _validate_path(self, path: Path, _operation: str = "") -> None:
         """Raise ``PermissionError`` if *path* is outside ``project_path``."""
@@ -1270,6 +1275,7 @@ register_tool(
     ToolSpec(
         name="git_init",
         description="Initialise a git repository at an absolute path",
+        risk_level="high",
         schema={
             "type": "object",
             "properties": {"path": {"type": "string", "description": "Absolute directory path"}},
@@ -1283,6 +1289,7 @@ register_tool(
     ToolSpec(
         name="git_clone",
         description="Clone a git repository into an absolute path",
+        risk_level="high",
         schema={
             "type": "object",
             "properties": {

@@ -37,6 +37,7 @@ from backend.runtime.dead_letter_service import (
     classify_error,
 )
 from backend.runtime.run_coordinator import RunCoordinator
+from backend.token_management import ContextOverflowError
 
 
 @pytest.fixture
@@ -132,6 +133,34 @@ class TestClassifyError:
         assert classify_error(ValueError("bad"))["reason"]
         assert classify_error("429 slow down")["reason"]
 
+    def test_a_context_overflow_is_transient_because_the_agent_shrinks(self) -> None:
+        """An overflow is the world asking for less input, not a defect.
+
+        The ReAct agent answers it with an emergency-shrink and the run
+        continues on the reduced context (``AgentBase._emergency_shrink_context``),
+        so it belongs with the rate limits, not with the schema errors.
+        """
+        verdict = classify_error(
+            ContextOverflowError("context overflow: 9000 tokens + 512 output reserve")
+        )
+
+        assert verdict["error_class"] == "contextoverflowerror"
+        assert verdict["recoverability"] == RECOVERABILITY_TRANSIENT
+        assert verdict["retry_after"] and verdict["retry_after"] > 0
+
+    def test_context_overflow_is_transient_while_its_base_class_stays_permanent(self) -> None:
+        """``ContextOverflowError`` subclasses ``ValueError`` — and is not
+        classified by its base: class names are matched exactly, so the
+        permanent ``ValueError`` verdict is untouched by the new entry."""
+        assert issubclass(ContextOverflowError, ValueError)
+
+        assert classify_error(ValueError("bad schema"))["recoverability"] == (
+            RECOVERABILITY_PERMANENT
+        )
+        assert classify_error("ContextOverflowError")["recoverability"] == (
+            RECOVERABILITY_TRANSIENT
+        )
+
 
 # ───── parking and reading ───────────────────────────────────────────────
 
@@ -154,6 +183,65 @@ class TestParkAndInspect:
 
         assert entry["recoverability"] == RECOVERABILITY_PERMANENT
         assert entry["retry_after"] is None
+
+    def test_parking_classifies_the_traceback_and_not_only_the_class_name(
+        self, service: DeadLetterService
+    ) -> None:
+        """Regression: a 429 parked with its traceback is retryable, not unknown.
+
+        ``ProviderHTTPStatusError`` is not a known transient class name, so the
+        verdict used to come from ``error_class`` alone — ``unknown``, handed to
+        a human — even though the traceback carried the 429 the classifier reads.
+        """
+        entry = _park(
+            service,
+            error="ProviderHTTPStatusError",
+            sanitized_traceback="OpenAI-compatible API error 429: Too Many Requests",
+        )
+
+        assert entry["recoverability"] == RECOVERABILITY_TRANSIENT
+        assert entry["retry_after"], "a rate limit must say when to try again"
+        assert entry["classification"]["recoverability"] == RECOVERABILITY_TRANSIENT
+        assert service.list(recoverability=RECOVERABILITY_TRANSIENT) == [entry]
+
+    def test_a_permanent_class_still_wins_over_a_transient_traceback(
+        self, service: DeadLetterService
+    ) -> None:
+        """Regression: reading the traceback must not promote a schema defect.
+
+        The class is decided first, so a ValueError/TypeError/SchemaError whose
+        traceback carries a retryable status stays permanent — a retry repeats it.
+        """
+        cases = (
+            ("ValueError", "invalid schema for tool arguments; upstream answered 503"),
+            ("TypeError", "argument 'path' must be str (connection reset by peer)"),
+            ("SchemaError", "result schema mismatch: provider returned 502"),
+        )
+        for index, (error_class, traceback_text) in enumerate(cases):
+            entry = _park(
+                service,
+                error=error_class,
+                sanitized_traceback=traceback_text,
+                task_id=f"task-{index}",
+            )
+
+            assert entry["recoverability"] == RECOVERABILITY_PERMANENT, error_class
+            assert entry["retry_after"] is None, error_class
+            assert entry["classification"]["recoverability"] == RECOVERABILITY_PERMANENT
+
+    def test_a_context_overflow_is_parked_as_retryable(
+        self, service: DeadLetterService
+    ) -> None:
+        """Regression: an overflow the agent can shrink out of is transient."""
+        entry = _park(
+            service,
+            error="ContextOverflowError",
+            sanitized_traceback="context length exceeded",
+        )
+
+        assert entry["recoverability"] == RECOVERABILITY_TRANSIENT
+        assert entry["retry_after"], "a shrink-and-continue failure is worth retrying"
+        assert entry["classification"]["error_class"] == "contextoverflowerror"
 
     def test_the_caller_can_override_the_classification(
         self, service: DeadLetterService
@@ -212,6 +300,27 @@ class TestParkAndInspect:
             state=None, recoverability=RECOVERABILITY_TRANSIENT
         )
         assert [entry["id"] for entry in found] == [entry_id]
+
+    def test_an_unclassified_entry_reads_its_traceback_as_evidence(
+        self, coordinator: RunCoordinator
+    ) -> None:
+        """A raw producer's 429 traceback counts as evidence too, so the row
+        reads as retryable instead of unexplained."""
+        entry_id = coordinator.enqueue_dead_letter(
+            {
+                "task_id": "task-raw",
+                "error_class": "ProviderHTTPStatusError",
+                "sanitized_traceback": "OpenAI-compatible API error 503: Service Unavailable",
+            }
+        )
+        service = DeadLetterService(coordinator)
+
+        inspected = service.inspect(entry_id)
+
+        assert inspected["recoverability"] == RECOVERABILITY_TRANSIENT
+        assert service.list(state=None, recoverability=RECOVERABILITY_TRANSIENT) == [
+            inspected
+        ]
 
 
 # ───── the operator cycle ────────────────────────────────────────────────

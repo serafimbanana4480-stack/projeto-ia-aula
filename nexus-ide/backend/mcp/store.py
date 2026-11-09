@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 
 from backend.mcp.templates import get_template
+from backend.mcp.validation import is_valid_input_schema, is_valid_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,62 @@ def tool_permission_fingerprint(tool: dict[str, Any]) -> str:
     }
     encoded = json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def redact_connector_secrets(connector: MCPConnector, text: str) -> str:
+    """Remove a connector's credentials from any text bound for the user.
+
+    Every message that can reach the model, the activity log, or the
+    application log goes through this: the connector's own environment, the
+    secret command-line arguments, and the forwarded host variables are all
+    credentials of this connector.
+    """
+    if not text:
+        return text
+    secrets = [value for value in connector.env.values() if value]
+    secrets.extend(
+        connector.args[index]
+        for index in connector.secret_arg_indexes
+        if 0 <= index < len(connector.args) and connector.args[index]
+    )
+    secrets.extend(os.environ.get(name, "") for name in connector.pass_through_env)
+    for secret in sorted({value for value in secrets if value}, key=len, reverse=True):
+        text = text.replace(secret, "[REDACTED]")
+    return text
+
+
+def validate_remote_url(raw_url: str) -> str:
+    """Validate a remote MCP URL against the public-address policy.
+
+    A remote connector is an outbound request made by the NEXUS host, so it
+    follows the same policy as every other remote call in the product
+    (``backend/tools/safe_http.py``): only public HTTP/S addresses, no
+    credentials in the URL, and the standard ports. Without this a connector
+    could be pointed at the NEXUS backend itself, at a loopback service, or
+    at the cloud metadata service.
+    """
+    from backend.tools.safe_http import normalize_public_http_url
+
+    candidate = (raw_url or "").strip()
+    if not candidate:
+        raise ValueError("URL MCP remoto inválido: indica um endereço HTTP/S público")
+    try:
+        parsed_url = httpx.URL(candidate)
+    except httpx.InvalidURL as exc:
+        raise ValueError("URL MCP remoto inválido: usa HTTP/S sem credenciais na URL") from exc
+    if (
+        parsed_url.scheme not in {"http", "https"}
+        or not parsed_url.host
+        or parsed_url.username
+        or parsed_url.password
+        or parsed_url.query
+        or parsed_url.fragment
+    ):
+        raise ValueError("URL MCP remoto inválido: usa HTTP/S sem credenciais na URL")
+    try:
+        return normalize_public_http_url(candidate)
+    except ValueError as exc:
+        raise ValueError(f"URL MCP remoto inválido: {exc}") from exc
 
 
 @dataclass
@@ -442,20 +499,7 @@ class MCPConnectorStore:
             extra_args = params.get("args", "")
             args = extra_args.split() if isinstance(extra_args, str) else list(extra_args)
         elif template_id == "http-remote":
-            url = params.get("url", "")
-            try:
-                parsed_url = httpx.URL(url)
-            except httpx.InvalidURL as exc:
-                raise ValueError("URL MCP remoto inválido: usa HTTP/S sem credenciais na URL") from exc
-            if (
-                parsed_url.scheme not in {"http", "https"}
-                or not parsed_url.host
-                or parsed_url.username
-                or parsed_url.password
-                or parsed_url.query
-                or parsed_url.fragment
-            ):
-                raise ValueError("URL MCP remoto inválido: usa HTTP/S sem credenciais na URL")
+            url = validate_remote_url(params.get("url", ""))
         elif template_id == "projectmind":
             root_path = params.get("root_path", "")
             command = self._projectmind_python(root_path)
@@ -516,6 +560,11 @@ class MCPConnectorStore:
                         continue
                     merged[str(env_name)] = str(env_value)
                 connector.env = merged
+                continue
+            if key == "url" and value is not None:
+                # A remote URL is re-validated: the public-address policy
+                # must hold for every connector, not only for new ones.
+                connector.url = validate_remote_url(str(value))
                 continue
             if hasattr(connector, key) and value is not None:
                 setattr(connector, key, value)
@@ -700,7 +749,11 @@ class MCPConnectorStore:
                 "tools": tools,
             }
         except Exception as exc:
-            return {"status": "error", "detail": f"Handshake falhou: {str(exc)[:240]}"}
+            # The handshake error can quote the command line or the
+            # environment of the connector: never let a credential reach
+            # the API response or the logs.
+            detail = redact_connector_secrets(connector, str(exc))[:240]
+            return {"status": "error", "detail": f"Handshake falhou: {detail}"}
 
     @staticmethod
     def _probe_projectmind(connector: MCPConnector) -> dict[str, Any]:
@@ -774,7 +827,15 @@ class MCPConnectorStore:
             re.MULTILINE,
         )
         return [
-            {"name": match.group("name"), "title": match.group("title"), "calls": 0, "success_rate": None}
+            {
+                "name": match.group("name"),
+                "title": match.group("title"),
+                "description": "",
+                "inputSchema": {"type": "object", "properties": {}},
+                "annotations": {},
+                "calls": 0,
+                "success_rate": None,
+            }
             for match in pattern.finditer(source)
         ]
 
@@ -799,7 +860,9 @@ class MCPConnectorStore:
                     "success_rate": previous.get(str(item.get("name")), {}).get("success_rate"),
                 }
                 for item in discovered
-                if isinstance(item, dict) and item.get("name")
+                if isinstance(item, dict)
+                and is_valid_tool_name(item.get("name"))
+                and is_valid_input_schema(item.get("inputSchema") or {})
             ]
         connector.tools = self._discover_tools(connector) or connector.tools
         self._save()

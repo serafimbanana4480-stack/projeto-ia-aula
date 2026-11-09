@@ -99,10 +99,10 @@ type Tone = "neutral" | "accent" | "success" | "warning" | "danger" | "info";
 const BADGE_TONE: Record<Tone, string> = {
   neutral: "text-nexus-muted bg-white/[0.05] border-white/[0.08]",
   accent: "text-[var(--nx-accent-bright)] bg-[rgba(124,106,251,0.12)] border-[rgba(124,106,251,0.28)]",
-  success: "text-emerald-300 bg-emerald-400/10 border-emerald-400/25",
-  warning: "text-amber-300 bg-amber-400/10 border-amber-400/25",
-  danger: "text-rose-300 bg-rose-400/10 border-rose-400/25",
-  info: "text-cyan-300 bg-cyan-400/10 border-cyan-400/25",
+  success: "text-nexus-accent2 bg-emerald-400/10 border-emerald-400/25",
+  warning: "text-nexus-accent3 bg-amber-400/10 border-amber-400/25",
+  danger: "text-nexus-accent4 bg-rose-400/10 border-rose-400/25",
+  info: "text-nexus-cyan bg-cyan-400/10 border-cyan-400/25",
 };
 
 export function Badge({
@@ -134,9 +134,9 @@ export function Badge({
 const DOT_TONE: Record<Tone, string> = {
   neutral: "bg-nexus-faint",
   accent: "bg-[var(--nx-accent)]",
-  success: "bg-emerald-400",
-  warning: "bg-amber-400",
-  danger: "bg-rose-400",
+  success: "bg-nexus-accent2",
+  warning: "bg-nexus-accent3",
+  danger: "bg-nexus-accent4",
   info: "bg-cyan-400",
 };
 

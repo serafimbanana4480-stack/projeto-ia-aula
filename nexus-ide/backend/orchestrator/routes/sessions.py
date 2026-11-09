@@ -31,6 +31,8 @@ from backend.persistence.db import (
     delete_session,
     get_messages_page,
     get_session_for_user,
+    get_session_run,
+    get_subagent_execution,
     list_session_runs,
     list_sessions_with_counts,
     update_session,
@@ -38,9 +40,81 @@ from backend.persistence.db import (
 from backend.persistence.db import (
     search_sessions as search_session_rows,
 )
+from backend.tools.todo_tools import read_session_todo_snapshot, todo_write
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+
+
+@router.get("/{session_id}/subagent-activity")
+async def subagent_activity_endpoint(
+    session_id: str,
+    after_seq: int = Query(default=0, ge=0),
+    limit: int = Query(default=500, ge=1, le=1000),
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Read one child's real events from the parent run's ordered journal."""
+    from backend.orchestrator.routes.chat_primary import runtime_event_to_stream_events
+    from backend.runtime.events import (
+        RuntimeEvent,
+        get_active_run_event_stream,
+        run_event_journal_path,
+    )
+
+    owner = str(_user.get("user_id") or "")
+    child = get_subagent_execution(session_id, owner)
+    if child is None:
+        raise HTTPException(status_code=404, detail="Subagent session not found")
+    parent_run = get_session_run(str(child["parent_run_id"]))
+    if parent_run is None or parent_run.get("session_id") != child["parent_session_id"]:
+        raise HTTPException(status_code=404, detail="Parent run not found")
+    task_id = str(child["task_id"])
+    run_id = str(child["parent_run_id"])
+    live = get_active_run_event_stream(run_id)
+    buffered: list[RuntimeEvent] = []
+    if live is not None:
+        buffered = [event for event in live.replay(after_seq=after_seq) if event.task_id == task_id]
+        if buffered:
+            await live.wait_persisted(buffered[-1].seq)
+    path = run_event_journal_path(run_id)
+
+    def read_page() -> list[RuntimeEvent]:
+        if path is None or not path.is_file():
+            return []
+        found: list[RuntimeEvent] = []
+        with path.open("r", encoding="utf-8") as journal:
+            for line in journal:
+                try:
+                    event = RuntimeEvent.try_from_dict(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+                if event and event.run_id == run_id and event.task_id == task_id and event.seq > after_seq:
+                    found.append(event)
+                    if len(found) > limit:
+                        break
+        return found
+
+    disk = await asyncio.to_thread(read_page)
+    by_seq = {event.seq: event for event in [*disk, *buffered]}
+    ordered = [by_seq[seq] for seq in sorted(by_seq)]
+    page = ordered[:limit]
+    frames = [
+        frame.model_dump(mode="json")
+        for event in page for frame in runtime_event_to_stream_events(event)
+    ]
+    return {
+        "child_session_id": session_id,
+        "child_run_id": child["child_run_id"],
+        "parent_run_id": run_id,
+        "task_id": task_id,
+        "status": child["status"],
+        "parent_status": parent_run.get("status"),
+        "live": live is not None,
+        "durable": path is not None and path.is_file(),
+        "events": frames,
+        "next_after_seq": page[-1].seq if page else after_seq,
+        "has_more": len(ordered) > limit,
+    }
 
 _PUBLIC_STREAM_TYPES = {
     "routing",
@@ -112,6 +186,25 @@ class SessionCreateBody(BaseModel):
 class SessionUpdateBody(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     mode: str | None = Field(default=None, min_length=1, max_length=32)
+
+
+class TodoCreateBody(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+    priority: str = Field(default="normal", pattern="^(low|normal|high)$")
+
+
+class TodoUpdateBody(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+    priority: str | None = Field(default=None, pattern="^(low|normal|high)$")
+    status: str | None = Field(default=None, pattern="^(pending|in_progress|completed|cancelled|blocked|failed)$")
+
+
+def _summary(items: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = {s: 0 for s in ("pending", "in_progress", "completed", "cancelled")}
+    for item in items:
+        counts[item["status"]] += 1
+    counts["total"] = len(items)
+    return {"counts": counts}
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +322,13 @@ async def delete_session_endpoint(
     existing = get_session_for_user(session_id, user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    from backend.persistence.bots import bot_for_session
+
+    if bot_for_session(user_id, session_id) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Remove o bot na área Bots; o histórico será preservado.",
+        )
     try:
         from backend.orchestrator.infinity.vibe_director import drop_director
 
@@ -250,19 +350,87 @@ async def delete_session_endpoint(
 @router.get("/{session_id}/todos")
 async def session_todos(
     session_id: str,
+    status: str = "",
     _user: dict = Depends(require_auth),
 ) -> dict[str, Any]:
     """Read the durable checklist without executing an agent or modifying it."""
-    from backend.tools.todo_tools import read_session_todo_snapshot
-
     if await asyncio.to_thread(
         get_session_for_user, session_id, str(_user.get("user_id") or "")
     ) is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    # The tool reads local storage synchronously; keep that work off the API loop.
-    result = await asyncio.to_thread(read_session_todo_snapshot, session_id)
+    result = await asyncio.to_thread(read_session_todo_snapshot, session_id, status)
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error", "Checklist unavailable"))
+    return {**result, "session_id": session_id}
+
+
+@router.post("/{session_id}/todos")
+async def create_session_todo(
+    session_id: str,
+    body: TodoCreateBody,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Create a new todo item for this session."""
+    if await asyncio.to_thread(
+        get_session_for_user, session_id, str(_user.get("user_id") or "")
+    ) is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    result = await todo_write(
+        operation="add",
+        content=body.content,
+        priority=body.priority,
+        session_id=session_id,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to create todo"))
+    return {**result, "session_id": session_id}
+
+
+@router.put("/{session_id}/todos/{todo_id}")
+async def update_session_todo(
+    session_id: str,
+    todo_id: str,
+    body: TodoUpdateBody,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Update a todo item for this session."""
+    if await asyncio.to_thread(
+        get_session_for_user, session_id, str(_user.get("user_id") or "")
+    ) is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    result = await todo_write(
+        operation="update",
+        id=todo_id,
+        content=body.content or "",
+        priority=body.priority or "",
+        status=body.status or "",
+        session_id=session_id,
+    )
+    if not result.get("ok"):
+        status_code = 404 if "not found" in result.get("error", "").lower() else 400
+        raise HTTPException(status_code=status_code, detail=result.get("error", "Failed to update todo"))
+    return {**result, "session_id": session_id}
+
+
+@router.delete("/{session_id}/todos/{todo_id}")
+async def delete_session_todo(
+    session_id: str,
+    todo_id: str,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Delete a todo item for this session."""
+    if await asyncio.to_thread(
+        get_session_for_user, session_id, str(_user.get("user_id") or "")
+    ) is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    result = await todo_write(
+        operation="remove",
+        id=todo_id,
+        session_id=session_id,
+    )
+    if not result.get("ok"):
+        status_code = 404 if "not found" in result.get("error", "").lower() else 400
+        raise HTTPException(status_code=status_code, detail=result.get("error", "Failed to delete todo"))
     return {**result, "session_id": session_id}
 
 
@@ -536,11 +704,44 @@ async def session_events_endpoint(
 __all__ = ["router"]
 
 
+def _stored_run_usage(run_id: str) -> dict[str, Any] | None:
+    """Usage persisted on the run row.
+
+    The journal records what the agent did, not the provider's token block.
+    Replaying it therefore rebuilt the timeline and left the session panel on
+    dashes even after the turn had stored real counts.
+    """
+    if not run_id:
+        return None
+    try:
+        row = get_session_run(run_id) or {}
+    except Exception:
+        logger.debug("Could not read stored usage for run %s", run_id, exc_info=True)
+        return None
+    raw = row.get("usage_json")
+    parsed: Any = raw
+    if isinstance(raw, str):
+        if not raw.strip() or raw.strip() == "{}":
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    counts = ("input_tokens", "output_tokens", "reasoning_tokens", "total_tokens")
+    if not any(isinstance(parsed.get(key), int | float) and parsed.get(key) > 0 for key in counts):
+        return None
+    return parsed
+
+
 def _runtime_event_to_chat_frames(event: Any, *, replayed: bool) -> str:
     """Map a primary runtime fact into the existing, ordered chat SSE contract."""
     from backend.orchestrator.routes.chat_primary import runtime_event_to_stream_events
 
     frames = runtime_event_to_stream_events(event)
+    kind = getattr(event.type, "value", event.type)
+    stored_usage = _stored_run_usage(str(event.run_id or "")) if kind == "run_completed" else None
     output: list[str] = []
     for frame in frames:
         data = dict(frame.data or {})
@@ -549,12 +750,22 @@ def _runtime_event_to_chat_frames(event: Any, *, replayed: bool) -> str:
                 "run_id": event.run_id,
                 "seq": event.seq,
                 "event_id": event.event_id,
-                "kind": event.type.value,
                 "runtime_type": event.type.value,
             }
         )
+        # Legacy chat frames already carry a semantic kind such as "task" or
+        # "tool". Replacing it during replay changes how the UI renders them.
+        if kind != "chat_frame":
+            data["kind"] = event.type.value
         if replayed:
             data["replayed"] = True
+        existing = data.get("usage")
+        has_tokens = isinstance(existing, dict) and any(
+            isinstance(existing.get(key), int | float) and existing.get(key) > 0
+            for key in ("input_tokens", "output_tokens", "total_tokens")
+        )
+        if stored_usage is not None and not has_tokens:
+            data["usage"] = stored_usage
         frame.data = data
         output.append(f"data: {frame.model_dump_json()}\n\n")
     return "".join(output)

@@ -97,7 +97,7 @@ class LMStudioProvider(OpenAIProvider):
         Concrete model ids (anything the LM Studio server exposes) are used
         verbatim, exactly like the Ollama/AirLLM registries handle them.
         """
-        selector = (model or "").strip().lower()
+        selector = (model or "").strip()
         aliases = {
             "micro": self._default_model,
             "nano": self._default_model,
@@ -109,7 +109,7 @@ class LMStudioProvider(OpenAIProvider):
             "small": self._fast_model,
             "coder": self._coder_model,
         }
-        return aliases.get(selector, selector or self._default_model)
+        return aliases.get(selector.lower(), selector or self._default_model)
 
     def validate_model(self, model: str, requirement: Any = None) -> str:
         """Accept any model id for local LM Studio inference.

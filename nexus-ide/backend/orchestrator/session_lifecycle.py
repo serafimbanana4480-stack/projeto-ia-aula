@@ -10,6 +10,8 @@ Provides a :class:`SessionLifecycleManager` that can:
 * Clean up orphan artifacts (unreferenced agent_states, whiteboard
   entries that no longer belong to any active session, …).
 * Remove temporary files in ``data/temp/`` older than 24 h.
+* Apply the run-state retention window (``run_state``, ``run_checkpoints``,
+  ``run_side_effects``, ``run_dead_letters`` and ``scheduled_tasks``).
 * Report session stats.
 
 The manager also runs an optional background asyncio loop that
@@ -37,6 +39,18 @@ logger = logging.getLogger(__name__)
 # Lazy-imported to avoid circular deps at module level
 _db = None
 _events = None
+
+#: Retention windows for the durable run-state tables, in days. They mirror
+#: the defaults of ``RunCoordinator.prune``: a terminal run is kept for a
+#: month, its checkpoints for two weeks and its dead letters for a quarter.
+DEFAULT_RUN_RETENTION_DAYS = 30
+DEFAULT_CHECKPOINT_RETENTION_DAYS = 14
+DEFAULT_DEAD_LETTER_RETENTION_DAYS = 90
+
+#: How often (in minutes) the background loop applies the run-state
+#: retention. It is deliberately slower than the session GC: run state is
+#: history, not garbage.
+DEFAULT_RUN_RETENTION_INTERVAL_MINUTES = 360
 
 
 def _get_db():
@@ -95,6 +109,8 @@ class SessionLifecycleManager:
         ttl_hours: int | None = None,
         gc_interval_minutes: int | None = None,
         temp_dir: Path | None = None,
+        run_retention_days: int | None = None,
+        run_retention_interval_minutes: int | None = None,
     ) -> None:
         settings = get_settings()
         self._ttl_hours = ttl_hours if ttl_hours is not None else settings.nexus_session_ttl_hours
@@ -106,6 +122,18 @@ class SessionLifecycleManager:
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._running = False
+        # Run-state retention: the durable run tables and the scheduled-task
+        # queue grow forever unless somebody applies the retention window.
+        # The background loop below is that "somebody" (see _prune_run_state).
+        self._run_retention_days = (
+            run_retention_days if run_retention_days is not None else DEFAULT_RUN_RETENTION_DAYS
+        )
+        self._run_retention_interval = (
+            run_retention_interval_minutes
+            if run_retention_interval_minutes is not None
+            else DEFAULT_RUN_RETENTION_INTERVAL_MINUTES
+        )
+        self._last_prune_at: float | None = None
 
     # ── Properties ─────────────────────────────────────────────────────
 
@@ -120,6 +148,16 @@ class SessionLifecycleManager:
     @property
     def gc_interval_minutes(self) -> int:
         return self._gc_interval
+
+    @property
+    def run_retention_days(self) -> int:
+        """How long a terminal run is kept before retention removes it."""
+        return self._run_retention_days
+
+    @property
+    def run_retention_interval_minutes(self) -> int:
+        """How often the background loop applies the run-state retention."""
+        return self._run_retention_interval
 
     # ── Background loop ─────────────────────────────────────────────────
 
@@ -151,7 +189,7 @@ class SessionLifecycleManager:
         logger.info("Session GC background loop stopped")
 
     async def _run_loop(self) -> None:
-        """Periodically run garbage collection."""
+        """Periodically run garbage collection and the run-state retention."""
         self._running = True
         try:
             while not self._stop_event.is_set():
@@ -162,6 +200,14 @@ class SessionLifecycleManager:
                     await self.run_gc(allow_destructive=False)
                 except Exception:
                     logger.exception("Session GC cycle failed")
+                try:
+                    # Retention for the durable run tables. Without this the
+                    # run state, its checkpoints, its side effects, its dead
+                    # letters and the scheduled-task queue grow forever:
+                    # RunCoordinator.prune() had no production caller.
+                    self._maybe_prune_run_state()
+                except Exception:
+                    logger.exception("Run-state retention failed")
                 # Wait for the configured interval (or until a stop signal)
                 try:
                     await asyncio.wait_for(
@@ -173,6 +219,42 @@ class SessionLifecycleManager:
                     continue  # interval elapsed, run again
         finally:
             self._running = False
+
+    # ── Run-state retention ──────────────────────────────────────────────
+
+    def _maybe_prune_run_state(self, *, now: float | None = None) -> dict[str, int] | None:
+        """Apply the run-state retention when its interval has elapsed.
+
+        Returns the prune counts, or ``None`` when the interval has not
+        elapsed yet (the retention is not due).
+        """
+        current = time.monotonic() if now is None else now
+        if (
+            self._last_prune_at is not None
+            and current - self._last_prune_at < self._run_retention_interval * 60
+        ):
+            return None
+        self._last_prune_at = current
+        return self._prune_run_state()
+
+    def _prune_run_state(self) -> dict[str, int]:
+        """Delete run state that fell out of the retention window.
+
+        Only *terminal* runs older than the window are removed, together with
+        their checkpoints, side effects and dead letters; the scheduled-task
+        queue is trimmed with the same window. A running or paused run is
+        never touched.
+        """
+        from backend.runtime.run_coordinator import RunCoordinator
+
+        coordinator = RunCoordinator()
+        counts = coordinator.prune(
+            runs_days=self._run_retention_days,
+            checkpoints_days=min(self._run_retention_days, DEFAULT_CHECKPOINT_RETENTION_DAYS),
+            dead_letters_days=max(self._run_retention_days, DEFAULT_DEAD_LETTER_RETENTION_DAYS),
+        )
+        logger.info("Run-state retention removed: %s", counts)
+        return counts
 
     # ── Core GC logic ───────────────────────────────────────────────────
 
@@ -360,6 +442,8 @@ class SessionLifecycleManager:
             **stats,
             "ttl_hours": self._ttl_hours,
             "gc_interval_minutes": self._gc_interval,
+            "run_retention_days": self._run_retention_days,
+            "run_retention_interval_minutes": self._run_retention_interval,
             "running": self._running,
         }
 

@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import ExecutionActivity from "../../../components/chat/ExecutionActivity";
+import { usePresentationStore } from "../../../stores/presentationStore";
 
 describe("ExecutionActivity", () => {
   const items = [
@@ -36,6 +37,19 @@ describe("ExecutionActivity", () => {
     expect(screen.getByText("Reorganizar a apresentação das ferramentas")).toBeTruthy();
   });
 
+  it("não inventa paralelismo nem chama testes a todas as verificações", () => {
+    render(<ExecutionActivity items={[
+      { ...items[0], agent: "CODER" },
+      { ...items[0], id: "reviewer", agent: "REVIEWER", timestamp: "2026-07-27T10:01:00Z" },
+      { ...items[0], id: "check", kind: "verification", title: "Revisão", agent: undefined },
+    ]} />);
+    const toggle = screen.getByRole("button", { expanded: false });
+    expect(toggle.textContent).toContain("2 agentes");
+    expect(toggle.textContent).not.toContain("em paralelo");
+    expect(toggle.textContent).toContain("verificações");
+    expect(toggle.textContent).not.toContain("testes");
+  });
+
   it("does not report success when the run timeline contains tool errors", () => {
     render(<ExecutionActivity items={items} hasErrors />);
 
@@ -64,8 +78,11 @@ describe("ExecutionActivity", () => {
 
     expect(screen.queryByRole("button", { name: /trabalho concluído/i })).toBeNull();
     expect(screen.getByRole("button", { name: /1 problema durante a execução/i })).toBeTruthy();
-    expect(container.querySelector(".text-emerald-400")).toBeNull();
-    expect(container.querySelector(".text-rose-400")).not.toBeNull();
+    // Status colours are now the `--nx-*` design tokens (accent2 = success
+    // green, accent4 = failure rose) instead of the raw Tailwind palette, so
+    // the same requirement is asserted against the token classes.
+    expect(container.querySelector(".text-nexus-accent2")).toBeNull();
+    expect(container.querySelector(".text-nexus-accent4")).not.toBeNull();
   });
 
   it("não inventa uma conclusão a partir de atividades que não reportaram sucesso", () => {
@@ -87,7 +104,7 @@ describe("ExecutionActivity", () => {
     expect(
       screen.getByRole("button", { name: /execução sem estado final confirmado/i }),
     ).toBeTruthy();
-    expect(container.querySelector(".text-emerald-400")).toBeNull();
+    expect(container.querySelector(".text-nexus-accent2")).toBeNull();
   });
 
   it("mostra a execução cancelada sem o verde de conclusão", () => {
@@ -106,7 +123,7 @@ describe("ExecutionActivity", () => {
     );
 
     expect(screen.getByRole("button", { name: /execução cancelada/i })).toBeTruthy();
-    expect(container.querySelector(".text-emerald-400")).toBeNull();
+    expect(container.querySelector(".text-nexus-accent2")).toBeNull();
   });
 
   it("compacta leituras adjacentes com contagens recebidas e permite rever cada evento", () => {
@@ -168,5 +185,36 @@ describe("ExecutionActivity", () => {
     fireEvent.scroll(viewport, { target: { scrollTop: 24 * 5_000 } });
     expect(screen.getAllByTestId("file-read-row").length).toBeLessThan(20);
     expect(screen.getByText("src/file-5000.py")).toBeTruthy();
+  });
+
+  it("no modo simples esconde a nota de routing e o nome do runtime primário", () => {
+    usePresentationStore.setState({ level: "simple" });
+    render(
+      <ExecutionActivity
+        items={[
+          {
+            id: "status-route",
+            kind: "status",
+            title: "A avançar com a tarefa",
+            detail: "pedido curto sem sinais de planeamento; o agente primário responde",
+            agent: "NEXUS",
+            status: "success",
+            timestamp: "2026-07-27T10:00:00Z",
+          },
+          {
+            id: "agent-done",
+            kind: "agent",
+            title: "NEXUS concluiu a sua parte",
+            agent: "NEXUS",
+            status: "success",
+            timestamp: "2026-07-27T10:00:01Z",
+          },
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    expect(screen.queryByText(/agente primário/)).toBeNull();
+    expect(screen.queryByText("NEXUS")).toBeNull();
+    expect(screen.getByText("A resposta ficou pronta.")).toBeTruthy();
   });
 });

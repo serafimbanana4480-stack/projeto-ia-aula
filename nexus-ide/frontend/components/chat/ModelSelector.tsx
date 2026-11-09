@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useModelStore, type Model } from "../../stores/modelStore";
 import { formatContext, formatPricePer1M } from "../../lib/format";
+import { usePopoverPosition } from "../../hooks/usePopoverPosition";
 
 /**
  * Model picker for the chat header.
@@ -94,9 +95,12 @@ function passesFilter(model: Model, filter: Filter): boolean {
   }
 }
 
-export default function ModelSelector() {
+type MenuPlacement = "above" | "below";
+
+export default function ModelSelector({ menuPlacement = "below" }: { menuPlacement?: MenuPlacement }) {
   const {
     activeModel,
+    activeProvider,
     models,
     modelsLoaded,
     modelsLoading,
@@ -114,9 +118,10 @@ export default function ModelSelector() {
   const containerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const popoverPosition = usePopoverPosition(open, containerRef, menuPlacement, 400);
 
   useEffect(() => {
-    void loadModels();
+    void loadModels(true);
   }, [loadModels]);
 
   // Close on outside click — the old dropdown stayed open until re-clicked.
@@ -168,13 +173,13 @@ export default function ModelSelector() {
     setHighlight(0);
   }, [query, filter]);
 
-  const selected = chatModels.find((m) => m.id === activeModel);
+  const selected = chatModels.find((m) => m.id === activeModel && m.provider === activeProvider);
   const buttonLabel = activeModel
     ? (selected?.name ?? activeModel)
     : "Automático";
 
-  function choose(id: string) {
-    setActiveModel(id, models.find((model) => model.id === id)?.provider);
+  function choose(id: string, provider = "") {
+    setActiveModel(id, provider);
     setOpen(false);
   }
 
@@ -200,7 +205,7 @@ export default function ModelSelector() {
     if (event.key === "Enter") {
       event.preventDefault();
       const model = flat[highlight];
-      if (model) choose(model.id);
+      if (model && model.status === "available") choose(model.id, model.provider);
     }
   }
 
@@ -208,8 +213,10 @@ export default function ModelSelector() {
     (p) => p.error && p.configured && !p.error.includes("Sem chave API configurada"),
   );
   const unconfiguredProviders = providerStatus.filter(
-    (p) => p.error && p.configured && p.error.includes("Sem chave API configurada"),
+    (p) => !p.configured && p.error?.includes("Sem chave API configurada"),
   );
+
+  const menuAbove = menuPlacement === "above";
 
   return (
     <div className="relative" ref={containerRef}>
@@ -222,24 +229,31 @@ export default function ModelSelector() {
             // first transient connection error until the whole page reloads.
             if (nextOpen && modelsError) void loadModels(true);
           }}
-        className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-2.5 py-1.5 text-[11px] font-medium text-nexus-muted transition-colors hover:border-nexus-accent/30 hover:text-nexus-text"
-        title={activeModel || "Automático — o router escolhe o modelo"}
-      >
-        {activeModel ? (
-          <span
-            className="h-2 w-2 shrink-0 rounded-full"
-            style={{ backgroundColor: selected?.color ?? "#7c6afb" }}
-          />
-        ) : (
-          <Sparkles className="h-3.5 w-3.5 text-nexus-accent/70" />
-        )}
-        <span className="hidden max-w-[140px] truncate sm:inline">{buttonLabel}</span>
-        <ChevronDown className="h-3 w-3" />
-      </button>
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          className="flex items-center gap-1.5 rounded-lg border border-nexus-border bg-nexus-card px-2.5 py-1.5 text-[11px] font-medium text-nexus-muted transition-colors hover:border-nexus-accent/30 hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent/70"
+          title={activeModel || "Automático — o router escolhe o modelo"}
+        >
+          {activeModel ? (
+            <span
+              className="h-2 w-2 shrink-0 rounded-full"
+              style={{ backgroundColor: selected?.color ?? "var(--nx-accent)" }}
+            />
+          ) : (
+            <Sparkles className="h-3.5 w-3.5 text-nexus-accent/70" aria-hidden="true" />
+          )}
+          <span className="hidden max-w-[140px] truncate sm:inline">{buttonLabel}</span>
+          <ChevronDown className="h-3 w-3" aria-hidden="true" />
+        </button>
 
       {open ? (
         <div
-          className="absolute right-0 top-full z-50 mt-1.5 w-[400px] overflow-hidden rounded-xl border border-nexus-border bg-nexus-card shadow-2xl shadow-black/40"
+          // Clamped to the viewport: a fixed 400px popup overflows when the
+          // chat is docked into a narrow column.
+          style={popoverPosition}
+          className="fixed flex flex-col overflow-hidden rounded-xl border border-nexus-border bg-nexus-card shadow-nx-3"
+          role="dialog"
+          aria-label="Selecionar modelo"
           onKeyDown={onKeyDown}
         >
           {/* Search */}
@@ -250,16 +264,23 @@ export default function ModelSelector() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Procurar modelo ou provider…"
+              aria-label="Procurar modelo ou provider"
               className="min-w-0 flex-1 bg-transparent text-xs text-nexus-text outline-none placeholder:text-nexus-muted"
             />
             <button
               type="button"
               onClick={() => void loadModels(true)}
               title="Recarregar catálogo dos providers"
+              aria-label="Recarregar catálogo dos providers"
               className="shrink-0 rounded p-1 text-nexus-muted transition-colors hover:text-nexus-text"
             >
-              <RefreshCw className={`h-3 w-3 ${modelsLoading ? "animate-spin" : ""}`} />
+              <RefreshCw className={`h-3 w-3 ${modelsLoading ? "animate-spin" : ""}`} aria-hidden="true" />
             </button>
+          </div>
+
+          <div className="flex items-center justify-between gap-2 border-b border-nexus-border bg-nexus-accent/5 px-3 py-2 text-[10px] text-nexus-muted">
+            <span className="flex items-center gap-1.5"><Sparkles className="h-3 w-3 text-nexus-accent" /> Escolhe o modelo e o fornecedor</span>
+            <span>{modelsLoading ? "A verificar…" : `${providerStatus.filter((p) => p.configured && !p.error).length} catálogos atualizados`}</span>
           </div>
 
           {/* Filters */}
@@ -283,7 +304,12 @@ export default function ModelSelector() {
             </span>
           </div>
 
-          <div ref={listRef} className="max-h-[340px] overflow-y-auto thin-scrollbar">
+          <div
+            ref={listRef}
+            className={`min-h-0 overflow-y-auto thin-scrollbar ${
+              menuAbove ? "max-h-[min(280px,calc(100dvh-14rem))]" : "max-h-[340px]"
+            }`}
+          >
             {/* Auto option — always first, always available. */}
             <button
               type="button"
@@ -314,7 +340,7 @@ export default function ModelSelector() {
             ) : null}
 
             {modelsError ? (
-              <div className="mx-2.5 my-2 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[10px] text-amber-300">
+              <div className="mx-2.5 my-2 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[10px] text-nexus-accent3">
                 <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
                 <span className="min-w-0">{modelsError}</span>
               </div>
@@ -344,7 +370,7 @@ export default function ModelSelector() {
                 </div>
                 {list.map((model) => {
                   const index = flat.indexOf(model);
-                  const isActive = model.id === activeModel;
+                  const isActive = model.id === activeModel && model.provider === activeProvider;
                   const isHighlighted = index === highlight;
                   return (
                     <button
@@ -352,8 +378,10 @@ export default function ModelSelector() {
                       data-index={index}
                       type="button"
                       onMouseEnter={() => setHighlight(index)}
-                      onClick={() => choose(model.id)}
-                      className={`flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors ${
+                      disabled={model.status !== "available"}
+                      title={model.status !== "available" ? "Catálogo desatualizado: atualiza antes de selecionar" : model.id}
+                      onClick={() => choose(model.id, model.provider)}
+                      className={`flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                         isActive
                           ? "bg-nexus-accent/10"
                           : isHighlighted
@@ -372,12 +400,13 @@ export default function ModelSelector() {
                             {model.name || model.id}
                           </span>
                           {model.free ? (
-                            <span className="shrink-0 rounded bg-emerald-500/15 px-1 py-px text-[9px] font-semibold text-emerald-400">
+                            <span className="shrink-0 rounded bg-emerald-500/15 px-1 py-px text-[9px] font-semibold text-nexus-accent2">
                               GRÁTIS
                             </span>
                           ) : null}
                         </span>
                         <span className="mt-0.5 flex items-center gap-2 text-[10px] text-nexus-muted">
+                          {model.status !== "available" ? <span>Por verificar</span> : null}
                           {model.contextWindow ? (
                             <span title="Janela de contexto">
                               {formatContext(model.contextWindow)} ctx
@@ -430,7 +459,7 @@ export default function ModelSelector() {
                 <Gauge className="h-3 w-3" />
                 {failedProviders.length} provider
                 {failedProviders.length > 1 ? "s" : ""} sem responder:{" "}
-                {failedProviders.map((p) => p.label).join(", ")}
+                {failedProviders.map((p) => `${p.label} (${p.error})`).join(" · ")}
               </span>
             </div>
           ) : null}

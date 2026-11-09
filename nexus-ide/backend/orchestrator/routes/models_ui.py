@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from backend.llm.model_catalog import aggregate_models
 from backend.middleware.auth import require_auth
@@ -199,7 +199,7 @@ async def list_available_models(
 
 @router.get("/models/catalog")
 async def models_catalog(
-    refresh: bool = False, _user: dict = Depends(require_auth)
+    request: Request, refresh: bool = False, _user: dict = Depends(require_auth)
 ) -> dict[str, object]:
     """Same data as ``/models/available`` plus per-provider status and errors.
 
@@ -207,11 +207,22 @@ async def models_catalog(
     the UI explain *why* a provider contributed no models.
     """
     try:
-        return await aggregate_models(refresh=refresh)
+        catalog = await aggregate_models(refresh=refresh)
+        from backend.llm.model_catalog import apply_catalog_to_llm_client, load_validated_models
+
+        client = getattr(request.app.state, "llm_client", None)
+        if client is not None:
+            for entry in catalog.get("providers", []):
+                if not entry.get("error"):
+                    provider = entry.get("provider", "")
+                    models = load_validated_models(provider)
+                    if models:
+                        apply_catalog_to_llm_client(client, provider, models)
+        return catalog
     except Exception as exc:  # noqa: BLE001
         logger.exception("Model aggregation failed")
         return {
-            "models": list(OPENROUTER_FREE_MODELS),
+            "models": [],
             "providers": [],
             "error": str(exc)[:200],
         }

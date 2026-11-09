@@ -127,18 +127,18 @@ export default function SystemHealth() {
       ? hasTelemetry ? "API ligada · telemetria disponível" : "API ligada · sem telemetria"
       : hasTelemetry ? "Sem ligação · dados antigos" : "Sem ligação";
   const stateClass = isLoading
-    ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+    ? "border-amber-500/30 bg-amber-500/10 text-nexus-accent3"
     : isLive && hasTelemetry
-      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+      ? "border-emerald-500/30 bg-emerald-500/10 text-nexus-accent2"
       : isLive
-        ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+        ? "border-amber-500/30 bg-amber-500/10 text-nexus-accent3"
         : "border-slate-700 bg-slate-800/60 text-slate-400";
 
   return (
     <section className="flex h-full min-h-0 flex-col" aria-label="Saúde do sistema">
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/70 px-4 py-3">
         <div className="flex min-w-0 items-center gap-2">
-          <Activity size={15} className="shrink-0 text-emerald-400" />
+          <Activity size={15} className="shrink-0 text-nexus-accent2" />
           <h2 className="truncate text-xs font-semibold text-slate-100">Recursos do sistema</h2>
         </div>
         <span className={`max-w-full truncate rounded-full border px-2 py-1 text-[9px] font-medium ${stateClass}`}>
@@ -148,7 +148,7 @@ export default function SystemHealth() {
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 sm:p-4">
         {error && (
-          <p role="status" className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[10px] leading-relaxed text-amber-200">
+          <p role="status" className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[10px] leading-relaxed text-nexus-accent3">
             {hasTelemetry
               ? "A atualização falhou; a última medição continua disponível."
               : isLive
@@ -163,7 +163,7 @@ export default function SystemHealth() {
           </p>
         )}
         {!isLive && hasTelemetry && !isLoading && (
-          <p className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[10px] leading-relaxed text-amber-200">
+          <p className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[10px] leading-relaxed text-nexus-accent3">
             A mostrar a última medição recebida; a API não está ligada agora.
           </p>
         )}

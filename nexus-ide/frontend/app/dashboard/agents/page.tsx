@@ -47,7 +47,7 @@ export default function AgentsPage() {
                 className="rounded border border-nexus-border bg-nexus-panel/50 p-4"
               >
                 <div className="flex items-center gap-2 mb-3">
-                  <Activity className="h-5 w-5 text-cyan-400" />
+                  <Activity className="h-5 w-5 text-nexus-cyan" />
                   <h3 className="font-semibold">Agent Topology</h3>
                 </div>
                 <p className="text-sm text-gray-400">
@@ -62,7 +62,7 @@ export default function AgentsPage() {
                 className="rounded border border-nexus-border bg-nexus-panel/50 p-4"
               >
                 <div className="flex items-center gap-2 mb-3">
-                  <Activity className="h-5 w-5 text-amber-400" />
+                  <Activity className="h-5 w-5 text-nexus-accent3" />
                   <h3 className="font-semibold">Performance</h3>
                 </div>
                 <p className="text-sm text-gray-400">

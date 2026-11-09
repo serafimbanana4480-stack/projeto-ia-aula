@@ -149,19 +149,19 @@ type TabId = (typeof TABS)[number]["id"];
 /** Proposed is deliberately muted, not hidden — it is information, not noise. */
 const STATE_STYLE: Record<Contract["state"], string> = {
   proposed: "bg-[rgba(148,163,184,0.12)] text-nexus-muted",
-  ready: "bg-[rgba(56,189,248,0.14)] text-sky-300",
-  running: "bg-[rgba(52,211,153,0.14)] text-emerald-300",
-  blocked: "bg-[rgba(251,191,36,0.14)] text-amber-300",
+  ready: "bg-[rgba(56,189,248,0.14)] text-nexus-cyan",
+  running: "bg-[rgba(52,211,153,0.14)] text-nexus-accent2",
+  blocked: "bg-[rgba(251,191,36,0.14)] text-nexus-accent3",
   completed: "bg-[rgba(124,106,251,0.14)] text-nexus-accent-bright",
-  failed: "bg-[rgba(251,113,133,0.16)] text-rose-300",
+  failed: "bg-[rgba(251,113,133,0.16)] text-nexus-accent4",
   skipped: "bg-[rgba(100,116,139,0.12)] text-nexus-faint",
 };
 
 const SEVERITY_STYLE: Record<Finding["severity"], string> = {
-  critical: "text-rose-300",
-  high: "text-rose-300",
-  medium: "text-amber-300",
-  low: "text-sky-300",
+  critical: "text-nexus-accent4",
+  high: "text-nexus-accent4",
+  medium: "text-nexus-accent3",
+  low: "text-nexus-cyan",
   info: "text-nexus-faint",
 };
 
@@ -332,9 +332,9 @@ export default function MissionPanel() {
             <span
               className={`h-1.5 w-1.5 rounded-full ${
                 mission.state === "executing"
-                  ? "bg-emerald-400 animate-pulse-subtle"
+                  ? "bg-nexus-accent2 animate-pulse-subtle"
                   : mission.state === "failed"
-                    ? "bg-rose-400"
+                    ? "bg-nexus-accent4"
                     : "bg-nexus-accent"
               }`}
             />
@@ -346,7 +346,7 @@ export default function MissionPanel() {
       {error ? (
         <div
           role="alert"
-          className="mt-3 flex items-start gap-2 rounded-lg border border-amber-400/25 bg-amber-400/[0.06] px-3 py-2 text-[11px] text-amber-200"
+          className="mt-3 flex items-start gap-2 rounded-lg border border-amber-400/25 bg-amber-400/[0.06] px-3 py-2 text-[11px] text-nexus-accent3"
         >
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>{error} A mostrar os últimos dados recebidos, que podem estar desatualizados.</span>
@@ -382,7 +382,7 @@ export default function MissionPanel() {
 
       <div className="mt-3 h-1 overflow-hidden rounded-full bg-[rgba(148,163,184,0.12)]">
         <div
-          className="h-full rounded-full bg-nx-accent transition-[width] duration-500"
+          className="h-full rounded-full bg-nexus-accent transition-[width] duration-500"
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -616,7 +616,7 @@ function ContractCard({ contract: c }: { contract: Contract }) {
       ) : null}
 
       {c.activity ? (
-        <p className="mt-2 rounded-md bg-[rgba(52,211,153,0.08)] px-2 py-1 font-mono text-[10px] text-emerald-300">
+        <p className="mt-2 rounded-md bg-[rgba(52,211,153,0.08)] px-2 py-1 font-mono text-[10px] text-nexus-accent2">
           {c.activity}
         </p>
       ) : null}
@@ -744,9 +744,9 @@ function TimelineTab({
             {verifications.map((v, i) => (
               <li key={`${v.command}-${i}`} className="flex items-start gap-2">
                 {v.passed ? (
-                  <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-400" />
+                  <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-nexus-accent2" />
                 ) : (
-                  <XCircle className="mt-0.5 h-3 w-3 shrink-0 text-rose-400" />
+                  <XCircle className="mt-0.5 h-3 w-3 shrink-0 text-nexus-accent4" />
                 )}
                 <div className="min-w-0 flex-1">
                   <code className="block truncate font-mono text-[10px] text-nexus-text">

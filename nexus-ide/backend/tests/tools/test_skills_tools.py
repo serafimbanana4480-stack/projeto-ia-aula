@@ -68,7 +68,7 @@ class TestLoadSkill:
     async def test_loads_content_with_header(self, skills_root: Path) -> None:
         result = await load_skill("alpha")
         assert result["ok"] is True
-        assert result["content"].startswith("### Skill: alpha\n\n")
+        assert result["content"].startswith("### Skill: alpha (v1.0.0)\n\n")
         assert "Passos aqui." in result["content"]
         assert result["truncated"] is False
 

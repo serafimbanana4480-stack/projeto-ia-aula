@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useMemo, useState, memo, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useState, memo, type CSSProperties, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ChevronDown,
@@ -16,6 +16,7 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
+  CircleDashed,
   Wrench,
   Code2,
   RotateCcw,
@@ -31,6 +32,7 @@ import {
 import type { ToolCallItem } from "../../lib/types";
 import { confirmTool, executeTool } from "../../lib/api";
 import { AGENT_DECLARED_TODO_CAVEAT } from "../../lib/foldRun";
+import { compactToolLine } from "../../lib/activityLine";
 import { log } from "../../lib/log";
 import {
   extractWebSources,
@@ -38,10 +40,15 @@ import {
   primaryToolArg,
   toolKindGroup,
 } from "../../lib/chatPresentation";
+import { redactPayload, toolCallSentence } from "../../lib/plainNarration";
+import { classifyToolResult } from "../../lib/toolResultView";
+import { usePresentationStore } from "../../stores/presentationStore";
+import ToolResultView from "./ToolResultView";
 
 interface ToolCallTimelineProps {
   calls: ToolCallItem[];
   sessionId?: string;
+  compact?: boolean;
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -146,7 +153,8 @@ function groupAdjacentToolCalls(calls: ToolCallItem[]) {
   for (const call of calls) {
     const previous = groups.at(-1);
     const first = previous?.[0];
-    if (first && first.name === call.name && first.status === call.status) {
+    if (first && first.name === call.name && first.status === call.status &&
+        first.agent === call.agent && first.taskId === call.taskId) {
       previous.push(call);
     } else {
       groups.push([call]);
@@ -305,7 +313,7 @@ function OutputViewer({ content, label, showLabel = true }: { content: string; l
         aria-live="off"
         tabIndex={0}
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
-        className="overflow-auto font-mono text-[10px] leading-[18px] text-slate-200/90"
+        className="overflow-auto font-mono text-[10px] leading-[18px] text-nexus-text/90"
         style={{ height: OUTPUT_VIEWPORT_HEIGHT }}
       >
         <div aria-hidden="true" style={{ height: firstRow * OUTPUT_ROW_HEIGHT }} />
@@ -367,9 +375,9 @@ const TODO_COUNT_LABELS: Record<TodoStatus, { one: string; many: string }> = {
 };
 
 const TODO_STATUS_STYLES: Record<TodoStatus, string> = {
-  pending: "text-amber-200",
-  in_progress: "text-sky-300",
-  completed: "text-emerald-300",
+  pending: "text-nexus-accent3",
+  in_progress: "text-nexus-cyan",
+  completed: "text-nexus-accent2",
   cancelled: "text-nexus-muted",
 };
 
@@ -422,6 +430,14 @@ function TodoResultContents({ result }: { result: Record<string, unknown> & { to
       <p role="note" className="text-[10px] leading-relaxed text-nexus-muted">
         {AGENT_DECLARED_TODO_CAVEAT}
       </p>
+      {total > 0 ? (
+        <div className="h-1 overflow-hidden rounded-full bg-nexus-bg" aria-hidden="true">
+          <div
+            className="h-full rounded-full bg-nexus-accent2"
+            style={{ width: `${Math.round((counts.completed / total) * 100)}%` }}
+          />
+        </div>
+      ) : null}
       <div role="group" aria-label="Resumo das tarefas" className="flex flex-wrap gap-1.5 text-[10px]">
         <span className="rounded-full border border-nexus-border/40 bg-nexus-bg/50 px-2 py-1 text-nexus-text">
           {total} {total === 1 ? "tarefa" : "tarefas"}
@@ -435,7 +451,13 @@ function TodoResultContents({ result }: { result: Record<string, unknown> & { to
       {entries.length > 0 ? (
         <ul aria-label="Tarefas" className="space-y-1.5">
           {entries.map((todo) => (
-            <li key={String(todo.id)} className="flex items-start gap-2 rounded-md border border-nexus-border/30 bg-nexus-bg/45 px-2.5 py-2">
+            <li key={String(todo.id)} className={`flex items-start gap-2 rounded-lg border px-2.5 py-2 ${
+              todo.status === "in_progress"
+                ? "border-nexus-cyan/30 bg-nexus-cyan/10"
+                : todo.status === "completed"
+                  ? "border-nexus-border/25 bg-nexus-bg/25"
+                  : "border-nexus-border/30 bg-nexus-bg/45"
+            }`}>
               <span className="shrink-0 pt-0.5 font-mono text-[9px] text-nexus-muted">#{todo.id}</span>
               <div className="min-w-0 flex-1">
                 <p className="break-words text-[11px] leading-relaxed text-nexus-text">{todo.content}</p>
@@ -458,9 +480,23 @@ function TodoResultContents({ result }: { result: Record<string, unknown> & { to
   );
 }
 
+function withStructuredResult(result: unknown, output: ReactNode): ReactNode {
+  const view = classifyToolResult(result);
+  if (view.kind === "none") return output;
+  return (
+    <div className="space-y-2">
+      <ToolResultView view={view} />
+      {output}
+    </div>
+  );
+}
+
 function ToolResultContents({ result, toolName }: { result: unknown; toolName?: string }) {
   if (!result || typeof result !== "object" || Array.isArray(result)) {
-    return <OutputViewer content={serializeOutput(result)} label="Resultado" showLabel={false} />;
+    return withStructuredResult(
+      result,
+      <OutputViewer content={serializeOutput(result)} label="Resultado" showLabel={false} />,
+    );
   }
   const record = result as Record<string, unknown>;
   if (toolName === "todo_write" || toolName === "todo_list") {
@@ -475,7 +511,10 @@ function ToolResultContents({ result, toolName }: { result: unknown; toolName?: 
   const stdoutKey = typeof record.stdout === "string" ? "stdout" : typeof record.stdout_tail === "string" ? "stdout_tail" : null;
   const stderrKey = typeof record.stderr === "string" ? "stderr" : typeof record.stderr_tail === "string" ? "stderr_tail" : null;
   if (!stdoutKey && !stderrKey) {
-    return <OutputViewer content={serializeOutput(result)} label="Resultado" showLabel={false} />;
+    return withStructuredResult(
+      result,
+      <OutputViewer content={serializeOutput(result)} label="Resultado" showLabel={false} />,
+    );
   }
   const streamKeys = new Set([stdoutKey, stderrKey].filter((key): key is string => Boolean(key)));
   const metadata = Object.fromEntries(Object.entries(record).filter(([key]) => !streamKeys.has(key)));
@@ -504,27 +543,37 @@ function formatCallTimestamp(timestamp: string): string | null {
 }
 
 function StatusIcon({ status }: { status: ToolCallItem["status"] }) {
+  if (status === "unknown") return <CircleDashed className="h-3.5 w-3.5 text-nexus-muted" />;
   if (status === "running") {
     return (
       <div className="relative">
-        <Loader2 className="h-3.5 w-3.5 animate-spin text-nexus-accent drop-shadow-[0_0_4px_rgba(99,102,241,0.6)]" />
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-nexus-accent drop-shadow-[0_0_4px_color-mix(in_srgb,var(--nx-accent)_60%,transparent)]" />
       </div>
     );
   }
   if (status === "awaiting_confirmation") {
-    return <ShieldAlert className="h-3.5 w-3.5 text-amber-300" />;
+    return <ShieldAlert className="h-3.5 w-3.5 text-nexus-accent3" />;
   }
   if (status === "success") {
     return (
-      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 drop-shadow-[0_0_3px_rgba(52,211,153,0.5)]" />
+      <CheckCircle2 className="h-3.5 w-3.5 text-nexus-accent2 drop-shadow-[0_0_3px_color-mix(in_srgb,var(--nx-emerald)_50%,transparent)]" />
     );
   }
   return (
-    <XCircle className="h-3.5 w-3.5 text-rose-400 drop-shadow-[0_0_3px_rgba(251,113,133,0.5)]" />
+    <XCircle className="h-3.5 w-3.5 text-nexus-accent4 drop-shadow-[0_0_3px_color-mix(in_srgb,var(--nx-rose)_50%,transparent)]" />
   );
 }
 
 function StatusConfig(status: ToolCallItem["status"]) {
+  if (status === "unknown") {
+    return {
+      border: "border-l-2 border-l-nexus-muted/40",
+      badge: "bg-nexus-bg text-nexus-muted border border-nexus-border/30",
+      icon: "text-nexus-muted",
+      resultBg: "bg-nexus-bg/30 border border-nexus-border/30",
+      resultText: "text-nexus-muted",
+    };
+  }
   if (status === "running") {
     return {
       border: "border-l-2 border-l-nexus-accent/60",
@@ -537,8 +586,8 @@ function StatusConfig(status: ToolCallItem["status"]) {
   if (status === "awaiting_confirmation") {
     return {
       border: "border-l-2 border-l-amber-300/70",
-      badge: "bg-amber-400/10 text-amber-200 border border-amber-300/30",
-      icon: "text-amber-300",
+      badge: "bg-amber-400/10 text-nexus-accent3 border border-amber-300/30",
+      icon: "text-nexus-accent3",
       resultBg: "bg-amber-400/5 border border-amber-300/10",
       resultText: "text-amber-200/90",
     };
@@ -546,16 +595,16 @@ function StatusConfig(status: ToolCallItem["status"]) {
   if (status === "success") {
     return {
       border: "border-l-2 border-l-emerald-400/60",
-      badge: "bg-emerald-400/5 text-emerald-400 border border-emerald-400/15",
-      icon: "text-emerald-400",
+      badge: "bg-emerald-400/5 text-nexus-accent2 border border-emerald-400/15",
+      icon: "text-nexus-accent2",
       resultBg: "bg-emerald-500/5 border border-emerald-400/10",
       resultText: "text-emerald-400/80",
     };
   }
   return {
     border: "border-l-2 border-l-rose-400/60",
-    badge: "bg-rose-400/10 text-rose-400 border border-rose-400/20",
-    icon: "text-rose-400",
+    badge: "bg-rose-400/10 text-nexus-accent4 border border-rose-400/20",
+    icon: "text-nexus-accent4",
     resultBg: "bg-rose-500/5 border border-rose-400/10",
     resultText: "text-rose-400/80",
   };
@@ -598,7 +647,7 @@ function tokenizeJson(json: string): JsonToken[] {
     } else if (bool !== undefined) {
       tokens.push({ text: bool, className: "text-purple-300/90" });
     } else if (nul !== undefined) {
-      tokens.push({ text: nul, className: "text-slate-400" });
+      tokens.push({ text: nul, className: "text-nexus-faint" });
     } else if (num !== undefined) {
       tokens.push({ text: num, className: "text-orange-300/90" });
     } else {
@@ -677,20 +726,31 @@ function phaseForTool(name: string): number {
 
 function ExecutionStages({ calls }: { calls: ToolCallItem[] }) {
   const labels = ["A ler", "A pesquisar", "A executar", "A validar"];
-  const highest = Math.max(...calls.map((call) => phaseForTool(call.name)), 0);
+  const present = labels
+    .map((label, index) => ({ label, index }))
+    .filter((stage) => calls.some((call) => phaseForTool(call.name) === stage.index));
+  if (present.length === 0) return null;
   return (
     <div className="flex flex-wrap items-center gap-1.5 border-b border-nexus-border/30 bg-nexus-bg/20 px-3 py-2">
-      {labels.map((label, index) => {
-        const completed = highest > index || calls.some((call) => phaseForTool(call.name) === index && call.status === "success");
-        const active = highest === index && calls.some((call) => phaseForTool(call.name) === index && call.status === "running");
+      {present.map((stage) => {
+        const stageCalls = calls.filter((call) => phaseForTool(call.name) === stage.index);
+        const active = stageCalls.some((call) => call.status === "running" || call.status === "awaiting_confirmation");
+        const failed = stageCalls.some((call) => call.status === "error");
+        const done = !active && !failed && stageCalls.every((call) => call.status === "success");
         return (
           <span
-            key={label}
-            className={`rounded-full px-2 py-0.5 text-[9px] font-semibold ${
-              completed ? "bg-emerald-400/10 text-emerald-300" : active ? "bg-nexus-accent/15 text-nexus-accent" : "bg-nexus-bg/60 text-nexus-muted/60"
+            key={stage.label}
+            className={`rounded-full px-2 py-0.5 text-[11px] ${
+              failed
+                ? "bg-rose-400/10 text-nexus-accent4"
+                : done
+                  ? "bg-emerald-400/10 text-nexus-accent2"
+                  : active
+                    ? "bg-nexus-accent/15 text-nexus-accent"
+                    : "bg-nexus-bg/60 text-nexus-muted/60"
             }`}
           >
-            {label}
+            {stage.label}
           </span>
         );
       })}
@@ -717,7 +777,7 @@ function WebSearchGroup({ calls }: { calls: ToolCallItem[] }) {
         className="flex cursor-pointer list-none items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-nexus-text/90 transition-colors duration-150 hover:bg-nexus-bg/60"
       >
         <span aria-hidden="true">🔎</span>
-        <span>Pesquisou na web</span>
+        <span>{webCalls.every((call) => call.status === "success") ? "Pesquisou na web" : "Pesquisas na web"}</span>
         <span className="tabular-nums text-[10px] font-normal text-nexus-muted">
           {webCalls.length} consulta{webCalls.length === 1 ? "" : "s"}
         </span>
@@ -829,7 +889,7 @@ function TerminalGroup({ calls }: { calls: ToolCallItem[] }) {
           {terminalCalls.length} {terminalCalls.length === 1 ? "ação" : "ações"}
         </span>
         {errors > 0 && (
-          <span className="rounded-full bg-rose-500/10 px-1.5 py-px font-sans text-[9px] text-rose-300">
+          <span className="rounded-full bg-rose-500/10 px-1.5 py-px font-sans text-[9px] text-nexus-accent4">
             {errors} erro{errors === 1 ? "" : "s"}
           </span>
         )}
@@ -850,12 +910,12 @@ function TerminalGroup({ calls }: { calls: ToolCallItem[] }) {
               <div
                 key={call.id}
                 className={`rounded-md px-2 py-1 font-mono text-[10px] leading-relaxed ${
-                  call.status === "error" ? "border border-rose-400/30 bg-rose-500/5 text-rose-200" : "bg-nexus-card/40 text-nexus-text/85"
+                  call.status === "error" ? "border border-rose-400/30 bg-rose-500/5 text-nexus-accent4" : "bg-nexus-card/40 text-nexus-text/85"
                 }`}
               >
                 <div className="flex min-w-0 items-center gap-1.5">
-                  <span aria-hidden="true" className={call.status === "error" ? "text-rose-400" : call.status === "running" ? "animate-pulse text-nexus-accent" : "text-emerald-400"}>
-                    {call.status === "error" ? "✕" : call.status === "running" ? "◉" : "✓"}
+                  <span aria-hidden="true" className={call.status === "error" ? "text-nexus-accent4" : call.status === "running" ? "animate-pulse text-nexus-accent" : call.status === "success" ? "text-nexus-accent2" : "text-nexus-muted"}>
+                    {call.status === "error" ? "✕" : call.status === "running" ? "◉" : call.status === "success" ? "✓" : "?"}
                   </span>
                   <span className="min-w-0 flex-1 truncate" title={command}>
                     {short}{duration ? ` · ${duration}` : ""}
@@ -874,7 +934,8 @@ function TerminalGroup({ calls }: { calls: ToolCallItem[] }) {
   );
 }
 
-function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
+function ToolCallTimeline({ calls, sessionId, compact = false }: ToolCallTimelineProps) {
+  const level = usePresentationStore((state) => state.level);
   const reactId = useId();
   const timelineBodyId = `tool-call-timeline-${reactId.replace(/:/g, "")}`;
   const [expanded, setExpanded] = useState(false);
@@ -882,6 +943,10 @@ function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
   const [retryResults, setRetryResults] = useState<Record<string, unknown>>({});
   const [retryErrors, setRetryErrors] = useState<Record<string, string>>({});
   const [confirming, setConfirming] = useState<string | null>(null);
+  const hasPendingConfirmation = Boolean(calls?.some((call) => call.status === "awaiting_confirmation"));
+  useEffect(() => {
+    if (hasPendingConfirmation) setExpanded(true);
+  }, [hasPendingConfirmation]);
   if (!calls || calls.length === 0) return null;
 
   const runningCount = calls.filter((c) => c.status === "running").length;
@@ -891,6 +956,8 @@ function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
   const callGroups = groupAdjacentToolCalls(calls);
   const headerGroups = callGroups.slice(0, 4);
   const headerCallCount = headerGroups.reduce((count, group) => count + group.length, 0);
+  const focusCall = calls.find((call) => call.status === "running" || call.status === "awaiting_confirmation") ?? calls[calls.length - 1];
+  const focusSentence = toolCallSentence(focusCall.name, focusCall.args, focusCall.status);
 
   const retryTool = async (call: ToolCallItem, confirmationId?: string) => {
     if (!sessionId || sessionId === "default") {
@@ -961,37 +1028,39 @@ function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
       initial={{ opacity: 0, y: 5 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.16, ease: "easeOut" }}
-      className="mt-3 overflow-hidden rounded-xl border border-nexus-border/60 bg-nexus-panel/50"
+      className={compact
+        ? "mt-1 overflow-hidden rounded-lg border border-nexus-border/40 bg-nexus-bg/20"
+        : "nx-work-surface mt-3 overflow-hidden rounded-xl border border-nexus-border/60"}
     >
       <motion.button
         type="button"
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         aria-controls={timelineBodyId}
-        className="flex w-full flex-wrap items-center justify-between gap-2.5 p-3 text-left transition-colors duration-150 hover:bg-nexus-card/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-accent/50"
+        className={`flex w-full flex-wrap items-center justify-between gap-2.5 text-left transition-colors duration-150 hover:bg-nexus-card/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-accent/50 ${compact ? "px-3 py-2" : "p-3"}`}
         whileHover={{ scale: 1.005 }}
         whileTap={{ scale: 0.995 }}
       >
-        <div className="flex flex-wrap items-center gap-2">
-          {headerGroups.map((group) => {
+        <div className={`flex min-w-0 flex-1 items-start gap-1.5 ${compact ? "flex-row items-center" : "flex-col"}`}>
+          <span className={`inline-flex shrink-0 items-center gap-1.5 text-[11px] font-semibold text-nexus-muted ${compact ? "" : "mb-1.5 uppercase tracking-wide"}`}>
+            <Wrench className="h-3.5 w-3.5" aria-hidden="true" />
+            Ferramentas · {calls.length}
+          </span>
+          {compact && <span data-testid="tool-call-sentence" className="min-w-0 truncate text-[12px] text-nexus-faint">{compactToolLine(focusCall.name, focusCall.args, focusCall.status) ?? focusSentence}</span>}
+          {!compact && headerGroups.map((group) => {
             const call = group[0];
-            const { label, Icon } = getToolDisplay(call.name);
-            const statusConfig = StatusConfig(call.status);
+            const { label } = getToolDisplay(call.name);
+            const cue = compactToolLine(call.name, call.args, call.status);
             return (
-              <motion.span
-                key={call.id}
-                className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${statusConfig.badge}`}
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: 0.05 }}
-              >
-                <Icon className="h-3 w-3" />
-                {label}{group.length > 1 ? ` × ${group.length}` : ""}
-                <StatusIcon status={call.status} />
-              </motion.span>
+              <span key={call.id} className="flex w-full min-w-0 items-baseline gap-2 text-[13px]">
+                <span className="shrink-0 text-nexus-text/90">
+                  {label}{group.length > 1 ? ` × ${group.length}` : ""}
+                </span>
+                {cue ? <span className="truncate text-nexus-faint">{cue}</span> : null}
+              </span>
             );
           })}
-          {calls.length > headerCallCount && (
+          {!compact && calls.length > headerCallCount && (
             <span className="rounded-full bg-nexus-bg/60 px-2 py-0.5 text-[10px] font-medium text-nexus-muted ring-1 ring-nexus-border/50">
               +{calls.length - headerCallCount}
             </span>
@@ -1009,15 +1078,15 @@ function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
             </span>
           )}
           {successCount > 0 && (
-            <span className="text-emerald-400">{successCount} ok</span>
+            <span className="text-nexus-accent2">{successCount} ok</span>
           )}
           {errorCount > 0 && (
-            <span className="text-rose-400">
+            <span className="text-nexus-accent4">
               {errorCount} erro{errorCount === 1 ? "" : "s"}
             </span>
           )}
           {confirmationCount > 0 && (
-            <span className="text-amber-300">
+            <span className="text-nexus-accent3">
               {confirmationCount} aprovaç{confirmationCount === 1 ? "ão" : "ões"}
             </span>
           )}
@@ -1034,17 +1103,24 @@ function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
         </div>
       </motion.button>
 
-      <ExecutionStages calls={calls} />
+      {!compact && (
+        <>
+          <p className="px-3 pb-2 text-[13px] leading-snug text-nexus-muted" data-testid="tool-call-sentence">
+            {compactToolLine(focusCall.name, focusCall.args, focusCall.status) ?? focusSentence}
+          </p>
+          <ExecutionStages calls={calls} />
+        </>
+      )}
 
       <AnimatePresence initial={false}>
         {expanded && (
           <motion.div
             id={timelineBodyId}
             data-testid="tool-call-timeline-body"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.16, ease: "easeInOut" }}
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
             className="overflow-hidden [content-visibility:auto]"
           >
             <div className="space-y-2.5 border-t border-nexus-border/30 bg-nexus-bg/20 p-3">
@@ -1060,7 +1136,10 @@ function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
                     key={call.id}
                     initial={{ opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: idx * 0.05 }}
+                    // Capped stagger: an uncapped `idx * 0.05` made the last of
+                    // 30 calls take 1.5s to appear — and that is exactly the
+                    // result the user is waiting for.
+                    transition={{ delay: Math.min(idx, 5) * 0.03 }}
                     className={`rounded-xl border border-nexus-border/60 bg-nexus-card/45 p-3 ${statusConfig.border}`}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1072,22 +1151,30 @@ function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
                         <span className="text-xs font-semibold text-nexus-text">
                           {label}
                         </span>
-                        <span className="rounded bg-nexus-bg/60 px-1.5 py-0.5 font-mono text-[9px] text-nexus-muted ring-1 ring-nexus-border/40">
-                          {call.name}
-                        </span>
+                        {call.agent && (
+                          <span className="text-[10px] text-nexus-muted">{call.agent}</span>
+                        )}
+                        {level === "technical" ? (
+                          <span className="rounded bg-nexus-bg/60 px-1.5 py-0.5 font-mono text-[9px] text-nexus-muted ring-1 ring-nexus-border/40">
+                            {call.name}
+                          </span>
+                        ) : null}
                       </div>
                       <div className="flex items-center gap-2">
                         <StatusIcon status={call.status} />
                         {call.durationMs !== undefined && (
-                          <span className="rounded-full bg-nexus-bg/60 px-2 py-0.5 font-mono text-[10px] text-nexus-muted ring-1 ring-nexus-border/40">
-                            {call.durationMs}ms
+                          <span
+                            className="rounded-full bg-nexus-bg/60 px-2 py-0.5 font-mono text-[10px] text-nexus-muted ring-1 ring-nexus-border/40"
+                            title="Duração da chamada"
+                          >
+                            {formatRunDuration(call.durationMs)}
                           </span>
                         )}
                         {formatCallTimestamp(call.timestamp) && (
                           <time
                             dateTime={call.timestamp}
+                            title={new Date(call.timestamp).toLocaleString("pt-PT")}
                             className="font-mono text-[9px] text-nexus-muted/75"
-                            aria-label="Hora da chamada"
                           >
                             {formatCallTimestamp(call.timestamp)}
                           </time>
@@ -1100,7 +1187,7 @@ function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
                           <Code2 className="h-3 w-3" />
                           Argumentos
                         </div>
-                        <JsonSyntaxHighlight data={call.args} />
+                        <JsonSyntaxHighlight data={redactPayload(call.args)} />
                       </div>
                     )}
                     {call.status === "success" && call.result !== undefined && (
@@ -1137,21 +1224,28 @@ function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
                             </div>
                           ) : null;
                         })()}
-                        <button
+                        {call.callId ? (
+                          <p className="mt-2 text-[10px] text-nexus-muted">
+                            Os argumentos registados podem estar ocultos; esta ação não pode ser repetida daqui.
+                          </p>
+                        ) : <button
                           type="button"
                           disabled={retrying === call.id}
                           onClick={() => void retryTool(call)}
-                          className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-rose-300/25 px-2 py-1 text-[10px] font-semibold text-rose-200 hover:bg-rose-400/10 disabled:opacity-50"
+                          className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-rose-300/25 px-2 py-1 text-[10px] font-semibold text-nexus-accent4 hover:bg-rose-400/10 disabled:opacity-50"
                         >
                           <RotateCcw className={`h-3 w-3 ${retrying === call.id ? "animate-spin" : ""}`} />
                           {retrying === call.id ? "A repetir…" : "Repetir ferramenta"}
-                        </button>
+                        </button>}
                         {retryErrors[call.id] !== undefined && (
-                          <div className="mt-2 rounded border border-rose-400/30 bg-rose-500/10 p-2 text-[10px] text-rose-200">
+                          <div className="mt-2 rounded border border-rose-400/30 bg-rose-500/10 p-2 text-[10px] text-nexus-accent4">
                             A repetição falhou: {retryErrors[call.id]}
                           </div>
                         )}
                       </motion.div>
+                    )}
+                    {call.status === "unknown" && call.error && (
+                      <p className="mt-2 text-[11px] text-nexus-muted">{call.error}</p>
                     )}
                     {call.status === "awaiting_confirmation" && (
                       <motion.div className="mt-2.5 rounded-lg border border-amber-300/20 bg-amber-300/5 p-2.5">
@@ -1159,26 +1253,31 @@ function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
                           Esta operação pode alterar ficheiros, executar código ou aceder a um serviço externo.
                           {call.suggestion && <span className="block mt-1 text-amber-200/70">{call.suggestion}</span>}
                         </div>
+                        {!call.confirmationId && (
+                          <p role="status" className="mt-2 text-[11px] text-nexus-accent3">
+                            A confirmação não pode ser enviada: falta o identificador desta operação.
+                          </p>
+                        )}
                         <div className="mt-2 flex gap-2">
                           <button
                             type="button"
-                            disabled={confirming === call.id}
+                            disabled={!call.confirmationId || confirming === call.id}
                             onClick={() => void resolveConfirmation(call, true)}
-                            className="rounded-md bg-emerald-400/15 px-2 py-1 text-[10px] font-semibold text-emerald-200 hover:bg-emerald-400/25 disabled:opacity-50"
+                            className="min-h-9 rounded-md bg-emerald-400/15 px-3 py-1 text-[12px] font-semibold text-nexus-accent2 hover:bg-emerald-400/25 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             Confirmar
                           </button>
                           <button
                             type="button"
-                            disabled={confirming === call.id}
+                            disabled={!call.confirmationId || confirming === call.id}
                             onClick={() => void resolveConfirmation(call, false)}
-                            className="rounded-md bg-rose-400/10 px-2 py-1 text-[10px] font-semibold text-rose-200 hover:bg-rose-400/20 disabled:opacity-50"
+                            className="min-h-9 rounded-md bg-rose-400/10 px-3 py-1 text-[12px] font-semibold text-nexus-accent4 hover:bg-rose-400/20 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             Recusar
                           </button>
                         </div>
                         {retryErrors[call.id] !== undefined && (
-                          <div className="mt-2 rounded border border-rose-400/30 bg-rose-500/10 p-2 text-[10px] text-rose-200">
+                          <div className="mt-2 rounded border border-rose-400/30 bg-rose-500/10 p-2 text-[10px] text-nexus-accent4">
                             A confirmação falhou: {retryErrors[call.id]}
                           </div>
                         )}
@@ -1195,7 +1294,7 @@ function ToolCallTimeline({ calls, sessionId }: ToolCallTimelineProps) {
                             <button
                               type="button"
                               onClick={() => void approveAndRetry(call)}
-                              className="mt-2 rounded-md bg-amber-400/15 px-2 py-1 font-semibold text-amber-200 hover:bg-amber-400/25"
+                              className="mt-2 rounded-md bg-amber-400/15 px-2 py-1 font-semibold text-nexus-accent3 hover:bg-amber-400/25"
                             >
                               Autorizar e executar
                             </button>

@@ -142,11 +142,14 @@ def scenario_p1_latency(client, project: Path) -> None:
     )
     events = sse(response.content)
     read_results = tool_results(events, "read_file")
+    primary_calls = sum(role == "primary" for role in PROVIDER.call_roles)
+    advisor_calls = sum(role == "advisor" for role in PROVIDER.call_roles)
     record(
         "P1 custo por turno (pergunta de leitura)",
         "2 inferências por turno (41s medidos vs 21s sem auditoria)",
-        f"{PROVIDER.calls} inferência(s); read_file executado: {bool(read_results)}",
-        PROVIDER.calls == 2 and bool(read_results),
+        f"{primary_calls} inferência(s) PRIMARY + {advisor_calls} revisão(ões) ADVISOR; "
+        f"{PROVIDER.calls} chamadas no total; read_file executado: {bool(read_results)}",
+        primary_calls == 2 and advisor_calls == 1 and bool(read_results),
     )
 
 
@@ -256,9 +259,9 @@ def scenario_tool_failure_is_observable(client, project: Path) -> None:
 
 def scenario_model_override_switch(client, project: Path) -> None:
     """A mudança de modelo escolhida por pedido chega ao provider."""
-    model_ids = ["qwen2.5:7b", "llama3.1:8b"]
-    PROVIDER.load(["RESPOSTA-MODELO-A", "RESPOSTA-MODELO-B"])
-    observed_by_request: list[list[str]] = []
+    model_ids = ["qwen2.5:7b", "llama3.1:8b", "qwen3"]
+    PROVIDER.load(["RESPOSTA-MODELO-A", "RESPOSTA-MODELO-B", "RESPOSTA-MODELO-C"])
+    observed_by_request: list[dict[str, list[str]]] = []
     for index, model_id in enumerate(model_ids, start=1):
         start = len(PROVIDER.models)
         client.post(
@@ -268,10 +271,22 @@ def scenario_model_override_switch(client, project: Path) -> None:
                 "session_id": f"e2e-model-switch-{index}",
                 "project_path": str(project),
                 "model": model_id,
+                "provider": "ollama",
                 "autonomous": True,
             },
         )
-        observed_by_request.append(PROVIDER.models[start:])
+        observed_by_request.append(
+            {
+                role: [
+                    model
+                    for model, call_role in zip(
+                        PROVIDER.models[start:], PROVIDER.call_roles[start:], strict=True
+                    )
+                    if call_role == role
+                ]
+                for role in ("primary", "advisor")
+            }
+        )
     observed = observed_by_request
     record(
         "Mudança explícita de modelo",
@@ -279,10 +294,10 @@ def scenario_model_override_switch(client, project: Path) -> None:
         f"IDs enviados ao provider scripted por pedido: {observed}",
         len(observed) == len(model_ids)
         and all(
-            models and set(models) == {expected}
-            for models, expected in zip(observed, model_ids, strict=True)
+            calls["primary"] and set(calls["primary"]) == {expected}
+            for calls, expected in zip(observed, model_ids, strict=True)
         ),
-        "valida propagação do ID, não qualidade nem disponibilidade dos modelos reais",
+        "separa o modelo explícito do chat do papel ADVISOR; não prova qualidade real",
     )
 
 
@@ -485,7 +500,7 @@ def scenario_p3_false_green(client, project: Path) -> None:
 def scenario_p4_no_project(client) -> None:
     """P4 — sem projeto selecionado, o agente não pode escrever no repo do NEXUS."""
     PROVIDER.load(["Preciso que selecione um projeto primeiro."])
-    client.post(
+    response = client.post(
         "/api/chat",
         json={
             "message": "O que faz app/repos/task_repo.py? Le o ficheiro.",
@@ -494,6 +509,7 @@ def scenario_p4_no_project(client) -> None:
             "autonomous": True,
         },
     )
+    events = sse(response.content)
     prompt = PROVIDER.last_prompt_text().lower()
     says_no_project = "sem projeto selecionado" in prompt
     # A regressão original: o PROJECT STATE era construído a partir do próprio
@@ -504,13 +520,20 @@ def scenario_p4_no_project(client) -> None:
     points_at_nexus_repo = bool(
         re.search(r"(?m)^- (?:raiz|conteúdo da raiz):", state)
     )
+    file_tool_results = [
+        event
+        for event in events
+        if event.get("type") == "tool_result"
+        and event.get("tool_name")
+        in {"read_file", "read_file_absolute", "write_file", "write_file_absolute"}
+    ]
     record(
         "P4 sem projeto selecionado",
         "PROJECT STATE era o repo do NEXUS ('.' resolvido contra o CWD do backend)",
-        f"contexto diz 'sem projeto selecionado': {says_no_project} | "
-        f"aponta para o repo do NEXUS: {points_at_nexus_repo}",
-        says_no_project and not points_at_nexus_repo,
-        "a UI já não envia '.'; o backend avisa quando recorre à raiz",
+        f"aviso literal presente: {says_no_project} | aponta para o repo do NEXUS: "
+        f"{points_at_nexus_repo} | resultados de ferramentas de ficheiros: {len(file_tool_results)}",
+        not points_at_nexus_repo and not file_tool_results,
+        "valida o limite de acesso real; não depende da frase usada no prompt",
     )
 
 
@@ -609,6 +632,81 @@ def scenario_p10_spawn(client, project: Path) -> None:
     )
 
 
+def scenario_primary_delegation_reaches_parent(client, project: Path) -> None:
+    """Accepted child work runs under the scheduler and reaches PRIMARY synthesis."""
+    from backend.orchestrator import infinity
+
+    original_advisor_switch = infinity.advisor_live_enabled
+    infinity.advisor_live_enabled = lambda: False
+    PROVIDER.load(
+        [
+            '```tool\n{"name":"spawn_task","arguments":'
+            '{"name":"review-pagination","agent":"ANALYZER",'
+            '"description":"Inspeciona app/repos/task_repo.py e devolve evidência sobre o offset.",'
+            '"definition_of_done":"Indica o cálculo do offset e os números da primeira página.",'
+            '"read_scope":["app/repos/task_repo.py"]}}\n```',
+            "A proposta foi submetida ao runtime; vou sintetizar a evidência quando regressar.",
+            "CHILD-EVIDENCE: list_page calcula offset como page * size.",
+            "SYNTESE-COM-CHILD: o child confirmou que list_page usa page * size.",
+        ]
+    )
+    try:
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": (
+                    "DELEGA-POSITIVA: analisa a paginação e usa ANALYZER para inspecionar "
+                    "app/repos/task_repo.py; depois sintetiza o resultado do child."
+                ),
+                "session_id": "e2e-primary-delegation-positive",
+                "project_path": str(project),
+                "autonomous": True,
+            },
+        )
+    finally:
+        infinity.advisor_live_enabled = original_advisor_switch
+
+    events = sse(response.content)
+    results = tool_results(events, "spawn_task")
+    child_result = next(
+        (
+            result
+            for result in results
+            if isinstance(result, dict)
+            and result.get("status") == "completed"
+            and "CHILD-EVIDENCE" in str(result.get("output") or "")
+        ),
+        None,
+    )
+    child_started = any(
+        event.get("type") == "agent_started" and event.get("agent") == "ANALYZER"
+        for event in events
+    )
+    child_finished = any(
+        event.get("type") == "agent_finished" and event.get("agent") == "ANALYZER"
+        for event in events
+    )
+    primary_prompts = [
+        "\n".join(str(message.get("content") or "") for message in messages)
+        for messages, role in zip(PROVIDER.prompts, PROVIDER.call_roles, strict=True)
+        if role == "primary"
+    ]
+    child_reached_synthesis = any("CHILD-EVIDENCE" in prompt for prompt in primary_prompts)
+    final_text = visible_text(events)
+    record(
+        "PRIMARY delegação aceite e sintetizada",
+        "a proposta podia ficar fora do scheduler ou perder o resultado do child",
+        f"scheduler child: started={child_started}, finished={child_finished} | "
+        f"resultado concluído com output: {child_result is not None} | "
+        f"output chegou ao prompt de síntese: {child_reached_synthesis}",
+        child_started
+        and child_finished
+        and child_result is not None
+        and child_reached_synthesis
+        and "SYNTESE-COM-CHILD" in final_text,
+    )
+
+
 def scenario_multiturn_memory(client, project: Path) -> None:
     """Execução longa: 5 turnos seguidos, memória e contexto sob controlo."""
     marks = []
@@ -643,7 +741,15 @@ def scenario_multiturn_memory(client, project: Path) -> None:
 
 
 def main(*, results_path: Path | None = None) -> int:
+    from backend.tools.ollama_client import OllamaClient
+
     tmp = Path(tempfile.mkdtemp(prefix="nexus-e2e-"))
+    had_default_model = hasattr(OllamaClient, "DEFAULT_MODEL")
+    previous_default_model = getattr(OllamaClient, "DEFAULT_MODEL", None)
+    # The scripted provider is the configured local model for this isolated
+    # harness. PRIMARY deliberately refuses to guess when Ollama has no
+    # provider-owned default model.
+    setattr(OllamaClient, "DEFAULT_MODEL", "scripted:latest")
     try:
         project = make_project(tmp)
         with build_client(project) as client:
@@ -661,8 +767,13 @@ def main(*, results_path: Path | None = None) -> int:
             scenario_p5_context_budget(client, project)
             scenario_p8_false_claims(client, project)
             scenario_p10_spawn(client, project)
+            scenario_primary_delegation_reaches_parent(client, project)
             scenario_multiturn_memory(client, project)
     finally:
+        if had_default_model:
+            setattr(OllamaClient, "DEFAULT_MODEL", previous_default_model)
+        else:
+            delattr(OllamaClient, "DEFAULT_MODEL")
         shutil.rmtree(tmp, ignore_errors=True)
 
     passed = sum(1 for r in RESULTS if r["ok"])

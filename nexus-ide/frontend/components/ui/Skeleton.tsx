@@ -9,21 +9,19 @@ interface SkeletonProps extends React.HTMLAttributes<HTMLDivElement> {
 }
 
 /**
- * Base skeleton block with a pulse animation.
- * Use className to control dimensions (w‑xx, h‑xx, rounded‑xx).
+ * Base skeleton block.
+ *
+ * Uses the design-system `.nx-shimmer` sweep instead of a second overlapping
+ * `animate-pulse`: two simultaneous pulses read as flicker, and `slate-*` is
+ * off-token so the placeholder stays dark in the light theme.
+ * Use className to control dimensions (w-xx, h-xx, rounded-xx).
  */
 export function Skeleton({ className = "", ...props }: SkeletonProps) {
   return (
     <div
-      className={`relative overflow-hidden rounded-lg bg-slate-800/60 animate-pulse ${className}`}
+      className={`nx-shimmer rounded-lg ${className}`}
       {...props}
-    >
-      {/* Shimmer overlay */}
-      <div
-        className="absolute inset-0 bg-gradient-to-r from-transparent via-slate-700/30 to-transparent animate-pulse"
-        style={{ animationDuration: "2s" }}
-      />
-    </div>
+    />
   );
 }
 
@@ -38,7 +36,7 @@ export function WidgetSkeleton() {
   return (
     <div className="h-full flex flex-col">
       {/* Header bar */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/60">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-nexus-border/60">
         <div className="flex items-center gap-2">
           <Skeleton className="w-4 h-4 rounded" />
           <Skeleton className="h-3 w-36 rounded" />
@@ -64,7 +62,7 @@ export function WidgetSkeleton() {
 /** Compact skeleton for smaller stat cards (e.g. inside a stats grid). */
 export function CardSkeleton() {
   return (
-    <div className="nexus-card p-4 space-y-3">
+    <div className="nx-card p-4 space-y-3">
       <Skeleton className="h-3 w-24 rounded" />
       <Skeleton className="h-8 w-16 rounded" />
       <Skeleton className="h-2 w-full rounded" />
@@ -76,7 +74,7 @@ export function CardSkeleton() {
 export function ChartSkeleton() {
   return (
     <div className="h-full flex flex-col">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/60">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-nexus-border/60">
         <Skeleton className="h-3 w-32 rounded" />
         <Skeleton className="h-3 w-12 rounded" />
       </div>
@@ -85,7 +83,9 @@ export function ChartSkeleton() {
           <Skeleton
             key={i}
             className="flex-1 rounded-t"
-            style={{ height: `${30 + Math.random() * 50}%` }}
+            // Deterministic heights: `Math.random()` here produces a
+            // server/client hydration mismatch and reshuffles on re-render.
+            style={{ height: `${30 + ((i * 29) % 45)}%` }}
           />
         ))}
       </div>
@@ -106,7 +106,7 @@ export function TableSkeleton({ rows = 5 }: { rows?: number }) {
       </div>
       {/* Rows */}
       {Array.from({ length: rows }).map((_, i) => (
-        <div key={i} className="flex gap-4 px-4 py-3 border-b border-slate-800/40">
+        <div key={i} className="flex gap-4 px-4 py-3 border-b border-nexus-border/40">
           <Skeleton className="h-3 w-1/4 rounded" />
           <Skeleton className="h-3 w-1/4 rounded" />
           <Skeleton className="h-3 w-1/4 rounded" />
@@ -124,33 +124,33 @@ export function DashboardSkeleton() {
     <div className="p-4 space-y-4">
       {/* Top row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2 nexus-widget">
+        <div className="nx-elev-1 overflow-hidden rounded-nx-lg lg:col-span-2">
           <WidgetSkeleton />
         </div>
-        <div className="nexus-widget">
+        <div className="nx-elev-1 overflow-hidden rounded-nx-lg">
           <WidgetSkeleton />
         </div>
       </div>
 
       {/* Middle row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="nexus-widget">
+        <div className="nx-elev-1 overflow-hidden rounded-nx-lg">
           <WidgetSkeleton />
         </div>
-        <div className="nexus-widget">
+        <div className="nx-elev-1 overflow-hidden rounded-nx-lg">
           <WidgetSkeleton />
         </div>
-        <div className="nexus-widget">
+        <div className="nx-elev-1 overflow-hidden rounded-nx-lg">
           <WidgetSkeleton />
         </div>
       </div>
 
       {/* Bottom row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="nexus-widget">
+        <div className="nx-elev-1 overflow-hidden rounded-nx-lg">
           <WidgetSkeleton />
         </div>
-        <div className="nexus-widget">
+        <div className="nx-elev-1 overflow-hidden rounded-nx-lg">
           <WidgetSkeleton />
         </div>
       </div>

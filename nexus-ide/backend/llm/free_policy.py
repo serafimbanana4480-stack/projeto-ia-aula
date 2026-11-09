@@ -14,6 +14,18 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def is_simulation_provider(provider: Any) -> bool:
+    """True when *provider* explicitly declares itself a simulation.
+
+    The check is deliberately strict (``is True``): a test double built with
+    ``unittest.mock`` auto-creates any attribute it is asked for, so a loose
+    truthiness test would classify every mock as a simulation and refuse
+    perfectly real providers.  Only the explicit ``simulation = True`` class
+    attribute counts.
+    """
+    return getattr(provider, "simulation", False) is True
+
+
 @dataclass(frozen=True, slots=True)
 class FreeModelRequirement:
     tool_calling: bool = False

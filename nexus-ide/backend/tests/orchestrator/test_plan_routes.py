@@ -290,6 +290,54 @@ def test_execute_unapproved_plan_raises_http_409(monkeypatch: Any) -> None:
     assert "aprovação explícita" in exc_info.value.detail
 
 
+def test_execute_plan_passes_authenticated_owner_to_engine(monkeypatch: Any) -> None:
+    plan = ExecutionPlan.from_steps(
+        title="Owned plan",
+        description="The durable run must keep its authenticated owner",
+        steps=[],
+        session_id="session-1",
+    )
+    plan.plan_id = "plan-1"
+    plan.approved = True
+    captured: dict[str, Any] = {}
+
+    class FakeEngine:
+        @staticmethod
+        def get_plan(_plan_id: str) -> ExecutionPlan:
+            return plan
+
+        async def execute_plan(self, **kwargs: Any) -> SimpleNamespace:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                run_id="run-owned",
+                state=SimpleNamespace(value="completed"),
+                completed_tasks=0,
+                failed_tasks=0,
+                total_duration_ms=0,
+                tokens_used=0,
+                errors=[],
+            )
+
+    monkeypatch.setattr(plan_routes, "_get_engine", lambda _request: FakeEngine())
+    monkeypatch.setattr(
+        plan_routes,
+        "get_session_for_user",
+        lambda _session_id, _user_id: {"id": "session-1", "user_id": "user-1"},
+    )
+
+    result = asyncio.run(
+        plan_routes.execute_plan(
+            plan_routes.PlanExecuteRequest(plan_id="plan-1", session_id="session-1"),
+            SimpleNamespace(),
+            {"user_id": "user-1"},
+        )
+    )
+
+    assert captured["user_id"] == "user-1"
+    assert captured["session_id"] == "session-1"
+    assert result["run_id"] == "run-owned"
+
+
 def test_continue_without_blocked_proposal_raises_http_409(monkeypatch: Any) -> None:
     class FakeEngine:
         @staticmethod

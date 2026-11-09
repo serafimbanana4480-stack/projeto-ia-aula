@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+import backend.config.settings as settings_module
 from backend.config.settings import (
     Settings,
     get_settings,
@@ -15,6 +16,37 @@ from backend.config.settings import (
 
 
 class TestSettingsDefaults:
+    def test_backend_binds_to_loopback_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A local IDE must not expose its tool API to the network by default."""
+        monkeypatch.delenv("BACKEND_HOST", raising=False)
+        settings = Settings(
+            _env_file=None,
+            secret_key="test-secret-key-long-enough-for-local-tests-0001",
+            jwt_secret="test-jwt-secret-long-enough-for-local-tests-0001",
+        )
+
+        assert settings.backend_host == "127.0.0.1"
+
+    def test_public_listener_with_open_registration_fails_config_validation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Network exposure must be an explicit decision with registration off."""
+        settings = Settings(
+            _env_file=None,
+            backend_host="0.0.0.0",
+            environment="development",
+            llm_provider="ollama",
+            local_llm_device="cpu",
+            secret_key="test-secret-key-long-enough-for-local-tests-0001",
+            jwt_secret="test-jwt-secret-long-enough-for-local-tests-0001",
+            allow_self_registration=True,
+        )
+        monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+        errors = settings_module.validate_configuration()
+
+        assert any("Self-registration cannot be enabled" in error for error in errors)
+
     def test_default_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify Settings has the expected local-provider fields.
 

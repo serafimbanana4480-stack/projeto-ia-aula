@@ -99,6 +99,36 @@ def normalize_public_http_url(value: str) -> str:
     return urlunsplit((scheme, netloc, parsed.path, parsed.query, ""))
 
 
+async def validate_public_http_url(
+    value: str,
+    *,
+    timeout: float = 5.0,
+    resolver: Any | None = None,
+) -> str:
+    """Validate an HTTP URL and require every DNS answer to be public.
+
+    ``normalize_public_http_url`` handles URL syntax, reserved hostnames, and
+    literal IPs. Browser requests also need a DNS check because the browser's
+    own resolver is separate from the guarded HTTPX transport. Call this for
+    each browser request, including redirects and subresources. The resolver
+    injection exists for deterministic tests; production uses the OS resolver.
+    """
+    normalized = normalize_public_http_url(value)
+    parsed = urlsplit(normalized)
+    host = parsed.hostname
+    if not host:  # Defensive: normalization already rejects this.
+        raise ValueError("A public HTTP hostname is required")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        backend = PublicAddressNetworkBackend(resolver=resolver)
+        await asyncio.wait_for(
+            backend._resolve_public_addresses(host, port, timeout), timeout=timeout
+        )
+    except Exception as exc:
+        raise ValueError("DNS did not resolve exclusively to public addresses") from exc
+    return normalized
+
+
 class PublicAddressNetworkBackend(httpcore.AsyncNetworkBackend):
     """Wrap a socket backend and pin each TCP connection to a public DNS result."""
 

@@ -12,12 +12,48 @@ from backend.tools.registry import ToolSpec, register_tool
 
 logger = logging.getLogger(__name__)
 
+#: Fields every email configuration must provide. The handlers used to read
+#: them with ``config["host"]`` and friends, so an incomplete configuration
+#: died with a bare ``KeyError`` that named nothing.
+_REQUIRED_CONFIG_FIELDS: tuple[str, ...] = ("host", "port", "username", "password")
+
 
 def _parse_config(config_json: str | dict) -> dict[str, Any]:
     """Parse email configuration from JSON string or dict."""
     if isinstance(config_json, str):
         return json.loads(config_json)
-    return dict(config_json)
+    if isinstance(config_json, dict):
+        return dict(config_json)
+    raise TypeError(
+        f"config_json must be a JSON string or a dict, got {type(config_json).__name__}"
+    )
+
+
+def _validate_config(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Return an error payload when *config* is incomplete, else ``None``."""
+    missing = [field for field in _REQUIRED_CONFIG_FIELDS if not config.get(field)]
+    if not missing:
+        return None
+    return {
+        "error": (
+            "Incomplete email configuration: missing "
+            + ", ".join(missing)
+            + ". Provide a config_json object with "
+            + ", ".join(_REQUIRED_CONFIG_FIELDS)
+            + "."
+        ),
+        "missing_fields": missing,
+        "required_fields": list(_REQUIRED_CONFIG_FIELDS),
+    }
+
+
+def _invalid_config_error(exc: Exception) -> dict[str, Any]:
+    """Return the structured error for a configuration that could not be parsed."""
+    return {
+        "error": f"Invalid email configuration: {exc}",
+        "missing_fields": list(_REQUIRED_CONFIG_FIELDS),
+        "required_fields": list(_REQUIRED_CONFIG_FIELDS),
+    }
 
 
 async def check_inbox(
@@ -36,7 +72,13 @@ async def check_inbox(
     Returns:
         Dict with count and emails list.
     """
-    config = _parse_config(config_json)
+    try:
+        config = _parse_config(config_json)
+    except (TypeError, ValueError) as exc:
+        return _invalid_config_error(exc)
+    invalid = _validate_config(config)
+    if invalid is not None:
+        return invalid
     emails = _fetch_emails(
         folder=config.get("folder", "INBOX"),
         limit=limit,
@@ -68,7 +110,13 @@ async def search_emails_tool(
     Returns:
         Dict with count and matching emails list.
     """
-    config = _parse_config(config_json)
+    try:
+        config = _parse_config(config_json)
+    except (TypeError, ValueError) as exc:
+        return _invalid_config_error(exc)
+    invalid = _validate_config(config)
+    if invalid is not None:
+        return invalid
     results = _search_emails(
         query=query,
         folder=config.get("folder", "INBOX"),
@@ -105,7 +153,13 @@ async def summarize_inbox(
             "limit": limit,
         }
 
-    config = _parse_config(config_json)
+    try:
+        config = _parse_config(config_json)
+    except (TypeError, ValueError) as exc:
+        return _invalid_config_error(exc)
+    invalid = _validate_config(config)
+    if invalid is not None:
+        return invalid
     emails = _fetch_emails(
         folder=config.get("folder", "INBOX"),
         limit=limit,
@@ -131,6 +185,7 @@ register_tool(
     ToolSpec(
         name="check_inbox",
         description="Check email inbox and return recent emails using IMAP configuration.",
+        category="email",
         schema={
             "type": "object",
             "properties": {
@@ -151,6 +206,7 @@ register_tool(
     ToolSpec(
         name="search_emails",
         description="Search emails by subject or body using IMAP configuration.",
+        category="email",
         schema={
             "type": "object",
             "properties": {
@@ -171,6 +227,7 @@ register_tool(
     ToolSpec(
         name="summarize_inbox",
         description="Return a summary of recent emails (subjects, senders, unread count).",
+        category="email",
         schema={
             "type": "object",
             "properties": {

@@ -30,12 +30,9 @@ import {
   Activity,
   BrainCircuit,
   CheckCircle2,
-  Clock,
   Command,
   Cpu,
-  Gauge,
   HardDrive,
-  Layers,
   MemoryStick,
   MessageSquare,
   ListTodo,
@@ -49,7 +46,7 @@ import { useMetricsStore } from "../../stores/metricsStore";
 import { useModeStore } from "../../stores/modeStore";
 import { Surface, SurfaceHeader } from "../../components/ui/Surface";
 import { KpiCard, GaugeCard } from "../../components/ui/KpiCard";
-import { Card, CardEmpty, CardStat } from "../../components/ui/Card";
+import { Card, CardEmpty } from "../../components/ui/Card";
 import UsageWidget from "../../components/dashboard/UsageWidget";
 import ProviderStatusWidget from "../../components/dashboard/ProviderStatusWidget";
 import MCPStatusWidget from "../../components/dashboard/MCPStatusWidget";
@@ -99,7 +96,8 @@ const PROMPT_SUGGESTIONS = [
 
 const DASHBOARD_SECTIONS = [
   { href: "#novo-objetivo", label: "Novo objetivo" },
-  { href: "#resumo", label: "Resumo" },
+  { href: "#agora", label: "Agora" },
+  { href: "#resumo", label: "Desempenho" },
   { href: "#execucao", label: "Execução" },
   { href: "#integracoes", label: "Integrações" },
   { href: "#agentes", label: "Agentes" },
@@ -124,16 +122,16 @@ function connectionView(
   online: boolean,
 ): { label: string; tone: ConnectionTone; dot: string } {
   if (status === "auth_required") {
-    return { label: "Sessão expirada", tone: "warning", dot: "bg-amber-400" };
+    return { label: "Sessão expirada", tone: "warning", dot: "bg-nexus-accent3" };
   }
   if (status === "degraded") {
-    return { label: "Degradado", tone: "warning", dot: "bg-amber-400" };
+    return { label: "Degradado", tone: "warning", dot: "bg-nexus-accent3" };
   }
-  if (online) return { label: "Ligado", tone: "success", dot: "bg-emerald-400" };
+  if (online) return { label: "Ligado", tone: "success", dot: "bg-nexus-accent2" };
   if (status === "connecting") {
-    return { label: "A ligar", tone: "neutral", dot: "bg-amber-400 animate-pulse-subtle" };
+    return { label: "A ligar", tone: "neutral", dot: "bg-nexus-accent3 animate-pulse-subtle" };
   }
-  return { label: "Offline", tone: "danger", dot: "bg-rose-400" };
+  return { label: "Offline", tone: "danger", dot: "bg-nexus-accent4" };
 }
 
 export default function DashboardClient() {
@@ -189,9 +187,9 @@ export default function DashboardClient() {
   }, [loadModes]);
 
   const m = metrics;
-  // Nothing has arrived yet — render skeletons rather than a page of dashes,
-  // which reads as "broken" instead of "loading".
-  const loading = m == null && backendOnline === false && connectionStatus === "connecting";
+  // An offline or expired session cannot deliver a snapshot; show the empty
+  // state instead of leaving the metrics in a perpetual loading animation.
+  const loading = m == null && (backendOnline || connectionStatus === "connecting") && connectionStatus !== "auth_required";
 
   const conn = connectionView(connectionStatus, backendOnline);
 
@@ -199,11 +197,10 @@ export default function DashboardClient() {
   const series = useMemo(() => {
     const throughput = seriesOf(history, (s) => s.tokens_per_second);
     const latency = seriesOf(history, (s) => s.avg_latency_ms);
-    const sessions = seriesOf(history, (s) => s.active_sessions);
     const success = seriesOf(history, (s) =>
       s.requests_total > 0 ? (s.requests_successful ?? 0) / s.requests_total : null,
     );
-    return { throughput, latency, sessions, success };
+    return { throughput, latency, success };
   }, [history]);
 
   const rate = successRate(m);
@@ -261,11 +258,11 @@ export default function DashboardClient() {
       {/* ── HERO ─────────────────────────────────────────────────────────
           A status band, not a marketing banner. It answers: is the system
           up, what is it running on, and how fresh is what I am looking at. */}
-      <header className="nx-dashboard-hero relative overflow-hidden border-b border-nexus-border/60 px-4 py-6 sm:px-6 sm:py-7 lg:px-8">
+      <header className="nx-dashboard-hero relative overflow-hidden border-b border-nexus-border/60 px-4 py-4 sm:px-6 lg:px-8">
         <div className="pointer-events-none absolute inset-0 bg-nx-mesh opacity-30" />
 
-        <div className="relative mx-auto flex max-w-7xl flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div className="space-y-2.5">
+        <div className="relative mx-auto flex max-w-7xl flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="space-y-1.5">
             <div className="flex items-center gap-2">
               <span className={`h-2 w-2 rounded-full ${conn.dot}`} />
               <span className="text-[11px] font-medium tracking-wide text-nexus-muted">
@@ -275,18 +272,18 @@ export default function DashboardClient() {
                 ) : null}
               </span>
             </div>
-            <h1 className="nx-title text-[30px] font-semibold leading-tight tracking-tight sm:text-[38px]">
+            <h1 className="nx-title text-[22px] font-semibold leading-tight tracking-tight sm:text-[26px]">
               Painel de Operações
             </h1>
-            <p className="max-w-xl text-[13px] leading-relaxed text-nexus-muted">
+            <p className="max-w-xl text-[12px] leading-relaxed text-nexus-muted">
               Os teus objetivos, agentes e ferramentas. Tudo à vista.
             </p>
-            <div className="flex flex-wrap items-center gap-2 pt-1">
-              <Link href="/" className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-nexus-accent/25 bg-nexus-accent/10 px-3.5 text-xs font-medium text-nexus-accent-bright transition-colors hover:bg-nexus-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent">
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              <Link href="/" className="inline-flex min-h-8 items-center gap-2 rounded-lg border border-nexus-accent/25 bg-nexus-accent/10 px-3.5 text-xs font-medium text-nexus-accent-bright transition-colors hover:bg-nexus-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent">
                 <MessageSquare className="h-3.5 w-3.5" /> Abrir chat
                 <ArrowRight className="h-3 w-3" />
               </Link>
-              <Link href="/dashboard/tasks" className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-nexus-border/70 bg-nexus-card/50 px-3.5 text-xs font-medium text-nexus-muted transition-colors hover:bg-nexus-card hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent">
+              <Link href="/dashboard/tasks" className="inline-flex min-h-8 items-center gap-2 rounded-lg border border-nexus-border/70 bg-nexus-card/50 px-3.5 text-xs font-medium text-nexus-muted transition-colors hover:bg-nexus-card hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent">
                 <ListTodo className="h-3.5 w-3.5" /> Ver tarefas
               </Link>
             </div>
@@ -363,7 +360,7 @@ export default function DashboardClient() {
               subtitle="Escreve o pedido e continua no chat ou no Swarm."
               className="flex-col items-stretch gap-2 sm:flex-row sm:items-center"
               action={
-                <span className="rounded-full bg-[rgba(124,106,251,0.12)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-nexus-accent-bright shadow-rim">
+                <span className="rounded-full bg-nexus-accent/12 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-nexus-accent-bright shadow-rim">
                   {MODE_LABEL[currentMode] ?? currentMode}
                 </span>
               }
@@ -385,11 +382,11 @@ export default function DashboardClient() {
                 value={promptInput}
                 onChange={(e) => setPromptInput(e.target.value)}
                 placeholder="Ex.: Analisar o repositório e sugerir correções"
-                className="nx-inset w-full rounded-xl px-4 py-3.5 text-sm text-nexus-text placeholder-nexus-faint outline-none transition-colors focus:border-[rgba(124,106,251,0.5)] sm:pr-40"
+                className="nx-inset w-full rounded-xl px-4 py-3.5 text-sm text-nexus-text placeholder-nexus-faint transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent sm:pr-40"
               />
               <button
                 type="submit"
-                className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-nx-accent px-3.5 py-2 text-xs font-semibold text-white shadow-nx-accent transition-colors hover:bg-nexus-accent-bright focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent-bright focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg sm:absolute sm:right-2 sm:top-1/2 sm:min-h-0 sm:w-auto sm:-translate-y-1/2"
+                className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-nexus-accent px-3.5 py-2 text-xs font-semibold text-white shadow-nx-accent transition-colors hover:bg-nexus-accent-bright focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent-bright focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg sm:absolute sm:right-2 sm:top-1/2 sm:min-h-0 sm:w-auto sm:-translate-y-1/2"
               >
                 {targetIsSwarm ? "Preparar no SWARM" : "Preparar no chat"}
                 <ArrowRight className="h-3 w-3" />
@@ -403,7 +400,7 @@ export default function DashboardClient() {
                   key={suggestion}
                   type="button"
                   onClick={() => setPromptInput(suggestion)}
-                  className="inline-flex min-h-10 items-center rounded-full border border-nexus-border px-3 py-1.5 text-left text-[11px] leading-snug text-nexus-muted shadow-rim transition-colors hover:border-[rgba(124,106,251,0.4)] hover:text-nexus-text"
+                  className="inline-flex min-h-10 items-center rounded-full border border-nexus-border px-3 py-1.5 text-left text-[11px] leading-snug text-nexus-muted shadow-rim transition-colors hover:border-nexus-accent/40 hover:text-nexus-text"
                 >
                   {suggestion}
                 </button>
@@ -412,13 +409,131 @@ export default function DashboardClient() {
           </Surface>
         </section>
 
-        {/* ── HERO KPIs ─────────────────────────────────────────────────
-            The four numbers that describe the product's behaviour. Each is
-            paired with the trend that makes it interpretable. */}
+        <section id="agora" aria-label="O que está a acontecer" className="scroll-mt-28 sm:scroll-mt-16">
+          <SectionHeading
+            title="Agora"
+            description="Execuções, agentes e erros neste momento."
+          />
+          <Surface
+            elevation={2}
+            padding="lg"
+            live={backendOnline}
+            className="flex flex-col"
+          >
+            <SurfaceHeader
+              icon={<Users className="h-4 w-4" />}
+              tone={erroringProfiles > 0 ? "danger" : "accent"}
+              title="Atividade por perfil"
+              subtitle="Respostas recentes, execuções e fila"
+              action={
+                <Link
+                  href="/swarm"
+                  className="rounded-lg border border-nexus-border px-2.5 py-1 text-[11px] font-medium text-nexus-accent-bright shadow-rim transition-colors hover:border-nexus-accent/45"
+                >
+                  Abrir Swarm
+                </Link>
+              }
+            />
+
+            <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+              <div>
+                <dt className="text-[11px] text-nexus-faint">Sessões</dt>
+                <dd className="mt-0.5 text-lg font-semibold tabular-nums text-nexus-text">
+                  {m?.active_sessions != null ? m.active_sessions : "Sem dados"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-[11px] text-nexus-faint">Em execução</dt>
+                <dd className="mt-0.5 text-lg font-semibold tabular-nums text-nexus-text">
+                  {agentActivity != null ? activeProfiles : "Sem dados"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-[11px] text-nexus-faint">Com falha</dt>
+                <dd className={`mt-0.5 text-lg font-semibold tabular-nums ${erroringProfiles > 0 ? "text-nexus-accent4" : "text-nexus-text"}`}>
+                  {agentActivity != null ? erroringProfiles : "Sem dados"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-[11px] text-nexus-faint">Fila</dt>
+                <dd className="mt-0.5 text-lg font-semibold tabular-nums text-nexus-text">
+                  {m?.queue_depth != null ? m.queue_depth : "Sem dados"}
+                </dd>
+              </div>
+            </dl>
+
+            <div className="mt-5 flex-1 space-y-2">
+              <div className="text-[13px] font-medium text-nexus-text">Respostas recentes</div>
+              {agentRecords.length > 0 ? (
+                agentRecords.slice(0, 5).map((agent) => (
+                  <div
+                    key={agent.agent}
+                    className="flex flex-wrap items-center justify-between gap-3 border-t border-nexus-border/50 py-2.5"
+                  >
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <span
+                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                          agent.status === "active"
+                            ? "bg-nexus-accent2"
+                            : agent.status === "error"
+                              ? "bg-nexus-accent4"
+                              : "bg-nexus-faint"
+                        }`}
+                        aria-hidden="true"
+                      />
+                      <span className="sr-only">
+                        {agent.status === "active"
+                          ? "em execução"
+                          : agent.status === "error"
+                            ? "com falha"
+                            : "sem execução"}
+                        {" · "}
+                      </span>
+                      <span className="truncate text-[13px] font-medium text-nexus-text">
+                        {agent.agent}
+                      </span>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-3 text-[12px] tabular-nums text-nexus-muted">
+                      <span>{agent.tasks_completed} respostas</span>
+                      {agent.status === "error" ? (
+                        <span className="text-nexus-accent4">falha na sessão</span>
+                      ) : null}
+                      <span className="text-nexus-faint">
+                        {formatLatency(agent.avg_latency_ms)}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <CardEmpty icon={<Activity className="h-3.5 w-3.5" />}>
+                  {agentActivity != null
+                    ? "Nenhum perfil reportou respostas nesta janela."
+                    : backendOnline
+                      ? "Atividade dos agentes sem dados."
+                      : "Sem ligação ao backend — atividade indisponível."}
+                </CardEmpty>
+              )}
+            </div>
+
+            <p className="mt-4 border-t border-nexus-border/60 pt-3 text-[12px] text-nexus-muted">
+              {m?.requests_failed != null
+                ? `${formatCompact(m.requests_failed)} ${m.requests_failed === 1 ? "pedido falhado" : "pedidos falhados"} (métricas de pedidos)`
+                : "Pedidos falhados sem dados"}
+              {(() => {
+                const failedProfiles = agentRecords.filter((agent) => agent.status === "error").length;
+                return failedProfiles > 0
+                  ? ` · ${failedProfiles} ${failedProfiles === 1 ? "perfil com falha" : "perfis com falha"} na última sessão`
+                  : "";
+              })()}
+            </p>
+          </Surface>
+        </section>
+
+        {/* Desempenho das execuções, depois a máquina. */}
         <section id="resumo" aria-label="Resumo do sistema" className="scroll-mt-28 space-y-6 sm:scroll-mt-16">
-          <SectionHeading title="Visão geral" description="Desempenho das execuções e recursos da máquina." />
+          <SectionHeading title="Desempenho" description="Débito, latência e pedidos. Sem amostras, não há gráfico." />
           <section aria-label="Indicadores principais">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <KpiCard
                 emphasis
                 label="Débito"
@@ -461,30 +576,11 @@ export default function DashboardClient() {
                 }
                 loading={loading}
               />
-              <KpiCard
-                emphasis
-                label="Sessões ativas"
-                value={m?.active_sessions != null ? String(m.active_sessions) : EMPTY}
-                icon={<Layers className="h-4 w-4" />}
-                color="var(--nx-amber)"
-                history={series.sessions}
-                delta={deltaOf(series.sessions)}
-                goodDirection="neutral"
-                hint={
-                  m?.queue_depth != null
-                    ? m.queue_depth > 0
-                      ? `${m.queue_depth} em fila`
-                      : "fila vazia"
-                    : "fila sem dados"
-                }
-                loading={loading}
-              />
             </div>
           </section>
 
-          {/* ── HOST TELEMETRY ────────────────────────────────────────────
-              Deliberately small. Present for diagnosis, silent otherwise. */}
           <section aria-label="Recursos do anfitrião">
+            <h3 className="mb-2 text-[13px] font-medium text-nexus-muted">Recursos da máquina</h3>
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               <GaugeCard
                 label="Processador"
@@ -559,10 +655,11 @@ export default function DashboardClient() {
             columns of span into a three-column grid — the row wrapped and left
             a hole in the right-hand track. The advisor takes the single
             remaining column, which its three short stats and five session rows
-            fit comfortably in. */}
+            fit comfortably in. Below 1440px viewport (sidebar open) the advisor
+            column was ~300px and its stat labels overflowed, so both stack. */}
         <section id="agentes" aria-label="Agentes e consultor" className="scroll-mt-28 sm:scroll-mt-16">
           <SectionHeading title="Equipa de agentes" description="Execuções autónomas e supervisão do consultor." />
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 min-[1440px]:grid-cols-3">
             <SubagentsWidget />
             <AdvisorWidget />
           </div>
@@ -570,115 +667,8 @@ export default function DashboardClient() {
 
         {/* ── SWARM + MODES ─────────────────────────────────────────────── */}
         <section id="orquestracao" aria-label="Orquestração e modo de execução" className="scroll-mt-28 sm:scroll-mt-16">
-          <SectionHeading title="Estratégia de execução" description="Atividade dos perfis e modo de trabalho dos agentes." />
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-          <Surface
-            elevation={1}
-            padding="lg"
-            live={backendOnline}
-            className="flex flex-col lg:col-span-2"
-          >
-            <SurfaceHeader
-              icon={<Users className="h-4 w-4" />}
-              tone={erroringProfiles > 0 ? "danger" : "accent"}
-              title="Atividade por perfil"
-              subtitle="Respostas recentes, execuções e fila do sistema"
-              action={
-                <Link
-                  href="/swarm"
-                  className="rounded-lg border border-nexus-border px-2.5 py-1 text-[11px] font-medium text-nexus-accent-bright shadow-rim transition-colors hover:border-[rgba(124,106,251,0.45)]"
-                >
-                  Abrir Swarm
-                </Link>
-              }
-            />
-
-            <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-              <CardStat
-                label="Perfis em execução"
-                value={agentActivity != null ? activeProfiles : EMPTY}
-                hint="Perfis associados a uma execução ativa"
-              />
-              <CardStat
-                label="Com respostas recentes"
-                value={agentActivity != null ? agentActivity.length : EMPTY}
-                hint="Perfis com respostas nos últimos 30 minutos"
-              />
-              <CardStat
-                label="Em sessão com falha"
-                value={agentActivity != null ? erroringProfiles : EMPTY}
-                hint="Perfis associados a sessões com falhas de ferramenta"
-              />
-              <CardStat
-                label="Profundidade da fila"
-                value={m?.queue_depth != null ? m.queue_depth : EMPTY}
-                hint="Pedidos à espera de um agente livre"
-              />
-            </div>
-
-            <div className="mt-5 flex-1 space-y-2">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
-                Respostas recentes por perfil
-              </div>
-              {agentRecords.length > 0 ? (
-                agentRecords.slice(0, 5).map((agent) => (
-                  <div
-                    key={agent.agent}
-                    className="nx-inset flex flex-wrap items-center justify-between gap-3 rounded-xl px-3.5 py-3"
-                  >
-                    <div className="flex min-w-0 items-center gap-2.5">
-                      <span
-                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                          agent.status === "active"
-                            ? "bg-emerald-400"
-                            : agent.status === "error"
-                              ? "bg-rose-400"
-                              : "bg-nexus-faint"
-                        }`}
-                      />
-                      <span className="truncate text-[12px] font-medium text-nexus-text">
-                        {agent.agent}
-                      </span>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-3 text-[11px] tabular-nums text-nexus-muted">
-                      <span>{agent.tasks_completed} respostas</span>
-                      {agent.status === "error" ? (
-                        <span className="text-rose-400">falha na sessão</span>
-                      ) : null}
-                      <span className="text-nexus-faint">
-                        {formatLatency(agent.avg_latency_ms)}
-                      </span>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <CardEmpty icon={<Activity className="h-3.5 w-3.5" />}>
-                  {agentActivity != null
-                    ? "Nenhum perfil reportou respostas nesta janela."
-                    : backendOnline
-                      ? "Atividade dos agentes sem dados."
-                      : "Sem ligação ao backend — atividade indisponível."}
-                </CardEmpty>
-              )}
-            </div>
-
-            <div className="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-nexus-border/60 pt-3 text-[11px] text-nexus-faint">
-              <span className="flex items-center gap-1.5">
-                <Clock className="h-3.5 w-3.5" />
-                Ativo há {formatUptime(m?.uptime_seconds)}
-              </span>
-              <span className="flex items-center gap-1.5">
-                <Gauge className="h-3.5 w-3.5" />
-                {m?.requests_failed != null
-                  ? m.requests_failed > 0
-                    ? `${formatCompact(m.requests_failed)} pedidos falhados`
-                    : "Sem falhas registadas"
-                  : "Falhas sem dados"}
-              </span>
-            </div>
-          </Surface>
-
-          <Surface elevation={1} padding="lg">
+          <SectionHeading title="Estratégia de execução" description="Modo de trabalho dos agentes." />
+          <Surface elevation={1} padding="lg" className="max-w-xl">
             <SurfaceHeader
               icon={<BrainCircuit className="h-4 w-4" />}
               title="Modo de execução"
@@ -743,7 +733,6 @@ export default function DashboardClient() {
               )}
             </div>
           </Surface>
-          </div>
         </section>
       </div>
     </div>

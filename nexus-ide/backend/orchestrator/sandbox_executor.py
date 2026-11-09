@@ -83,9 +83,12 @@ class SandboxExecutor:
         )
 
     async def _run_in_subprocess(self, test_command: str, start: float) -> SandboxResult:
+        import shlex
+
+        argv = shlex.split(test_command)
         result = subprocess.run(
-            test_command,
-            shell=True,
+            argv,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=120,
@@ -103,9 +106,12 @@ class SandboxExecutor:
     async def run_lint(self, lint_command: str = "ruff check .") -> SandboxResult:
         start = time.time()
         try:
+            import shlex
+
+            argv = shlex.split(lint_command)
             result = subprocess.run(
-                lint_command,
-                shell=True,
+                argv,
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=60,

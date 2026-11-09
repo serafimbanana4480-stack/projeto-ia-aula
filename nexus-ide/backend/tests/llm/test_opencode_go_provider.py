@@ -76,10 +76,25 @@ def test_resolve_model_auto_fallback(provider: OpenCodeGoProvider) -> None:
     assert provider.resolve_model("auto") == "minimax-m3"
 
 
-def test_resolve_model_unknown_falls_back_to_default(provider: OpenCodeGoProvider) -> None:
-    """Unknown model IDs should fall back to the default model (minimax-m3)."""
-    assert provider.resolve_model("unknown-model-xyz") == provider.DEFAULT_MODEL
-    assert provider.resolve_model("unknown-model-xyz") == "minimax-m3"
+def test_resolve_model_unknown_raises_instead_of_substituting(
+    provider: OpenCodeGoProvider,
+) -> None:
+    """An unknown model id must be an error, not a silent substitution.
+
+    The ``vision`` tier of ``config/models.yaml`` points at
+    ``gemini-2.0-flash``; the old code quietly answered it with the default
+    *text* model, so the caller could not know which model had run.
+    """
+    with pytest.raises(ValueError, match="Unknown OpenCode Go model"):
+        provider.resolve_model("unknown-model-xyz")
+
+
+def test_resolve_model_declares_the_vision_tier_explicitly(
+    provider: OpenCodeGoProvider,
+) -> None:
+    """The vision tier of models.yaml resolves through a declared alias."""
+    assert provider.resolve_model("gemini-2.0-flash") in provider.list_models()
+    assert provider.resolve_model("gemini-2.0-flash") != provider.DEFAULT_MODEL
 
 
 def test_resolve_model_empty_falls_back_to_default(provider: OpenCodeGoProvider) -> None:

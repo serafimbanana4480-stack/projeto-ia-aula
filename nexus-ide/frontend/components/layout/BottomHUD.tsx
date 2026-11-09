@@ -73,9 +73,9 @@ export default function BottomHUD() {
       ? "warning"
       : "success";
   const diskTextClass = diskTone === "danger"
-    ? "text-rose-400"
+    ? "text-nexus-accent4"
     : diskTone === "warning"
-      ? "text-amber-300"
+      ? "text-nexus-accent3"
       : "text-nexus-text";
   const connectionTone = connectionStatus === "degraded"
     ? "warning"
@@ -104,7 +104,7 @@ export default function BottomHUD() {
           {/* Liveness only: readiness and resource pressure are shown separately. */}
           <div className="flex items-center gap-1.5">
             <StatusDot tone={connectionTone} pulse={connectionStatus === "connecting"} size={7} />
-            <span className={connectionTone === "success" ? "text-emerald-400" : connectionTone === "warning" ? "text-amber-300" : "text-rose-400"}>
+            <span className={connectionTone === "success" ? "text-nexus-accent2" : connectionTone === "warning" ? "text-nexus-accent3" : "text-nexus-accent4"}>
               {connectionLabel}
             </span>
             <span className="text-nexus-faint">Backend</span>
@@ -112,7 +112,7 @@ export default function BottomHUD() {
 
           {/* Modelo ativo — dado real do backend (cloud-only, sem Ollama local) */}
           <div className="flex items-center gap-1.5">
-            <Zap className={`h-3 w-3 ${hasActiveModel ? "text-emerald-400" : "text-nexus-faint"}`} />
+            <Zap className={`h-3 w-3 ${hasActiveModel ? "text-nexus-accent2" : "text-nexus-faint"}`} />
             <span className={`max-w-[100px] truncate sm:max-w-[180px] ${hasActiveModel ? "text-nexus-text" : "text-nexus-faint"}`} title={hasActiveModel ? metrics!.active_model : undefined}>
               {hasActiveModel ? metrics!.active_model : "—"}
             </span>

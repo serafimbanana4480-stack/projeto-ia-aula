@@ -20,7 +20,6 @@ from backend.orchestrator.router import (
 from backend.orchestrator.router_engine import (
     DEFAULT_CACHE_TTL,
 )
-from backend.orchestrator.routing_strategies import FALLBACK_DECISION
 
 
 class TestBackCompatAliases:

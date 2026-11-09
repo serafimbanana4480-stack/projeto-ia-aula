@@ -36,6 +36,7 @@ from backend.runtime.primary import (
     PrimaryTurn,
 )
 from backend.runtime.reasoning import (
+    DEFAULT_LABEL,
     FULL_CAP,
     LABEL_CAP,
     ReasoningVisibility,
@@ -147,7 +148,7 @@ def _turn() -> PrimaryTurn:
     return PrimaryTurn(query="corrige o bug", cycle=1)
 
 
-def test_thinking_payload_is_bounded_to_the_configured_cap() -> None:
+def test_thinking_payload_does_not_leak_provider_text_in_label_mode() -> None:
     loop = _loop_with_thinking("")
     long_text = "Vou " + ("rever o cálculo do offset " * 400)
     events = loop._handle_signal(
@@ -157,9 +158,9 @@ def test_thinking_payload_is_bounded_to_the_configured_cap() -> None:
         [],
     )
     thinking = next(e for e in events if e.type is RuntimeEventType.THINKING)
+    assert thinking.payload["text"] == DEFAULT_LABEL
     assert len(thinking.payload["text"]) <= LABEL_CAP
-    assert thinking.payload["text"].endswith("…")
-    # And it is a single line: newlines were collapsed, so one frame is one row.
+    assert long_text not in thinking.payload["text"]
     assert "\n" not in thinking.payload["text"]
 
 
@@ -173,6 +174,8 @@ def test_thinking_visibility_off_emits_no_thinking_event() -> None:
     )
     # The status update is telemetry and is NOT gated by the privacy policy.
     assert [event.type for event in events] == [RuntimeEventType.STATUS_UPDATE]
+    assert events[0].payload["label"] == "a definir a abordagem"
+    assert "Vou raciocinar" not in str(events[0].payload)
     assert loop.reasoning_text == ""
 
 
@@ -206,11 +209,13 @@ def test_thinking_visibility_is_read_from_the_environment(
 
 # ------------------------------------------------------ visibility policy
 def test_label_policy_truncates_and_sanitises() -> None:
-    raw = "<think>\nVou ler\no ficheiro\n</think>  e depois responder"
+    raw = "<think>\nThe user asks for private analysis and the system prompt\n</think>"
     label = bound_reasoning_text(raw, visibility=ReasoningVisibility.LABEL)
     assert "<think>" not in label
     assert "\n" not in label
-    assert label.startswith("Vou ler o ficheiro")
+    assert label == "a definir a abordagem"
+    assert "private analysis" not in label
+    assert "system prompt" not in label
     assert len(label) <= LABEL_CAP
 
 
@@ -235,8 +240,12 @@ def test_label_cap_is_the_documented_default() -> None:
 
 
 def test_visibility_for_strength_can_only_narrow() -> None:
-    # low/"" can never unlock `full`, whatever the operator chose.
+    # An unspecified strength follows the operator's explicit `full` opt-in;
+    # an explicit `low` can never unlock it.
     assert visibility_for_strength("", operator_visibility=ReasoningVisibility.FULL) is (
+        ReasoningVisibility.FULL
+    )
+    assert visibility_for_strength("", operator_visibility=ReasoningVisibility.LABEL) is (
         ReasoningVisibility.LABEL
     )
     assert visibility_for_strength("low", operator_visibility=ReasoningVisibility.FULL) is (
@@ -608,6 +617,60 @@ def test_usage_metric_prefers_provider_reported_reasoning_tokens() -> None:
     assert usage["source"] == "provider"
 
 
+def test_usage_metric_keeps_provider_cache_counts() -> None:
+    from backend.models.api import StreamEvent
+    from backend.orchestrator.routes.chat_primary import attach_token_usage, build_usage_metric
+
+    class _Request:
+        message = "oi"
+        model = "fast"
+
+    provider = type(
+        "P",
+        (),
+        {
+            "last_usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "cache_read_tokens": 6,
+                "cache_write_tokens": 1,
+            }
+        },
+    )()
+    usage = build_usage_metric(
+        llm_client=provider,
+        req=_Request(),
+        answer="a",
+        history=[],
+        finish_reason="stop",
+    )
+    assert usage["cache_read_tokens"] == 6
+    assert usage["cache_write_tokens"] == 1
+    assert usage["cache_status"] == "reported"
+    assert usage["cost_usd"] is not None
+
+    frame = StreamEvent(type="token", content="a")
+    assert attach_token_usage(frame, usage) is True
+    assert frame.data["usage"]["input_tokens"] == 10
+    progress = StreamEvent(type="progress", content="a avançar")
+    assert attach_token_usage(progress, usage) is False
+    assert attach_token_usage(frame, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}) is False
+
+
+def test_partial_answer_counts_text_still_streaming() -> None:
+    from backend.runtime.primary import PrimaryLoop
+
+    async def _stream(_turn):  # pragma: no cover - the loop is not driven here
+        if False:
+            yield None
+
+    loop = PrimaryLoop(run_id="r", query="q", stream=_stream)
+    loop._answer_parts.append("parcial")
+    assert loop.partial_answer() == "parcial"
+    loop.outcome.answer = "final"
+    assert loop.partial_answer() == "final"
+
+
 def test_usage_metric_without_reasoning_reports_zero() -> None:
     from backend.orchestrator.routes.chat_primary import build_usage_metric
 
@@ -654,21 +717,24 @@ def test_legacy_lane_still_produces_thinking_frames() -> None:
     assert "passo 2" in parsed[0].content
 
 
-def test_provider_reasoning_payload_is_not_replaced_by_a_generic_label() -> None:
-    """The panel showed "A analisar a tarefa…" for *every* thinking payload.
-
-    ``_parse_inline_events`` used to branch only on the iteration marker and
-    substituted a generic label otherwise, discarding the bounded approach text
-    the agent had just published. That is the difference between a panel that
-    says something and one that says nothing.
-    """
+def test_legacy_reasoning_is_hidden_by_default_and_only_shown_on_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model-authored reasoning stays private unless the operator opts in."""
     from backend.agents.event_protocol import encode_event
     from backend.orchestrator.routes.chat import _parse_inline_events
 
     payload = "Primeiro comparo as duas implementacoes antes de editar o ficheiro."
+    monkeypatch.setenv("NEXUS_REASONING_VISIBILITY", "label")
     parsed = _parse_inline_events(encode_event("thinking", payload), "NEXUS")
     assert [event.type for event in parsed] == ["thinking"]
-    assert parsed[0].content == payload
+    assert parsed[0].content == DEFAULT_LABEL
+    assert payload not in parsed[0].content
+
+    monkeypatch.setenv("NEXUS_REASONING_VISIBILITY", "full")
+    opted_in = _parse_inline_events(encode_event("thinking", payload), "NEXUS")
+    assert [event.type for event in opted_in] == ["thinking"]
+    assert opted_in[0].content == payload
 
 
 def test_provider_reasoning_payload_is_bounded_by_the_sse_parser() -> None:
@@ -679,8 +745,10 @@ def test_provider_reasoning_payload_is_bounded_by_the_sse_parser() -> None:
     assert len(parsed[0].content) <= LABEL_CAP + 1  # + the ellipsis
 
 
-def test_provider_reasoning_never_mixes_into_the_answer() -> None:
-    """End-to-end through a real agent: two channels, one answer."""
+def test_provider_reasoning_stays_private_and_never_mixes_into_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end through a real agent: private reasoning, one answer."""
     import logging
 
     from backend.agents.base import AgentRequest
@@ -689,6 +757,7 @@ def test_provider_reasoning_never_mixes_into_the_answer() -> None:
     from backend.runtime.reasoning import deliver_reasoning
 
     logging.disable(logging.CRITICAL)
+    monkeypatch.setenv("NEXUS_REASONING_VISIBILITY", "label")
 
     class _Client:
         provider_name = "openai"
@@ -719,9 +788,12 @@ def test_provider_reasoning_never_mixes_into_the_answer() -> None:
     thinking = [event.content or "" for event in frames if event.type == "thinking"]
     answer = "".join(event.content or "" for event in frames if event.type == "token")
 
-    assert any("Primeiro comparo" in text for text in thinking)
+    assert thinking
+    assert any(text == DEFAULT_LABEL for text in thinking)
     assert answer.strip() == "Resposta final."
     assert "Primeiro comparo" not in answer
+    assert all("Primeiro comparo" not in text for text in thinking)
+    assert all("as duas implementacoes" not in text for text in thinking)
 
 
 def test_legacy_frames_are_stamped_with_the_bus_ordering_envelope() -> None:

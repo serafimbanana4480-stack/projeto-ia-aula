@@ -447,20 +447,34 @@ async def _analyze_uncached(project_path: str = ".") -> dict:
             return {"error": f"Project path not found: {project_path}"}
 
         scan_state: dict[str, Any] = {}
-        files = list(_walk_project(project, state=scan_state))
 
-        ext_counter: Counter = Counter()
-        for i, f in enumerate(files):
-            if i and i % 2 == 0:
-                await asyncio.sleep(0)
-            ext = f.suffix.lower() or "no_extension"
-            ext_counter[ext] += 1
+        def _scan_sync():
+            # Walking + reading thousands of files is pure blocking I/O/CPU.
+            # It used to run on the event loop (Guardian every ~30-70s) and
+            # froze every HTTP request, e.g. /api/auth/login for 30s+.
+            files = list(_walk_project(project, state=scan_state))
+            ext_counter: Counter = Counter()
+            for f in files:
+                ext_counter[f.suffix.lower() or "no_extension"] += 1
+            return (
+                files,
+                ext_counter,
+                _detect_framework(project, files),
+                _find_dependencies(project, files),
+                _count_loc(project, files),
+                _find_test_coverage(project, files),
+                _detect_issues(project, files),
+            )
 
-        framework_info = _detect_framework(project, files)
-        dependencies = _find_dependencies(project, files)
-        loc_info = _count_loc(project, files)
-        coverage_info = _find_test_coverage(project, files)
-        issues = _detect_issues(project, files)
+        (
+            files,
+            ext_counter,
+            framework_info,
+            dependencies,
+            loc_info,
+            coverage_info,
+            issues,
+        ) = await asyncio.to_thread(_scan_sync)
 
         report = {
             "project_path": str(project),

@@ -1,0 +1,56 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e4]
+  - generic [ref=e6]:
+    - complementary "Navegação principal" [ref=e7]:
+      - generic [ref=e8]:
+        - button "Nova tarefa" [ref=e9] [cursor=pointer]
+        - button "Colapsar barra lateral" [ref=e12] [cursor=pointer]
+      - navigation [ref=e15]:
+        - link "Dashboard" [ref=e16] [cursor=pointer]:
+          - /url: /dashboard
+        - link "Bots" [ref=e24] [cursor=pointer]:
+          - /url: /bots
+        - link "Chat" [ref=e31] [cursor=pointer]:
+          - /url: /
+        - link "Projetos" [ref=e36] [cursor=pointer]:
+          - /url: /projects
+        - link "Tarefas" [ref=e41] [cursor=pointer]:
+          - /url: /dashboard/tasks
+        - link "Agentes" [ref=e47] [cursor=pointer]:
+          - /url: /swarm
+        - link "Ficheiros" [ref=e53] [cursor=pointer]:
+          - /url: /editor
+        - link "Skills" [ref=e61] [cursor=pointer]:
+          - /url: /tools
+        - link "Memória" [ref=e66] [cursor=pointer]:
+          - /url: /nexus
+        - link "Integrações" [ref=e79] [cursor=pointer]:
+          - /url: /mcp
+        - button "Mais" [ref=e86] [cursor=pointer]
+      - link "Definições" [ref=e94] [cursor=pointer]:
+        - /url: /settings
+    - main [ref=e100]:
+      - generic [ref=e193]:
+        - region "Grupos de bots" [ref=e194]:
+          - generic [ref=e195]:
+            - button "Bots" [ref=e196] [cursor=pointer]
+            - generic [ref=e199]:
+              - generic [ref=e200]:
+                - paragraph [ref=e201]: NEXUS
+                - heading "Grupos" [level=1] [ref=e202]
+              - button "Criar grupo" [ref=e203] [cursor=pointer]
+            - paragraph [ref=e205]: Reúne os teus bots numa conversa partilhada.
+          - generic [ref=e206]:
+            - button "123 O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições." [ref=e207] [cursor=pointer]:
+              - generic [ref=e214]:
+                - generic [ref=e215]: "123"
+                - generic [ref=e216]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - button "os mais quentinhos Provider 'kilo' não está configurado/ativo; o pedido foi interrompido para não trocar silenciosamente de provider." [ref=e217] [cursor=pointer]:
+              - generic [ref=e224]:
+                - generic [ref=e225]: os mais quentinhos
+                - generic [ref=e226]: Provider 'kilo' não está configurado/ativo; o pedido foi interrompido para não trocar silenciosamente de provider.
+        - region "Conversa de grupo" [ref=e227]:
+          - generic [ref=e228]:
+            - heading "Conversas em grupo" [level=2] [ref=e234]
+            - paragraph [ref=e235]: Cria um grupo para reunir diferentes perspetivas.
+            - button "Criar grupo" [ref=e236] [cursor=pointer]

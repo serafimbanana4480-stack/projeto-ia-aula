@@ -16,6 +16,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -393,6 +394,7 @@ def validate_total_budget(
     tool_result_tokens: int = 0,
     model_tier: str = "coder",
     output_reserve: int = 4_096,
+    model_id: str | None = None,
 ) -> bool:
     """Validate that the total assembled context fits within the model's context window.
 
@@ -407,6 +409,7 @@ def validate_total_budget(
         tool_result_tokens: Tokens used by tool execution results.
         model_tier: The model tier name.
         output_reserve: Tokens to reserve for model output (default 4096).
+        model_id: Optional concrete model whose advertised window caps the tier.
 
     Returns:
         True if within budget.
@@ -415,7 +418,7 @@ def validate_total_budget(
         ContextOverflowError: If total + output_reserve > model context limit.
     """
     total = system_tokens + memory_tokens + history_tokens + query_tokens + tool_result_tokens
-    limit = get_context_limit(model_tier)
+    limit = get_context_limit(model_tier, model_id=model_id)
 
     if total + output_reserve > limit:
         # Distinguish the two very different causes, because they need
@@ -479,11 +482,12 @@ def _get_dedup_savings() -> float:
 
 
 def trim_context_structured(
-    iterations: list[dict],
+    iterations: list[dict[str, Any]],
     model_tier: str,
     model: str = "cl100k_base",
     min_iterations: int = 2,
-) -> list[dict]:
+    model_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Trim context by preserving objective + last N iterations, compressing the rest.
 
     This structured approach replaces the fragile string-splitting heuristic
@@ -495,6 +499,8 @@ def trim_context_structured(
         model_tier: Model tier for threshold calculation.
         model: Model name for token counting.
         min_iterations: Minimum number of recent iterations to keep in full.
+        model_id: Concrete model id, used to keep the trim threshold aligned with
+            the model that will receive the request.
 
     Returns:
         Trimmed list of iterations.
@@ -502,7 +508,7 @@ def trim_context_structured(
     if not iterations:
         return iterations
 
-    threshold = dynamic_threshold(model_tier)
+    threshold = dynamic_threshold(model_tier, model_id=model_id)
 
     # Always preserve: objective (iter[0]) + last min_iterations
     if len(iterations) <= min_iterations + 1:
@@ -526,7 +532,9 @@ def trim_context_structured(
     return result
 
 
-def _compress_iterations(iterations: list[dict], model: str) -> list[dict]:
+def _compress_iterations(
+    iterations: list[dict[str, Any]], model: str
+) -> list[dict[str, Any]]:
     """Compress old iterations into a compact summary.
 
     Currently extracts key info from each iteration. In the future this can

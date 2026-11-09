@@ -54,9 +54,9 @@ const CHART_COLORS = [
 // Consistent tone → text-colour lookup so status colour reads the same as
 // every other widget: emerald healthy, amber warning, rose critical.
 const TONE_TEXT: Record<"success" | "warning" | "danger", string> = {
-  success: "text-emerald-400",
-  warning: "text-amber-400",
-  danger: "text-rose-400",
+  success: "text-nexus-accent2",
+  warning: "text-nexus-accent3",
+  danger: "text-nexus-accent4",
 };
 
 function formatTokens(n: number): string {
@@ -282,7 +282,7 @@ export default function UsageWidget() {
               {tot.suffix}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-nexus-muted">
-              <span className="text-cyan-400">
+              <span className="text-nexus-cyan">
                 <AnimatedNumber value={totIn.num} decimals={totIn.decimals} />
                 {totIn.suffix} entrada
               </span>
@@ -355,7 +355,7 @@ export default function UsageWidget() {
                           <div className="nx-elev-2 nx-surface rounded-lg px-2.5 py-2 text-xs">
                             <p className="font-semibold text-nexus-text">{d.fullName}</p>
                             <p className="text-nexus-muted">{formatTokens(d.value)} tokens</p>
-                            <p className="text-emerald-400">Custo estimado: {formatCost(d.cost)}</p>
+                            <p className="text-nexus-accent2">Custo estimado: {formatCost(d.cost)}</p>
                           </div>
                         );
                       }}

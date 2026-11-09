@@ -172,14 +172,14 @@ export function AISwarmCore() {
   return (
     <div className="ai-swarm-core relative w-full h-full bg-[#0a0a0f]">
       <div className="absolute top-4 left-4 z-10 nx-elev-2 nx-glass p-4 rounded-lg !border !border-cyan-500/25">
-        <h2 className="flex items-center gap-2 text-cyan-400 text-xl font-bold mb-2">
+        <h2 className="flex items-center gap-2 text-nexus-cyan text-xl font-bold mb-2">
           NÚCLEO DO SWARM DE IA
           <StatusDot tone={isConnected ? 'success' : 'neutral'} pulse={isConnected} label={isConnected ? 'Ligado' : 'Desligado'} />
         </h2>
         <div className="text-xs text-gray-400 space-y-0.5">
           <div>Agentes: <span className="tabular-nums text-gray-200">{agents?.length || 0}</span></div>
           <div>Ligações: <span className="tabular-nums text-gray-200">{connections?.length || 0}</span></div>
-          <div>Ativos: <span className="tabular-nums text-emerald-400">{agents?.filter(a => a.status === 'active').length || 0}</span></div>
+          <div>Ativos: <span className="tabular-nums text-nexus-accent2">{agents?.filter(a => a.status === 'active').length || 0}</span></div>
         </div>
       </div>
 
@@ -225,7 +225,7 @@ function AgentDetailsPanel({ agent, onClose }: { agent: AgentNode, onClose: () =
       className="absolute top-4 right-4 z-20 nx-elev-3 nx-surface nx-glass p-6 rounded-lg !border !border-cyan-500/40 w-80"
     >
       <div className="flex justify-between items-center mb-4">
-        <h3 className="text-cyan-400 font-bold">{agent.agentId}</h3>
+        <h3 className="text-nexus-cyan font-bold">{agent.agentId}</h3>
         <button onClick={onClose} aria-label="Fechar detalhes" className="text-gray-400 hover:text-white">✕</button>
       </div>
 
@@ -236,7 +236,7 @@ function AgentDetailsPanel({ agent, onClose }: { agent: AgentNode, onClose: () =
         </div>
         <div className="flex justify-between">
           <span className="text-gray-400">Estado:</span>
-          <span className={agent.status === 'active' ? 'text-emerald-400' : 'text-amber-400'}>
+          <span className={agent.status === 'active' ? 'text-nexus-accent2' : 'text-nexus-accent3'}>
             {STATUS_LABEL_PT[agent.status]}
           </span>
         </div>

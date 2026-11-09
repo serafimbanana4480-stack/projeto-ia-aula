@@ -11,6 +11,7 @@ type ReadinessState = {
   diskStatus: string | null;
   writeBlocked: boolean;
   freePercent: number | null;
+  freeBytes: number | null;
 };
 
 const UNAVAILABLE: ReadinessState = {
@@ -19,6 +20,7 @@ const UNAVAILABLE: ReadinessState = {
   diskStatus: null,
   writeBlocked: false,
   freePercent: null,
+  freeBytes: null,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -39,6 +41,8 @@ function parseReadiness(value: unknown): ReadinessState | null {
   const freePercent = typeof snapshot.free_percent === "number" && Number.isFinite(snapshot.free_percent)
     ? Math.max(0, Math.min(100, snapshot.free_percent))
     : null;
+  const freeSource = typeof snapshot.free_bytes === "number" ? snapshot.free_bytes : disk.free_bytes;
+  const freeBytes = typeof freeSource === "number" && Number.isFinite(freeSource) && freeSource >= 0 ? freeSource : null;
 
   return {
     status: value.status,
@@ -46,11 +50,22 @@ function parseReadiness(value: unknown): ReadinessState | null {
     diskStatus: typeof disk.status === "string" ? disk.status : null,
     writeBlocked: disk.write_blocked === true,
     freePercent,
+    freeBytes,
   };
 }
 
 function formatPercent(value: number): string {
   return new Intl.NumberFormat("pt-PT", { maximumFractionDigits: 1 }).format(value);
+}
+
+function formatFree(state: ReadinessState): string {
+  const parts: string[] = [];
+  if (state.freeBytes !== null) {
+    parts.push(`${new Intl.NumberFormat("pt-PT", { maximumFractionDigits: 1 }).format(state.freeBytes / 1024 ** 3)} GB livres`);
+  }
+  if (state.freePercent !== null) parts.push(`${formatPercent(state.freePercent)}%`);
+  if (parts.length === 0) return "";
+  return parts.length === 2 ? ` — ${parts[0]} (${parts[1]})` : ` — ${parts[0]}${state.freeBytes === null ? " livre" : ""}`;
 }
 
 export default function RuntimeReadinessBanner() {
@@ -115,16 +130,16 @@ export default function RuntimeReadinessBanner() {
         role="status"
         className="flex items-start gap-2.5 rounded-xl border border-amber-300/20 bg-amber-300/[0.05] px-3.5 py-2.5 text-xs text-amber-100/80"
       >
-        <CircleHelp className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" aria-hidden="true" />
+        <CircleHelp className="mt-0.5 h-4 w-4 shrink-0 text-nexus-accent3" aria-hidden="true" />
         <span>Não foi possível confirmar a prontidão do runtime.</span>
       </div>
     );
   }
 
   const message = critical
-    ? `Armazenamento crítico${readiness.freePercent === null ? "" : ` — ${formatPercent(readiness.freePercent)}% livre`}. O runtime está não pronto e o guard de escrita está ativo.`
+    ? `Armazenamento crítico${formatFree(readiness)}. O runtime está não pronto e o guard de escrita está ativo.`
     : warning
-      ? `Pouco espaço no disco${readiness.freePercent === null ? "" : ` — ${formatPercent(readiness.freePercent)}% livre`}.`
+      ? `Pouco espaço no disco${formatFree(readiness)}.`
       : `Runtime não pronto${failedDependencies ? ` — dependências: ${failedDependencies}` : "."}`;
 
   return (
@@ -136,7 +151,7 @@ export default function RuntimeReadinessBanner() {
           : "border-amber-300/25 bg-amber-300/[0.07] text-amber-100/90"
       }`}
     >
-      <AlertTriangle className={`mt-0.5 h-4 w-4 shrink-0 ${critical ? "text-rose-300" : "text-amber-300"}`} aria-hidden="true" />
+      <AlertTriangle className={`mt-0.5 h-4 w-4 shrink-0 ${critical ? "text-nexus-accent4" : "text-nexus-accent3"}`} aria-hidden="true" />
       <span>{message}</span>
     </div>
   );

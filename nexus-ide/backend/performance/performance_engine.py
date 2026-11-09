@@ -414,7 +414,7 @@ class PerformanceEngine:
         """Collect system performance metrics."""
         try:
             # CPU usage
-            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_percent = await asyncio.to_thread(psutil.cpu_percent, 1)
             await self.collect_metric(
                 PerformanceMetricType.CPU_USAGE,
                 cpu_percent,

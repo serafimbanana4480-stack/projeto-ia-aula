@@ -86,5 +86,5 @@ try {
 }
 
 Write-Host "`n✅ Setup complete!" -ForegroundColor Green
-Write-Host "   Start backend:  uvicorn backend.orchestrator.main:app --reload" -ForegroundColor Cyan
-Write-Host "   Start frontend: cd frontend; npm run dev`n" -ForegroundColor Cyan
+Write-Host "   Start backend:  uvicorn backend.orchestrator.main:app" -ForegroundColor Cyan
+Write-Host "   Start frontend: cd frontend; pnpm run dev`n" -ForegroundColor Cyan

@@ -840,14 +840,7 @@ async def discover_models(provider: str, *, refresh: bool = False) -> DiscoveryR
             return DiscoveryResult(
                 provider, models, cached=True, fetched_at=fetched_at
             )
-        if models:
-            return DiscoveryResult(
-                provider,
-                _stale_models(raw_models if isinstance(raw_models, list) else []),
-                cached=True,
-                fetched_at=fetched_at,
-                error="catalog validation expired",
-            )
+        # Expired entries are a fallback only: try the provider again first.
 
     try:
         models = await _fetch_models(provider, api_key, base_url)
@@ -865,6 +858,9 @@ async def discover_models(provider: str, *, refresh: bool = False) -> DiscoveryR
             )
         return DiscoveryResult(provider, [], error=message)
 
+    # Other provider requests may have completed while this one awaited HTTP.
+    # Merge into the latest cache rather than overwriting their results.
+    cache = _load_cache()
     cache[provider] = _cache_entry(provider, models)
     _write_cache(cache)
     return DiscoveryResult(provider, models, fetched_at=time.time())
@@ -1000,10 +996,12 @@ def apply_catalog_to_llm_client(client: Any, provider: str, models: list[ModelIn
     """Push refreshed catalog entries into live provider instances."""
     updated = 0
     stack: list[Any] = [client]
+    seen: set[int] = set()
     while stack:
         obj = stack.pop()
-        if obj is None:
+        if obj is None or id(obj) in seen:
             continue
+        seen.add(id(obj))
         if getattr(obj, "provider_name", None) == provider and hasattr(obj, "_catalog"):
             obj._catalog = models
             obj.validated_at = None
@@ -1053,7 +1051,7 @@ def catalog_is_fresh(provider: str = "openrouter") -> bool:
 async def refresh_provider_catalog(provider: str = "openrouter") -> bool:
     """Fetch and persist a fresh provider catalog."""
     result = await discover_models(provider, refresh=True)
-    return bool(result.models)
+    return bool(result.models) and not result.error
 
 
 def schedule_provider_catalog_refresh(app: Any, provider: str = "openrouter") -> None:
@@ -1090,15 +1088,18 @@ async def _catalog_refresh_loop(app: Any) -> None:
     stop = _catalog_refresh_stop
     while stop is not None and not stop.is_set():
         try:
-            if await refresh_provider_catalog("openrouter"):
-                models = load_validated_models("openrouter")
-                client = getattr(app.state, "llm_client", None)
-                if client is not None and models:
-                    count = apply_catalog_to_llm_client(client, "openrouter", models)
-                    logger.info(
-                        "Background catalog refresh applied to %d provider instance(s)",
-                        count,
-                    )
+            # Discovery resolves current credentials and provider-specific APIs.
+            # Missing keys are skipped without issuing a network request.
+            results = await asyncio.gather(
+                *(discover_models(provider, refresh=True) for provider in PROVIDER_SPECS),
+                return_exceptions=True,
+            )
+            client = getattr(app.state, "llm_client", None)
+            for provider, result in zip(PROVIDER_SPECS, results, strict=False):
+                if isinstance(result, BaseException):
+                    logger.warning("Catalog refresh failed for %s: %s", provider, result)
+                elif client is not None and result.models and not result.error:
+                    apply_catalog_to_llm_client(client, provider, result.models)
         except Exception:
             logger.exception("Background catalog refresh tick failed")
         try:

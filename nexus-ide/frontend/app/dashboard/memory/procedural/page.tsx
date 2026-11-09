@@ -19,7 +19,7 @@ export default function MemoryProceduralPage() {
             animate={{ opacity: 1, y: 0 }}
           >
             <div className="mb-6 flex items-center gap-3">
-              <Workflow className="h-6 w-6 text-amber-400" />
+              <Workflow className="h-6 w-6 text-nexus-accent3" />
               <h1 className="text-2xl font-bold">Procedural Memory</h1>
             </div>
 

@@ -1,0 +1,13 @@
+{
+  "models": [{ "id": "nexus-stub-coder", "object": "model", "owned_by": "test-double" }],
+  "modes": {
+    "text": {
+      "delayMs": 2000,
+      "frames": [
+        { "content": "Olá! Esta é uma resposta simulada " },
+        { "content": "para validar o streaming dos Bots." },
+        { "finish_reason": "stop" }
+      ]
+    }
+  }
+}

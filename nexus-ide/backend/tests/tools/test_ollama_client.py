@@ -130,6 +130,156 @@ class TestChatStream:
         finally:
             await client.aclose()
 
+    async def test_native_tool_schemas_and_calls_use_ollama_chat_protocol(self) -> None:
+        captured: dict = {}
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_dir",
+                    "description": "List project files",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                },
+            }
+        ]
+        response_body = (
+            json.dumps(
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "list_dir",
+                                    "arguments": {"path": "backend"},
+                                }
+                            }
+                        ],
+                    },
+                    "done": False,
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "message": {"role": "assistant", "content": ""},
+                    "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 5,
+                    "eval_count": 3,
+                }
+            )
+            + "\n"
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(req.content.decode())
+            return httpx.Response(200, content=response_body.encode())
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        # This is how the free local provider is configured as a fallback.
+        client.direct_answer = True
+        try:
+            result = "".join(
+                [
+                    token
+                    async for token in client.chat_stream(
+                        "qwen3",
+                        [
+                            ChatMessage(
+                                role="system",
+                                content="TOOL USAGE — use list_dir to inspect the project.",
+                            ),
+                            ChatMessage(role="user", content="lista os ficheiros"),
+                        ],
+                        options={
+                            "tools": tools,
+                            "tool_choice": "auto",
+                            "parallel_tool_calls": False,
+                            "num_predict": 512,
+                        },
+                    )
+                ]
+            )
+
+            assert result.startswith("\n<tool_call>")
+            assert result.endswith("</tool_call>")
+            from backend.agents.base import AgentBase
+
+            assert AgentBase()._parse_tool_calls(result) == [
+                ("list_dir", {"path": "backend"})
+            ]
+            request = captured["body"]
+            assert request["tools"] == tools
+            assert not {"tools", "tool_choice", "parallel_tool_calls"} & set(
+                request["options"]
+            )
+            # A tool-capable fallback keeps the real agent contract intact.
+            assert "TOOL USAGE" in request["messages"][0]["content"]
+            assert client.last_finish_reason == "stop"
+        finally:
+            await client.aclose()
+
+    async def test_retries_prompt_tool_protocol_when_server_rejects_native_tools(self) -> None:
+        captured: list[dict] = []
+        tool_call = (
+            '<tool_call>{"name":"list_dir","arguments":{"path":"."}}'
+            "</tool_call>"
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            body = json.loads(req.content.decode())
+            captured.append(body)
+            if body.get("tools"):
+                return httpx.Response(400, json={"error": "tools are not supported"})
+            return httpx.Response(
+                200,
+                content=(
+                    json.dumps({"message": {"content": tool_call}, "done": False})
+                    + "\n"
+                    + json.dumps({"message": {"content": ""}, "done": True})
+                    + "\n"
+                ).encode(),
+            )
+
+        client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
+        try:
+            result = "".join(
+                [
+                    token
+                    async for token in client.chat_stream(
+                        "legacy-model",
+                        [
+                            ChatMessage(role="system", content="TOOL USAGE\nlist_dir"),
+                            ChatMessage(role="user", content="lista os ficheiros"),
+                        ],
+                        options={
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "list_dir",
+                                        "parameters": {"type": "object", "properties": {}},
+                                    },
+                                }
+                            ],
+                            "tool_choice": "auto",
+                        },
+                    )
+                ]
+            )
+            assert len(captured) == 2
+            assert captured[0].get("tools")
+            assert "tools" not in captured[1]
+            assert result == tool_call
+        finally:
+            await client.aclose()
+
     async def test_moves_late_system_messages_before_other_turns(self) -> None:
         captured: dict = {}
 
@@ -327,7 +477,7 @@ class TestChatStream:
             with pytest.raises(OllamaError, match="completed without content"):
                 async for _ in client.chat_stream("m", [ChatMessage(role="user", content="q")]):
                     pass
-            assert sleeps == [1, 2, 4, 8]
+            assert sleeps == [15.0] * 9
         finally:
             await client.aclose()
 
@@ -365,16 +515,28 @@ class TestChatStream:
         finally:
             await client.aclose()
 
-    async def test_non_200_raises(self) -> None:
+    async def test_non_200_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = 0
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
         def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
             return httpx.Response(503, text="upstream busy")
 
+        monkeypatch.setattr("backend.tools.ollama_client.asyncio.sleep", fake_sleep)
         client = OllamaClient("http://mock", transport=httpx.MockTransport(handler))
         try:
             with pytest.raises(OllamaError) as excinfo:
                 async for _ in client.chat_stream("m", [ChatMessage(role="user", content="q")]):
                     pass
+            assert "failed after 10 attempts" in str(excinfo.value)
             assert "503" in str(excinfo.value)
+            assert calls == 10
+            assert sleeps == [15.0] * 9
         finally:
             await client.aclose()
 
@@ -395,6 +557,7 @@ class TestChatComplete:
 class TestRetryOnServerError:
     async def test_retry_on_503_then_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sleeps: list[float] = []
+        request_payloads: list[dict[str, object]] = []
 
         async def fake_sleep(delay: float) -> None:
             sleeps.append(delay)
@@ -406,6 +569,7 @@ class TestRetryOnServerError:
         def handler(req: httpx.Request) -> httpx.Response:
             nonlocal call_count
             call_count += 1
+            request_payloads.append(json.loads(req.content))
             if call_count <= 2:
                 return httpx.Response(503, text="upstream busy")
             return make_stream_response(["ok"])
@@ -415,7 +579,9 @@ class TestRetryOnServerError:
             result = await client.chat_complete("m", [ChatMessage(role="user", content="hi")])
             assert result == "ok"
             assert call_count == 3
-            assert sleeps == [1, 2]
+            assert sleeps == [15.0, 15.0]
+            assert request_payloads == [request_payloads[0]] * 3
+            assert request_payloads[0]["messages"][-1]["content"] == "hi"
         finally:
             await client.aclose()
 
@@ -441,7 +607,7 @@ class TestRetryOnServerError:
             result = await client.chat_complete("m", [ChatMessage(role="user", content="hi")])
             assert result == "ok"
             assert call_count == 2
-            assert sleeps == [1]
+            assert sleeps == [15.0]
         finally:
             await client.aclose()
 
@@ -461,9 +627,9 @@ class TestRetryOnServerError:
             with pytest.raises(OllamaError) as excinfo:
                 async for _ in client.chat_stream("m", [ChatMessage(role="user", content="q")]):
                     pass
-            assert "failed after 5 attempts" in str(excinfo.value)
+            assert "failed after 10 attempts" in str(excinfo.value)
             assert "HTTP 503" in str(excinfo.value)
-            assert sleeps == [1, 2, 4, 8]
+            assert sleeps == [15.0] * 9
         finally:
             await client.aclose()
 

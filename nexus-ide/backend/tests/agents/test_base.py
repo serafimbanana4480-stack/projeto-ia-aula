@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 from pathlib import Path
 
 import pytest
 
 from backend.agents.base import AgentAction, AgentBase, AgentRequest, AgentResponse
+from backend.agents.event_protocol import split_stream
 
 
 class TestAgentAction:
@@ -163,7 +165,17 @@ class TestAgentContextTrimming:
         # Build a large context (>4000 tokens)
         parts = [f"Tool tool_{i} returned: {'x' * 500}" for i in range(50)]
         big_context = "\nTool ".join(parts)
-        trimmed = agent._trim_context(big_context, 10)
+        import backend.agents.base as base_mod
+
+        # p26: trimming only happens when the context is over budget; a
+        # context that fits must be returned untouched (no re-read bait).
+        assert agent._trim_context(big_context[:2000], 10) == big_context[:2000]
+        original_threshold = base_mod.dynamic_threshold
+        base_mod.dynamic_threshold = lambda *a, **k: 100
+        try:
+            trimmed = agent._trim_context(big_context, 10)
+        finally:
+            base_mod.dynamic_threshold = original_threshold
         # The trim should reduce the context size.
         assert len(trimmed) < len(big_context)
         # Either path may run: structured compression or fallback summarization.
@@ -241,6 +253,78 @@ class TestAgentBaseContract:
                 {"name": "Verify", "description": "Run focused tests"},
             )
         ]
+
+    @pytest.mark.parametrize("duplicate", [False, True])
+    async def test_primary_spawn_proposal_does_not_call_legacy_background_handler(
+        self, monkeypatch, duplicate: bool
+    ) -> None:
+        legacy_calls: list[tuple[str, dict]] = []
+
+        async def legacy_spawn_handler(name, _session_id, args, **_kwargs):
+            legacy_calls.append((name, args))
+            return {"status": "spawned", "spawned": True}
+
+        monkeypatch.setattr("backend.agents.base.execute_tool", legacy_spawn_handler)
+        agent = _scripted_agent(
+            [
+                '```tool\n{"name":"spawn_task","arguments":'
+                '{"name":"Review docs","description":"Check the docs",'
+                '"definition_of_done":"Find and report the relevant sections"}}\n```',
+                "Vou aguardar pelo resultado da delegação.",
+            ],
+            supported_actions={AgentAction.SPAWN_TASK},
+        )
+        context: dict[str, object] = {"_nexus_primary": True}
+        if duplicate:
+            context.update({"_spawn_names": ["review docs"], "_spawn_proposals": 1})
+        request = _request(context=context)
+
+        output = [token async for token in agent._run_react_loop(request)]
+
+        assert legacy_calls == []
+        assert any(
+            "tool_result|spawn_task|" in token and "proposal_submitted" in token
+            for token in output
+        )
+        _, frames = split_stream("".join(output))
+        proposal = next(json.loads(payload.split("|", 1)[1]) for kind, payload in frames
+                        if kind == "tool_result" and payload.startswith("spawn_task|"))
+        assert proposal["spawned"] is False
+        assert "sem confirmação" in proposal["message"]
+        assert "AUTOMATICAMENTE" not in proposal["message"]
+        if duplicate:
+            assert "Já propuseste" in proposal["message"]
+            assert "JA foi lancado" not in proposal["message"]
+
+    def test_evidence_summary_calls_proposals_proposals(self) -> None:
+        request = _request(query="Analisa com dois subagentes", context={"_spawn_proposals": 2})
+        answer = AgentBase._evidence_final_answer(request, "", {"spawn_task"})
+
+        assert answer is not None
+        assert "Propostas de subagentes: 2 (início não confirmado)" in answer[0]
+        assert "Subagentes lançados" not in answer[0]
+
+    async def test_primary_hands_two_requested_proposals_to_scheduler(self) -> None:
+        agent = _scripted_agent(
+            [
+                '```tool\n{"name":"spawn_task","arguments":'
+                '{"name":"first","description":"Analyze A",'
+                '"definition_of_done":"Report A"}}\n```',
+                '```tool\n{"name":"spawn_task","arguments":'
+                '{"name":"second","description":"Analyze B",'
+                '"definition_of_done":"Report B"}}\n```',
+                "A resposta só deve ser pedida depois da delegação.",
+            ],
+            supported_actions={AgentAction.SPAWN_TASK},
+        )
+        request = _request(query="Analisa com dois subagentes", context={"_nexus_primary": True})
+
+        output = [token async for token in agent._run_react_loop(request)]
+
+        assert sum("tool_call|spawn_task|" in token for token in output) == 2
+        assert agent.attempts == 2
+        assert request.context.get("_nexus_yielded_to_scheduler") is True
+        assert request.context.get("_agent_run_success") is False
 
     def test_parses_native_function_parameter_tool_call(self) -> None:
         """OpenRouter-style tool markup must execute instead of ending a run."""
@@ -518,6 +602,23 @@ class TestKimiToolCallDialect:
         )
         assert self._agent()._parse_tool_calls(payload) == []
 
+    def test_bracketed_tool_call_start_format_parses_literal_keyword_arguments(self) -> None:
+        payload = "<|tool_call_start|>[read_file(path='README.md')]<|tool_call_end|>"
+        assert self._agent()._parse_tool_calls(payload) == [
+            ("read_file", {"path": "README.md"})
+        ]
+
+    def test_bracketed_tool_call_start_rejects_dynamic_python_and_unknown_tools(self) -> None:
+        agent = self._agent()
+        dynamic = (
+            "<|tool_call_start|>"
+            "[read_file(path=__import__('os').getcwd())]"
+            "<|tool_call_end|>"
+        )
+        unknown = "<|tool_call_start|>[delete_everything(path='/')]<|tool_call_end|>"
+        assert agent._parse_tool_calls(dynamic) == []
+        assert agent._parse_tool_calls(unknown) == []
+
     def test_plain_prose_mentioning_the_tokens_yields_nothing(self) -> None:
         payload = "The model sometimes writes <|tool_call_begin|> without any JSON body."
         assert self._agent()._parse_tool_calls(payload) == []
@@ -646,10 +747,12 @@ def _scripted_agent(responses, **attrs):
         def __init__(self) -> None:
             self.attempts = 0
             self.model_ids_seen: list[str | None] = []
+            self.contexts_seen: list[str] = []
 
         async def stream_llm(self, request, **_kwargs):
             self.attempts += 1
             self.model_ids_seen.append(request.context.get("_model_override"))
+            self.contexts_seen.append(str(_kwargs.get("context") or ""))
             if callable(responses):
                 payload = responses(self.attempts)
             else:
@@ -682,6 +785,49 @@ _STEPS_PLAN = '{ "steps": [ { "tool": "list_dir", "parameters": { "path": "." } 
 _COMMANDS_PLAN = '{ "commands": [ { "command": "list_dir", "path": "." } ] }'
 _JSON_FENCE = '```json\n{"name": "list_dir", "arguments": {"path": "."}}\n```'
 _REAL_CALL = '```tool\n{"name": "list_dir", "arguments": {"path": "."}}\n```'
+
+
+async def test_unlimited_agent_continues_past_previous_default(monkeypatch) -> None:
+    async def execute(name, _session_id, args, **_kwargs):
+        return {"tool": name, "result": {"content": f"evidence {args['path']}"}}
+
+    monkeypatch.setattr("backend.agents.base.execute_tool", execute)
+    def response(attempt):
+        if attempt <= 30:
+            return f'```tool\n{{"name":"read_file","arguments":{{"path":"file{attempt}.py"}}}}\n```'
+        return "Resultado final."
+
+    agent = _scripted_agent(response)
+    output = [part async for part in agent._run_react_loop(_request(max_iterations=-1))]
+    assert agent.attempts == 31
+    assert "Resultado final." in "".join(output)
+    assert agent._last_run_success is True
+
+
+class TestIntermediateAssistantMessages:
+    async def test_buffered_tool_turns_keep_model_messages_in_order(self, monkeypatch) -> None:
+        async def execute(name, _session_id, _args, **_kwargs):
+            return {"tool": name, "result": {"content": "evidência"}}
+
+        monkeypatch.setattr("backend.agents.base.execute_tool", execute)
+        read = '```tool\n{"name":"read_file","arguments":{"path":"a.py"}}\n```'
+        agent = _scripted_agent([
+            f"Vou inspecionar o projeto.\n{_REAL_CALL}",
+            f"Encontrei um ficheiro; vou lê-lo.\n{read}",
+            "Este é o resultado final.",
+        ])
+        output = [part async for part in agent._run_react_loop(_request(autonomous=True, max_iterations=3))]
+        text = "".join(output)
+        assert text.index("Vou inspecionar") < text.index("tool_call|list_dir")
+        assert text.index("tool_result|list_dir") < text.index("Encontrei um ficheiro")
+        assert text.index("Encontrei um ficheiro") < text.index("tool_call|read_file")
+        assert text.index("tool_result|read_file") < text.index("Este é o resultado final")
+        assert "```tool" not in text
+
+    def test_private_markup_before_a_tool_is_not_exposed(self) -> None:
+        assert _scripted_agent(["unused"])._tool_call_preface(
+            f"<think>análise privada</think>\n{_REAL_CALL}"
+        ) == ""
 
 
 class TestVerificationAfterMutation:
@@ -743,6 +889,95 @@ class TestVerificationAfterMutation:
 
         assert executed == ["write_file", "read_file"]
         assert "Repeated identical tool call skipped" in "".join(output)
+
+    async def test_repeat_at_iteration_cap_gets_one_final_synthesis_turn(
+        self, monkeypatch
+    ) -> None:
+        import json
+
+        executed: list[str] = []
+
+        async def execute(name, _session_id, _args, **_kwargs):
+            executed.append(name)
+            return {"tool": name, "result": {"content": "CHECK: persisted result"}}
+
+        monkeypatch.setattr("backend.agents.base.execute_tool", execute)
+        read = (
+            "```tool\n"
+            + json.dumps({"name": "read_file", "arguments": {"path": "README.md"}})
+            + "\n```"
+        )
+        agent = _scripted_agent(
+            [read, read, read, "Resumo: CHECK: persisted result"],
+            supported_actions={AgentAction.READ_FILE},
+        )
+
+        output = [token async for token in agent._run_react_loop(_request(max_iterations=3))]
+
+        assert agent.attempts == 4
+        assert executed == ["read_file"]
+        assert "Resumo: CHECK: persisted result" in "".join(output)
+        assert "SÍNTESE INCOMPLETA" not in "".join(output)
+        assert agent._last_run_success is True
+
+    async def test_persistent_repeat_gets_one_tool_free_synthesis_with_prior_evidence(
+        self, monkeypatch
+    ) -> None:
+        executed: list[str] = []
+        request = _request(max_iterations=4)
+        allowed_tools_seen = []
+        read = (
+            '```tool\n{"name":"read_file","arguments":{"path":"README.md"}}\n```'
+        )
+
+        async def execute(name, _session_id, _args, **_kwargs):
+            executed.append(name)
+            return {"tool": name, "result": {"content": "CHECK: persisted result"}}
+
+        def respond(_attempt: int) -> str:
+            allowed_tools_seen.append(AgentBase._runtime_allowed_tools(request))
+            if request.context.get("_tool_free_synthesis"):
+                return "Resumo: CHECK: persisted result"
+            return read
+
+        monkeypatch.setattr("backend.agents.base.execute_tool", execute)
+        agent = _scripted_agent(respond, supported_actions={AgentAction.READ_FILE})
+
+        output = [token async for token in agent._run_react_loop(request)]
+
+        assert executed == ["read_file"]
+        assert agent.attempts == 5
+        assert allowed_tools_seen[-1] == frozenset()
+        assert "CHECK: persisted result" in agent.contexts_seen[-1]
+        assert "Resumo: CHECK: persisted result" in "".join(output)
+        assert "_tool_free_synthesis" not in request.context
+        assert agent._last_run_success is True
+
+    async def test_tool_call_during_tool_free_synthesis_is_never_executed(
+        self, monkeypatch
+    ) -> None:
+        executed: list[str] = []
+        request = _request(max_iterations=4)
+        read = (
+            '```tool\n{"name":"read_file","arguments":{"path":"README.md"}}\n```'
+        )
+
+        async def execute(name, _session_id, _args, **_kwargs):
+            executed.append(name)
+            return {"tool": name, "result": {"content": "CHECK: persisted result"}}
+
+        monkeypatch.setattr("backend.agents.base.execute_tool", execute)
+        agent = _scripted_agent(
+            [read, read, read, read, read],
+            supported_actions={AgentAction.READ_FILE},
+        )
+
+        output = [token async for token in agent._run_react_loop(request)]
+
+        assert executed == ["read_file"]
+        assert agent.attempts == 5
+        assert "[RECOLHA CONCLUÍDA — SÍNTESE INCOMPLETA]" in "".join(output)
+        assert agent._last_run_success is False
 _WRITE_ABSOLUTE_CALL = (
     '```tool\n{"name": "write_file_absolute", "arguments": '
     '{"path": "C:\\\\Users\\\\rodri\\\\Desktop\\\\relatorio.md", '
@@ -1113,7 +1348,12 @@ class TestStreamFailureRecovery:
 
         monkeypatch.setattr(
             "backend.agents.base.get_model_config",
-            lambda _key: {"id": "configured/tier-model", "max_tokens": 64, "temperature": 0.1},
+            lambda _key: {
+                "id": "configured/tier-model",
+                "fallback_id": "configured/fallback-model",
+                "max_tokens": 64,
+                "temperature": 0.1,
+            },
         )
         agent = _Agent()
         monkeypatch.setattr(agent, "system_prompt", lambda: "fixture system prompt")
@@ -1129,6 +1369,63 @@ class TestStreamFailureRecovery:
 
         assert "".join(output) == "fixture answer"
         assert provider.models == [selected_model]
+
+    async def test_selected_model_failure_does_not_cascade_to_tier_model(
+        self, monkeypatch
+    ) -> None:
+        selected_model = "openrouter/free-selected-model"
+
+        class _Agent(AgentBase):
+            name = "FIXTURE"
+            model_key = "coder"
+            prompt_file = "router"
+
+            async def _execute(self, request):
+                async for token in self.stream_llm(request):
+                    yield token
+
+        class _Provider:
+            provider_name = "openrouter"
+
+            def __init__(self) -> None:
+                self.models: list[str] = []
+
+            async def chat_stream(self, *, model, messages, **_kwargs):
+                self.models.append(model)
+                raise RuntimeError("502 upstream connection reset")
+                yield "unreachable"
+
+        monkeypatch.setattr(
+            "backend.agents.base.get_model_config",
+            lambda _key: {
+                "id": "configured/tier-model",
+                "fallback_id": "configured/possibly-paid-fallback",
+                "max_tokens": 64,
+                "temperature": 0.1,
+            },
+        )
+        agent = _Agent()
+        monkeypatch.setattr(agent, "system_prompt", lambda: "fixture system prompt")
+
+        async def no_wait(*_args):
+            await asyncio.sleep(0)
+
+        monkeypatch.setattr(agent, "_wait_before_fallback", no_wait)
+        provider = _Provider()
+        request = AgentRequest(
+            session_id="fixture-session",
+            query="answer with the selected model",
+            client=provider,
+            context={"_model_override": selected_model},
+            max_iterations=6,
+        )
+
+        output = [token async for token in agent._run_react_loop(request)]
+
+        assert provider.models == [selected_model]
+        assert any(token.startswith("<event>error|LLM stream failed") for token in output)
+        assert agent._last_run_success is False
+        assert request.context["_agent_run_success"] is False
 
     async def test_context_overflow_shrinks_and_retries_once(self) -> None:
         from backend.token_management import ContextOverflowError
@@ -1426,6 +1723,12 @@ class TestEvidenceGateDeadlockRegression:
             "verificação exigida."
         )
         assert output_reports_incompletion(emitted) == "[TAREFA NÃO CONCLUÍDA]"
+        assert (
+            output_reports_incompletion(
+                "[RECOLHA CONCLUÍDA — SÍNTESE INCOMPLETA] ferramentas correram"
+            )
+            == "[RECOLHA CONCLUÍDA — SÍNTESE INCOMPLETA]"
+        )
 
     async def test_alternating_discovery_calls_are_detected_as_a_loop(
         self, monkeypatch

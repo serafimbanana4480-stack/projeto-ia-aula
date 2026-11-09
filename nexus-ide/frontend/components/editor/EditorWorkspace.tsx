@@ -122,7 +122,7 @@ export default function EditorWorkspace() {
         setTree(entries);
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to load file tree",
+          err instanceof Error ? err.message : "Nao foi possivel carregar a arvore de ficheiros",
         );
       } finally {
         setLoadingTree(false);
@@ -143,7 +143,7 @@ export default function EditorWorkspace() {
         setContent(result.content);
         setDirty(false);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load file");
+        setError(err instanceof Error ? err.message : "Nao foi possivel carregar o ficheiro");
       } finally {
         setLoadingFile(false);
       }
@@ -181,7 +181,7 @@ export default function EditorWorkspace() {
       }
       setDirty(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save file");
+      setError(err instanceof Error ? err.message : "Nao foi possivel guardar o ficheiro");
     } finally {
       setSaving(false);
     }
@@ -197,7 +197,7 @@ export default function EditorWorkspace() {
         : await executeTerminalCommand(command, workspaceRoot, 30, "default");
       if (result) setTerminalResults((prev) => [...prev, result]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to run command");
+      setError(err instanceof Error ? err.message : "Nao foi possivel executar o comando");
     } finally {
       setRunning(false);
     }
@@ -206,7 +206,7 @@ export default function EditorWorkspace() {
   const handleSelectDesktopFolder = useCallback(async () => {
     if (!desktopMode) {
       setError(
-        "Desktop bridge not available. Open the Electron app to access any folder on the Mac.",
+        "A ponte de desktop nao esta disponivel. Abre a aplicacao de desktop para aceder a qualquer pasta.",
       );
       return;
     }
@@ -224,7 +224,7 @@ export default function EditorWorkspace() {
   }, [desktopMode, loadTree]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 bg-nexus-bg p-3 text-gray-200">
+    <div className="flex h-full min-h-0 flex-col gap-3 bg-nexus-bg p-3 text-nexus-text">
       <div className="flex items-center justify-between rounded-lg border border-nexus-border bg-nexus-panel/60 px-4 py-3">
         <div className="flex items-center gap-3">
           <div className="rounded-md bg-nexus-accent/15 p-2 text-nexus-accent">
@@ -232,24 +232,24 @@ export default function EditorWorkspace() {
           </div>
           <div>
             <p className="text-sm font-semibold">Workspace de edição</p>
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-nexus-faint">
               {desktopMode
-                ? "Modo desktop ativo: acesso nativo a qualquer pasta do Mac"
+                ? "Modo desktop ativo: acesso nativo a qualquer pasta do computador"
                 : "Ficheiros locais, editor controlado e terminal integrado"}
             </p>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-xs text-gray-400">
-          <span className="rounded-md border border-nexus-border bg-black/20 px-2 py-1 text-gray-300">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-nexus-muted">
+          <span className="rounded-md border border-nexus-border bg-nexus-elevated px-2 py-1 text-nexus-text">
             {desktopMode ? "Pasta" : "Root"}: {workspaceRoot}
           </span>
           {desktopMode && (
             <button
               type="button"
               onClick={() => void handleSelectDesktopFolder()}
-              className="rounded-md border border-nexus-accent bg-nexus-accent/10 px-3 py-1.5 text-gray-100 transition-colors hover:bg-nexus-accent/20"
+              className="rounded-md border border-nexus-accent bg-nexus-accent/10 px-3 py-1.5 text-nexus-text transition-colors hover:bg-nexus-accent/20"
             >
-              Escolher pasta do Mac
+              Escolher pasta
             </button>
           )}
           <input
@@ -257,10 +257,10 @@ export default function EditorWorkspace() {
             onChange={(e) => setWorkspaceInput(e.target.value)}
             placeholder={
               desktopMode
-                ? "pasta selecionada no Mac"
+                ? "pasta escolhida"
                 : "escreve uma pasta, ex. frontend/components"
             }
-            className="min-w-[260px] rounded-md border border-nexus-border bg-black/30 px-2 py-1 text-xs text-gray-200 outline-none placeholder:text-gray-600 focus:border-nexus-accent"
+            className="min-w-[260px] rounded-md border border-nexus-border bg-nexus-elevated px-2 py-1 text-xs text-nexus-text placeholder:text-nexus-faint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent"
           />
           <button
             type="button"
@@ -272,7 +272,7 @@ export default function EditorWorkspace() {
               setTerminalResults([]);
               void loadTree(workspaceInput.trim() || ".");
             }}
-            className="rounded-md border border-nexus-accent bg-nexus-accent/10 px-3 py-1.5 text-gray-100 transition-colors hover:bg-nexus-accent/20"
+            className="rounded-md border border-nexus-accent bg-nexus-accent/10 px-3 py-1.5 text-nexus-text transition-colors hover:bg-nexus-accent/20"
           >
             {desktopMode ? "Abrir pasta escrita" : "Abrir pasta"}
           </button>
@@ -292,7 +292,7 @@ export default function EditorWorkspace() {
               className={`rounded-md border px-2 py-1 transition-colors ${
                 workspaceRoot === preset.path
                   ? "border-nexus-accent bg-nexus-accent/15 text-nexus-accent"
-                  : "border-nexus-border bg-black/20 hover:bg-nexus-border/40"
+                  : "border-nexus-border bg-nexus-elevated hover:bg-nexus-border/40"
               }`}
             >
               {preset.label}
@@ -326,7 +326,7 @@ export default function EditorWorkspace() {
       </div>
 
       {error && (
-        <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+        <div className="flex items-start gap-2 rounded-lg border border-nexus-accent3/30 bg-nexus-accent3/10 px-4 py-3 text-sm text-nexus-accent3">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>{error}</span>
         </div>
@@ -337,7 +337,7 @@ export default function EditorWorkspace() {
       >
         {!explorerCollapsed && (
           <section className="overflow-hidden rounded-lg border border-nexus-border bg-nexus-panel/60">
-            <div className="border-b border-nexus-border px-4 py-3 text-xs uppercase tracking-wide text-gray-500">
+            <div className="border-b border-nexus-border px-4 py-3 text-xs uppercase tracking-wide text-nexus-faint">
               Explorer
             </div>
             <div className="h-full overflow-auto p-3">
@@ -358,7 +358,7 @@ export default function EditorWorkspace() {
                 <p className="text-sm font-medium">
                   {activePath || "Nenhum ficheiro selecionado"}
                 </p>
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-nexus-faint">
                   {language} •{" "}
                   {dirty ? "alterações por guardar" : "estado limpo"}
                 </p>
@@ -398,13 +398,13 @@ export default function EditorWorkspace() {
             </div>
           </div>
 
-          <div className="flex min-h-[240px] flex-col overflow-hidden rounded-lg border border-nexus-border bg-black/35">
+          <div className="flex min-h-[240px] flex-col overflow-hidden rounded-lg border border-nexus-border bg-nexus-void">
             <div className="flex items-center justify-between border-b border-nexus-border px-4 py-3">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <TerminalSquare className="h-4 w-4 text-nexus-accent" />
                 Terminal local
               </div>
-              <div className="text-xs text-gray-500">
+              <div className="text-xs text-nexus-faint">
                 Execução segura via sandbox
               </div>
             </div>
@@ -421,15 +421,15 @@ export default function EditorWorkspace() {
         </section>
       </div>
 
-      <div className="flex items-center gap-2 text-xs text-gray-500">
+      <div className="flex items-center gap-2 text-xs text-nexus-faint">
         <FolderOpen className="h-3.5 w-3.5" />
         <span>
           {desktopMode
-            ? "O modo desktop usa o seletor nativo do Mac e dá acesso real à pasta escolhida."
+            ? "O modo desktop usa o seletor nativo do sistema e dá acesso real à pasta escolhida."
             : "O workspace usa ficheiros locais reais e grava alterações diretamente na pasta selecionada."}
         </span>
         {dirty && (
-          <span className="text-amber-300">• alterações pendentes</span>
+          <span className="text-nexus-accent3">• alterações pendentes</span>
         )}
       </div>
     </div>

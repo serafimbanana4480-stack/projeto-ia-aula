@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import RunTimeline from "../../../components/chat/RunTimeline";
 import { AGENT_DECLARED_TODO_CAVEAT } from "../../../lib/foldRun";
 import type { ChatMessage, RunStep } from "../../../lib/types";
+import { useModelStore } from "../../../stores/modelStore";
 
 function makeMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -30,7 +31,8 @@ function headerOf(container: HTMLElement): HTMLElement {
 
 /** The green completion mark. Only a run that REPORTED completion may have it. */
 function showsGreenCompletion(container: HTMLElement): boolean {
-  return headerOf(container).querySelector(".text-emerald-400") !== null;
+  // Green is now the `--nx-accent2` design token, not the raw Tailwind palette.
+  return headerOf(container).querySelector(".text-nexus-accent2") !== null;
 }
 
 /** The status pill stating what the run actually reported. */
@@ -50,6 +52,31 @@ function makeStep(overrides: Partial<RunStep> & Pick<RunStep, "seq" | "kind">): 
 }
 
 describe("RunTimeline", () => {
+  it("estima o custo apenas com o modelo reportado e os dois valores de utilização", () => {
+    const old = useModelStore.getState();
+    useModelStore.setState({
+      activeModel: "outro-modelo",
+      models: [
+        { id: "modelo-real", provider: "openrouter", tier: "fast", size_gb: 0, status: "available", inputPricePer1M: 1, outputPricePer1M: 2 },
+        { id: "outro-modelo", provider: "openrouter", tier: "fast", size_gb: 0, status: "available", inputPricePer1M: 100, outputPricePer1M: 100 },
+      ],
+    });
+    try {
+      const withTelemetry = (telemetry: Record<string, unknown>) => makeMessage({ metadata: { footer: { telemetry } } });
+      const view = render(<RunTimeline message={withTelemetry({ input_tokens: 1_000_000, output_tokens: 1_000_000 })} />);
+      expect(screen.queryByTestId("run-cost")).toBeNull();
+
+      view.rerender(<RunTimeline message={withTelemetry({ input_tokens: 1_000_000, output_tokens: null, provider: { name: "openrouter", model: "modelo-real" } })} />);
+      expect(screen.queryByTestId("run-cost")).toBeNull();
+
+      view.rerender(<RunTimeline message={withTelemetry({ input_tokens: 1_000_000, output_tokens: 1_000_000, provider: { name: "openrouter", model: "modelo-real" } })} />);
+      expect(screen.getByTestId("run-cost").textContent).toContain("3");
+      expect(screen.getByTestId("run-cost").textContent).not.toContain("200");
+      view.unmount();
+    } finally {
+      useModelStore.setState({ activeModel: old.activeModel, models: old.models });
+    }
+  });
   it("não renderiza nada quando não há passos nem actividade", () => {
     const { container } = render(
       <RunTimeline message={makeMessage()} isStreaming={false} />,
@@ -85,7 +112,9 @@ describe("RunTimeline", () => {
       "false",
     );
     expect(screen.getByTestId("run-timeline-toggle").hasAttribute("aria-controls")).toBe(false);
-    expect(screen.queryAllByTestId("run-step")).toHaveLength(0);
+    // The chat stays conversational; work rows mount only when the user opens
+    // the activity detail.
+    expect(screen.queryByTestId("run-step")).toBeNull();
     expect(screen.queryByTestId("run-timeline-body")).toBeNull();
   });
 
@@ -162,8 +191,13 @@ describe("RunTimeline", () => {
   it("mantém a tarefa atual visível antes de chegarem detalhes do run", () => {
     render(<RunTimeline message={makeMessage()} isStreaming />);
 
-    expect(screen.getByText("Tarefa atual")).toBeTruthy();
-    expect(screen.getByRole("status").textContent).toBe("A iniciar execução…");
+    // The live one-liner is rendered inside the toggle button itself. It used
+    // to be a `role="status"` live region, but a live region inside the toggle
+    // joins the button's accessible name, so every stream event re-announced
+    // the whole control; visibility of the current task is the requirement.
+    const toggle = screen.getByTestId("run-timeline-toggle");
+    expect(toggle.textContent).toContain("Tarefa atual");
+    expect(toggle.textContent).toContain("A iniciar execução…");
   });
 
   it("agrupa apenas passos adjacentes com o mesmo task_id explícito", () => {
@@ -182,7 +216,8 @@ describe("RunTimeline", () => {
     expand();
     const group = screen.getByTestId("run-step-group");
     expect(group.textContent).toContain("CODER");
-    expect(group.textContent).toContain("2 atualizações da mesma tarefa");
+    expect(group.textContent).toContain("à espera");
+    expect(group.getAttribute("data-agent")).toBe("CODER");
     expect((group as HTMLDetailsElement).open).toBe(false);
 
     fireEvent.click(group.querySelector("summary")!);
@@ -215,9 +250,43 @@ describe("RunTimeline", () => {
 
     expand();
 
-    expect(screen.getByText("1 de 2 concluídas")).toBeTruthy();
-    expect(screen.getByText("Inspecionar o frontend")).toBeTruthy();
-    expect(screen.getByText("Refatorizar a timeline")).toBeTruthy();
+    expect(screen.getByTestId("plan-summary").textContent).toBe("1/2");
+    expect(screen.queryByTestId("plan-step")).toBeNull();
+    fireEvent.click(screen.getByTestId("plan-toggle"));
+    expect(screen.getByTestId("plan-toggle").getAttribute("aria-label")).toContain("1 de 2 concluídas");
+    expect(screen.getAllByTestId("plan-step").map((step) => step.textContent)).toEqual([
+      expect.stringContaining("Inspecionar o frontend"),
+      expect.stringContaining("Refatorizar a timeline"),
+    ]);
+  });
+
+  it("atualiza o plano visível quando a IA muda a etapa ativa", () => {
+    const first = makeMessage({
+      activities: [{
+        id: "plan-1", kind: "plan", title: "Plano atualizado", status: "running",
+        timestamp: "2026-01-01T00:00:00Z",
+        data: { todos: [
+          { id: 1, content: "Ler os ficheiros", status: "in_progress" },
+          { id: 2, content: "Executar verificação", status: "pending" },
+        ] },
+      }],
+    });
+    const view = render(<RunTimeline message={first} isStreaming />);
+    expect(screen.getByTestId("plan-current-step").textContent).toContain("Ler os ficheiros");
+
+    view.rerender(<RunTimeline message={makeMessage({
+      activities: [{
+        id: "plan-2", kind: "plan", title: "Plano atualizado", status: "running",
+        timestamp: "2026-01-01T00:00:02Z",
+        data: { todos: [
+          { id: 1, content: "Ler os ficheiros", status: "completed" },
+          { id: 2, content: "Executar verificação", status: "in_progress" },
+        ] },
+      }],
+    })} isStreaming />);
+
+    expect(screen.getByTestId("plan-current-step").textContent).toContain("Executar verificação");
+    expect(screen.getByTestId("plan-summary").textContent).toBe("1/2");
   });
 
   it("mostra o rodapé vivo com fase, tempo e tokens", () => {
@@ -240,21 +309,12 @@ describe("RunTimeline", () => {
     expect(screen.getByText("15 tokens")).toBeTruthy();
   });
 
-  it("mostra o chip 'raciocinou' mesmo sem um passo de raciocínio", () => {
-    render(
-      <RunTimeline
-        message={makeMessage({ thinking: "Vou ler o ficheiro e resumir." })}
-        isStreaming={false}
-      />,
-    );
-
-    expect(screen.getByText("raciocinou")).toBeTruthy();
-  });
-
-  it("mostra o chip 'raciocinou' a partir de um passo de raciocínio", () => {
-    render(
+  it("não mostra bloco, resumo nem passos de raciocínio", () => {
+    const { container } = render(
       <RunTimeline
         message={makeMessage({
+          thinking: "Texto interno que não deve aparecer no chat.",
+          metadata: { reasoningVisibility: "full" },
           steps: [
             {
               seq: 1,
@@ -272,26 +332,63 @@ describe("RunTimeline", () => {
       />,
     );
 
-    expect(screen.getByText("raciocinou")).toBeTruthy();
+    expect(container.innerHTML).toBe("");
+    expect(screen.queryByText(/raciocínio|abordagem|Texto interno/)).toBeNull();
   });
 
-  it("mostra o painel de raciocínio com o cabeçalho e a duração reais", () => {
+  it("mostra a abordagem publicada e cada subagente à parte", () => {
+    const approach = "Vou ler o chat antes de mexer nos subagentes.";
     render(
       <RunTimeline
         message={makeMessage({
-          thinking: "Primeiro confirmo o ficheiro, depois aplico a correção.",
+          thinking: approach,
+          metadata: { reasoningVisibility: "label" },
+          activities: [
+            {
+              id: "agent-architect",
+              kind: "agent",
+              title: "ARCHITECT começou a trabalhar",
+              agent: "ARCHITECT",
+              status: "running",
+              timestamp: "2026-01-01T00:00:00Z",
+              data: { name: "ARCHITECT", objective: "Rever a timeline" },
+            },
+            {
+              id: "agent-planner",
+              kind: "agent",
+              title: "PLANNER começou a trabalhar",
+              agent: "PLANNER",
+              status: "running",
+              timestamp: "2026-01-01T00:00:01Z",
+              data: { name: "PLANNER" },
+            },
+          ],
           steps: [
             {
               seq: 1,
               kind: "thinking",
-              label: "a definir a abordagem",
+              label: approach,
               target: "",
               verb: "thinking",
               status: "success",
               icon: "brain",
-              startedAt: 1_700_000_000_000,
-              durationMs: 4200,
-              detail: {},
+              detail: { visibility: "label" },
+            },
+            {
+              seq: 2,
+              kind: "tool_call",
+              label: "a usar ferramenta",
+              target: "read_file",
+              verb: "tool",
+              status: "success",
+              icon: "tool",
+              agent: "ARCHITECT",
+              event: {
+                type: "tool_call",
+                timestamp: "2026-01-01T00:00:02.000Z",
+                tool_name: "read_file",
+                tool_args: { path: "src/chat/RunTimeline.tsx" },
+              },
             },
           ],
         })}
@@ -301,9 +398,14 @@ describe("RunTimeline", () => {
 
     expand();
 
-    // Not streaming -> "Resumo da abordagem", with the folded step duration.
-    expect(screen.getByText("Resumo da abordagem")).toBeTruthy();
-    expect(screen.getByText("4s")).toBeTruthy();
+    expect(screen.queryByText(approach)).toBeNull();
+    expect(screen.queryByText("A analisar a tarefa…")).toBeNull();
+    expect(screen.queryByText("raciocinou")).toBeNull();
+    const entries = screen.getAllByTestId("agent-roster-entry");
+    expect(entries).toHaveLength(2);
+    expect(entries.map((entry) => entry.getAttribute("data-agent"))).toEqual(["ARCHITECT", "PLANNER"]);
+    expect(entries[0].textContent).toContain("Leu RunTimeline.tsx");
+    expect(screen.getAllByText("Leu RunTimeline.tsx").length).toBeGreaterThan(0);
   });
 
   it("mostra os tokens de raciocínio no rodapé", () => {
@@ -518,12 +620,14 @@ describe("RunTimeline", () => {
 
       expect(pills).toEqual(["1 erro", "execução cancelada", "execução interrompida"]);
       // Amber warning colour for the interruption — the same one the header
-      // already uses for a warning — and no rose anywhere on it.
-      expect(headers[2].querySelector(".text-amber-300")).not.toBeNull();
-      expect(headers[2].querySelector(".text-rose-400")).toBeNull();
-      expect(headers[2].querySelector(".text-emerald-400")).toBeNull();
+      // already uses for a warning — and no rose anywhere on it. The tones are
+      // now `--nx-*` design tokens (accent3 = amber, accent4 = rose,
+      // accent2 = success green) rather than the raw Tailwind palette.
+      expect(headers[2].querySelector(".text-nexus-accent3")).not.toBeNull();
+      expect(headers[2].querySelector(".text-nexus-accent4")).toBeNull();
+      expect(headers[2].querySelector(".text-nexus-accent2")).toBeNull();
       // An interrupted run is not a failed one even when it also failed a step.
-      expect(headers[1].querySelector(".text-rose-400")).toBeNull();
+      expect(headers[1].querySelector(".text-nexus-accent4")).toBeNull();
     });
 
     it("declara no plano que os estados são declarados pelo agente", () => {
@@ -545,13 +649,114 @@ describe("RunTimeline", () => {
         />,
       );
 
-      expand();
+      fireEvent.click(screen.getByTestId("plan-toggle"));
 
       // Same sentence, same `role="note"` semantics as the checklist and the
       // session panel: the ticks are a claim the agent made about itself.
       const caveat = screen.getByText(AGENT_DECLARED_TODO_CAVEAT);
       expect(caveat.getAttribute("role")).toBe("note");
-      expect(screen.getByLabelText("Plano de execução").contains(caveat)).toBe(true);
+      expect(screen.getByLabelText("Plano da IA").contains(caveat)).toBe(true);
+    });
+  });
+
+  // Progressive disclosure for bursts of mechanical work: 24 file reads are
+  // ONE honest line, not 24 rows. The group expands into the very same rows
+  // an ungrouped run shows, so grouping hides work, it never rewrites it.
+  describe("agrupamento de atividade", () => {
+    function reads(count: number): RunStep[] {
+      return Array.from({ length: count }, (_, index) => ({
+        seq: index + 1,
+        kind: "tool_started",
+        label: "Ler ficheiro",
+        target: "read_file",
+        verb: "tool",
+        status: "success",
+        icon: "wrench",
+        startedAt: 1_700_000_000_000 + index * 100,
+        durationMs: 100,
+      })) as RunStep[];
+    }
+
+    it("colapsa uma explosão de leituras numa única linha de grupo", () => {
+      render(
+        <RunTimeline message={makeMessage({ steps: reads(24) })} isStreaming={false} />,
+      );
+
+      expand();
+
+      // One group row standing in for 24 steps. (jsdom keeps the content of a
+      // closed <details> in the DOM, so "collapsed" is asserted on the open
+      // attribute, not on row count.)
+      const groups = screen.getAllByTestId("run-activity-group");
+      expect(groups).toHaveLength(1);
+      expect(groups[0].textContent).toContain("Exploração · 24 ações de exploração");
+      expect((groups[0] as HTMLDetailsElement).open).toBe(false);
+    });
+
+    it("expande o grupo nas mesmas linhas fiéis da timeline", () => {
+      render(
+        <RunTimeline message={makeMessage({ steps: reads(24) })} isStreaming={false} />,
+      );
+
+      expand();
+      const group = screen.getByTestId("run-activity-group");
+      fireEvent.click(group.querySelector("summary")!);
+
+      expect(screen.getAllByTestId("run-step")).toHaveLength(24);
+    });
+
+    it("mantém passos de agente sempre visíveis (nunca agrupados)", () => {
+      render(
+        <RunTimeline
+          message={makeMessage({
+            steps: [
+              ...reads(5).map((step) => ({ ...step, seq: step.seq + 10 })),
+              {
+                seq: 1,
+                kind: "subagent_started",
+                label: "CODER começou",
+                target: "CODER",
+                verb: "agent",
+                status: "success",
+                icon: "bot",
+              },
+              {
+                seq: 2,
+                kind: "subagent_finished",
+                label: "CODER concluiu",
+                target: "CODER",
+                verb: "agent",
+                status: "success",
+                icon: "bot",
+              },
+            ],
+          })}
+          isStreaming={false}
+        />,
+      );
+
+      expand();
+
+      // Os 5 reads colapsam num grupo; os passos de agente ficam como linhas
+      // próprias, fora do grupo.
+      const groups = screen.getAllByTestId("run-activity-group");
+      expect(groups).toHaveLength(1);
+      expect(groups[0].textContent).toContain("Exploração · 5 ações de exploração");
+      const agentRows = screen
+        .getAllByTestId("run-step")
+        .filter((row) => row.textContent?.includes("CODER"));
+      expect(agentRows).toHaveLength(2);
+    });
+
+    it("mostra a contagem de erros reais no grupo", () => {
+      const steps = reads(4);
+      steps[2].status = "error";
+      render(<RunTimeline message={makeMessage({ steps })} isStreaming={false} />);
+
+      expect(screen.getByTestId("run-timeline-toggle").getAttribute("aria-expanded")).toBe("false");
+      expect(screen.queryByTestId("run-timeline-body")).toBeNull();
+      expand();
+      expect(screen.getByTestId("run-activity-group").textContent).toContain("1 erro");
     });
   });
 });

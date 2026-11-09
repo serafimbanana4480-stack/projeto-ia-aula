@@ -183,7 +183,7 @@ def test_task_endpoints_include_real_plan_states_and_assigned_steps(client, monk
 
     monkeypatch.setattr(app.state, "orchestration_engine", FakePlanEngine(), raising=False)
 
-    data = client.get("/api/tasks/list").json()
+    data = client.get("/api/tasks/list?include_steps=true").json()
     assert data["queued"][0]["status"] == "awaiting_approval"
     assert data["queued"][0]["approval_status"] == "awaiting_approval"
     assert data["queued"][0]["progress"] is None
@@ -193,6 +193,10 @@ def test_task_endpoints_include_real_plan_states_and_assigned_steps(client, monk
     assert data["failed"][0]["status"] == "failed"
     assert data["completed"][0]["status"] == "completed"
     assert data["completed"][0]["created_at"] == "2023-11-14T22:13:23+00:00"
+
+    detail = client.get(f"/api/tasks/{plans[0].plan_id}")
+    assert detail.status_code == 200
+    assert detail.json()["task"]["steps"][0]["agent"] == "REVIEWER"
 
     active = client.get("/api/tasks/active").json()["tasks"]
     assert {item["id"] for item in active} == {plans[0].plan_id, plans[1].plan_id}

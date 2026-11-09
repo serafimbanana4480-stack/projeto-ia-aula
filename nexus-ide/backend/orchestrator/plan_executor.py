@@ -89,13 +89,19 @@ def partition_tool_errors(output: str) -> tuple[list[str], list[str]]:
             later_kind == "tool_result"
             for _, later_kind, _ in events[index + 1 :]
         )
-        (recovered if has_later_success else unrecovered).append(payload)
+        # A call the agent contract refused never executed: nothing broke,
+        # the guard simply stopped a model that reached for a tool outside its
+        # role (free models often do). Failing the whole mission for that made
+        # every read-only ANALYZER step that "tried" execute_code fail the run.
+        contract_refusal = "Agent contract forbids tool" in payload
+        (recovered if (has_later_success or contract_refusal) else unrecovered).append(payload)
     return unrecovered, recovered
 
 
 _INCOMPLETION_MARKERS: tuple[str, ...] = (
     "[TAREFA NÃO CONCLUÍDA]",
     "[TAREFA NAO CONCLUIDA]",
+    "[RECOLHA CONCLUÍDA — SÍNTESE INCOMPLETA]",
     # Double-encoded UTF-8. A literal in ``agents/base.py`` was corrupted this
     # way and the marker stopped matching, so a run that had honestly declared
     # itself incomplete was invisible to this check (2026-08-02, session
@@ -123,6 +129,16 @@ def output_reports_incompletion(output: str) -> str | None:
 # Backwards-compatible alias — the original module-level helper lived in
 # ``engine.py`` and is still imported by the test suite as a private name.
 _extract_tool_errors = extract_tool_errors
+
+
+async def _backoff_before_retry(attempt: int) -> None:
+    """Wait a bounded, jittered moment before the next attempt.
+
+    Kept as a module-level function so a test can neutralise the wait
+    without patching ``asyncio.sleep`` process-wide.
+    """
+    jitter = random.uniform(0, 1)
+    await asyncio.sleep((2**attempt) + jitter)
 
 
 async def iterate_agent_output(output: Any) -> AsyncIterator[str]:
@@ -155,12 +171,21 @@ class PlanExecutor:
         *,
         default_timeout: int = 300,
         max_parallel: int = 5,
+        model_override: str = "",
     ) -> None:
         self._llm_client = llm_client
         self._registry = registry
         self._events = event_bus
         self._agent_pool = agent_pool
         self._default_timeout = default_timeout
+        self._model_override = str(model_override or "").strip()
+        # One run of one agent instance at a time. The registry shares a
+        # single instance per agent type and the run verdict is instance
+        # state (``_last_run_success``), so same-agent tasks must not overlap:
+        # see the lock site in ``_execute_task`` for the failure this
+        # prevents. Different agents keep running in parallel.
+        self._agent_locks: dict[str, asyncio.Lock] = {}
+        self._agent_locks_guard = asyncio.Lock()
         # The engine exposes this budget and the layer loop is where tasks are
         # actually scheduled, so keep the bound here as well.
         self._max_parallel = max(1, int(max_parallel))
@@ -173,6 +198,62 @@ class PlanExecutor:
             )
         except ValueError:
             self._task_max_iterations = 10
+
+    def _agent_run_lock(self, agent_id: str) -> asyncio.Lock:
+        """The one-run-at-a-time lock for an agent type (see ``__init__``)."""
+        lock = self._agent_locks.get(agent_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._agent_locks[agent_id] = lock
+        return lock
+
+    async def _schedule_retry(
+        self,
+        task: TaskNode,
+        graph: DependencyGraph,
+        session_id: str,
+        attempt: int,
+        *,
+        reason: str,
+        detail: str = "",
+    ) -> bool:
+        """Move *task* to RETRYING when the retry budget allows another try.
+
+        Returns ``True`` when the caller must continue the retry loop, and
+        ``False`` when the budget is exhausted (the caller then reports the
+        failure and returns).
+
+        Every failure branch of the task loop used to ``return`` on the
+        first failure, so ``TaskNode.max_retries`` only ever applied to a
+        timeout or a raised exception. A step that produced no evidence, hit
+        an unrecovered tool error, or admitted it was incomplete is exactly
+        the case a retry exists for.
+        """
+        if attempt >= task.max_retries:
+            return False
+        task.retry_count = attempt + 1
+        # A retry starts from a clean slate: the previous error must not
+        # survive on a task that is about to run again.
+        task.error_message = ""
+        graph.transition_status(task.task_id, TaskStatus.RETRYING)
+        data: dict[str, Any] = {
+            "attempt": attempt + 1,
+            "max_retries": task.max_retries,
+            "reason": reason,
+        }
+        if detail:
+            data["detail"] = detail
+        await self._events.publish(
+            OrchestratorEvent(
+                event_type=EventType.AGENT_RETRY,
+                source=task.agent,
+                session_id=session_id,
+                task_id=task.task_id,
+                data=data,
+            )
+        )
+        await _backoff_before_retry(attempt)
+        return True
 
     async def execute(
         self,
@@ -554,7 +635,7 @@ class PlanExecutor:
             )
             return {"error": task.error_message}
         configured_model = getattr(agent, "model_key", "")
-        effective_model = task.model_key or (
+        effective_model = self._model_override or task.model_key or (
             configured_model if isinstance(configured_model, str) else ""
         )
         # An empty ``allowed_tools`` is NOT "the agent may use everything" —
@@ -586,6 +667,17 @@ class PlanExecutor:
         # Build context from dependencies
         dep_context = self._build_dependency_context(task, ctx)
         conv_log = get_conversation_logger(session_id)
+        evidence_requirement = (
+            "verification"
+            if task.agent == "DEBUGGER" or task.name.strip().lower().startswith("verify")
+            else ("discovery" if self._task_is_discovery(task) else "substantive")
+        )
+        task_failure_scope = f"plan-task:{session_id}:{task.task_id}"
+        # Reset exactly this task's breaker once. It remains active through
+        # retries, while task-scoped keys stop parallel tasks from clearing or
+        # inheriting one another's failure streaks.
+        reset_tool_failures(task_failure_scope)
+        retry_guidance = ""
 
         for attempt in range(task.max_retries + 1):
             # A retry is a new execution attempt. Keep the guarded state
@@ -602,19 +694,12 @@ class PlanExecutor:
 
                 conv_log.log_task_started(task.task_id, task.name, task.agent, attempt + 1)
 
-                # Give every task a clean circuit breaker. The breaker is keyed
-                # by (session, tool) and a session spans the whole mission, so
-                # a failure streak in an earlier task would otherwise start
-                # this one with its tools already short-circuited. That is what
-                # killed the DEBUGGER "Verify" step in session
-                # bf1e9435b9ec47c9: run_shell was disabled on iteration 1 by
-                # failures that happened in a different task, and the
-                # "verification" gate has no other way to close.
-                reset_tool_failures(session_id)
-
+                task_prompt = self._build_task_prompt(task, dep_context, ctx.project_path)
+                if retry_guidance:
+                    task_prompt += f"\n\nRETRY GUIDANCE:\n{retry_guidance}"
                 request = AgentRequest(
                     session_id=session_id,
-                    query=self._build_task_prompt(task, dep_context, ctx.project_path),
+                    query=task_prompt,
                     client=self._llm_client,
                     project_path=ctx.project_path,
                     context={
@@ -624,48 +709,98 @@ class PlanExecutor:
                         "_enforce_agent_contract": True,
                         "_allowed_tools": task_tools,
                         "model": effective_model,
-                        "_tool_evidence_requirement": (
-                            "verification"
-                            if task.agent == "DEBUGGER"
-                            or task.name.strip().lower().startswith("verify")
-                            else (
-                                "discovery"
-                                if self._task_is_discovery(task)
-                                else "substantive"
-                            )
+                        **(
+                            {"_model_override": self._model_override}
+                            if self._model_override
+                            else {}
                         ),
+                        "_tool_evidence_requirement": evidence_requirement,
                         "_tool_evidence": [],
+                        "_tool_failure_scope": task_failure_scope,
+                        # The task's own intent, read from its name and
+                        # description.  The prompt built below names the file
+                        # tools ("Use the write_file tool to create files."),
+                        # so the agent cannot infer the intent from the
+                        # assembled text — and must not, or every plan step
+                        # would look like a request to produce a file.
+                        "_file_task": self._task_is_file_task(task),
                     },
                     max_iterations=self._task_max_iterations,
                     autonomous=True,
                 )
 
-                # Stream execution with hard timeout
+                # Stream execution with hard timeout.
+                #
+                # One lock per agent type guards the whole run-and-read
+                # section. The registry hands every task the *same* agent
+                # instance for a type, and the run verdict lives on that
+                # instance (``_last_run_success``): two concurrent tasks of
+                # the same agent overwrite each other's verdict, so the loop
+                # that did not finish last reads a stranger's failure and is
+                # marked FAILED by the evidence gate even though its own
+                # tools succeeded (this is exactly how the engine's three
+                # concurrent DEBUGGER verification loops failed each other).
+                # The per-agent pool slot alone does not help: it admits up
+                # to ``concurrency`` runs of one instance. Serialising the
+                # shared instance keeps parallelism *between* agents (the
+                # DAG's real gain) while making the per-agent verdict true.
                 output_parts: list[str] = []
-                async with (
-                    self._agent_pool.slot(task.agent),
-                    EventEmitter(self._events, task.agent, session_id, task.task_id) as emit,
-                ):
-                    async with asyncio.timeout(self._default_timeout):
-                        async for token in iterate_agent_output(agent.run(request)):
-                            output_parts.append(token)
-                            await emit.emit(EventType.TOKEN, content=token)
+                async with self._agent_run_lock(task.agent):
+                    async with (
+                        self._agent_pool.slot(task.agent),
+                        EventEmitter(
+                            self._events, task.agent, session_id, task.task_id
+                        ) as emit,
+                    ):
+                        async with asyncio.timeout(self._default_timeout):
+                            async for token in iterate_agent_output(agent.run(request)):
+                                output_parts.append(token)
+                                await emit.emit(EventType.TOKEN, content=token)
 
-                output = "".join(output_parts)
-                unrecovered_errors, recovered_errors = partition_tool_errors(output)
+                    output = "".join(output_parts)
+                    unrecovered_errors, recovered_errors = partition_tool_errors(output)
 
-                # AgentBase owns evidence/iteration honesty and exposes the
-                # verdict after its stream closes. PlanExecutor previously
-                # ignored that verdict and marked a task COMPLETED whenever
-                # the visible text lacked a recognised error marker. That
-                # allowed a discovery-only list_dir loop to fail internally
-                # yet still become TASK_COMPLETED.
-                agent_run_success = getattr(agent, "_last_run_success", None)
-                if agent_run_success is False:
+                    # AgentBase owns evidence/iteration honesty and exposes the
+                    # verdict after its stream closes. PlanExecutor previously
+                    # ignored that verdict and marked a task COMPLETED whenever
+                    # the visible text lacked a recognised error marker. That
+                    # allowed a discovery-only list_dir loop to fail internally
+                    # yet still become TASK_COMPLETED. The verdict is read
+                    # inside the lock precisely because it is instance state.
+                    agent_run_success = getattr(agent, "_last_run_success", None)
+                if agent_run_success is False and not unrecovered_errors:
                     task.output_data["content"] = output
+                    requirement = evidence_requirement
+                    successful_tools = request.context.get("_successful_tools") or []
                     task.error_message = (
-                        "Agent execution failed its runtime/tool evidence gate"
+                        "Agent execution failed its runtime/tool evidence gate "
+                        f"(required={requirement}; successful_tools="
+                        f"{', '.join(str(name) for name in successful_tools) or 'none'})"
                     )
+                    # The retry budget exists for exactly this: a step that
+                    # produced no evidence is worth another attempt. It used
+                    # to return on the FIRST failure, so ``max_retries`` was
+                    # dead configuration for every branch except a timeout
+                    # or a raised exception.
+                    if await self._schedule_retry(
+                        task,
+                        graph,
+                        session_id,
+                        attempt,
+                        reason="evidence_gate",
+                        detail=task.error_message,
+                    ):
+                        retry_guidance = self._retry_guidance(
+                            "evidence_gate", requirement, task_tools
+                        )
+                        logger.warning(
+                            "Task %s failed its evidence gate — retrying "
+                            "(attempt %d/%d)",
+                            task.task_id,
+                            attempt + 2,
+                            task.max_retries + 1,
+                        )
+                        continue
                     graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
                     task.completed_at = time.time()
                     conv_log.log_task_failed(
@@ -715,6 +850,26 @@ class PlanExecutor:
                 if unrecovered_errors:
                     task.output_data["content"] = output
                     task.error_message = unrecovered_errors[0]
+                    if await self._schedule_retry(
+                        task,
+                        graph,
+                        session_id,
+                        attempt,
+                        reason="tool_error",
+                        detail=task.error_message,
+                    ):
+                        retry_guidance = self._retry_guidance(
+                            "tool_error", evidence_requirement, task_tools
+                        )
+                        logger.warning(
+                            "Task %s hit an unrecovered tool error — retrying "
+                            "(attempt %d/%d): %s",
+                            task.task_id,
+                            attempt + 2,
+                            task.max_retries + 1,
+                            task.error_message,
+                        )
+                        continue
                     graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
                     task.completed_at = time.time()
 
@@ -768,6 +923,29 @@ class PlanExecutor:
                     task.error_message = (
                         f"Agent reported the task as not completed ({incompletion})"
                     )
+                    # An agent that admitted it did not finish may well
+                    # finish on a second attempt. The budget is there for
+                    # that; it used to be ignored on this branch.
+                    if await self._schedule_retry(
+                        task,
+                        graph,
+                        session_id,
+                        attempt,
+                        reason="agent_incomplete",
+                        detail=task.error_message,
+                    ):
+                        retry_guidance = self._retry_guidance(
+                            "agent_incomplete", evidence_requirement, task_tools
+                        )
+                        logger.warning(
+                            "Task %s reported itself incomplete — retrying "
+                            "(attempt %d/%d): %s",
+                            task.task_id,
+                            attempt + 2,
+                            task.max_retries + 1,
+                            incompletion,
+                        )
+                        continue
                     graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
                     task.completed_at = time.time()
 
@@ -855,6 +1033,9 @@ class PlanExecutor:
                     task.max_retries + 1,
                 )
                 if attempt < task.max_retries:
+                    retry_guidance = self._retry_guidance(
+                        "timeout", evidence_requirement, task_tools
+                    )
                     graph.transition_status(task.task_id, TaskStatus.RETRYING)
                     await self._events.publish(
                         OrchestratorEvent(
@@ -869,8 +1050,7 @@ class PlanExecutor:
                             },
                         )
                     )
-                    jitter = random.uniform(0, 1)
-                    await asyncio.sleep((2**attempt) + jitter)
+                    await _backoff_before_retry(attempt)
                 else:
                     task.error_message = f"Task timed out after {self._default_timeout}s"
                     graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
@@ -904,6 +1084,9 @@ class PlanExecutor:
                 )
 
                 if attempt < task.max_retries:
+                    retry_guidance = self._retry_guidance(
+                        "exception", evidence_requirement, task_tools
+                    )
                     graph.transition_status(task.task_id, TaskStatus.RETRYING)
                     await self._events.publish(
                         OrchestratorEvent(
@@ -914,8 +1097,7 @@ class PlanExecutor:
                             data={"attempt": attempt + 1, "max_retries": task.max_retries},
                         )
                     )
-                    jitter = random.uniform(0, 1)
-                    await asyncio.sleep((2**attempt) + jitter)
+                    await _backoff_before_retry(attempt)
                 else:
                     task.error_message = str(exc)
                     graph.transition_status(task.task_id, TaskStatus.FAILED, task.error_message)
@@ -981,6 +1163,90 @@ class PlanExecutor:
         if cls._MUTATING_TASK_RE.search(text):
             return False
         return bool(cls._DISCOVERY_TASK_RE.search(text))
+
+    @staticmethod
+    def _task_is_file_task(task: Any) -> bool:
+        """True when the task itself asks for a file to be produced.
+
+        The prompt the executor builds names the file tools ("Use the
+        ``write_file`` tool to create files."), so the intent has to be read
+        from the task's own name and description.  Reading it from the
+        assembled prompt would make EVERY plan step look like a request to
+        produce a file.
+        """
+        text = " ".join(
+            part
+            for part in (
+                getattr(task, "name", ""),
+                getattr(task, "description", ""),
+            )
+            if part
+        )
+        if not text:
+            return False
+        return bool(AgentBase._is_file_task(text))
+
+    @staticmethod
+    def _retry_guidance(
+        reason: str,
+        requirement: str,
+        allowed_tools: list[str],
+    ) -> str:
+        """Change the next attempt's strategy after a deterministic failure.
+
+        Retrying the identical prompt caused the same weak model to repeat the
+        same discovery calls for all three attempts. The feedback is kept
+        generic so tool output, exception text, and other untrusted data are not
+        fed back as new instructions.
+        """
+        if reason == "evidence_gate":
+            directive = (
+                "The previous attempt did not meet the required evidence gate. "
+                "Do not repeat the same tool call with the same arguments. "
+                "Use a different permitted tool or target, and finish the task "
+                "with the requested evidence. If the required information is "
+                "unavailable, name the blocker instead of claiming completion."
+            )
+        elif reason == "tool_error":
+            directive = (
+                "A tool failed in the previous attempt. Do not repeat that exact "
+                "call; use a safe alternative or state why the task is blocked."
+            )
+        elif reason == "agent_incomplete":
+            directive = (
+                "The previous attempt reported the task incomplete. Continue from "
+                "the remaining work; do not repeat completed actions or claim "
+                "success without evidence."
+            )
+        elif reason == "timeout":
+            directive = (
+                "The previous attempt exceeded its time limit. Reduce the scope "
+                "of each step and make concrete progress with the remaining time."
+            )
+        else:
+            directive = (
+                "The previous attempt ended with an execution error. Reassess the "
+                "approach and do not repeat the same failing action."
+            )
+
+        preferred_by_requirement = {
+            "verification": {"run_tests", "run_lint", "type_check", "execute_code"},
+            "discovery": {"read_file", "read_file_absolute", "search_in_files", "search_codebase"},
+            "substantive": {
+                "read_file",
+                "read_file_absolute",
+                "search_in_files",
+                "run_tests",
+                "run_lint",
+                "type_check",
+                "execute_code",
+                "write_file",
+            },
+        }
+        available = sorted(set(allowed_tools) & preferred_by_requirement.get(requirement, set()))
+        if available:
+            directive += " Permitted tools that can satisfy this step: " + ", ".join(available) + "."
+        return directive
 
     def _build_task_prompt(self, task: TaskNode, dep_context: str, project_path: str = ".") -> str:
         """Build the prompt for a specific task execution."""

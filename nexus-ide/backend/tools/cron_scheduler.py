@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import logging
 import os
@@ -610,10 +611,46 @@ def scheduler_status() -> dict[str, Any]:
 
 from backend.tools.registry import ToolSpec, register_tool  # noqa: E402
 
+
+async def schedule_task_tool(
+    name: str,
+    schedule: str | dict[str, Any],
+    payload: dict[str, Any],
+    task_type: str = "agent",
+    description: str = "",
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """Coroutine wrapper around :func:`schedule_task`.
+
+    The registry awaits every handler, so a synchronous handler could never
+    run ("object dict can't be used in 'await' expression"). The blocking
+    SQLite write happens in a worker thread so the event loop keeps running.
+    """
+    return await asyncio.to_thread(
+        schedule_task, name, schedule, payload, task_type, description, enabled
+    )
+
+
+async def list_tasks_tool(enabled_only: bool = False) -> list[dict[str, Any]]:
+    """Coroutine wrapper around :func:`list_tasks` (the registry awaits it)."""
+    return await asyncio.to_thread(list_tasks, enabled_only)
+
+
+async def cancel_task_tool(name: str) -> dict[str, Any]:
+    """Coroutine wrapper around :func:`cancel_task` (the registry awaits it)."""
+    return await asyncio.to_thread(cancel_task, name)
+
+
+async def scheduler_status_tool() -> dict[str, Any]:
+    """Coroutine wrapper around :func:`scheduler_status` (the registry awaits it)."""
+    return await asyncio.to_thread(scheduler_status)
+
+
 register_tool(
     ToolSpec(
         name="schedule_task",
         description="Schedule a recurring or one-time task with cron expression, interval, or timestamp.",
+        category="task",
         schema={
             "type": "object",
             "properties": {
@@ -633,7 +670,7 @@ register_tool(
             },
             "required": ["name", "schedule", "payload"],
         },
-        handler=schedule_task,
+        handler=schedule_task_tool,
     )
 )
 
@@ -641,13 +678,14 @@ register_tool(
     ToolSpec(
         name="list_tasks",
         description="List all scheduled cron tasks.",
+        category="task",
         schema={
             "type": "object",
             "properties": {
                 "enabled_only": {"type": "boolean", "default": False},
             },
         },
-        handler=list_tasks,
+        handler=list_tasks_tool,
     )
 )
 
@@ -655,6 +693,7 @@ register_tool(
     ToolSpec(
         name="cancel_task",
         description="Cancel/remove a scheduled task by name.",
+        category="task",
         schema={
             "type": "object",
             "properties": {
@@ -662,7 +701,7 @@ register_tool(
             },
             "required": ["name"],
         },
-        handler=cancel_task,
+        handler=cancel_task_tool,
     )
 )
 
@@ -670,7 +709,8 @@ register_tool(
     ToolSpec(
         name="scheduler_status",
         description="Get cron scheduler status and job counts.",
+        category="task",
         schema={"type": "object", "properties": {}},
-        handler=scheduler_status,
+        handler=scheduler_status_tool,
     )
 )

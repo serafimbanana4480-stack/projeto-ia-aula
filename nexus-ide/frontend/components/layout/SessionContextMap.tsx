@@ -45,6 +45,6 @@ export default function SessionContextMap({ contextWindow = 0 }: { contextWindow
         : "Entrada reportada pelo provider na última chamada."}
     </p>
     {streaming && <p className="mt-2 text-[10px] text-nexus-accent-bright">Execução em curso · último valor reportado</p>}
-    {percent !== null && percent >= 90 && <p role="status" className="mt-2 text-[11px] text-amber-300">Contexto próximo do limite. Usa uma nova sessão ou reduz os anexos.</p>}
+    {percent !== null && percent >= 90 && <p role="status" className="mt-2 text-[11px] text-nexus-accent3">Contexto próximo do limite. Usa uma nova sessão ou reduz os anexos.</p>}
   </section>;
 }

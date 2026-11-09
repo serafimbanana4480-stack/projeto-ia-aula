@@ -32,14 +32,19 @@ DEFAULT_LIMITS = httpx.Limits(
 # stricter limits can override it explicitly through the constructor.
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=180.0, write=5.0, pool=5.0)
 
-_RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+_RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 _RETRYABLE_EXCEPTIONS = (
     httpx.ConnectError,
     httpx.ReadError,
     httpx.RemoteProtocolError,
     httpx.TimeoutException,
 )
-_BACKOFF_DELAYS = (1, 2, 4, 8)
+# Keep transient recovery bounded to five total requests. Four retries are
+# enough to survive a short local/provider interruption without holding a chat
+# turn open for several minutes. The payload is built once and reused verbatim.
+CHAT_MAX_ATTEMPTS = 5
+CHAT_RETRY_DELAY_SECONDS = 15.0
+_BACKOFF_DELAYS = (CHAT_RETRY_DELAY_SECONDS,) * (CHAT_MAX_ATTEMPTS - 1)
 _MODEL_ALIASES = {
     # Preserve historical aliases that existed in the AirLLM-only phase.
     "q3b-4bit": "qwen2.5:3b",
@@ -313,13 +318,55 @@ class OllamaClient:
         # providers.  Ollama expects ``num_predict``; forwarding the other
         # names inside its options object is unnecessary and can break strict
         # server versions.
-        excluded_options = {"max_tokens", "max_output_tokens"}
-        if getattr(self, "disable_tools", False):
-            excluded_options.update({"tools", "tool_choice"})
+        # ``max_tokens``/``max_output_tokens`` are OpenAI names, while Ollama
+        # receives tools at the request root rather than inside ``options``.
+        # ``_nexus_reasoning_sink`` and ``think`` are
+        # transport keys of this module, not Ollama options: the sink is a
+        # Python callable, and forwarding it inside ``payload["options"]`` made
+        # every json= encode raise "Object of type function is not JSON
+        # serializable", killing the whole Ollama turn.
+        excluded_options = {
+            "max_tokens",
+            "max_output_tokens",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            REASONING_SINK_OPTION,
+            REASONING_REQUEST_OPTION,
+        }
+        disable_tools = bool(getattr(self, "disable_tools", False))
+        requested_tools = (options or {}).get("tools") or _.get("tools")
+        tool_choice = (options or {}).get("tool_choice") or _.get("tool_choice")
+        tools = (
+            [tool for tool in requested_tools if isinstance(tool, dict)]
+            if isinstance(requested_tools, (list, tuple)) and not disable_tools
+            else []
+        )
+        if isinstance(tool_choice, dict):
+            function = tool_choice.get("function")
+            selected_name = str(
+                (function.get("name") if isinstance(function, dict) else "")
+                or tool_choice.get("name")
+                or ""
+            ).strip()
+            if selected_name:
+                tools = [
+                    tool
+                    for tool in tools
+                    if isinstance(tool.get("function"), dict)
+                    and str(tool["function"].get("name") or "") == selected_name
+                ]
+        elif str(tool_choice or "").strip().lower() == "none":
+            tools = []
+
         ollama_options = {
             key: value for key, value in (options or {}).items() if key not in excluded_options
         }
-        if getattr(self, "direct_answer", False):
+        # A cloud-failure fallback is intentionally compact for ordinary chat,
+        # but its direct-answer prompt strips the tool contract. Keep the full
+        # agent prompt whenever this request can use tools.
+        direct_answer = bool(getattr(self, "direct_answer", False) and not tools)
+        if direct_answer:
             # The Coder tier can request an 8k output budget.  That is useful
             # for a tool-capable cloud model but makes a CPU local fallback
             # spend minutes generating unnecessary text.  Keep this lane
@@ -359,7 +406,7 @@ class OllamaClient:
             cap = 512 if structured_request else 256
             ollama_options["num_predict"] = min(max(requested_predict, 128), cap)
         resolved_model = self._resolve_model(model)
-        if getattr(self, "direct_answer", False):
+        if direct_answer:
             direct_messages = [
                 message.to_dict() if isinstance(message, ChatMessage) else dict(message)
                 for message in messages
@@ -375,6 +422,10 @@ class OllamaClient:
             "stream": True,
             "options": ollama_options,
         }
+        # Ollama's native chat API expects function schemas at the request's
+        # top level, not inside the generation ``options`` object.
+        if tools:
+            payload["tools"] = tools
         # Qwen-derived local models can spend the entire output budget in the
         # Ollama ``message.thinking`` field, leaving ``message.content`` empty
         # and making the chat appear broken. Thinking therefore stays opt-in:
@@ -404,9 +455,11 @@ class OllamaClient:
         failures: list[str] = []
         max_attempts = len(_BACKOFF_DELAYS) + 1
         emitted_content = False
+        native_tools_downgraded = False
 
         for attempt in range(1, max_attempts + 1):
             retryable_failure: str | None = None
+            tool_calls: dict[int, dict[str, Any]] = {}
             try:
                 async with self._client.stream("POST", "/api/chat", json=payload) as response:
                     if response.status_code >= 400:
@@ -421,6 +474,27 @@ class OllamaClient:
                             # not a transient server failure. Retrying the same
                             # invalid message only delays the real diagnosis.
                             raise OllamaError(error_message)
+                        if (
+                            tools
+                            and not native_tools_downgraded
+                            and response.status_code in {400, 422}
+                            and any(
+                                marker in error_message.lower()
+                                for marker in ("tool", "function")
+                            )
+                        ):
+                            # Older Ollama versions and some local model
+                            # servers reject the native schema. The agent
+                            # prompt still contains its explicit, allow-listed
+                            # <tool_call> protocol, so retry once without the
+                            # native field and let the shared parser handle it.
+                            native_tools_downgraded = True
+                            payload.pop("tools", None)
+                            logger.warning(
+                                "Ollama rejected native tool schemas; retrying once "
+                                "with the agent's prompt-based tool protocol"
+                            )
+                            continue
                         if response.status_code not in _RETRYABLE_STATUS_CODES:
                             raise OllamaError(error_message)
                         retryable_failure = error_message
@@ -454,6 +528,50 @@ class OllamaClient:
                                 emitted_content = True
                                 yield chunk
 
+                            # Ollama returns native function calls under
+                            # message.tool_calls. They can arrive in a frame
+                            # before the final done frame, so collect them by
+                            # call index and emit the agent's one shared wrapper
+                            # dialect only after the provider stream completes.
+                            message = data.get("message")
+                            message = message if isinstance(message, dict) else {}
+                            frame_calls = message.get("tool_calls") or data.get("tool_calls")
+                            if isinstance(frame_calls, list):
+                                for position, call in enumerate(frame_calls):
+                                    if not isinstance(call, dict):
+                                        continue
+                                    try:
+                                        index = int(call.get("index", position))
+                                    except (TypeError, ValueError):
+                                        index = position
+                                    function = call.get("function")
+                                    function = function if isinstance(function, dict) else call
+                                    name = str(function.get("name") or "").strip()
+                                    if not name:
+                                        continue
+                                    slot = tool_calls.setdefault(
+                                        index, {"name": "", "arguments": {}}
+                                    )
+                                    slot["name"] = name
+                                    arguments = function.get("arguments")
+                                    if isinstance(arguments, dict):
+                                        existing = slot.get("arguments")
+                                        if isinstance(existing, dict):
+                                            existing.update(arguments)
+                                        else:
+                                            slot["arguments"] = dict(arguments)
+                                    elif isinstance(arguments, str) and arguments:
+                                        existing = slot.get("arguments")
+                                        if isinstance(existing, dict) and existing:
+                                            # Some compatible servers change
+                                            # representation mid-stream. Keep
+                                            # the most recent complete form.
+                                            slot["arguments"] = arguments
+                                        else:
+                                            slot["arguments"] = (
+                                                str(existing or "") + arguments
+                                            )
+
                             # Some compatible Ollama servers include the
                             # final text delta and ``done`` in one frame.
                             # Consume that delta before ending the stream so
@@ -463,7 +581,19 @@ class OllamaClient:
                                 break
 
                         if final_chunk:
-                            if not emitted_content:
+                            emitted_tool_call = False
+                            if tool_calls:
+                                from backend.llm.tool_calls import render_tool_call
+
+                                for _index, slot in sorted(tool_calls.items()):
+                                    name = str(slot.get("name") or "").strip()
+                                    if not name:
+                                        continue
+                                    emitted_tool_call = True
+                                    yield "\n" + render_tool_call(
+                                        name, slot.get("arguments", {})
+                                    )
+                            if not emitted_content and not emitted_tool_call:
                                 retryable_failure = "Ollama stream completed without content"
                             else:
                                 self._last_finish_reason = str(

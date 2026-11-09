@@ -5,17 +5,23 @@ services:
       dockerfile: docker/backend/Dockerfile
     container_name: nexus-backend
     ports:
-      - "8000:8000"
+      # Keep the development API local by default. Set NEXUS_BIND_HOST=0.0.0.0
+      # only when this instance is intentionally exposed to the network.
+      - "${NEXUS_BIND_HOST:-127.0.0.1}:8000:8000"
     environment:
       - LLM_PROVIDER=ollama
       - OLLAMA_HOST=http://host.docker.internal:11434
       - OLLAMA_DEFAULT_MODEL=glm-5.2
       - LOCAL_LLM_DEVICE=cpu
-      - ENVIRONMENT=development
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - BACKEND_HOST=${NEXUS_BIND_HOST:-127.0.0.1}
+      - ALLOW_SELF_REGISTRATION
       - DATABASE_URL=sqlite:///./data/nexus.db
       - REDIS_URL=redis://redis:6379
-      - SECRET_KEY=${SECRET_KEY:-development-secret-key-change-in-production}
-      - JWT_SECRET=${JWT_SECRET:-development-jwt-secret-change-in-production}
+      # Require operator-generated signing keys; published placeholder values
+      # are rejected by the backend's startup configuration gate.
+      - SECRET_KEY=${SECRET_KEY:?Set SECRET_KEY in the Compose environment}
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in the Compose environment}
     volumes:
       - nexus-data:/app/data
       - ../config:/app/config:ro
@@ -41,7 +47,7 @@ services:
       dockerfile: ../docker/frontend.Dockerfile
     container_name: nexus-frontend
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
     depends_on:
@@ -55,7 +61,7 @@ services:
     image: redis:7-alpine
     container_name: nexus-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -72,7 +78,7 @@ services:
     image: prom/prometheus:latest
     container_name: nexus-prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ../config/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus-data:/prometheus

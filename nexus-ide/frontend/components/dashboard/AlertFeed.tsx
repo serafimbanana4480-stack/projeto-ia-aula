@@ -136,7 +136,7 @@ export default function AlertFeed() {
         {!backendOnline && (
           <div
             role="alert"
-            className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300"
+            className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-nexus-accent3"
           >
             <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
             Backend offline — alertas não disponíveis
@@ -146,7 +146,7 @@ export default function AlertFeed() {
         {alertsError && alerts.length === 0 && (
           <div
             role="alert"
-            className="mt-3 flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300"
+            className="mt-3 flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-nexus-accent4"
           >
             <AlertCircle className="h-3 w-3 shrink-0" aria-hidden="true" />
             Falha ao carregar alertas: {alertsError}

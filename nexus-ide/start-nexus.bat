@@ -16,8 +16,8 @@ REM
 REM Para desenvolver o backend com hot-reload, usa start-nexus-dev.bat
 REM (reload limitado a backend/, excluindo dirs escritos pelo agente).
 set NEXUS_ALLOW_DEGRADED_STARTUP=1
-start "NEXUS Backend" cmd /k "cd /d C:\Users\rodri\Desktop\nexus\nexus-ide && set NEXUS_ALLOW_DEGRADED_STARTUP=1 && .venv\Scripts\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8001"
-start "NEXUS Frontend" cmd /k "cd /d C:\Users\rodri\Desktop\nexus\nexus-ide\frontend && set NEXT_PUBLIC_API_URL=http://127.0.0.1:8001 && pnpm run dev -- --hostname 127.0.0.1 --port 3001"
+start "NEXUS Backend" cmd /k "cd /d C:\Users\rodri\Desktop\nexus\nexus-ide && set NEXUS_ALLOW_DEGRADED_STARTUP=1 && set BACKEND_HOST=127.0.0.1 && .venv\Scripts\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8001"
+start "NEXUS Frontend" cmd /k "cd /d C:\Users\rodri\Desktop\nexus\nexus-ide\frontend && set NEXT_PUBLIC_API_URL=http://127.0.0.1:8001 && pnpm run dev --hostname 127.0.0.1 --port 3001"
 
 echo.
 echo NEXUS a iniciar: Backend (':8001') e Frontend (':3001') em janelas separadas.

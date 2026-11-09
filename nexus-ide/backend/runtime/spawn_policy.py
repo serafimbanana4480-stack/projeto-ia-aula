@@ -24,8 +24,11 @@ declined even if they are individually reasonable.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 
 
 class SpawnVerdict(StrEnum):
@@ -41,6 +44,7 @@ class SubagentProposal:
     name: str
     objective: str
     definition_of_done: str = ""
+    context: str = ""
     read_scope: frozenset[str] = frozenset()
     write_scope: frozenset[str] = frozenset()
     depends_on: frozenset[str] = frozenset()
@@ -76,6 +80,10 @@ class SpawnPolicy:
     #: Objectives already being investigated, to avoid duplicate work.
     active_objectives: dict[str, str] = field(default_factory=dict)
     completed_tasks: set[str] = field(default_factory=set)
+    #: Root the relative scopes are resolved against (the run's project).
+    #: Absolute scopes ignore it; relative ones ("src/app.py") are anchored
+    #: here so two workers never disagree about what "src/" means.
+    scope_root: str = ""
 
     @property
     def live_workers(self) -> int:
@@ -168,7 +176,7 @@ class SpawnPolicy:
         if not write_scope:
             return None
         for name, owned in self.active_write_scopes.items():
-            if owned & write_scope:
+            if scopes_overlap(owned, write_scope, self.scope_root):
                 return name
         return None
 
@@ -186,9 +194,81 @@ def _normalise(text: str) -> str:
     return " ".join(text.lower().split())
 
 
+# ---------------------------------------------------------------------------
+# write scopes are paths, not strings
+# ---------------------------------------------------------------------------
+def normalise_scope_path(raw: str, root: str = "") -> str:
+    """Absolute, normalised, case-folded form of one scope entry.
+
+    A scope is a *path*: a worker that owns the directory ``src/`` and a
+    proposal that names the file ``src/a.py`` write the same bytes. The old
+    check compared the raw strings (``owned & write_scope``), so those two
+    workers ran at the same time and clobbered each other's file.
+
+    Relative scopes are resolved against *root* (the run's project) so every
+    participant of a run agrees on what ``src/`` means; absolute scopes are
+    kept as they are.
+    """
+    text = str(raw or "").strip().strip('"').strip("'")
+    if not text:
+        return ""
+    try:
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            base_text = str(root or "").strip()
+            base = Path(base_text).expanduser() if base_text else Path.cwd()
+            candidate = base / candidate
+        return os.path.normcase(os.path.normpath(str(candidate)))
+    except (OSError, RuntimeError, ValueError):  # pragma: no cover - defensive
+        return os.path.normcase(os.path.normpath(text))
+
+
+def scope_paths_overlap(left: str, right: str) -> bool:
+    """True when two normalised paths denote the same file or nest.
+
+    ``left`` contains ``right`` (or the other way round) means the two scopes
+    touch the same bytes, so they must not run concurrently.
+    """
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    separator = os.sep
+    if left.endswith(separator):
+        left = left[: -len(separator)]
+    if right.endswith(separator):
+        right = right[: -len(separator)]
+    if not left or not right:
+        return False
+    return left.startswith(right + separator) or right.startswith(left + separator)
+
+
+def normalise_scopes(scopes: Iterable[str], root: str = "") -> frozenset[str]:
+    """Normalised, de-duplicated form of a scope collection."""
+    normalised = {
+        path for path in (normalise_scope_path(item, root) for item in scopes) if path
+    }
+    return frozenset(normalised)
+
+
+def scopes_overlap(left: Iterable[str], right: Iterable[str], root: str = "") -> bool:
+    """True when any entry of *left* touches any entry of *right*."""
+    normalised_left = normalise_scopes(left, root)
+    normalised_right = normalise_scopes(right, root)
+    for one in normalised_left:
+        for other in normalised_right:
+            if scope_paths_overlap(one, other):
+                return True
+    return False
+
+
 __all__ = [
     "SpawnDecision",
     "SpawnPolicy",
     "SpawnVerdict",
     "SubagentProposal",
+    "normalise_scope_path",
+    "normalise_scopes",
+    "scope_paths_overlap",
+    "scopes_overlap",
 ]

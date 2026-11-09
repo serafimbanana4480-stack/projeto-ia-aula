@@ -76,11 +76,11 @@ dependencies = [
 analytics = ["numpy>=1.26"]
 federated = ["numpy>=1.26"]
 quantum = ["numpy>=1.26"]
-browser = ["playwright>=1.44"]
+browser = ["playwright>=1.48"]
 # Convenience aggregate for local development and CI images that want it all.
 extras = [
     "numpy>=1.26",
-    "playwright>=1.44",
+    "playwright>=1.48",
 ]
 
 [dependency-groups]

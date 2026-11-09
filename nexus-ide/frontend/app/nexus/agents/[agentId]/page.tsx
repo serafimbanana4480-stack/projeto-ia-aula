@@ -60,8 +60,8 @@ export default function AgentDetailPage({ params }: { params: Promise<{ agentId:
                 <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
                   agent.status === "idle" ? "bg-slate-500/15 border-slate-500/40 text-slate-400" :
                   agent.status === "thinking" ? "bg-violet-500/15 border-violet-500/40 text-violet-300" :
-                  agent.status === "executing" ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300" :
-                  "bg-amber-500/15 border-amber-500/40 text-amber-300"
+                  agent.status === "executing" ? "bg-emerald-500/15 border-emerald-500/40 text-nexus-accent2" :
+                  "bg-amber-500/15 border-amber-500/40 text-nexus-accent3"
                 }`}>
                   {agent.status.toUpperCase()}
                 </span>
@@ -128,7 +128,7 @@ export default function AgentDetailPage({ params }: { params: Promise<{ agentId:
                         <span className="text-[9px] font-bold uppercase text-violet-300">{step.type.replace("_", " ")}</span>
                         {step.tokens && <span className="text-[9px] text-slate-500">{step.tokens} tok</span>}
                         {step.confidence && (
-                          <span className={`text-[9px] font-semibold ${step.confidence > 0.7 ? "text-emerald-400" : "text-amber-400"}`}>
+                          <span className={`text-[9px] font-semibold ${step.confidence > 0.7 ? "text-nexus-accent2" : "text-nexus-accent3"}`}>
                             {(step.confidence * 100).toFixed(0)}% conf
                           </span>
                         )}
@@ -154,7 +154,7 @@ export default function AgentDetailPage({ params }: { params: Promise<{ agentId:
             {/* Context usage */}
             <div className="nexus-widget p-4">
               <div className="flex items-center gap-2 mb-3">
-                <HardDrive size={13} className="text-cyan-400" />
+                <HardDrive size={13} className="text-nexus-cyan" />
                 <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Context Window</span>
               </div>
               <div className="space-y-2">
@@ -181,7 +181,7 @@ export default function AgentDetailPage({ params }: { params: Promise<{ agentId:
             {/* Tools */}
             <div className="nexus-widget p-4">
               <div className="flex items-center gap-2 mb-3">
-                <Cpu size={13} className="text-emerald-400" />
+                <Cpu size={13} className="text-nexus-accent2" />
                 <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Available Tools</span>
               </div>
               <div className="space-y-2">
@@ -192,8 +192,8 @@ export default function AgentDetailPage({ params }: { params: Promise<{ agentId:
                       <p className="text-[9px] text-slate-500 mt-0.5">{tool.description}</p>
                     </div>
                     <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full border ${
-                      tool.status === "available" ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300" :
-                      tool.status === "running" ? "bg-amber-500/15 border-amber-500/40 text-amber-300" :
+                      tool.status === "available" ? "bg-emerald-500/15 border-emerald-500/40 text-nexus-accent2" :
+                      tool.status === "running" ? "bg-amber-500/15 border-amber-500/40 text-nexus-accent3" :
                       "bg-red-500/15 border-red-500/40 text-red-300"
                     }`}>
                       {tool.status}

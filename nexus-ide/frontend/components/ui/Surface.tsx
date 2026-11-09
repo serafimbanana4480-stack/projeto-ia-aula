@@ -31,21 +31,26 @@ const ELEVATION: Record<Elevation, string> = {
 const PADDING: Record<Padding, string> = {
   none: "",
   xs: "p-2.5",
-  sm: "p-3.5",
-  md: "p-5",
+  sm: "p-3",
+  md: "p-4",
   lg: "p-6",
 };
 
 /** Tones tint the border and add a coloured bloom, never the whole fill —
  *  a fully tinted panel stops reading as a surface and starts reading as an
- *  alert, which is a signal we want to reserve for real alerts. */
+ *  alert, which is a signal we want to reserve for real alerts.
+ *
+ *  The tints are `color-mix` against the live token rather than hardcoded
+ *  rgba: the dark accent is #7c6afb but the light one is #6d56dd, and a
+ *  literal kept the dark purple border in the light theme. */
 const TONE: Record<Tone, string> = {
   neutral: "",
-  accent: "!border-[rgba(124,106,251,0.30)] shadow-nx-accent",
-  success: "!border-[rgba(52,211,153,0.28)]",
-  warning: "!border-[rgba(251,191,36,0.28)]",
-  danger: "!border-[rgba(251,113,133,0.30)]",
-  info: "!border-[rgba(34,211,238,0.28)]",
+  accent:
+    "!border-[color-mix(in_srgb,var(--nx-accent)_30%,transparent)] shadow-nx-accent",
+  success: "!border-[color-mix(in_srgb,var(--nx-emerald)_28%,transparent)]",
+  warning: "!border-[color-mix(in_srgb,var(--nx-amber)_28%,transparent)]",
+  danger: "!border-[color-mix(in_srgb,var(--nx-rose)_30%,transparent)]",
+  info: "!border-[color-mix(in_srgb,var(--nx-cyan)_28%,transparent)]",
 };
 
 export interface SurfaceProps {
@@ -198,13 +203,14 @@ export function SurfaceHeader({
   action?: ReactNode;
   className?: string;
 }) {
+  // Token-derived tints so the icon chips follow the active theme.
   const ICON_TONE: Record<Tone, string> = {
     neutral: "text-nexus-muted bg-white/[0.05]",
-    accent: "text-nexus-accent-bright bg-[rgba(124,106,251,0.13)]",
-    success: "text-emerald-300 bg-emerald-400/12",
-    warning: "text-amber-300 bg-amber-400/12",
-    danger: "text-rose-300 bg-rose-400/12",
-    info: "text-cyan-300 bg-cyan-400/12",
+    accent: "text-nexus-accent-bright bg-nexus-accent/15",
+    success: "text-nexus-accent2 bg-nexus-accent2/12",
+    warning: "text-nexus-accent3 bg-nexus-accent3/12",
+    danger: "text-nexus-accent4 bg-nexus-accent4/12",
+    info: "text-nexus-cyan bg-nexus-cyan/12",
   };
 
   return (
@@ -218,7 +224,7 @@ export function SurfaceHeader({
           </span>
         ) : null}
         <div className="min-w-0">
-          <h3 className="text-[13px] font-semibold leading-snug tracking-tight text-nexus-text">
+          <h3 className="text-sm font-semibold leading-snug tracking-tight text-nexus-text">
             {title}
           </h3>
           {subtitle ? (

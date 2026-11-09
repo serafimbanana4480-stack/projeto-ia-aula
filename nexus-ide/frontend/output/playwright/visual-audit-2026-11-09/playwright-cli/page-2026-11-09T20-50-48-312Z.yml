@@ -1,0 +1,137 @@
+- generic [active] [ref=f1e1]:
+  - alert [ref=f1e2]
+  - generic [ref=f1e3]:
+    - banner [ref=f1e4]:
+      - generic [ref=f1e5]:
+        - generic [ref=f1e6]:
+          - generic [ref=f1e18]: NEXUS
+          - generic [ref=f1e19]:
+            - generic [ref=f1e20]: /
+            - generic [ref=f1e21]: Projetos
+        - 'button "Selecionar projeto: Sem projeto" [ref=f1e24] [cursor=pointer]':
+          - generic [ref=f1e27]: Sem projeto
+      - generic [ref=f1e30]:
+        - generic [ref=f1e31]: A ligar
+        - button "Documentação" [ref=f1e36] [cursor=pointer]
+        - button "Mudar para tema claro" [ref=f1e40] [cursor=pointer]
+        - button "Sair" [ref=f1e43] [cursor=pointer]
+        - generic "Utilizador" [ref=f1e48]: UT
+    - generic [ref=f1e52]:
+      - complementary "Navegação principal" [ref=f1e53]:
+        - generic [ref=f1e54]:
+          - button "Nova tarefa" [ref=f1e55] [cursor=pointer]
+          - button "Colapsar barra lateral" [ref=f1e58] [cursor=pointer]
+        - navigation [ref=f1e61]:
+          - link "Dashboard" [ref=f1e62] [cursor=pointer]:
+            - /url: /dashboard
+          - link "Bots" [ref=f1e70] [cursor=pointer]:
+            - /url: /bots
+          - link "Chat" [ref=f1e76] [cursor=pointer]:
+            - /url: /
+          - link "Projetos" [ref=f1e81] [cursor=pointer]:
+            - /url: /projects
+          - link "Tarefas" [ref=f1e87] [cursor=pointer]:
+            - /url: /dashboard/tasks
+          - link "Agentes" [ref=f1e93] [cursor=pointer]:
+            - /url: /swarm
+          - link "Ficheiros" [ref=f1e99] [cursor=pointer]:
+            - /url: /editor
+          - link "Skills" [ref=f1e107] [cursor=pointer]:
+            - /url: /tools
+          - link "Memória" [ref=f1e112] [cursor=pointer]:
+            - /url: /nexus
+          - link "Integrações" [ref=f1e125] [cursor=pointer]:
+            - /url: /mcp
+          - button "Mais" [ref=f1e132] [cursor=pointer]
+        - link "Definições" [ref=f1e140] [cursor=pointer]:
+          - /url: /settings
+      - main [ref=f1e146]:
+        - generic [ref=f1e147]:
+          - generic [ref=f1e148]:
+            - generic [ref=f1e149]:
+              - generic [ref=f1e150]:
+                - generic [ref=f1e162]: NEXUS
+                - generic [ref=f1e163]:
+                  - generic [ref=f1e164]: /
+                  - generic [ref=f1e165]: Projetos
+              - 'button "Selecionar projeto: Sem projeto" [ref=f1e168] [cursor=pointer]':
+                - generic [ref=f1e171]: Sem projeto
+            - generic [ref=f1e174]:
+              - generic [ref=f1e175]: A ligar
+              - button "Documentação" [ref=f1e180] [cursor=pointer]
+              - button "Mudar para tema claro" [ref=f1e184] [cursor=pointer]
+              - button "Sair" [ref=f1e187] [cursor=pointer]
+              - generic "Utilizador" [ref=f1e192]: UT
+          - generic [ref=f1e196]:
+            - complementary "Navegação principal" [ref=f1e197]:
+              - generic [ref=f1e198]:
+                - button "Nova tarefa" [ref=f1e199] [cursor=pointer]
+                - button "Colapsar barra lateral" [ref=f1e202] [cursor=pointer]
+              - navigation [ref=f1e205]:
+                - link "Dashboard" [ref=f1e206] [cursor=pointer]:
+                  - /url: /dashboard
+                - link "Bots" [ref=f1e214] [cursor=pointer]:
+                  - /url: /bots
+                - link "Chat" [ref=f1e220] [cursor=pointer]:
+                  - /url: /
+                - link "Projetos" [ref=f1e225] [cursor=pointer]:
+                  - /url: /projects
+                - link "Tarefas" [ref=f1e231] [cursor=pointer]:
+                  - /url: /dashboard/tasks
+                - link "Agentes" [ref=f1e237] [cursor=pointer]:
+                  - /url: /swarm
+                - link "Ficheiros" [ref=f1e243] [cursor=pointer]:
+                  - /url: /editor
+                - link "Skills" [ref=f1e251] [cursor=pointer]:
+                  - /url: /tools
+                - link "Memória" [ref=f1e256] [cursor=pointer]:
+                  - /url: /nexus
+                - link "Integrações" [ref=f1e269] [cursor=pointer]:
+                  - /url: /mcp
+                - button "Mais" [ref=f1e276] [cursor=pointer]
+              - link "Definições" [ref=f1e284] [cursor=pointer]:
+                - /url: /settings
+            - main [ref=f1e290]:
+              - generic [ref=f1e291]:
+                - generic [ref=f1e292]:
+                  - heading "Projects" [level=1] [ref=f1e296]
+                  - button "New Project" [ref=f1e297] [cursor=pointer]
+                - generic [ref=f1e299]: Loading projects...
+          - region "Estado do sistema" [ref=f1e303]:
+            - generic [ref=f1e304]:
+              - generic [ref=f1e305]:
+                - generic [ref=f1e306]:
+                  - generic [ref=f1e310]: A ligar
+                  - generic [ref=f1e311]: Backend
+                - generic [ref=f1e312]:
+                  - generic [ref=f1e315]: —
+                  - generic [ref=f1e316]: Modelo
+                - generic [ref=f1e318]:
+                  - generic [ref=f1e319]: CPU
+                  - generic [ref=f1e320]: —
+                - generic [ref=f1e321]:
+                  - generic [ref=f1e322]: RAM
+                  - generic [ref=f1e323]: —
+                - generic [ref=f1e324]:
+                  - generic [ref=f1e325]: Disco
+                  - generic [ref=f1e326]: —
+              - generic [ref=f1e327]: "Uptime: —"
+    - region "Estado do sistema" [ref=f1e333]:
+      - generic [ref=f1e334]:
+        - generic [ref=f1e335]:
+          - generic [ref=f1e336]:
+            - generic [ref=f1e340]: A ligar
+            - generic [ref=f1e341]: Backend
+          - generic [ref=f1e342]:
+            - generic [ref=f1e345]: —
+            - generic [ref=f1e346]: Modelo
+          - generic [ref=f1e348]:
+            - generic [ref=f1e349]: CPU
+            - generic [ref=f1e350]: —
+          - generic [ref=f1e351]:
+            - generic [ref=f1e352]: RAM
+            - generic [ref=f1e353]: —
+          - generic [ref=f1e354]:
+            - generic [ref=f1e355]: Disco
+            - generic [ref=f1e356]: —
+        - generic [ref=f1e357]: "Uptime: —"

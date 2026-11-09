@@ -1,0 +1,14 @@
+{
+  "model": "nexus-local-validation",
+  "duration_seconds": 6.7,
+  "timed_out": false,
+  "calls": [],
+  "children_started": 0,
+  "text_frames": 0,
+  "terminal_errors": [
+    "LLM stream failed: All providers failed for chat_stream: LMStudioProvider: OpenAI-compatible API error 400: {\"error\":{\"code\":400,\"message\":\"request (8375 tokens) exceeds the available context size (8192 tokens), try increasing it\",\"type\":\"exceed_context_size_error\",\"n_prompt_tokens\":8375,\"n_ctx\":8192}}. Nenhum fornecedor conseguiu responder."
+  ],
+  "module_changed": false,
+  "project_copy": "C:\\Users\\rodri\\Desktop\\nexus\\nexus-ide\\.cache\\pytest\\codex-real-agentic-af4196dc050e4ede8a49fd6896b4817c\\test_local_model_agentic_accep0\\nexus-module-copy",
+  "model_server": "http://127.0.0.1:1239/v1"
+}

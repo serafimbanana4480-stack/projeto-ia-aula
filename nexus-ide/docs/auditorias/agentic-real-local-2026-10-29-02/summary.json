@@ -1,0 +1,12 @@
+{
+  "model": "nexus-local-validation",
+  "duration_seconds": 180.9,
+  "timed_out": true,
+  "calls": [],
+  "children_started": 0,
+  "text_frames": 0,
+  "terminal_errors": [],
+  "module_changed": false,
+  "project_copy": "C:\\Users\\rodri\\Desktop\\nexus\\nexus-ide\\.cache\\pytest\\codex-real-agentic-a435fbab490c444e840b6604f304ea0d\\test_local_model_agentic_accep0\\nexus-module-copy",
+  "model_server": "http://127.0.0.1:1239/v1"
+}

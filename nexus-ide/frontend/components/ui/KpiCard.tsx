@@ -49,7 +49,7 @@ function DeltaBadge({
   let tone = "text-nexus-muted";
   if (!flat && goodDirection !== "neutral") {
     const good = goodDirection === "up" ? rising : !rising;
-    tone = good ? "text-emerald-400" : "text-red-400";
+    tone = good ? "text-nexus-accent2" : "text-nexus-accent4";
   }
 
   const Icon = flat ? ArrowRight : rising ? ArrowUpRight : ArrowDownRight;
@@ -108,18 +108,23 @@ export function KpiCard({
         <div className="min-w-0">
           {loading ? (
             <div className="nx-shimmer h-8 w-24 rounded" />
+          ) : !value || value === EMPTY ? (
+            <div className="text-sm font-medium text-nexus-muted">Sem dados</div>
           ) : (
             <div
               className={`truncate font-bold leading-none tabular-nums text-nexus-text ${
                 emphasis ? "text-3xl" : "text-2xl"
               }`}
             >
-              {value || EMPTY}
+              {value}
             </div>
           )}
-          <div className="mt-2 flex items-center gap-1.5">
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
             {delta != null && !loading ? (
               <DeltaBadge delta={delta} goodDirection={goodDirection} />
+            ) : null}
+            {!loading && value && value !== EMPTY && history && history.length <= 1 ? (
+              <span className="text-[10px] text-nexus-faint">Sem série ainda.</span>
             ) : null}
             {hint ? <span className="text-[10px] text-nexus-faint">{hint}</span> : null}
           </div>
@@ -129,8 +134,8 @@ export function KpiCard({
           <Sparkline
             data={history}
             color={color}
-            width={emphasis ? 72 : 88}
-            height={emphasis ? 30 : 30}
+                width={emphasis ? 72 : 88}
+                height={30}
             className="shrink-0"
           />
         ) : null}
@@ -182,29 +187,35 @@ export function GaugeCard({
           </span>
         ) : null}
       </div>
-      <div className="mt-1.5 flex items-baseline gap-1.5">
-        <span className="text-lg font-semibold tabular-nums text-nexus-text">
-          {known ? `${clamped.toFixed(0)}%` : EMPTY}
-        </span>
-        {detail ? <span className="text-[10px] text-nexus-faint">{detail}</span> : null}
-      </div>
-      <div
-        className="nx-inset mt-2 h-1.5 overflow-hidden rounded-full"
-        role="progressbar"
-        aria-label={label}
-        aria-valuenow={known ? Math.round(clamped) : undefined}
-        aria-valuemin={0}
-        aria-valuemax={100}
-      >
-        <div
-          className="h-full rounded-full transition-[width,background-color] duration-500"
-          style={{
-            width: `${clamped}%`,
-            backgroundColor: barColor,
-            boxShadow: known ? `0 0 8px -1px ${barColor}` : undefined,
-          }}
-        />
-      </div>
+      {known ? (
+        <>
+          <div className="mt-1.5 flex items-baseline gap-1.5">
+            <span className="text-lg font-semibold tabular-nums text-nexus-text">
+              {`${clamped.toFixed(0)}%`}
+            </span>
+            {detail ? <span className="text-[10px] text-nexus-faint">{detail}</span> : null}
+          </div>
+          <div
+            className="nx-inset mt-2 h-1.5 overflow-hidden rounded-full"
+            role="progressbar"
+            aria-label={label}
+            aria-valuenow={Math.round(clamped)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
+            <div
+              className="h-full rounded-full transition-[width,background-color] duration-500 motion-reduce:transition-none"
+              style={{
+                width: `${clamped}%`,
+                backgroundColor: barColor,
+                boxShadow: `0 0 8px -1px ${barColor}`,
+              }}
+            />
+          </div>
+        </>
+      ) : (
+        <p className="mt-1.5 text-sm text-nexus-muted">Sem leitura.</p>
+      )}
     </Card>
   );
 }

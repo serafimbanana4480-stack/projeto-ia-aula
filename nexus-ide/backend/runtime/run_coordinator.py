@@ -551,6 +551,9 @@ def _normalize_dod_results(results: Sequence[dict[str, Any]]) -> list[dict[str, 
         normalized.append(
             {"requirement": requirement, "verdict": verdict, "evidence": evidence}
         )
+    names = [entry["requirement"] for entry in normalized]
+    if len(names) != len(set(names)):
+        raise ValueError("results must not contain duplicate requirements")
     return normalized
 
 
@@ -988,6 +991,10 @@ class RunCoordinator:
             normalized = _normalize_dod_results(results)
             by_requirement = {entry["requirement"]: entry for entry in normalized}
             missing: list[dict[str, Any]] = []
+            if not run.definition_of_done:
+                missing.append(
+                    {"requirement": "definition_of_done", "verdict": "UNKNOWN", "reason": "not_defined"}
+                )
             for requirement in run.definition_of_done:
                 entry = by_requirement.get(requirement)
                 if entry is None:
@@ -995,7 +1002,10 @@ class RunCoordinator:
                         {"requirement": requirement, "verdict": "UNKNOWN", "reason": "not_reported"}
                     )
                 elif entry["verdict"] == "PASS":
-                    continue
+                    if not entry["evidence"]:
+                        missing.append(
+                            {"requirement": requirement, "verdict": "UNKNOWN", "reason": "no_evidence"}
+                        )
                 else:
                     missing.append(
                         {

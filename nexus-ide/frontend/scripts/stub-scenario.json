@@ -1,0 +1,38 @@
+{
+  "models": [
+    { "id": "nexus-stub-coder", "object": "model", "owned_by": "nexus-audit-stub" },
+    { "id": "nexus-stub-fast", "object": "model", "owned_by": "nexus-audit-stub" }
+  ],
+  "modes": {
+    "text": {
+      "delayMs": 40,
+      "frames": [
+        { "reasoning": "Pergunta de conhecimento. Respondo direto, sem ferramentas." },
+        { "content": "O **NEXUS IDE** e uma IDE assistida por IA multi-agente.\n\n- **Chat** com streaming real por SSE e ordem total `(run_id, seq)`\n- **Subagentes** com politica de spawn e escopo de escrita isolado\n- **Dashboard** com estado operacional real, nao estimativas" },
+        { "finish_reason": "stop" }
+      ]
+    },
+    "tool": {
+      "delayMs": 40,
+      "frames": [
+        { "reasoning": "Preciso de inspecionar o repositorio antes de afirmar qualquer coisa." },
+        { "content": "Vou inspecionar o projeto.\n\n" },
+        {
+          "tool_call": {
+            "id": "call_stub_list",
+            "name": "list_dir",
+            "arguments": { "path": "." }
+          }
+        },
+        { "finish_reason": "tool_calls" }
+      ]
+    },
+    "after_tool": {
+      "delayMs": 40,
+      "frames": [
+        { "content": "Li o resultado real do disco.\n\n**Estrutura:** `backend/` (FastAPI, orquestrador, runtime, agentes, ferramentas) e `frontend/` (Next.js 15, React 19, Tailwind, Zustand).\n\n**Runtime:** o loop PRIMARY corre OBSERVE -> ACT -> TOOL -> TEST -> REPORT, e cada evento leva `run_id` + `seq` para ordem total." },
+        { "finish_reason": "stop" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,273 @@
+name: NEXUS IDE CI
+
+# This file lives at the REPOSITORY ROOT (.github/workflows/), which is the only
+# place GitHub Actions discovers workflows from.
+#
+# It previously lived at nexus-ide/.github/workflows/ci.yml. The git root is
+# the parent of nexus-ide/, so GitHub never saw that copy and this pipeline has
+# never run a single time. See nexus-ide/.github/workflows/ci.yml for the
+# relocation note.
+#
+# Every path below is therefore relative to the repository root, and every
+# backend command runs from nexus-ide/ because that is where pyproject.toml
+# lives -- pytest's `pythonpath = ["."]` and mypy's `packages = ["backend"]` are
+# both relative to it. The old workflow did `cd backend`, which broke every
+# `backend.*` absolute import and installed a stale 33-line requirements file.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# A new push to the same branch supersedes the previous run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep caches out of the runner's small disk.
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  backend-tests:
+    name: backend (pytest + mypy + ruff ratchet)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nexus-ide
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "nexus-ide/uv.lock"
+
+      # --frozen: fail if uv.lock needs regenerating, rather than silently
+      # resolving. pyproject.toml + uv.lock are the source of truth; the
+      # requirements.txt files are now deliberate pointers (see item 3).
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Show resolved toolchain
+        run: |
+          uv run python -V
+          uv run ruff --version
+          uv run mypy --version
+          uv run pytest --version
+
+      # Runs from nexus-ide/ so pythonpath=["."] resolves and every
+      # `from backend...` import works.
+      - name: Run pytest with coverage
+        run: >
+          uv run pytest backend/tests
+          --cov=backend
+          --cov-report=xml:coverage.xml
+          --cov-report=term-missing:skip-covered
+          --cov-report=json:coverage.json
+          --cov-fail-under=37
+          -p no:randomly
+
+      # mypy is run with NO --ignore-missing-imports and no path argument, so it
+      # picks up [tool.mypy] in pyproject.toml: strict = true,
+      # packages = ["backend"]. The old command overrode strict and threw away
+      # the real configuration.
+      #
+      # ADVISORY, not blocking. Strict mypy over the whole backend currently
+      # reports ~2050 errors across ~310 files (see
+      # nexus-ide/docs/auditorias/CURRENT_UI_ARCHITECTURE.md and the counts in
+      # tools/ci/quality_baseline.json). As a blocking step it failed at step 5
+      # of 9, so the ratchet, schema-parity and coverage-artifact steps below
+      # never executed at all -- the gate was not a gate, it was an outage.
+      # The enforced quality gate is the ratchet. Flip this to blocking only
+      # once the recorded error count reaches 0.
+      - name: Run mypy (project config, strict) [advisory]
+        continue-on-error: true
+        run: uv run mypy
+
+      # Ratchet, not a wall. ruff currently reports ~210 findings across files
+      # owned by several people; failing on those would block every merge. This
+      # fails only if the count GROWS, per code and per file.
+      # See tools/ci/check_quality_ratchet.py and quality_baseline.json.
+      - name: Ruff ratchet (no new findings)
+        run: uv run python tools/ci/check_quality_ratchet.py
+
+      # alembic + sqlalchemy are NOT in pyproject.toml / uv.lock, even though
+      # backend/migrations/ exists and persistence/db.py stamps + runs it.
+      # `uv sync --frozen` therefore leaves them out on purpose, and the runtime
+      # degrades gracefully when they are missing (see backend/persistence/db.py
+      # `_alembic_available`) -- so pytest above runs, and MUST keep running,
+      # against exactly the environment a clean install produces. Installing
+      # them before that step deleted CI's only exercise of the degraded path.
+      # The only consumer is schema-parity below, which compares
+      # `alembic upgrade head` against persistence/schemas.sql and genuinely
+      # needs them; hence the step sits here, immediately before it and after
+      # pytest, the ratchet and mypy. `--python` pins the install to the
+      # interpreter `uv run` resolved instead of letting uv discover `.venv` in
+      # the working directory, so the toolchain lands in the environment the
+      # tests just ran in rather than somewhere else.
+      # TODO: declare both in pyproject.toml and re-lock; this step can then go.
+      - name: Install migration toolchain if absent
+        run: |
+          if ! uv run python -c "import alembic, sqlalchemy" 2>/dev/null; then
+            echo "alembic/sqlalchemy absent from the locked env; installing for the schema-parity step"
+            uv pip install --python "$(uv run python -c 'import sys; print(sys.executable)')" "alembic>=1.13" "sqlalchemy>=2.0"
+          else
+            echo "alembic/sqlalchemy already present"
+          fi
+
+      # schemas.sql is canonical; this asserts `alembic upgrade head` converges
+      # on it. Uses temp dirs only, never data/.
+      - name: Schema parity (schemas.sql vs alembic head)
+        run: uv run python tools/ci/schema_parity.py
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: nexus-ide/coverage.xml
+          if-no-files-found: warn
+
+      # Real, not `if: false`. Codecov needs a token, so it only runs when one
+      # is configured; the coverage.xml artifact above is uploaded either way,
+      # so coverage is never lost just because the token is missing.
+      - name: Upload coverage to Codecov
+        if: ${{ secrets.CODECOV_TOKEN != '' }}
+        uses: codecov/codecov-action@v4
+        with:
+          files: nexus-ide/coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  frontend-tests:
+    name: frontend (type-check + eslint + vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nexus-ide/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          # pnpm-lock.yaml, not package-lock.json -- this is a pnpm project and
+          # the old workflow cached/ran npm against a non-existent lockfile.
+          cache: pnpm
+          cache-dependency-path: nexus-ide/frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm run type-check
+
+      # `eslint .` rather than `next lint`: next lint is deprecated in 15.5 and
+      # its LegacyESLint bridge is removed in Next 16. It also silently skipped
+      # hooks/, stores/, contexts/, types/, tests/ and e2e/.
+      - name: Lint
+        run: pnpm exec eslint .
+
+      - name: Unit tests
+        run: pnpm run test
+
+      - name: Build
+        run: pnpm run build
+
+  security-scan:
+    name: security (bandit + pip-audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nexus-ide
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Was `bandit ... || true`, which could never fail the build. Now real,
+      # but gated on HIGH severity only: medium/low findings across ~570 files
+      # would be noise. Tighten with -ll -lll once the backlog is cleared.
+      - name: Bandit (HIGH severity and above)
+        run: |
+          uv run --with bandit bandit -r backend -ll -q
+          uv run --with bandit bandit -r backend -ll -f json -o bandit-report.json || true
+
+      - name: Upload bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: nexus-ide/bandit-report.json
+          if-no-files-found: warn
+
+      # Was `safety check -r backend/requirements.txt || echo ...`: it scanned
+      # a hand-written requirements file that no longer carries dependencies,
+      # and the `|| echo` made it unable to fail. `safety` is deprecated in
+      # favour of pip-audit, so this audits the real resolved dependency set
+      # exported from uv.lock.
+      - name: pip-audit (resolved dependencies from uv.lock)
+        run: |
+          uv export --frozen --no-hashes --no-emit-project -o requirements-ci.txt
+          uv run --with pip-audit pip-audit -r requirements-ci.txt --strict
+
+  docker-build:
+    name: docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nexus-ide/docker/backend/Dockerfile
+          push: false
+          tags: nexus-backend:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./nexus-ide/frontend
+          file: nexus-ide/docker/frontend.Dockerfile
+          push: false
+          tags: nexus-frontend:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build sandbox image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: nexus-ide/docker/sandbox.Dockerfile
+          push: false
+          tags: nexus-sandbox:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -39,7 +39,7 @@ const AGENT_COLORS: Record<string, string> = {
   RESEARCHER: "text-yellow-400",
   DOCUMENTER: "text-pink-400",
   OPTIMIZER: "text-orange-400",
-  ROUTER: "text-cyan-400",
+  ROUTER: "text-nexus-cyan",
   DASHBOARD: "text-teal-400",
   MICRO: "text-gray-400",
 };
@@ -218,7 +218,7 @@ export default function AgentActivity() {
                     </span>
                     <div className="mt-0.5 flex items-center gap-2">
                       <span className="flex items-center gap-1 text-[10px] text-nexus-faint" title="Respostas recentes">
-                        <CheckCircle2 className="h-3 w-3 text-emerald-400" aria-hidden="true" />
+                        <CheckCircle2 className="h-3 w-3 text-nexus-accent2" aria-hidden="true" />
                         <span className="tabular-nums" aria-label="Respostas">
                           {activity.tasks_completed}
                         </span>

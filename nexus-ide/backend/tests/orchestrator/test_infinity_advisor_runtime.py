@@ -56,3 +56,18 @@ def test_advisor_reviews_terminal_event_and_emits_renderable_note(tmp_path, monk
         await events.aclose()
 
     asyncio.run(exercise())
+
+
+def test_advisor_cannot_replace_a_model_pinned_by_the_user(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(advisor_engine, "NOTES_DIR", tmp_path)
+    context = {"_model_override": "chosen-model", "_model_pinned_by_user": True}
+    events = RunEventStream("run-pinned-model")
+    runtime = advisor_engine.AdvisorRuntime(
+        run_id="run-pinned-model", session_id="session", events=events,
+        llm_client=_ReviewClient(), agent_context=context,
+    )
+
+    assert runtime._maybe_switch_model("other-model") is False
+    assert context["_model_override"] == "chosen-model"
+    assert events.history() == []
+    asyncio.run(events.aclose())

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from backend.runtime.primary import (
     AgentSignalKind,
     PrimaryLoop,
     PrimaryOutcome,
+    PrimaryTurn,
 )
 
 
@@ -293,6 +295,8 @@ async def test_tool_lifecycle_has_specific_command_and_test_start_events(
 
 @pytest.mark.asyncio
 async def test_primary_uses_the_provider_paired_with_the_selected_model() -> None:
+    from backend.llm.factory import ResilientLLMProvider
+
     local = SimpleNamespace(provider_name="lmstudio")
     openrouter = SimpleNamespace(provider_name="openrouter")
     default_client = SimpleNamespace(primary=local, fallbacks=[openrouter])
@@ -303,8 +307,224 @@ async def test_primary_uses_the_provider_paired_with_the_selected_model() -> Non
 
     selected, error = await chat_primary._request_provider_client(request, default_client)
 
-    assert selected is openrouter
+    assert isinstance(selected, ResilientLLMProvider)
+    assert selected.primary is openrouter
+    assert selected.fallbacks == []
     assert error is None
+
+
+@pytest.mark.asyncio
+async def test_primary_pinned_primary_provider_does_not_fall_through_to_another_provider() -> None:
+    from backend.llm.factory import ResilientLLMProvider
+
+    openrouter = SimpleNamespace(provider_name="openrouter")
+    fallback = SimpleNamespace(provider_name="lmstudio")
+    default_client = ResilientLLMProvider(openrouter, [fallback])
+    request = SimpleNamespace(provider="openrouter", model="liquid/model:free")
+
+    selected, error = await chat_primary._request_provider_client(request, default_client)
+
+    assert error is None
+    assert isinstance(selected, ResilientLLMProvider)
+    assert selected.primary is openrouter
+    assert selected.fallbacks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_provider", ["lmstudio", ""])
+async def test_primary_passes_selected_provider_role_model_when_model_is_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+    request_provider: str,
+) -> None:
+    from backend.orchestrator import advanced_modes
+    from backend.orchestrator import registry as agent_registry
+    from backend.orchestrator.context_manager import ContextStore
+
+    roles_seen: list[str] = []
+
+    class LMStudioWrapper:
+        provider_name = "lmstudio"
+
+        def resolve_model(self, role: str) -> str:
+            roles_seen.append(role)
+            return "spark-x2.5-4b" if role == "coder" else role
+
+    provider = LMStudioWrapper()
+    if request_provider:
+        client = SimpleNamespace(providers={"lmstudio": provider}, free_only=False)
+    else:
+        from backend.llm.factory import ResilientLLMProvider
+
+        client = ResilientLLMProvider(provider, [])
+    agent = SimpleNamespace(model_key="coder")
+    captured: dict[str, object] = {}
+
+    class StopAfterSelection(Exception):
+        pass
+
+    class NoActiveModes:
+        def build_active_execution_profile(self) -> dict[str, object]:
+            return {}
+
+        def prepare_active_execution_profile(self, _message: str) -> dict[str, object]:
+            return {}
+
+    def capture_stream_factory(**kwargs: object) -> None:
+        captured.update(kwargs)
+        raise StopAfterSelection
+
+    monkeypatch.setattr(chat_primary, "run_integration_enabled", lambda: False)
+    monkeypatch.setattr(advanced_modes, "get_orchestrator", lambda: NoActiveModes())
+    monkeypatch.setattr(agent_registry, "resolve", lambda *_args: agent)
+    monkeypatch.setattr(chat_primary, "make_signal_stream", capture_stream_factory)
+
+    request = SimpleNamespace(
+        message="Olá",
+        session_id="session-provider-role-model",
+        project_path="",
+        mode="auto",
+        model="",
+        provider=request_provider,
+        model_is_concrete=False,
+        thinking_strength="",
+        autonomous=False,
+    )
+    with pytest.raises(StopAfterSelection):
+        async for _frame in chat_primary.run_primary_chat(
+            request,
+            client,
+            {},
+            ContextStore(),
+            decision=chat_primary.plan_turn("Olá", "auto", ""),
+            owner_id="user-provider-role-model",
+        ):
+            pass
+
+    selected_client = captured["llm_client"]
+    assert selected_client.primary is provider
+    assert captured["agent_context"]["_model_override"] == "spark-x2.5-4b"
+    assert roles_seen == ["coder"]
+
+
+@pytest.mark.asyncio
+async def test_primary_dispatches_pinned_lmstudio_model_to_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.agents.nexus_primary import NexusPrimaryAgent
+    from backend.orchestrator import advanced_modes
+    from backend.orchestrator import registry as agent_registry
+    from backend.orchestrator.context_manager import ContextStore
+
+    dispatched: list[tuple[str, str]] = []
+
+    class LMStudioWrapper:
+        provider_name = "lmstudio"
+        last_model = ""
+        last_finish_reason = "stop"
+        last_usage: dict[str, int] = {}
+
+        async def chat_stream(self, model: str, messages: list[dict], **_kwargs):
+            dispatched.append((self.provider_name, model))
+            self.last_model = model
+            yield "Resposta fixture do provider."
+
+    class NoActiveModes:
+        def build_active_execution_profile(self) -> dict[str, object]:
+            return {}
+
+        def prepare_active_execution_profile(self, _message: str) -> dict[str, object]:
+            return {}
+
+    agent = NexusPrimaryAgent()
+    agent.system_prompt = lambda: "prompt fixture"
+    provider = LMStudioWrapper()
+    client = SimpleNamespace(providers={"lmstudio": provider}, free_only=False)
+    monkeypatch.setenv("NEXUS_ADVISOR_ENABLED", "0")
+    monkeypatch.setattr(chat_primary, "run_integration_enabled", lambda: False)
+    monkeypatch.setattr(advanced_modes, "get_orchestrator", lambda: NoActiveModes())
+    monkeypatch.setattr(agent_registry, "resolve", lambda *_args: agent)
+
+    request = SimpleNamespace(
+        message="Olá",
+        session_id="session-primary-pinned-lmstudio-model",
+        project_path="",
+        mode="auto",
+        model="spark-x2.5-4b",
+        provider="lmstudio",
+        model_is_concrete=True,
+        thinking_strength="",
+        autonomous=False,
+    )
+    frames = [
+        frame
+        async for frame in chat_primary.run_primary_chat(
+            request,
+            client,
+            {},
+            ContextStore(),
+            decision=chat_primary.plan_turn("Olá", "auto", ""),
+            owner_id="user-primary-pinned-lmstudio-model",
+        )
+    ]
+
+    assert dispatched == [("lmstudio", "spark-x2.5-4b")]
+    assert any('"type":"done"' in frame for frame in frames)
+
+
+@pytest.mark.asyncio
+async def test_primary_reports_journal_failure_before_contacting_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    from backend.agents.nexus_primary import NexusPrimaryAgent
+    from backend.orchestrator import advanced_modes
+    from backend.orchestrator import registry as agent_registry
+    from backend.orchestrator.context_manager import ContextStore
+    from backend.persistence.db import get_messages, get_session_run
+    from backend.runtime import events as runtime_events
+
+    called = []
+
+    class Provider:
+        provider_name = "lmstudio"
+
+        async def chat_stream(self, model, messages, **_kwargs):
+            called.append(model)
+            yield "Não devia ser enviado."
+
+    class NoActiveModes:
+        def build_active_execution_profile(self):
+            return {}
+
+        def prepare_active_execution_profile(self, _message):
+            return {}
+
+    def broken_append(_path, _line):
+        raise OSError("journal unavailable")
+
+    monkeypatch.setenv("NEXUS_EVENT_JOURNAL", "1")
+    monkeypatch.setattr(runtime_events, "run_event_journal_path", lambda _run_id: tmp_path / "run.jsonl")
+    monkeypatch.setattr(runtime_events, "_append_line", broken_append)
+    monkeypatch.setattr(chat_primary, "run_integration_enabled", lambda: False)
+    monkeypatch.setattr(advanced_modes, "get_orchestrator", lambda: NoActiveModes())
+    monkeypatch.setattr(agent_registry, "resolve", lambda *_args: NexusPrimaryAgent())
+    request = SimpleNamespace(
+        message="Olá", session_id="session-journal-failure", project_path="", mode="auto",
+        model="spark-x2.5-4b", provider="lmstudio", model_is_concrete=True,
+        thinking_strength="", autonomous=False,
+    )
+    client = SimpleNamespace(providers={"lmstudio": Provider()}, free_only=False)
+    frames = [json.loads(frame.removeprefix("data: ").strip()) async for frame in
+              chat_primary.run_primary_chat(request, client, {}, ContextStore(),
+                  decision=chat_primary.plan_turn("Olá", "auto", ""), owner_id="fixture")]
+
+    failure = next(frame for frame in frames if frame["type"] == "error")
+    assert failure["data"]["error_category"] == "journal_write"
+    assert not called
+    assert not any(frame["type"] in {"routing", "token"} for frame in frames)
+    assert get_session_run(failure["data"]["run_id"])["status"] == "failed"
+    saved = get_messages(request.session_id)
+    assert all("Nada foi alterado" not in row["content"] for row in saved)
+    assert frames[-1]["type"] == "done"
 
 
 @pytest.mark.asyncio
@@ -317,6 +537,110 @@ async def test_primary_fails_closed_for_an_unconfigured_selected_provider() -> N
     assert selected is None
     assert error is not None
     assert "openrouter" in error
+
+
+@pytest.mark.asyncio
+async def test_primary_fails_closed_when_a_pinned_model_has_no_resolved_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_catalog_models() -> dict[str, list[dict[str, str]]]:
+        return {"models": []}
+
+    monkeypatch.setattr("backend.llm.model_catalog.aggregate_models", no_catalog_models)
+    default_client = SimpleNamespace(provider_name="lmstudio")
+    request = SimpleNamespace(provider="", model="unknown-provider/model-x")
+
+    selected, error = await chat_primary._request_provider_client(request, default_client)
+
+    assert selected is None
+    assert error is not None
+    assert "unknown-provider/model-x" in error
+
+
+@pytest.mark.asyncio
+async def test_primary_resolves_provider_for_concrete_model_without_separator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.llm.factory import ResilientLLMProvider
+
+    async def catalog_models() -> dict[str, list[dict[str, str]]]:
+        return {"models": [{"id": "local-model", "provider": "ollama"}]}
+
+    monkeypatch.setattr("backend.llm.model_catalog.aggregate_models", catalog_models)
+    local = SimpleNamespace(provider_name="lmstudio")
+    ollama = SimpleNamespace(provider_name="ollama")
+    default_client = SimpleNamespace(primary=local, fallbacks=[ollama])
+    request = SimpleNamespace(
+        provider="",
+        model="local-model",
+        model_is_concrete=False,
+    )
+
+    selected, error = await chat_primary._request_provider_client(request, default_client)
+
+    assert isinstance(selected, ResilientLLMProvider)
+    assert selected.primary is ollama
+    assert selected.fallbacks == []
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_provider_selection_error_fails_adopted_run_and_resets_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    calls: list[tuple[str, object]] = []
+
+    class Lifecycle:
+        run_id = "adopted-run-id"
+        closed = False
+
+        def fail(self, reason: str) -> None:
+            calls.append(("failed", reason))
+            self.closed = True
+
+    lifecycle = Lifecycle()
+    monkeypatch.setattr(chat_primary, "run_integration_enabled", lambda: True)
+    monkeypatch.setattr(chat_primary.RunLifecycle, "begin", lambda **_kwargs: lifecycle)
+    monkeypatch.setattr(chat_primary, "_primary_run_user_id", lambda _session: "")
+    monkeypatch.setattr(
+        chat_primary,
+        "_publish_run_context",
+        lambda run_id: calls.append(("published", run_id)) or "context-token",
+    )
+    monkeypatch.setattr(
+        chat_primary,
+        "_clear_run_context",
+        lambda token: calls.append(("cleared", token)),
+    )
+
+    async def provider_error(_req, _client):
+        return None, "provider unavailable"
+
+    monkeypatch.setattr(chat_primary, "_request_provider_client", provider_error)
+    req = SimpleNamespace(
+        session_id="provider-error-session",
+        project_path="",
+        message="responde",
+        provider="missing",
+        model="model-x",
+    )
+    frames = [
+        json.loads(frame.removeprefix("data: ").strip())
+        async for frame in chat_primary.run_primary_chat(
+            req,
+            object(),
+            object(),
+            SimpleNamespace(),
+            decision=chat_primary.plan_turn("responde", "auto", ""),
+        )
+    ]
+
+    assert ("published", "adopted-run-id") in calls
+    assert ("failed", "provider selection failed: provider unavailable") in calls
+    assert ("cleared", "context-token") in calls
+    assert frames[0]["data"]["run_id"] == "adopted-run-id"
 
 
 @pytest.mark.asyncio
@@ -350,3 +674,138 @@ async def test_primary_fails_when_agent_explicitly_reports_iteration_exhaustion(
     assert loop.outcome.failed is True
     assert any(event.type is RuntimeEventType.RUN_FAILED for event in events)
     assert not any(event.type is RuntimeEventType.RUN_COMPLETED for event in events)
+
+
+def test_primary_classifies_incomplete_synthesis_marker_as_failure() -> None:
+    from backend.models.api import StreamEvent
+
+    signal = chat_primary.stream_events_to_signals(
+        StreamEvent(
+            type="token",
+            content=(
+                "[RECOLHA CONCLUÍDA — SÍNTESE INCOMPLETA] As ferramentas correram, "
+                "mas o modelo não produziu a análise final."
+            ),
+        )
+    )
+
+    assert signal is not None
+    assert signal.kind is AgentSignalKind.ERROR
+    assert signal.ok is False
+    assert signal.payload["reason"] == "agent_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_primary_honors_request_scoped_agent_failure_verdict() -> None:
+    class IncompleteAgent:
+        def run(self, request):
+            async def stream():
+                request.context["_agent_run_success"] = False
+                yield "<event>answer</event>"
+
+            return stream()
+
+    stream_factory = chat_primary.make_signal_stream(
+        agent=IncompleteAgent(),
+        llm_client=object(),
+        session_id="session-agent-verdict",
+        run_id="run-agent-verdict",
+        project_path="",
+        history=[],
+        agent_context={},
+        max_iterations=4,
+        autonomous=False,
+    )
+    signals = [signal async for signal in stream_factory(PrimaryTurn(query="faz a tarefa"))]
+
+    assert signals[-1].kind is AgentSignalKind.ERROR
+    assert signals[-1].payload["reason"] == "agent_incomplete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_delegation", [True, False])
+async def test_scheduler_handoff_requires_an_observed_proposal(with_delegation: bool) -> None:
+    from backend.agents.event_protocol import encode_event
+
+    class HandoffAgent:
+        def run(self, request):
+            async def stream():
+                request.context["_agent_run_success"] = False
+                request.context["_nexus_yielded_to_scheduler"] = True
+                if with_delegation:
+                    yield encode_event("tool_call", "spawn_task", json.dumps({
+                        "name": "review", "description": "Inspect the task",
+                        "definition_of_done": "Report evidence",
+                    }))
+
+            return stream()
+
+    stream_factory = chat_primary.make_signal_stream(
+        agent=HandoffAgent(), llm_client=object(), session_id="handoff-test",
+        run_id="handoff-test", project_path="", history=[], agent_context={},
+        max_iterations=4, autonomous=True,
+    )
+    signals = [signal async for signal in stream_factory(PrimaryTurn(query="faz a tarefa"))]
+
+    if with_delegation:
+        assert any(signal.kind is AgentSignalKind.DELEGATE for signal in signals)
+        assert not any(signal.kind is AgentSignalKind.ERROR for signal in signals)
+    else:
+        assert signals[-1].kind is AgentSignalKind.ERROR
+        assert signals[-1].payload["reason"] == "agent_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_requested_delegations_reach_scheduler_before_parent_continues(tmp_path) -> None:
+    from backend.agents.base import AgentAction, AgentBase
+
+    class ScriptedPrimary(AgentBase):
+        name = "NEXUS"
+        model_key = "nano"
+        prompt_file = "router"
+        supported_actions = {AgentAction.SPAWN_TASK}
+
+        def __init__(self):
+            self.model_calls = 0
+            self.turns = 0
+            self.child_feedback_seen = False
+
+        async def stream_llm(self, request, **_kwargs):
+            self.model_calls += 1
+            name = {1: "first", 2: "second"}[self.model_calls]
+            yield '```tool\n' + json.dumps({"name": "spawn_task", "arguments": {
+                "name": name, "description": f"Inspect {name}",
+                "definition_of_done": "Report evidence",
+            }}) + '\n```'
+
+        async def run(self, request):
+            self.turns += 1
+            if self.turns == 1:
+                async for token in self._run_react_loop(request):
+                    yield token
+            else:
+                self.child_feedback_seen = "RESULTADOS DOS SUBAGENTES" in request.query
+                request.context["_agent_run_success"] = True
+                yield "<event>answer</event>"
+                yield "Resultados recebidos."
+
+    async def subagent(proposal):
+        return f"Resultado de {proposal.name}"
+
+    agent = ScriptedPrimary()
+    stream = chat_primary.make_signal_stream(
+        agent=agent, llm_client=object(), session_id="handoff-flow", run_id="handoff-flow",
+        project_path=str(tmp_path), history=[], agent_context={"_nexus_primary": True},
+        max_iterations=4, autonomous=True,
+    )
+    loop = PrimaryLoop(
+        run_id="handoff-flow", query="Analisa com dois subagentes", stream=stream,
+        project_path=str(tmp_path), run_subagent=subagent, max_cycles=1,
+    )
+    events = [event async for event in loop.run()]
+
+    assert agent.model_calls == 2
+    assert len([event for event in events if event.type is RuntimeEventType.SUBAGENT_STARTED]) == 2
+    assert {result.status for result in loop.outcome.subagents} == {"completed"}
+    assert agent.child_feedback_seen is True
+    assert loop.outcome.failed is False

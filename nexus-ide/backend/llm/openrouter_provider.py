@@ -65,27 +65,39 @@ class OpenRouterProvider:
         "mistral/mistral-large": "mistral/mistral-large",
         # FREE OpenRouter model aliases for NEXUS' internal tiers. Keep these
         # IDs in one place so the router and the UI cannot drift apart.
-        "deepseek-v4-pro": "nvidia/nemotron-3-super-120b-a12b:free",
+        # nemotron-3-super-120b-a12b:free left the live catalog (2026-10-28);
+        # nemotron-3-ultra is the listed zero-price successor with tool calls.
+        "deepseek-v4-pro": "nvidia/nemotron-3-ultra-550b-a55b:free",
         # These aliases are deliberately pinned to IDs present in the live
         # catalog. The former ``tencent/hy3:free`` and ``laguna-m.1`` targets
         # returned 404/"no endpoints" and caused the fallback cascade to look
         # like a stalled autonomous agent.
         "glm-5.2": "google/gemma-4-31b-it:free",
         "deepseek-v4-flash": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "kimi-k2.7-code": "poolside/laguna-s-2.1:free",
-        "minimax-m3": "openai/gpt-oss-20b:free",
-        "qwen3.7-max": "nvidia/nemotron-3-super-120b-a12b:free",
+        # Main agent ("coder" tier). Pinned 2026-10-28 after a direct 3-step
+        # tool-calling probe (read -> search -> run_tests): nemotron-3.5-super-vl
+        # did all 3 native tool calls in 2.7s; laguna-s-2.1 also passed (6.9s)
+        # and stays reachable through the fallback chain.
+        "kimi-k2.7-code": "nvidia/nemotron-3.5-super-vl:free",
+        # OpenRouter removed gpt-oss-20b:free from the live catalog on
+        # 2026-10-25. Keep this internal fast-tier alias on a currently listed
+        # zero-price endpoint instead of turning every request into a 404.
+        "minimax-m3": "nvidia/nemotron-3.5-lightning:free",
+        "qwen3.7-max": "nvidia/nemotron-3-ultra-550b-a55b:free",
         "mimo-v2.5": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "mimo-v2-pro": "google/gemma-4-31b-it:free",
         # Direct IDs are accepted as well, which makes this provider safe to
         # use from the model directory without introducing a second mapping.
         "tencent/hy3:free": "google/gemma-4-31b-it:free",
-        "nvidia/nemotron-3-super-120b-a12b:free": "nvidia/nemotron-3-super-120b-a12b:free",
+        "nvidia/nemotron-3-super-120b-a12b:free": "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free": "nvidia/nemotron-3-ultra-550b-a55b:free",
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         "poolside/laguna-m.1:free": "poolside/laguna-s-2.1:free",
         "poolside/laguna-s-2.1:free": "poolside/laguna-s-2.1:free",
         "openai/gpt-oss-20b:free": "openai/gpt-oss-20b:free",
         "google/gemma-4-31b-it:free": "google/gemma-4-31b-it:free",
+        "nvidia/nemotron-3.5-super-vl:free": "nvidia/nemotron-3.5-super-vl:free",
+        "cohere/north-mini-code:free": "cohere/north-mini-code:free",
     }
 
     def __init__(
@@ -133,9 +145,36 @@ class OpenRouterProvider:
         """Expose the OpenAI-compatible response stop reason to the runtime."""
         return str(getattr(self._client, "last_finish_reason", "") or "")
 
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Expose the wrapped provider's token usage.
+
+        Without this the wrapper advertised no usage at all and every
+        OpenRouter answer was billed from a character-count *estimate*, so the
+        budget and the session panel were approximate instead of exact.
+        """
+        return dict(getattr(self._client, "last_usage", {}) or {})
+
     @staticmethod
     def _rate_limit_reset_delay(error: BaseException) -> float | None:
-        """Extract OpenRouter's account reset timestamp from a 429 error."""
+        """Extract OpenRouter's account reset timestamp from a 429 error.
+
+        The reset time is an HTTP *response header* (``X-RateLimit-Reset``),
+        never part of the response body.  The provider error therefore has to
+        carry the headers, otherwise the cooldown could never be armed and a
+        rate-limited account was hammered on every request.  The message is
+        still inspected as a fallback for gateways that echo the header in the
+        body.
+        """
+        headers = getattr(error, "headers", None)
+        if headers is not None:
+            getter = getattr(headers, "get", None)
+            if callable(getter):
+                raw = getter("X-RateLimit-Reset") or getter("x-ratelimit-reset")
+                if raw:
+                    delay = OpenRouterProvider._reset_delay_from_value(str(raw))
+                    if delay is not None:
+                        return delay
         match = re.search(
             r'X-RateLimit-Reset[\\"\']*\s*:\s*[\\"\']*(\d+(?:\.\d+)?)',
             str(error),
@@ -143,7 +182,15 @@ class OpenRouterProvider:
         )
         if not match:
             return None
-        reset = float(match.group(1))
+        return OpenRouterProvider._reset_delay_from_value(match.group(1))
+
+    @staticmethod
+    def _reset_delay_from_value(raw: str) -> float | None:
+        """Convert a reset timestamp (epoch seconds or milliseconds) to a delay."""
+        try:
+            reset = float(raw)
+        except (TypeError, ValueError):
+            return None
         if reset > 10_000_000_000:
             reset /= 1000.0
         return max(0.0, reset - time.time())
@@ -181,6 +228,13 @@ class OpenRouterProvider:
         global _quota_cooldown_until
         delay = self._rate_limit_reset_delay(error)
         if delay is None:
+            return
+        text = str(error).lower()
+        if "upstream" in text or "provider returned error" in text:
+            # A single free model being throttled by its upstream host is not
+            # an account-wide quota event; arming the global cooldown here
+            # would also block every same-provider fallback model.
+            logger.warning("OpenRouter model rate-limited upstream; trying fallbacks")
             return
         _quota_cooldown_until = max(
             _quota_cooldown_until,
@@ -331,13 +385,39 @@ class OpenRouterProvider:
     def resolve_model(self, model: str) -> str:
         """Resolve an alias to its OpenRouter model identifier."""
         override = os.environ.get("NEXUS_OPENROUTER_TOOL_MODEL", "").strip()
-        if override and model != "auto":
+        # An explicit fallback model must not be rewritten back to the model
+        # that just failed, otherwise the fallback chain retries one model.
+        if override and model != "auto" and model != getattr(self, "fallback_model", None):
             return override
         return self.MODEL_ALIASES.get(model, model)
+
+    @staticmethod
+    def _prepare_request_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Translate NEXUS' reasoning flag into OpenRouter's bounded API option.
+
+        The agent loop captures reasoning only when its request asks for it.
+        OpenRouter uses ``reasoning_effort`` on the wire; passing NEXUS' local
+        ``think`` switch through unchanged used to silently leave the provider
+        on its default reasoning budget.
+        """
+        options = kwargs.get("options")
+        if not isinstance(options, dict):
+            return kwargs
+        normalized = dict(options)
+        wants_reasoning = normalized.pop("think", None) is True
+        if (
+            wants_reasoning
+            and "reasoning" not in normalized
+            and "reasoning_effort" not in normalized
+        ):
+            normalized["reasoning"] = {"effort": "low"}
+        kwargs["options"] = normalized
+        return kwargs
 
     async def chat_stream(self, model, messages, **kwargs):
         self._client.last_finish_reason = ""
         resolved = self.validate_model(model)
+        kwargs = self._prepare_request_kwargs(kwargs)
         dispatch_timeout = kwargs.pop("_nexus_dispatch_timeout", None)
         try:
             dispatch_timeout = float(dispatch_timeout) if dispatch_timeout is not None else None
@@ -363,6 +443,7 @@ class OpenRouterProvider:
     async def chat_complete(self, model, messages, **kwargs):
         self._client.last_finish_reason = ""
         resolved = self.validate_model(model)
+        kwargs = self._prepare_request_kwargs(kwargs)
         dispatch_timeout = kwargs.pop("_nexus_dispatch_timeout", None)
         try:
             dispatch_timeout = float(dispatch_timeout) if dispatch_timeout is not None else None

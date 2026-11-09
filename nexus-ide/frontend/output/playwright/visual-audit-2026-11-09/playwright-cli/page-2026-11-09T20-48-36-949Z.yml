@@ -1,0 +1,312 @@
+- generic [ref=e1]:
+  - alert [ref=e4]
+  - generic [ref=e6]:
+    - complementary "Navegação principal" [ref=e7]:
+      - generic [ref=e8]:
+        - button "Nova tarefa" [ref=e9] [cursor=pointer]
+        - button "Colapsar barra lateral" [ref=e12] [cursor=pointer]
+      - navigation [ref=e15]:
+        - link "Dashboard" [ref=e16] [cursor=pointer]:
+          - /url: /dashboard
+        - link "Bots" [ref=e24] [cursor=pointer]:
+          - /url: /bots
+        - link "Chat" [ref=e31] [cursor=pointer]:
+          - /url: /
+        - link "Projetos" [ref=e36] [cursor=pointer]:
+          - /url: /projects
+        - link "Tarefas" [ref=e41] [cursor=pointer]:
+          - /url: /dashboard/tasks
+        - link "Agentes" [ref=e47] [cursor=pointer]:
+          - /url: /swarm
+        - link "Ficheiros" [ref=e53] [cursor=pointer]:
+          - /url: /editor
+        - link "Skills" [ref=e61] [cursor=pointer]:
+          - /url: /tools
+        - link "Memória" [ref=e66] [cursor=pointer]:
+          - /url: /nexus
+        - link "Integrações" [ref=e79] [cursor=pointer]:
+          - /url: /mcp
+        - button "Mais" [ref=e86] [cursor=pointer]
+      - link "Definições" [ref=e94] [cursor=pointer]:
+        - /url: /settings
+    - main [ref=e100]:
+      - generic [ref=e193]:
+        - region "Grupos de bots" [ref=e194]:
+          - generic [ref=e195]:
+            - button "Bots" [ref=e196] [cursor=pointer]
+            - generic [ref=e199]:
+              - generic [ref=e200]:
+                - paragraph [ref=e201]: NEXUS
+                - heading "Grupos" [level=1] [ref=e202]
+              - button "Criar grupo" [ref=e203] [cursor=pointer]
+            - paragraph [ref=e205]: Reúne os teus bots numa conversa partilhada.
+          - generic [ref=e206]:
+            - button "123 O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições." [active] [ref=e207] [cursor=pointer]:
+              - generic [ref=e214]:
+                - generic [ref=e215]: "123"
+                - generic [ref=e216]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - button "os mais quentinhos Provider 'kilo' não está configurado/ativo; o pedido foi interrompido para não trocar silenciosamente de provider." [ref=e217] [cursor=pointer]:
+              - generic [ref=e224]:
+                - generic [ref=e225]: os mais quentinhos
+                - generic [ref=e226]: Provider 'kilo' não está configurado/ativo; o pedido foi interrompido para não trocar silenciosamente de provider.
+        - region "Conversa de grupo" [ref=e227]:
+          - generic [ref=e244]:
+            - heading "123" [level=2] [ref=e245]
+            - paragraph [ref=e246]: Debugger · FORGE
+          - region "Execuções persistentes" [ref=e247]:
+            - button "Execuções de equipa com leitura de ficheiro" [ref=e248] [cursor=pointer]
+          - generic "Histórico do grupo" [ref=e249]:
+            - article [ref=e250]:
+              - paragraph [ref=e251]: Tu
+              - generic [ref=e252]:
+                - heading "NEXUS IDE | Auditoria Profunda do Ambiente, Ferramentas e Capacidades Agentic" [level=1] [ref=e253]
+                - heading "OBJETIVO PRINCIPAL" [level=2] [ref=e254]
+                - paragraph [ref=e255]: Realiza uma auditoria técnica completa e autónoma ao ambiente onde estás atualmente a executar, incluindo sistema operativo, hardware, runtime, modelos de IA, ferramentas, providers, integrações, permissões, memória, terminal, browser, execução de código e arquitetura do NEXUS IDE.
+                - paragraph [ref=e256]:
+                  - strong [ref=e257]: Não te limites a analisar configurações ou documentação. Descobre, testa e comprova o que realmente funciona.
+                - paragraph [ref=e258]: O objetivo é compreender exatamente quais são as tuas capacidades reais, quais são as limitações e como poderias executar tarefas complexas com a máxima autonomia, eficiência, estabilidade e segurança.
+                - heading "P0 — DESCOBERTA DO AMBIENTE" [level=2] [ref=e259]
+                - paragraph [ref=e260]: "Investiga automaticamente:"
+                - list [ref=e261]:
+                  - listitem [ref=e262]: Sistema operativo, versão, arquitetura e ambiente de execução.
+                  - listitem [ref=e263]: CPU, GPU, VRAM, RAM, armazenamento e recursos disponíveis.
+                  - listitem [ref=e264]: Python, Node.js, Git, Docker, WSL, PowerShell e outros runtimes.
+                  - listitem [ref=e265]: Variáveis de ambiente relevantes, sem revelar segredos.
+                  - listitem [ref=e266]: Processos, serviços, portas locais e dependências.
+                  - listitem [ref=e267]: Diretórios de trabalho, repositórios e estrutura do projeto.
+                  - listitem [ref=e268]: Restrições de filesystem, rede, sandbox e permissões.
+                  - listitem [ref=e269]: Limites de CPU, memória, contexto, execução e concorrência.
+                - paragraph [ref=e270]: Distingue o ambiente do processo da IA, o backend do NEXUS IDE, os containers e a máquina anfitriã. Não assumas que tens acesso a todos.
+                - paragraph [ref=e271]: Identifica quais os recursos efetivamente acessíveis e quais apenas aparecem configurados.
+                - heading "P1 — INVENTÁRIO COMPLETO DAS TOOLS" [level=2] [ref=e272]
+                - paragraph [ref=e273]: Descobre todas as ferramentas registadas, disponíveis ou integradas no NEXUS IDE.
+                - paragraph [ref=e274]: "Investiga especialmente:"
+                - list [ref=e275]:
+                  - listitem [ref=e276]:
+                    - strong [ref=e277]: "Terminal:"
+                    - text: execução de comandos, processos persistentes, cancelamento, timeouts e streaming.
+                  - listitem [ref=e278]:
+                    - strong [ref=e279]: "Filesystem:"
+                    - text: leitura, escrita, pesquisa, edição, diffs e operações multificheiro.
+                  - listitem [ref=e280]:
+                    - strong [ref=e281]: "Código:"
+                    - text: geração, refactoring, debugging, testes, linting e builds.
+                  - listitem [ref=e282]:
+                    - strong [ref=e283]: "Browser:"
+                    - text: navegação, pesquisa web, páginas dinâmicas, screenshots e automação.
+                  - listitem [ref=e284]:
+                    - strong [ref=e285]: "Git:"
+                    - text: branches, commits, diffs, histórico e worktrees.
+                  - listitem [ref=e286]:
+                    - strong [ref=e287]: "Modelos:"
+                    - text: LM Studio, Ollama, OpenRouter, Kilo e outros providers existentes.
+                  - listitem [ref=e288]:
+                    - strong [ref=e289]: "MCP:"
+                    - text: servidores, ferramentas expostas, schemas, autenticação e conectividade.
+                  - listitem [ref=e290]:
+                    - strong [ref=e291]: "Memória:"
+                    - text: histórico, contexto persistente, RAG, embeddings e recuperação de conhecimento.
+                  - listitem [ref=e292]:
+                    - strong [ref=e293]: "Agentes:"
+                    - text: subagentes, delegação, comunicação, execução paralela e partilha de resultados.
+                  - listitem [ref=e294]:
+                    - strong [ref=e295]: "Automação:"
+                    - text: tarefas agendadas, filas, workers, retries, checkpoints e execução prolongada.
+                  - listitem [ref=e296]:
+                    - strong [ref=e297]: "Multimodalidade:"
+                    - text: imagens, documentos, áudio, voz e outras capacidades disponíveis.
+                - paragraph [ref=e298]: "Para cada ferramenta, identifica:"
+                - list [ref=e299]:
+                  - listitem [ref=e300]: Nome e finalidade.
+                  - listitem [ref=e301]: Provider ou implementação.
+                  - listitem [ref=e302]: Schema de entrada e saída.
+                  - listitem [ref=e303]: Permissões necessárias.
+                  - listitem [ref=e304]: Estado de disponibilidade.
+                  - listitem [ref=e305]: Latência observada.
+                  - listitem [ref=e306]: Erros e limitações.
+                  - listitem [ref=e307]: Capacidade de execução paralela.
+                  - listitem [ref=e308]: Capacidade de cancelamento.
+                  - listitem [ref=e309]: Resultado de um teste real e seguro.
+                - paragraph [ref=e310]:
+                  - text: Classifica cada ferramenta como
+                  - strong [ref=e311]: WORKING, DEGRADED, BROKEN, UNAVAILABLE ou NOT_TESTED
+                  - text: .
+                - paragraph [ref=e312]: Não confundas uma ferramenta registada com uma ferramenta funcional.
+                - heading "P2 — TESTAR A INTELIGÊNCIA OPERACIONAL DO AGENTE" [level=2] [ref=e313]
+                - paragraph [ref=e314]: "Verifica se consegues efetivamente:"
+                - list [ref=e315]:
+                  - listitem [ref=e316]: Interpretar objetivos complexos e transformá-los em planos executáveis.
+                  - listitem [ref=e317]: Escolher autonomamente a ferramenta adequada.
+                  - listitem [ref=e318]: Executar várias ferramentas em sequência e em paralelo.
+                  - listitem [ref=e319]: Ler um repositório e compreender a sua arquitetura.
+                  - listitem [ref=e320]: Editar vários ficheiros mantendo consistência.
+                  - listitem [ref=e321]: Executar testes, interpretar erros e corrigir problemas.
+                  - listitem [ref=e322]: Pesquisar documentação quando necessário.
+                  - listitem [ref=e323]: Utilizar os resultados de uma ferramenta nas seguintes.
+                  - listitem [ref=e324]: Recuperar de falhas sem perder o contexto.
+                  - listitem [ref=e325]: Delegar tarefas a subagentes especializados.
+                  - listitem [ref=e326]: Retomar tarefas interrompidas através de checkpoints.
+                  - listitem [ref=e327]: Trabalhar durante períodos prolongados sem entrar em ciclos infinitos.
+                  - listitem [ref=e328]: Identificar quando precisas de aprovação humana.
+                  - listitem [ref=e329]: Reconhecer quando uma tarefa está realmente concluída.
+                - paragraph [ref=e330]: Executa pequenos testes controlados em diretórios temporários, com resultados esperados definidos previamente.
+                - paragraph [ref=e331]: Não alteres ficheiros importantes do utilizador durante a auditoria.
+                - heading "P3 — PROVIDERS E MODELOS" [level=2] [ref=e332]
+                - paragraph [ref=e333]: Identifica os modelos realmente disponíveis e os endpoints que respondem.
+                - paragraph [ref=e334]: "Verifica:"
+                - list [ref=e335]:
+                  - listitem [ref=e336]: Identidade real do modelo, quando comprovável.
+                  - listitem [ref=e337]: Context window e limites de tokens.
+                  - listitem [ref=e338]: Tool calling nativo e compatibilidade dos schemas.
+                  - listitem [ref=e339]: Streaming de respostas.
+                  - listitem [ref=e340]: Reasoning e respetiva exposição no NEXUS IDE.
+                  - listitem [ref=e341]: Chamadas paralelas.
+                  - listitem [ref=e342]: Timeouts, retries e rate limits.
+                  - listitem [ref=e343]: Tratamento de erros.
+                  - listitem [ref=e344]: Cancelamento de geração.
+                  - listitem [ref=e345]: Recuperação de sessões.
+                  - listitem [ref=e346]: Compatibilidade entre providers.
+                - paragraph [ref=e347]: Não substituas providers nem modelos existentes.
+                - paragraph [ref=e348]: Deteta incompatibilidades e propõe adaptações que preservem a arquitetura atual.
+                - heading "P4 — AUDITORIA DO NEXUS IDE" [level=2] [ref=e349]
+                - paragraph [ref=e350]: "Investiga o funcionamento completo do sistema que te executa:"
+                - list [ref=e351]:
+                  - listitem [ref=e352]: Frontend e backend.
+                  - listitem [ref=e353]: Chat e streaming SSE/WebSocket.
+                  - listitem [ref=e354]: Router de modelos e agentes.
+                  - listitem [ref=e355]: Tool registry e tool dispatcher.
+                  - listitem [ref=e356]: Gestão de sessões.
+                  - listitem [ref=e357]: Persistência de mensagens.
+                  - listitem [ref=e358]: Gestão da context window.
+                  - listitem [ref=e359]: Execução de comandos e ferramentas.
+                  - listitem [ref=e360]: Filas e workers.
+                  - listitem [ref=e361]: Estados de tarefas.
+                  - listitem [ref=e362]: Cancelamento, pausa e retoma.
+                  - listitem [ref=e363]: Logs, tracing e observabilidade.
+                  - listitem [ref=e364]: Segurança, isolamento e controlo de permissões.
+                - paragraph [ref=e365]: Identifica ferramentas existentes que não estejam acessíveis ao agente, integrações incompletas, funcionalidades simuladas e capacidades anunciadas que não funcionem realmente.
+                - paragraph [ref=e366]: Analisa também oportunidades de melhorar a seleção de ferramentas, a utilização de contexto, a comunicação entre agentes e a fiabilidade de tarefas longas.
+                - heading "P5 — EFICIÊNCIA E AUTONOMIA" [level=2] [ref=e367]
+                - paragraph [ref=e368]: "Investiga como aproveitar melhor os recursos disponíveis para maximizar:"
+                - list [ref=e369]:
+                  - listitem [ref=e370]: Velocidade de execução.
+                  - listitem [ref=e371]: Qualidade das decisões.
+                  - listitem [ref=e372]: Precisão na seleção de ferramentas.
+                  - listitem [ref=e373]: Utilização eficiente de tokens.
+                  - listitem [ref=e374]: Paralelismo sem conflitos.
+                  - listitem [ref=e375]: Recuperação de falhas.
+                  - listitem [ref=e376]: Persistência de objetivos e progresso.
+                  - listitem [ref=e377]: Coordenação entre agentes.
+                  - listitem [ref=e378]: Redução de chamadas desnecessárias.
+                  - listitem [ref=e379]: Estabilidade em tarefas com centenas de etapas.
+                - paragraph [ref=e380]: Propõe melhorias concretas e ordenadas por impacto, risco, custo e dificuldade.
+                - paragraph [ref=e381]: Evita adicionar dependências ou ferramentas quando as existentes já resolvem o problema.
+                - heading "P6 — RELATÓRIO E PROVAS" [level=2] [ref=e382]
+                - paragraph [ref=e383]: "Produz um relatório técnico com:"
+                - list [ref=e384]:
+                  - listitem [ref=e385]:
+                    - strong [ref=e386]: "System Overview:"
+                    - text: ambiente real identificado.
+                  - listitem [ref=e387]:
+                    - strong [ref=e388]: "Hardware & Runtime:"
+                    - text: recursos e limitações.
+                  - listitem [ref=e389]:
+                    - strong [ref=e390]: "Tool Inventory:"
+                    - text: todas as ferramentas e respetivos estados.
+                  - listitem [ref=e391]:
+                    - strong [ref=e392]: "Model & Provider Matrix:"
+                    - text: compatibilidade e funcionamento.
+                  - listitem [ref=e393]:
+                    - strong [ref=e394]: "Agentic Capability Matrix:"
+                    - text: capacidades efetivamente demonstradas.
+                  - listitem [ref=e395]:
+                    - strong [ref=e396]: "Architecture Findings:"
+                    - text: falhas e oportunidades.
+                  - listitem [ref=e397]:
+                    - strong [ref=e398]: "Performance Findings:"
+                    - text: latências e principais gargalos.
+                  - listitem [ref=e399]:
+                    - strong [ref=e400]: "P0/P1/P2 Recommendations:"
+                    - text: correções prioritárias.
+                  - listitem [ref=e401]:
+                    - strong [ref=e402]: "Evidence:"
+                    - text: comandos, testes, resultados e logs sanitizados.
+                  - listitem [ref=e403]:
+                    - strong [ref=e404]: "Final Verdict:"
+                    - text: o que funciona, o que falha e o que falta comprovar.
+                - paragraph [ref=e405]: Cada conclusão deve indicar se foi MEASURED, OBSERVED, INFERRED ou NOT_TESTED.
+                - heading "REGRAS OBRIGATÓRIAS" [level=2] [ref=e406]
+                - list [ref=e407]:
+                  - listitem [ref=e408]: Preserva todos os ficheiros e alterações existentes.
+                  - listitem [ref=e409]: Não exponhas passwords, tokens, chaves API ou outros segredos.
+                  - listitem [ref=e410]: Não executes comandos destrutivos.
+                  - listitem [ref=e411]: Não abras portas públicas nem alteres permissões sem autorização.
+                  - listitem [ref=e412]: Não instales dependências sem necessidade e aprovação.
+                  - listitem [ref=e413]: Não declares sucesso sem evidência reproduzível.
+                  - listitem [ref=e414]: Não inventes ferramentas ou capacidades.
+                  - listitem [ref=e415]: Não confundas testes simulados com integrações reais.
+                  - listitem [ref=e416]: Se não tiveres acesso a determinada camada, explica exatamente o bloqueio.
+                  - listitem [ref=e417]: Usa o máximo de autonomia permitido pelas ferramentas e permissões reais.
+                - paragraph [ref=e418]:
+                  - strong [ref=e419]: "RESULTADO ESPERADO:"
+                  - text: uma radiografia completa do NEXUS IDE e do ambiente onde a IA está a executar, demonstrando quais são as suas capacidades reais, quais as ferramentas que consegue utilizar e como transformar a arquitetura existente num sistema agentic mais autónomo, robusto, rápido e funcional.
+                - paragraph [ref=e420]: Começa imediatamente pela descoberta do ambiente e pelo inventário das ferramentas. Prossegue autonomamente até concluir todos os testes seguros possíveis e apresenta um relatório baseado em provas, não em suposições.
+            - article [ref=e421]:
+              - paragraph [ref=e422]: Debugger · falhou
+              - paragraph [ref=e424]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e425]:
+              - paragraph [ref=e426]: FORGE · falhou
+              - paragraph [ref=e428]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e429]:
+              - paragraph [ref=e430]: Debugger · falhou
+              - paragraph [ref=e432]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e433]:
+              - paragraph [ref=e434]: FORGE · falhou
+              - paragraph [ref=e436]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e437]:
+              - paragraph [ref=e438]: Debugger · falhou
+              - paragraph [ref=e440]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e441]:
+              - paragraph [ref=e442]: FORGE · falhou
+              - paragraph [ref=e444]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e445]:
+              - paragraph [ref=e446]: Debugger · falhou
+              - paragraph [ref=e448]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e449]:
+              - paragraph [ref=e450]: FORGE · falhou
+              - paragraph [ref=e452]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e453]:
+              - paragraph [ref=e454]: Debugger · falhou
+              - paragraph [ref=e456]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e457]:
+              - paragraph [ref=e458]: FORGE · falhou
+              - paragraph [ref=e460]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e461]:
+              - paragraph [ref=e462]: Debugger · falhou
+              - paragraph [ref=e464]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e465]:
+              - paragraph [ref=e466]: FORGE · falhou
+              - paragraph [ref=e468]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e469]:
+              - paragraph [ref=e470]: Tu
+              - paragraph [ref=e472]: bom dia
+            - article [ref=e473]:
+              - paragraph [ref=e474]: Debugger · falhou
+              - paragraph [ref=e476]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e477]:
+              - paragraph [ref=e478]: FORGE · falhou
+              - paragraph [ref=e480]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e481]:
+              - paragraph [ref=e482]: Debugger · falhou
+              - paragraph [ref=e484]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - article [ref=e485]:
+              - paragraph [ref=e486]: FORGE · falhou
+              - paragraph [ref=e488]: O Kilo está bloqueado pela política só gratuita. Revê essa política e a configuração do fornecedor em Definições.
+            - status
+          - generic [ref=e490]:
+            - generic [ref=e491]: "Sem ferramentas: respostas por ordem até consenso, numa falha, ou no limite de voltas/tempo do grupo"
+            - generic [ref=e493]:
+              - textbox "Mensagem para o grupo" [ref=e494]:
+                - /placeholder: Escreve para o grupo…
+              - button "Enviar ao grupo" [disabled] [ref=e495]
+            - paragraph [ref=e499]: Enter envia · Shift+Enter cria uma linha

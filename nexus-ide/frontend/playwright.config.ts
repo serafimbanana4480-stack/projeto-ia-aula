@@ -25,7 +25,7 @@ export default defineConfig({
   ],
   webServer: {
     // pnpm, not npm. This is a pnpm-only project (packageManager:
-    // pnpm@11.17.0, pnpm-lock.yaml, AGENTS.md mandates pnpm), and `npm run dev`
+    // pnpm@10.34.9, pnpm-lock.yaml, AGENTS.md mandates pnpm), and `npm run dev`
     // in a pnpm workspace resolves binaries and env differently -- it worked by
     // accident locally and would not work under `pnpm exec playwright test`.
     // Reachable now via `pnpm run test:e2e` (added to package.json); before

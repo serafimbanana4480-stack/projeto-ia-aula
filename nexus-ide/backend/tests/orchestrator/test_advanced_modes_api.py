@@ -198,10 +198,16 @@ async def test_explicit_advanced_command_reaches_its_adapter(monkeypatch, orches
 
 
 @pytest.mark.asyncio
-async def test_armed_composite_routes_project_work_but_keeps_questions_primary(monkeypatch, orchestrator):
+@pytest.mark.parametrize("mode_id", ["autonomous", "vibe-infinity"])
+async def test_armed_composite_routes_project_work_but_keeps_questions_primary(
+    monkeypatch, orchestrator, mode_id
+):
     from backend.orchestrator.routes import chat, chat_primary
 
-    orchestrator.activate_mode("autonomous")
+    # Multi-phase work stays on PRIMARY by default; this test covers the
+    # explicit compatibility switch for the legacy planner lane.
+    monkeypatch.setenv("NEXUS_LEGACY_PLANNED", "1")
+    orchestrator.activate_mode(mode_id)
     async def legacy(*_args):
         yield "plan-execute-verify"
     async def primary(*_args, **_kwargs):
@@ -236,12 +242,17 @@ async def test_primary_agent_receives_armed_policies_without_creating_question_g
     monkeypatch.setattr(chat_primary, "make_signal_stream", capture)
     req = SimpleNamespace(message="Como funciona esta função?", session_id="isolated-policy", project_path="")
     decision = chat_primary.plan_turn(req.message, "auto", "")
+    allowed_without_mode = chat_primary._tool_policy_context(
+        decision, has_project=False
+    )["_allowed_tools"]
+    mode_allowed = modes.get_advanced_mode_tool_allowlist("evolve") or ()
+    expected_allowed = tuple(name for name in mode_allowed if name in allowed_without_mode)
     before = len(orchestrator.state_manager.get_session("evolve").goal_tree)
     with pytest.raises(RuntimeError, match="context inspected"):
         _ = [frame async for frame in chat_primary.run_primary_chat(req, object(), object(), SimpleNamespace(get_history=history), decision=decision)]
     assert "evolve" in captured["_system_addon"]
     assert captured["_advanced_profile"]["primary_mode"] == "evolve"
-    assert captured["_allowed_tools"] == ()  # a policy does not widen tool access
+    assert captured["_allowed_tools"] == expected_allowed  # a policy does not widen tool access
     assert len(orchestrator.state_manager.get_session("evolve").goal_tree) == before
 
 
@@ -346,7 +357,7 @@ async def test_primary_mode_policy_load_failure_disables_all_tools(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_primary_applies_the_configured_mode_iteration_ceiling(
+async def test_primary_ignores_mode_iteration_ceiling(
     monkeypatch, orchestrator, tmp_path
 ):
     from backend.orchestrator import registry
@@ -400,7 +411,7 @@ async def test_primary_applies_the_configured_mode_iteration_ceiling(
             )
         ]
 
-    assert captured["max_iterations"] == 15
+    assert captured["max_iterations"] == -1
     assert captured["agent_context"]["_advanced_profile"]["primary_mode"] == "advisor-infinity"
     assert captured["agent_context"]["_allowed_tools"] == modes.get_advanced_mode_tool_allowlist(
         "advisor-infinity"

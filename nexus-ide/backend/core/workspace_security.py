@@ -54,7 +54,6 @@ _BLOCKED_COMMAND_PATTERNS = {
     "rm -rf /*",
     "rm -rf ~",
     "rm -rf ~/*",
-    "dd ",
     "mkfs",
     "mkfs.",
     "fdisk",
@@ -78,6 +77,15 @@ _BLOCKED_COMMAND_PATTERNS = {
     "diskpart",
     "convert /fs:ntfs",
 }
+
+# Dangerous commands that must be matched as a WHOLE WORD.
+#
+# ``dd`` used to live in ``_BLOCKED_COMMAND_PATTERNS`` as the substring
+# ``"dd "``, which also matched the trailing ``"dd "`` of ``git add .``,
+# ``npm add lodash`` and ``yarn add lodash`` — three perfectly ordinary
+# commands.  A substring match cannot tell "the dd utility" from "the last
+# two letters of add", so these patterns are tokenised instead.
+_BLOCKED_COMMAND_WORDS: set[str] = {"dd"}
 
 _BLOCKED_SYSTEM_PATHS = {
     "/etc",
@@ -533,8 +541,104 @@ _SHELL_WHITELIST: set[str] = {
     "fl",
 }
 
+# cmd.exe builtins that are not standalone executables on Windows.
+_WIN_CMD_INTERNALS: frozenset[str] = frozenset(
+    {"echo", "dir", "type", "cd", "md", "rd", "copy", "move", "cls", "tree"}
+)
+
 _GIT_BLOCKED_SUBCOMMANDS: set[str] = {"push", "reset", "clean", "rebase", "cherry-pick"}
 _GIT_BLOCKED_FLAGS: set[str] = {"--force", "--hard", "-f", "-D", "--delete"}
+
+# Git subcommands that only READ repository state.  The shell tool is the
+# "safe command" path, so it must not be able to mutate the repository, the
+# index or the remote; mutating git work goes through the dedicated git
+# tools, which apply their own confirmation policy.
+_GIT_READONLY_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "status",
+        "log",
+        "diff",
+        "show",
+        "blame",
+        "describe",
+        "ls-files",
+        "rev-parse",
+        "shortlog",
+    }
+)
+
+# Subcommands that are read-only only in an explicit read-only form:
+# ``git branch --list`` lists, ``git branch -d`` deletes, ``git tag`` lists
+# but ``git tag v1`` creates, ``git remote`` lists but ``git remote add``
+# registers a new remote.
+_GIT_READONLY_FLAG_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "branch": frozenset(
+        {
+            "--list",
+            "-l",
+            "-a",
+            "-r",
+            "--all",
+            "--remotes",
+            "--show-current",
+            "-v",
+            "--verbose",
+        }
+    ),
+    "remote": frozenset({"-v", "--verbose"}),
+    "tag": frozenset({"--list", "-l"}),
+}
+
+# Global git options that either execute code or change the configuration
+# git itself evaluates.  ``git -c alias.pwn=!<cmd> pwn`` runs an arbitrary
+# shell command through an alias, which is the classic way of smuggling
+# command execution through a "safe" git command.
+_GIT_BLOCKED_GLOBAL_OPTIONS: frozenset[str] = frozenset(
+    {
+        "-c",
+        "--config-env",
+        "--exec-path",
+        "--ext-diff",
+        "--textconv",
+        "--upload-pack",
+        "--receive-pack",
+    }
+)
+
+# Global options that consume the following argument (the argument is a
+# value, not the subcommand).
+_GIT_VALUE_OPTIONS: frozenset[str] = frozenset(
+    {
+        "-C",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--super-prefix",
+        "--config-env",
+        "--exec-path",
+    }
+)
+
+# Global options that take no value.
+_GIT_FLAG_OPTIONS: frozenset[str] = frozenset(
+    {
+        "--no-pager",
+        "-p",
+        "--paginate",
+        "--bare",
+        "--literal-pathspecs",
+        "--no-replace-objects",
+        "--no-optional-locks",
+        "--no-advice",
+        "--no-lazy-fetch",
+        "--html-path",
+        "--man-path",
+        "--info-path",
+        "--version",
+        "--help",
+        "-h",
+    }
+)
 
 _SAFE_GIT_HOSTS: set[str] = {
     "github.com",
@@ -562,6 +666,39 @@ _DANGEROUS_MODULES: set[str] = {
     "subprocess",
 }
 
+# Members of ``os`` that must never be reached — neither as ``os.system``
+# nor as a bare ``system`` bound by ``from os import system``.
+_BLOCKED_OS_MEMBERS: frozenset[str] = frozenset(
+    {
+        "system",
+        "popen",
+        "fork",
+        "forkpty",
+        "kill",
+        "killpg",
+        "remove",
+        "unlink",
+        "rename",
+        "renames",
+        "rmdir",
+        "removedirs",
+        "environ",
+        "putenv",
+        "unsetenv",
+        "startfile",
+        "truncate",
+    }
+)
+
+# Members of ``shutil`` that copy or destroy whole data trees.
+_BLOCKED_SHUTIL_MEMBERS: frozenset[str] = frozenset({"rmtree", "move"})
+
+# Modules that must not be star-imported: ``from os import *`` binds every
+# dangerous name at once and defeats any name-based check.
+_BLOCKED_STAR_IMPORT_MODULES: frozenset[str] = frozenset(
+    {"os", "shutil", "subprocess", "importlib", "ctypes", "pty", "socket", "urllib"}
+)
+
 
 def _fix_windows_path_literals(code: str) -> str:
     """Rewrite bare Windows drive-path string literals to raw strings."""
@@ -582,12 +719,183 @@ def _fix_windows_path_literals(code: str) -> str:
     return pattern.sub(_repl, code)
 
 
-def _check_python_sandbox(code: str) -> tuple[bool, str]:
+def _resolve_string_arg(node: ast.expr) -> str | None:
+    """Resolve an AST expression to a string constant if possible.
+
+    Returns the resolved string for simple literals and concatenations,
+    or None for dynamic expressions that cannot be safely resolved.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _resolve_string_arg(node.left)
+        right = _resolve_string_arg(node.right)
+        if left is not None and right is not None:
+            return left + right
+    # Cannot safely resolve dynamic expressions (calls, variables, etc.)
+    return None
+
+
+def _resolve_path_expr(node: ast.expr) -> Path | None:
+    """Resolve an AST expression to a filesystem path when it is a literal."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return Path(node.value)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _resolve_path_expr(node.left)
+        right = _resolve_path_expr(node.right)
+        if left is not None and right is not None:
+            return Path(f"{left}{right}")
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            else:
+                return None
+        return Path("".join(parts))
+    return None
+
+
+def _is_blocked_module_member(module: str, member: str) -> bool:
+    """Return ``True`` when ``module.member`` must not be used in sandbox mode.
+
+    The decision is made on the SYMBOL, never on the call syntax: ``system``
+    reached through ``from os import system`` is exactly as dangerous as
+    ``os.system``.
+    """
+    if module == "os":
+        # ``exec*`` / ``spawn*`` cover the whole family of process-replacing
+        # helpers, including ones added by newer CPython releases.
+        if member.startswith("exec") or member.startswith("spawn"):
+            return True
+        return member in _BLOCKED_OS_MEMBERS
+    if module == "shutil":
+        return member in _BLOCKED_SHUTIL_MEMBERS or member.startswith("copy")
+    if module == "importlib":
+        return member == "import_module"
+    return module == "subprocess"
+
+
+def _collect_import_bindings(tree: ast.AST) -> tuple[dict[str, str], dict[str, str]]:
+    """Collect the names bound by the imports of *tree*.
+
+    Returns ``(module_aliases, symbol_aliases)``:
+
+    * *module_aliases* maps a local name to the module it refers to
+      (``import os as o`` -> ``{"o": "os"}``);
+    * *symbol_aliases* maps a local name to the fully qualified symbol it
+      refers to (``from os import system`` -> ``{"system": "os.system"}``).
+    """
+    module_aliases: dict[str, str] = {}
+    symbol_aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                module_aliases[bound] = alias.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                bound = alias.asname or alias.name
+                symbol_aliases[bound] = f"{module}.{alias.name}"
+    return module_aliases, symbol_aliases
+
+
+def _resolve_module_expr(node: ast.expr, module_aliases: dict[str, str]) -> str | None:
+    """Return the module an expression refers to, when it can be resolved.
+
+    Handles a plain imported name (``os``), an aliased import (``o`` for
+    ``import os as o``) and the two dynamic import helpers
+    (``__import__("os")`` / ``importlib.import_module("os")``).
+    """
+    if isinstance(node, ast.Name):
+        return module_aliases.get(node.id)
+    if isinstance(node, ast.Call):
+        func = node.func
+        is_import = isinstance(func, ast.Name) and func.id == "__import__"
+        is_import_module = isinstance(func, ast.Attribute) and func.attr == "import_module"
+        if (is_import or is_import_module) and node.args:
+            resolved = _resolve_string_arg(node.args[0])
+            if resolved:
+                return resolved.split(".")[0]
+    return None
+
+
+def _sandbox_root(project_root: str | None) -> Path:
+    """Return the directory model-supplied code is allowed to write to."""
+    if project_root:
+        try:
+            return Path(project_root).expanduser().resolve()
+        except (OSError, ValueError):
+            pass
+    try:
+        return Path.cwd().resolve()
+    except (OSError, ValueError):  # pragma: no cover - deleted cwd
+        return Path(".").resolve()
+
+
+def _open_write_escape_reason(node: ast.Call, root: Path) -> str:
+    """Return a rejection reason when ``open(...)`` writes outside *root*.
+
+    Only write modes (``w``/``a``/``x``/``+``) are considered: reading a file
+    outside the project is handled by the path validators, while *writing*
+    one is how a sandboxed script plants a payload.
+    """
+    if not node.args:
+        return ""
+    target = _resolve_path_expr(node.args[0])
+    if target is None:
+        return ""
+    mode: str | None = None
+    if len(node.args) > 1:
+        mode = _resolve_string_arg(node.args[1])
+    else:
+        for keyword in node.keywords:
+            if keyword.arg == "mode":
+                mode = _resolve_string_arg(keyword.value)
+    if not mode or not any(ch in mode for ch in ("w", "a", "x", "+")):
+        return ""
+    try:
+        resolved = target.expanduser()
+        if not resolved.is_absolute():
+            resolved = root / resolved
+        resolved = resolved.resolve()
+    except (OSError, ValueError):
+        return ""
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return (
+            f"open('{target}', '{mode}') writes outside the project root "
+            "and is blocked in sandbox mode"
+        )
+    return ""
+
+
+def _check_python_sandbox(
+    code: str, project_root: str | None = None
+) -> tuple[bool, str]:
     """Scan Python code for dangerous imports / operations using AST.
 
     Regex-based scanning is easily bypassed via encoding tricks, dynamic
     imports, string concatenation, etc.  AST parsing gives us a reliable
     view of every import and dangerous call in the code.
+
+    The check resolves the SYMBOL and not the call syntax.  ``from os import
+    system`` binds the bare name ``system``, which looks nothing like the
+    attribute access ``os.system`` — a purely syntactic check therefore never
+    fired while the code still ran with the full privileges of the backend
+    process.
+
+    Args:
+        code: Source code to inspect.
+        project_root: Directory the code may write to.  Defaults to the
+            current working directory.
+
+    Returns:
+        ``(is_safe, reason)`` — *reason* is empty when the code is safe.
     """
     parse_candidates = (code,)
     if "\\" in code:
@@ -610,32 +918,34 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
             )
         return False, f"Invalid Python syntax: {last_exc}"
 
-    def _resolve_string_arg(node: ast.expr) -> str | None:
-        """Resolve an AST expression to a string constant if possible.
-        Returns the resolved string for simple literals and concatenations,
-        or None for dynamic expressions that cannot be safely resolved.
-        """
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            left = _resolve_string_arg(node.left)
-            right = _resolve_string_arg(node.right)
-            if left is not None and right is not None:
-                return left + right
-        # Cannot safely resolve dynamic expressions (calls, variables, etc.)
-        return None
+    module_aliases, symbol_aliases = _collect_import_bindings(tree)
+    root = _sandbox_root(project_root)
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import | ast.ImportFrom):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    base = alias.name.split(".")[0]
-                    if base in _BLOCKED_IMPORTS:
-                        return False, f"import {alias.name} is blocked in sandbox mode"
-            elif isinstance(node, ast.ImportFrom):
-                base = (node.module or "").split(".")[0]
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                base = alias.name.split(".")[0]
                 if base in _BLOCKED_IMPORTS:
-                    return False, f"from {node.module} import is blocked in sandbox mode"
+                    return False, f"import {alias.name} is blocked in sandbox mode"
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            base = module.split(".")[0]
+            if base in _BLOCKED_IMPORTS:
+                return False, f"from {node.module} import is blocked in sandbox mode"
+            for alias in node.names:
+                if alias.name == "*":
+                    if base in _BLOCKED_STAR_IMPORT_MODULES:
+                        return False, (
+                            f"from {module} import * is blocked in sandbox mode"
+                        )
+                    continue
+                # ``from os import system`` binds the bare name ``system``:
+                # the import itself has to be refused, otherwise the call
+                # looks like an ordinary local function.
+                if _is_blocked_module_member(base, alias.name):
+                    return False, (
+                        f"from {module} import {alias.name} is blocked in sandbox mode"
+                    )
 
         if isinstance(node, ast.Call):
             # Block __import__ with dangerous modules — reject dynamic args
@@ -680,32 +990,50 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
                     "import_module",
                 ):
                     return False, f"getattr targeting '{resolved}' is blocked in sandbox mode"
+                # getattr(os, "system") is just another spelling of os.system.
+                if resolved:
+                    target_module = _resolve_module_expr(node.args[0], module_aliases)
+                    if target_module and _is_blocked_module_member(target_module, resolved):
+                        return False, (
+                            f"getattr({target_module}, '{resolved}') is blocked in sandbox mode"
+                        )
 
             # Block eval, exec, compile
             if isinstance(node.func, ast.Name) and node.func.id in ("eval", "exec", "compile"):
                 return False, f"{node.func.id}() is blocked in sandbox mode"
 
-            # Block os.system, os.popen, os.exec*, subprocess.call, etc.
-            if (
-                isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id in _DANGEROUS_MODULES
-                and node.func.attr
-                in (
-                    "system",
-                    "popen",
-                    "exec",
-                    "execv",
-                    "execve",
-                    "fork",
-                    "kill",
-                    "spawn",
-                )
-            ):
-                return (
-                    False,
-                    f"{node.func.value.id}.{node.func.attr}() is blocked in sandbox mode",
-                )
+            # Block a dangerous member reached through a bound name
+            # (``from os import system`` -> ``system(...)``).
+            if isinstance(node.func, ast.Name):
+                symbol = symbol_aliases.get(node.func.id)
+                if symbol:
+                    symbol_module, _, symbol_member = symbol.partition(".")
+                    if _is_blocked_module_member(symbol_module, symbol_member):
+                        return False, (
+                            f"{node.func.id}() (bound from {symbol_module}) "
+                            "is blocked in sandbox mode"
+                        )
+            # Block os.system, os.popen, os.exec*, shutil.rmtree, ...
+            elif isinstance(node.func, ast.Attribute):
+                module = _resolve_module_expr(node.func.value, module_aliases)
+                if module is None:
+                    base_name = (
+                        node.func.value.id if isinstance(node.func.value, ast.Name) else None
+                    )
+                    if base_name in _DANGEROUS_MODULES:
+                        module = base_name
+                if module and _is_blocked_module_member(module, node.func.attr):
+                    return (
+                        False,
+                        f"{module}.{node.func.attr}() is blocked in sandbox mode",
+                    )
+
+            # Block open(..., "w"/"a"/"x") that targets a path outside the
+            # project root.
+            if isinstance(node.func, ast.Name) and node.func.id == "open":
+                reason = _open_write_escape_reason(node, root)
+                if reason:
+                    return False, reason
 
             # Block access to __builtins__ via attribute (e.g. __builtins__['eval'])
             if (
@@ -715,7 +1043,77 @@ def _check_python_sandbox(code: str) -> tuple[bool, str]:
             ):
                 return False, "__builtins__ access is blocked in sandbox mode"
 
+        elif isinstance(node, ast.Attribute):
+            # Attribute access that is not a call: ``os.environ`` reads the
+            # whole environment, ``x = os.system`` smuggles the callable out.
+            module = _resolve_module_expr(node.value, module_aliases)
+            if module is None:
+                base_name = node.value.id if isinstance(node.value, ast.Name) else None
+                if base_name in _DANGEROUS_MODULES:
+                    module = base_name
+            if module and _is_blocked_module_member(module, node.attr):
+                return False, f"{module}.{node.attr} is blocked in sandbox mode"
+
     return True, ""
+
+
+# ---------------------------------------------------------------------------
+# Environment scrubbing for model-supplied code
+# ---------------------------------------------------------------------------
+
+# Variables that may cross the process boundary into model-supplied code.
+# Everything else is dropped, so an API key held by the server process can
+# never be read back by the code the model wrote.
+_PYTHON_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "HOME",
+        "LANG",
+        "PYTHONIOENCODING",
+        "PYTHONHASHSEED",
+    }
+)
+
+# Name fragments that mark a variable as credential-bearing.
+_CREDENTIAL_NAME_MARKERS: tuple[str, ...] = (
+    "KEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "CREDENTIAL",
+    "AUTH",
+    "PRIVATE",
+)
+
+
+def _looks_like_credential(name: str) -> bool:
+    """Return ``True`` when the variable *name* looks credential-bearing."""
+    upper = name.upper()
+    return any(marker in upper for marker in _CREDENTIAL_NAME_MARKERS)
+
+
+def _python_child_environment() -> dict[str, str]:
+    """Build a minimal environment for model-supplied Python code.
+
+    The server process environment holds provider API keys, signing secrets
+    and database credentials.  Handing it over to code the model wrote
+    leaks every one of them (``print(os.environ)`` was enough to read
+    ``OPENROUTER_API_KEY`` and friends), so the child only receives an
+    explicit allow-list plus the non-secret ``NEXUS_*`` settings, and every
+    credential-shaped variable is dropped.
+    """
+    child: dict[str, str] = {}
+    for name, value in os.environ.items():
+        if _looks_like_credential(name):
+            continue
+        upper = name.upper()
+        if upper in _PYTHON_ENV_ALLOWLIST or upper.startswith("NEXUS_"):
+            child[name] = value
+    return child
+
 
 
 # ---------------------------------------------------------------------------
@@ -835,6 +1233,69 @@ def _split_on_separators(command: str) -> list[str]:
     return [s.strip() for s in segments if s.strip()]
 
 
+def _validate_git_invocation(tokens: list[str], command: str) -> tuple[bool, str]:
+    """Validate a ``git`` invocation against a read-only allow-list.
+
+    ``git`` is on the command allow-list, so anything it accepts is reachable
+    by the model.  That includes ``git -c alias.pwn=!<cmd> pwn``, which runs
+    an arbitrary shell command through an alias: the command is a *git*
+    command, but it executes whatever the alias expands to.
+
+    Args:
+        tokens: The tokenised command (``tokens[0]`` is ``git``).
+        command: The raw command string.
+
+    Returns:
+        ``(is_safe, reason)`` — *reason* is empty when the command is safe.
+    """
+    # A ``!`` inside a git invocation is the marker of a shell alias
+    # (``alias.pwn=!cmd``); git expands it in the caller's shell.
+    if "!" in command:
+        return False, "Git commands containing '!' (alias expansion) are blocked for safety"
+
+    args = tokens[1:]
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in _GIT_BLOCKED_GLOBAL_OPTIONS or arg.startswith(
+            ("--exec-path=", "--config-env=")
+        ):
+            return False, f"Git option '{arg}' is blocked for safety"
+        if arg in _GIT_VALUE_OPTIONS:
+            index += 2
+            continue
+        if arg in _GIT_FLAG_OPTIONS:
+            index += 1
+            continue
+        if arg.startswith("-"):
+            # Unknown global option: refuse rather than guess what it does.
+            return False, f"Git option '{arg}' is blocked for safety"
+        break
+    else:
+        # No subcommand at all ("git", "git --version"): nothing to run.
+        return True, ""
+
+    subcmd = args[index].lower()
+    rest = args[index + 1 :]
+
+    if subcmd in _GIT_READONLY_SUBCOMMANDS:
+        return True, ""
+
+    allowed_flags = _GIT_READONLY_FLAG_SUBCOMMANDS.get(subcmd)
+    if allowed_flags is not None:
+        if all(flag in allowed_flags for flag in rest):
+            return True, ""
+        return False, (
+            f"Git subcommand '{subcmd}' is blocked for safety "
+            "(only its read-only form is allowed)"
+        )
+
+    return False, (
+        f"Git subcommand '{subcmd}' is blocked for safety "
+        "(not in the read-only allow-list)"
+    )
+
+
 def _validate_single_command(command: str) -> tuple[bool, str]:
     """Validate one shell segment (no pipes, no chaining)."""
     # Defence in depth: this helper is the last gate before a segment is handed
@@ -862,10 +1323,12 @@ def _validate_single_command(command: str) -> tuple[bool, str]:
             subcmd = tokens[1].lower()
             if subcmd in _GIT_BLOCKED_SUBCOMMANDS:
                 return False, f"Git subcommand '{subcmd}' is blocked for safety"
-            cmd_lower = command.lower()
             for flag in _GIT_BLOCKED_FLAGS:
-                if flag in cmd_lower:
+                # Token based: a substring match would flag ``--follow`` and
+                # ``--format`` because they contain "-f".
+                if any(tok == flag or tok.startswith(f"{flag}=") for tok in tokens[1:]):
                     return False, f"Git flag '{flag}' is blocked for safety"
+            return _validate_git_invocation(tokens, command)
         return True, ""
 
     # Block inline code execution flags that enable arbitrary code execution
@@ -899,6 +1362,13 @@ def _validate_shell_command(command: str) -> tuple[bool, str]:
     for pattern in _BLOCKED_COMMAND_PATTERNS:
         if pattern.lower() in cmd_lower:
             return False, f"Dangerous pattern '{pattern}' is blocked"
+
+    # Blocked dangerous commands matched as a WHOLE WORD.  A substring match
+    # on "dd " also matched "git add .", "npm add lodash" and "yarn add
+    # lodash", which are perfectly ordinary commands.
+    for word in _BLOCKED_COMMAND_WORDS:
+        if re.search(rf"\b{re.escape(word)}\b", cmd_lower):
+            return False, f"Dangerous pattern '{word}' is blocked"
 
     # Blocked system paths in command string
     for blocked_path in _BLOCKED_SYSTEM_PATHS:
@@ -945,6 +1415,38 @@ def _validate_shell_command(command: str) -> tuple[bool, str]:
                         return False, f"Piping curl to '{other_base}' is blocked for safety"
 
     return True, ""
+
+
+def argv_for_validated_shell_command(command: str) -> list[str]:
+    """Build ``Popen`` argv for a command that passed ``_validate_shell_command``.
+
+    Callers must validate first. Pipelines use a single ``cmd.exe /c`` on Windows
+    (metacharacters already rejected) or a POSIX pipeline executed in
+    :func:`backend.core.workspace_shell.execute_shell`.
+    """
+    cmd_str = command.strip()
+    segments = _split_on_separators(cmd_str)
+    if not segments:
+        raise ValueError("empty command")
+    if len(segments) == 1:
+        segment = segments[0]
+        if os.name == "nt":
+            try:
+                base = Path(shlex.split(segment)[0]).stem.lower()
+            except (ValueError, IndexError):
+                base = segment.strip().split()[0].lower()
+            if base in _WIN_CMD_INTERNALS:
+                return ["cmd.exe", "/d", "/s", "/c", segment]
+        try:
+            return shlex.split(segment)
+        except ValueError:
+            parts = segment.strip().split()
+            if not parts:
+                raise ValueError("empty command") from None
+            return parts
+    if os.name == "nt":
+        return ["cmd.exe", "/d", "/s", "/c", cmd_str]
+    raise ValueError("posix pipeline")
 
 
 def _validate_path(project_path: str, target_path: str) -> Path:

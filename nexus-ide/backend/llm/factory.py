@@ -18,13 +18,116 @@ from backend.config.settings import get_settings
 from backend.llm.airllm_provider import AirLLMProvider
 from backend.llm.cost_governor import BudgetExceededError
 from backend.llm.dev_provider import DevProvider
-from backend.llm.free_policy import ProviderUnavailableError
+from backend.llm.free_policy import ProviderUnavailableError, is_simulation_provider
 from backend.llm.multi_llm_manager import MultiLLMManager
 from backend.llm.ollama_provider import OllamaProvider
 
 logger = logging.getLogger(__name__)
 
 RUNTIME_SETTINGS_PATH = Path(__file__).resolve().parents[2] / "data" / "settings.json"
+
+#: The methods that produce a *user-visible answer*.  A simulated provider may
+#: never satisfy one of them: its canned reply is not an answer, and the run
+#: would be persisted as completed.  Embeddings are not in this set — the
+#: deterministic mock embedding is a deliberate, documented last resort.
+_ANSWER_METHODS = frozenset({"chat_complete", "chat_stream", "batch_complete"})
+
+
+#: How a provider failure is explained to the user, by category. The raw
+#: exception text ("All connection attempts failed") tells the user nothing
+#: they can act on; the category tells them what to do next.
+FAILURE_REMEDIATION: dict[str, str] = {
+    "auth": "As credenciais do fornecedor foram recusadas. Configura a chave em Definições.",
+    "quota": "A quota do fornecedor está esgotada. Tenta mais tarde ou usa outro fornecedor.",
+    "rate_limit": "O fornecedor limitou o ritmo de pedidos. Tenta mais tarde.",
+    "model_not_found": "O fornecedor não encontrou o modelo ou endpoint. Verifica o identificador e a configuração.",
+    "network": "Não foi possível ligar ao fornecedor. Verifica a rede ou arranca o servidor local.",
+    "timeout": "O fornecedor demorou demasiado a responder.",
+    "empty_stream": "O fornecedor respondeu sem qualquer conteúdo.",
+    "budget": "O orçamento desta execução foi excedido.",
+    "simulation": (
+        "Nenhum fornecedor real respondeu. O único fallback disponível é uma "
+        "simulação e uma simulação nunca pode ser entregue como resposta."
+    ),
+    "unknown": "Nenhum fornecedor conseguiu responder.",
+}
+
+
+def classify_provider_failure(exc: BaseException) -> str:
+    """Map a provider exception onto an actionable category.
+
+    The distinction matters: a refused key, an exhausted quota and a local
+    server that is not running all surface as "all providers failed", but
+    only one of them is fixed by restarting something.
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and status in (401, 403):
+        return "auth"
+    if isinstance(status, int) and status == 402:
+        return "quota"
+    if isinstance(status, int) and status == 429:
+        return "rate_limit"
+    if isinstance(status, int) and status == 404:
+        return "model_not_found"
+
+    category = str(getattr(exc, "category", "") or "").strip().lower()
+    if category in {"quota", "rate_limit", "auth", "simulation", "model_not_found"}:
+        return category
+
+    text = str(exc).lower()
+    if "401" in text or "403" in text or "invalid api key" in text or "unauthorized" in text:
+        return "auth"
+    if "402" in text or "credit" in text or "insufficient_quota" in text:
+        return "quota"
+    if "429" in text or "rate limit" in text or "too many requests" in text:
+        return "rate_limit"
+    if "budget" in text and (
+        "cost" in text or "spend" in text or "usd" in text or "cost governor" in text
+    ):
+        return "budget"
+    if "dispatch budget" in text or "cooldown" in text:
+        # A provider's own dispatch budget is a rate limit, not the run's cost
+        # budget. Reporting it as "budget" would send the user to the wrong
+        # setting.
+        return "rate_limit"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "all connection attempts failed" in text or "connect" in text or "network" in text:
+        return "network"
+    if "empty stream" in text or "without text content" in text:
+        return "empty_stream"
+    return "unknown"
+
+
+#: When several providers fail for different reasons, the one the user has to
+#: act on wins. Credentials and quota come first because they need a decision;
+#: a local server that is not running comes last because it is usually a
+#: symptom of the same environment problem.
+_FAILURE_CATEGORY_PRIORITY = (
+    "auth",
+    "budget",
+    "quota",
+    "rate_limit",
+    "model_not_found",
+    # A simulation is only ever the *last* resort of the chain, so it means
+    # "no real provider produced an answer".  It outranks the transient
+    # categories (network/timeout) because it is the fact the user has to act
+    # on, and it loses to a real provider's own terminal problem (auth,
+    # budget, quota, rate limit).
+    "simulation",
+    "empty_stream",
+    "timeout",
+    "network",
+)
+
+
+def _aggregate_failure_category(categories: list[str]) -> str:
+    """Pick the single category that best explains a chain of failures."""
+    present = {c for c in categories if c}
+    for candidate in _FAILURE_CATEGORY_PRIORITY:
+        if candidate in present:
+            return candidate
+    return "unknown" if present else ""
 
 
 def _load_runtime_overrides() -> dict[str, Any]:
@@ -81,6 +184,18 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _test_remote_fallbacks_disabled() -> bool:
+    """Keep integration-test subprocesses from inheriting live cloud access.
+
+    Tests sometimes start a real backend process to exercise restart and
+    persistence. That process inherits the developer's environment and reads
+    runtime settings, so an exhausted local fixture could otherwise fall
+    through to real provider credentials. This opt-in guard only narrows the
+    fallback chain; normal runtime behaviour is unchanged.
+    """
+    return _as_bool(os.environ.get("NEXUS_TEST_DISABLE_REMOTE_FALLBACKS", "false"))
+
+
 def _free_only_enabled(settings: Any, overrides: dict[str, Any]) -> bool:
     """Resolve the fail-closed runtime policy from settings/UI overrides."""
     import os
@@ -133,6 +248,9 @@ class MockProvider:
     eligibility_reason = "deterministic simulation only"
 
     _last_usage: dict[str, int] = {}
+    # Uniform provider contract: every provider exposes the stop reason of its
+    # last call, even a simulated one.
+    last_finish_reason: str = ""
 
     @property
     def last_usage(self) -> dict[str, int]:
@@ -267,9 +385,37 @@ class ResilientLLMProvider:
         return str(getattr(self.primary, "provider_name", "") or "")
 
     @property
+    def last_model(self) -> str:
+        """The concrete model the last successful call actually used.
+
+        The provider that answered is not always the primary one — the
+        fallback chain exists for that — so this reads the provider that
+        served the request.
+        """
+        for holder in (self.last_provider, self.primary):
+            model = str(getattr(holder, "last_model", "") or "")
+            if model:
+                return model
+        return ""
+
+    @property
     def direct_answer_fallback(self) -> bool:
-        """Whether the last successful call used the tool-free local lane."""
+        """Whether the selected local fallback uses compact direct answers."""
         return bool(getattr(self.last_provider, "direct_answer", False))
+
+    @property
+    def last_finish_reason(self) -> str:
+        """Stop reason of the provider that served the last call.
+
+        The runtime uses it to tell a normal stop from a provider-side
+        output-token truncation.  Without it the wrapper hid the reason of
+        whichever provider actually answered.
+        """
+        for holder in (self.last_provider, self.primary):
+            reason = str(getattr(holder, "last_finish_reason", "") or "")
+            if reason:
+                return reason
+        return ""
 
     async def aclose(self) -> None:
         await self.primary.aclose()
@@ -291,6 +437,18 @@ class ResilientLLMProvider:
             value = kwargs.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+        # Explicit provider selection unwraps a provider from MultiLLMManager.
+        # Such chat calls do not carry kwargs with the run id, but the runtime
+        # already publishes it in a task-local ContextVar. Use that same source
+        # so selected-provider calls still obey the per-run budget and ledger.
+        try:
+            from backend.runtime.run_context import get_current_run_id
+
+            active_run_id = get_current_run_id()
+            if active_run_id:
+                return active_run_id
+        except Exception:  # pragma: no cover - run context is optional
+            logger.debug("Could not read active run id for cost accounting", exc_info=True)
         context = kwargs.get("context")
         if isinstance(context, dict):
             for key in ("run_id", "mission_id", "session_id"):
@@ -376,13 +534,32 @@ class ResilientLLMProvider:
         except Exception:  # pragma: no cover - accounting must not break chat
             logger.exception("Cost governor recording failed")
 
+    @staticmethod
+    def _simulation_refusal(provider: Any) -> ProviderUnavailableError:
+        """The typed error raised when a simulated provider is reached.
+
+        A simulated provider must never satisfy a real request.  The
+        ``MultiLLMManager`` already refuses it (category ``"simulation"``);
+        this class only refused it while ``free_only`` was on, so a dead
+        primary fell through to :class:`DevProvider` and its canned reply was
+        delivered as the agent's answer — and the run was persisted as
+        completed.
+        """
+        return ProviderUnavailableError(
+            f"Provider {provider.__class__.__name__} is simulation-only; "
+            "it cannot complete a real request",
+            category="simulation",
+            provider=provider.__class__.__name__,
+        )
+
     async def _try_providers(self, method: str, *args: Any, **kwargs: Any) -> Any:
         """Try providers without allowing simulation to claim real success."""
         failures: list[str] = []
+        failure_categories: list[str] = []
         self._cost_check(kwargs)
         for provider in [self.primary, *self.fallbacks]:
             if self.free_only and (
-                getattr(provider, "simulation", False)
+                is_simulation_provider(provider)
                 or (
                     provider.__class__.__name__.lower().startswith("ollama")
                     and not getattr(provider, "_free_validated", False)
@@ -390,8 +567,10 @@ class ResilientLLMProvider:
             ):
                 continue
             try:
+                if method in _ANSWER_METHODS and is_simulation_provider(provider):
+                    raise self._simulation_refusal(provider)
                 provider_args = args
-                fallback_model = str(getattr(provider, "fallback_model", "") or "").strip()
+                fallback_model = str(getattr(provider, "fallback_model", "") or "").strip() if provider is not self.primary else ""
                 if fallback_model and method == "chat_complete" and args:
                     provider_args = (fallback_model, *args[1:])
                 validator = getattr(provider, "validate_model", None)
@@ -402,6 +581,11 @@ class ResilientLLMProvider:
                     validator(validation_model)
                 result = await getattr(provider, method)(*provider_args, **kwargs)
                 if method == "chat_complete" and isinstance(result, str):
+                    # An empty answer is not a successful completion.
+                    if not result.strip():
+                        raise RuntimeError(
+                            f"Provider {provider.__class__.__name__} returned an empty completion"
+                        )
                     self.last_provider = provider
                     self.last_provider_at = time.time()
                     self._cost_record(
@@ -418,6 +602,7 @@ class ResilientLLMProvider:
             except Exception as exc:
                 detail = " ".join(str(exc).split())[:360] or type(exc).__name__
                 failures.append(f"{provider.__class__.__name__}: {detail}")
+                failure_categories.append(classify_provider_failure(exc))
                 logger.warning(
                     "Provider %s failed for %s: %s",
                     provider.__class__.__name__,
@@ -425,11 +610,15 @@ class ResilientLLMProvider:
                     exc,
                 )
                 continue
+        aggregate_category = _aggregate_failure_category(failure_categories)
+        remediation = FAILURE_REMEDIATION.get(aggregate_category, "")
+        message = f"All providers failed for {method}: {' | '.join(failures)}"
+        if remediation:
+            message = f"{message}. {remediation}"
         raise ProviderUnavailableError(
-            f"All providers failed for {method}: {' | '.join(failures)}",
-            category="provider_unavailable",
+            message,
+            category=aggregate_category or "provider_unavailable",
         )
-
     async def chat_stream(
         self,
         model: str,
@@ -437,11 +626,15 @@ class ResilientLLMProvider:
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         failures: list[str] = []
+        # Categories of every provider that failed, so the aggregate error can
+        # explain *what kind* of failure happened instead of only listing the
+        # raw exception strings.
+        failure_categories: list[str] = []
         # Hard cap before any token is requested from a paid provider.
         self._cost_check(kwargs)
         for provider in [self.primary, *self.fallbacks]:
             if self.free_only and (
-                getattr(provider, "simulation", False)
+                is_simulation_provider(provider)
                 or (
                     provider.__class__.__name__.lower().startswith("ollama")
                     and not getattr(provider, "_free_validated", False)
@@ -452,7 +645,9 @@ class ResilientLLMProvider:
             attempt_started = time.monotonic()
             collected: list[str] = []
             try:
-                provider_model = str(getattr(provider, "fallback_model", "") or model).strip()
+                if is_simulation_provider(provider):
+                    raise self._simulation_refusal(provider)
+                provider_model = str((getattr(provider, "fallback_model", "") if provider is not self.primary else "") or model).strip()
                 validator = getattr(provider, "validate_model", None)
                 if self.free_only and callable(validator):
                     validator(provider_model)
@@ -484,6 +679,7 @@ class ResilientLLMProvider:
             except Exception as exc:
                 detail = " ".join(str(exc).split())[:360] or type(exc).__name__
                 failures.append(f"{provider.__class__.__name__}: {detail}")
+                failure_categories.append(classify_provider_failure(exc))
                 logger.warning(
                     "Provider %s failed for chat_stream: %s",
                     provider.__class__.__name__,
@@ -493,13 +689,29 @@ class ResilientLLMProvider:
                     # The response has already been observed by the user. A
                     # fallback here would splice a second answer onto it and
                     # can repeat tool calls in a ReAct response.
+                    #
+                    # The provider was billed for the tokens it did deliver, so
+                    # the spend has to be recorded even though the stream
+                    # failed half-way (audit D7).
+                    self._cost_record(
+                        provider,
+                        provider_model,
+                        messages,
+                        "".join(collected),
+                        kwargs,
+                    )
                     raise
                 continue
             finally:
                 kwargs.pop("_stream_retry_attempt", None)
+        aggregate_category = _aggregate_failure_category(failure_categories)
+        remediation = FAILURE_REMEDIATION.get(aggregate_category, "")
+        message = f"All providers failed for chat_stream: {' | '.join(failures)}"
+        if remediation:
+            message = f"{message}. {remediation}"
         raise ProviderUnavailableError(
-            f"All providers failed for chat_stream: {' | '.join(failures)}",
-            category="provider_unavailable",
+            message,
+            category=aggregate_category or "provider_unavailable",
         )
 
     async def chat_complete(
@@ -529,7 +741,7 @@ class ResilientLLMProvider:
         self._cost_check(kwargs)
         for provider in [self.primary, *self.fallbacks]:
             if self.free_only and (
-                getattr(provider, "simulation", False)
+                is_simulation_provider(provider)
                 or (
                     provider.__class__.__name__.lower().startswith("ollama")
                     and not getattr(provider, "_free_validated", False)
@@ -537,7 +749,9 @@ class ResilientLLMProvider:
             ):
                 continue
             try:
-                provider_model = str(getattr(provider, "fallback_model", "") or model or "")
+                if is_simulation_provider(provider):
+                    raise self._simulation_refusal(provider)
+                provider_model = str((getattr(provider, "fallback_model", "") if provider is not self.primary else "") or model or "")
                 validator = getattr(provider, "validate_model", None)
                 if self.free_only and callable(validator):
                     validator(provider_model)
@@ -595,7 +809,7 @@ class ResilientLLMProvider:
         """
         providers = []
         for provider in [self.primary, *self.fallbacks]:
-            if getattr(provider, "simulation", False):
+            if is_simulation_provider(provider):
                 continue
             if self.free_only and (
                 provider.__class__.__name__.lower().startswith("ollama")
@@ -618,6 +832,26 @@ class ResilientLLMProvider:
                 return False
 
         return any(await asyncio.gather(*(probe(provider) for provider in providers)))
+
+
+def ensure_cost_governed_provider(
+    provider: Any,
+    *,
+    free_only: bool | None = None,
+) -> Any:
+    """Keep a selected raw provider behind the normal policy wrapper.
+
+    Provider selection from a multi-provider manager intentionally chooses one
+    concrete provider. Returning that raw client used to skip budget checks,
+    cost recording, free-only validation, and the simulation refusal. Existing
+    manager and resilient clients already own those policies and are returned
+    unchanged; a single raw provider gets a no-fallback resilient wrapper.
+    """
+    if isinstance(provider, (ResilientLLMProvider, MultiLLMManager)):
+        return provider
+    if free_only is None:
+        free_only = bool(getattr(provider, "free_only", False))
+    return ResilientLLMProvider(provider, [], free_only=bool(free_only))
 
 
 def _build_fallback_chain(
@@ -689,13 +923,52 @@ def _build_fallback_chain(
             # local fallback object; the primary provider still receives the
             # exact model selected by the user.
             fallback.fallback_model = local_model_id
-            fallback.disable_tools = True
+            # The Ollama adapter now supports native tool schemas/calls. Keep
+            # them enabled so provider failover does not silently turn an
+            # agentic request into a direct-answer-only request.
             fallback.direct_answer = True
             fallbacks.append(fallback)
+
+        if _test_remote_fallbacks_disabled():
+            fallbacks.append(MockProvider())
+            return fallbacks
 
         # Allow either configured provider to fail over to the other while
         # keeping free_only fail-closed for every remote request.
         if primary_provider == "openrouter":
+            # Free OpenRouter models are rate-limited *per model* upstream
+            # (429 "temporarily rate-limited upstream"). Falling over to another
+            # validated zero-price model keeps the run alive instead of failing
+            # the turn or dropping to an offline local server.
+            from backend.llm.openrouter_provider import OpenRouterProvider
+
+            or_key = _usable_api_key(_setting_value(settings, overrides, "openrouter_api_key", ""))
+            raw_chain = str(
+                os.environ.get("NEXUS_OPENROUTER_FALLBACK_MODELS")
+                or _setting_value(settings, overrides, "nexus_openrouter_fallback_models", "")
+                or ""
+            )
+            chain = [m.strip() for m in raw_chain.split(",") if m.strip()]
+            or_catalog = overrides.get("policy_candidates")
+            if or_key and chain:
+                for fallback_id in chain:
+                    or_fallback = OpenRouterProvider(
+                        base_url=_setting_value(
+                            settings, overrides, "openrouter_base_url", "https://openrouter.ai/api"
+                        ),
+                        api_key=or_key,
+                        free_only=True,
+                        catalog=or_catalog if isinstance(or_catalog, list) else None,
+                        validation_ttl_seconds=int(
+                            _setting_value(settings, overrides, "provider_validation_ttl_seconds", 600)
+                        ),
+                        max_latency_ms=int(
+                            _setting_value(settings, overrides, "max_provider_latency_ms", 30_000)
+                        ),
+                        local_embed_host=_setting_value(settings, overrides, "ollama_host", ""),
+                    )
+                    or_fallback.fallback_model = fallback_id
+                    fallbacks.append(or_fallback)
             from backend.llm.lmstudio_provider import LMStudioProvider
 
             lmstudio_host = _setting_value(
@@ -777,7 +1050,11 @@ def _build_fallback_chain(
         fallbacks.append(OllamaProvider(base_url=ollama_host))
         logger.info("Added Ollama fallback host %s to AirLLM chain", ollama_host)
 
-    if openai_api_key := _setting_value(settings, overrides, "openai_api_key", ""):
+    if _test_remote_fallbacks_disabled():
+        fallbacks.append(MockProvider())
+        return fallbacks
+
+    if openai_api_key := _usable_api_key(_setting_value(settings, overrides, "openai_api_key", "")):
         from backend.llm.openai_provider import OpenAIProvider
 
         fallbacks.append(
@@ -789,7 +1066,7 @@ def _build_fallback_chain(
             )
         )
 
-    if kimi_api_key := _setting_value(settings, overrides, "kimi_api_key", ""):
+    if kimi_api_key := _usable_api_key(_setting_value(settings, overrides, "kimi_api_key", "")):
         from backend.llm.kimi_provider import KimiProvider
 
         fallbacks.append(
@@ -801,7 +1078,9 @@ def _build_fallback_chain(
             )
         )
 
-    if deepseek_api_key := _setting_value(settings, overrides, "deepseek_api_key", ""):
+    if deepseek_api_key := _usable_api_key(
+        _setting_value(settings, overrides, "deepseek_api_key", "")
+    ):
         from backend.llm.openai_provider import OpenAIProvider
 
         fallbacks.append(
@@ -813,7 +1092,7 @@ def _build_fallback_chain(
             )
         )
 
-    if groq_api_key := _setting_value(settings, overrides, "groq_api_key", ""):
+    if groq_api_key := _usable_api_key(_setting_value(settings, overrides, "groq_api_key", "")):
         from backend.llm.openai_provider import OpenAIProvider
 
         fallbacks.append(
@@ -825,7 +1104,9 @@ def _build_fallback_chain(
             )
         )
 
-    if anthropic_api_key := _setting_value(settings, overrides, "anthropic_api_key", ""):
+    if anthropic_api_key := _usable_api_key(
+        _setting_value(settings, overrides, "anthropic_api_key", "")
+    ):
         from backend.llm.anthropic_provider import AnthropicProvider
 
         fallbacks.append(
@@ -837,7 +1118,7 @@ def _build_fallback_chain(
             )
         )
 
-    if gemini_api_key := _setting_value(settings, overrides, "gemini_api_key", ""):
+    if gemini_api_key := _usable_api_key(_setting_value(settings, overrides, "gemini_api_key", "")):
         from backend.llm.gemini_provider import GeminiProvider
 
         fallbacks.append(
@@ -852,7 +1133,9 @@ def _build_fallback_chain(
             )
         )
 
-    if openrouter_api_key := _setting_value(settings, overrides, "openrouter_api_key", ""):
+    if openrouter_api_key := _usable_api_key(
+        _setting_value(settings, overrides, "openrouter_api_key", "")
+    ):
         from backend.llm.openrouter_provider import OpenRouterProvider
 
         fallbacks.append(
@@ -870,11 +1153,16 @@ def _build_fallback_chain(
     # adding the same host twice only repeats a failing request.
 
     # Add DevProvider for zero-cost local development before the ultimate mock fallback
+    #
+    # Every configured cloud provider counts as a real provider.  Anthropic was
+    # missing from this list, so configuring *only* Anthropic still appended
+    # the DevProvider simulation to the chain (audit D11).
     has_any_real_provider = bool(
         openai_api_key
         or kimi_api_key
         or deepseek_api_key
         or groq_api_key
+        or anthropic_api_key
         or gemini_api_key
         or openrouter_api_key
     )
@@ -1358,7 +1646,9 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "openai":
         from backend.llm.openai_provider import OpenAIProvider
 
-        api_key = _setting_value(settings, effective_overrides, "openai_api_key", "")
+        api_key = _usable_api_key(
+            _setting_value(settings, effective_overrides, "openai_api_key", "")
+        )
         if not api_key:
             logger.warning("OPENAI_API_KEY not set — requests will fail")
         logger.info("Using OpenAI provider")
@@ -1372,7 +1662,9 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "deepseek":
         from backend.llm.openai_provider import OpenAIProvider
 
-        api_key = _setting_value(settings, effective_overrides, "deepseek_api_key", "")
+        api_key = _usable_api_key(
+            _setting_value(settings, effective_overrides, "deepseek_api_key", "")
+        )
         if not api_key:
             logger.warning("DEEPSEEK_API_KEY not set — requests will fail")
         logger.info("Using DeepSeek provider")
@@ -1386,7 +1678,7 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "kimi":
         from backend.llm.kimi_provider import KimiProvider
 
-        api_key = _setting_value(settings, effective_overrides, "kimi_api_key", "")
+        api_key = _usable_api_key(_setting_value(settings, effective_overrides, "kimi_api_key", ""))
         if not api_key:
             logger.warning("KIMI_API_KEY not set — requests will fail")
         logger.info("Using Kimi provider")
@@ -1400,7 +1692,7 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "groq":
         from backend.llm.openai_provider import OpenAIProvider
 
-        api_key = _setting_value(settings, effective_overrides, "groq_api_key", "")
+        api_key = _usable_api_key(_setting_value(settings, effective_overrides, "groq_api_key", ""))
         if not api_key:
             logger.warning("GROQ_API_KEY not set — requests will fail")
         logger.info("Using Groq provider")
@@ -1414,7 +1706,9 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "anthropic":
         from backend.llm.anthropic_provider import AnthropicProvider
 
-        api_key = _setting_value(settings, effective_overrides, "anthropic_api_key", "")
+        api_key = _usable_api_key(
+            _setting_value(settings, effective_overrides, "anthropic_api_key", "")
+        )
         if not api_key:
             logger.warning("ANTHROPIC_API_KEY not set — requests will fail")
         logger.info("Using Anthropic provider")
@@ -1428,7 +1722,9 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "gemini":
         from backend.llm.gemini_provider import GeminiProvider
 
-        api_key = _setting_value(settings, effective_overrides, "gemini_api_key", "")
+        api_key = _usable_api_key(
+            _setting_value(settings, effective_overrides, "gemini_api_key", "")
+        )
         if not api_key:
             logger.warning("GEMINI_API_KEY not set — requests will fail")
         logger.info("Using Gemini provider")
@@ -1445,7 +1741,9 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "openrouter":
         from backend.llm.openrouter_provider import OpenRouterProvider
 
-        api_key = _setting_value(settings, effective_overrides, "openrouter_api_key", "")
+        api_key = _usable_api_key(
+            _setting_value(settings, effective_overrides, "openrouter_api_key", "")
+        )
         if not api_key:
             logger.warning("OPENROUTER_API_KEY not set — requests will fail")
         logger.info("Using OpenRouter provider")
@@ -1475,7 +1773,7 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "kilo":
         from backend.llm.kilo_provider import KiloProvider
 
-        api_key = _setting_value(settings, effective_overrides, "kilo_api_key", "")
+        api_key = _usable_api_key(_setting_value(settings, effective_overrides, "kilo_api_key", ""))
         if not api_key:
             logger.warning("KILO_API_KEY not set — requests will fail")
         logger.info("Using Kilo AI Gateway provider")
@@ -1491,7 +1789,9 @@ def create_llm_client(**overrides: Any) -> Any:
     if provider == "opencode_go":
         from backend.llm.opencode_go_provider import OpenCodeGoProvider
 
-        api_key = _setting_value(settings, effective_overrides, "opencode_go_api_key", "")
+        api_key = _usable_api_key(
+            _setting_value(settings, effective_overrides, "opencode_go_api_key", "")
+        )
         if not api_key:
             logger.warning("OPENCODE_GO_API_KEY not set — requests will fail")
         logger.info("Using OpenCode Go provider at https://opencode.ai/zen/go/v1")

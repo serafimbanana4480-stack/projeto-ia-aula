@@ -7,14 +7,22 @@ having done any real work.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.orchestrator.dependency_graph import ExecutionPlan, TaskNode
+from backend.orchestrator.agent_pool import AgentPool
+from backend.orchestrator.dependency_graph import (
+    DependencyGraph,
+    ExecutionPlan,
+    TaskNode,
+    TaskStatus,
+)
 from backend.orchestrator.engine import OrchestrationEngine
 from backend.orchestrator.events import EventBus
-from backend.orchestrator.types import OrchestrationResult, OrchestrationState
+from backend.orchestrator.plan_executor import PlanExecutor
+from backend.orchestrator.types import ExecutionContext, OrchestrationResult, OrchestrationState
 from backend.orchestrator.verification import (
     VerificationOutcome,
     _create_fix_tasks,
@@ -444,3 +452,269 @@ class TestBlockedVerificationDoesNotClaimSuccess:
         summary = result.verification.summary()
         assert "could NOT be performed" in summary
         assert "not a pass" in summary
+
+
+# ---------------------------------------------------------------------------
+# The verdict marker must be the agent's answer, not the prompt's template
+# ---------------------------------------------------------------------------
+
+#: The verification prompt asks the agent to answer with this template.  It
+#: contains a literal ``VERDICT: PASS`` line, so an agent that quotes the
+#: instructions back carries TWO verdict markers.
+ECHOED_VERDICT_TEMPLATE = (
+    "Answer with a final line in exactly this format:\n"
+    "VERDICT: PASS   (if no problems were found)\n"
+    "VERDICT: FAIL   (if problems were found, then list them)"
+)
+
+
+class TestVerdictMarkerIsTheAgentsAnswer:
+    def test_verification_echoed_template_does_not_mask_fail(self) -> None:
+        """An echoed template must never turn a real defect into a pass.
+
+        The first verdict marker used to win, and the template's ``PASS``
+        always comes first.  The agent's own ``VERDICT: FAIL`` was therefore
+        read as a pass: no fix task was created and the plan reported
+        success on a real defect.
+        """
+        output = (
+            "Verify the output of task 'Execute Objective'. "
+            "Check for: bugs, syntax errors, missing imports, logic errors, edge cases. "
+            "Run any tests if available.\n\n"
+            f"{ECHOED_VERDICT_TEMPLATE}\n\n"
+            "Original output:\nprint('hello')\n\n"
+            "The handler swallows exceptions and the import of `os` is missing.\n"
+            "VERDICT: FAIL"
+        )
+
+        assert output_reports_issues(output, "Verify: Execute Objective") is True
+
+    def test_verification_last_verdict_wins(self) -> None:
+        """The LAST verdict marker is the agent's answer."""
+        pass_then_fail = (
+            "VERDICT: PASS\n"
+            "Everything looks fine at first glance.\n"
+            "On a second look the import of `os` is missing.\n"
+            "VERDICT: FAIL"
+        )
+        assert output_reports_issues(pass_then_fail) is True
+
+        fail_then_pass = (
+            "VERDICT: FAIL\n"
+            "The handler swallows exceptions.\n"
+            "On a second look the code is correct.\n"
+            "VERDICT: PASS"
+        )
+        assert output_reports_issues(fail_then_pass) is False
+
+    def test_a_bare_verdict_is_never_stripped(self) -> None:
+        """Only the *template* lines are removed, never the agent's answer."""
+        assert output_reports_issues("VERDICT: FAIL\nbroken import") is True
+        assert output_reports_issues("VERDICT: PASS") is False
+
+
+# ---------------------------------------------------------------------------
+# The plan retry budget must actually be used
+# ---------------------------------------------------------------------------
+
+
+class _StubAgent:
+    """An agent stand-in whose ``run`` replays a scripted output.
+
+    ``verdicts`` mirrors the agent's own ``_last_run_success`` flag, which
+    the executor reads after the stream closes.
+    """
+
+    model_key = "coder"
+
+    def __init__(self, outputs: list[str], verdicts: list[bool] | None = None) -> None:
+        self._outputs = list(outputs)
+        self._verdicts = list(verdicts) if verdicts is not None else None
+        self.calls = 0
+        self.requests = []
+        self._last_run_success = True
+
+    async def run(self, request):  # noqa: ANN001 - test double
+        self.calls += 1
+        self.requests.append(request)
+        index = min(self.calls - 1, len(self._outputs) - 1)
+        yield self._outputs[index]
+        if self._verdicts is not None:
+            self._last_run_success = self._verdicts[
+                min(self.calls - 1, len(self._verdicts) - 1)
+            ]
+
+
+@pytest.fixture
+def isolated_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep the JSONL audit trail out of the repository."""
+    import backend.core.conversation_log as conversation_log
+
+    root = tmp_path / "conversations"
+    root.mkdir(exist_ok=True)
+    conversation_log._loggers.clear()
+    monkeypatch.setattr(conversation_log, "_DEFAULT_LOG_DIR", root)
+    yield root
+    conversation_log._loggers.clear()
+
+
+@pytest.fixture
+def no_retry_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralise the backoff between two attempts."""
+
+    async def _no_wait(_attempt: int) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "backend.orchestrator.plan_executor._backoff_before_retry", _no_wait
+    )
+
+
+def _executor(agent: _StubAgent, *, model_override: str = "") -> PlanExecutor:
+    return PlanExecutor(
+        llm_client=object(),
+        registry={"CODER": agent},
+        event_bus=EventBus(),
+        agent_pool=AgentPool(),
+        model_override=model_override,
+    )
+
+
+def _retryable_task(max_retries: int) -> tuple[TaskNode, DependencyGraph]:
+    task = TaskNode(
+        name="Implement: retry budget",
+        description="Implement the requested change.",
+        agent="CODER",
+        max_retries=max_retries,
+    )
+    graph = DependencyGraph()
+    graph.add_task(task)
+    graph.transition_status(task.task_id, TaskStatus.READY)
+    return task, graph
+
+
+async def _run_task(
+    executor: PlanExecutor,
+    task: TaskNode,
+    graph: DependencyGraph,
+) -> dict:
+    ctx = ExecutionContext(session_id="s-retry", project_path=".")
+    return await executor._execute_task(task, ctx, graph, "s-retry", "run-1")
+
+
+class TestPlanRetryBudget:
+    """``TaskNode.max_retries`` used to be dead configuration.
+
+    The task loop opened ``for attempt in range(task.max_retries + 1)`` but
+    the evidence-gate failure, the unrecovered-tool-error and the
+    agent-reported-incompletion branches all ``return``ed on the first
+    failure.  Only a timeout or a raised exception ever retried.
+    """
+
+    @pytest.mark.asyncio
+    async def test_plan_retries_on_tool_error(
+        self, isolated_logs: Path, no_retry_wait: None
+    ) -> None:
+        agent = _StubAgent(["<event>tool_error|write_file|File not found</event>"])
+        executor = _executor(agent)
+        task, graph = _retryable_task(1)
+
+        result = await _run_task(executor, task, graph)
+
+        assert agent.calls == 2, "an unrecovered tool error must consume a retry"
+        assert task.status == TaskStatus.FAILED
+        assert "File not found" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_selected_model_override_reaches_plan_agent_request(
+        self,
+        isolated_logs: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        selected_model = "fixture-provider/exact-model-id"
+        monkeypatch.setattr(
+            "backend.orchestrator.plan_executor.validate_agent_contract",
+            lambda *_args, **_kwargs: [],
+        )
+        agent = _StubAgent(["Read complete"])
+        executor = _executor(agent, model_override=selected_model)
+        task, graph = _retryable_task(0)
+
+        result = await _run_task(executor, task, graph)
+
+        assert result["success"] is True
+        assert agent.requests[0].context["_model_override"] == selected_model
+
+    @pytest.mark.asyncio
+    async def test_plan_retries_on_incomplete_agent(
+        self, isolated_logs: Path, no_retry_wait: None
+    ) -> None:
+        agent = _StubAgent(
+            ["[TAREFA NÃO CONCLUÍDA] O agente atingiu o limite de 3 passos."]
+        )
+        executor = _executor(agent)
+        task, graph = _retryable_task(1)
+
+        result = await _run_task(executor, task, graph)
+
+        assert agent.calls == 2, "an agent that gave up must consume a retry"
+        assert task.status == TaskStatus.FAILED
+        assert "not completed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_plan_retries_on_evidence_gate_failure(
+        self, isolated_logs: Path, no_retry_wait: None
+    ) -> None:
+        agent = _StubAgent(
+            ["Listei o diretorio; o trabalho esta feito."],
+            verdicts=[False],
+        )
+        executor = _executor(agent)
+        task, graph = _retryable_task(1)
+
+        result = await _run_task(executor, task, graph)
+
+        assert agent.calls == 2, "a failed evidence gate must consume a retry"
+        assert task.status == TaskStatus.FAILED
+        assert "evidence gate" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_evidence_retry_changes_prompt_strategy(
+        self, isolated_logs: Path, no_retry_wait: None
+    ) -> None:
+        agent = _StubAgent(
+            ["repeated discovery", "still incomplete"],
+            verdicts=[False, False],
+        )
+        executor = _executor(agent)
+        task, graph = _retryable_task(1)
+
+        await _run_task(executor, task, graph)
+
+        assert len(agent.requests) == 2
+        retry_prompt = agent.requests[1].query
+        assert "RETRY GUIDANCE" in retry_prompt
+        assert "Do not repeat the same tool call" in retry_prompt
+        assert "read_file" in retry_prompt
+        assert agent.requests[0].context["_tool_failure_scope"] == (
+            agent.requests[1].context["_tool_failure_scope"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_plan_gives_up_after_max_retries(
+        self, isolated_logs: Path, no_retry_wait: None
+    ) -> None:
+        agent = _StubAgent(
+            ["[TAREFA NÃO CONCLUÍDA] O agente atingiu o limite de 3 passos."]
+        )
+        executor = _executor(agent)
+        task, graph = _retryable_task(2)
+
+        result = await _run_task(executor, task, graph)
+
+        assert agent.calls == 3, "max_retries=2 means three attempts in total"
+        assert task.status == TaskStatus.FAILED
+        assert task.retry_count == 2
+        assert "not completed" in result["error"]
+        assert result["incomplete"] is True
+

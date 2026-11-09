@@ -425,6 +425,7 @@ class AgentLifecycleManager:
             client=self._llm_client,
             context=instance.context,
             project_path=instance.context.get("project_path", "."),
+            user_id=str(instance.context.get("_authenticated_user_id") or ""),
             # Keep the ReAct ceiling high; the task deadline and repeated-tool
             # guard remain the practical safety limits.
             max_iterations=1000,

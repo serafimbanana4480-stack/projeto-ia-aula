@@ -215,6 +215,9 @@ class TestRetryConstants:
     """Tests for retry-related constants."""
 
     def test_retryable_status_codes(self) -> None:
+        assert 408 in _RETRYABLE_STATUS_CODES
+        assert 425 in _RETRYABLE_STATUS_CODES
+        assert 429 in _RETRYABLE_STATUS_CODES
         assert 500 in _RETRYABLE_STATUS_CODES
         assert 502 in _RETRYABLE_STATUS_CODES
         assert 503 in _RETRYABLE_STATUS_CODES
@@ -229,7 +232,7 @@ class TestRetryConstants:
 
     def test_backoff_delays_exist(self) -> None:
         from backend.tools.ollama_client import _BACKOFF_DELAYS
-        assert _BACKOFF_DELAYS == (1, 2, 4, 8)
+        assert _BACKOFF_DELAYS == (15.0,) * 9
 
 
 class TestPrepareDirectAnswerMessages:

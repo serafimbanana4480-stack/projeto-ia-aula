@@ -121,7 +121,7 @@ export function MemorySystemVisualization() {
   return (
     <div className={`memory-system-visualization nx-elev-2 nx-surface relative w-full h-full !border !border-cyan-500/25 rounded-lg overflow-hidden ${isConnected ? 'nx-live-rim' : ''}`}>
       <div className="absolute top-0 left-0 right-0 z-10 bg-gradient-to-b from-black/80 to-transparent p-4">
-        <h2 className="flex items-center gap-2 text-cyan-400 text-xl font-bold">
+        <h2 className="flex items-center gap-2 text-nexus-cyan text-xl font-bold">
           VISUALIZAÇÃO DO SISTEMA DE MEMÓRIA
           <StatusDot tone={isConnected ? 'success' : 'neutral'} pulse={isConnected} label={isConnected ? 'Ligado' : 'Desligado'} />
         </h2>
@@ -132,7 +132,7 @@ export function MemorySystemVisualization() {
         <button
           onClick={() => setViewMode('graph')}
           className={`px-3 py-1 rounded text-sm transition-colors ${
-            viewMode === 'graph' ? 'bg-cyan-500/30 text-cyan-400' : 'bg-black/30 text-gray-400 hover:text-gray-300'
+            viewMode === 'graph' ? 'bg-cyan-500/30 text-nexus-cyan' : 'bg-black/30 text-gray-400 hover:text-gray-300'
           }`}
         >
           {VIEW_MODE_LABEL_PT.graph}
@@ -140,7 +140,7 @@ export function MemorySystemVisualization() {
         <button
           onClick={() => setViewMode('episodic')}
           className={`px-3 py-1 rounded text-sm transition-colors ${
-            viewMode === 'episodic' ? 'bg-cyan-500/30 text-cyan-400' : 'bg-black/30 text-gray-400 hover:text-gray-300'
+            viewMode === 'episodic' ? 'bg-cyan-500/30 text-nexus-cyan' : 'bg-black/30 text-gray-400 hover:text-gray-300'
           }`}
         >
           {VIEW_MODE_LABEL_PT.episodic}
@@ -148,7 +148,7 @@ export function MemorySystemVisualization() {
         <button
           onClick={() => setViewMode('semantic')}
           className={`px-3 py-1 rounded text-sm transition-colors ${
-            viewMode === 'semantic' ? 'bg-cyan-500/30 text-cyan-400' : 'bg-black/30 text-gray-400 hover:text-gray-300'
+            viewMode === 'semantic' ? 'bg-cyan-500/30 text-nexus-cyan' : 'bg-black/30 text-gray-400 hover:text-gray-300'
           }`}
         >
           {VIEW_MODE_LABEL_PT.semantic}
@@ -208,7 +208,7 @@ function MemoryDetailsPanel({ memory, onClose }: { memory: MemoryNode, onClose: 
   return (
     <div className="absolute bottom-4 right-4 z-20 nx-elev-3 nx-surface nx-glass p-6 rounded-lg !border !border-cyan-500/40 w-80">
       <div className="flex justify-between items-center mb-4">
-        <h3 className="text-cyan-400 font-bold">Nó de Memória</h3>
+        <h3 className="text-nexus-cyan font-bold">Nó de Memória</h3>
         <button onClick={onClose} aria-label="Fechar detalhes" className="text-gray-400 hover:text-white">✕</button>
       </div>
 

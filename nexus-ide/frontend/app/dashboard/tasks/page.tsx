@@ -15,7 +15,6 @@ import {
   RefreshCw,
   XCircle,
 } from "lucide-react";
-import AppShell from "../../../components/layout/AppShell";
 import { apiUrl } from "../../../lib/api";
 import { authenticatedFetch } from "../../../lib/auth";
 
@@ -310,7 +309,7 @@ export default function TasksPage() {
       while (remaining > 0) {
         const limit = Math.min(remaining, TASK_API_MAX_LIMIT);
         const response = await authenticatedFetch(
-          apiUrl(`/api/tasks/list?limit=${limit}&offset=${nextOffset}`),
+          apiUrl(`/api/tasks/list?limit=${limit}&offset=${nextOffset}&include_steps=false`),
           {
             method: "GET",
             cache: "no-store",
@@ -434,8 +433,7 @@ export default function TasksPage() {
     : null;
 
   return (
-    <AppShell title="Tarefas" noPadding>
-      <div className="min-h-full bg-[radial-gradient(ellipse_at_top_left,rgba(124,106,251,0.10),transparent_44%)] px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
+    <div className="min-h-full bg-[radial-gradient(ellipse_at_top_left,rgba(124,106,251,0.10),transparent_44%)] px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
         <div className="mx-auto max-w-7xl">
           <motion.header
             initial={{ opacity: 0, y: 12 }}
@@ -559,15 +557,15 @@ export default function TasksPage() {
 
             {error && (
               <div className="mx-4 mt-4 flex items-start gap-3 rounded-xl border border-rose-400/25 bg-rose-400/[0.07] p-4 sm:mx-5" role="alert">
-                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-300" aria-hidden="true" />
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-nexus-accent4" aria-hidden="true" />
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium text-rose-200">Não foi possível atualizar as tarefas</p>
+                  <p className="text-sm font-medium text-nexus-accent4">Não foi possível atualizar as tarefas</p>
                   <p className="mt-1 break-words text-xs leading-relaxed text-rose-100/70">{error}</p>
                 </div>
                 <button
                   type="button"
                   onClick={() => void loadTasks(undefined, counts.all > 0 ? "manual" : "initial")}
-                  className="shrink-0 rounded-lg px-2 py-1 text-xs font-semibold text-rose-200 transition hover:bg-rose-300/10"
+                  className="shrink-0 rounded-lg px-2 py-1 text-xs font-semibold text-nexus-accent4 transition hover:bg-rose-300/10"
                 >
                   Tentar de novo
                 </button>
@@ -651,7 +649,6 @@ export default function TasksPage() {
           </p>
         </div>
       </div>
-    </AppShell>
   );
 }
 
@@ -671,11 +668,11 @@ function SummaryCard({
   loading: boolean;
 }) {
   const tones = {
-    cyan: "text-cyan-300 bg-cyan-300/10 ring-cyan-300/20",
+    cyan: "text-nexus-cyan bg-cyan-300/10 ring-cyan-300/20",
     violet: "text-violet-300 bg-violet-300/10 ring-violet-300/20",
-    green: "text-emerald-300 bg-emerald-300/10 ring-emerald-300/20",
-    red: "text-rose-300 bg-rose-300/10 ring-rose-300/20",
-    amber: "text-amber-300 bg-amber-300/10 ring-amber-300/20",
+    green: "text-nexus-accent2 bg-emerald-300/10 ring-emerald-300/20",
+    red: "text-nexus-accent4 bg-rose-300/10 ring-rose-300/20",
+    amber: "text-nexus-accent3 bg-amber-300/10 ring-amber-300/20",
   };
 
   return (
@@ -708,11 +705,11 @@ function TaskRow({ task, group, index }: { task: DashboardTask; group: TaskGroup
   const isCancelled = group === "cancelled";
   const hasProgress = !isCompleted && !isCancelled && task.progress !== null && task.progress > 0;
   const statusTone = isPaused
-    ? "border-amber-300/20 bg-amber-300/[0.08] text-amber-200"
+    ? "border-amber-300/20 bg-amber-300/[0.08] text-nexus-accent3"
     : isCompleted
-      ? "border-emerald-300/20 bg-emerald-300/[0.08] text-emerald-200"
+      ? "border-emerald-300/20 bg-emerald-300/[0.08] text-nexus-accent2"
       : isFailed
-        ? "border-rose-300/20 bg-rose-300/[0.08] text-rose-200"
+        ? "border-rose-300/20 bg-rose-300/[0.08] text-nexus-accent4"
         : isCancelled
           ? "border-slate-300/20 bg-slate-300/[0.06] text-slate-300"
           : group === "active"
@@ -764,7 +761,7 @@ function TaskRow({ task, group, index }: { task: DashboardTask; group: TaskGroup
               </span>
             )}
             {task.kind === "plan" && task.approval_status === "approved" && (
-              <span className="text-emerald-300">Plano aprovado</span>
+              <span className="text-nexus-accent2">Plano aprovado</span>
             )}
             {hasProgress && (
               <span className="ml-auto tabular-nums text-nexus-muted">
@@ -783,7 +780,7 @@ function TaskRow({ task, group, index }: { task: DashboardTask; group: TaskGroup
               aria-valuenow={Math.round(task.progress!)}
             >
               <div
-                className={`h-full rounded-full transition-[width] duration-500 ${group === "active" ? "bg-gradient-to-r from-cyan-400 to-nexus-accent" : group === "failed" ? "bg-rose-400" : "bg-violet-400"}`}
+                className={`h-full rounded-full transition-[width] duration-500 ${group === "active" ? "bg-gradient-to-r from-cyan-400 to-nexus-accent" : group === "failed" ? "bg-nexus-accent4" : "bg-violet-400"}`}
                 style={{ width: `${task.progress}%` }}
               />
             </div>
@@ -794,7 +791,7 @@ function TaskRow({ task, group, index }: { task: DashboardTask; group: TaskGroup
             </p>
           )}
           {task.error && (
-            <p className="mt-2 break-words text-xs text-rose-200" role="status">{task.error}</p>
+            <p className="mt-2 break-words text-xs text-nexus-accent4" role="status">{task.error}</p>
           )}
           {task.kind === "plan" && task.steps.length > 0 && (
             <div className="mt-3 border-t border-nexus-border/50 pt-2">
@@ -822,7 +819,7 @@ function TaskRow({ task, group, index }: { task: DashboardTask; group: TaskGroup
                           {step.agent && <span className="text-[10px] text-nexus-accent">{step.agent}</span>}
                         </div>
                         {step.description && <p className="mt-1 text-[11px] text-nexus-muted">{step.description}</p>}
-                        {step.error && <p className="mt-1 text-[11px] text-rose-300">{step.error}</p>}
+                        {step.error && <p className="mt-1 text-[11px] text-nexus-accent4">{step.error}</p>}
                       </div>
                     </li>
                   ))}

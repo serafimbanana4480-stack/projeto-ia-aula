@@ -29,8 +29,8 @@ for _OWNER_MODULE in (
 ):
     import_module(_OWNER_MODULE)
 
-from backend.tools import registry
-from backend.tools.registry import (
+from backend.tools import registry  # noqa: E402 - specs must register before fixture snapshot
+from backend.tools.registry import (  # noqa: E402 - specs must register before fixture snapshot
     ToolSpec,
     autonomous_confirmation_required,
     execute_tool,
@@ -59,6 +59,237 @@ def _register(name: str, handler, **kwargs) -> ToolSpec:
     spec = ToolSpec(name=name, description="test tool", handler=handler, **kwargs)
     register_tool(spec)
     return spec
+
+
+async def test_execute_tool_allows_name_in_caller_allowlist():
+    calls = []
+
+    async def handler(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    _register("allowlist_probe", handler)
+    result = await execute_tool(
+        "allowlist_probe", "allowlist-session", {}, allowed_tools={"allowlist_probe"}
+    )
+
+    assert result["ok"] is True
+    assert len(calls) == 1
+
+
+async def test_execute_tool_rejects_name_outside_caller_allowlist():
+    calls = []
+
+    async def handler(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    _register("allowlist_denied_probe", handler)
+    result = await execute_tool(
+        "allowlist_denied_probe", "allowlist-session", {}, allowed_tools={"other"}
+    )
+
+    assert result["ok"] is False
+    assert result["error_category"] == "tool_not_allowed"
+    assert calls == []
+
+
+async def test_execute_tool_empty_allowlist_denies_every_tool():
+    calls = []
+
+    async def handler(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    _register("allowlist_empty_probe", handler)
+    result = await execute_tool(
+        "allowlist_empty_probe", "allowlist-session", {}, allowed_tools=()
+    )
+
+    assert result["ok"] is False
+    assert result["error_category"] == "tool_not_allowed"
+    assert calls == []
+
+
+async def test_execute_tool_none_allowlist_keeps_unrestricted_dispatch():
+    calls = []
+
+    async def handler(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    _register("allowlist_none_probe", handler)
+    result = await execute_tool(
+        "allowlist_none_probe", "allowlist-session", {}, allowed_tools=None
+    )
+
+    assert result["ok"] is True
+    assert len(calls) == 1
+
+
+async def test_sentinel_cannot_bypass_caller_allowlist():
+    calls = []
+
+    async def handler(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    _register("sentinel_allowlist_probe", handler)
+    result = await execute_tool(
+        "sentinel_allowlist_probe",
+        "allowlist-session",
+        {},
+        sentinel_enforced=True,
+        allowed_tools={"read_file"},
+    )
+
+    assert result["ok"] is False
+    assert result["error_category"] == "tool_not_allowed"
+    assert calls == []
+
+
+async def test_registry_replaces_model_project_path_with_trusted_project(tmp_path):
+    received = []
+    project = tmp_path / "selected-project"
+    project.mkdir()
+
+    async def handler(project_path: str):
+        received.append(project_path)
+        return {"ok": True}
+
+    _register(
+        "trusted_project_path_probe",
+        handler,
+        schema={"type": "object", "properties": {"project_path": {"type": "string"}}},
+    )
+    result = await execute_tool(
+        "trusted_project_path_probe",
+        "project-scope-session",
+        {"project_path": str(tmp_path / "model-selected-project")},
+        project_path=str(project),
+    )
+
+    assert result["ok"] is True
+    assert received == [str(project.resolve())]
+
+
+async def test_registry_constrains_cwd_to_selected_project(tmp_path):
+    received = []
+    project = tmp_path / "selected-project"
+    inside = project / "src"
+    outside = tmp_path / "other-project"
+    inside.mkdir(parents=True)
+    outside.mkdir()
+
+    async def handler(cwd: str):
+        received.append(cwd)
+        return {"ok": True}
+
+    _register(
+        "trusted_cwd_probe",
+        handler,
+        schema={"type": "object", "properties": {"cwd": {"type": "string"}}},
+    )
+    safe = await execute_tool(
+        "trusted_cwd_probe",
+        "cwd-scope-session",
+        {"cwd": "src"},
+        project_path=str(project),
+    )
+    escaped = await execute_tool(
+        "trusted_cwd_probe",
+        "cwd-scope-session",
+        {"cwd": str(outside)},
+        project_path=str(project),
+    )
+    no_context = await execute_tool(
+        "trusted_cwd_probe",
+        "cwd-scope-session",
+        {"cwd": str(outside)},
+    )
+
+    assert safe["ok"] is True
+    assert received == [str(inside.resolve())]
+    assert escaped["ok"] is False
+    assert escaped["error_category"] == "project_scope_denied"
+    assert no_context["ok"] is False
+    assert no_context["error_category"] == "project_scope_denied"
+    assert received == [str(inside.resolve())]
+
+
+async def test_execute_script_registry_confines_script_and_cwd(tmp_path):
+    project = tmp_path / "selected-project"
+    scripts = project / "scripts"
+    outside = tmp_path / "other-project"
+    scripts.mkdir(parents=True)
+    outside.mkdir()
+    script = scripts / "task.py"
+    script.write_text("pass\n", encoding="utf-8")
+    outside_script = outside / "other.py"
+    outside_script.write_text("pass\n", encoding="utf-8")
+    received = []
+
+    async def handler(path: str, cwd: str):
+        received.append((path, cwd))
+        return {"ok": True}
+
+    _register(
+        "execute_script",
+        handler,
+        schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "cwd": {"type": "string"}},
+            "required": ["path"],
+        },
+    )
+    safe = await execute_tool(
+        "execute_script",
+        "script-scope-session",
+        {"path": "scripts/task.py", "cwd": "scripts"},
+        project_path=str(project),
+    )
+    escaped = await execute_tool(
+        "execute_script",
+        "script-scope-session",
+        {"path": str(outside_script)},
+        project_path=str(project),
+    )
+    no_context = await execute_tool(
+        "execute_script", "script-scope-session", {"path": str(script)}
+    )
+
+    assert safe["ok"] is True
+    assert received == [(str(script.resolve()), str(scripts.resolve()))]
+    assert escaped["ok"] is False
+    assert escaped["error_category"] == "project_scope_denied"
+    assert no_context["ok"] is False
+    assert no_context["error_category"] == "project_scope_denied"
+    assert received == [(str(script.resolve()), str(scripts.resolve()))]
+
+
+async def test_browser_tool_uses_trusted_dispatch_session_id():
+    received = []
+
+    async def handler(**kwargs):
+        received.append(kwargs)
+        return {"ok": True}
+
+    _register(
+        "browser_session_probe",
+        handler,
+        schema={"properties": {"session_id": {"type": "string"}}},
+    )
+    result = await execute_tool(
+        "browser_session_probe",
+        "trusted-browser-session",
+        {"session_id": "model-selected-session"},
+        user_id="trusted-user",
+    )
+
+    assert result["ok"] is True
+    assert received == [
+        {"session_id": "trusted-browser-session", "user_id": "trusted-user"}
+    ]
 
 
 
@@ -112,6 +343,48 @@ async def test_circuit_breaker_is_scoped_per_session():
     assert other["error"] == "boom"
 
 
+async def test_circuit_breaker_isolated_between_parallel_plan_tasks():
+    async def boom(**kwargs):
+        raise RuntimeError("boom")
+
+    _register("task_scoped_failure_probe", boom)
+
+    for _ in range(registry.TOOL_MAX_CONSECUTIVE_FAILURES):
+        result = await execute_tool(
+            "task_scoped_failure_probe",
+            "shared-session",
+            {},
+            failure_scope="task-a",
+        )
+        assert result.get("circuit_open") is None
+
+    blocked = await execute_tool(
+        "task_scoped_failure_probe", "shared-session", {}, failure_scope="task-a"
+    )
+    assert blocked.get("circuit_open") is True
+
+    # A sibling task in the same user session still gets its own attempts.
+    sibling = await execute_tool(
+        "task_scoped_failure_probe", "shared-session", {}, failure_scope="task-b"
+    )
+    assert sibling.get("circuit_open") is None
+    assert sibling["error"] == "boom"
+    assert tool_failure_count(
+        "task_scoped_failure_probe", "shared-session", "task-a"
+    ) == registry.TOOL_MAX_CONSECUTIVE_FAILURES
+    assert tool_failure_count(
+        "task_scoped_failure_probe", "shared-session", "task-b"
+    ) == 1
+
+    reset_tool_failures("task-a")
+    assert tool_failure_count(
+        "task_scoped_failure_probe", "shared-session", "task-a"
+    ) == 0
+    assert tool_failure_count(
+        "task_scoped_failure_probe", "shared-session", "task-b"
+    ) == 1
+
+
 async def test_success_resets_failure_counter():
     state = {"fail": True}
 
@@ -161,7 +434,9 @@ async def test_confirmation_gate_runs_before_cache(monkeypatch):
     assert calls == []  # handler never ran, cache never short-circuited
 
 
-async def test_skill_tool_uses_the_trusted_session_not_model_arguments(monkeypatch):
+async def test_skill_tool_rejects_model_selected_project_without_trusted_context(
+    monkeypatch, tmp_path,
+):
     from backend.tools.registry import get_tool
 
     seen: list[dict] = []
@@ -173,16 +448,29 @@ async def test_skill_tool_uses_the_trusted_session_not_model_arguments(monkeypat
     spec = get_tool("list_skills")
     assert spec is not None
     monkeypatch.setattr(spec, "handler", handler)
+    project = tmp_path / "trusted-project"
+    project.mkdir()
 
-    result = await execute_tool(
+    blocked = await execute_tool(
         "list_skills",
         "trusted-session",
         {"project_path": "C:/safe-project", "session_id": "model-controlled-session"},
     )
 
+    assert blocked.get("ok") is False
+    assert blocked.get("error_category") == "project_scope_denied"
+    assert seen == []
+
+    result = await execute_tool(
+        "list_skills",
+        "trusted-session",
+        {"project_path": "C:/safe-project", "session_id": "model-controlled-session"},
+        project_path=str(project),
+    )
+
     assert result.get("ok") is True
     assert seen == [
-        {"project_path": "C:/safe-project", "session_id": "trusted-session"}
+        {"project_path": str(project.resolve()), "session_id": "trusted-session"}
     ]
 
 
@@ -336,7 +624,15 @@ async def test_model_supplied_confirm_does_not_approve_dangerous_tool() -> None:
     discard_confirmation(str(result["confirmation_id"]))
 
 
-async def test_unsupported_handler_argument_fails_without_execution() -> None:
+async def test_unsupported_handler_argument_is_dropped_and_the_call_runs() -> None:
+    """An argument the handler cannot accept must not sink the call.
+
+    138 of the 148 schemas leave ``additionalProperties`` unset (which means
+    "extra keys allowed"), so a model that sent one key the handler does not
+    declare used to get the whole call rejected with ``invalid_args`` and no
+    work done at all. The unknown key is now dropped, the handler still runs
+    with the arguments it does accept, and the dropped key is reported.
+    """
     calls: list[dict] = []
 
     async def handler(path: str):
@@ -350,8 +646,30 @@ async def test_unsupported_handler_argument_fails_without_execution() -> None:
         {"path": "inside-project.txt", "overwite": False},
     )
 
+    assert result.get("ok") is True
+    assert "overwite" in result.get("dropped_arguments", [])
+    # The handler ran, and it did NOT receive the key it cannot accept.
+    assert calls == [{"path": "inside-project.txt"}]
+
+
+async def test_missing_required_handler_argument_is_still_fatal() -> None:
+    """Dropping unknown keys must not weaken the required-argument check."""
+    calls: list[dict] = []
+
+    async def handler(path: str):
+        calls.append({"path": path})
+        return {"ok": True}
+
+    _register("strict_required_args_test", handler)
+    result = await execute_tool(
+        "strict_required_args_test",
+        "session-missing-required-args",
+        {},
+    )
+
+    assert result.get("ok") is False
     assert result.get("error_category") == "invalid_args"
-    assert "overwite" in result.get("unsupported_arguments", [])
+    assert "path" in str(result.get("error"))
     assert calls == []
 
 
@@ -497,41 +815,29 @@ class TestChainedReadOnlyShellIsAutoApproved:
         ) is True
 
 
-#: Tools whose ToolSpec lives in a file outside the fix's editable surface, so
-#: their honest ``risk_level`` could not be corrected here. All four mutate
-#: state (a commit, a pull, a repo init, a clone) and SHOULD be ``high`` like
-#: every other commit tool; until their own files are fixed they are gated by
-#: ``_CONFIRMATION_TOOLS`` alone.
-#:
-#: Follow-up: add ``risk_level="high"`` at
-#:   backend/tools/git_auto_commit.py:1053  (approve_pending_commit)
-#:   backend/tools/git_tools.py:404         (git_pull)
-#:   backend/core/workspace.py:1271         (git_init)
-#:   backend/core/workspace.py:1284         (git_clone)
-_NAME_LIST_ONLY_TOOLS = frozenset(
-    {"approve_pending_commit", "git_pull", "git_init", "git_clone"}
+DECLARED_HIGH_TOOLS = frozenset(
+    {
+        "git_commit_safe",
+        "git_commit_all",
+        "build_skill",
+        "approve_pending_commit",
+        "git_pull",
+        "git_init",
+        "git_clone",
+    }
 )
-
-#: Tools whose ToolSpec was fixed to declare ``risk_level="high"`` as well, so
-#: the gate does not rest on one maintainable list.
-DECLARED_HIGH_TOOLS = frozenset({"git_commit_safe", "git_commit_all", "build_skill"})
 
 
 @pytest.mark.parametrize(
     "tool_name",
-    sorted(DECLARED_HIGH_TOOLS | _NAME_LIST_ONLY_TOOLS),
+    sorted(DECLARED_HIGH_TOOLS),
 )
 def test_state_mutating_tools_require_confirmation(tool_name: str) -> None:
     """P1 (audit 2026-10-06): commits and project writes run with no gate.
 
     The confirmation policy is risk_level high/critical OR membership in
-    _CONFIRMATION_TOOLS. These tools were declared ``low``/``medium`` and were
-    absent from the name list, so a default chat turn executed them unattended.
-
-    The ``risk_level`` itself is deliberately NOT asserted here for
-    _NAME_LIST_ONLY_TOOLS: pinning it to ``"low"`` would make this test fail the
-    moment someone fixes the declarations above. The intended value lives in
-    ``test_name_list_only_tools_declare_their_documented_risk`` instead.
+    _CONFIRMATION_TOOLS. Both checks are asserted so a name-list omission cannot
+    silently lower the approval boundary.
     """
     from backend.tools.registry import get_tool, tool_requires_confirmation
 
@@ -542,36 +848,20 @@ def test_state_mutating_tools_require_confirmation(tool_name: str) -> None:
         f"{tool_name} must be listed in _CONFIRMATION_TOOLS"
     )
     assert tool_requires_confirmation(spec) is True
-    if tool_name in DECLARED_HIGH_TOOLS:
-        assert spec.risk_level == "high", (
-            f"{tool_name} risk_level={spec.risk_level!r} still under-declares its effect"
-        )
+    assert spec.risk_level == "high", (
+        f"{tool_name} risk_level={spec.risk_level!r} still under-declares its effect"
+    )
 
 
 @pytest.mark.parametrize(
     "tool_name",
-    [
-        pytest.param(
-            tool_name,
-            marks=pytest.mark.xfail(
-                strict=False,
-                reason=(
-                    "under-declared risk_level; fix the ToolSpec at the "
-                    "file:line named in _NAME_LIST_ONLY_TOOLS and this becomes an XPASS"
-                ),
-            ),
-        )
-        for tool_name in sorted(_NAME_LIST_ONLY_TOOLS)
-    ],
+    sorted(DECLARED_HIGH_TOOLS),
 )
-def test_name_list_only_tools_declare_their_documented_risk(tool_name: str) -> None:
-    """These four mutate state, so they should declare ``risk_level="high"``.
+def test_state_mutating_tools_declare_high_risk(tool_name: str) -> None:
+    """State-mutating tools declare high risk as a second approval boundary.
 
-    ``xfail(strict=False)`` is the ratchet in the RIGHT direction: the assertion
-    is what the declaration ought to be, so fixing the ToolSpec turns this into
-    an XPASS instead of breaking the suite, and any *other* change to the risk is
-    still reported. The confirmation gate for these tools is asserted strictly in
-    ``test_state_mutating_tools_require_confirmation``.
+    The explicit classification complements the confirmation-name registry so
+    these operations remain gated if that central list is accidentally changed.
     """
     from backend.tools.registry import get_tool
 
@@ -580,7 +870,7 @@ def test_name_list_only_tools_declare_their_documented_risk(tool_name: str) -> N
 
     assert spec.risk_level == "high", (
         f"{tool_name} risk_level={spec.risk_level!r} under-declares a "
-        "state-mutating tool; see the _NAME_LIST_ONLY_TOOLS follow-up list"
+        "state-mutating tool"
     )
 
 

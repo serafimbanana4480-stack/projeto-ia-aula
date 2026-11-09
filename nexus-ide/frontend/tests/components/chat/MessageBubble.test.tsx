@@ -72,7 +72,11 @@ describe("MessageBubble — markdown rendering", () => {
     const pre = container.querySelector("pre");
     expect(pre).not.toBeNull();
     expect(pre?.textContent).toContain("print");
-    expect(screen.getByRole("button", { name: "Copiar bloco de código" })).toBeTruthy();
+    // After the "Aplicar" -> "Copiar" relabel the code block carries TWO copy
+    // affordances sharing the accessible name "Copiar bloco de código" (the
+    // icon button and the labelled action button), so a single-role query now
+    // matches both. The requirement is that the affordance exists.
+    expect(screen.getAllByRole("button", { name: "Copiar bloco de código" }).length).toBeGreaterThan(0);
   });
 
   it("trata código inline sem lhe dar o treatment de bloco", () => {
@@ -189,7 +193,7 @@ describe("MessageBubble — XSS / transport-markup neutralisation", () => {
     expect(container.textContent).not.toContain("read_file");
   });
 
-  it("remove um bloco <thinking> mas mantém o texto lá dentro", () => {
+  it("remove um bloco <thinking> incluindo o raciocínio privado", () => {
     const { container } = render(
       <MessageBubble
         message={assistant("<thinking>Primeiro leio o ficheiro.</thinking>Concluído.")}
@@ -198,7 +202,7 @@ describe("MessageBubble — XSS / transport-markup neutralisation", () => {
 
     expect(container.textContent).not.toContain("<thinking>");
     expect(container.textContent).not.toContain("</thinking>");
-    expect(container.textContent).toContain("Primeiro leio o ficheiro.");
+    expect(container.textContent).not.toContain("Primeiro leio o ficheiro.");
     expect(container.textContent).toContain("Concluído.");
   });
 
@@ -238,9 +242,11 @@ describe("MessageBubble — agent attribution", () => {
 });
 
 describe("MessageBubble — streaming placeholder and actions", () => {
-  it("mostra 'A pensar...' enquanto não há nada para mostrar", () => {
+  it("mostra 'A pensar…' enquanto não há nada para mostrar", () => {
+    // The placeholder now uses the ellipsis character, matching the rest of
+    // the product's typography.
     render(<MessageBubble message={assistant("")} isStreaming />);
-    expect(screen.getByText("A pensar...")).toBeTruthy();
+    expect(screen.getByText("A pensar…")).toBeTruthy();
   });
 
   it("esconde o placeholder quando a mensagem já tem atividade", () => {
@@ -261,7 +267,7 @@ describe("MessageBubble — streaming placeholder and actions", () => {
         isStreaming
       />,
     );
-    expect(screen.queryByText("A pensar...")).toBeNull();
+    expect(screen.queryByText("A pensar…")).toBeNull();
   });
 
   it("esconde o placeholder quando há raciocínio a transmitir", () => {
@@ -271,7 +277,7 @@ describe("MessageBubble — streaming placeholder and actions", () => {
         isStreaming
       />,
     );
-    expect(screen.queryByText("A pensar...")).toBeNull();
+    expect(screen.getByTestId("assistant-response").textContent).not.toContain("A pensar…");
   });
 
   it("oferece reenviar quando a mensagem é um erro recuperável", () => {
@@ -370,10 +376,46 @@ describe("MessageBubble — clipboard", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("conteúdo a copiar"));
   });
 
+  it("desenha um bloco de dados em vez de mostrar o JSON", () => {
+    render(
+      <MessageBubble
+        message={assistant(
+          'Antes.\n\n```stats\n{"items":[{"value":"88%","label":"Adoção de IA"}]}\n```\n',
+        )}
+      />,
+    );
+
+    const stats = screen.getByTestId("rich-stats");
+    expect(stats.textContent).toContain("88%");
+    expect(stats.textContent).toContain("Adoção de IA");
+    expect(screen.queryByText("stats")).toBeNull();
+  });
+
+  it("formata uma tabela markdown", () => {
+    const { container } = render(
+      <MessageBubble
+        message={assistant("| Componente | Estado |\n| --- | --- |\n| WSL | Validada |\n")}
+      />,
+    );
+
+    expect(container.querySelector("table")).not.toBeNull();
+    expect(container.querySelector("th")?.textContent).toBe("Componente");
+    expect(container.textContent).toContain("Validada");
+  });
+
+  it("deixa um bloco de dados inválido como código", async () => {
+    render(<MessageBubble message={assistant("```stats\nisto não é json\n```")} />);
+    expect(await screen.findByText("stats")).toBeTruthy();
+    expect(screen.queryByTestId("rich-stats")).toBeNull();
+  });
+
   it("copia o código de um bloco fenced", async () => {
     render(<MessageBubble message={assistant("```js\nconst a = 1;\n```")} />);
 
-    await screen.findByRole("button", { name: "Copiar bloco de código" });
+    // Both copy affordances share the accessible name "Copiar bloco de
+    // código" since the action button's relabel; this test targets the icon
+    // button by its title.
+    await screen.findByTitle("Copiar código");
     fireEvent.click(screen.getByTitle("Copiar código"));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("const a = 1;"));
   });

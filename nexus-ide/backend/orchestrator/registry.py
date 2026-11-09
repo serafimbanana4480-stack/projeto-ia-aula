@@ -128,7 +128,11 @@ def resolve(registry: AgentRegistry, name: AgentName) -> AgentBase:
     DASHBOARD is invocable for metrics queries.
     """
     if name in registry:
-        return registry[name]
+        agent = registry[name]
+        # p30: some registered roles (e.g. GUARDIAN) are monitors without a
+        # ReAct ``run``; delegating to them crashed with AttributeError.
+        if callable(getattr(agent, "run", None)):
+            return agent
     return registry["CODER"]
 
 

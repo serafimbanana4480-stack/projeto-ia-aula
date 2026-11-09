@@ -10,9 +10,8 @@ Design constraints (derived from reproduced defects, see
   every subscriber with no ``await`` in between, so two concurrent emitters
   can never be resumed in the wrong order. The old bus persisted through
   ``asyncio.to_thread`` before notifying subscribers, which inverted order.
-* **Persistence off the hot path.** Durable writes are drained by a single
-  background writer from an ordered queue, so a slow disk delays durability,
-  never the agent.
+* **Persistence before delivery.** A single background writer appends events
+  in order. Network consumers wait for the append before delivering an event.
 * **Replayable.** A client that refreshes or reconnects resumes with
   ``replay(after_seq=...)`` and receives exactly the events it missed, in
   order, with no duplicates.
@@ -37,6 +36,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _active_run_streams: dict[str, RunEventStream] = {}
+
+
+class JournalWriteError(RuntimeError):
+    """The run journal could not record an event before delivery."""
 
 
 def run_event_journal_path(run_id: str) -> Path | None:
@@ -115,6 +118,11 @@ class RuntimeEventType(StrEnum):
     RECOVERY = "recovery"
     USER_STEERING = "user_steering"
     ADVISOR_NOTE = "advisor_note"
+
+    # A public, already-normalised chat frame from the legacy autonomous lane.
+    # It is journalled once per frame so replay and live delivery use exactly
+    # the same contiguous run sequence, including frames split from one token.
+    CHAT_FRAME = "chat_frame"
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +225,9 @@ class RunEventStream:
         self._journal_path = journal_path
         self._journal_queue: asyncio.Queue[RuntimeEvent | None] | None = None
         self._journal_task: asyncio.Task[None] | None = None
+        self._journal_progress = asyncio.Event()
+        self._journal_written_seq = 0
+        self._journal_error: Exception | None = None
         _active_run_streams[run_id] = self
 
     # -- emission ------------------------------------------------------
@@ -294,6 +305,7 @@ class RunEventStream:
         highest = after_seq
         try:
             for event in backlog:
+                await self.wait_persisted(event.seq)
                 highest = event.seq
                 yield event
             if self._closed:
@@ -304,6 +316,7 @@ class RunEventStream:
                     break
                 if event.seq <= highest:
                     continue  # already delivered from the backlog
+                await self.wait_persisted(event.seq)
                 highest = event.seq
                 yield event
         finally:
@@ -327,23 +340,49 @@ class RunEventStream:
             _offer(self._journal_queue, event)
         self._journal_task = asyncio.create_task(self._drain_journal())
 
+    async def wait_persisted(self, seq: int) -> None:
+        """Wait until an event's journal append completes, or report a write failure.
+
+        In-memory streams intentionally configured without a journal keep their
+        existing behaviour. This confirms a closed file append for process
+        recovery; it does not claim an fsync or power-loss guarantee.
+        """
+        if self._journal_path is None:
+            return
+        if seq < 1 or seq > self._seq:
+            raise ValueError("sequence does not belong to this stream")
+        while self._journal_written_seq < seq:
+            if self._journal_error is not None:
+                raise JournalWriteError("Could not write the run journal") from self._journal_error
+            if self._journal_task is None:
+                raise JournalWriteError("The run journal has not been started")
+            self._journal_progress.clear()
+            await self._journal_progress.wait()
+
     async def _drain_journal(self) -> None:
         assert self._journal_path is not None and self._journal_queue is not None
         path = self._journal_path
         try:
             await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
-        except OSError:
+        except OSError as exc:
             logger.exception("Could not create journal directory for %s", path)
+            self._journal_error = exc
+            self._journal_progress.set()
             return
         while True:
             event = await self._journal_queue.get()
             if event is None:
                 return
-            line = json.dumps(event.to_sse(), ensure_ascii=False, default=str)
             try:
+                line = json.dumps(event.to_sse(), ensure_ascii=False, default=str)
                 await asyncio.to_thread(_append_line, path, line)
-            except OSError:
+            except Exception as exc:  # noqa: BLE001 - propagate failure to waiting consumers
                 logger.exception("Journal append failed for run %s", self.run_id)
+                self._journal_error = exc
+                self._journal_progress.set()
+                return
+            self._journal_written_seq = event.seq
+            self._journal_progress.set()
 
     async def aclose(self) -> None:
         """Close the stream, flush the journal, and release subscribers."""
@@ -423,6 +462,7 @@ __all__ = [
     "RunEventStream",
     "RuntimeEvent",
     "RuntimeEventType",
+    "JournalWriteError",
     "dedupe_and_order",
     "get_active_run_event_stream",
     "run_event_journal_path",

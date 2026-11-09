@@ -300,6 +300,10 @@ class AdvisorRuntime:
 
     # ── delivery ─────────────────────────────────────────────────────────
     def _maybe_switch_model(self, desired: str | None) -> bool:
+        # A concrete model chosen in the composer is a user decision, not a
+        # tier preference the advisor can silently replace mid-run.
+        if self._agent_context.get("_model_pinned_by_user"):
+            return False
         if not desired or desired == self.desired_model:
             return False
         current = str(self._agent_context.get("_model_override") or "")

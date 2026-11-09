@@ -98,12 +98,12 @@ const MODE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = 
 
 const MODE_COLORS: Record<string, string> = {
   architecture: "text-violet-400",
-  investigation: "text-sky-400",
-  implementation: "text-emerald-400",
-  review: "text-amber-400",
+  investigation: "text-nexus-cyan",
+  implementation: "text-nexus-accent2",
+  review: "text-nexus-accent3",
   bugfix: "text-red-400",
   planning: "text-indigo-400",
-  research: "text-cyan-400",
+  research: "text-nexus-cyan",
 };
 
 const MODE_GRADIENTS: Record<string, string> = {
@@ -215,13 +215,13 @@ const FALLBACK_AGENTS: AgentSpec[] = [
 
 const STATE_COLORS: Record<string, string> = {
   proposed: "text-slate-400",
-  discussed: "text-sky-400",
-  validated: "text-amber-400",
-  approved: "text-emerald-400",
+  discussed: "text-nexus-cyan",
+  validated: "text-nexus-accent3",
+  approved: "text-nexus-accent2",
   implementing: "text-blue-400",
-  implemented: "text-emerald-400",
-  reviewing: "text-amber-400",
-  completed: "text-emerald-400",
+  implemented: "text-nexus-accent2",
+  reviewing: "text-nexus-accent3",
+  completed: "text-nexus-accent2",
   rejected: "text-red-400",
   failed: "text-red-400",
 };
@@ -709,7 +709,7 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat, projectPath = 
                     aria-pressed={active}
                     className={`rounded-md border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide transition-colors ${
                       active
-                        ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                        ? "border-emerald-500/40 bg-emerald-500/15 text-nexus-accent2"
                         : "border-nexus-border bg-nexus-card/40 text-nexus-muted hover:border-nexus-accent/30 hover:text-nexus-text"
                     }`}
                   >
@@ -822,7 +822,7 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat, projectPath = 
                         </div>
                         <div className="ml-1 mt-1 text-nexus-muted">{p.description?.slice(0, 200)}</div>
                         {p.evidence_refs?.length > 0 && (
-                          <div className="ml-1 mt-1 text-[10px] text-emerald-400">
+                          <div className="ml-1 mt-1 text-[10px] text-nexus-accent2">
                             Evidence: {p.evidence_refs.slice(0, 3).join(", ")}
                             {p.evidence_refs.length > 3 && ` (+${p.evidence_refs.length - 3} more)`}
                           </div>
@@ -833,7 +833,7 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat, projectPath = 
                       <div key={r.review_id} className="mb-2 rounded border border-amber-500/20 bg-amber-500/5 p-2">
                         <div className="flex items-center gap-2 font-mono text-[10px]">
                           {r.passed ? (
-                            <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                            <CheckCircle2 className="h-3 w-3 text-nexus-accent2" />
                           ) : (
                             <XCircle className="h-3 w-3 text-red-400" />
                           )}
@@ -865,10 +865,10 @@ export default function SwarmPanel({ sessionId, onInsertIntoChat, projectPath = 
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-nexus-muted">
                     Final quality scores
                   </div>
-                  <ScoreBar value={result.scores?.quality ?? 0} label="Quality" color="bg-emerald-500" />
+                  <ScoreBar value={result.scores?.quality ?? 0} label="Quality" color="bg-nexus-accent2" />
                   <ScoreBar value={result.scores?.confidence ?? 0} label="Confidence" color="bg-sky-500" />
                   <ScoreBar value={result.scores?.risk ?? 0} label="Risk" color="bg-red-500" />
-                  <ScoreBar value={result.scores?.complexity ?? 0} label="Complexity" color="bg-amber-500" />
+                  <ScoreBar value={result.scores?.complexity ?? 0} label="Complexity" color="bg-nexus-accent3" />
                   {result.evidence_used?.length > 0 && (
                     <div className="mt-2 border-t border-nexus-border/40 pt-2 text-[10px]">
                       <div className="mb-1 text-nexus-muted">

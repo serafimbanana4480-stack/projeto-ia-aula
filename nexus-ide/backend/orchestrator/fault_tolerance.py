@@ -506,7 +506,7 @@ class FaultToleranceSystem:
         """Check system resource health."""
         try:
             import psutil
-            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_percent = await asyncio.to_thread(psutil.cpu_percent, 1)
             return cpu_percent < 80.0  # Less than 80% CPU usage
         except Exception as e:
             logger.error("Resource health check failed: %s", e)

@@ -16,7 +16,13 @@ from typing import Any
 import httpx
 
 from backend.config.settings import get_settings
-from backend.llm.openai_provider import _system_verify_context
+from backend.llm.openai_provider import (
+    ProviderHTTPStatusError,
+    _system_verify_context,
+    retry_delay,
+)
+from backend.llm.tool_calls import render_tool_call
+from backend.runtime.reasoning import REASONING_SINK_OPTION, deliver_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +64,48 @@ class KimiProvider:
             timeout=httpx.Timeout(10.0, connect=10.0, read=60.0, write=10.0),
             verify=_system_verify_context(),
         )
+        # Internal — set after each successful chat call
+        self._last_usage: dict[str, int] = {}
+        # The provider's own stop reason ("stop", "length", "tool_calls").
+        # The runtime reads it to detect a token-limit truncation.
+        self.last_finish_reason: str = ""
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Return usage from the most recent call."""
+        return dict(self._last_usage)
+
     def resolve_model(self, model: str) -> str:
         """Resolve a model alias to the actual Kimi model name."""
         return self.MODEL_ALIASES.get(model, model)
+
+    @staticmethod
+    def _extract_usage(data: Any) -> dict[str, int]:
+        """Extract token counts from an OpenAI-compatible Kimi response."""
+        if not isinstance(data, dict):
+            return {}
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            return {}
+        details = usage.get("completion_tokens_details")
+        reasoning = 0
+        if isinstance(details, dict):
+            for key in ("reasoning_tokens", "reasoning"):
+                value = details.get(key)
+                if isinstance(value, int | float) and value > 0:
+                    reasoning = int(value)
+                    break
+        extracted = {
+            "input_tokens": usage.get("prompt_tokens", 0) or 0,
+            "output_tokens": usage.get("completion_tokens", 0) or 0,
+            "total_tokens": usage.get("total_tokens", 0) or 0,
+        }
+        if reasoning:
+            extracted["reasoning_tokens"] = reasoning
+        return extracted
 
     async def _post_with_retry(
         self,
@@ -72,18 +113,29 @@ class KimiProvider:
         json_payload: dict[str, Any],
         max_retries: int = 3,
     ) -> httpx.Response:
-        """POST with exponential backoff retry for transient errors."""
+        """POST with exponential backoff retry for transient errors.
+
+        A provider that answers with ``Retry-After`` knows when it will be
+        available again; honouring it beats a fixed backoff that hammers an
+        endpoint which explicitly asked for a pause.
+        """
         last_exc: Exception | None = None
         for attempt in range(1, max_retries + 1):
             try:
                 resp = await self._client.post(path, json=json_payload)
                 if resp.status_code < 500:
                     return resp
-                last_exc = RuntimeError(f"Kimi API error {resp.status_code}: {resp.text}")
+                last_exc = ProviderHTTPStatusError(
+                    resp.status_code,
+                    resp.text,
+                    label="Kimi API",
+                    headers=getattr(resp, "headers", None),
+                )
+                wait = retry_delay(resp, attempt)
             except (httpx.NetworkError, httpx.TimeoutException) as exc:
                 last_exc = exc
-            if attempt < max_retries:
                 wait = 2 ** (attempt - 1)
+            if attempt < max_retries:
                 logger.warning(
                     "Kimi request failed (attempt %d/%d), retrying in %.1fs: %s",
                     attempt,
@@ -103,6 +155,8 @@ class KimiProvider:
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         """Stream chat completion from Kimi API."""
+        self._last_usage = {}
+        self.last_finish_reason = ""
         payload: dict[str, Any] = {
             "model": self.resolve_model(model),
             "messages": messages,
@@ -118,10 +172,18 @@ class KimiProvider:
             ):
                 if key in options:
                     payload[key] = options[key]
+            # Native function calling: Kimi is OpenAI-compatible, so the
+            # neutral tool schema is forwarded as-is.
+            for key in ("tools", "tool_choice", "parallel_tool_calls"):
+                if options.get(key):
+                    payload[key] = options[key]
 
         max_retries = 3
         last_exc: Exception | None = None
         emitted_output = False
+        emitted_tool_call = False
+        # Native tool-call fragments, keyed by their stream index.
+        tool_calls_acc: dict[int, dict[str, str]] = {}
         for attempt in range(1, max_retries + 1):
             try:
                 async with self._client.stream(
@@ -130,7 +192,7 @@ class KimiProvider:
                     if resp.status_code != 200:
                         text = await resp.aread()
                         if resp.status_code >= 500 and attempt < max_retries:
-                            wait = 2 ** (attempt - 1)
+                            wait = retry_delay(resp, attempt)
                             logger.warning(
                                 "Kimi stream error %d (attempt %d/%d), retrying in %.1fs",
                                 resp.status_code,
@@ -140,28 +202,76 @@ class KimiProvider:
                             )
                             await asyncio.sleep(wait)
                             continue
-                        raise RuntimeError(f"Kimi API error {resp.status_code}: {text.decode()}")
+                        raise ProviderHTTPStatusError(
+                            resp.status_code,
+                            text.decode(),
+                            label="Kimi API",
+                            headers=getattr(resp, "headers", None),
+                        )
                     async for line in resp.aiter_lines():
                         line = line.strip()
                         if not line:
                             continue
-                        if line == "data: [DONE]":
+                        if line in ("data: [DONE]", "data:[DONE]"):
                             break
-                        if line.startswith("data: "):
-                            try:
-                                data = json.loads(line[6:])
-                                delta = data.get("choices", [{}])[0].get("delta", {})
-                                content = delta.get("content", "")
-                                if content:
-                                    emitted_output = True
-                                    yield content
-                            except (json.JSONDecodeError, IndexError):
+                        # The SSE spec allows ``data:`` with or without the
+                        # space after the colon.
+                        if not line.startswith("data:"):
+                            continue
+                        try:
+                            data = json.loads(line[5:].lstrip())
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(data, dict):
+                            continue
+                        choices = data.get("choices", [])
+                        choice = (
+                            choices[0] if choices and isinstance(choices[0], dict) else {}
+                        )
+                        finish_reason = choice.get("finish_reason")
+                        if finish_reason:
+                            self.last_finish_reason = str(finish_reason).strip().lower()
+                        usage = data.get("usage")
+                        if usage:
+                            self._last_usage.update(self._extract_usage(data))
+                        # ``delta.reasoning_content`` is Kimi's own approach
+                        # text; it belongs in the reasoning panel and never in
+                        # the answer.
+                        parsed = deliver_reasoning(
+                            (options or {}).get(REASONING_SINK_OPTION), "openai", data
+                        )
+                        if parsed.usage:
+                            self._last_usage.update(parsed.usage)
+                        content = parsed.content
+                        if content:
+                            emitted_output = True
+                            yield content
+                        for frag in parsed.tool_calls:
+                            if not isinstance(frag, dict):
                                 continue
-                    if emitted_output:
-                        return
-                    # A successful HTTP response without emitted assistant
-                    # text must not be reported as a blank successful answer.
-                    raise RuntimeError("Kimi stream completed without text content")
+                            idx = frag.get("index", 0) or 0
+                            slot = tool_calls_acc.setdefault(
+                                idx, {"name": "", "arguments": ""}
+                            )
+                            fn = frag.get("function") or {}
+                            if fn.get("name"):
+                                slot["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                slot["arguments"] += fn["arguments"]
+                # The stream ended without an error: fold Kimi's native tool
+                # calls back into the explicit ``<tool_call>`` wrapper the
+                # agent loop parses and enforces.
+                for _idx, slot in sorted(tool_calls_acc.items()):
+                    name = (slot.get("name") or "").strip()
+                    if not name:
+                        continue
+                    emitted_tool_call = True
+                    yield "\n" + render_tool_call(name, slot.get("arguments") or "")
+                if emitted_output or emitted_tool_call:
+                    return
+                # A successful HTTP response without emitted assistant
+                # text must not be reported as a blank successful answer.
+                raise RuntimeError("Kimi stream completed without text content")
             except (httpx.NetworkError, httpx.TimeoutException) as exc:
                 # Once text is visible to the user, restarting would append a
                 # second response to an already-partial answer.
@@ -191,6 +301,7 @@ class KimiProvider:
         **kwargs: Any,
     ) -> str:
         """Non-streaming chat completion."""
+        self.last_finish_reason = ""
         payload: dict[str, Any] = {
             "model": self.resolve_model(model),
             "messages": messages,
@@ -200,13 +311,38 @@ class KimiProvider:
             for key in ("temperature", "max_tokens", "top_p"):
                 if key in options:
                     payload[key] = options[key]
+            for key in ("tools", "tool_choice", "parallel_tool_calls"):
+                if options.get(key):
+                    payload[key] = options[key]
 
         resp = await self._post_with_retry("/chat/completions", payload)
         if resp.status_code != 200:
-            raise RuntimeError(f"Kimi API error {resp.status_code}: {resp.text}")
+            raise ProviderHTTPStatusError(
+                resp.status_code,
+                resp.text,
+                label="Kimi API",
+                headers=getattr(resp, "headers", None),
+            )
 
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        self._last_usage = self._extract_usage(data)
+        choices = data.get("choices") or []
+        choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+        finish_reason = choice.get("finish_reason")
+        if finish_reason:
+            self.last_finish_reason = str(finish_reason).strip().lower()
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        rendered: list[str] = []
+        for call in message.get("tool_calls") or ():
+            fn = (call or {}).get("function") or {}
+            name = (fn.get("name") or "").strip()
+            if not name:
+                continue
+            rendered.append(render_tool_call(name, fn.get("arguments")))
+        if rendered:
+            content = (content + "\n" + "\n".join(rendered)).strip()
+        return content
 
     async def embed(
         self,
@@ -218,7 +354,12 @@ class KimiProvider:
         payload = {"model": self.resolve_model(model), "input": texts}
         resp = await self._post_with_retry("/embeddings", payload)
         if resp.status_code != 200:
-            raise RuntimeError(f"Kimi API error {resp.status_code}: {resp.text}")
+            raise ProviderHTTPStatusError(
+                resp.status_code,
+                resp.text,
+                label="Kimi API",
+                headers=getattr(resp, "headers", None),
+            )
 
         data = resp.json()
         return [item["embedding"] for item in data["data"]]

@@ -1,0 +1,18 @@
+{
+  "model": "nexus-local-validation",
+  "duration_seconds": 181.1,
+  "timed_out": true,
+  "calls": [
+    "read_file",
+    "read_file",
+    "spawn_task",
+    "spawn_task",
+    "run_tests"
+  ],
+  "children_started": 0,
+  "text_frames": 0,
+  "terminal_errors": [],
+  "module_changed": false,
+  "project_copy": "C:\\Users\\rodri\\AppData\\Local\\Temp\\nexus-acceptance-1a35f6c0c1864d01b93303c0f875d731\\test_local_model_agentic_accep0\\nexus-module-copy",
+  "model_server": "http://127.0.0.1:1239/v1"
+}

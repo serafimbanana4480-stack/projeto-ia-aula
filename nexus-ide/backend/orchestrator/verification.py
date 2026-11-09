@@ -79,6 +79,8 @@ __all__ = [
     "_extract_inconclusive_verifications",
     "_create_fix_tasks",
     "_create_final_review_task",
+    "_strip_verdict_template",
+    "_last_verdict",
 ]
 
 
@@ -116,6 +118,64 @@ _VERDICT_RE = re.compile(
     re.IGNORECASE,
 )
 _PASSING_VERDICTS = {"pass", "passed", "ok", "approve", "approved", "aprovado", "clean"}
+
+# ---------------------------------------------------------------------------
+# The verification prompt is part of the output we have to read
+# ---------------------------------------------------------------------------
+#
+# The task prompt we send the DEBUGGER asks it to answer with a literal
+# template::
+#
+#     Answer with a final line in exactly this format:
+#     VERDICT: PASS   (if no problems were found)
+#     VERDICT: FAIL   (if problems were found, then list them)
+#
+# An agent that quotes the instructions back and *then* reports its real
+# verdict therefore carries TWO verdict markers.  The first one — the
+# template's ``PASS`` — used to win, so a real defect was read as a pass:
+# no fix task was created and the plan reported success.
+#
+# Two rules fix it:
+#
+# 1. the template lines are removed before the scan (they are instructions,
+#    not the agent's answer);
+# 2. the LAST verdict marker wins — the agent's own answer comes after the
+#    template it echoed.
+_VERDICT_TEMPLATE_RE = re.compile(
+    r"\bverdict\s*[:=]\s*(?:pass(?:ed)?|fail(?:ed)?)\b[ \t]*\([^)]{0,160}\)",
+    re.IGNORECASE,
+)
+_VERDICT_TEMPLATE_LEADIN_RE = re.compile(
+    r"answer\s+with\s+a\s+final\s+line[^\n]{0,80}?:",
+    re.IGNORECASE,
+)
+
+
+def _strip_verdict_template(text: str) -> str:
+    """Remove the echoed verification template from *text*.
+
+    Only the *template* lines are removed: a bare ``VERDICT: PASS`` /
+    ``VERDICT: FAIL`` line is the agent's own answer and must survive.  A
+    template line is recognised by its explanatory parenthetical
+    (``(if no problems were found)``), which a real verdict never has.
+    """
+    if not text:
+        return text
+    cleaned = _VERDICT_TEMPLATE_LEADIN_RE.sub(" ", text)
+    cleaned = _VERDICT_TEMPLATE_RE.sub(" ", cleaned)
+    return cleaned
+
+
+def _last_verdict(text: str) -> re.Match[str] | None:
+    """Return the LAST verdict marker in *text* (``None`` when there is none).
+
+    The last one wins because the agent's own answer comes after anything it
+    echoed back from the instructions.
+    """
+    last: re.Match[str] | None = None
+    for match in _VERDICT_RE.finditer(text or ""):
+        last = match
+    return last
 
 # Word-boundary matches only. Note the absence of bare "fix"/"missing":
 # those appear in our own prompt text and in benign prose far too often to
@@ -226,6 +286,32 @@ _OPENROUTER_FREE_TIER_DAILY_LIMIT_RE = re.compile(
 )
 
 
+_TOOL_CALL_BLOCK_RE = re.compile(
+    r"<\s*/?\s*tool_call\s*>|```\s*tool\b.*?(?:```|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_tool_calls(text: str) -> str:
+    """Drop the model's tool-call syntax from text before it is read as prose.
+
+    A tool call is not a finding, but its *arguments* are prose to the issue
+    scanner: ``run_tests(..., fail_fast=true)`` contains the word "fail", so
+    every verification whose model emitted a tool call was read as reporting a
+    defect and spawned a fix task — forever, because the fix tasks verified
+    again and hit the same false positive (the 2-round verification exhaustion
+    of the engine lane). The tag itself and its fenced form are removed with
+    everything between them.
+    """
+    if not text:
+        return text
+    cleaned = _TOOL_CALL_BLOCK_RE.sub(" ", text)
+    # The opening/closing tag pair was collapsed above; anything that looked
+    # like a call but had no closing tag leaves a dangling argument blob, so
+    # drop from the first surviving tag to the end of its line.
+    return cleaned
+
+
 def _denoise(output: str, task_name: str = "") -> str:
     """Remove echoed instructions and the task's own name from ``output``.
 
@@ -234,6 +320,9 @@ def _denoise(output: str, task_name: str = "") -> str:
     """
     text = output or ""
     text = _ECHOED_PROMPT_RE.sub(" ", text)
+    # The verification template carries a literal "VERDICT: PASS" line. It
+    # must never be read as the agent's answer.
+    text = _strip_verdict_template(text)
     if task_name:
         text = text.replace(task_name, " ")
         stripped = strip_cycle_prefixes(task_name)
@@ -280,14 +369,14 @@ def output_is_inconclusive(output: str, task_name: str = "") -> bool:
     """
     if not output or not output.strip():
         return False
-    cleaned = _denoise(output, task_name)
+    cleaned = _denoise(_strip_tool_calls(output), task_name)
     if not _INFRA_FAILURE_RE.search(cleaned):
         return False
     # Infrastructure noise only counts as inconclusive when nothing else in the
     # output stands on its own: an agent that hit one 429, retried and then
     # reported a real defect has still verified something.
     remainder = _strip_infra_failures(cleaned).strip()
-    if _VERDICT_RE.search(remainder):
+    if _last_verdict(remainder):
         return False
     if _OPENROUTER_FREE_TIER_DAILY_LIMIT_RE.search(cleaned):
         return True
@@ -302,6 +391,14 @@ def output_reports_issues(output: str, task_name: str = "") -> bool:
     treated as a finding; an agent that produced nothing has not found
     anything.
 
+    Two rules make the verdict marker trustworthy:
+
+    * the echoed verification template is stripped first (it contains a
+      literal ``VERDICT: PASS`` line that is an instruction, not an
+      answer);
+    * the LAST verdict marker wins, so an agent that quotes the template
+      and then reports ``VERDICT: FAIL`` is read as a failure.
+
     Sentences describing our own plumbing failing are removed before the scan.
     Without that, "Autonomous execution stopped before 'run_shell'" matched
     ``\\bfail...\\b``-style patterns and spawned a fix task for a permission
@@ -310,9 +407,9 @@ def output_reports_issues(output: str, task_name: str = "") -> bool:
     if not output or not output.strip():
         return False
 
-    cleaned = _denoise(output, task_name)
+    cleaned = _denoise(_strip_tool_calls(output), task_name)
 
-    verdict_match = _VERDICT_RE.search(cleaned)
+    verdict_match = _last_verdict(cleaned)
     if verdict_match:
         verdict = verdict_match.group("verdict").lower()
         return verdict not in _PASSING_VERDICTS

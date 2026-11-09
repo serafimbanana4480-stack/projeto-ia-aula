@@ -90,7 +90,7 @@ function ApprovalCard({ req, onAction }: { req: ApprovalRequest; onAction: (id: 
         <span className="flex items-center gap-1">
           Confidence:
           {req.confidence != null ? (
-            <span className={`font-bold ${req.confidence > 0.8 ? "text-emerald-400" : req.confidence > 0.5 ? "text-amber-400" : "text-red-400"}`}>
+            <span className={`font-bold ${req.confidence > 0.8 ? "text-nexus-accent2" : req.confidence > 0.5 ? "text-nexus-accent3" : "text-red-400"}`}>
               {(req.confidence * 100).toFixed(0)}%
             </span>
           ) : (
@@ -102,7 +102,7 @@ function ApprovalCard({ req, onAction }: { req: ApprovalRequest; onAction: (id: 
       <div className="flex items-center gap-2 pt-3 border-t border-slate-700/30">
         <button
           onClick={() => onAction(req.id, "approve")}
-          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition-colors"
+          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-nexus-accent2 text-white text-[11px] font-bold transition-colors"
         >
           <CheckCircle2 size={13} /> Approve
         </button>
@@ -235,7 +235,7 @@ export default function HumanInTheLoopPage() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-amber-500/20 to-orange-500/20 border border-amber-500/30 flex items-center justify-center">
-              <UserCheck size={22} className="text-amber-400" />
+              <UserCheck size={22} className="text-nexus-accent3" />
             </div>
             <div>
               <h1 className="text-xl font-bold text-slate-100">Human-in-the-Loop</h1>
@@ -244,7 +244,7 @@ export default function HumanInTheLoopPage() {
           </div>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/60 border border-slate-700/60">
-              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+              <span className="w-2 h-2 rounded-full bg-nexus-accent3 animate-pulse" />
               <span className="text-[11px] text-slate-300">{pending.length} pending requests</span>
             </div>
           </div>
@@ -280,7 +280,7 @@ export default function HumanInTheLoopPage() {
           {/* Pending approvals */}
           <div className="xl:col-span-2 space-y-3">
             <h2 className="text-[11px] uppercase tracking-widest font-bold text-slate-400 flex items-center gap-2">
-              <Shield size={12} className="text-amber-400" />
+              <Shield size={12} className="text-nexus-accent3" />
               Pending Approvals
             </h2>
               <AnimatePresence mode="popLayout">
@@ -317,7 +317,7 @@ export default function HumanInTheLoopPage() {
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-[11px] font-semibold text-slate-300">{req.agentName}</span>
                         <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                          action === "approve" ? "bg-emerald-500/20 text-emerald-300" :
+                          action === "approve" ? "bg-emerald-500/20 text-nexus-accent2" :
                           action === "reject" ? "bg-red-500/20 text-red-300" :
                           "bg-blue-500/20 text-blue-300"
                         }`}>

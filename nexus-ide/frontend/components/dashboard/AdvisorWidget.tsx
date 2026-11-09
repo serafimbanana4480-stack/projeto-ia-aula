@@ -56,8 +56,8 @@ interface AdvisorStatus {
 const POLL_MS = 15_000;
 
 const STATE_TONE: Record<string, string> = {
-  active: "text-emerald-400",
-  paused: "text-amber-400",
+  active: "text-nexus-accent2",
+  paused: "text-nexus-accent3",
   completed: "text-nexus-accent-bright",
   inactive: "text-nexus-faint",
 };
@@ -116,13 +116,13 @@ export default function AdvisorWidget() {
             <span
               className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider shadow-rim ${
                 status.active
-                  ? "bg-[rgba(245,158,11,0.12)] text-amber-400"
+                  ? "bg-[rgba(245,158,11,0.12)] text-nexus-accent3"
                   : "bg-[rgba(148,163,184,0.12)] text-nexus-muted"
               }`}
             >
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
-                  status.active ? "bg-amber-400" : "bg-nexus-faint"
+                  status.active ? "bg-nexus-accent3" : "bg-nexus-faint"
                 }`}
               />
               {status.active ? "Configurado" : "Desativado"}

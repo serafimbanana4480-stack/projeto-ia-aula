@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { apiUrl } from "../lib/api";
+import { authenticatedFetch } from "../lib/auth";
 
 export interface MemoryChunk {
   id: string;
@@ -110,7 +111,10 @@ export const useMemoryStore = create<MemoryStore>((set) => ({
   fetchMemoryStats: async () => {
     set({ isLoading: true, error: null });
     try {
-      const res = await fetch(apiUrl("/api/memory/stats"));
+      // The endpoint is behind the default-deny middleware, so it needs the
+      // bearer token. A bare ``fetch`` here answered 401 and the memory
+      // widget on /nexus never showed a number.
+      const res = await authenticatedFetch(apiUrl("/api/memory/stats"));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const payload: unknown = await res.json();
       if (!isRecord(payload)) {

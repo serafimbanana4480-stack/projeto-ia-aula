@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from backend.tools.interpreters import scrubbed_environment
+
 logger = logging.getLogger(__name__)
 
 # Lazy imports to avoid circular deps at module load time
@@ -296,14 +298,14 @@ class SandboxExecutor:
             # Write code file
             ext = {"python": "py", "javascript": "js", "bash": "sh"}.get(language, "txt")
             code_file = tmp / f"code.{ext}"
-            code_file.write_text(code)
+            code_file.write_text(code, encoding="utf-8")  # p36: docker python reads UTF-8
 
             # Write additional files
             if files:
                 for fname, fcontent in files.items():
                     fpath = tmp / fname
                     fpath.parent.mkdir(parents=True, exist_ok=True)
-                    fpath.write_text(fcontent)
+                    fpath.write_text(fcontent, encoding="utf-8")  # p36
 
             # Build docker command
             cmd = [
@@ -463,6 +465,14 @@ class SandboxExecutor:
                 # Linux: set memory limit via environment for child process
                 env["PYTHONMEMORY"] = str(self._config.max_memory_mb * 1024 * 1024)
 
+            # The child must never inherit the server environment: it holds
+            # the provider API keys and the signing secrets, and the code
+            # executed here is model-supplied.  Only the scrubbed allow-list
+            # crosses the process boundary; the explicit, non-secret
+            # additions above are layered on top of it.
+            child_env = scrubbed_environment()
+            child_env.update(env)
+
             # Use Popen so a timeout can terminate exactly this child process.
             # Calling taskkill with /IM would also kill the pytest runner and
             # unrelated Python processes on Windows.
@@ -471,7 +481,7 @@ class SandboxExecutor:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=cwd or tempfile.gettempdir(),
-                env={**os.environ, **env} if env else None,
+                env=child_env,
                 creationflags=(
                     subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
                 ),

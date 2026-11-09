@@ -28,8 +28,11 @@ BRIEF_NAME = "project-state.md"
 MAX_CONTEXT_CHARS = 4_000
 MAX_EVENTS = 1_000
 MAX_RETRIEVED_EVENTS = 3
+MAX_HISTORY_ITEMS_PER_OWNER = 8
+MAX_HISTORY_ITEMS_TOTAL = 64
 RECOVERY_AFTER_SECONDS = 10 * 60
 DECISION_REVIEW_AFTER_SECONDS = 90 * 24 * 60 * 60
+CONTINUITY_STATE_SCHEMA_VERSION = 3
 
 WRITE_TOOLS = frozenset(
     {
@@ -247,7 +250,7 @@ def _changed_since(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
 
 def _default_state(project_path: str) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": CONTINUITY_STATE_SCHEMA_VERSION,
         "project_path": project_path,
         "project_goal": "",
         "current_task": None,
@@ -270,16 +273,59 @@ def _compact_task(task: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _task_timestamp(task: dict[str, Any]) -> float:
+    try:
+        return float(task.get("updated_at") or task.get("started_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _owner_key(owner_id: str) -> str:
+    cleaned = str(owner_id or "").strip()
+    return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:24] if cleaned else ""
+
+
+def _owned_history(items: Any, owner_key: str) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    return [
+        item for item in items
+        if isinstance(item, dict) and str(item.get("owner_key") or "") == owner_key
+    ]
+
+
+def _upsert_owned_history(items: Any, item: dict[str, Any]) -> list[dict[str, Any]]:
+    existing = [value for value in items if isinstance(value, dict)] if isinstance(items, list) else []
+    owner_key = str(item.get("owner_key") or "")
+    run_id = str(item.get("run_id") or "")
+    own = [
+        item,
+        *(value for value in existing
+          if str(value.get("owner_key") or "") == owner_key
+          and str(value.get("run_id") or "") != run_id),
+    ][:MAX_HISTORY_ITEMS_PER_OWNER]
+    others = [value for value in existing if str(value.get("owner_key") or "") != owner_key]
+    return [*own, *others[: max(0, MAX_HISTORY_ITEMS_TOTAL - len(own))]]
+
+
 class ProjectContinuityStore:
     """Per-project durable state and bounded retrieval over a SQLite journal."""
 
-    def __init__(self, project_path: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        project_path: str | os.PathLike[str],
+        *,
+        owner_id: str = "",
+    ) -> None:
         self.root = Path(project_path).expanduser().resolve()
         if not self.root.is_dir():
             raise NotADirectoryError(str(self.root))
         self.state_dir = self.root / STATE_DIR
         self.db_path = self.state_dir / DB_NAME
-        self.brief_path = self.state_dir / BRIEF_NAME
+        self.owner_key = _owner_key(owner_id)
+        self.brief_path = self.state_dir / (
+            f"project-state-{self.owner_key}.md" if self.owner_key else BRIEF_NAME
+        )
         self.project_key = os.path.normcase(str(self.root))
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
@@ -301,11 +347,37 @@ class ProjectContinuityStore:
                     state_json TEXT NOT NULL,
                     updated_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS continuity_tasks (
+                    project_key TEXT NOT NULL,
+                    owner_key TEXT NOT NULL DEFAULT '',
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT '',
+                    updated_at REAL NOT NULL DEFAULT 0,
+                    resume_from_run_id TEXT NOT NULL DEFAULT '',
+                    task_json TEXT NOT NULL,
+                    PRIMARY KEY(project_key, owner_key, session_id, run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_continuity_tasks_owner_status_time
+                    ON continuity_tasks(project_key, owner_key, status, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_continuity_tasks_owner_session_time
+                    ON continuity_tasks(project_key, owner_key, session_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_continuity_tasks_resume
+                    ON continuity_tasks(project_key, owner_key, session_id, resume_from_run_id);
+                CREATE TABLE IF NOT EXISTS continuity_task_legacy_projections (
+                    project_key TEXT NOT NULL,
+                    owner_key TEXT NOT NULL DEFAULT '',
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    projection_json TEXT NOT NULL,
+                    PRIMARY KEY(project_key, owner_key, session_id, run_id)
+                );
                 CREATE TABLE IF NOT EXISTS continuity_events (
                     event_id TEXT PRIMARY KEY,
                     project_key TEXT NOT NULL,
                     session_id TEXT NOT NULL DEFAULT '',
                     run_id TEXT NOT NULL DEFAULT '',
+                    owner_key TEXT NOT NULL DEFAULT '',
                     event_type TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT '',
                     content TEXT NOT NULL DEFAULT '',
@@ -336,6 +408,17 @@ class ProjectContinuityStore:
                     ON continuity_decisions(project_key, status, updated_at DESC);
                 """
             )
+            event_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(continuity_events)")
+            }
+            if "owner_key" not in event_columns:
+                conn.execute(
+                    "ALTER TABLE continuity_events ADD COLUMN owner_key TEXT NOT NULL DEFAULT ''"
+                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_continuity_events_owner_time "
+                "ON continuity_events(project_key, owner_key, created_at DESC)"
+            )
             columns = {
                 str(row[1]) for row in conn.execute("PRAGMA table_info(continuity_decisions)")
             }
@@ -344,6 +427,305 @@ class ProjectContinuityStore:
                     "ALTER TABLE continuity_decisions ADD COLUMN evidence_fingerprints_json TEXT NOT NULL DEFAULT '{}'"
                 )
             conn.commit()
+        # Keep the JSON journal and normalized task rows in one transaction.
+        # A failed copy/verification leaves the original JSON as the source
+        # of truth and causes construction to fail closed.
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._migrate_json_tasks(conn)
+
+    def _migrate_json_tasks(self, conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "SELECT state_json FROM continuity_state WHERE project_key = ?",
+            (self.project_key,),
+        ).fetchone()
+        if row is None:
+            return
+        state = self._decode_state(row["state_json"])
+        if not self._state_needs_task_migration(state):
+            return
+        self._migrate_state_tasks(conn, state)
+
+    @staticmethod
+    def _decode_state(state_json: str) -> dict[str, Any]:
+        try:
+            state = json.loads(state_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                "Project continuity state is malformed; preserving the original row"
+            ) from exc
+        if not isinstance(state, dict):
+            raise RuntimeError("Project continuity state is not an object; preserving the row")
+        return state
+
+    @staticmethod
+    def _state_needs_task_migration(state: dict[str, Any]) -> bool:
+        tasks = state.get("session_tasks")
+        current = state.get("current_task")
+        return bool(
+            int(state.get("schema_version") or 1) < CONTINUITY_STATE_SCHEMA_VERSION
+            or (isinstance(tasks, dict) and tasks)
+            or (isinstance(current, dict) and current.get("run_id"))
+        )
+
+    def _legacy_task_records(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        tasks_by_session = state.get("session_tasks", {})
+        if tasks_by_session is None:
+            tasks_by_session = {}
+        if not isinstance(tasks_by_session, dict):
+            raise RuntimeError("Legacy session_tasks is malformed; preserving the original state")
+
+        records: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for session_id, session_tasks in tasks_by_session.items():
+            if not isinstance(session_tasks, dict):
+                raise RuntimeError("Legacy session task map is malformed; preserving the original state")
+            for run_id, source_task in session_tasks.items():
+                if not isinstance(source_task, dict):
+                    raise RuntimeError("Legacy task record is malformed; preserving the original state")
+                task = dict(source_task)
+                outer_session_id = str(session_id or "")
+                outer_run_id = str(run_id or "")
+                if (
+                    task.get("session_id") not in (None, "", outer_session_id)
+                    or task.get("run_id") not in (None, "", outer_run_id)
+                ):
+                    raise RuntimeError("Legacy task key conflicts with its payload; preserving the original state")
+                task["session_id"] = str(task.get("session_id") or outer_session_id)
+                task["run_id"] = str(task.get("run_id") or outer_run_id)
+                if not task.get("owner_key"):
+                    owner_key = self._infer_owner_key(
+                        task["session_id"], task["run_id"]
+                    )
+                    task["owner_key"] = owner_key
+                else:
+                    task["owner_key"] = str(task["owner_key"])
+                identity = (
+                    str(task.get("owner_key") or ""),
+                    str(task.get("session_id") or ""),
+                    str(task.get("run_id") or ""),
+                )
+                if not identity[1] or not identity[2]:
+                    raise RuntimeError("Legacy task is missing a stable key; preserving the original state")
+                previous = records.get(identity)
+                if previous is not None and previous != task:
+                    raise RuntimeError("Conflicting legacy task payloads; preserving the original state")
+                records[identity] = task
+
+        # schema v1 only had current_task. Treat it as another complete run
+        # when absent from session_tasks; the nested per-session record wins
+        # when both contain the same run, as it was the resumable source.
+        legacy_current = state.get("current_task")
+        if isinstance(legacy_current, dict) and legacy_current.get("run_id"):
+            last_session = state.get("last_session")
+            session_id = str(
+                legacy_current.get("session_id")
+                or (last_session.get("session_id") if isinstance(last_session, dict) else "")
+                or "legacy-session"
+            )
+            task = dict(legacy_current)
+            task["session_id"] = str(task.get("session_id") or session_id)
+            task["run_id"] = str(task.get("run_id") or "")
+            if not task.get("owner_key"):
+                owner_key = self._infer_owner_key(session_id, str(task.get("run_id") or ""))
+                task["owner_key"] = owner_key
+            else:
+                task["owner_key"] = str(task["owner_key"])
+            identity = (
+                str(task.get("owner_key") or ""),
+                str(task.get("session_id") or ""),
+                str(task.get("run_id") or ""),
+            )
+            if identity not in records:
+                records[identity] = task
+                if task.get("status") in {
+                    "in_progress", "started", "awaiting_verification",
+                    "interrupted", "paused", "blocked",
+                }:
+                    recent = state.get("recent_tasks")
+                    if not isinstance(recent, list):
+                        recent = []
+                    state["recent_tasks"] = [
+                        _compact_task(task),
+                        *(item for item in recent
+                          if not isinstance(item, dict) or item.get("run_id") != task["run_id"]),
+                    ][:MAX_HISTORY_ITEMS_PER_OWNER]
+            elif records[identity] != task:
+                # Older writers updated session_tasks but left current_task
+                # stale. Keep that complete projection durably as well.
+                state["_continuity_legacy_current_projection"] = task
+
+        for key in ("completed", "blocked", "recent_tasks"):
+            items = state.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, dict) and not item.get("owner_key"):
+                    inferred = self._infer_owner_key(
+                        str(item.get("session_id") or ""), str(item.get("run_id") or "")
+                    )
+                    if inferred:
+                        item["owner_key"] = inferred
+        last = state.get("last_session")
+        if isinstance(last, dict) and not last.get("owner_key"):
+            inferred = self._infer_owner_key(
+                str(last.get("session_id") or ""), str(last.get("run_id") or "")
+            )
+            if inferred:
+                last["owner_key"] = inferred
+        return list(records.values())
+
+    def _migrate_state_tasks(self, conn: sqlite3.Connection, state: dict[str, Any]) -> None:
+        records = self._legacy_task_records(state)
+        projection = state.pop("_continuity_legacy_current_projection", None)
+        self._persist_and_verify_legacy_tasks(conn, records, legacy_projection=projection)
+        state.pop("session_tasks", None)
+        current = state.get("current_task")
+        if isinstance(current, dict) and current.get("run_id"):
+            state["current_task"] = None
+        state["schema_version"] = CONTINUITY_STATE_SCHEMA_VERSION
+        self._write_state(conn, state)
+
+    def _persist_and_verify_legacy_tasks(
+        self,
+        conn: sqlite3.Connection,
+        records: list[dict[str, Any]],
+        *,
+        legacy_projection: dict[str, Any] | None = None,
+    ) -> None:
+        expected: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for task in records:
+            project_key = self.project_key
+            owner_key = str(task.get("owner_key") or "")
+            session_id = str(task.get("session_id") or "")
+            run_id = str(task.get("run_id") or "")
+            if not session_id or not run_id:
+                raise RuntimeError("Cannot migrate a task without session/run ids; source preserved")
+            identity = (project_key, owner_key, session_id, run_id)
+            previous = expected.get(identity)
+            if previous is not None and previous != task:
+                raise RuntimeError("Duplicate legacy task key with different payload; source preserved")
+            expected[identity] = task
+
+        for (project_key, owner_key, session_id, run_id), task in expected.items():
+            payload = _json(task)
+            conn.execute(
+                """INSERT OR IGNORE INTO continuity_tasks
+                   (project_key, owner_key, session_id, run_id, status, updated_at,
+                    resume_from_run_id, task_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    project_key,
+                    owner_key,
+                    session_id,
+                    run_id,
+                    str(task.get("status") or ""),
+                    _task_timestamp(task),
+                    str(task.get("resume_from_run_id") or ""),
+                    payload,
+                ),
+            )
+            stored = conn.execute(
+                """SELECT task_json FROM continuity_tasks
+                   WHERE project_key=? AND owner_key=? AND session_id=? AND run_id=?""",
+                (project_key, owner_key, session_id, run_id),
+            ).fetchone()
+            if stored is None or self._decode_task_payload(stored["task_json"]) != task:
+                raise RuntimeError(
+                    "Continuity task migration did not preserve a complete payload; source preserved"
+                )
+
+        if len(expected) != len(records):
+            raise RuntimeError("Continuity task migration count mismatch; source preserved")
+        stored_rows = conn.execute(
+            """SELECT owner_key, session_id, run_id, task_json
+               FROM continuity_tasks WHERE project_key=?""",
+            (self.project_key,),
+        ).fetchall()
+        stored = {
+            (
+                self.project_key,
+                str(row["owner_key"] or ""),
+                str(row["session_id"] or ""),
+                str(row["run_id"] or ""),
+            ): self._decode_task_payload(row["task_json"])
+            for row in stored_rows
+        }
+        if len(stored_rows) != len(expected) or stored != expected:
+            raise RuntimeError(
+                "Continuity task migration key/count/payload comparison failed; source preserved"
+            )
+
+        if legacy_projection is not None:
+            identity = (
+                self.project_key,
+                str(legacy_projection.get("owner_key") or ""),
+                str(legacy_projection.get("session_id") or ""),
+                str(legacy_projection.get("run_id") or ""),
+            )
+            if identity not in expected:
+                raise RuntimeError(
+                    "Legacy current task has no matching canonical run; source preserved"
+                )
+            conn.execute(
+                """INSERT OR IGNORE INTO continuity_task_legacy_projections
+                   (project_key, owner_key, session_id, run_id, projection_json)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (*identity, _json(legacy_projection)),
+            )
+            projection_row = conn.execute(
+                """SELECT projection_json FROM continuity_task_legacy_projections
+                   WHERE project_key=? AND owner_key=? AND session_id=? AND run_id=?""",
+                identity,
+            ).fetchone()
+            if (
+                projection_row is None
+                or self._decode_task_payload(projection_row["projection_json"]) != legacy_projection
+            ):
+                raise RuntimeError(
+                    "Legacy current task projection was not preserved; source preserved"
+                )
+        projection_rows = conn.execute(
+            """SELECT owner_key, session_id, run_id, projection_json
+               FROM continuity_task_legacy_projections WHERE project_key=?""",
+            (self.project_key,),
+        ).fetchall()
+        expected_projections = (
+            {
+                (
+                    self.project_key,
+                    str(legacy_projection.get("owner_key") or ""),
+                    str(legacy_projection.get("session_id") or ""),
+                    str(legacy_projection.get("run_id") or ""),
+                ): legacy_projection
+            }
+            if legacy_projection is not None
+            else {}
+        )
+        stored_projections = {
+            (
+                self.project_key,
+                str(row["owner_key"] or ""),
+                str(row["session_id"] or ""),
+                str(row["run_id"] or ""),
+            ): self._decode_task_payload(row["projection_json"])
+            for row in projection_rows
+        }
+        if (
+            len(projection_rows) != len(expected_projections)
+            or stored_projections != expected_projections
+        ):
+            raise RuntimeError(
+                "Legacy current projection key/count/payload comparison failed; source preserved"
+            )
+
+    def _decode_task_payload(self, task_json: str) -> dict[str, Any]:
+        try:
+            task = json.loads(task_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Continuity task payload is malformed") from exc
+        if not isinstance(task, dict):
+            raise RuntimeError("Continuity task payload is not an object")
+        return task
 
     def _state(self, conn: sqlite3.Connection) -> dict[str, Any]:
         row = conn.execute(
@@ -352,13 +734,48 @@ class ProjectContinuityStore:
         ).fetchone()
         if not row:
             return _default_state(str(self.root))
-        try:
-            state = json.loads(row["state_json"])
-            return state if isinstance(state, dict) else _default_state(str(self.root))
-        except (TypeError, json.JSONDecodeError):
-            return _default_state(str(self.root))
+        state = self._decode_state(row["state_json"])
+        if self._state_needs_task_migration(state):
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            self._migrate_state_tasks(conn, state)
+        return state
+
+    def _infer_owner_key(self, session_id: str, run_id: str) -> str:
+        if session_id:
+            try:
+                from backend.persistence.db import get_session
+
+                session = get_session(session_id)
+                if isinstance(session, dict) and session.get("user_id"):
+                    return _owner_key(str(session["user_id"]))
+            except Exception:
+                logger.debug("Could not resolve owner for continuity session %s", session_id)
+        if run_id:
+            run = self._run_record(run_id)
+            if run.get("user_id"):
+                return _owner_key(str(run["user_id"]))
+        return ""
 
     def _save_state(self, conn: sqlite3.Connection, state: dict[str, Any]) -> None:
+        # Compatibility/dual-write path: never remove task payloads from a
+        # legacy JSON state until every key and complete payload is present
+        # in the normalized table in this same transaction.
+        legacy_version = int(state.get("schema_version") or 1) < CONTINUITY_STATE_SCHEMA_VERSION
+        if legacy_version or "session_tasks" in state:
+            records = self._legacy_task_records(state)
+            projection = state.pop("_continuity_legacy_current_projection", None)
+            self._persist_and_verify_legacy_tasks(
+                conn, records, legacy_projection=projection
+            )
+        state.pop("session_tasks", None)
+        current = state.get("current_task")
+        if isinstance(current, dict) and current.get("run_id"):
+            state["current_task"] = None
+        state["schema_version"] = CONTINUITY_STATE_SCHEMA_VERSION
+        self._write_state(conn, state)
+
+    def _write_state(self, conn: sqlite3.Connection, state: dict[str, Any]) -> None:
         state["updated_at"] = time.time()
         conn.execute(
             """INSERT INTO continuity_state(project_key, state_json, updated_at)
@@ -366,6 +783,109 @@ class ProjectContinuityStore:
                state_json=excluded.state_json, updated_at=excluded.updated_at""",
             (self.project_key, _json(state), state["updated_at"]),
         )
+
+    def _upsert_task(self, conn: sqlite3.Connection, task: dict[str, Any]) -> None:
+        session_id = str(task.get("session_id") or "")
+        run_id = str(task.get("run_id") or "")
+        if not session_id or not run_id:
+            raise ValueError("Continuity tasks require session_id and run_id")
+        conn.execute(
+            """INSERT INTO continuity_tasks
+               (project_key, owner_key, session_id, run_id, status, updated_at,
+                resume_from_run_id, task_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(project_key, owner_key, session_id, run_id) DO UPDATE SET
+                 status=excluded.status,
+                 updated_at=excluded.updated_at,
+                 resume_from_run_id=excluded.resume_from_run_id,
+                 task_json=excluded.task_json""",
+            (
+                self.project_key,
+                str(task.get("owner_key") or ""),
+                session_id,
+                run_id,
+                str(task.get("status") or ""),
+                _task_timestamp(task),
+                str(task.get("resume_from_run_id") or ""),
+                _json(task),
+            ),
+        )
+
+    def _task_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        task = self._decode_task_payload(row["task_json"])
+        actual_key = (
+            str(row["owner_key"] or ""),
+            str(row["session_id"] or ""),
+            str(row["run_id"] or ""),
+        )
+        task_key = (
+            str(task.get("owner_key") or ""),
+            str(task.get("session_id") or ""),
+            str(task.get("run_id") or ""),
+        )
+        if actual_key != task_key:
+            raise RuntimeError("Continuity task row key does not match its full payload")
+        return task
+
+    def _list_tasks(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        owner_key: str,
+        session_id: str | None = None,
+        exclude_session_id: str | None = None,
+        statuses: set[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = ["project_key = ?", "owner_key = ?"]
+        params: list[Any] = [self.project_key, owner_key]
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if exclude_session_id is not None:
+            clauses.append("session_id <> ?")
+            params.append(exclude_session_id)
+        if statuses:
+            status_list = sorted(statuses)
+            clauses.append(f"status IN ({','.join('?' for _ in status_list)})")
+            params.extend(status_list)
+        sql = (
+            "SELECT owner_key, session_id, run_id, task_json FROM continuity_tasks WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY updated_at DESC, run_id DESC"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(1, int(limit)))
+        rows = conn.execute(sql, params).fetchall()
+        return [self._task_from_row(row) for row in rows]
+
+    def _get_task(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        session_id: str,
+        run_id: str,
+        owner_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        row = conn.execute(
+            """SELECT owner_key, session_id, run_id, task_json FROM continuity_tasks
+               WHERE project_key=? AND owner_key=? AND session_id=? AND run_id=?""",
+            (self.project_key, self.owner_key if owner_key is None else owner_key, session_id, run_id),
+        ).fetchone()
+        return self._task_from_row(row) if row else None
+
+    def _latest_task(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        owner_key: str,
+        session_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        tasks = self._list_tasks(
+            conn, owner_key=owner_key, session_id=session_id, limit=1
+        )
+        return tasks[0] if tasks else None
 
     def _event(
         self,
@@ -383,11 +903,11 @@ class ProjectContinuityStore:
         at = created_at if created_at is not None else time.time()
         conn.execute(
             """INSERT INTO continuity_events
-               (event_id, project_key, session_id, run_id, event_type, status,
-                content, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (event_id, project_key, session_id, run_id, owner_key, event_type, status,
+                content, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 event_id, self.project_key, _clean(session_id, 128), _clean(run_id, 128),
-                _clean(event_type, 48), _clean(status, 48), _clean(content, 500),
+                self.owner_key, _clean(event_type, 48), _clean(status, 48), _clean(content, 500),
                 _json(payload or {}), at,
             ),
         )
@@ -421,97 +941,150 @@ class ProjectContinuityStore:
         model: str = "",
         now: float | None = None,
     ) -> dict[str, Any]:
-        """Persist the pre-change checkpoint and current task before model work."""
+        """Persist a session-scoped checkpoint before model work."""
         stamp = now if now is not None else time.time()
         observed = snapshot or capture_project_snapshot(self.root)
         objective = _clean(objective, 600)
         with self._connect() as conn:
             state = self._state(conn)
-            prior = state.get("current_task")
-            if isinstance(prior, dict) and prior.get("run_id") != run_id:
-                age = stamp - float(prior.get("updated_at") or stamp)
-                if prior.get("status") in {"in_progress", "started", "awaiting_verification"}:
-                    stored_run = self._run_record(str(prior.get("run_id") or ""))
-                    stored_run_status = str(stored_run.get("status") or "")
-                    if stored_run_status == "running":
-                        prior_status = "in_progress"
-                    elif stored_run_status == "completed":
-                        # A crash may have landed after the durable run row but
-                        # before the project journal. Reconcile from live files
-                        # and tests; never infer completion from the row alone.
-                        prior_status = "awaiting_verification"
-                    elif stored_run_status in {"interrupted", "cancelled", "failed"}:
-                        prior_status = "interrupted" if stored_run_status == "interrupted" else "paused"
-                    elif age >= RECOVERY_AFTER_SECONDS:
-                        prior_status = "interrupted"
+            resume_requested = bool(
+                re.search(r"\b(continua|continuar|retoma|retomar|resume|pick up)\b", objective, re.I)
+            )
+
+            # A different session can be the one that left work unfinished
+            # before a process restart. Reconcile stale project tasks once,
+            # then preserve their compact checkpoint for later sessions.
+            recoverable_tasks = self._list_tasks(
+                conn,
+                owner_key=self.owner_key,
+                exclude_session_id=session_id,
+                statuses={"in_progress", "started"},
+            )
+            for old_task in recoverable_tasks:
+                other_session_id = str(old_task.get("session_id") or "")
+                age = stamp - _task_timestamp(old_task)
+                old_run_id = str(old_task.get("run_id") or "")
+                stored_run = self._run_record(old_run_id)
+                stored_status = str(stored_run.get("status") or "")
+                if stored_status == "completed":
+                    recovery_status = "awaiting_verification"
+                elif stored_status in {"interrupted", "cancelled", "failed"}:
+                    recovery_status = "paused" if stored_status == "cancelled" else "interrupted"
+                elif stored_status == "running":
+                    try:
+                        from backend.runtime.events import get_active_run_event_stream
+
+                        if get_active_run_event_stream(old_run_id) is not None:
+                            continue
+                    except Exception:
+                        logger.debug("Could not inspect live run %s during continuity recovery", old_run_id)
+                    if age >= RECOVERY_AFTER_SECONDS:
+                        recovery_status = "interrupted"
                     else:
-                        prior_status = "paused"
-                    prior["status"] = prior_status
-                    prior["updated_at"] = stamp
-                    prior["next_action"] = (
-                        "Reabrir o projeto, confirmar as alterações e retomar do último checkpoint."
-                        if prior_status == "interrupted"
-                        else "Retomar ou fechar esta tarefa depois de confirmar o estado real."
+                        continue
+                elif age >= RECOVERY_AFTER_SECONDS:
+                    recovery_status = "interrupted"
+                else:
+                    continue
+                old_task["status"] = recovery_status
+                old_task["updated_at"] = stamp
+                self._upsert_task(conn, old_task)
+                state["recent_tasks"] = _upsert_owned_history(
+                    state.get("recent_tasks"), _compact_task(old_task)
+                )
+                self._event(
+                    conn,
+                    event_type="task_recovery",
+                    status=recovery_status,
+                    content=f"Tarefa anterior sem fecho confirmado: {old_task.get('objective', '')}",
+                    session_id=other_session_id,
+                    run_id=old_run_id,
+                    payload={"age_seconds": max(0, int(age)), "snapshot": _snapshot_brief(observed)},
+                    created_at=stamp,
+                )
+                if stored_status == "failed" and stored_run.get("error"):
+                    failure = _clean(stored_run.get("error"), 220)
+                    state["blocked"] = _upsert_owned_history(
+                        state.get("blocked"),
+                        {
+                            "objective": old_task.get("objective", ""),
+                            "problem": failure,
+                            "at": stamp,
+                            "run_id": old_run_id,
+                            "session_id": other_session_id,
+                            "owner_key": self.owner_key,
+                        },
                     )
-                    state["recent_tasks"] = [_compact_task(prior), *(state.get("recent_tasks") or [])][:8]
                     self._event(
                         conn,
-                        event_type="task_recovery",
-                        status=prior_status,
-                        content=f"Tarefa anterior sem fecho confirmado: {prior.get('objective', '')}",
-                        session_id=session_id,
-                        run_id=str(prior.get("run_id") or ""),
-                        payload={"age_seconds": max(0, int(age)), "snapshot": _snapshot_brief(observed)},
+                        event_type="failure",
+                        status="failed",
+                        content=f"Falha recuperada do run anterior: {failure}",
+                        session_id=other_session_id,
+                        run_id=old_run_id,
+                        payload={"recovered_from_session_run": True},
                         created_at=stamp,
                     )
-                    if stored_run_status == "failed" and stored_run.get("error"):
-                        failure = _clean(stored_run.get("error"), 220)
-                        state["blocked"] = [
-                            {
-                                "objective": prior.get("objective", ""),
-                                "problem": failure,
-                                "at": stamp,
-                                "run_id": prior.get("run_id", ""),
-                            },
-                            *(state.get("blocked") or []),
-                        ][:8]
-                        self._event(
-                            conn,
-                            event_type="failure",
-                            status="failed",
-                            content=f"Falha recuperada do run anterior: {failure}",
-                            session_id=session_id,
-                            run_id=str(prior.get("run_id") or ""),
-                            payload={"recovered_from_session_run": True},
-                            created_at=stamp,
-                        )
 
+            prior = next(iter(self._list_tasks(
+                conn,
+                owner_key=self.owner_key,
+                session_id=session_id,
+                statuses={
+                    "in_progress", "started", "awaiting_verification",
+                    "interrupted", "paused", "blocked",
+                },
+                limit=1,
+            )), None)
+            prior_session_id = session_id if prior else ""
+            if prior is None and resume_requested:
+                prior = next(iter(self._list_tasks(
+                    conn,
+                    owner_key=self.owner_key,
+                    exclude_session_id=session_id,
+                    statuses={"awaiting_verification", "interrupted", "paused", "blocked"},
+                    limit=1,
+                )), None)
+                prior_session_id = str(prior.get("session_id") or "") if prior else ""
             resume = bool(
                 isinstance(prior, dict)
                 and prior.get("status") in {"paused", "interrupted", "awaiting_verification", "blocked"}
-                and re.search(r"\b(continua|continuar|retoma|retomar|resume|pick up)\b", objective, re.I)
+                and resume_requested
             )
-            task_objective = (
-                str(prior.get("objective") or objective)
-                if resume and isinstance(prior, dict)
-                else objective
-            )
-            if resume and isinstance(prior, dict):
-                previous = [
-                    item for item in state.get("recent_tasks", [])
-                    if not isinstance(item, dict) or item.get("run_id") != prior.get("run_id")
-                ]
-                state["recent_tasks"] = [_compact_task(prior), *previous][:8]
-            else:
-                state["recent_tasks"] = [
-                    item for item in state.get("recent_tasks", [])
-                    if isinstance(item, dict) and item.get("run_id") != run_id
-                ][:8]
-            state["current_task"] = {
+            task_objective = str(prior.get("objective") or objective) if resume and prior else objective
+            if prior and prior.get("status") in {"in_progress", "started", "awaiting_verification"}:
+                age = stamp - float(prior.get("updated_at") or stamp)
+                stored_run = self._run_record(str(prior.get("run_id") or ""))
+                stored_status = str(stored_run.get("status") or "")
+                if stored_status == "completed":
+                    prior["status"] = "awaiting_verification"
+                elif stored_status in {"interrupted", "cancelled", "failed"} or age >= RECOVERY_AFTER_SECONDS:
+                    prior["status"] = "interrupted" if stored_status != "cancelled" else "paused"
+                else:
+                    prior["status"] = "paused"
+                prior["updated_at"] = stamp
+                self._upsert_task(conn, prior)
+                state["recent_tasks"] = _upsert_owned_history(
+                    state.get("recent_tasks"), _compact_task(prior)
+                )
+                self._event(
+                    conn,
+                    event_type="task_recovery",
+                    status=str(prior["status"]),
+                    content=f"Tarefa anterior sem fecho confirmado: {prior.get('objective', '')}",
+                    session_id=session_id,
+                    run_id=str(prior.get("run_id") or ""),
+                    payload={"age_seconds": max(0, int(age)), "snapshot": _snapshot_brief(observed)},
+                    created_at=stamp,
+                )
+            task = {
                 "run_id": run_id,
                 "session_id": session_id,
+                "owner_key": self.owner_key,
                 "objective": task_objective,
                 "resume_prompt": objective if resume else "",
+                "resume_from_run_id": str(prior.get("run_id") or "") if resume and prior else "",
+                "resume_from_session_id": prior_session_id if resume else "",
                 "status": "in_progress",
                 "started_at": stamp,
                 "updated_at": stamp,
@@ -521,15 +1094,18 @@ class ProjectContinuityStore:
                 "actions": [],
                 "verification": {"status": "not_run"},
             }
-            state["last_observed_snapshot"] = _snapshot_brief(observed)
+            self._upsert_task(conn, task)
+            state["current_task"] = task
             state["last_session"] = {
                 "session_id": session_id,
                 "run_id": run_id,
+                "owner_key": self.owner_key,
                 "started_at": stamp,
                 "status": "in_progress",
                 "model": _clean(model, 128),
                 "objective": task_objective,
             }
+            state["last_observed_snapshot"] = _snapshot_brief(observed)
             state["next_action"] = "Inspecionar os ficheiros relevantes e validar a memória contra o checkout atual."
             self._event(
                 conn,
@@ -577,9 +1153,7 @@ class ProjectContinuityStore:
 
         with self._connect() as conn:
             state = self._state(conn)
-            task = state.get("current_task")
-            if not isinstance(task, dict) or task.get("run_id") != run_id:
-                task = None
+            task = self._get_task(conn, session_id=session_id, run_id=run_id)
             if phase in {"call", "started", "before"}:
                 if task is not None:
                     task["last_tool_snapshot"] = snapshot
@@ -610,6 +1184,8 @@ class ProjectContinuityStore:
                     run_id=run_id,
                     payload={"paths": paths, "snapshot": _snapshot_brief(snapshot) if snapshot else None},
                 )
+                if task is not None:
+                    self._upsert_task(conn, task)
                 self._save_state(conn, state)
             else:
                 succeeded = bool(ok)
@@ -652,15 +1228,17 @@ class ProjectContinuityStore:
                         payload={"tool": name, "paths": changed or paths, "approach_attempted": approach},
                     )
                     if task is not None:
-                        state["blocked"] = [
+                        state["blocked"] = _upsert_owned_history(
+                            state.get("blocked"),
                             {
                                 "objective": task.get("objective", ""),
                                 "problem": f"{name}: {_clean(error or self._result_error(result) or 'falhou', 180)}",
                                 "at": time.time(),
                                 "run_id": run_id,
+                                "session_id": session_id,
+                                "owner_key": self.owner_key,
                             },
-                            *(state.get("blocked") or []),
-                        ][:8]
+                        )
                         state["next_action"] = (
                             "Ler a falha e confirmar o código atual antes de repetir a abordagem."
                         )
@@ -681,6 +1259,8 @@ class ProjectContinuityStore:
                             "result_summary": self._result_summary(result),
                         },
                     )
+                if task is not None:
+                    self._upsert_task(conn, task)
                 self._save_state(conn, state)
         if is_write:
             self._write_brief()
@@ -758,7 +1338,8 @@ class ProjectContinuityStore:
         stamp = now if now is not None else time.time()
         if snapshot is None:
             with self._connect() as conn:
-                current = self._state(conn).get("current_task") or {}
+                self._state(conn)
+                current = self._get_task(conn, session_id=session_id, run_id=run_id) or {}
             focus_paths = [
                 *list(changed_files),
                 *list(current.get("declared_changed_files") or []),
@@ -769,8 +1350,8 @@ class ProjectContinuityStore:
         provided_verification = verification
         with self._connect() as conn:
             state = self._state(conn)
-            task = state.get("current_task")
-            if not isinstance(task, dict) or task.get("run_id") != run_id:
+            task = self._get_task(conn, session_id=session_id, run_id=run_id)
+            if not isinstance(task, dict):
                 return None
             if provided_verification is None:
                 recorded_verification = task.get("verification") or {}
@@ -834,40 +1415,57 @@ class ProjectContinuityStore:
                 state.get("last_verified_snapshot")
                 and state["last_verified_snapshot"].get("fingerprint") != after.get("fingerprint")
             )
+            last = state.get("last_session") or {}
             state["last_session"] = {
                 "session_id": session_id,
                 "run_id": run_id,
-                "started_at": (state.get("last_session") or {}).get("started_at", stamp),
+                "owner_key": self.owner_key,
+                "started_at": last.get("started_at", stamp) if last.get("session_id") == session_id else task.get("started_at", stamp),
                 "ended_at": stamp,
                 "status": status,
                 "model": _clean(model or task.get("model"), 128),
-                "objective": task.get("objective", ""),
-                "tools": task["tools"],
             }
+            state["current_task"] = task
+            state["recent_tasks"] = _upsert_owned_history(
+                state.get("recent_tasks"), _compact_task(task)
+            )
             if task_status == "verified":
-                state["completed"] = [
+                state["completed"] = _upsert_owned_history(
+                    state.get("completed"),
                     {
                         "objective": task.get("objective", ""),
                         "verified_at": stamp,
                         "verification": task["verification"],
                         "snapshot_fingerprint": after.get("fingerprint"),
                         "changed_files": actual_changes,
+                        "session_id": session_id,
+                        "run_id": run_id,
+                        "owner_key": self.owner_key,
                     },
-                    *(state.get("completed") or []),
-                ][:8]
+                )
                 state["last_verified_snapshot"] = _snapshot_brief(after)
                 state["verification_stale"] = False
                 state["blocked"] = [
                     item for item in state.get("blocked", [])
-                    if not _similar(str(item.get("objective", "")), str(task.get("objective", "")))
-                ][:8]
+                    if not isinstance(item, dict)
+                    or str(item.get("owner_key") or "") != self.owner_key
+                    or item.get("run_id") != run_id
+                    or not _similar(str(item.get("objective", "")), str(task.get("objective", "")))
+                ][:MAX_HISTORY_ITEMS_TOTAL]
                 state["next_action"] = "Reconfirmar este resultado se o checkout mudar antes da próxima tarefa."
             elif task_status == "blocked":
                 issue = _clean(error or verification.get("summary") or "A validação falhou.", 220)
-                state["blocked"] = [
-                    {"objective": task.get("objective", ""), "problem": issue, "at": stamp, "run_id": run_id},
-                    *(state.get("blocked") or []),
-                ][:8]
+                state["blocked"] = _upsert_owned_history(
+                    state.get("blocked"),
+                    {
+                        "objective": task.get("objective", ""),
+                        "problem": issue,
+                        "at": stamp,
+                        "run_id": run_id,
+                        "session_id": session_id,
+                        "owner_key": self.owner_key,
+                    },
+                )
                 state["next_action"] = "Inspecionar a falha registada, alterar a abordagem e voltar a validar."
                 self._event(
                     conn,
@@ -908,7 +1506,7 @@ class ProjectContinuityStore:
                 },
                 created_at=stamp,
             )
-            state["current_task"] = task
+            self._upsert_task(conn, task)
             self._save_state(conn, state)
         self._write_brief()
         return task
@@ -981,16 +1579,21 @@ class ProjectContinuityStore:
         self,
         query: str,
         *,
+        session_id: str = "",
         snapshot: dict[str, Any] | None = None,
         now: float | None = None,
         max_chars: int = MAX_CONTEXT_CHARS,
     ) -> str:
-        """Reconcile durable notes with the real checkout and return a small brief."""
+        """Reconcile shared project notes and this session's own task history."""
         stamp = now if now is not None else time.time()
         observed = snapshot or capture_project_snapshot(self.root)
         with self._connect() as conn:
             state = self._state(conn)
-            state["last_observed_snapshot"] = _snapshot_brief(observed)
+            current_task = self._latest_task(
+                conn,
+                owner_key=self.owner_key,
+                session_id=session_id if session_id else None,
+            )
             rows = conn.execute(
                 "SELECT * FROM continuity_decisions WHERE project_key=? AND status IN ('active','needs_review') ORDER BY updated_at DESC LIMIT 100",
                 (self.project_key,),
@@ -1002,8 +1605,7 @@ class ProjectContinuityStore:
                 status = row["status"]
                 evidence_changed = any(
                     _file_state(self.root, path) != fingerprints.get(path)
-                    for path in paths
-                    if path in fingerprints
+                    for path in paths if path in fingerprints
                 )
                 expired = (
                     stamp - float(row["created_at"]) > DECISION_REVIEW_AFTER_SECONDS
@@ -1027,15 +1629,94 @@ class ProjectContinuityStore:
                 state.get("last_verified_snapshot")
                 and state["last_verified_snapshot"].get("fingerprint") != observed.get("fingerprint")
             )
+            state["last_observed_snapshot"] = _snapshot_brief(observed)
             state["updated_at"] = stamp
             self._save_state(conn, state)
-            event_rows = conn.execute(
-                "SELECT * FROM continuity_events WHERE project_key=? ORDER BY created_at DESC LIMIT 100",
-                (self.project_key,),
-            ).fetchall()
-            event_rows = list(event_rows)
+            if self.owner_key:
+                event_rows = conn.execute(
+                    """SELECT e.* FROM continuity_events AS e WHERE e.project_key=? AND (
+                           (e.owner_key=? AND (
+                               e.session_id=? OR e.event_type='failure'
+                               OR (e.session_id='' AND e.event_type IN ('decision','project_goal'))
+                           ))
+                           OR (e.owner_key='' AND EXISTS (
+                               SELECT 1 FROM continuity_tasks AS t
+                               WHERE t.project_key=e.project_key AND t.owner_key=?
+                                 AND t.session_id=e.session_id AND t.run_id=e.run_id
+                           ) AND NOT EXISTS (
+                               SELECT 1 FROM continuity_tasks AS other
+                               WHERE other.project_key=e.project_key
+                                 AND other.session_id=e.session_id AND other.run_id=e.run_id
+                                 AND other.owner_key<>?
+                           ))
+                           OR (e.owner_key='' AND e.session_id=''
+                               AND e.event_type IN ('decision','project_goal'))
+                       ) ORDER BY e.created_at DESC LIMIT 100""",
+                    (
+                        self.project_key,
+                        self.owner_key,
+                        session_id,
+                        self.owner_key,
+                        self.owner_key,
+                    ),
+                ).fetchall()
+            else:
+                event_rows = conn.execute(
+                    """SELECT * FROM continuity_events WHERE project_key=?
+                       AND event_type IN ('decision','project_goal','failure')
+                       ORDER BY created_at DESC LIMIT 100""",
+                    (self.project_key,),
+                ).fetchall()
+        scoped = dict(state)
+        scoped["current_task"] = current_task
+        # Project-level summaries are shared only inside the authenticated
+        # owner's continuity scope. Detailed actions stay attached to the
+        # selected session's current task above.
+        for key in ("completed", "blocked", "recent_tasks"):
+            scoped[key] = _owned_history(state.get(key), self.owner_key)
+        last = state.get("last_session") or {}
+        if (
+            isinstance(last, dict)
+            and (
+                str(last.get("owner_key") or "") != self.owner_key
+                or (session_id and last.get("session_id") != session_id)
+            )
+        ):
+            task = scoped["current_task"]
+            last = (
+                {
+                    "session_id": session_id,
+                    "run_id": task.get("run_id", ""),
+                    "owner_key": self.owner_key,
+                    "started_at": task.get("started_at", 0),
+                    "ended_at": task.get("updated_at", 0),
+                    "status": task.get("status", ""),
+                    "model": task.get("model", ""),
+                }
+                if task
+                else None
+            )
+        elif not isinstance(last, dict):
+            last = None
+        elif not last:
+            task = scoped["current_task"]
+            last = (
+                {
+                    "run_id": task.get("run_id", ""),
+                    "owner_key": self.owner_key,
+                    "started_at": task.get("started_at", 0),
+                    "ended_at": task.get("updated_at", 0),
+                    "status": task.get("status", ""),
+                    "model": task.get("model", ""),
+                }
+                if task
+                else None
+            )
+        scoped["last_session"] = last
+        if isinstance(last, dict) and str(last.get("owner_key") or "") != self.owner_key:
+            scoped["next_action"] = "Inspecionar os ficheiros relevantes antes de agir."
         self._write_brief()
-        return self._render_context(state, observed, decisions, event_rows, query, max_chars)
+        return self._render_context(scoped, observed, decisions, list(event_rows), query, max_chars)
 
     def _render_context(
         self,
@@ -1075,6 +1756,8 @@ class ProjectContinuityStore:
         elif current_status == "blocked":
             current_status = "bloqueada por falha"
         lines.append(f"TAREFA ATUAL: {current_status} — {_clean(task.get('objective'), 220)}")
+        if task.get("model"):
+            lines.append(f"MODELO DA TAREFA: {_clean(task.get('model'), 128)}")
 
         query_terms = _tokens(query)
         completed = sorted(
@@ -1200,18 +1883,34 @@ class ProjectContinuityStore:
         try:
             with self._connect() as conn:
                 state = self._state(conn)
+                task = self._latest_task(conn, owner_key=self.owner_key)
                 rows = conn.execute(
                     "SELECT * FROM continuity_decisions WHERE project_key=? AND status IN ('active','needs_review') ORDER BY updated_at DESC LIMIT 3",
                     (self.project_key,),
                 ).fetchall()
                 failures = conn.execute(
-                    """SELECT content, created_at FROM continuity_events
-                       WHERE project_key=? AND event_type='failure'
-                       ORDER BY created_at DESC LIMIT 3""",
-                    (self.project_key,),
+                    """SELECT e.content, e.created_at FROM continuity_events AS e
+                       WHERE e.project_key=? AND e.event_type='failure' AND (
+                           e.owner_key=? OR (
+                               e.owner_key='' AND EXISTS (
+                                   SELECT 1 FROM continuity_tasks AS t
+                                   WHERE t.project_key=e.project_key
+                                     AND t.owner_key=? AND t.session_id=e.session_id
+                                     AND t.run_id=e.run_id
+                                      AND NOT EXISTS (
+                                          SELECT 1 FROM continuity_tasks AS other
+                                          WHERE other.project_key=e.project_key
+                                            AND other.session_id=e.session_id
+                                            AND other.run_id=e.run_id
+                                            AND other.owner_key<>?
+                                      )
+                               )
+                           )
+                       ) ORDER BY e.created_at DESC LIMIT 3""",
+                    (self.project_key, self.owner_key, self.owner_key, self.owner_key),
                 ).fetchall()
             snapshot = state.get("last_observed_snapshot") or {}
-            task = state.get("current_task") or {}
+            task = task or {}
             pending_changes = bool(
                 task.get("changed_files")
                 and task.get("status") in {"in_progress", "awaiting_verification", "blocked", "interrupted"}
@@ -1225,7 +1924,7 @@ class ProjectContinuityStore:
                 f"ESTADO ATUAL: {task.get('status') or 'sem tarefa ativa'}; snapshot={snapshot.get('fingerprint', 'não observado')[:12]}",
                 "O QUE JÁ FOI FEITO:",
             ]
-            completed = state.get("completed") or []
+            completed = _owned_history(state.get("completed"), self.owner_key)
             lines.extend(
                 (
                     "- verificado anteriormente; checkout mudou: "
@@ -1239,7 +1938,8 @@ class ProjectContinuityStore:
             lines.extend(["EM CURSO:", f"- {_clean(task.get('objective') or 'nenhuma', 220)}"])
             lines.append("BLOQUEADO:")
             lines.extend(
-                f"- {_clean(item.get('problem'), 180)}" for item in (state.get("blocked") or [])[:4]
+                f"- {_clean(item.get('problem'), 180)}"
+                for item in _owned_history(state.get("blocked"), self.owner_key)[:4]
             )
             lines.append("FALHAS CONHECIDAS:")
             lines.extend(f"- {_clean(row['content'], 200)}" for row in failures)
@@ -1259,14 +1959,24 @@ class ProjectContinuityStore:
             )
             if not rows:
                 lines.append("- nenhuma registada")
-            lines.extend(["PRÓXIMA AÇÃO:", f"- {_clean(state.get('next_action'), 240)}"])
             last = state.get("last_session") or {}
-            if last:
+            next_action = state.get("next_action")
+            if not isinstance(last, dict) or str(last.get("owner_key") or "") != self.owner_key:
+                next_action = "Inspecionar os ficheiros relevantes antes de escolher a próxima ação."
+            lines.extend(["PRÓXIMA AÇÃO:", f"- {_clean(next_action, 240)}"])
+            if isinstance(last, dict) and str(last.get("owner_key") or "") == self.owner_key:
                 last_at = float(last.get("ended_at") or last.get("started_at") or 0)
                 last_label = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(last_at))
                 lines.append(
                     f"ÚLTIMA SESSÃO: {last_label} · {_clean(last.get('status'), 32)} · "
                     f"modelo={_clean(last.get('model') or 'não indicado', 80)}"
+                )
+            elif task:
+                last_at = _task_timestamp(task)
+                last_label = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(last_at))
+                lines.append(
+                    f"ÚLTIMA SESSÃO: {last_label} · {_clean(task.get('status'), 32)} · "
+                    f"modelo={_clean(task.get('model') or 'não indicado', 80)}"
                 )
             content = "\n".join(lines).rstrip() + "\n"
             self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -1317,14 +2027,15 @@ def load_project_continuity(
     session_id: str,
     run_id: str,
     model: str = "",
+    owner_id: str = "",
 ) -> tuple[dict[str, Any], str]:
     """Create a pre-work checkpoint and build the bounded continuity context."""
     snapshot = capture_project_snapshot(project_path)
-    store = ProjectContinuityStore(project_path)
+    store = ProjectContinuityStore(project_path, owner_id=owner_id)
     store.begin_run(
         session_id=session_id, run_id=run_id, objective=query, snapshot=snapshot, model=model
     )
-    continuity = store.bootstrap_context(query, snapshot=snapshot)
+    continuity = store.bootstrap_context(query, session_id=session_id, snapshot=snapshot)
     return snapshot, continuity
 
 

@@ -86,7 +86,7 @@ describe("Dashboard tasks page", () => {
     expect(screen.getByText("42% reportado")).toBeTruthy();
     expect(screen.queryByRole("progressbar", { name: /0%/ })).toBeNull();
     expect(authenticatedFetch).toHaveBeenCalledWith(
-      "http://localhost:8000/api/tasks/list?limit=50&offset=0",
+      "http://localhost:8000/api/tasks/list?limit=50&offset=0&include_steps=false",
       expect.objectContaining({ method: "GET", cache: "no-store" }),
     );
 
@@ -280,7 +280,7 @@ describe("Dashboard tasks page", () => {
         & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(authenticatedFetch).toHaveBeenLastCalledWith(
-      "http://localhost:8000/api/tasks/list?limit=50&offset=50",
+      "http://localhost:8000/api/tasks/list?limit=50&offset=50&include_steps=false",
       expect.objectContaining({ method: "GET" }),
     );
     expect(screen.queryByRole("button", { name: "Carregar mais tarefas" })).toBeNull();

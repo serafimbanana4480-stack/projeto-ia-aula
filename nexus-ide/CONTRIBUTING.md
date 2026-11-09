@@ -117,7 +117,7 @@ pip install -e ".[dev]"
 **Frontend:**
 ```bash
 cd frontend
-npm install
+pnpm install --frozen-lockfile
 ```
 
 ## Estrutura do Projeto
@@ -164,7 +164,7 @@ pytest -v
 ```bash
 make test-frontend
 # ou
-cd frontend && npm test
+cd frontend && pnpm run test
 ```
 
 ## Lint e Type Check
@@ -183,8 +183,8 @@ cd backend && mypy . --ignore-missing-imports
 ```bash
 make lint-frontend
 # ou
-cd frontend && npm run lint
-cd frontend && npm run type-check
+cd frontend && pnpm run lint
+cd frontend && pnpm run type-check
 ```
 
 ## Adicionar um Novo Agente
@@ -253,7 +253,7 @@ Frontend logs aparecem no browser console.
 ## Perguntas Comuns
 
 **Q: Os testes do frontend falham com "Cannot find module"?**  
-A: Corre `npm install` no diretório `frontend/` para instalar as dependências de teste.
+A: Corre `pnpm install --frozen-lockfile` no diretório `frontend/` para instalar as dependências de teste.
 
 **Q: O Ollama não responde?**  
 A: Verifica se o container está a correr: `docker ps`. Se não, corre `make setup` ou `docker compose -f docker/docker-compose.yml up -d`.

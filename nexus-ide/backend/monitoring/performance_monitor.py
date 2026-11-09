@@ -758,7 +758,7 @@ class PerformanceMonitor:
     async def _collect_system_metrics(self) -> None:
         """Collect system-level metrics."""
         # CPU metrics
-        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_percent = await asyncio.to_thread(psutil.cpu_percent, 1)
         await self.record_metric(
             PerformanceMetricType.CPU_USAGE,
             "system",

@@ -37,15 +37,36 @@ function thinking(
 
 describe("foldRun · painel de raciocínio", () => {
   it("popula message.thinking a partir de um frame thinking", () => {
-    const message = assistant([thinking("Vou ler o ficheiro antes de responder.", 1)]);
+    const message = assistant([
+      thinking("Vou ler o ficheiro antes de responder.", 1, { data: { visibility: "full" } }),
+    ]);
     expect(message.thinking).toContain("Vou ler o ficheiro antes de responder.");
+  });
+
+  it("esconde raciocínio sem visibilidade full, mantendo o sinal de progresso", () => {
+    const message = assistant([thinking("conteúdo privado", 1)]);
+    expect(message.thinking).toBe("A analisar a tarefa…");
+    expect(message.steps?.find((step) => step.verb === "thinking")?.label).toBe(
+      "A analisar a tarefa…",
+    );
+  });
+
+  it("continua a ocultar o conteúdo privado ao juntar frames de raciocínio", () => {
+    const message = assistant([
+      thinking("primeiro conteúdo privado", 1),
+      thinking("segundo conteúdo privado", 2, { data: { text: "segundo conteúdo privado" } }),
+    ]);
+    const step = message.steps?.find((item) => item.verb === "thinking");
+    expect(step?.event?.content).toBe("A analisar a tarefa…");
+    expect(step?.detail).toMatchObject({ text: "A analisar a tarefa…" });
+    expect(JSON.stringify(step)).not.toContain("conteúdo privado");
   });
 
   it("cria UM passo por bloco de raciocínio, não um por delta", () => {
     const deltas = [
-      thinking("Vou ", 1),
-      thinking("ler o ", 2),
-      thinking("ficheiro.", 3),
+      thinking("Vou ", 1, { data: { visibility: "full" } }),
+      thinking("ler o ", 2, { data: { visibility: "full" } }),
+      thinking("ficheiro.", 3, { data: { visibility: "full" } }),
     ];
     const message = assistant([...deltas]);
 
@@ -61,7 +82,7 @@ describe("foldRun · painel de raciocínio", () => {
     // 400 deltas of reasoning is the real shape of a long thinking block.
     const events: StreamEvent[] = [];
     for (let index = 1; index <= 400; index += 1) {
-      events.push(thinking(`t${index} `, index));
+      events.push(thinking(`t${index} `, index, { data: { visibility: "full" } }));
     }
     const message = assistant(events);
     expect((message.steps ?? []).filter((step) => step.verb === "thinking")).toHaveLength(1);
@@ -143,7 +164,7 @@ describe("foldRun · painel de raciocínio", () => {
     // before the sanitiser instead would have overwritten the streamed
     // `message.thinking`.
     const message = assistant([
-      thinking("Abordagem real do agente.", 1),
+      thinking("Abordagem real do agente.", 1, { data: { visibility: "full" } }),
       {
         type: "token",
         run_id: "run-reason",

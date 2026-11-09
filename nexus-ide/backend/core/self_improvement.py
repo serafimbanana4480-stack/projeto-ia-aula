@@ -822,9 +822,12 @@ class ProposalApplier:
         """
         cwd = str(self._repo_path) if self._repo_path else None
         try:
+            import shlex
+
+            argv = shlex.split(self._test_command)
             proc = subprocess.run(
-                self._test_command,
-                shell=True,
+                argv,
+                shell=False,
                 capture_output=True,
                 text=True,
                 cwd=cwd,

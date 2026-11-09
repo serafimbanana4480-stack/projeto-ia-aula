@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backend.tools import file_api
 from backend.tools.file_api import _validate_relative_path as _validate_path
 from backend.tools.file_ops import (
     list_dir,
@@ -86,6 +87,70 @@ class TestReadFile:
         result = await read_file("../etc/passwd", str(tmp_path))
         assert "error" in result
         assert "not allowed" in result["error"]
+
+
+@pytest.mark.parametrize(
+    "operation", ["read", "read_multiple", "write", "list", "delete", "search"]
+)
+@pytest.mark.asyncio
+async def test_absolute_file_api_paths_cannot_escape_selected_project(
+    tmp_path: Path, operation: str
+) -> None:
+    project = tmp_path / "selected-project"
+    outside = tmp_path / "other-project"
+    project.mkdir()
+    outside.mkdir()
+    outside_file = outside / "private.txt"
+    outside_file.write_text("outside secret", encoding="utf-8")
+
+    if operation == "read":
+        result = await file_api.read(str(outside_file), project_path=str(project))
+        assert "error" in result
+        assert "outside project root" in result["error"]
+        assert "content" not in result
+    elif operation == "read_multiple":
+        result = await file_api.read_multiple(
+            [str(outside_file)], project_path=str(project)
+        )
+        assert result["read_count"] == 0
+        assert "outside project root" in result["errors"][str(outside_file)]
+    elif operation == "write":
+        result = await file_api.write(
+            str(outside_file), "overwritten", project_path=str(project)
+        )
+        assert "error" in result
+        assert outside_file.read_text(encoding="utf-8") == "outside secret"
+    elif operation == "list":
+        result = await file_api.list_files(str(outside), project_path=str(project))
+        assert "error" in result
+        assert "outside project root" in result["error"]
+    elif operation == "delete":
+        result = await file_api.delete(
+            str(outside_file), project_path=str(project), move_to_trash=False
+        )
+        assert "error" in result
+        assert outside_file.read_text(encoding="utf-8") == "outside secret"
+    else:
+        result = await file_api.search(
+            "outside secret", path=str(outside), project_path=str(project)
+        )
+        assert "error" in result
+        assert "outside project root" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_absolute_file_api_path_inside_selected_project_remains_allowed(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "selected-project"
+    project.mkdir()
+    target = project / "visible.txt"
+    target.write_text("inside project", encoding="utf-8")
+
+    result = await file_api.read(str(target), project_path=str(project))
+
+    assert result.get("content") == "inside project"
+    assert "error" not in result
 
 
 class TestWriteFile:

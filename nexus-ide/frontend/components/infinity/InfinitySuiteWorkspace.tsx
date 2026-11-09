@@ -41,7 +41,10 @@ export function InfinitySuiteWorkspace({ compact = false, onCommandPrepared }: {
   useEffect(() => {
     void loadModes();
     const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void loadModes();
+      // A visible tab polls for a fresh snapshot, so it must bypass the
+      // "already loaded" guard that keeps the rest of the app from
+      // refetching the same catalogue on every mount.
+      if (document.visibilityState === "visible") void loadModes(true);
     }, 20_000);
     return () => window.clearInterval(timer);
   }, [loadModes]);
@@ -95,7 +98,7 @@ export function InfinitySuiteWorkspace({ compact = false, onCommandPrepared }: {
 
   return (
     <div className="min-w-0 space-y-4">
-      {(error || actionError) && <div role="alert" className="flex items-start gap-2 rounded-xl border border-amber-400/25 bg-amber-400/10 p-3 text-xs leading-relaxed text-amber-200">
+      {(error || actionError) && <div role="alert" className="flex items-start gap-2 rounded-xl border border-amber-400/25 bg-amber-400/10 p-3 text-xs leading-relaxed text-nexus-accent3">
         <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
         <div className="min-w-0 flex-1"><p>{error || actionError}</p>{error && health && <p className="mt-1">Os dados abaixo são a última leitura. Atualiza antes de alterar modos.</p>}</div>
         <button type="button" onClick={() => void refreshHealth()} disabled={loading}
@@ -113,11 +116,11 @@ export function InfinitySuiteWorkspace({ compact = false, onCommandPrepared }: {
           </div>)}
         </div>
 
-        {disk?.write_blocked && <div role="status" className="rounded-xl border border-amber-400/25 bg-amber-400/[0.07] p-3 text-xs leading-relaxed text-amber-200">
+        {disk?.write_blocked && <div role="status" className="rounded-xl border border-amber-400/25 bg-amber-400/[0.07] p-3 text-xs leading-relaxed text-nexus-accent3">
           <div className="flex items-center gap-2 font-semibold"><AlertTriangle aria-hidden="true" className="h-4 w-4" />Execução bloqueada pelo armazenamento</div>
           <p className="mt-1">{disk.snapshot?.free_percent.toLocaleString("pt-PT", { maximumFractionDigits: 1, minimumFractionDigits: 1 }) ?? "—"}% livre; o runtime exige {disk.threshold_percent ?? 5}%. Podes consultar e configurar os modos. As execuções sujeitas ao guard ficam bloqueadas.</p>
         </div>}
-        {health.healthy === false && <p role="alert" className="text-xs text-amber-300">O catálogo está incompleto. Alguns modos podem estar indisponíveis.</p>}
+        {health.healthy === false && <p role="alert" className="text-xs text-nexus-accent3">O catálogo está incompleto. Alguns modos podem estar indisponíveis.</p>}
 
         <div className="rounded-2xl border border-purple-400/25 bg-purple-400/[0.06] p-4">
           <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-purple-300"><Layers aria-hidden="true" className="h-3.5 w-3.5" />Perfil do próximo pedido</div>

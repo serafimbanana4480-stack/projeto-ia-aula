@@ -19,6 +19,33 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active);
 
+-- Refresh exchanges are single-use, but the same idempotency key must be able
+-- to recover the exact response if a client loses the first HTTP response.
+-- Token pairs are encrypted with the application's SECRET_KEY before storage.
+CREATE TABLE IF NOT EXISTS auth_refresh_exchanges (
+    refresh_jti           TEXT PRIMARY KEY,
+    idempotency_key_hash  TEXT NOT NULL,
+    response_ciphertext   TEXT NOT NULL,
+    expires_at            REAL NOT NULL,
+    created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_refresh_exchanges_expiry
+    ON auth_refresh_exchanges(expires_at);
+
+-- Store only one-way hashes for revoked credentials. These records must
+-- survive a backend restart while never storing bearer tokens or session IDs.
+CREATE TABLE IF NOT EXISTS auth_revocations (
+    revocation_type  TEXT NOT NULL CHECK (revocation_type IN ('token', 'session')),
+    credential_hash TEXT NOT NULL,
+    expires_at      REAL NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (revocation_type, credential_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_revocations_expiry
+    ON auth_revocations(expires_at);
+
 -- ---------------------------------------------------------------------------
 -- USER PROFILE — preferences, routines, and personal memories
 -- ---------------------------------------------------------------------------
@@ -108,6 +135,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     started_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     last_active_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     context_json  TEXT,
+    -- Soft-delete marker written by the session garbage collector. A session
+    -- with status='expired' is not listed any more; expired_at records when
+    -- the collector expired it.
+    status        TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'idle', 'expired')),
+    expired_at    TEXT,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
 );
 
@@ -115,6 +148,88 @@ CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_mode ON sessions(mode);
 CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(last_active_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_active ON sessions(user_id, last_active_at DESC);
+
+-- A bot owns a normal chat session; messages and runs remain in the existing
+-- session store. Profiles carry no credentials or tool permissions.
+CREATE TABLE IF NOT EXISTS bot_profiles (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    session_id      TEXT NOT NULL UNIQUE,
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    instructions    TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    -- Per-bot tool capabilities as a JSON object. Keys: read/research/tasks/
+    -- memory/write (all boolean). Enforced fail-closed on every execution.
+    capabilities    TEXT NOT NULL DEFAULT '{"read": true, "research": true, "tasks": true, "memory": true, "write": false}',
+    archived        INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+    deleted         INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_bot_profiles_owner
+    ON bot_profiles(user_id, deleted, archived, updated_at DESC);
+
+-- Group conversations are isolated from ordinary tool-capable chat sessions.
+CREATE TABLE IF NOT EXISTS bot_groups (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bot_groups_owner ON bot_groups(user_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS bot_group_members (
+    group_id TEXT NOT NULL REFERENCES bot_groups(id) ON DELETE CASCADE,
+    bot_id TEXT NOT NULL REFERENCES bot_profiles(id) ON DELETE RESTRICT,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (group_id, bot_id),
+    UNIQUE (group_id, position)
+);
+CREATE TABLE IF NOT EXISTS bot_group_messages (
+    id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL REFERENCES bot_groups(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'error')),
+    content TEXT NOT NULL,
+    bot_id TEXT,
+    bot_name TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bot_group_messages ON bot_group_messages(group_id, created_at);
+
+CREATE TABLE IF NOT EXISTS bot_group_runs (
+    id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL REFERENCES bot_groups(id),
+    user_id TEXT NOT NULL,
+    request TEXT NOT NULL,
+    project_root TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bot_group_runs_owner ON bot_group_runs(user_id, group_id, created_at);
+CREATE TABLE IF NOT EXISTS bot_group_run_tasks (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES bot_group_runs(id),
+    position INTEGER NOT NULL,
+    bot_id TEXT NOT NULL,
+    bot_name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    status TEXT NOT NULL,
+    result TEXT,
+    error TEXT,
+    UNIQUE(run_id, position)
+);
+CREATE TABLE IF NOT EXISTS bot_group_run_records (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES bot_group_runs(id),
+    task_id TEXT NOT NULL REFERENCES bot_group_run_tasks(id),
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
 
 -- ---------------------------------------------------------------------------
 -- SESSION RUNS / CHECKPOINTS — durable progress for long-running streams
@@ -154,6 +269,23 @@ CREATE INDEX IF NOT EXISTS idx_session_runs_session_updated ON session_runs(sess
 CREATE INDEX IF NOT EXISTS idx_session_runs_correlation_updated ON session_runs(correlation_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_session_runs_mission_updated ON session_runs(mission_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_session_runs_goal_updated ON session_runs(goal_id, updated_at);
+
+-- A child has its own session and run. Its detailed events remain in the
+-- parent's ordered journal and are selected by task_id when replayed.
+CREATE TABLE IF NOT EXISTS subagent_executions (
+    parent_session_id TEXT NOT NULL,
+    parent_run_id     TEXT NOT NULL,
+    task_id           TEXT NOT NULL,
+    child_session_id  TEXT NOT NULL UNIQUE,
+    child_run_id      TEXT NOT NULL UNIQUE,
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (parent_run_id, task_id),
+    FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_run_id) REFERENCES session_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (child_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (child_run_id) REFERENCES session_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_subagent_executions_parent ON subagent_executions(parent_session_id, parent_run_id);
 
 -- run_id links a persisted message to the durable execution that produced it.
 CREATE TABLE IF NOT EXISTS messages (
@@ -277,6 +409,7 @@ CREATE TABLE IF NOT EXISTS whiteboard_entries (
     entry_id         TEXT PRIMARY KEY,
     topic            TEXT NOT NULL,
     author_agent     TEXT NOT NULL,
+    user_id          TEXT NOT NULL DEFAULT '',
     content          TEXT NOT NULL,
     timestamp        TEXT NOT NULL,
     importance       REAL NOT NULL DEFAULT 0.5
@@ -290,6 +423,7 @@ CREATE INDEX IF NOT EXISTS idx_wb_topic ON whiteboard_entries(topic);
 CREATE INDEX IF NOT EXISTS idx_wb_author ON whiteboard_entries(author_agent);
 CREATE INDEX IF NOT EXISTS idx_wb_timestamp ON whiteboard_entries(timestamp);
 CREATE INDEX IF NOT EXISTS idx_wb_archived ON whiteboard_entries(archived);
+CREATE INDEX IF NOT EXISTS idx_wb_user_timestamp ON whiteboard_entries(user_id, timestamp);
 
 CREATE TABLE IF NOT EXISTS whiteboard_entry_links (
     id              TEXT PRIMARY KEY,
@@ -606,3 +740,49 @@ CREATE TABLE IF NOT EXISTS run_dead_letters (
 
 CREATE INDEX IF NOT EXISTS idx_run_dead_letters_run ON run_dead_letters(run_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_run_dead_letters_state ON run_dead_letters(state, created_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- STRUCTURED LOGS — durable observability log written by the log store.
+-- The table used to exist only in the live database (created on demand by
+-- backend/observability/log_store.py) and was missing here, so a database
+-- built from this file and a live database had a different shape.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS structured_logs (
+    id          TEXT PRIMARY KEY,
+    timestamp   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    level       TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    agent       TEXT,
+    session_id  TEXT,
+    task_id     TEXT,
+    extra_json  TEXT,
+    correlation_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_logs_session ON structured_logs(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_logs_agent ON structured_logs(agent, timestamp);
+CREATE INDEX IF NOT EXISTS idx_logs_level ON structured_logs(level, timestamp);
+CREATE INDEX IF NOT EXISTS idx_logs_time ON structured_logs(timestamp DESC);
+
+-- ---------------------------------------------------------------------------
+-- USAGE LEDGER — durable per-call LLM spend record (the cost governor's
+-- financial ledger). Like structured_logs it used to exist only in the live
+-- database.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS usage_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    day TEXT NOT NULL,
+    provider TEXT DEFAULT '',
+    model TEXT DEFAULT '',
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    cost_usd REAL DEFAULT 0.0,
+    session_id TEXT DEFAULT '',
+    run_id TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_ledger_day ON usage_ledger(day);
+CREATE INDEX IF NOT EXISTS idx_usage_ledger_run ON usage_ledger(run_id);

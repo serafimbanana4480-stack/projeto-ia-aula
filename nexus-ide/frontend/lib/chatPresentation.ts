@@ -1,4 +1,39 @@
-import type { ActivityItem, AgentName, StreamEvent } from "./types";
+import type { ActivityItem, AgentName, ChatMessage, RunStep, StreamEvent } from "./types";
+
+/**
+ * A stable React key for one run-timeline row.
+ *
+ * The obvious key — ``${step.seq}-${step.kind}`` — collides. The legacy
+ * pipeline emits frames without a ``seq``, and `foldRun` gives every one of
+ * them the same sentinel value, so two `status` rows in the same group both
+ * keyed to `-1-status`. React then warned about duplicate keys and could
+ * drop or duplicate rows.
+ *
+ * The runtime's own frames carry a unique ``event_id``, which is used when
+ * present. Everything else falls back to a composite that includes the row's
+ * position, so two rows can never share a key.
+ */
+export function runStepKey(step: RunStep, index: number): string {
+  const eventId = step.event?.event_id;
+  if (typeof eventId === "string" && eventId.length > 0) return `e:${eventId}`;
+  const task = step.taskId ? `:${step.taskId}` : "";
+  return `s:${step.seq}:${step.kind}${task}:${index}`;
+}
+
+/**
+ * Hide repeated assistant rows from legacy retries of the same durable run.
+ * A distinct run remains a distinct turn, even when its answer text matches.
+ */
+export function collapseDuplicateRunAnswers(messages: ChatMessage[]): ChatMessage[] {
+  const seen = new Set<string>();
+  return messages.filter((message) => {
+    if (message.role !== "assistant" || !message.runId || !message.content.trim()) return true;
+    const key = JSON.stringify([message.runId, message.content]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 const EVENT_TITLES: Record<string, string> = {
   project_defaulted: "Projeto predefinido selecionado",
@@ -16,6 +51,7 @@ const EVENT_TITLES: Record<string, string> = {
 };
 
 const RUNTIME_EVENT_TITLES: Record<string, string> = {
+  cancel_requested: "Paragem pedida · estado não confirmado",
   command_completed: "Comando concluído",
   file_changed: "Ficheiros alterados",
   file_read: "Ficheiro lido",
@@ -90,6 +126,13 @@ export function sanitizeAssistantContent(value: string): string {
     .replace(/<tool\b[^>]*>[\s\S]*?(?:<\/tool>|$)/gi, "")
     .replace(/<\|tool_call_begin\|>[\s\S]*?(?:<\|tool_call_end\|>|$)/gi, "")
     .replace(/<event\b[^>]*>[\s\S]*?(?:<\/event>|$)/gi, "")
+    // Old assistant rows could persist provider-authored reasoning as
+    // `<think>` content. Remove the whole block from history; stripping only
+    // its tags would reveal the private text to the next renderer.
+    .replace(
+      /<\s*(think|thinking|reasoning|scratchpad)\s*>[\s\S]*?(?:<\s*\/\s*\1\s*>|$)/gi,
+      "",
+    )
     .replace(/<\/?(?:function|parameter)[^>]*>/gi, "")
     // Must stay in step with the backend's `strip_reasoning_markup`
     // (`backend/runtime/reasoning.py`), whose pattern is
@@ -219,19 +262,27 @@ export function activityFromProgress(event: StreamEvent, index: number): Activit
       ? rawStatus
       : "pending";
   const taskId = String(data.task_id ?? "");
+  const isMessageLifecycle = runtimeKind === "message_started" || runtimeKind === "message_completed";
+  const cycle = data.cycle ?? data.cycles;
+  const messageLifecycleKey =
+    taskId ||
+    (typeof cycle === "string" || typeof cycle === "number" ? String(cycle) : "default");
   const todos = Array.isArray(data.todos) ? data.todos : [];
-  const completedTodos = todos.filter((todo) => {
+  const tasks = todos.filter((todo) => !(todo && typeof todo === "object" && ["category", "objective"].includes(String((todo as { type?: unknown }).type))));
+  const completedTodos = tasks.filter((todo) => {
     if (!todo || typeof todo !== "object") return false;
     const todoStatus = String((todo as { status?: unknown }).status ?? "").toLowerCase();
     return ["done", "complete", "completed", "success"].includes(todoStatus);
   }).length;
   const detail =
     runtimeKind === "plan_updated" && todos.length > 0
-      ? `${completedTodos} de ${todos.length} etapas concluídas`
+      ? `${completedTodos} de ${tasks.length} etapas concluídas`
       : sanitizeAssistantContent(event.content ?? "");
 
   return {
-    id: taskId || `activity-${index}-${event.timestamp}`,
+    id: isMessageLifecycle
+      ? `message-${messageLifecycleKey}`
+      : taskId || `activity-${index}-${event.timestamp}`,
     kind,
     title:
       runtimeKind === "plan_updated"
@@ -394,7 +445,9 @@ export function agentActivity(
   const delegateName = event.data?.target ?? event.data?.name;
   const activityAgent =
     typeof delegateName === "string" && delegateName.trim()
-      ? (delegateName as AgentName)
+      ? (event.agent && delegateName.startsWith(`${event.agent}:`)
+          ? event.agent
+          : delegateName as AgentName)
       : event.agent;
   const agent = activityAgent ?? (status === "running" ? "IA" : "Agente");
   const title =
@@ -414,12 +467,12 @@ export function agentActivity(
                 ? `${agent} terminou com aviso`
                 : `${agent} está pendente`;
   return {
-    id: `agent-${activityAgent ?? "AI"}-${String(event.data?.task_id ?? index)}`,
+    id: `agent-${activityAgent ?? "AI"}-${String(event.task_id || event.data?.task_id || index)}`,
     kind: "agent",
     title,
     agent: activityAgent,
     status,
     timestamp: event.timestamp,
-    data: event.data,
+    data: event.task_id ? { ...event.data, task_id: event.task_id } : event.data,
   };
 }

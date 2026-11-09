@@ -143,7 +143,11 @@ describe("Mission Control widgets", () => {
 
     render(<AgentActivityMap />);
 
-    expect(screen.getAllByText("RESEARCHER")).toHaveLength(2);
+    // The card shows the raw agent type as its name; the role line below
+    // it is now localised to pt-PT (RESEARCHER -> Investigador), so the type
+    // appears once instead of twice.
+    expect(screen.getByText("RESEARCHER")).toBeInTheDocument();
+    expect(screen.getByText("Investigador")).toBeInTheDocument();
     expect(screen.getByText("Estado desconhecido")).toBeInTheDocument();
     expect(screen.getByText("0 em curso")).toBeInTheDocument();
     expect(screen.queryByText("A executar")).not.toBeInTheDocument();
@@ -184,7 +188,10 @@ describe("Mission Control widgets", () => {
     expect(screen.getByText("0% relevância")).toBeInTheDocument();
     expect(screen.getByText("0 consultas")).toBeInTheDocument();
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(mockFetch).toHaveBeenCalledWith("/api/memory/stats");
+    // The store now uses `authenticatedFetch`, which sends the bearer token
+    // (and can refresh it), so the call carries an options object too.
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/memory/stats");
+    expect(mockFetch.mock.calls[0][1]).toBeDefined();
   });
 
   it("shows a memory empty response as unavailable rather than zero", async () => {

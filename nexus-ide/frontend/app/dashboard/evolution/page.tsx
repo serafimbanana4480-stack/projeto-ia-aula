@@ -1,7 +1,6 @@
 import { Suspense } from "react";
-import EvolutionClient from "./EvolutionClient";
 import AppShell from "../../../components/layout/AppShell";
-
+import EvolutionClient from "./EvolutionClient";
 export const metadata = {
   title: "Evolution Engine | NEXUS IDE",
   description: "Self-improving agent evolution engine — champions, challengers, failure analysis, and rollback history",
