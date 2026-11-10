@@ -26,7 +26,7 @@ export default function GroupIncidentCard({
 
   return (
     <article
-      className="mx-auto max-w-3xl rounded-xl border border-rose-400/30 bg-rose-400/[0.06] p-4"
+      className="rounded-2xl border border-[color:var(--nx-rose)]/35 bg-[color:color-mix(in_srgb,var(--nx-rose)_8%,var(--nx-surface-1))] p-4"
       data-testid="group-incident"
     >
       <div className="flex items-start gap-3">

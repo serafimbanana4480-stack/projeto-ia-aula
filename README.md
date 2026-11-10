@@ -1,63 +1,145 @@
 # NEXUS IDE
 
-### Um espaço para desenvolver com IA, acompanhar tarefas e explorar agentes.
+IDE local para trabalhar com IA: um chat principal, bots com identidade própria e grupos em que vários bots leem, passam trabalho e registam o que cada um fez.
 
-O NEXUS IDE junta chat, projetos, ferramentas e modelos de IA numa interface local. Podes conversar com um modelo, configurar bots com instruções próprias e acompanhar a atividade das tuas tarefas a partir do mesmo sítio.
+[English](nexus-ide/README.md) · [Português, na pasta do projeto](nexus-ide/README_PT.md)
 
-![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white) ![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=next.js) ![React](https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white) ![Estado](https://img.shields.io/badge/estado-em%20desenvolvimento-8B5CF6)
+![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white) ![Next.js 15](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white) ![React 19](https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white)
 
-[Ver a interface](#a-interface) · [Começar](#começar) · [Modelos e agentes](#modelos-bots-e-agentes) · [Arquitetura](#arquitetura) · [Testes](#testes-e-verificação)
+[Funcionalidades](#funcionalidades) · [Galeria](#galeria) · [Arquitetura](#arquitetura) · [Começar](#começar) · [Testes](#testes) · [Limitações](#limitações)
 
-![Painel de operações do NEXUS IDE](docs/readme/dashboard.png)
+![Grupo concluído: três bots, passagem de FORGE para Debugger e o resultado da leitura de ficheiro](docs/screenshots/group-done-wide.png)
 
-*Painel de operações numa captura de outubro de 2026. Os valores e o estado apresentados pertencem a essa sessão.*
+*Grupo «Revisão concluída» a 1920×1080. Dados do fixture local: nenhum provider pago foi contactado.*
 
-## O que podes explorar
+## Funcionalidades
 
-| Área | Para que serve |
-| --- | --- |
-| **Chat** | Conversar com a IA, acompanhar respostas e consultar atividade, contexto e tarefas da sessão. |
-| **Bots** | Criar assistentes com nome, instruções, fornecedor e modelo próprios; organizar conversas individuais e de grupo. |
-| **Projetos e ficheiros** | Trabalhar com o contexto de um projeto e aceder às áreas de ficheiros disponíveis na interface. |
-| **Tarefas e agentes** | Acompanhar trabalho, estados e atividade reportada durante as execuções. |
-| **Skills, memória e integrações** | Explorar instruções reutilizáveis, contexto persistente e integrações configuradas. |
-| **Modelos** | Configurar fornecedores locais ou externos, conforme os serviços e credenciais disponíveis. |
+A barra principal liga as superfícies que existem hoje. O que a API não devolve aparece como indisponível ou por confirmar, não como saudável.
 
-> **Estado do projeto:** o NEXUS está em desenvolvimento. A disponibilidade de modelos, ferramentas e integrações depende da configuração e dos serviços em execução. Uma interface ou um teste isolado não garante autonomia prolongada nem prontidão para produção.
+| Área | Rota | O que faz |
+| --- | --- | --- |
+| **Chat** | `/` | Conversa principal com markdown, código, compositor e painel de contexto da sessão. |
+| **Grupos de bots** | `/bots` | Vários bots na mesma sala. A conversa segue por ordem. Erros iguais na mesma volta agrupam-se num incidente. |
+| **Execução com ficheiro** | `/bots` | Pedido separado, com caminho de ficheiro. O primeiro participante lê, os do meio contribuem, o último faz a revisão crítica. As passagens ficam no registo. |
+| **Bots** | `/bots` | Conversas individuais, com marca própria, papel, provider, modelo e atividade de ferramentas. |
+| **Dashboard** | `/dashboard` | Painel de operações: atalhos, modelo ativo e prontidão do runtime quando a API a confirma. |
+| **Projetos** | `/projects` | Pastas ligadas às conversas. |
+| **Tarefas** | `/dashboard/tasks` | Fila, falhas e concluídas. As etapas vêm em lista; a API não traz árvore de pais e filhos. |
+| **Ficheiros** | `/editor` | Editor Monaco e terminal local, sobre uma pasta escolhida. |
+| **Skills** | `/tools` | Ferramentas e instruções reutilizáveis expostas pela API. |
+| **Memória** | `/nexus` | Recursos de conhecimento e contexto do NEXUS. |
+| **Integrações** | `/mcp` | Ligações MCP. Um conector configurado não é apresentado como saudável sem medição. |
+| **Modelos** | `/models` | Catálogo de modelos e providers. A inferência fica «não verificada» até a API dizer o contrário. |
+| **Agentes / SWARM** | `/swarm` | Superfície de agentes. Não é, por si, prova de que vários agentes correram. |
+| **Pesquisa e recolha** | `/search`, `/scraping` | Pesquisa e recolha web, conforme as chaves e o serviço configurados. |
+| **Documentos** | `/documents` | Documentos guardados pela aplicação. |
+| **Aprovações** | `/nexus/hitl` | Fila do que espera uma decisão humana. |
+| **Definições** | `/settings` | Provider predefinido e chaves. Guardar uma chave não valida a ligação. |
 
-## A interface
+## Galeria
 
-### Bots com identidade própria
+Capturas do estado atual, tiradas com o servidor de fixture em `nexus-ide/frontend/e2e/overhaul/fixture-server.mjs` e o Next de desenvolvimento. Não houve chamada a Ollama, OpenRouter, Kilo, OpenAI nem a outro provider pago. Onde o fixture não implementa a rota, a imagem mostra a falha real da interface.
 
-Define as instruções e escolhe o fornecedor e o modelo para cada conversa. A captura mostra a configuração de um bot num ambiente de teste; o modelo apresentado é simulado.
+### Desktop
 
-![Janela de criação de um bot](docs/readme/bots-configuracao.png)
+![Painel de operações](docs/screenshots/dashboard-desktop.png)
 
-Na área de bots podes voltar às conversas e consultar a configuração. Nesta captura, a resposta também é simulada para testar a interface e o streaming.
+*Dashboard a 1440×900. Sem `/api/ready` no fixture, a faixa diz que a prontidão não foi confirmada.*
 
-![Conversa com um bot em ambiente de teste](docs/readme/bots-conversa.png)
+![Chat principal com markdown e código](docs/screenshots/chat-desktop.png)
 
-### Acompanhar uma equipa de agentes
+*Chat. O markdown e o bloco de código vêm da sessão de fixture. Os agentes dessa sessão não têm rota no fixture, por isso o cartão diz HTTP 404.*
 
-Uma vista de atividade pode apresentar agentes, tarefas, estados e dependências. A imagem seguinte é uma **pré-visualização com dados simulados**, não uma demonstração de agentes reais em execução.
+![Conversa individual do bot FORGE, com a chamada read_file aberta](docs/screenshots/bot-desktop.png)
 
-![Pré-visualização de uma equipa de agentes com dados simulados](docs/readme/agentes-simulados.jpg)
+*Bot individual. A marca é gerada a partir da identidade, não são iniciais. O estado do modelo é «Inferência não verificada».*
+
+![Grupo em execução: FORGE a ler o ficheiro e Debugger à espera](docs/screenshots/group-running-desktop.png)
+
+*Execução em curso. A faixa diz quem está a executar e quem está à espera. O cartão agrupa a leitura de `src/parser.ts`.*
+
+![Incidente de provider com quatro ocorrências no mesmo cartão](docs/screenshots/group-incident-desktop.png)
+
+*Quatro erros com o mesmo texto na mesma volta ficam num incidente. Não há repetição automática.*
+
+![Painel de contexto no separador Ficheiros](docs/screenshots/group-context-desktop.png)
+
+*Contexto do grupo: Participantes, Plano, Ficheiros, Ferramentas e Eventos. Abaixo de 1440 px abre em gaveta.*
+
+![Lista de projetos](docs/screenshots/projects-desktop.png)
+
+![Tarefas, com uma falha de provider](docs/screenshots/tasks-desktop.png)
+
+![Definições, com o fornecedor predefinido](docs/screenshots/settings-desktop.png)
+
+![Editor sem pasta selecionada](docs/screenshots/editor-desktop.png)
+
+*Editor. Sem pasta, e sem a árvore de ficheiros no fixture, a página mostra 404 e «Nenhum ficheiro encontrado».*
+
+### Tablet e telemóvel
+
+![Dashboard a 768×1024, com a navegação fechada](docs/screenshots/dashboard-tablet.png)
+
+![Chat a 390×844](docs/screenshots/chat-mobile.png)
+
+![Bot FORGE a 390×844](docs/screenshots/bot-mobile.png)
+
+*Abaixo de 1024 px a navegação principal é uma gaveta. No telemóvel, a lista de bots e a conversa ocupam o ecrã à vez.*
+
+## Arquitetura
+
+O browser fala com um backend FastAPI. O chat e as salas de grupo recebem a resposta por SSE. A persistência de referência é SQLite, descrita em `nexus-ide/backend/persistence/schemas.sql`.
+
+```mermaid
+flowchart LR
+  subgraph browser [Browser]
+    Next["Next.js 15 · React 19"]
+  end
+  subgraph api [FastAPI]
+    Routes["orchestrator · rotas"]
+    Runtime["runtime · loop principal"]
+    Groups["salas de grupo · SSE"]
+    FileRuns["execuções com ficheiro"]
+    Providers["llm · providers"]
+    DB[("SQLite")]
+  end
+  Next --> Routes
+  Routes --> Runtime
+  Routes --> Groups
+  Routes --> FileRuns
+  Runtime --> Providers
+  Groups --> Providers
+  FileRuns --> Providers
+  Runtime --> DB
+  Groups --> DB
+  FileRuns --> DB
+```
+
+Uma sala de grupo não é o mesmo que uma execução com ficheiro.
+
+- Na **conversa**, os participantes respondem por ordem até consenso, até uma falha, ou até ao limite de voltas e de tempo. Esta conversa não tem ferramentas. Erros equivalentes entre duas mensagens do utilizador juntam-se num incidente, com contagem, agentes e o texto técnico por baixo. Repetir a mensagem é uma ação explícita.
+- Na **execução com ficheiro**, o pedido leva `message`, `file_path` e `project_path`. O primeiro bot lê o ficheiro, os intermédios contribuem e o último faz a revisão crítica. Cada passagem guarda `trust: analysis_unverified`: a análise anterior entra como dado, não como facto verificado.
+- No **bot individual**, a sessão usa o stream do runtime (`useAgentStream`). As chamadas de ferramenta que o stream emite aparecem num cartão. O raciocínio privado do stream não é mostrado.
+
+Um provider listado, ou uma chave guardada, não significa que a inferência tenha sido medida.
 
 ## Começar
 
-### Requisitos
+Precisas de Python 3.12 ou superior, Node.js e pnpm 10.34.9 (o `packageManager` do frontend). Git. Um provider local (Ollama ou LM Studio) ou uma chave de um provider externo, se quiseres mesmo inferência. As capturas deste README não precisam de chave.
 
-- Python **3.12 ou superior** e Node.js; o frontend declara **pnpm 10.34.9**.
-- Git e acesso ao fornecedor de modelos escolhido. Para modelos locais, instala e inicia o serviço correspondente, como Ollama ou LM Studio.
-- Credenciais apenas se escolheres um fornecedor externo. Nunca publiques o teu ficheiro `.env` ou as tuas chaves.
+Há dois perfis de portas. O `.env.example` e o `INICIAR_NEXUS.bat` usam **8000** e **3000**. Nesta máquina essas portas podem estar ocupadas por outro projeto; o perfil local `nexus-ide/start-nexus.bat` usa **8001** e **3001**.
 
-### Instalação local no Windows
+### Windows, `INICIAR_NEXUS.bat`
 
-No PowerShell, a partir da pasta onde queres guardar o projeto:
+O script está na raiz do repositório. Antes de o correres noutro computador, edita `RAIZ`: hoje aponta para `C:\Users\rodri\Desktop\nexus`. Confirma `.venv`, `frontend\node_modules` e `.env`. Se a porta 8000 ou 3000 já estiver à escuta, o script sai e não mata o processo que a ocupa.
+
+`nexus-ide\start-nexus.bat` é o outro atalho, também com caminho fixo desta máquina, e arranca o backend em 8001 e o frontend em 3001, sem `--reload`. `start-nexus-dev.bat` limita o reload à pasta `backend/`. O reload sobre a árvore inteira reinicia o processo quando um agente grava um `.py` e perde o estado da sessão em memória.
+
+### Arranque manual
+
+A partir de `nexus-ide/`:
 
 ```powershell
-git clone https://github.com/serafimbanana4480-stack/projeto-ia-aula.git
-cd projeto-ia-aula/nexus-ide
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 Copy-Item .env.example .env
@@ -67,81 +149,111 @@ corepack prepare pnpm@10.34.9 --activate
 pnpm install --frozen-lockfile
 ```
 
-Edita `nexus-ide/.env` de acordo com o teu ambiente e fornecedor. Consulta as opções em [.env.example](nexus-ide/.env.example) antes de iniciar.
+Em macOS ou Linux, o Python do virtualenv é `.venv/bin/python` e a cópia do ambiente é `cp .env.example .env`.
 
-**Terminal 1 — backend**, a partir de `nexus-ide/`:
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8000
-```
-
-**Terminal 2 — frontend**, a partir de `nexus-ide/frontend/`:
+Perfil local, quando 8000 e 3000 estão ocupadas. Terminal do backend, em `nexus-ide/`, **sem** `--reload`:
 
 ```powershell
-$env:NEXT_PUBLIC_API_URL = 'http://127.0.0.1:8000'
-pnpm run dev
+$env:BACKEND_HOST = "127.0.0.1"
+$env:ALLOWED_ORIGINS = "http://127.0.0.1:3001,http://localhost:3001"
+.\.venv\Scripts\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8001
 ```
 
-Abre [localhost:3000](http://localhost:3000). A documentação da API fica em [localhost:8000/docs](http://localhost:8000/docs) e a verificação básica do backend em [localhost:8000/health](http://localhost:8000/health). Se uma porta já estiver ocupada, verifica primeiro que processo a está a usar.
-
-> O script `INICIAR_NEXUS.bat` na raiz contém um caminho específico desta máquina. Para uma instalação noutro computador, usa os comandos manuais acima ou adapta o caminho antes de o executar.
-
-### Primeiros passos
-
-1. Inicia o backend e o frontend e entra na interface.
-2. Configura um fornecedor e confirma que o modelo escolhido está disponível.
-3. Abre o chat ou cria um bot com instruções adequadas à tarefa.
-4. Começa com um pedido pequeno e verifica a resposta e a atividade apresentada.
-5. Revê alterações e resultados antes de os aplicares ao teu projeto.
-
-## Modelos, bots e agentes
-
-O backend inclui integrações para fornecedores locais e cloud, incluindo Ollama, LM Studio, OpenRouter e OpenAI. **Um fornecedor aparecer na interface não significa que esteja ligado ou que a inferência tenha sido verificada.** Quando usas um fornecedor externo, os dados enviados no pedido saem da tua máquina e ficam sujeitos às condições desse serviço.
-
-Os bots permitem configurar conversas com instruções próprias. O runtime principal e os restantes componentes de agentes e orquestração têm responsabilidades diferentes; a seleção de um modo ou a apresentação de uma equipa não prova que vários agentes independentes tenham trabalhado numa execução concreta. Consulta os eventos e os relatórios da execução para perceber o que aconteceu.
-
-## Arquitetura
-
-```text
-Browser
-  └── frontend/          Next.js, React, TypeScript e Zustand
-        └── backend/     FastAPI
-              ├── runtime/       execução e eventos do runtime principal
-              ├── orchestrator/ rotas e orquestração
-              ├── agents/       agentes e papéis
-              ├── llm/          fornecedores de modelos
-              ├── tools/        ferramentas disponíveis
-              ├── persistence/  SQLite e esquema
-              └── knowledge/    memória e conhecimento
-```
-
-O código principal está em [`nexus-ide/`](nexus-ide/). A documentação e os relatórios de auditoria estão em [`nexus-ide/docs/`](nexus-ide/docs/) e [`docs/`](docs/). Os eventos do chat são um contrato entre frontend e backend; `backend/persistence/schemas.sql` é a referência do esquema de persistência.
-
-## Testes e verificação
-
-Executa os testes do backend a partir de `nexus-ide/`:
+Terminal do frontend, em `nexus-ide/frontend/`:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest backend/tests -q
+$env:NEXT_PUBLIC_API_URL = "http://127.0.0.1:8001"
+pnpm run dev -- --hostname 127.0.0.1 --port 3001
 ```
 
-Para verificar o frontend, a partir de `nexus-ide/frontend/`:
+Abre [http://127.0.0.1:3001](http://127.0.0.1:3001). Saúde da API: [http://127.0.0.1:8001/health](http://127.0.0.1:8001/health). Documentação interativa: [http://127.0.0.1:8001/docs](http://127.0.0.1:8001/docs).
+
+Para o perfil 8000/3000, usa a porta 8000 no uvicorn, `NEXT_PUBLIC_API_URL=http://127.0.0.1:8000` e `pnpm run dev` (porta 3000 por omissão). Inclui `http://localhost:3000` e `http://127.0.0.1:3000` em `ALLOWED_ORIGINS`.
+
+## Configuração
+
+Copia `nexus-ide/.env.example` para `nexus-ide/.env`. Não commits o `.env`. Os nomes abaixo são os do exemplo; os valores ficam só na tua máquina. O frontend lê `NEXT_PUBLIC_API_URL` de `nexus-ide/frontend/.env.local` (vê `nexus-ide/frontend/.env.example`).
+
+| Grupo | Chaves |
+| --- | --- |
+| Ambiente | `ENVIRONMENT`, `DEBUG`, `LOG_LEVEL`, `BACKEND_HOST`, `BACKEND_PORT` |
+| Provider | `LLM_PROVIDER`, `NEXUS_FREE_ONLY`, `NEXUS_PROVIDER_VALIDATION_TTL_SECONDS`, `NEXUS_MAX_PROVIDER_LATENCY_MS`, `NEXUS_NATIVE_TOOL_CALLING` |
+| Teto de gasto | `NEXUS_DAILY_BUDGET_USD`, `NEXUS_PER_RUN_BUDGET_USD`, `NEXUS_UNKNOWN_PRICE_USD_PER_1M_INPUT`, `NEXUS_UNKNOWN_PRICE_USD_PER_1M_OUTPUT` |
+| OpenCode Go | `OPENCODE_GO_API_KEY`, `OPENCODE_GO_BASE_URL` |
+| Local | `NEXUS_ENABLE_OLLAMA`, `OLLAMA_HOST`, `OLLAMA_DASHBOARD_HOST`, `LMSTUDIO_HOST`, `LMSTUDIO_API_KEY`, `LMSTUDIO_DEFAULT_MODEL`, `LMSTUDIO_FAST_MODEL`, `LMSTUDIO_CODER_MODEL`, `LMSTUDIO_READ_TIMEOUT` |
+| Experimental | `AIRLLM_EXPERIMENTAL_ENABLED`, `LOCAL_LLM_DEVICE`, `LOCAL_LLM_COMPRESSION`, `LOCAL_LLM_DASHBOARD_DEVICE` |
+| Outros providers | `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `KIMI_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY` (comentadas no exemplo) |
+| Rede e dados | `REDIS_URL`, `REDIS_DB`, `REDIS_PASSWORD`, `DATABASE_URL`, `BRAVE_API_KEY` |
+| Auth | `SECRET_KEY`, `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_EXPIRATION_MINUTES`, `ALLOWED_ORIGINS` |
+| Limites | `RATE_LIMIT_ENABLED`, `RATE_LIMIT_REQUESTS_PER_MINUTE` |
+| Frontend | `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_CHAT_STREAM_TIMEOUT_MS`, `NEXT_PUBLIC_DEBUG` |
+| Observabilidade | `OTEL_EXPORTER_OTLP_ENDPOINT`, `PROMETHEUS_PORT`, `ENABLE_TRACING`, `ENABLE_METRICS` |
+| Autonomia, desligada por omissão | `AUTO_COMMIT_ENABLED`, `AUTO_COMMIT_STRATEGY`, `AUTO_COMMIT_MODEL`, `NEXUS_AUTO_APPLY`, `NEXUS_AUTO_APPLY_DRY_RUN`, `NEXUS_SELF_HEAL_MAX_PER_HOUR`, `NEXUS_PROPOSAL_TEST_CMD`, `NEXUS_AUTONOMOUS_STEP_TIMEOUT`, `NEXUS_REACT_MAX_ITERATIONS`, `NEXUS_REASONING_VISIBILITY` |
+
+Redis é opcional. Se não estiver a correr, o limite de pedidos e o barramento de eventos seguem em memória e registam a falha de ligação.
+
+## Testes
+
+Frontend, a partir de `nexus-ide/frontend/`:
 
 ```powershell
 pnpm run type-check
 pnpm run lint
 pnpm run test
+pnpm exec playwright test -c playwright.overhaul.config.ts
 ```
 
-Os resultados dependem da versão e do ambiente em uso. Para testar uma integração real, confirma também a configuração, a ligação ao fornecedor e o resultado de uma execução completa; testes com dados simulados têm um alcance diferente.
+`pnpm run test` é Vitest. O Playwright de overhaul sobe o fixture na porta 8765 e o Next na 3010; não contacta providers. As capturas deste README saem de `e2e/overhaul/readme-shots.spec.ts` quando `README_SHOTS_DIR` aponta para `docs/screenshots`.
 
-## Mais informação
+Backend, a partir de `nexus-ide/`, com o virtualenv ativo:
 
-- [Guia do projeto](nexus-ide/README.md) e [documentação em português](nexus-ide/README_PT.md) — documentação adicional, que pode conter detalhes históricos.
-- [Guia de arranque](nexus-ide/STARTUP.md) — referência adicional; verifica caminhos específicos da máquina.
-- [Instruções para contribuir](nexus-ide/CONTRIBUTING.md).
-- [Auditorias e evidências](nexus-ide/docs/auditorias/).
+```powershell
+python -m pytest backend/tests -q
+```
 
----
+`make test-backend` chama o mesmo pytest com cobertura e um mínimo de 5%. A suíte completa é longa; o workflow em `.github/workflows/ci.yml` parte-a por pastas e só corre em `main` e `develop`. Ruff e mypy entram nesse CI por um ratchet (`tools/ci/check_quality_ratchet.py`), não como `ruff check` limpo: há uma base de achados já aceite.
 
-**NEXUS IDE** · Um projeto em evolução para experimentar desenvolvimento assistido por IA.
+Nesta máquina confirmaram-se `tsc`, o lint do frontend, o Vitest, `next build` e o Playwright de overhaul, incluindo o spec das capturas. O pytest do backend não foi repetido aqui: não há virtualenv do projeto neste ambiente.
+
+## Estrutura
+
+```text
+INICIAR_NEXUS.bat          atalho Windows, portas 8000 e 3000
+docs/screenshots/          capturas deste README
+nexus-ide/
+  backend/                 FastAPI: orchestrator, runtime, agents, llm, tools, persistence
+  frontend/                Next.js, componentes, Vitest e Playwright
+  docs/                    auditorias e notas de operação
+  config/                  prompts e configuração dos agentes
+  pyproject.toml           pacote Python e pytest
+  start-nexus.bat          perfil local 8001 / 3001
+  CONTRIBUTING.md          guia de contribuição, em parte histórico
+```
+
+O código que corre é `nexus-ide/`. `nexus-ide/archive/` é histórico e não entra no import.
+
+## Limitações
+
+Retiradas do overhaul de 9 de novembro de 2026 e do que a API expõe hoje.
+
+- A conversa de grupo não recebe ferramentas nem um plano. Só a execução com ficheiro traz `tool_call`, `tool_result` e `handoff`.
+- Não há tipo de mensagem «coordenador» nem «decisão». Não são desenhados.
+- `@` no compositor e o botão Responder inserem o nome no rascunho. Não mudam a ordem de resposta.
+- O compositor dos bots não envia anexos. O caminho de ficheiro existe na execução durável.
+- Pins e não-lidas ficam em `localStorage`.
+- O raciocínio privado do stream não é mostrado.
+- O dashboard não foi reescrito. Continua denso, e sem `/api/ready` a prontidão fica por confirmar.
+- As tarefas não têm árvore. Memória, PDF, base de dados, modelos e mission control não tiveram uma passagem visual própria.
+- O worker do Monaco avisa `Can't resolve <dynamic>`. O ecrã abre na mesma.
+- O catálogo de modelos cresce de 80 em 80.
+- Não há ficheiro `LICENSE` na raiz nem em `nexus-ide/`. Este README não concede uma licença.
+
+## Contribuir
+
+O fluxo curto: branch a partir da linha em que estás a trabalhar, comandos da secção [Testes](#testes), e um pull request com o que mudou na interface e na API. [nexus-ide/CONTRIBUTING.md](nexus-ide/CONTRIBUTING.md) tem a versão bilingue; vários atalhos `make` desse texto assumem Docker e um layout antigo. Em caso de divergência, valem os comandos desta página.
+
+Não commits `.env`, chaves, nem `nexus-ide/data/`.
+
+## Licença
+
+O repositório não inclui um ficheiro `LICENSE`. Até existir um, não há uma licença de uso declarada por este README.
