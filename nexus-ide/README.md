@@ -1,380 +1,258 @@
-# NEXUS IDE — IDE Assistida por IA com Arquitetura Multiagente
+# NEXUS IDE
 
-> **Desenvolvimento local, privacidade total, produção-ready.**
+A local IDE for working with AI: a main chat, bots with their own identity, and groups where several bots read a file, hand work over, and record what each one did.
 
-<p align="center">
-  <img src="https://img.shields.io/badge/status-Active%20Development-brightgreen?style=for-the-badge" alt="Status">
-  <img src="https://img.shields.io/badge/python-3.12+-blue?style=for-the-badge&logo=python" alt="Python">
-  <img src="https://img.shields.io/badge/node-20+-green?style=for-the-badge&logo=node.js" alt="Node">
-  <img src="https://img.shields.io/badge/next.js-15-black?style=for-the-badge&logo=next.js" alt="Next.js">
-  <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/badge/tests-passing-brightgreen?style=for-the-badge" alt="Tests">
-  <img src="https://img.shields.io/badge/OpenRouter-integrated-8A2BE2?style=for-the-badge" alt="OpenRouter">
-  <img src="https://img.shields.io/badge/multi--agent-24_specialists-FF6B6B?style=for-the-badge" alt="Multi-agent">
-  <img src="https://img.shields.io/badge/thinking-live%20feed-00BFFF?style=for-the-badge" alt="Thinking">
-</p>
+[Português](README_PT.md) · [Português, at the repository root](../README.md)
 
----
+![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white) ![Next.js 15](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white) ![React 19](https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white)
 
-## Índice
+[Features](#features) · [Gallery](#gallery) · [Architecture](#architecture) · [Start](#start) · [Tests](#tests) · [Limitations](#limitations)
 
-- [O que é](#o-que-é)
-- [Filosofia](#filosofia)
-- [Stack Tecnológica](#stack-tecnológica)
-- [Início Rápido](#início-rápido)
-- [Agentes](#agentes)
-- [Funcionalidades](#funcionalidades)
-- [Dashboard](#dashboard)
-- [Segurança](#segurança)
-- [Testes](#testes)
-- [API](#api)
-- [Estrutura do Projeto](#estrutura-do-projeto)
-- [Configuração](#configuração)
-- [Estado do Projeto](#estado-do-projeto)
-- [Requisitos de Sistema](#requisitos-de-sistema)
-- [Documentação Adicional](#documentação-adicional)
-- [Contribuição](#contribuição)
+![Completed group: three bots, a handoff from FORGE to Debugger, and the file-read result](../docs/screenshots/group-done-wide.png)
 
----
+*Group “Revisão concluída” at 1920×1080. Local fixture data: no paid provider was contacted.*
 
-## O que é
+## Features
 
-A **NEXUS IDE** é um ambiente de desenvolvimento integrado assistido por Inteligência Artificial que corre integralmente no teu computador. Ao contrário de assistentes genéricos, utiliza **agentes especializados** (CODER, DEBUGGER, ARCHITECT, ANALYZER, etc.) com roteamento inteligente via **SmartRouter**, que classifica intenções, seleciona o modelo adequado e encaminha o pedido ao agente com maior confiança.
+The primary nav lists the surfaces that exist today. Anything the API does not return is shown as unavailable or not confirmed, never as healthy.
 
-Todo o processamento de IA pode correr localmente via **Ollama**, garantindo privacidade total dos dados. Para cenários que exigem modelos mais potentes, suporta providers cloud (OpenRouter, OpenAI) configuráveis via `.env`. A arquitetura modular com orquestração multiagente, caching semântico, locks distribuídos e sandbox isolado torna a NEXUS IDE uma ferramenta **production-ready** para equipas que valorizam controlo, segurança e performance.
+| Area | Route | What it does |
+| --- | --- | --- |
+| **Chat** | `/` | Main conversation with markdown, code, a composer, and the session context panel. |
+| **Bot groups** | `/bots` | Several bots in one room. Replies go in order. Identical errors in the same turn collapse into one incident. |
+| **File run** | `/bots` | A separate request with a file path. The first participant reads, the middle ones contribute, the last does the critical review. Handoffs are stored. |
+| **Bots** | `/bots` | One-to-one chats, with a generated mark, role, provider, model, and tool activity. |
+| **Dashboard** | `/dashboard` | Operations panel: shortcuts, the active model, and runtime readiness when the API confirms it. |
+| **Projects** | `/projects` | Folders attached to conversations. |
+| **Tasks** | `/dashboard/tasks` | Queue, failures, and completed work. Steps are a list; the API does not send a parent/child tree. |
+| **Files** | `/editor` | Monaco editor and a local terminal, on a folder you choose. |
+| **Skills** | `/tools` | Tools and reusable instructions exposed by the API. |
+| **Memory** | `/nexus` | Knowledge and context resources. |
+| **Integrations** | `/mcp` | MCP connections. A configured connector is not shown as healthy without a measurement. |
+| **Models** | `/models` | Model and provider catalog. Inference stays “not verified” until the API says otherwise. |
+| **Agents / SWARM** | `/swarm` | Agent surface. Opening it is not evidence that several agents ran. |
+| **Search and scraping** | `/search`, `/scraping` | Web search and collection, depending on keys and the configured service. |
+| **Documents** | `/documents` | Documents stored by the app. |
+| **Approvals** | `/nexus/hitl` | Items waiting for a human decision. |
+| **Settings** | `/settings` | Default provider and keys. Saving a key does not validate the connection. |
 
----
+## Gallery
 
-## Filosofia
+Shots of the current UI, taken with the fixture server in `frontend/e2e/overhaul/fixture-server.mjs` and the Next dev server. No call was made to Ollama, OpenRouter, Kilo, OpenAI, or any other paid provider. Where the fixture does not implement the route, the picture shows the real failure state.
 
-- **🏠 Privacidade primeiro** — Tudo corre localmente. Sem dados enviados para terceiros.
-- **🧠 Agentes especializados** — Cada tarefa tem um agente dedicado, não um monolito genérico.
-- **🔒 Defense-in-depth** — Múltiplas camadas de segurança desde o editor até ao sandbox.
-- **⚡ Performance por omissão** — Caching semântico, FAISS vector search, lazy loading, SWC minification.
-- **🎯 Controlo total** — Configuração conservadora por omissão; o operador ativa cada funcionalidade explicitamente.
-- **📊 Observabilidade integrada** — Prometheus, health checks, dashboard em tempo real com histórico de tokens.
-- **🌍 Acessível e multilíngua** — Suporte a11y, i18n (PT), responsividade mobile.
+### Desktop
 
----
+![Operations panel](../docs/screenshots/dashboard-desktop.png)
 
-## Stack Tecnológica
+*Dashboard at 1440×900. Without `/api/ready` in the fixture, the banner says readiness was not confirmed.*
 
-| Camada | Tecnologia | Versão | Badge |
-|--------|-----------|--------|-------|
-| Backend | Python + FastAPI + Uvicorn | 3.12+ | ![Python](https://img.shields.io/badge/python-3.12+-blue) |
-| Backend | Pydantic v2, SQLite | — | — |
-| Frontend | Next.js + React + TypeScript | 15 / 19 | ![Node](https://img.shields.io/badge/node-20+-green) |
-| Frontend | Tailwind CSS + shadcn/ui | — | — |
-| Editor | Monaco Editor (dynamic import) | — | — |
-| IA Local | Ollama | recente | — |
-| IA Cloud | OpenRouter, OpenAI (via `.env`) | — | — |
-| Sandbox | Docker (isolado) + Python AST fallback | — | — |
-| Cache | FAISS (ANN index), Redis (locks), semântico (embeddings) | — | — |
-| Observabilidade | Prometheus, OpenTelemetry, health checks | — | — |
-| Testes | pytest + vitest + Playwright + ruff + mypy + eslint | — | ![Tests](https://img.shields.io/badge/tests-passing-brightgreen) |
-| Desktop | Electron (opcional, pasta `desktop/`) | — | — |
+![Main chat with markdown and code](../docs/screenshots/chat-desktop.png)
 
----
+*Chat. Markdown and the code block come from the fixture session. That session’s agents have no fixture route, so the card reports HTTP 404.*
 
-## Início Rápido
+![FORGE bot conversation, with the read_file call expanded](../docs/screenshots/bot-desktop.png)
 
-<details>
-<summary><strong>Windows — Executar com <code>iniciar.bat</code></strong></summary>
+*Single bot. The mark is generated from the identity, not initials. Model state is “Inferência não verificada”.*
 
-```bat
-cd nexus-ide
-iniciar.bat
+![Running group: FORGE reading the file, Debugger waiting](../docs/screenshots/group-running-desktop.png)
+
+*Run in progress. The strip shows who is executing and who is waiting. The card groups the read of `src/parser.ts`.*
+
+![Provider incident with four occurrences in one card](../docs/screenshots/group-incident-desktop.png)
+
+*Four errors with the same text in the same turn become one incident. Nothing is retried automatically.*
+
+![Group context panel on the Files tab](../docs/screenshots/group-context-desktop.png)
+
+*Group context: Participantes, Plano, Ficheiros, Ferramentas, Eventos. Below 1440 px it opens as a drawer.*
+
+![Project list](../docs/screenshots/projects-desktop.png)
+
+![Tasks, with one provider failure](../docs/screenshots/tasks-desktop.png)
+
+![Settings, with the default provider](../docs/screenshots/settings-desktop.png)
+
+![Editor with no folder selected](../docs/screenshots/editor-desktop.png)
+
+*Editor. No folder is open, and the fixture does not serve the file tree, so the page shows 404 and “Nenhum ficheiro encontrado”.*
+
+### Tablet and phone
+
+![Dashboard at 768×1024, navigation closed](../docs/screenshots/dashboard-tablet.png)
+
+![Chat at 390×844](../docs/screenshots/chat-mobile.png)
+
+![FORGE bot at 390×844](../docs/screenshots/bot-mobile.png)
+
+*Below 1024 px the primary navigation is a drawer. On a phone, the bot list and the conversation take the screen one at a time.*
+
+## Architecture
+
+The browser talks to a FastAPI backend. Chat and group rooms stream over SSE. The persistence reference is SQLite, described in `backend/persistence/schemas.sql`.
+
+```mermaid
+flowchart LR
+  subgraph browser [Browser]
+    Next["Next.js 15 · React 19"]
+  end
+  subgraph api [FastAPI]
+    Routes["orchestrator · routes"]
+    Runtime["runtime · primary loop"]
+    Groups["group rooms · SSE"]
+    FileRuns["file-reading runs"]
+    Providers["llm · providers"]
+    DB[("SQLite")]
+  end
+  Next --> Routes
+  Routes --> Runtime
+  Routes --> Groups
+  Routes --> FileRuns
+  Runtime --> Providers
+  Groups --> Providers
+  FileRuns --> Providers
+  Runtime --> DB
+  Groups --> DB
+  FileRuns --> DB
 ```
 
-| Comando | Descrição |
-|---------|-----------|
-| `iniciar.bat` | Inicia backend + frontend (Docker e Ollama se disponíveis) |
-| `iniciar.bat --dev` | Modo leve — sem Docker nem Ollama |
-| `iniciar.bat --docker` | Stack completa via Docker Compose |
-| `iniciar.bat --parar` | Para backend, frontend e containers Docker |
-| `iniciar.bat --skip-browser` | Não abre o navegador automaticamente |
-| `iniciar.bat --verificar` | Arranque silencioso para testes/CI |
-| `iniciar.bat --help` | Mostra todas as opções |
-</details>
+A group conversation is not the same thing as a file-reading run.
 
-<details>
-<summary><strong>Linux / macOS</strong></summary>
+- In the **conversation**, participants reply in order until consensus, one failure, or the turn and time limit. That conversation has no tools. Equivalent errors between two user messages collapse into one incident, with a count, the agents, and the technical text underneath. Resending is an explicit action.
+- In a **file run**, the request carries `message`, `file_path`, and `project_path`. The first bot reads the file, the middle ones contribute, and the last does the critical review. Each handoff stores `trust: analysis_unverified`: the previous analysis is input, not a verified fact.
+- For a **single bot**, the session uses the runtime stream (`useAgentStream`). Tool calls the stream emits show up in a card. Private reasoning from the stream is not rendered.
 
-```bash
-./start-mac.sh    # iniciar
-./start-mac.sh --parar     # parar
-./start-mac.sh --status    # estado dos serviços
-./start-mac.sh --setup     # instalar dependências
-make dev                   # stack Docker
-```
-</details>
+A listed provider, or a saved key, does not mean inference was measured.
 
-<details>
-<summary><strong>Primeira execução</strong></summary>
+## Start
 
-1. `copy .env.example .env` (ou `cp .env.example .env`)
-2. Edite `.env` com as tuas configurações
-3. Execute `iniciar.bat` (Windows) ou `./start-mac.sh` (macOS/Linux)
-</details>
+You need Python 3.12 or newer, Node.js, and pnpm 10.34.9 (the frontend `packageManager`). Git. A local provider (Ollama or LM Studio) or an external key only if you actually want inference. The screenshots in this README do not need a key.
 
-**URLs após arranque:**
+There are two port profiles. `.env.example` and `../INICIAR_NEXUS.bat` use **8000** and **3000**. On this machine those ports may belong to another project; the local profile `start-nexus.bat` uses **8001** and **3001**.
 
-| Serviço | URL |
-|---------|-----|
-| IDE | http://localhost:3000 |
-| API | http://localhost:8000 |
-| Documentação API | http://localhost:8000/docs |
-| Prometheus | http://localhost:9090 (com Docker) |
+### Windows, `INICIAR_NEXUS.bat`
 
----
+The script lives at the repository root. Before running it on another computer, edit `RAIZ`: it currently points at `C:\Users\rodri\Desktop\nexus`. It expects `.venv`, `frontend\node_modules`, and `.env`. If port 8000 or 3000 is already listening, the script exits and does not kill the other process.
 
-## Agentes
+`start-nexus.bat` is the other shortcut. It also has a path fixed to this machine, and it starts the backend on 8001 and the frontend on 3001, without `--reload`. `start-nexus-dev.bat` limits reload to `backend/`. A reload over the whole tree restarts the process when an agent writes a `.py` file and drops the in-memory session state.
 
-| Agente | Função |
-|--------|--------|
-| **ROUTER** | SmartRouter com 4 passos: **Classificação de Intenção** → **Seleção de Model Tier** (small/medium/large) → **Matching de Agente** (via `routing_config.py`) → **Confidence Scoring & Fallback**. Gerencia o roteamento inteligente de todos os pedidos. |
-| **ARCHITECT** | Design de sistemas e arquitetura de software. |
-| **CODER** | Geração e edição de código com ReAct loop. |
-| **DEBUGGER** | Diagnóstico de erros e debugging interativo. |
-| **ANALYZER** | Revisão crítica de código com análise estática. |
-| **RESEARCHER** | Pesquisa web e recolha de informação. |
-| **DOCUMENTER** | Geração de documentação técnica. |
-| **OPTIMIZER** | Otimização de performance e refatoração. |
-| **DASHBOARD** | Monitorização do sistema, métricas e alertas. |
-| **GUARDIAN** | 🔒 Vigilância de segurança, deteção de anomalias e proteção em tempo real. |
-| **OVERSEER** | 👁️ Supervisor multi-agente: coordena fluxos complexos e valida resultados entre agentes. |
+### Manual start
 
-Configuração de modelos: `config/models.yaml`. Prompts: `config/prompts/`.
+From `nexus-ide/`:
 
----
-
-## Funcionalidades
-
-| Categoria | Funcionalidade | Descrição |
-|-----------|---------------|-----------|
-| **Core** | Multi-agente orquestrado | SmartRouter com 4 passos, ReAct loop, streaming |
-| **Core** | Editor Monaco | Dynamic import (`next/dynamic`), lazy loading, bundle reduzido |
-| **Core** | Chat contextual | Histórico, upload de ficheiros, timeout handling |
-| **Core** | Caching semântico | Embedding-similarity cache para respostas LLM (target 25%+ hit rate) |
-| **Core** | Vector search (FAISS) | O(n) 200ms → O(log n) <10ms para 10K vectores |
-| **Segurança** | Locks distribuídos Redis | `SET NX PX` + Lua, TTL 30s, fallback in-memory |
-| **Segurança** | Content-Security-Policy | CSP configurável (middleware + Next.js headers), toggle `CSP_ENABLED` |
-| **Segurança** | Validação de upload | 10 MB limite, allowlist extensões, magic bytes, anti path traversal |
-| **Segurança** | Rate limiting | 10 req/min por IP, JWT auth em endpoints protegidos |
-| **Segurança** | Sandbox Docker | Execução de código isolada, fallback Python AST |
-| **Performance** | Token Management | Contagem tiktoken (~95% accuracy), deduplicação de contexto, budget validation |
-| **Performance** | Tool Result Cache | TTL-based para ferramentas idempotentes, LRU expiry |
-| **Performance** | Cost Tracking | Por modelo/sessão/agente, métricas Prometheus |
-| **Performance** | SWC Minification | `swcMinify`, `optimizePackageImports`, `removeConsole` em produção |
-| **Performance** | EventBus async | I/O assíncrono com `asyncio.to_thread()`, deque O(1) |
-| **Performance** | Alert debounce | 15 min por métrica+severity no dashboard agent |
-| **UX** | Server Components | Dashboard SSR com Suspense, loading.tsx, error.tsx |
-| **UX** | Dashboard em tempo real | SSE, 8 widgets, RequestFlow, TokenTimeline, gráficos Recharts |
-| **UX** | Acessibilidade (a11y) | Roles, aria, teclado, `progressbar`, `aria-sort` |
-| **UX** | Internacionalização (i18n) | PT consistente em toda a interface |
-| **UX** | Responsividade | Mobile-first, grelha adaptativa |
-| **UX** | Polling consolidado | `usePolling` hook (pause on hidden, cleanup automático) |
-
----
-
-## Dashboard
-
-A NEXUS IDE inclui um **dashboard de monitorização em tempo real** construído com Next.js Server Components e SSE para streaming de métricas.
-
-**Arquitetura:**
-- `app/dashboard/page.tsx` — **Server Component** com `metadata` + `<Suspense>`
-- `app/dashboard/DashboardClient.tsx` — lógica de cliente com widgets reactivos
-- `loading.tsx` + `error.tsx` — estados de loading e erro com fallback UI
-- Monaco Editor com `next/dynamic` (`ssr:false`) — bundle da rota `/editor` reduzido
-
-**Widgets disponíveis (8):**
-
-| Widget | Descrição |
-|--------|-----------|
-| **RequestFlow** | Diagrama vivo: agentes ativos, tokens/s, estado do router. A11y (roles, aria) e i18n PT. |
-| **TokenTimeline** | Histórico real 1h/6h/24h via `store.loadHistory` + endpoint `/api/metrics/history`. Fallback SSE. |
-| **AgentActivity** | Gráfico de barras (Recharts) — tarefas por agente. Tema nexus (`CHART_COLORS`). |
-| **MetricsGrid** | Grelha de métricas consolidadas com source do store. |
-| **AlertFeed** | Feed de alertas com store + `usePolling`. |
-| **GuardianWidget** | Estado do Guardian agent com polling consolidado. |
-| **SystemHealth** | Health checks do backend e serviços. |
-| **CacheStats** | Hit rates do cache semântico e tool cache. |
-
-**Stack visual:** Recharts + Tailwind + tema escuro nexus. **Polling** consolidado via hook `frontend/hooks/usePolling.ts` com pausa em hidden e cleanup automático.
-
-**Testes:** 4 ficheiros Vitest dedicados (RequestFlow, TokenTimeline, AgentActivity, MetricsGrid).
-
----
-
-## Segurança
-
-Arquitetura **defense-in-depth** com 8 camadas de proteção:
-
-| # | Camada | Implementação |
-|---|--------|---------------|
-| 1 | 🔒 **Autenticação JWT** | 20+ endpoints protegidos (colaboração, meta, guardian, overseer, agent_bus, agent_state, meta_analyzer) |
-| 2 | 🚦 **Rate Limiting** | 10 req/min por IP em todos os endpoints públicos |
-| 3 | 🧪 **Sandbox Docker** | Execução de código isolado em container; fallback Python AST com capacidades limitadas |
-| 4 | 🛡️ **Path Traversal & Shell Validation** | Ferramentas ReAct validam paths e comandos shell antes de executar |
-| 5 | 🔐 **Locks Distribuídos Redis (SEC-001 ✅)** | `backend/core/file_locks.py` — `SET NX PX` + libertação Lua segura (verifica owner antes do `DEL`). TTL 30s configurável (`NEXUS_LOCK_REDIS_TTL_MS`). Fallback `filelock → asyncio.Lock` quando Redis indisponível. Kill-switch `NEXUS_DISABLE_REDIS_LOCK`. |
-| 6 | 🌐 **CSP Configurável (SEC-002 ✅)** | `backend/middleware/security.py` com `DEFAULT_CSP` afinado para Next.js + Monaco + Tailwind. Toggle `CSP_ENABLED`, override `CSP_POLICY`. Defense-in-depth no frontend via `headers()` em `frontend/next.config.mjs`. |
-| 7 | 📁 **Validação de Upload (SEC-003 ✅)** | `backend/orchestrator/routes/files.py` — limite 10 MB, allowlist de extensões, verificação de magic bytes com detecção de mismatch (extensão vs conteúdo real), guard contra path traversal. 6 casos de teste. |
-| 8 | 🔍 **RCE Prevention** | 3 RCEs corrigidos em `cron_scheduler.py`, 4 em `data_analysis.py` (shell injection, exec(), query injection, path traversal). |
-
-> **SEC-001, SEC-002 e SEC-003** — fechados na sprint **2026-06-18**.
-
----
-
-## Testes
-
-| Suite | Tecnologia | Como executar | Cobertura (medida 2026-07-25) |
-|-------|-----------|---------------|-------------------------------|
-| **Backend** | pytest + coverage | `python -m pytest backend/tests/ --cov=backend -q` ou `make test-backend` | ~8% linha (baseline). Alvo: 80%+ |
-| **Frontend** | Vitest | `cd frontend && pnpm run test` | 4 ficheiros para widgets (RequestFlow, TokenTimeline, AgentActivity, MetricsGrid) |
-| **E2E** | Playwright | `cd e2e && npx playwright test` | Fluxos críticos de ponta a ponta |
-| **Lint** | ruff + mypy + eslint | `make lint` | Qualidade de código, tipos, estilo |
-
-> Testes marcados `@integration` requerem Ollama em execução. `faiss` é opcional (TestFAISSVectorStore usa `pytest.importorskip`).
-
----
-
-## API
-
-| Método | Endpoint | Descrição |
-|--------|----------|-----------|
-| GET | `/api/health` | Health check básico |
-| GET | `/api/metrics` | Métricas em tempo real (Prometheus) |
-| GET | `/api/metrics/history` | Histórico de métricas (1h/6h/24h) — wraps `metrics_store.get_timeline`, fallback SSE |
-| POST | `/api/chat` | Envio de mensagens ao agente |
-| POST | `/api/upload` | Upload de ficheiros (com validação SEC-003) |
-| GET | `/api/agents` | Lista de agentes disponíveis |
-| GET | `/api/agent/{id}/status` | Estado de um agente específico |
-| POST | `/api/agent/{id}/task` | Envio de tarefa a um agente |
-| GET | `/api/auth/login` | Autenticação JWT |
-| GET | `/api/cache/stats` | Estatísticas de cache semântico |
-
-Documentação interativa: http://localhost:8000/docs
-
----
-
-## Estrutura do Projeto
-
-```
-nexus-ide/
-├── iniciar.bat              # Script único de arranque (Windows)
-├── run.py                   # Entry point do backend
-├── backend/                 # FastAPI, agentes, orquestração, ferramentas
-│   ├── agents/              # Agentes especializados (CODER, DEBUGGER, etc.)
-│   ├── orchestrator/        # SmartRouter, Engine, EventBus, routing_config
-│   ├── tools/               # Ferramentas ReAct (ficheiros, shell, web)
-│   ├── core/                # Workspace, file_locks, segurança, auto-correção
-│   ├── middleware/           # Security middleware (CSP, rate limit, etc.)
-│   ├── cache/               # Cache semântico, FAISS vector store, tool cache
-│   ├── observability/       # Métricas, health checks, cost tracking
-│   └── tests/               # Suite pytest (agentes, orquestrador, segurança)
-├── frontend/                # Interface Next.js
-│   ├── app/dashboard/       # Dashboard SSR (page.tsx, DashboardClient, loading, error)
-│   ├── hooks/               # usePolling e hooks partilhados
-│   └── __tests__/           # Testes Vitest para widgets
-├── config/                  # models.yaml, prompts/, ambientes
-├── docker/                  # Dockerfiles e docker-compose.yml
-├── docs/                    # Guias do utilizador e desenvolvedor
-├── e2e/                     # Testes end-to-end e scripts de validação
-├── scripts/                 # Setup, healthcheck, smoke-test
-├── desktop/                 # App Electron (opcional)
-├── planeamento/             # Documentação de planeamento técnico
-├── logs/                    # Logs de arranque (gerados em runtime)
-├── Makefile                 # Comandos make (testes, lint, dev)
-└── .env.example             # Template de configuração
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+Copy-Item .env.example .env
+cd frontend
+corepack enable
+corepack prepare pnpm@10.34.9 --activate
+pnpm install --frozen-lockfile
 ```
 
-### Comandos Makefile
+On macOS or Linux the virtualenv Python is `.venv/bin/python` and the copy is `cp .env.example .env`.
 
-```bash
-make test              # Todos os testes
-make test-backend      # pytest com coverage
-make test-frontend     # vitest
-make lint              # ruff + mypy + eslint
-make backend           # Backend com reload
-make frontend          # Frontend dev server
-make healthcheck       # Verificação rápida de serviços
-make setup             # Setup inicial completo (Linux/macOS)
+Local profile, when 8000 and 3000 are taken. Backend terminal, in `nexus-ide/`, **without** `--reload`:
+
+```powershell
+$env:BACKEND_HOST = "127.0.0.1"
+$env:ALLOWED_ORIGINS = "http://127.0.0.1:3001,http://localhost:3001"
+.\.venv\Scripts\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8001
 ```
 
----
+Frontend terminal, in `nexus-ide/frontend/`:
 
-## Configuração
+```powershell
+$env:NEXT_PUBLIC_API_URL = "http://127.0.0.1:8001"
+pnpm run dev -- --hostname 127.0.0.1 --port 3001
+```
 
-O ficheiro `.env` controla o comportamento do backend. Todas as flags são **conservadoras por omissão** — capacidades autónomas estão desligadas até ativação explícita.
+Open [http://127.0.0.1:3001](http://127.0.0.1:3001). API health: [http://127.0.0.1:8001/health](http://127.0.0.1:8001/health). Interactive docs: [http://127.0.0.1:8001/docs](http://127.0.0.1:8001/docs).
 
-| Variável | Default | Efeito |
-|----------|---------|--------|
-| `NEXUS_AUTO_APPLY` | `false` | Quando `true`, o `ProposalApplier` pode aplicar propostas do `SelfImprovementAnalyzer` automaticamente. |
-| `NEXUS_AUTO_APPLY_DRY_RUN` | `true` | Quando `true`, exige um dry-run + suite de testes antes de aplicar. |
-| `NEXUS_EVENT_REPLAY` | `false` | Quando `true`, o `EventBus` reproduz eventos persistidos no arranque. |
-| `NEXUS_EVENT_RETENTION_HOURS` | `24` | Janela de retenção do `EventStore`. |
-| `NEXUS_MEMORY_DECAY` | `false` | Quando `true`, o `MemoryBank` corre varredura periódica de decay. |
-| `NEXUS_MEMORY_DECAY_THRESHOLD` | `0.2` | Importância mínima para uma memória sobreviver. |
-| `NEXUS_MEMORY_DECAY_INTERVAL_HOURS` | `24` | Intervalo entre varreduras de decay. |
-| `NEXUS_SELF_HEAL_MAX_PER_HOUR` | `5` | Circuit-breaker para o re-planner do `AutoCorrectionLoop`. |
-| `NEXUS_PROPOSAL_TEST_CMD` | `python -m pytest backend/tests -q --maxfail=1` | Comando para dry-run antes de aplicar proposta. |
-| `NEXUS_LOCK_REDIS_TTL_MS` | `30000` | TTL dos locks Redis (SEC-001). |
-| `NEXUS_DISABLE_REDIS_LOCK` | `false` | Kill-switch para locks Redis. |
-| `CSP_ENABLED` | `true` | Ativa/desativa Content-Security-Policy (SEC-002). |
-| `CSP_POLICY` | — | Override total da CSP. |
+For the 8000/3000 profile, use port 8000, `NEXT_PUBLIC_API_URL=http://127.0.0.1:8000`, and `pnpm run dev` (port 3000 by default). Put `http://localhost:3000` and `http://127.0.0.1:3000` in `ALLOWED_ORIGINS`.
 
----
+## Configuration
 
-## Estado do Projeto
+Copy `.env.example` to `.env`. Do not commit `.env`. The names below are the ones in the example; values stay on your machine. The frontend reads `NEXT_PUBLIC_API_URL` from `frontend/.env.local` (see `frontend/.env.example`).
 
-| Dimensão | Pontuação (0–10) | Sprint 2026-06-18 |
-|----------|-----------------|-------------------|
-| 🔒 Segurança | **9/10** | SEC-001/002/003 fechados, RCEs corrigidos, auth em 20+ endpoints |
-| 📊 Dashboard | **7/10** | Server Component, 8 widgets, SSE, histórico tokens, a11y, i18n PT |
-| 🧪 Testes | **7/10** | Upload (6), CSP, locks, 4 ficheiros Vitest, suite executável |
-| ⚡ Performance | **7/10** | Monaco lazy, SWC minify, FAISS, caching, token management |
-| 🎨 Frontend/UX | **7/10** | Server Components, loading/error, responsivo, i18n, a11y |
+| Group | Keys |
+| --- | --- |
+| Environment | `ENVIRONMENT`, `DEBUG`, `LOG_LEVEL`, `BACKEND_HOST`, `BACKEND_PORT` |
+| Provider | `LLM_PROVIDER`, `NEXUS_FREE_ONLY`, `NEXUS_PROVIDER_VALIDATION_TTL_SECONDS`, `NEXUS_MAX_PROVIDER_LATENCY_MS`, `NEXUS_NATIVE_TOOL_CALLING` |
+| Spend caps | `NEXUS_DAILY_BUDGET_USD`, `NEXUS_PER_RUN_BUDGET_USD`, `NEXUS_UNKNOWN_PRICE_USD_PER_1M_INPUT`, `NEXUS_UNKNOWN_PRICE_USD_PER_1M_OUTPUT` |
+| OpenCode Go | `OPENCODE_GO_API_KEY`, `OPENCODE_GO_BASE_URL` |
+| Local | `NEXUS_ENABLE_OLLAMA`, `OLLAMA_HOST`, `OLLAMA_DASHBOARD_HOST`, `LMSTUDIO_HOST`, `LMSTUDIO_API_KEY`, `LMSTUDIO_DEFAULT_MODEL`, `LMSTUDIO_FAST_MODEL`, `LMSTUDIO_CODER_MODEL`, `LMSTUDIO_READ_TIMEOUT` |
+| Experimental | `AIRLLM_EXPERIMENTAL_ENABLED`, `LOCAL_LLM_DEVICE`, `LOCAL_LLM_COMPRESSION`, `LOCAL_LLM_DASHBOARD_DEVICE` |
+| Other providers | `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `KIMI_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY` (commented out in the example) |
+| Network and data | `REDIS_URL`, `REDIS_DB`, `REDIS_PASSWORD`, `DATABASE_URL`, `BRAVE_API_KEY` |
+| Auth | `SECRET_KEY`, `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_EXPIRATION_MINUTES`, `ALLOWED_ORIGINS` |
+| Limits | `RATE_LIMIT_ENABLED`, `RATE_LIMIT_REQUESTS_PER_MINUTE` |
+| Frontend | `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_CHAT_STREAM_TIMEOUT_MS`, `NEXT_PUBLIC_DEBUG` |
+| Observability | `OTEL_EXPORTER_OTLP_ENDPOINT`, `PROMETHEUS_PORT`, `ENABLE_TRACING`, `ENABLE_METRICS` |
+| Autonomy, off by default | `AUTO_COMMIT_ENABLED`, `AUTO_COMMIT_STRATEGY`, `AUTO_COMMIT_MODEL`, `NEXUS_AUTO_APPLY`, `NEXUS_AUTO_APPLY_DRY_RUN`, `NEXUS_SELF_HEAL_MAX_PER_HOUR`, `NEXUS_PROPOSAL_TEST_CMD`, `NEXUS_AUTONOMOUS_STEP_TIMEOUT`, `NEXUS_REACT_MAX_ITERATIONS`, `NEXUS_REASONING_VISIBILITY` |
 
----
+Redis is optional. If it is not running, rate limiting and the event bus stay in memory and log the connection failure.
 
-## Requisitos de Sistema
+## Tests
 
-| Componente | Versão | Obrigatório |
-|------------|--------|-------------|
-| Python | 3.12+ | Sim |
-| Node.js | 20+ | Sim |
-| npm | incluído com Node | Sim |
-| Git | qualquer recente | Sim |
-| Ollama | recente | Recomendado (modelos locais) |
-| Docker Desktop | recente | Opcional (sandbox e stack completa) |
+Frontend, from `frontend/`:
 
-**Hardware recomendado:** 8+ cores, 16 GB RAM, GPU com 8 GB+ VRAM para modelos grandes.
+```powershell
+pnpm run type-check
+pnpm run lint
+pnpm run test
+pnpm exec playwright test -c playwright.overhaul.config.ts
+```
 
----
+`pnpm run test` is Vitest. The overhaul Playwright run starts the fixture on port 8765 and Next on 3010; it does not contact providers. The screenshots in this README come from `e2e/overhaul/readme-shots.spec.ts` when `README_SHOTS_DIR` points at `docs/screenshots` in the repository root.
 
-## Documentação Adicional
+Backend, from `nexus-ide/`, with the virtualenv active:
 
-| Documento | Conteúdo |
-|-----------|----------|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Arquitetura detalhada |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | Guia de contribuição |
-| [docs/user-guide.md](./docs/user-guide.md) | Manual do utilizador |
-| [docs/developer-setup.md](./docs/developer-setup.md) | Setup de desenvolvimento |
-| [docs/troubleshooting.md](./docs/troubleshooting.md) | Resolução de problemas |
-| [docs/FAQ.md](./docs/FAQ.md) | Perguntas frequentes |
-| [.archive/auditorias/](./.archive/auditorias/) | Relatórios de auditoria históricos |
+```powershell
+python -m pytest backend/tests -q
+```
 
----
+`make test-backend` calls the same pytest with coverage and a 5% floor. The full suite is long; `.github/workflows/ci.yml` shards it and only runs on `main` and `develop`. Ruff and mypy enter that CI through a ratchet (`tools/ci/check_quality_ratchet.py`), not as a clean `ruff check`: an accepted baseline of findings already exists.
 
-## Contribuição
+On this machine, `tsc`, the frontend lint, Vitest, `next build`, and the overhaul Playwright suite (including the screenshot spec) were confirmed. The backend pytest suite was not re-run here: this environment has no project virtualenv.
 
-1. Fork do repositório
-2. Branch: `git checkout -b feature/nome`
-3. Testes: `make test && make lint`
-4. Pull Request
+## Structure
 
-Ver [CONTRIBUTING.md](./CONTRIBUTING.md).
+```text
+../INICIAR_NEXUS.bat       Windows shortcut, ports 8000 and 3000
+../docs/screenshots/       screenshots in this README
+backend/                   FastAPI: orchestrator, runtime, agents, llm, tools, persistence
+frontend/                  Next.js, components, Vitest, and Playwright
+docs/                      audits and operating notes
+config/                    agent prompts and configuration
+pyproject.toml             Python package and pytest
+start-nexus.bat            local profile, 8001 / 3001
+CONTRIBUTING.md            contribution guide; parts of it are historical
+```
 
----
+What runs is this directory. `archive/` is history and is not imported.
 
-**Última atualização:** 2026-06-18
+## Limitations
+
+Taken from the 9 November 2026 UI overhaul and from what the API actually exposes.
+
+- The group conversation does not receive tools or a plan. Only the file-reading run carries `tool_call`, `tool_result`, and `handoff`.
+- There is no “coordinator” or “decision” message type. None is drawn.
+- `@` in the composer and the Reply button insert the name into the draft. They do not change who answers.
+- The bot composer does not upload attachments. A file path exists only on the durable run.
+- Pins and unread state live in `localStorage`.
+- Private reasoning from the stream is not shown.
+- The dashboard was not rewritten. It stays dense, and without `/api/ready` readiness stays unconfirmed.
+- Tasks are not a tree. Memory, PDF, database, models, and mission control did not get their own visual pass.
+- The Monaco worker warns `Can't resolve <dynamic>`. The screen still opens.
+- The model catalog grows 80 entries at a time.
+- There is no `LICENSE` file at the repository root or in this directory. This README does not grant a license.
+
+## Contributing
+
+Short path: branch from the line you are working on, run the commands in [Tests](#tests), and open a pull request that says what changed in the UI and the API. [CONTRIBUTING.md](CONTRIBUTING.md) is the bilingual guide; several `make` targets there assume Docker and an older layout. When they disagree, the commands on this page win.
+
+Do not commit `.env`, keys, or `data/`.
+
+## License
+
+The repository does not include a `LICENSE` file. Until one exists, this README does not grant a license to use the code.
