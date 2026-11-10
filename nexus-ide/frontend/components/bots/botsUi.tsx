@@ -5,6 +5,7 @@ import { Check, Copy } from "lucide-react";
 import type { ChatMessage } from "../../lib/types";
 import { AssistantMarkdown } from "../chat/MessageBubble";
 import { useThemeStore } from "../../stores/themeStore";
+import { IdentityMark } from "./chat/identity";
 
 export const BOT_INPUT =
   "w-full rounded-xl border border-[color:var(--nx-line-strong)] bg-[color:var(--nx-surface-1)] px-3 py-2.5 text-sm text-[color:var(--nx-text)] outline-none placeholder:text-[color:var(--nx-text-faint)] transition-[border-color,box-shadow] duration-[var(--nx-dur-fast)] focus:border-[color:var(--nx-accent)] focus:shadow-[0_0_0_3px_color-mix(in_srgb,var(--nx-accent)_18%,transparent)]";
@@ -37,24 +38,8 @@ export function BotAvatar({
   thinking?: boolean;
   compact?: boolean;
 }) {
-  const hue = hueFromId(id);
-  const initial = name.trim().charAt(0).toUpperCase() || "?";
-  return (
-    <span
-      aria-hidden="true"
-      className={`nx-bots-avatar relative flex shrink-0 items-center justify-center overflow-hidden border font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,.14)] ${
-        thinking ? "nx-bots-avatar-live border-cyan-300/60" : "border-white/10"
-      } ${large ? "h-28 w-28 rounded-[1.75rem] text-4xl" : compact ? "h-8 w-8 rounded-lg text-xs" : "h-11 w-11 rounded-xl text-sm"}`}
-      style={{
-        borderColor: thinking ? undefined : `hsla(${hue}, 70%, 68%, .45)`,
-        background: `hsl(${hue} 32% 22%)`,
-        color: `hsl(${hue} 80% 86%)`,
-      }}
-    >
-      {thinking && <span className="absolute inset-0 animate-pulse rounded-[inherit] bg-cyan-300/10" />}
-      <span className="relative">{initial}</span>
-    </span>
-  );
+  const size = large ? 112 : compact ? 32 : 44;
+  return <IdentityMark id={id} name={name} size={size} live={thinking} tone={thinking ? "live" : "idle"} />;
 }
 
 export function BotStatusPill({

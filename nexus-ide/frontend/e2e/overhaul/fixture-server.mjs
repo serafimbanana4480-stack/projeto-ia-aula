@@ -26,13 +26,15 @@ const user = {
 };
 
 const bots = [
-  { id: "forge", session_id: "sess-forge", name: "FORGE", description: "Programação", instructions: "Implementa com evidência.", provider: "kilo", model: "kilo-free", archived: false, last_message: "falhou", last_active_at: "2026-11-09T10:00:00Z" },
+  { id: "forge", session_id: "sess-forge", name: "FORGE", description: "Programação", instructions: "Implementa com evidência.", provider: "kilo", model: "kilo-free", archived: false, last_message: "Encontrei o ramo em parse().", last_active_at: "2026-11-09T10:05:00Z" },
   { id: "debug", session_id: "sess-debug", name: "Debugger", description: "Diagnóstico", instructions: "Separa hipótese de evidência.", provider: "kilo", model: "kilo-free", archived: false, last_message: null, last_active_at: "2026-11-09T09:00:00Z" },
+  { id: "pulse", session_id: "sess-pulse", name: "PULSE", description: "Síntese", instructions: "Sintetiza só o que está verificado.", provider: "ollama", model: "fixture/model-1", archived: false, last_message: null, last_active_at: "2026-11-08T18:00:00Z" },
 ];
 
 const groups = [
   { id: "g-fail", name: "123", bot_ids: ["forge", "debug"], last_message: "O Kilo está bloqueado pela política só gratuita." },
   { id: "g-run", name: "Revisão em curso", bot_ids: ["forge", "debug"], last_message: "A analisar o diff" },
+  { id: "g-done", name: "Revisão concluída", bot_ids: ["forge", "debug", "pulse"], last_message: "Falta cobertura para string vazia." },
   { id: "g-idle", name: "Planeamento", bot_ids: ["forge", "debug"], last_message: null },
 ];
 
@@ -53,6 +55,11 @@ const histories = {
     { id: "u2", role: "user", content: "Revê o diff do parser.", bot_id: null, bot_name: null, created_at: "2026-11-09T11:00:00Z" },
     { id: "a2", role: "assistant", content: "A ler `parser.ts` e a comparar com o teste.", bot_id: "forge", bot_name: "FORGE", created_at: "2026-11-09T11:00:02Z" },
   ],
+  "g-done": [
+    { id: "u3", role: "user", content: "O que garante o contrato de `parse`?", bot_id: null, bot_name: null, created_at: "2026-11-09T12:00:00Z" },
+    { id: "a3", role: "assistant", content: "O ramo relevante está em `parse()`.\n\n```ts\nexport function parse(input: string) {\n  return input.trim();\n}\n```\n\nO trim é o que o ficheiro faz. Não vi testes.", bot_id: "forge", bot_name: "FORGE", created_at: "2026-11-09T12:00:04Z" },
+    { id: "a4", role: "assistant", content: "Concordo com o trim, mas falta o caso de entrada vazia. Sem um teste, a conclusão fica por verificar.", bot_id: "debug", bot_name: "Debugger", created_at: "2026-11-09T12:00:09Z" },
+  ],
   "g-idle": [],
 };
 
@@ -67,7 +74,10 @@ const runs = {
       { id: "t1", bot_name: "FORGE", provider: "kilo", model: "kilo-free", status: "failed", result: null, error: kilo },
       { id: "t2", bot_name: "Debugger", provider: "kilo", model: "kilo-free", status: "skipped", result: null, error: null },
     ],
-    records: [],
+    records: [
+      { id: "fail-call", task_id: "t1", kind: "tool_call", payload: { tool: "read_file", path: "src/parser.ts" } },
+      { id: "fail-result", task_id: "t1", kind: "tool_result", payload: { call_id: "fail-call", error: kilo } },
+    ],
   }],
   "g-run": [{
     id: "run-live",
@@ -79,7 +89,27 @@ const runs = {
       { id: "t3", bot_name: "FORGE", provider: "kilo", model: "kilo-free", status: "running", result: null, error: null },
       { id: "t4", bot_name: "Debugger", provider: "kilo", model: "kilo-free", status: "pending", result: null, error: null },
     ],
-    records: [],
+    records: [
+      { id: "live-call", task_id: "t3", kind: "tool_call", payload: { tool: "read_file", path: "src/parser.ts" } },
+    ],
+  }],
+  "g-done": [{
+    id: "run-done",
+    status: "completed",
+    request: "Confirmar o contrato de parse",
+    project_root: "/workspace/nexus",
+    file_path: "src/parser.ts",
+    tasks: [
+      { id: "t5", bot_id: "forge", bot_name: "FORGE", provider: "kilo", model: "kilo-free", status: "completed", result: "O trim é o contrato observável no ficheiro.", error: null },
+      { id: "t6", bot_id: "debug", bot_name: "Debugger", provider: "kilo", model: "kilo-free", status: "completed", result: "Falta cobertura para string vazia.", error: null },
+      { id: "t7", bot_id: "pulse", bot_name: "PULSE", provider: "ollama", model: "fixture/model-1", status: "completed", result: "Verificado: trim. Por verificar: string vazia.", error: null },
+    ],
+    records: [
+      { id: "done-call", task_id: "t5", kind: "tool_call", payload: { tool: "read_file", path: "src/parser.ts" } },
+      { id: "done-result", task_id: "t5", kind: "tool_result", payload: { call_id: "done-call", path: "src/parser.ts" } },
+      { id: "done-hand", task_id: "t6", kind: "handoff", payload: { source_bot_id: "forge", trust: "analysis_unverified", previous_analyses: [{ bot_name: "FORGE", analysis: "O trim é o contrato observável no ficheiro." }] } },
+      { id: "done-hand-2", task_id: "t7", kind: "handoff", payload: { source_bot_id: "debug", trust: "analysis_unverified", previous_analyses: [{ bot_name: "Debugger", analysis: "Falta cobertura para string vazia." }] } },
+    ],
   }],
   "g-idle": [],
 };
@@ -191,16 +221,19 @@ const server = http.createServer(async (req, res) => {
     const id = decodeURIComponent(sessionMessages[1]);
     if (id === "sess-forge") {
       send(res, 200, {
-        messages: [{
-          id: "m-tool",
-          role: "assistant",
-          content: "Encontrei o ramo em `parse()`.\n\n```ts\nexport function parse(input: string) {\n  return input.trim();\n}\n```",
-          timestamp: "2026-11-09T10:05:00Z",
-          toolCalls: [{ id: "tool-1", name: "read_file", status: "success" }],
-        }],
+        messages: [
+          { id: "m-user", role: "user", content: "Onde é que o parser corta a entrada?", timestamp: "2026-11-09T10:04:00Z" },
+          {
+            id: "m-tool",
+            role: "assistant",
+            content: "Encontrei o ramo em `parse()`.\n\n```ts\nexport function parse(input: string) {\n  return input.trim();\n}\n```",
+            timestamp: "2026-11-09T10:05:00Z",
+            toolCalls: [{ id: "tool-1", name: "read_file", status: "success", args: { path: "src/parser.ts" } }],
+          },
+        ],
         has_more: false,
         next_cursor: null,
-        count: 1,
+        count: 2,
       });
       return;
     }

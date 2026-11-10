@@ -89,6 +89,7 @@ test_*.png
 # Evidência do overhaul UI (antes/depois). A regra *.png acima ignora-os
 # sem esta exceção.
 !frontend/output/playwright/overhaul-2026-11-09/**/*.png
+!frontend/output/playwright/bots-chat-v2/**/*.png
 
 # Runtime logs
 logs/

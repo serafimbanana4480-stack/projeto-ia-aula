@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { list, history, send, stream } = vi.hoisted(() => ({ list: vi.fn(), history: vi.fn(), send: vi.fn(), stream: { events: [] as unknown[], streaming: false } }));
 vi.mock("../../../lib/bots", () => ({ listBots: list, createBot: vi.fn(), updateBot: vi.fn(), removeBot: vi.fn() }));
-vi.mock("../../../lib/api", () => ({ getSessionHistoryPage: history, getProviderCatalog: vi.fn(), getProviderModels: vi.fn() }));
+vi.mock("../../../lib/api", () => ({ apiUrl: (path: string) => path, getSessionHistoryPage: history, getProviderCatalog: vi.fn(), getProviderModels: vi.fn() }));
+vi.mock("../../../lib/auth", () => ({ authenticatedFetch: vi.fn(async () => ({ ok: true, json: async () => ({ groups: [] }) })) }));
 vi.mock("../../../hooks/useAgentStream", () => ({
   useAgentStream: () => ({ events: stream.events, streaming: stream.streaming, busyOtherSession: false, error: null, send, cancel: vi.fn() }),
 }));

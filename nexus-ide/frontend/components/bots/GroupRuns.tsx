@@ -122,10 +122,10 @@ export default function GroupRuns({ groupId, embedded = false }: { groupId: stri
     {open && <div className="mt-3 max-h-96 space-y-4 overflow-y-auto">
       <p className="text-xs text-zinc-400">Todos os bots do grupo trabalham por ordem sobre o ficheiro: o primeiro lê e analisa; os seguintes contribuem; o último revê criticamente. A execução continua se fechares o browser; podes pará-la a qualquer momento.</p>
       <form onSubmit={(event) => void start(event)} className="grid gap-2">
-        <label>Projeto registado <input aria-label="Caminho do projeto" value={project} onChange={(event) => setProject(event.target.value)} className="ml-2 rounded bg-zinc-800 p-2" /></label>
-        <label>Ficheiro <input aria-label="Ficheiro a ler" required maxLength={1000} value={file} onChange={(event) => setFile(event.target.value)} className="ml-2 rounded bg-zinc-800 p-2" /></label>
-        <label>Pedido <textarea aria-label="Pedido da execução" required maxLength={12000} value={message} onChange={(event) => setMessage(event.target.value)} className="ml-2 w-full rounded bg-zinc-800 p-2" /></label>
-        <button disabled={sending} className="w-fit rounded bg-violet-500 px-3 py-2 disabled:opacity-40">{sending ? "A iniciar…" : "Iniciar execução"}</button>
+        <label className="text-[12px]">Projeto registado <input aria-label="Caminho do projeto" value={project} onChange={(event) => setProject(event.target.value)} className="mt-1 w-full rounded-lg border border-white/10 bg-[color:var(--nx-bg)] p-2" /></label>
+        <label className="text-[12px]">Ficheiro <input aria-label="Ficheiro a ler" required maxLength={1000} value={file} onChange={(event) => setFile(event.target.value)} className="mt-1 w-full rounded-lg border border-white/10 bg-[color:var(--nx-bg)] p-2" /></label>
+        <label className="text-[12px]">Pedido <textarea aria-label="Pedido da execução" required maxLength={12000} value={message} onChange={(event) => setMessage(event.target.value)} className="mt-1 w-full rounded-lg border border-white/10 bg-[color:var(--nx-bg)] p-2" /></label>
+        <button disabled={sending} className="w-fit rounded-lg bg-[color:var(--nx-accent)] px-3 py-2 text-white disabled:opacity-40">{sending ? "A iniciar…" : "Iniciar execução"}</button>
       </form>
       {error && <p role="alert" className="text-red-300">{error}</p>}
       {runs.map((run) => <details key={run.id} className="rounded border border-white/10 p-3" open={run.status === "running" || run.status === "pending"}>
