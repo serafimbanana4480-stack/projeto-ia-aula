@@ -117,6 +117,30 @@ describe("BotsWorkspace", () => {
     expect(screen.getByRole("button", { name: /Pixel/ }).getAttribute("aria-current")).toBe("true");
   });
 
+  it("mostra o motivo concreto quando uma família não pode correr", async () => {
+    list.mockResolvedValue([{
+      id: "bot-1", session_id: "session-1", name: "Pixel", description: "UI", instructions: "",
+      provider: "lmstudio", model: "local", archived: false, last_message: null, last_active_at: "",
+      capabilities: { read: true, research: true, tasks: true, memory: true, write: true, shell: true, browser: true, mcp: true, auto_accept: true },
+      available_capabilities: ["read", "research", "tasks", "memory", "write", "shell"],
+      capability_blocks: {
+        browser: "O Playwright não está instalado neste backend.",
+        mcp: "Nenhum servidor MCP configurado.",
+      },
+    }]);
+    history.mockReset().mockResolvedValue({ messages: [], has_more: false, next_cursor: null });
+    render(<BotsWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: /Pixel/ }));
+    await screen.findByText("Olá, sou Pixel");
+    fireEvent.click(screen.getByRole("button", { name: "Informações do bot" }));
+    expect(screen.getByText("Leitura de ficheiros")).toBeTruthy();
+    expect(screen.getByText("Shell e testes")).toBeTruthy();
+    expect(screen.getByText(/O Playwright não está instalado neste backend/)).toBeTruthy();
+    expect(screen.getByText(/Nenhum servidor MCP configurado/)).toBeTruthy();
+    expect(screen.queryByText(/Ligadas, mas sem ferramentas/)).toBeNull();
+    expect(screen.getByRole("option", { name: "Espaço do bot (predefinido)", hidden: true })).toBeTruthy();
+  });
+
   it("mostra as instruções e o acesso real no perfil do bot", async () => {
     list.mockResolvedValue([{ id: "bot-1", session_id: "session-1", name: "Pixel", description: "UI", instructions: "Responde com precisão", provider: "lmstudio", model: "local", archived: false, last_message: null, last_active_at: "" }]);
     history.mockReset().mockResolvedValue({ messages: [], has_more: false, next_cursor: null });
