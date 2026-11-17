@@ -24,6 +24,7 @@ would otherwise be able to read back through ``os.environ``.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -58,6 +59,85 @@ def resolve_python_interpreter(project_path: str | None = None) -> str:
         return sys.executable
 
     return shutil.which("python3") or shutil.which("python") or "python"
+
+
+def workspace_confinement_preamble(project_root: str) -> str:
+    """Install an audit hook that keeps file access inside *project_root*.
+
+    The hook allows reading the interpreter's own standard library so imports
+    still work, and refuses every other path that resolves outside the
+    workspace. Writes are workspace-only. The model cannot remove the hook.
+    """
+    root = json.dumps(str(Path(project_root).expanduser().resolve()))
+    return f"""
+import os as _nexus_os
+import sys as _nexus_sys
+from pathlib import Path as _NexusPath
+_NEXUS_ROOT = _NexusPath({root}).resolve()
+_NEXUS_READ_ROOTS = []
+for _candidate in (
+    _nexus_sys.prefix,
+    getattr(_nexus_sys, "base_prefix", ""),
+    getattr(_nexus_sys, "base_exec_prefix", ""),
+):
+    if _candidate:
+        try:
+            _NEXUS_READ_ROOTS.append(_NexusPath(_candidate).resolve())
+        except OSError:
+            pass
+
+def _nexus_resolved(path):
+    if path is None:
+        return None
+    text = _nexus_os.fsdecode(path) if isinstance(path, (bytes, _nexus_os.PathLike)) else str(path)
+    if not text:
+        return None
+    candidate = _NexusPath(text)
+    if not candidate.is_absolute():
+        candidate = _NexusPath.cwd() / candidate
+    return candidate.resolve()
+
+def _nexus_inside(resolved, roots):
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+def _nexus_write(mode, flags):
+    text = mode.decode("ascii", "ignore") if isinstance(mode, bytes) else str(mode or "")
+    if any(mark in text for mark in ("w", "a", "x", "+")):
+        return True
+    try:
+        value = int(flags or 0)
+    except (TypeError, ValueError):
+        return False
+    write_bits = (
+        _nexus_os.O_WRONLY | _nexus_os.O_RDWR | _nexus_os.O_APPEND | _nexus_os.O_CREAT
+    )
+    return bool(value & write_bits)
+
+def _nexus_audit(event, args):
+    if event == "open" and args:
+        resolved = _nexus_resolved(args[0])
+        if resolved is None:
+            return
+        writing = _nexus_write(args[1] if len(args) > 1 else "", args[2] if len(args) > 2 else 0)
+        allowed = (_NEXUS_ROOT,) if writing else (_NEXUS_ROOT, *_NEXUS_READ_ROOTS)
+        if not _nexus_inside(resolved, allowed):
+            raise PermissionError(f"Access denied outside workspace: {{resolved}}")
+    elif event in {{"os.listdir", "os.scandir", "os.chdir"}} and args:
+        resolved = _nexus_resolved(args[0])
+        if resolved is not None and not _nexus_inside(resolved, (_NEXUS_ROOT,)):
+            raise PermissionError(f"Access denied outside workspace: {{resolved}}")
+    elif event in {{"subprocess.Popen", "os.system", "os.posix_spawn", "ctypes.dlopen"}}:
+        raise PermissionError("Process and native calls are blocked inside the workspace sandbox")
+
+_nexus_sys.addaudithook(_nexus_audit)
+_nexus_os.chdir(_NEXUS_ROOT)
+"""
 
 
 def scrubbed_environment() -> dict[str, str]:
@@ -100,6 +180,8 @@ async def run_python_code(
     from backend.core.workspace_security import _check_python_sandbox, _log_operation
 
     is_safe, reason = _check_python_sandbox(code, project_root=project_root)
+    if project_root:
+        code = workspace_confinement_preamble(project_root) + "\n" + code
     if not is_safe:
         result = {
             "error": f"Sandbox blocked: {reason}",

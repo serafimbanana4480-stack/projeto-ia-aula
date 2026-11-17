@@ -1736,12 +1736,16 @@ def make_signal_stream(
                     and saw_delegation
                 )
                 if request.context.get("_agent_run_success") is False and not scheduler_handoff:
+                    evidence = str(request.context.get("_budget_evidence") or "").strip()
+                    text = (
+                        "O agente terminou sem concluir a tarefa ou sem produzir "
+                        "uma resposta final validada."
+                    )
+                    if evidence and evidence not in text:
+                        text = f"{text}\n\n{evidence}"
                     yield AgentSignal(
                         AgentSignalKind.ERROR,
-                        text=(
-                            "O agente terminou sem concluir a tarefa ou sem produzir "
-                            "uma resposta final validada."
-                        ),
+                        text=text,
                         payload={"reason": "agent_incomplete"},
                         ok=False,
                     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -44,9 +45,11 @@ class TestSandboxConfig:
 
 
 class TestExecuteCode:
-    def test_python_hello(self) -> None:
+    def test_python_hello(self, tmp_path: Path) -> None:
         """Test that Python code executes and returns output."""
-        result = asyncio.run(execute_code("print('hello world')", "python"))
+        result = asyncio.run(
+            execute_code("print('hello world')", "python", project_path=str(tmp_path))
+        )
         assert isinstance(result, dict)
         assert result["exit_code"] == 0
         assert "hello world" in result["stdout"]
@@ -57,13 +60,28 @@ class TestExecuteCode:
         with pytest.raises(ValueError, match="Unsupported language"):
             asyncio.run(execute_code("code", "ruby"))
 
-    def test_python_error(self) -> None:
+    def test_python_error(self, tmp_path: Path) -> None:
         """Test that Python code with errors returns non-zero exit code."""
-        result = asyncio.run(execute_code("raise ValueError('test error')", "python"))
+        result = asyncio.run(
+            execute_code("raise ValueError('test error')", "python", project_path=str(tmp_path))
+        )
         assert result.exit_code != 0
         assert "test error" in result.stderr
 
-    def test_timeout(self) -> None:
+    def test_timeout(self, tmp_path: Path) -> None:
         """Test that code execution times out correctly."""
-        result = asyncio.run(execute_code("import time; time.sleep(60)", "python", timeout=1))
+        result = asyncio.run(
+            execute_code(
+                "import time; time.sleep(60)",
+                "python",
+                timeout=1,
+                project_path=str(tmp_path),
+            )
+        )
         assert result.timed_out is True
+
+    def test_without_a_workspace_does_not_run(self) -> None:
+        result = asyncio.run(execute_code("print('should not run')", "python"))
+        assert result.exit_code != 0
+        assert "workspace" in result.stderr.lower()
+        assert "should not run" not in result.stdout

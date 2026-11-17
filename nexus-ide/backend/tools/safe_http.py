@@ -140,6 +140,51 @@ class PublicAddressNetworkBackend(httpcore.AsyncNetworkBackend):
         self._inner = inner or httpcore.AnyIOBackend()
         self._resolver = resolver
 
+    async def _lookup_records(self, host: str, port: int, timeout: float | None) -> Any:
+        """Resolve *host*, falling back to the OS resolver when the loop one fails.
+
+        On Windows, ``loop.getaddrinfo`` with ``IPPROTO_TCP`` can raise even
+        when the process can reach the same host through the normal resolver
+        (the provider client does). A second strategy and a thread call to
+        ``socket.getaddrinfo`` use that resolver. A mixed public/private
+        answer is still rejected by the caller.
+        """
+        if self._resolver is not None:
+            lookup = self._resolver(host, port)
+            return await asyncio.wait_for(lookup, timeout=timeout or 10.0)
+
+        loop = asyncio.get_running_loop()
+        errors: list[Exception] = []
+        strategies = (
+            (socket.AF_UNSPEC, socket.SOCK_STREAM, socket.IPPROTO_TCP),
+            (socket.AF_UNSPEC, socket.SOCK_STREAM, 0),
+        )
+        for family, socktype, proto in strategies:
+            try:
+                return await asyncio.wait_for(
+                    loop.getaddrinfo(
+                        host, port, family=family, type=socktype, proto=proto
+                    ),
+                    timeout=timeout or 10.0,
+                )
+            except Exception as exc:
+                errors.append(exc)
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    socket.getaddrinfo,
+                    host,
+                    port,
+                    socket.AF_UNSPEC,
+                    socket.SOCK_STREAM,
+                ),
+                timeout=timeout or 10.0,
+            )
+        except Exception as exc:
+            errors.append(exc)
+            detail = "; ".join(f"{type(item).__name__}: {item}" for item in errors[-2:])
+            raise httpcore.ConnectError(f"Public DNS resolution failed: {detail}") from exc
+
     async def _resolve_public_addresses(self, host: str, port: int, timeout: float | None) -> list[str]:
         try:
             literal = ipaddress.ip_address(host.split("%", 1)[0])
@@ -152,18 +197,7 @@ class PublicAddressNetworkBackend(httpcore.AsyncNetworkBackend):
             return [literal.compressed]
 
         try:
-            if self._resolver is not None:
-                lookup = self._resolver(host, port)
-            else:
-                loop = asyncio.get_running_loop()
-                lookup = loop.getaddrinfo(
-                    host,
-                    port,
-                    family=socket.AF_UNSPEC,
-                    type=socket.SOCK_STREAM,
-                    proto=socket.IPPROTO_TCP,
-                )
-            records = await asyncio.wait_for(lookup, timeout=timeout or 10.0)
+            records = await self._lookup_records(host, port, timeout)
             addresses = list(
                 dict.fromkeys(
                     str(record[4][0]).split("%", 1)[0]
@@ -175,7 +209,9 @@ class PublicAddressNetworkBackend(httpcore.AsyncNetworkBackend):
         except httpcore.ConnectError:
             raise
         except Exception as exc:
-            raise httpcore.ConnectError("Public DNS resolution failed") from exc
+            raise httpcore.ConnectError(
+                f"Public DNS resolution failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
         if not addresses or any(not _is_public_ip(address) for address in addresses):
             raise httpcore.ConnectError("DNS resolved to a non-public address")

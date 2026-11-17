@@ -2669,6 +2669,32 @@ class AgentBase(ABC):
 
         return decode_payload(match.group(1)).strip()
 
+    @staticmethod
+    def _bind_request_llm(request: AgentRequest) -> None:
+        """Publish the provider this turn is already using for nested tools."""
+        from backend.llm.caller_context import bind_caller_llm
+
+        model = str(
+            request.context.get("_model_override")
+            or request.context.get("_resolved_model")
+            or ""
+        )
+        bind_caller_llm(request.client, model)
+
+    @staticmethod
+    def _budget_evidence(
+        counts: dict[str, int], errors: dict[str, list[str]]
+    ) -> str:
+        """A short, server-authored account of the tools this run actually called."""
+        if not counts:
+            return ""
+        used = ", ".join(f"{name} ×{count}" for name, count in sorted(counts.items()))
+        lines = [f"Evidência desta execução: {used}."]
+        for name, messages in sorted(errors.items()):
+            if messages:
+                lines.append(f"{name} falhou: {messages[-1][:240]}")
+        return "\n".join(lines)
+
     async def _store_requested_memory(self, request: AgentRequest) -> bool:
         """Store the user's remember-request when the model never called the tool."""
         allowed = request.context.get("_allowed_tools")
@@ -3909,7 +3935,34 @@ class AgentBase(ABC):
         # instead of asking the same forbidden call until the budget runs out.
         contract_refusals = 0
         denied_tool_names: set[str] = set()
-        while iteration < max_iterations:
+        budget_summary_armed = False
+        step_budget = max_iterations
+        while True:
+            if iteration >= max_iterations:
+                # The step budget is gone and the model only emitted tool
+                # calls. One last turn, with tools removed, has to write the
+                # answer the user will actually see.
+                if (
+                    not budget_summary_armed
+                    and tool_event_counts
+                    and not final_answer_produced
+                    and max_iterations != float("inf")
+                ):
+                    budget_summary_armed = True
+                    max_iterations = iteration + 1
+                    request.context["_tool_free_synthesis"] = True
+                    request.context["_budget_summary_turn"] = True
+                    evidence = self._budget_evidence(tool_event_counts, tool_error_texts)
+                    request.context["_budget_evidence"] = evidence
+                    directive = (
+                        "\n[SYSTEM] O orçamento de passos acabou. Não chames ferramentas. "
+                        "Escreve agora a resposta final para o utilizador, só com a evidência "
+                        f"já recolhida ({evidence}). Se uma ferramenta falhou, cita o erro real."
+                    )
+                    context += directive
+                    self._remember_sticky_directive(sticky_directives, directive)
+                else:
+                    break
             iteration += 1
             tool_free_synthesis_turn = bool(request.context.get("_tool_free_synthesis"))
             logger.info(
@@ -4190,6 +4243,14 @@ class AgentBase(ABC):
                     return
                 if _ev is not None:
                     yield _ev[0] + "\n\n"
+                digest = str(request.context.get("_budget_evidence") or "").strip()
+                if not digest:
+                    digest = self._budget_evidence(tool_event_counts, tool_error_texts)
+                if digest:
+                    request.context["_budget_evidence"] = digest
+                    # Its own chunk: the sentence below is an incomplete-run
+                    # marker, and a marker in the same chunk hides the evidence.
+                    yield digest + "\n\n"
                 yield (
                     "[RECOLHA CONCLUÍDA — SÍNTESE INCOMPLETA] As ferramentas "
                     "anteriores correram, mas o modelo voltou a pedir ferramentas "
@@ -4619,7 +4680,13 @@ class AgentBase(ABC):
                 # stopped WITHOUT an answer is never a success, whatever the
                 # tools it managed to run.
                 final_answer_produced = True
-                if not request.context.get("_unverified_claims"):
+                if request.context.get("_budget_summary_turn"):
+                    evidence = str(request.context.get("_budget_evidence") or "").strip()
+                    if evidence and evidence not in answer:
+                        answer = f"{answer.rstrip()}\n\n{evidence}".strip()
+                    request.context.pop("_tool_free_synthesis", None)
+                    self._record_run_success(request, False)
+                elif not request.context.get("_unverified_claims"):
                     self._record_run_success(
                         request,
                         final_answer_produced and (
@@ -4907,6 +4974,7 @@ class AgentBase(ABC):
                 ) -> tuple[str, dict[str, Any], dict[str, Any], float]:
                     async with limiter:
                         started = time.monotonic()
+                        self._bind_request_llm(request)
                         response = await execute_tool(
                             name,
                             request.session_id,
@@ -5007,6 +5075,7 @@ class AgentBase(ABC):
                 async def invoke_current_tool(
                     *, confirmed: bool, name: str = tool_name, tool_args: dict[str, Any] = args,
                 ) -> dict[str, Any]:
+                    self._bind_request_llm(request)
                     return await execute_tool(
                         name,
                         request.session_id,
@@ -5317,13 +5386,23 @@ class AgentBase(ABC):
             )
             return
         # The iteration cap was reached without a final answer: this run did
-        # not finish and must never be persisted as a success.
+        # not finish and must never be persisted as a success. The evidence
+        # line is its own chunk so the chat shows it even when the failure
+        # marker is classified as a run error.
         self._record_run_success(request, False)
-        yield encode_event("warning", f"Reached maximum iterations ({max_iterations}) — task NOT completed")
+        request.context.pop("_tool_free_synthesis", None)
+        evidence = self._budget_evidence(tool_event_counts, tool_error_texts)
+        if evidence:
+            request.context["_budget_evidence"] = evidence
+            yield evidence + "\n\n"
+        reported_steps = step_budget if step_budget != float("inf") else max_iterations
+        yield encode_event(
+            "warning", f"Reached maximum iterations ({reported_steps}) — task NOT completed"
+        )
         yield "<event>answer</event>"
         yield (
             f"[TAREFA NÃO CONCLUÍDA] O agente atingiu o limite de "
-            f"{max_iterations} passos sem produzir uma resposta final. "
+            f"{reported_steps} passos sem produzir uma resposta final. "
             f"O objetivo pode não ter sido cumprido."
         )
 

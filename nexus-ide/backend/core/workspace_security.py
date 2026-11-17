@@ -483,6 +483,7 @@ _SHELL_WHITELIST: set[str] = {
     # Basic navigation & listing
     "ls",
     "dir",
+    "type",
     "pwd",
     "cd",
     "clear",
@@ -563,6 +564,7 @@ _GIT_READONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "describe",
         "ls-files",
         "rev-parse",
+        "ls-tree",
         "shortlog",
     }
 )
@@ -1296,6 +1298,133 @@ def _validate_git_invocation(tokens: list[str], command: str) -> tuple[bool, str
     )
 
 
+_POWERSHELL_READONLY_COMMANDS = frozenset(
+    {
+        "get-content",
+        "get-childitem",
+        "get-location",
+        "get-item",
+        "get-itemproperty",
+        "select-string",
+        "type",
+        "dir",
+        "write-output",
+        "write-host",
+    }
+)
+# A cmd switch is one letter, optionally ``:value`` (``/b``, ``/s``, ``/O:N``).
+# A longer token such as ``/etc`` is a path, not a switch.
+_WIN_SWITCH = re.compile(r"^/[A-Za-z](?::[\w.-]*)?$")
+_DRIVE_ABS = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _validate_readonly_powershell(tokens: list[str]) -> tuple[bool, str]:
+    """Allow ``powershell Get-Content`` and reject every mutating cmdlet."""
+    args = list(tokens[1:])
+    flags = {"-noprofile", "-nologo", "-noninteractive"}
+    while args and args[0].lower() in flags:
+        args = args[1:]
+    if args and args[0].lower() in {"-command", "-c"}:
+        args = args[1:]
+    if not args:
+        return False, "PowerShell without a read-only command is blocked"
+    cmd = Path(args[0]).stem.lower()
+    if cmd not in _POWERSHELL_READONLY_COMMANDS:
+        return False, (
+            f"PowerShell command '{args[0]}' is blocked. "
+            "Only read-only commands such as Get-Content are allowed inside the workspace."
+        )
+    return True, ""
+
+
+def shell_tokens(command: str) -> list[str]:
+    """Split a command without treating Windows ``\\`` as an escape."""
+    if "\\" in command:
+        try:
+            return shlex.split(command, posix=False)
+        except ValueError:
+            return command.split()
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def python_inline_code(command: str) -> str | None:
+    """Return the snippet of ``python -c <code>``, or None for other commands."""
+    tokens = shell_tokens(command)
+    if not tokens:
+        return None
+    base = Path(tokens[0]).stem.lower()
+    if base not in {"python", "python3", "py"}:
+        return None
+    try:
+        index = next(i for i, token in enumerate(tokens) if token == "-c")
+    except StopIteration:
+        return None
+    if index + 1 >= len(tokens):
+        return None
+    return tokens[index + 1]
+
+
+def command_paths_escape_root(command: str, root: str | Path) -> str | None:
+    """Reject ``..\\``, ``../`` and absolute paths that leave *root*.
+
+    The working directory alone is not a sandbox: ``dir ..\\..\\..\\backend``
+    lists a folder outside the bot workspace while cwd stays inside it.
+    """
+    try:
+        root_path = Path(root).expanduser().resolve()
+    except (OSError, ValueError):
+        return "Workspace root is not a usable directory"
+    for token in shell_tokens(command):
+        reason = _token_escapes_root(token, root_path)
+        if reason:
+            return reason
+    return None
+
+
+def _token_escapes_root(token: str, root: Path) -> str | None:
+    raw = token.strip().strip('"').strip("'")
+    if not raw or raw.startswith("-"):
+        return None
+    if _WIN_SWITCH.match(raw) and "\\" not in raw and ".." not in raw:
+        return None
+    normalized = raw.replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    drive_abs = bool(_DRIVE_ABS.match(raw)) or raw.startswith("\\\\")
+    posix_abs = normalized.startswith("/") and not _WIN_SWITCH.match(raw)
+    looks_like_path = (
+        ".." in parts
+        or "\\" in raw
+        or ("/" in raw and not _WIN_SWITCH.match(raw))
+        or raw == ".."
+        or drive_abs
+        or posix_abs
+        or Path(raw).is_absolute()
+    )
+    if not looks_like_path:
+        return None
+    if drive_abs or posix_abs or Path(raw).is_absolute():
+        if drive_abs and os.name != "nt":
+            return f"Path '{raw}' is outside the workspace"
+        try:
+            resolved = Path(raw).expanduser().resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            return f"Path '{raw}' is outside the workspace"
+        return None
+    depth = 0
+    for part in parts:
+        if part == "..":
+            depth -= 1
+            if depth < 0:
+                return f"Path '{raw}' escapes the workspace"
+        else:
+            depth += 1
+    return None
+
+
 def _validate_single_command(command: str) -> tuple[bool, str]:
     """Validate one shell segment (no pipes, no chaining)."""
     # Defence in depth: this helper is the last gate before a segment is handed
@@ -1331,13 +1460,15 @@ def _validate_single_command(command: str) -> tuple[bool, str]:
             return _validate_git_invocation(tokens, command)
         return True, ""
 
-    # Block inline code execution flags that enable arbitrary code execution
-    if base_cmd in ("python", "python3", "py") and any(t == "-c" for t in tokens[1:]):
-        return False, f"{base_cmd} -c (inline code execution) is blocked for safety"
+    # node -e and a shell -c still run arbitrary host commands. python -c is
+    # allowed because execute_shell runs that snippet inside the workspace
+    # confinement hook instead of a raw interpreter.
     if base_cmd == "node" and any(t == "-e" for t in tokens[1:]):
         return False, "node -e (inline code execution) is blocked for safety"
     if base_cmd in ("bash", "sh", "zsh", "fish") and any(t == "-c" for t in tokens[1:]):
         return False, f"{base_cmd} -c (inline code execution) is blocked for safety"
+    if base_cmd in {"powershell", "pwsh"}:
+        return _validate_readonly_powershell(tokens)
 
     if base_cmd not in _SHELL_WHITELIST:
         return False, f"Command '{base_cmd}' is not in the safe command whitelist"
