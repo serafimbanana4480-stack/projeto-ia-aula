@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Activity, Archive, Bot as BotIcon, ChevronRight, Info, Plus, Settings2, Trash2, Users, X, Zap } from "lucide-react";
+import { Archive, Bot as BotIcon, ChevronRight, Info, Plus, Settings2, Trash2, Users, X, Zap } from "lucide-react";
 import { apiUrl, getProviderCatalog, getProviderModels, getSessionHistoryPage, type ProviderSpec } from "../../lib/api";
 import { authenticatedFetch } from "../../lib/auth";
 import { BOT_CAPABILITY_KEYS, DEFAULT_BOT_CAPABILITIES, createBot, listBots, removeBot, updateBot, type Bot, type BotSettings } from "../../lib/bots";
@@ -577,18 +577,19 @@ export default function BotsWorkspace() {
             busy={streaming}
             disabled={!bot.provider || !bot.model || busyOtherSession || Boolean(historyErrors[session]) || historyLoading || !Object.hasOwn(history, session)}
             placeholder={bot.provider && bot.model ? `Mensagem para ${bot.name}` : "Configura o modelo para conversar"}
-            footnote="Enter envia · Shift + Enter muda de linha. As respostas podem conter erros."
+            footnote="As respostas podem conter erros."
             focusTick={focusTick}
             sendLabel="Enviar mensagem"
             stopLabel="Pedir paragem"
             agents={bots.filter((item) => !item.archived && item.id !== bot.id).map((item) => ({ id: item.id, name: item.name, role: item.description || "Função não descrita" }))}
-            pill={(
-              <span className="inline-flex max-w-full items-center gap-1.5 truncate text-[11px] text-[color:var(--nx-text-faint)]">
-                <Activity size={12} />
-                {bot.provider && bot.model ? `${bot.provider} · ${bot.model}` : "Sem modelo"}
-                <span className="hidden sm:inline">· {currentProject ? currentProject.name : "Sem projeto selecionado"}</span>
-              </span>
-            )}
+            models={[{
+              id: bot.id,
+              name: bot.name,
+              model: bot.model || "",
+              provider: bot.provider || "",
+              project: currentProject?.name ?? "",
+              status: bot.provider && bot.model ? "Inferência ainda não verificada." : "Configuração em falta.",
+            }]}
           />
         </div>
       </> : (
