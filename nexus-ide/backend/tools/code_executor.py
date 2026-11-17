@@ -10,10 +10,10 @@ Uses SandboxExecutor which provides:
 from __future__ import annotations
 
 import logging
-import tempfile
 import time
 from typing import Any
 
+from backend.core.workspace_security import command_paths_escape_root
 from backend.tools.interpreters import run_python_code
 from backend.tools.registry import ToolSpec, register_tool
 
@@ -86,7 +86,12 @@ def _get_executor():
     return _executor
 
 
-async def execute_code(code: str, language: str = "python", timeout: int = 30) -> dict[str, Any]:
+async def execute_code(
+    code: str,
+    language: str = "python",
+    timeout: int = 30,
+    project_path: str = "",
+) -> dict[str, Any]:
     """Run code in a sandboxed environment.
 
     Uses SandboxExecutor which provides Docker isolation when available,
@@ -114,21 +119,33 @@ async def execute_code(code: str, language: str = "python", timeout: int = 30) -
             f"Unsupported language: {language}. Supported: {', '.join(LANGUAGE_CONFIG.keys())}"
         )
 
+    workspace = str(project_path or "").strip()
+    if not workspace:
+        return ExecutionResult(
+            stdout="",
+            stderr=(
+                "execute_code requires a workspace and was not run. "
+                "File access is confined to the selected project or the bot folder."
+            ),
+            exit_code=1,
+            execution_time=0.0,
+            timed_out=False,
+        )
+
     try:
         executor = _get_executor()
 
-        # Docker isolation already provides an empty environment inside the
-        # container.  The local fallback does not, so Python is executed
-        # through the hardened runner instead.
-        if language == "python" and not await executor.check_docker():
-            workdir = tempfile.gettempdir()
+        # Python always runs in the workspace with an audit hook. The old
+        # local fallback used the system temp directory and could open any
+        # file the server process could read.
+        if language == "python":
             started = time.monotonic()
             local = await run_python_code(
                 code,
-                cwd=workdir,
+                cwd=workspace,
                 timeout=timeout,
-                project_root=workdir,
-                script_dir=workdir,
+                project_root=workspace,
+                script_dir=workspace,
             )
             return ExecutionResult(
                 stdout=str(local.get("stdout") or "")[:100_000],
@@ -138,10 +155,23 @@ async def execute_code(code: str, language: str = "python", timeout: int = 30) -
                 timed_out=bool(local.get("timed_out", False)),
             )
 
+        for line in code.splitlines():
+            if not line.strip():
+                continue
+            escape = command_paths_escape_root(line, workspace)
+            if escape:
+                return ExecutionResult(
+                    stdout="",
+                    stderr=f"Blocked: {escape}",
+                    exit_code=1,
+                    execution_time=0.0,
+                    timed_out=False,
+                )
         result = await executor.execute(
             code=code,
             language=language,
             timeout=timeout,
+            cwd=workspace,
         )
 
         return ExecutionResult(
@@ -169,6 +199,8 @@ register_tool(
         name="execute_code",
         description=(
             "Execute code in a sandboxed environment (Python, JavaScript, Bash). "
+            "File access stays inside the selected project or the bot workspace; "
+            "there is no host-wide fallback. "
             "Uses Docker isolation when available, with dangerous command detection. "
             "CRITICAL risk commands (rm -rf /, etc.) are automatically blocked."
         ),
@@ -182,6 +214,12 @@ register_tool(
                     "default": "python",
                 },
                 "timeout": {"type": "integer", "default": 30, "description": "Timeout in seconds"},
+                "project_path": {
+                    "type": "string",
+                    "description": (
+                        "Workspace root. Injected by NEXUS; file access stays inside it."
+                    ),
+                },
             },
             "required": ["code"],
         },

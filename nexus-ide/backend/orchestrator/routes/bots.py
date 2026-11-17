@@ -85,35 +85,112 @@ def _owner(user: dict[str, Any]) -> str:
     return owner
 
 
-def _available_capabilities(bot: dict[str, Any]) -> list[str]:
-    """Capability families whose tools are actually available to the model.
+def _mcp_block_reason() -> str:
+    """Why the MCP family cannot run, or empty when a server is configured."""
+    try:
+        from mcp import ClientSession  # noqa: F401
+    except ImportError:
+        return (
+            "A dependência Python 'mcp' não está instalada. "
+            "Instala com: uv sync (pacote mcp)."
+        )
+    try:
+        from backend.mcp.store import MCPConnectorStore
 
-    A flag is only reported as available when the live registry can serve at
-    least one tool of that family. This keeps the UI honest: a capability the
-    user enabled but whose tools are missing (for example the browser family
-    without Playwright) is not advertised as active.
+        connectors = MCPConnectorStore.get_instance().list_connectors()
+    except Exception:
+        return "Não foi possível ler a configuração dos servidores MCP."
+    enabled = [
+        item for item in connectors
+        if isinstance(item, dict) and item.get("enabled", True)
+    ]
+    if not enabled:
+        return "Nenhum servidor MCP configurado."
+    return ""
+
+
+def _capability_report(bot: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+    """Families the bot can use, and a specific reason for each one it cannot.
+
+    A family is blocked only when a real dependency is missing: the tool is
+    not installed, or, for MCP, no server is configured. Lack of a selected
+    project is not a block — the bot uses its own folder.
     """
     from backend.orchestrator.routes.chat_primary import _BOT_CAPABILITY_TOOLS
     from backend.tools.registry import list_tools
 
+    capabilities = bot.get("capabilities") if isinstance(bot.get("capabilities"), dict) else {}
     try:
-        available = {
-            spec.name
-            for spec in list_tools(enabled_only=True)
-            if spec.available and spec.enabled and spec.handler is not None
+        specs = {
+            spec.name: spec
+            for spec in list_tools(enabled_only=False)
         }
     except Exception:
-        return []
-    capabilities = bot.get("capabilities") or {}
-    return sorted(
-        flag
-        for flag, tools in _BOT_CAPABILITY_TOOLS.items()
-        if capabilities.get(flag) and (tools & available)
-    )
+        specs = {}
+    available: list[str] = []
+    blocked: dict[str, str] = {}
+    for flag, tools in _BOT_CAPABILITY_TOOLS.items():
+        if not capabilities.get(flag):
+            continue
+        live = [
+            name for name in tools
+            if name in specs
+            and specs[name].available
+            and specs[name].enabled
+            and specs[name].handler is not None
+        ]
+        if flag == "mcp" and live:
+            reason = _mcp_block_reason()
+            if reason:
+                blocked[flag] = reason
+                continue
+        if live:
+            available.append(flag)
+            continue
+        if flag == "browser":
+            blocked[flag] = "O Playwright não está instalado neste backend."
+            continue
+        if flag == "mcp":
+            reason = _mcp_block_reason()
+            if reason:
+                blocked[flag] = reason
+                continue
+        from backend.tools.registry import unavailable_tool_reason
+
+        dependency = next(
+            (unavailable_tool_reason(name) for name in tools if unavailable_tool_reason(name)),
+            "",
+        )
+        if dependency:
+            blocked[flag] = dependency
+            continue
+        reasons = []
+        for name in tools:
+            spec = specs.get(name)
+            if spec is None:
+                continue
+            detail = spec.unavailable_reason or spec.missing_dependency
+            if detail:
+                reasons.append(str(detail))
+        blocked[flag] = reasons[0] if reasons else (
+            "Nenhuma ferramenta desta família está registada neste processo."
+        )
+    return sorted(available), blocked
+
+
+def _available_capabilities(bot: dict[str, Any]) -> list[str]:
+    """Capability families whose tools are actually available to the model."""
+    available, _blocked = _capability_report(bot)
+    return available
 
 
 def _with_availability(bot: dict[str, Any]) -> dict[str, Any]:
-    return {**bot, "available_capabilities": _available_capabilities(bot)}
+    available, blocked = _capability_report(bot)
+    return {
+        **bot,
+        "available_capabilities": available,
+        "capability_blocks": blocked,
+    }
 
 
 @router.get("/room-memory")

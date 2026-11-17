@@ -628,10 +628,8 @@ class ResilientLLMProvider:
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         failures: list[str] = []
-        # Categories of every provider that failed, so the aggregate error can
-        # explain *what kind* of failure happened instead of only listing the
-        # raw exception strings.
         failure_categories: list[str] = []
+        retry_after: float | None = None
         # Hard cap before any token is requested from a paid provider.
         self._cost_check(kwargs)
         for provider in [self.primary, *self.fallbacks]:
@@ -682,6 +680,9 @@ class ResilientLLMProvider:
                 detail = " ".join(str(exc).split())[:360] or type(exc).__name__
                 failures.append(f"{provider.__class__.__name__}: {detail}")
                 failure_categories.append(classify_provider_failure(exc))
+                hinted = getattr(exc, "retry_after", None)
+                if isinstance(hinted, (int, float)) and hinted >= 0:
+                    retry_after = float(hinted)
                 logger.warning(
                     "Provider %s failed for chat_stream: %s",
                     provider.__class__.__name__,
@@ -714,6 +715,7 @@ class ResilientLLMProvider:
         raise ProviderUnavailableError(
             message,
             category=aggregate_category or "provider_unavailable",
+            retry_after=retry_after,
         )
 
     async def chat_complete(

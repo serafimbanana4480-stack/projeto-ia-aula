@@ -455,7 +455,7 @@ async def todo_write(
                         "id": state["next_id"],
                         "content": entry["content"],
                         "priority": entry["priority"],
-                        "status": "pending",
+                        "status": entry.get("status") or "pending",
                         "created_at": _now_iso(),
                         "updated_at": _now_iso(),
                     }
@@ -486,20 +486,66 @@ async def todo_write(
         return {"ok": True, "operation": op, "session_id": key, "todos": [], **_summary([])}
 
 
+def _coerce_todo_entry(entry: Any) -> dict[str, Any] | str:
+    """Accept the shapes models actually send, and default a missing priority."""
+    if isinstance(entry, str):
+        text = entry.strip()
+        if not text:
+            return "Every item needs a non-empty content."
+        return {"content": text[:_MAX_CONTENT_CHARS], "priority": "normal", "status": "pending"}
+    if not isinstance(entry, dict):
+        return "items must be a non-empty list of task strings or objects."
+    text = str(
+        entry.get("content") or entry.get("title") or entry.get("text") or entry.get("task") or ""
+    ).strip()
+    if not text:
+        return "Every item needs a non-empty content, title or text."
+    raw_priority = entry.get("priority")
+    if raw_priority is None or str(raw_priority).strip() == "":
+        prio = "normal"
+    else:
+        prio = _priority_of(raw_priority)
+        if prio not in PRIORITIES:
+            prio = "normal"
+    raw_status = str(entry.get("status") or "pending").strip().lower()
+    status_aliases = {
+        "done": "completed",
+        "complete": "completed",
+        "open": "pending",
+        "todo": "pending",
+        "doing": "in_progress",
+        "wip": "in_progress",
+    }
+    status = status_aliases.get(raw_status, raw_status)
+    if status not in STATUSES:
+        status = "pending"
+    parsed = {"content": text[:_MAX_CONTENT_CHARS], "priority": prio, "status": status}
+    for key in ("parent_id", "type", "rules", "criteria"):
+        if key in entry:
+            parsed[key] = entry[key]
+    return parsed
+
+
 def _items_from_set_all(items: Any) -> list[dict[str, Any]] | str:
+    if isinstance(items, str):
+        text = items.strip()
+        if text.startswith("["):
+            try:
+                items = json.loads(text)
+            except json.JSONDecodeError:
+                items = [text]
+        elif text:
+            items = [text]
+    if isinstance(items, dict):
+        items = [items]
     if not isinstance(items, list) or not items:
-        return "items must be a non-empty list of {content, priority} objects."
+        return "items must be a non-empty list of task strings or objects."
     parsed: list[dict[str, Any]] = []
     for entry in items:
-        if not isinstance(entry, dict):
-            return "items must be a non-empty list of {content, priority} objects."
-        text = str(entry.get("content") or "").strip()
-        if not text:
-            return "Every item needs a non-empty 'content'."
-        prio = _priority_of(entry.get("priority") or "normal")
-        if prio not in PRIORITIES:
-            return f"Invalid priority {entry.get('priority')!r}; use one of: {', '.join(PRIORITIES)}."
-        parsed.append({"content": text[:_MAX_CONTENT_CHARS], "priority": prio, **{key: entry[key] for key in ("parent_id", "type", "rules", "criteria") if key in entry}})
+        coerced = _coerce_todo_entry(entry)
+        if isinstance(coerced, str):
+            return coerced
+        parsed.append(coerced)
     return parsed
 
 

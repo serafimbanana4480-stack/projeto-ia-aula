@@ -364,6 +364,15 @@ class OpenAIProvider:
                     delay,
                     exc,
                 )
+                from backend.agents.event_protocol import encode_event
+
+                yield encode_event(
+                    "status",
+                    (
+                        f"O provedor falhou (tentativa {attempt}/{max_attempts}); "
+                        f"a tentar de novo em {int(delay)}s."
+                    ),
+                )
                 await asyncio.sleep(delay)
 
     async def _chat_stream_once(

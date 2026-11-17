@@ -105,7 +105,8 @@ register_tool(
             "Run shell commands in the project directory. "
             "Allowed commands include: python, pip, npm, node, git, cargo, go, make, "
             "gcc, clang, find, grep, awk, sed, tar, rsync, and many more. "
-            "Dangerous commands (rm -rf /, dd, mkfs, format, shutdown, etc.) are blocked."
+            "Dangerous commands (rm -rf /, dd, mkfs, format, shutdown, etc.) are blocked. "
+            "Paths that leave the workspace, including .. and absolute paths, are rejected."
             + (
                 " WINDOWS: commands run in cmd.exe, NOT bash/PowerShell - grep, ls, cat, "
                 "head, find -name and Get-ChildItem do not exist. Use: dir /s /b, type FILE, "

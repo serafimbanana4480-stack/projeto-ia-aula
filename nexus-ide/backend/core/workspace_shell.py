@@ -28,7 +28,9 @@ from backend.core.workspace_security import (
     _validate_shell_command,
     _verify_auth_token,
     argv_for_validated_shell_command,
+    command_paths_escape_root,
     logger,
+    python_inline_code,
 )
 from backend.tools.interpreters import resolve_python_interpreter, scrubbed_environment
 from backend.tools.output_stream import current_output_channel
@@ -461,7 +463,11 @@ async def execute_shell(
 
     is_safe, reason = _validate_shell_command(command)
     if not is_safe:
-        result = {"error": f"Blocked: {reason}", "command": command}
+        result = {
+            "error": f"Blocked: {reason}",
+            "command": command,
+            "policy_denied": True,
+        }
         _log_operation("execute_shell", {"command": command, "cwd": cwd}, result)
         return result
 
@@ -469,6 +475,38 @@ async def execute_shell(
         cwd_path = Path(cwd).expanduser().resolve() if cwd else None
     except Exception:
         cwd_path = None
+
+    if cwd_path is not None:
+        escape = command_paths_escape_root(command, cwd_path)
+        if escape:
+            result = {
+                "error": f"Blocked: {escape}",
+                "command": command,
+                "policy_denied": True,
+                "cwd": str(cwd_path),
+            }
+            _log_operation("execute_shell", {"command": command, "cwd": cwd}, result)
+            return result
+
+    inline = python_inline_code(command)
+    if inline is not None:
+        if cwd_path is None:
+            return {
+                "error": "Blocked: python -c requires a workspace",
+                "command": command,
+                "policy_denied": True,
+            }
+        from backend.tools.interpreters import run_python_code
+
+        confined = await run_python_code(
+            inline,
+            cwd=str(cwd_path),
+            timeout=float(timeout),
+            project_root=str(cwd_path),
+        )
+        confined["command"] = command
+        confined["cwd"] = str(cwd_path)
+        return confined
 
     # Validate cwd against blocked paths
     if cwd_path:

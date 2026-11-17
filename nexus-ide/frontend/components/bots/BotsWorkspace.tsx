@@ -22,6 +22,9 @@ const TEMPLATES = [
   { name: "Personalizado", description: "Um assistente à tua medida", instructions: "" },
   { name: "Programador", description: "Desenvolvimento de software", instructions: "Ajuda a desenvolver software com explicações precisas e exemplos úteis." },
   { name: "Arquiteto", description: "Arquitetura de software", instructions: "Analisa decisões de arquitetura, alternativas e compromissos técnicos." },
+  { name: "Revisor", description: "Revisão de código e de texto", instructions: "Revisa alterações com evidência, aponta riscos e distingue factos de opinião." },
+  { name: "Tester", description: "Verificação e testes", instructions: "Propõe verificações reproduzíveis e separa o que foi observado do que falta provar." },
+  { name: "Pesquisa", description: "Pesquisa com fontes", instructions: "Pesquisa fontes públicas, resume o que encontrou e indica o que não conseguiu verificar." },
   { name: "Orquestrador", description: "Coordenação de tarefas e agentes", instructions: "Transforma objetivos em etapas verificáveis, identifica dependências, atribui trabalho aos especialistas disponíveis e acompanha bloqueios. Não declares tarefas concluídas sem evidência." },
   { name: "Hacker autorizado", description: "Análise de segurança em ambientes autorizados", instructions: "Analisa apenas sistemas e ambientes para os quais o utilizador tem autorização. Delimita o âmbito, privilegia validação segura e reporta evidência, impacto e mitigação. Não executes ações destrutivas nem testes fora do âmbito autorizado." },
   { name: "UI/UX", description: "Design de interfaces e experiência", instructions: "Ajuda a avaliar interfaces, acessibilidade e experiência de utilização." },
@@ -57,19 +60,16 @@ const CAPABILITY_LABELS: Record<string, string> = {
   auto_accept: "Aceitação automática",
 };
 
-/** Capabilities that need a selected project before they can do anything. */
-const PROJECT_BOUND_CAPABILITIES = new Set(["read", "write", "shell"]);
-
 const CAPABILITY_NOTES: Record<string, string> = {
-  read: "Lê ficheiros e pastas do projeto selecionado.",
+  read: "Lê ficheiros e pastas. Sem projeto, usa a pasta própria do bot.",
   research: "Pesquisa na web e obtém páginas.",
   tasks: "Tarefas, planeamento e skills.",
-  memory: "Memória própria do bot; funciona sem projeto.",
-  write: "Cria e edita ficheiros dentro da pasta do projeto.",
-  shell: "Executa comandos e testes dentro da pasta do projeto.",
-  browser: "Automatiza um browser (precisa do Playwright no backend).",
-  mcp: "Ferramentas de conectores MCP configurados.",
-  auto_accept: "Aprova operações dentro da pasta do projeto sem perguntar.",
+  memory: "Memória própria do bot.",
+  write: "Cria e edita ficheiros na pasta de trabalho.",
+  shell: "Executa comandos e testes dentro da pasta de trabalho.",
+  browser: "Automatiza um browser quando o Playwright está instalado.",
+  mcp: "Ferramentas dos servidores MCP configurados.",
+  auto_accept: "Aprova operações dentro da pasta de trabalho sem perguntar.",
 };
 
 type ListedGroup = { id: string; name: string; bot_ids: string[]; last_message: string | null };
@@ -137,6 +137,14 @@ function BotEditor({ bot, close, saved }: { bot: Bot | null; close: () => void; 
               const template = TEMPLATES.find((item) => item.name === event.target.value);
               if (template) setForm((current) => ({ ...current, description: template.description, instructions: template.instructions }));
             }}>{TEMPLATES.map((template) => <option key={template.name}>{template.name}</option>)}</select>
+            <span className="mt-2 flex flex-wrap gap-1.5">
+              {["Revisor", "Arquiteto", "Tester", "Pesquisa"].map((name) => (
+                <button key={name} type="button" className="rounded-lg border border-[color:var(--nx-line)] px-2.5 py-1 text-[12px] text-[color:var(--nx-text-dim)] hover:bg-[color:var(--nx-surface-3)]" onClick={() => {
+                  const template = TEMPLATES.find((item) => item.name === name);
+                  if (template) setForm((current) => ({ ...current, name: current.name || template.name, description: template.description, instructions: template.instructions }));
+                }}>{name}</button>
+              ))}
+            </span>
           </label>}
           <label className="block text-[12px] font-medium">Nome<input className={`${BOT_INPUT} mt-2`} required maxLength={80} value={form.name} onChange={(event) => set("name", event.target.value)} placeholder="Ex.: Pixel" autoFocus /></label>
           <label className="block text-[12px] font-medium">Descrição<input className={`${BOT_INPUT} mt-2`} maxLength={500} value={form.description} onChange={(event) => set("description", event.target.value)} placeholder="Em que é que este bot te ajuda?" /></label>
@@ -170,7 +178,6 @@ function BotEditor({ bot, close, saved }: { bot: Bot | null; close: () => void; 
                       <span className="block text-[12px] font-medium text-[color:var(--nx-text)]">{CAPABILITY_LABELS[key]}</span>
                       <span className="mt-0.5 block text-[11px] leading-4 text-[color:var(--nx-text-faint)]">
                         {CAPABILITY_NOTES[key]}
-                        {PROJECT_BOUND_CAPABILITIES.has(key) ? " Precisa de um projeto selecionado." : ""}
                       </span>
                     </span>
                     <button
@@ -188,17 +195,25 @@ function BotEditor({ bot, close, saved }: { bot: Bot | null; close: () => void; 
               })}
             </ul>
             <p className="mt-3 text-[11px] leading-4 text-[color:var(--nx-text-faint)]">
-              Sem projeto selecionado, apenas pesquisa web, browser, MCP, memória, tarefas e skills
-              funcionam. As capacidades de ficheiros e shell pedem um projeto antes de executar.
+              Sem um projeto registado, ficheiros e shell usam a pasta própria do bot.
+              Escolher um projeto substitui essa pasta. Browser e MCP só ficam de fora quando
+              a dependência ou o servidor realmente faltam.
             </p>
           </fieldset>
-          <p className="rounded-xl border border-[color:var(--nx-line)] bg-[color:var(--nx-bg)] p-3 text-[12px] leading-5 text-[color:var(--nx-text-dim)]">As capacidades que precisam de pasta só atuam dentro da raiz do projeto selecionado. A aceitação automática, quando ligada, só abrevia operações dentro dessa pasta; fora dela, ou sem projeto, o bot pede sempre confirmação. As credenciais e o endpoint são configurados nas definições do NEXUS.</p>
+          <p className="rounded-xl border border-[color:var(--nx-line)] bg-[color:var(--nx-bg)] p-3 text-[12px] leading-5 text-[color:var(--nx-text-dim)]">Ficheiros e shell ficam dentro da pasta de trabalho: a pasta própria do bot, ou o projeto escolhido na barra. A aceitação automática, quando ligada, só abrevia operações dentro dessa pasta. As credenciais e o endpoint são configurados nas definições do NEXUS.</p>
           {error && <p role="alert" className="text-[13px] text-[color:var(--nx-rose)]">{error}</p>}
         </div>
         <div className="sticky bottom-0 z-10 flex justify-end gap-3 border-t border-[color:var(--nx-line)] bg-[color:var(--nx-surface-1)] px-6 py-4"><button type="button" onClick={close} className="rounded-xl px-4 py-2 text-[13px] text-[color:var(--nx-text-dim)]">Cancelar</button><button disabled={saving} className="rounded-xl bg-[color:var(--nx-accent)] px-4 py-2 text-[13px] font-medium text-white disabled:opacity-50">{saving ? "A guardar…" : "Guardar bot"}</button></div>
       </form>
     </dialog>
   );
+}
+
+function retryNotice(message?: ChatMessage): string {
+  const notices = message?.metadata?.notices;
+  if (!Array.isArray(notices)) return "Atividade da conversa em curso";
+  const latest = [...notices].reverse().find((item) => typeof item === "string" && item.trim());
+  return typeof latest === "string" ? latest : "Atividade da conversa em curso";
 }
 
 function workingLabel(message?: ChatMessage): string {
@@ -515,7 +530,7 @@ export default function BotsWorkspace() {
               }}
               className="max-w-[10rem] truncate rounded-lg border border-[color:var(--nx-line)] bg-[color:var(--nx-surface-1)] px-2 py-1.5 text-[12px] text-[color:var(--nx-text-dim)]"
             >
-              <option value="">Sem projeto</option>
+              <option value="">Espaço do bot (predefinido)</option>
               {projects.map((project) => (
                 <option key={project.id} value={project.id}>{project.name}</option>
               ))}
@@ -531,7 +546,12 @@ export default function BotsWorkspace() {
                 <IdentityMark id={bot.id} name={bot.name} size={84} labelled />
                 <h3 className="mt-5 text-xl font-semibold tracking-tight">Olá, sou {bot.name}</h3>
                 <p className="mt-2 max-w-sm text-[14px] leading-6 text-[color:var(--nx-text-dim)]">{bot.description || "Envia uma mensagem para começar."}</p>
-                <p className="mt-4 max-w-md text-[12px] leading-5 text-[color:var(--nx-text-faint)]">{currentProject ? `Leitura e análise limitadas a ${currentProject.name}.` : "Seleciona um projeto na barra lateral para permitir leitura e análise dos seus ficheiros."} As ferramentas de leitura disponíveis dependem da configuração; escrita e execução estão desligadas.</p>
+                <p className="mt-4 max-w-md text-[12px] leading-5 text-[color:var(--nx-text-faint)]">{currentProject ? `A pasta de trabalho é ${currentProject.name}.` : "Sem projeto registado: ficheiros e shell usam a pasta própria deste bot."} As famílias ativas são as capacidades ligadas.</p>
+                <div className="mt-4 flex flex-wrap justify-center gap-2">
+                  {["Resume o projeto", "Encontra um bug", "Explica este ficheiro"].map((prompt) => (
+                    <button key={prompt} type="button" onClick={() => setDrafts((current) => ({ ...current, [session]: prompt }))} className="rounded-full border border-[color:var(--nx-line)] px-3 py-1.5 text-[12px] text-[color:var(--nx-text-dim)] hover:bg-[color:var(--nx-surface-3)]">{prompt}</button>
+                  ))}
+                </div>
                 {(!bot.provider || !bot.model) && <button type="button" onClick={() => setEditor(bot)} className="mt-5 rounded-xl border border-[color:var(--nx-amber)]/40 px-4 py-2.5 text-[13px] font-medium text-[color:var(--nx-amber)]">Configurar modelo</button>}
               </div>
             ) : messages.map((message, index) => {
@@ -550,11 +570,12 @@ export default function BotsWorkspace() {
                     onRegenerate={message.role === "assistant" && priorUser ? () => void deliver(priorUser.content) : undefined}
                     onConfirmTool={(confirmationId) => void resolveToolConfirmation(confirmationId, true)}
                     onRejectTool={(confirmationId) => void resolveToolConfirmation(confirmationId, false)}
+                    onChoose={message.role === "assistant" ? (choice) => setDrafts((current) => ({ ...current, [session]: choice })) : undefined}
                   />
                 </div>
               );
             })}
-            {streaming && <TypingRow name={bot.name} id={bot.id} label={workingLabel(liveAssistant)} detail="Atividade da conversa em curso" />}
+            {streaming && <TypingRow name={bot.name} id={bot.id} label={workingLabel(liveAssistant)} detail={retryNotice(liveAssistant)} />}
             {(error || streamError) && (
               <p role="alert" className="rounded-xl border border-[color:var(--nx-rose)]/30 p-3 text-[13px] text-[color:var(--nx-rose)]">
                 {error || streamError}
@@ -586,7 +607,7 @@ export default function BotsWorkspace() {
               <span className="inline-flex max-w-full items-center gap-1.5 truncate text-[11px] text-[color:var(--nx-text-faint)]">
                 <Activity size={12} />
                 {bot.provider && bot.model ? `${bot.provider} · ${bot.model}` : "Sem modelo"}
-                <span className="hidden sm:inline">· {currentProject ? currentProject.name : "Sem projeto selecionado"}</span>
+                <span className="hidden sm:inline">· {currentProject ? currentProject.name : "Espaço do bot (predefinido)"}</span>
               </span>
             )}
           />
@@ -635,33 +656,32 @@ export default function BotsWorkspace() {
         <div className="mt-3 rounded-xl border border-[color:var(--nx-line)] p-3">
           <h4 className="text-[10px] font-medium uppercase tracking-[0.14em] text-[color:var(--nx-text-faint)]">Acesso</h4>
           {(() => {
-            const available = new Set(bot.available_capabilities ?? []);
+            const reported = bot.available_capabilities;
+            const blocks = bot.capability_blocks ?? {};
             const chosen = BOT_CAPABILITY_KEYS.filter((flag) => bot.capabilities?.[flag] ?? DEFAULT_BOT_CAPABILITIES[flag]);
             if (chosen.length === 0) {
               return <p className="mt-2 text-[12px] leading-5 text-[color:var(--nx-text-dim)]">Nenhuma capacidade ligada. Edita a configuração do bot para lhe dar acesso a ferramentas.</p>;
             }
-            // Auto-accept is a mode, not a tool family: the backend never
-            // reports it as an availability, so it must not be listed as
-            // "ligada, mas sem ferramentas".
             const toolFamilies = chosen.filter((flag) => flag !== "auto_accept");
-            const usable = toolFamilies.filter((flag) => available.has(flag));
-            const blocked = toolFamilies.filter((flag) => !available.has(flag));
+            const usable = toolFamilies.filter((flag) => !blocks[flag] && (reported ? reported.includes(flag) : true));
+            const blocked = toolFamilies.filter((flag) => blocks[flag] || (reported ? !reported.includes(flag) : false));
             return (
               <>
                 {usable.length > 0 && (
-                  <ul className="mt-2 flex flex-wrap gap-1.5">
+                  <ul className="mt-2 flex flex-wrap gap-1.5" aria-label="Famílias disponíveis">
                     {usable.map((flag) => (
                       <li key={flag} className="rounded-md border border-[color:var(--nx-line)] bg-[color:var(--nx-surface-2)] px-2 py-0.5 text-[11px] text-[color:var(--nx-text-dim)]">{CAPABILITY_LABELS[flag] ?? flag}</li>
                     ))}
                   </ul>
                 )}
                 {blocked.length > 0 && (
-                  <>
-                    <p className="mt-2 text-[11px] leading-4 text-[color:var(--nx-amber)]">
-                      Ligadas, mas sem ferramentas disponíveis agora: {blocked.map((flag) => CAPABILITY_LABELS[flag] ?? flag).join(", ")}.
-                      {" "}Confirma as dependências do backend (por exemplo o Playwright para o browser).
-                    </p>
-                  </>
+                  <ul className="mt-2 space-y-1" aria-label="Famílias bloqueadas">
+                    {blocked.map((flag) => (
+                      <li key={flag} className="text-[11px] leading-4 text-[color:var(--nx-amber)]">
+                        {CAPABILITY_LABELS[flag] ?? flag}: {blocks[flag] || "Nenhuma ferramenta desta família está registada neste processo."}
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </>
             );
@@ -669,8 +689,8 @@ export default function BotsWorkspace() {
           <p className="mt-2 text-[12px] leading-5 text-[color:var(--nx-text-dim)]">
             {currentProject
               ? `Projeto selecionado: ${currentProject.name}.`
-              : "Sem projeto selecionado: pesquisa web, browser, MCP, memória, tarefas e skills continuam a funcionar; ficheiros e shell pedem um projeto."}
-            {" "}Aceitação automática {autoAccept ? "ligada" : "desligada"}: operações dentro da pasta do projeto {autoAccept ? "avançam sem confirmação" : "pedem confirmação"}; fora dela, ou sem projeto, pedem sempre confirmação.
+              : "Espaço do bot (predefinido): ficheiros e shell ficam na pasta própria deste bot."}
+            {" "}Aceitação automática {autoAccept ? "ligada" : "desligada"}: operações dentro da pasta de trabalho {autoAccept ? "avançam sem confirmação" : "pedem confirmação"}; fora dela pedem sempre confirmação.
           </p>
         </div>
         <div className="mt-3 space-y-1">

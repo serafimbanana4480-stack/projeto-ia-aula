@@ -525,6 +525,25 @@ async def _search_duckduckgo(
                 )
                 if len(hits) >= max_results:
                     break
+            if not hits:
+                # The HTML endpoint sometimes serves the lite markup instead
+                # of ``.result``. An empty parse of that page looked like a
+                # genuine "0 hits" while the links were present.
+                for a_tag in soup.select("a.result-link"):
+                    title = a_tag.get_text(strip=True)
+                    href = str(a_tag.get("href") or "")
+                    if not title or not href:
+                        continue
+                    hits.append(
+                        SearchHit(
+                            title=title,
+                            url=href,
+                            snippet="",
+                            source_engine="duckduckgo",
+                        )
+                    )
+                    if len(hits) >= max_results:
+                        break
             return hits
         except Exception as exc:
             logger.error("DuckDuckGo search failed: %s", exc)

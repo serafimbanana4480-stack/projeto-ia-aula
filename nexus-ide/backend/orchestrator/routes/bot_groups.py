@@ -632,9 +632,13 @@ def _group_project_root(owner: str, group_id: str, requested: str) -> str:
     except Exception:
         logger.warning("Could not read the group's previous project", exc_info=True)
         return ""
+    from backend.persistence.bot_workspace import is_default_bot_workspace
+
     for row in rows:
         root = str(row["project_root"] or "").strip()
-        if not root:
+        if not root or is_default_bot_workspace(root):
+            # A previous turn's private bot folder is not a project the user
+            # selected. The next participant gets its own folder instead.
             continue
         try:
             from pathlib import Path

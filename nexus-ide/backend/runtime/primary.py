@@ -1743,8 +1743,28 @@ class PrimaryLoop:
             self.telemetry.mark_agent_failure()
             self.outcome.failed = True
             self.outcome.error = signal.text.strip() or "O provider devolveu um erro sem detalhes."
+            # An incomplete run used to become only RUN_FAILED, with
+            # time_to_first_token left null, so the chat showed nothing.
+            # The failure sentence is also the visible answer.
+            if signal.payload.get("reason") == "agent_incomplete":
+                notice = self.outcome.error
+                already = "".join(self._answer_parts)
+                if notice and notice not in already:
+                    prefix = "\n\n" if already.strip() else ""
+                    if not already.strip():
+                        self.telemetry.mark_first_token()
+                    self._answer_parts.append(prefix + notice)
+                    events.append(
+                        emit(RuntimeEventType.MESSAGE_DELTA, text=prefix + notice)
+                    )
             self._failure_event_emitted = True
-            events.append(emit(RuntimeEventType.RUN_FAILED, error=self.outcome.error))
+            failure_fields: dict[str, Any] = {"error": self.outcome.error}
+            category = str(signal.payload.get("error_category") or "").strip()
+            if category:
+                failure_fields["error_category"] = category
+            if signal.payload.get("retry_after") is not None:
+                failure_fields["retry_after"] = signal.payload.get("retry_after")
+            events.append(emit(RuntimeEventType.RUN_FAILED, **failure_fields))
         return events
 
     def _record_tool_effect(

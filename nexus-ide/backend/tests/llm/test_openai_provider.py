@@ -68,6 +68,37 @@ async def test_stream_error_payload_is_not_silently_discarded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retryable_503_is_visible_before_the_next_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider("https://api.example.test/v1", api_key="test-key")
+    await provider.aclose()
+    calls = 0
+
+    from backend.llm.openai_provider import ProviderHTTPStatusError
+
+    async def stream_once(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ProviderHTTPStatusError(503, "upstream unavailable")
+        yield "resposta"
+
+    slept: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        slept.append(delay)
+
+    monkeypatch.setattr(provider, "_chat_stream_once", stream_once)
+    monkeypatch.setattr("backend.llm.openai_provider.asyncio.sleep", _sleep)
+    chunks = [chunk async for chunk in provider.chat_stream("model", [{"role": "user", "content": "olá"}])]
+    assert calls == 2
+    assert slept == [15.0]
+    assert any("tentativa 1/" in chunk and "15s" in chunk for chunk in chunks)
+    assert chunks[-1] == "resposta"
+
+
+@pytest.mark.asyncio
 async def test_stream_records_provider_finish_reason() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(

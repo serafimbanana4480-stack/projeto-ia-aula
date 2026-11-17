@@ -88,9 +88,14 @@ async def consult_agent(
     if not question.strip():
         return {"error": "Question cannot be empty."}
 
-    # Build A2A message for traceability
+    # Priority is optional. Models send "normal", "" or omit it; none of
+    # those is a reason to reject the consultation.
+    priority_aliases = {"normal": "medium", "med": "medium", "urgent": "high", "": "medium"}
+    normalized_priority = priority_aliases.get(
+        str(priority or "").strip().lower(), str(priority or "").strip().lower()
+    )
     try:
-        priority_enum = MessagePriority(priority.lower())
+        priority_enum = MessagePriority(normalized_priority or "medium")
     except ValueError:
         priority_enum = MessagePriority.MEDIUM
 
@@ -122,23 +127,30 @@ async def consult_agent(
 
     try:
         from backend.agents.base import AgentRequest
+        from backend.llm.caller_context import current_caller_llm
         from backend.orchestrator.registry import build_default_registry, resolve
 
-        # Reuse the shared LLM client from the FastAPI app state when available,
-        # otherwise create one via the factory.
-        client = None
-        try:
-            from backend.orchestrator.main import app
+        # Use the calling bot's provider. The process default is often a
+        # local server that is not running, which produced
+        # "[ANALYZER returned no output]" after "All connection attempts failed".
 
-            if hasattr(app.state, "llm_client"):
-                client = app.state.llm_client
-        except (ImportError, AttributeError) as exc:
-            logger.debug("Could not reuse shared LLM client, will create new one: %s", exc)
+        client, caller_model = current_caller_llm()
+        borrowed_client = client is not None
+        if client is None:
+            try:
+                from backend.orchestrator.main import app
+
+                if hasattr(app.state, "llm_client"):
+                    client = app.state.llm_client
+                    borrowed_client = client is not None
+            except (ImportError, AttributeError) as exc:
+                logger.debug("Could not reuse shared LLM client, will create new one: %s", exc)
 
         if client is None:
             from backend.llm import create_llm_client
 
             client = create_llm_client()
+            borrowed_client = False
 
         # Get the target agent from the registry
         registry = build_default_registry()
@@ -152,6 +164,8 @@ async def consult_agent(
         }
         if allowed_tools is not None:
             extra_context["_allowed_tools"] = tuple(allowed_tools)
+        if caller_model:
+            extra_context["_model_override"] = caller_model
         if context:
             extra_context["consultation_context"] = context
 
@@ -207,20 +221,30 @@ async def consult_agent(
         response_text, _sub_frames = split_stream("".join(parts))
         response_text = response_text.strip()
 
-        # Only close the client if we created it (not the shared one)
-        if not hasattr(client, "_shared") and hasattr(client, "aclose"):
-            # We created this client — close it
+        # Only close a client this call created. The caller's provider and
+        # the shared app client stay open for the rest of the turn.
+        if not borrowed_client and hasattr(client, "aclose"):
             try:
                 await client.aclose()
             except Exception as exc:
                 logger.debug("Failed to close temporary LLM client: %s", exc)
 
+        failure = next(
+            (
+                payload
+                for kind, payload in reversed(_sub_frames)
+                if kind in {"error", "warning"} and str(payload or "").strip()
+            ),
+            "",
+        )
         if not response_text.strip():
+            detail = str(failure or "").strip() or "o provedor não devolveu texto"
             return {
+                "error": f"A consulta a {agent_upper} falhou: {detail}",
                 "agent": agent_upper,
-                "response": f"[{agent_upper} returned no output]",
                 "a2a_message_id": a2a_msg.message_id,
                 "a2a_correlation_id": a2a_msg.correlation_id,
+                "error_category": "provider",
             }
 
         return {
@@ -280,8 +304,10 @@ register_tool(
                 },
                 "priority": {
                     "type": "string",
-                    "enum": ["critical", "high", "medium", "low"],
-                    "description": "Message priority level",
+                    "description": (
+                        "Optional message priority (critical, high, medium, low). "
+                        "Omitted or unknown values default to medium."
+                    ),
                 },
                 "context": {
                     "type": "string",

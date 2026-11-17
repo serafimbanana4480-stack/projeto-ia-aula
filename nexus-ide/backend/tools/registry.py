@@ -301,6 +301,16 @@ _UNAVAILABLE_MODULE_TOOLS: dict[str, tuple[str, ...]] = {
         "browser_get_links",
         "browser_close",
     ),
+    "mcp_tools": (
+        "mcp_list_tools",
+        "mcp_recommend_tools",
+        "mcp_call_readonly_tool",
+        "mcp_call_tool",
+        "mcp_project_context",
+        "mcp_impact_analysis",
+        "mcp_project_status",
+        "mcp_sequential_thinking",
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -1158,6 +1168,14 @@ def register_tool(spec: ToolSpec) -> ToolSpec:
     _registry[spec.name] = spec
     logger.info("Registered tool: %s", spec.name)
     return spec
+
+
+def unavailable_tool_reason(name: str) -> str:
+    """Why a tool from a module that failed to import cannot run, or empty."""
+    for info in _unavailable_modules.values():
+        if name in info.get("tools", ()):
+            return str(info.get("error") or "")
+    return ""
 
 
 def record_unavailable_module(module_name: str, error: str) -> None:
@@ -2978,13 +2996,26 @@ async def execute_tool(
         # framed, so the success/error schema is unchanged.
         framed_result = frame_external_result(name, result)
         if handler_error:
-            failure_count = _record_tool_failure(name, session_id, failure_scope)
+            policy_denied = bool(raw_result.get("policy_denied")) or handler_error.startswith(
+                "Blocked:"
+            )
+            failure_count = (
+                tool_failure_count(name, session_id, failure_scope)
+                if policy_denied
+                else _record_tool_failure(name, session_id, failure_scope)
+            )
             response = _typed_tool_response(
                 name,
                 ok=False,
                 result=framed_result,
                 error=handler_error,
-                error_category="timeout" if raw_result.get("timed_out") else "tool",
+                error_category=(
+                    "timeout"
+                    if raw_result.get("timed_out")
+                    else "policy_denied"
+                    if policy_denied
+                    else "tool"
+                ),
                 duration_ms=duration_ms,
                 timed_out=bool(raw_result.get("timed_out")),
                 exit_code=raw_result.get("exit_code"),

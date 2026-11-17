@@ -156,7 +156,11 @@ async def _request_with_retry(
                 e,
             )
             await asyncio.sleep(delay)
-    raise last_exception or RuntimeError("All retry attempts failed")
+    if last_exception is None:
+        raise RuntimeError(f"All retry attempts failed ({MAX_RETRIES}/{MAX_RETRIES})")
+    raise RuntimeError(
+        f"{last_exception} (tentativa {MAX_RETRIES}/{MAX_RETRIES} falhou)"
+    ) from last_exception
 
 
 # ---------------------------------------------------------------------------

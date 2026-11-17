@@ -326,6 +326,8 @@ class AgentBase(ABC):
     # rate-limited model must not monopolise an autonomous run, but hammering
     # the same shared pool immediately is equally likely to fail.
     _MAX_BACKOFF_SECONDS = 8.0
+    #: Extra attempts after the first 429, same model, before a fallback or a failure.
+    _MAX_RATE_LIMIT_RETRIES = 2
     _parallel_safe_tools = {
         "get_file_info",
         "get_file_info_absolute",
@@ -1600,6 +1602,11 @@ class AgentBase(ABC):
                     on_final_chunk=_capture_final_chunk,
                     **dispatch_kwargs,
                 ):
+                    # A provider retry notice is not model output. Counting it
+                    # as emitted text blocked the fallback and hid the retry.
+                    if self._status_frame_text(token) is not None:
+                        yield token
+                        continue
                     if token:
                         emitted_output = True
                     tokens_out += 1
@@ -1726,6 +1733,10 @@ class AgentBase(ABC):
     @staticmethod
     def _is_rate_limited(exc: BaseException) -> bool:
         """Return whether an exception represents a retryable rate limit."""
+        if getattr(exc, "status_code", None) == 429:
+            return True
+        if str(getattr(exc, "category", "") or "").strip().lower() == "rate_limit":
+            return True
         message = str(exc).lower()
         return (
             "429" in message
@@ -1735,9 +1746,27 @@ class AgentBase(ABC):
             or "temporarily throttled" in message
         )
 
+    def _retry_delay_seconds(self, exc: BaseException, attempt_idx: int) -> float:
+        """Seconds to wait before another try. Retry-After wins; otherwise exponential."""
+        hinted = getattr(exc, "retry_after", None)
+        suggested = float(hinted) if isinstance(hinted, (int, float)) and hinted >= 0 else None
+        if suggested is None:
+            suggested = self._extract_retry_delay(exc)
+        if suggested is None:
+            suggested = min(1.0 * (2 ** max(0, attempt_idx)), self._MAX_BACKOFF_SECONDS)
+        return min(max(0.0, suggested), self._MAX_BACKOFF_SECONDS)
+
+    async def _sleep_retry(self, delay: float) -> None:
+        """Bounded pause before a rate-limit retry. Tests replace this."""
+        if delay > 0:
+            await asyncio.sleep(delay)
+
     @staticmethod
     def _extract_retry_delay(exc: BaseException) -> float | None:
         """Extract a provider retry hint in seconds, if one is present."""
+        hinted = getattr(exc, "retry_after", None)
+        if isinstance(hinted, (int, float)) and hinted >= 0:
+            return float(hinted)
         message = str(exc)
         retry_after = re.search(
             r"retry[-_ ]after\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", message, re.I
@@ -2368,6 +2397,412 @@ class AgentBase(ABC):
         if requirement == "verification":
             text += self._BLOCKED_TOOL_VERIFICATION_STEER
         return text
+
+    _BOT_CLAIM_RULES: tuple[tuple[frozenset[str], re.Pattern[str], str], ...] = (
+        (
+            frozenset({
+                "read_file", "read_multiple_files", "list_dir", "list_files",
+                "search_in_files", "search_codebase",
+            }),
+            re.compile(
+                r"\b(?:li|abri|analisei|inspecionei)\b.{0,60}\b"
+                r"(?:ficheiros?|arquivos?|files?|pastas?|direct[oó]rios?|c[oó]digos?)\b",
+                re.IGNORECASE,
+            ),
+            "diz que leu ficheiros, mas nenhuma ferramenta de leitura correu",
+        ),
+        (
+            frozenset({
+                "write_file", "write_file_absolute", "append_file", "create_directory",
+            }),
+            re.compile(
+                r"\b(?:criei|escrevi|alterei|guardei|gravei)\b.{0,60}\b"
+                r"(?:ficheiro|arquivo|file|pasta|nota)\b",
+                re.IGNORECASE,
+            ),
+            "diz que escreveu um ficheiro, mas nenhuma ferramenta de escrita correu",
+        ),
+        (
+            frozenset({
+                "run_shell", "execute_shell", "execute_code", "run_tests",
+                "run_python_script",
+            }),
+            re.compile(
+                r"\b(?:corri|executei|testei|validei)\b.{0,48}\b"
+                r"(?:testes|comando|script|shell)\b",
+                re.IGNORECASE,
+            ),
+            "diz que executou um comando ou testes, mas nenhuma ferramenta de shell correu",
+        ),
+        (
+            frozenset({"store_memory", "remember_fact"}),
+            re.compile(
+                r"\b(?:memorizei|guardei na mem[oó]ria|registei na mem[oó]ria)\b",
+                re.IGNORECASE,
+            ),
+            "diz que guardou memória, mas nenhuma ferramenta de memória correu",
+        ),
+    )
+
+    _BOT_ANSWER_CAP = 8_000
+    _BOT_EXTRA_TOOLS: frozenset[str] = frozenset({
+        "web_fetch",
+        "web_search",
+        "fetch_url",
+        "search_web",
+        "search_web_v2",
+        "list_files",
+        "append_file",
+        "remember_fact",
+        "browser_navigate",
+        "browser_click",
+        "mcp_list_tools",
+        "mcp_call_tool",
+        "mcp_project_context",
+        "consult_agent",
+        "get_file_info",
+        "run_python_script",
+        "run_tests",
+        "run_lint",
+    })
+    _BOT_COUNT_PATTERNS: tuple[re.Pattern[str], ...] = (
+        re.compile(
+            r"\b([a-z][a-z0-9_]{2,64})\b\s*\(\s*(\d{1,4})\s*chamadas?",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(\d{1,4})\s*chamadas?\s+(?:de\s+|a\s+|ao\s+|à\s+)?\b([a-z][a-z0-9_]{2,64})\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([a-z][a-z0-9_]{2,64})\b[^\n]{0,40}?\b(\d{1,4})\s+vezes\b",
+            re.IGNORECASE,
+        ),
+    )
+    _REMEMBER_REQUEST = re.compile(
+        r"\b(?:lembra-te|lembra te|memoriza(?:r)?|guarda(?:r)? na mem[oó]ria|"
+        r"n[aã]o te esque[cç]as)\b",
+        re.IGNORECASE,
+    )
+    _STATUS_FRAME = re.compile(r"<event>status\|(.*?)</event>", re.DOTALL)
+
+    @classmethod
+    def _known_bot_tool_names(cls) -> frozenset[str]:
+        return cls._ALLOWED_TOOL_NAMES | cls._BOT_EXTRA_TOOLS
+
+    @classmethod
+    def _tool_event_counts(
+        cls,
+        successful_tools: set[str],
+        tool_events: dict[str, int] | None,
+    ) -> dict[str, int]:
+        if tool_events is None:
+            return {name: 1 for name in successful_tools}
+        counts = {str(name): int(count) for name, count in tool_events.items()}
+        for name in successful_tools:
+            counts.setdefault(name, 1)
+        return counts
+
+    @classmethod
+    def _unsupported_bot_claims(
+        cls,
+        answer: str,
+        successful_tools: set[str],
+        tool_events: dict[str, int] | None = None,
+        tool_errors: dict[str, str] | None = None,
+    ) -> tuple[str, ...]:
+        """Claims of work that this turn's tool events do not support.
+
+        Covers Portuguese phrasing, tool names written in prose, invented call
+        counts and invented error messages. ``tool_events`` is the real count
+        of each tool that ran, including calls that returned an error.
+        """
+        text = " ".join((answer or "").split())
+        if not text:
+            return ()
+        counts = cls._tool_event_counts(successful_tools, tool_events)
+        errors = {
+            str(name).lower(): str(body or "")
+            for name, body in (tool_errors or {}).items()
+        }
+        known = cls._known_bot_tool_names()
+        found: list[str] = []
+
+        def add(message: str) -> None:
+            if message not in found:
+                found.append(message)
+
+        for tools, pattern, message in cls._BOT_CLAIM_RULES:
+            if set(counts) & tools:
+                continue
+            if pattern.search(text):
+                add(message)
+
+        names = sorted(known, key=len, reverse=True)
+        mention_re = re.compile(
+            r"\b(?:" + "|".join(re.escape(name) for name in names) + r")\b",
+            re.IGNORECASE,
+        )
+        denial = re.compile(
+            r"\b(?:não|nao)\s+(?:chamei|usei|executei|corri|houve|foi)\b"
+            r"|\b(?:sem|nunca)\s+(?:chamar|usar|executar|correr)\b",
+            re.IGNORECASE,
+        )
+        seen_mentions: set[str] = set()
+        for match in mention_re.finditer(text):
+            name = match.group(0).lower()
+            if name in seen_mentions or name not in known:
+                continue
+            seen_mentions.add(name)
+            window = text[max(0, match.start() - 40) : match.start()]
+            if denial.search(window):
+                continue
+            if counts.get(name, 0) > 0:
+                continue
+            add(f"menciona {name}, mas essa ferramenta não correu neste turno")
+
+        claimed_counts: list[tuple[str, int]] = []
+        for pattern in cls._BOT_COUNT_PATTERNS:
+            for match in pattern.finditer(text):
+                groups = [group for group in match.groups() if group is not None]
+                if len(groups) != 2:
+                    continue
+                if groups[0].isdigit():
+                    count_text, tool_name = groups[0], groups[1]
+                else:
+                    tool_name, count_text = groups[0], groups[1]
+                tool_name = tool_name.lower()
+                if tool_name not in known:
+                    continue
+                claimed_counts.append((tool_name, int(count_text)))
+        for tool_name, claimed in claimed_counts:
+            actual = counts.get(tool_name, 0)
+            if claimed != actual:
+                add(
+                    f"diz que {tool_name} correu {claimed} vezes, "
+                    f"mas o turno registou {actual}"
+                )
+
+        error_hits: list[tuple[str, str, str]] = []
+        error_word = re.compile(
+            r"\b(TypeError|ValueError|KeyError|AttributeError|Traceback|SyntaxError|Exception)\b",
+            re.IGNORECASE,
+        )
+        for match in error_word.finditer(text):
+            before = text[max(0, match.start() - 80) : match.start()]
+            nearby = list(mention_re.finditer(before))
+            if not nearby:
+                continue
+            error_hits.append((
+                nearby[-1].group(0).lower(),
+                match.group(1),
+                text[match.end() : match.end() + 80],
+            ))
+        for tool_name, kind, tail in error_hits:
+            if tool_name not in known:
+                continue
+            quotes = re.findall(r"['\"]([A-Za-z_][\w]{1,64})['\"]", tail)
+            actual_error = errors.get(tool_name, "")
+            if counts.get(tool_name, 0) <= 0:
+                detail = f" '{quotes[0]}'" if quotes else ""
+                add(
+                    f"descreve um erro {kind}{detail} de {tool_name}, "
+                    "mas essa ferramenta não correu"
+                )
+                continue
+            if quotes and not all(token.lower() in actual_error.lower() for token in quotes):
+                add(
+                    f"atribui a {tool_name} o erro '{quotes[0]}', "
+                    "que não aparece no resultado real"
+                )
+            elif kind.lower() not in actual_error.lower() and quotes:
+                add(
+                    f"atribui a {tool_name} um {kind} que o resultado real não tem"
+                )
+        return tuple(found)
+
+    @classmethod
+    def _collapse_bot_answer(cls, text: str) -> str:
+        """Drop a sentence that repeats, and keep the answer inside the cap."""
+        raw = text or ""
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", raw) if part.strip()]
+        if not sentences:
+            sentences = [raw.strip()] if raw.strip() else []
+        seen: dict[str, int] = {}
+        kept: list[str] = []
+        stopped = False
+        for sentence in sentences:
+            key = " ".join(sentence.split()).casefold()
+            if len(key) >= 40:
+                seen[key] = seen.get(key, 0) + 1
+                if seen[key] > 2:
+                    stopped = True
+                    break
+            kept.append(sentence)
+            if sum(len(part) + 1 for part in kept) >= cls._BOT_ANSWER_CAP:
+                stopped = True
+                break
+        body = " ".join(kept).strip()
+        if len(body) > cls._BOT_ANSWER_CAP:
+            body = body[: cls._BOT_ANSWER_CAP].rstrip()
+            stopped = True
+        if stopped:
+            note = "[Resposta interrompida: o texto repetia-se.]"
+            if note not in body:
+                body = f"{body}\n\n{note}".strip()
+        return body
+
+    @staticmethod
+    def _same_prose(left: str, right: str) -> bool:
+        a = " ".join((left or "").split()).casefold()[:600]
+        b = " ".join((right or "").split()).casefold()[:600]
+        if len(a) < 40 or len(b) < 40:
+            return False
+        return a == b or a in b or b in a
+
+    @staticmethod
+    def _status_frame_text(token: str) -> str | None:
+        match = AgentBase._STATUS_FRAME.fullmatch((token or "").strip())
+        if match is None:
+            return None
+        from backend.agents.event_protocol import decode_payload
+
+        return decode_payload(match.group(1)).strip()
+
+    @staticmethod
+    def _bind_request_llm(request: AgentRequest) -> None:
+        """Publish the provider this turn is already using for nested tools."""
+        from backend.llm.caller_context import bind_caller_llm
+
+        model = str(
+            request.context.get("_model_override")
+            or request.context.get("_resolved_model")
+            or ""
+        )
+        bind_caller_llm(request.client, model)
+
+    @staticmethod
+    def _budget_evidence(
+        counts: dict[str, int], errors: dict[str, list[str]]
+    ) -> str:
+        """A short, server-authored account of the tools this run actually called."""
+        if not counts:
+            return ""
+        used = ", ".join(f"{name} ×{count}" for name, count in sorted(counts.items()))
+        lines = [f"Evidência desta execução: {used}."]
+        for name, messages in sorted(errors.items()):
+            if messages:
+                lines.append(f"{name} falhou: {messages[-1][:240]}")
+        return "\n".join(lines)
+
+    async def _store_requested_memory(self, request: AgentRequest) -> bool:
+        """Store the user's remember-request when the model never called the tool."""
+        allowed = request.context.get("_allowed_tools")
+        if allowed is not None and "store_memory" not in {
+            str(name) for name in allowed
+        }:
+            return False
+        content = " ".join((request.query or "").split())[:1500]
+        if not content or not request.user_id:
+            return False
+        from backend.tools.registry import execute_tool
+
+        result = await execute_tool(
+            "store_memory",
+            request.session_id,
+            {"content": content, "memory_type": "session", "tags": "bot"},
+            user_id=request.user_id,
+            confirmed=True,
+            enforce_confirmation=True,
+            autonomous=request.autonomous,
+            project_path=request.project_path,
+            allowed_tools=self._runtime_allowed_tools(request),
+            memory_session_only=bool(request.context.get("_bot_memory_session_scope")),
+            auto_accept=True,
+        )
+        return isinstance(result, dict) and "error" not in result
+
+    @staticmethod
+    def _bot_claim_nudge(claims: tuple[str, ...]) -> str:
+        listed = "\n".join(f"- {item}" for item in claims)
+        return (
+            "\n[SYSTEM] A resposta afirma trabalho que nenhuma ferramenta fez:\n"
+            f"{listed}\n"
+            "Chama agora a ferramenta correspondente e usa só o resultado dela. "
+            "Se não a puderes chamar, retira a afirmação. Não inventes resultados."
+        )
+
+    @staticmethod
+    def _with_unverified_notice(answer: str, claims: tuple[str, ...]) -> str:
+        listed = "\n".join(f"- {item}" for item in claims)
+        notice = (
+            "[Não verificado]\n"
+            "A resposta afirma ações sem uma chamada de ferramenta correspondente:\n"
+            f"{listed}"
+        )
+        body = (answer or "").rstrip()
+        return f"{body}\n\n{notice}" if body else notice
+
+    _WORK_PART_SPLIT = re.compile(
+        r"(?:\n+\s*(?:\d+[\).\]]|[-*])\s+)"
+        r"|(?:\s+\be depois\b\s+)"
+        r"|(?:\s+\bem seguida\b\s+)"
+        r"|(?:\s+\be também\b\s+)",
+        re.IGNORECASE,
+    )
+    _WORK_PART_FAILURE = re.compile(
+        r"não consegui|nao consegui|não foi possível|nao foi possivel|falhou",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _work_parts(cls, query: str) -> list[str]:
+        """Split a multi-part request. A single sentence stays one part."""
+        text = " ".join((query or "").split())
+        if not text:
+            return []
+        pieces = [part.strip(" .;") for part in cls._WORK_PART_SPLIT.split(text)]
+        pieces = [part for part in pieces if len(part) >= 3]
+        return pieces if len(pieces) >= 2 else []
+
+    @classmethod
+    def _bot_continuation_nudge(
+        cls, request: AgentRequest, answer: str, tool_trace: list[str]
+    ) -> str:
+        """Ask the model to finish parts that still have no tool evidence."""
+        parts = request.context.get("_work_parts")
+        if not isinstance(parts, list):
+            parts = cls._work_parts(request.query)
+            request.context["_work_parts"] = parts
+        if len(parts) < 2:
+            return ""
+        evidence = " ".join(tool_trace).casefold()
+        answer_text = (answer or "").casefold()
+        remaining: list[str] = []
+        for part in parts:
+            keywords = [
+                word for word in re.findall(r"[\w]{5,}", part.casefold())
+                if word not in cls._TOPIC_STOPWORDS
+            ]
+            if not keywords:
+                keywords = [part.casefold()[:24]]
+            has_tool = any(word in evidence for word in keywords)
+            failed = bool(cls._WORK_PART_FAILURE.search(answer or "")) and any(
+                word in answer_text for word in keywords
+            )
+            if not has_tool and not failed:
+                remaining.append(part)
+        if not remaining:
+            return ""
+        listed = "\n".join(f"- {part}" for part in remaining)
+        return (
+            "\n[SYSTEM] O pedido tem várias partes e ainda falta evidência de ferramenta para:\n"
+            f"{listed}\n"
+            "A prosa não conta. Chama agora a ferramenta real de cada parte em falta, "
+            "antes de qualquer texto final: read_file ou list_dir para ler, "
+            "search_in_files para procurar, run_shell para executar, store_memory para "
+            "lembrar. Não repitas a resposta anterior e não dês a resposta final antes da chamada."
+        )
 
     def _has_required_tool_evidence(
         self,
@@ -3433,6 +3868,9 @@ class AgentBase(ABC):
         # This prevents a provisional "please confirm" response or raw tool-call
         # markup from becoming visible before the loop can correct/execute it.
         buffer_model_output = request.autonomous and bool(self.supported_actions)
+        # Bot prose is held until the turn is final. Continuation attempts used
+        # to stream one after another, so the user saw every draft concatenated.
+        hold_bot_answer = bool(request.context.get("_isolated_bot_conversation"))
         # How many times the model was asked to re-emit a tool call in the
         # required wrapper, and whether any tool reported an error. Both feed
         # ``_last_run_success``: a run that never executed what it intended, or
@@ -3453,6 +3891,16 @@ class AgentBase(ABC):
         # How many times the model was asked to actually write the file it
         # claimed to have created.
         file_write_corrections = 0
+        continuation_nudges = 0
+        claim_nudges = 0
+        tool_trace: list[str] = []
+        tool_event_counts: dict[str, int] = {}
+        tool_error_texts: dict[str, list[str]] = {}
+
+        def note_tool_event(name: str, error: str = "") -> None:
+            tool_event_counts[name] = tool_event_counts.get(name, 0) + 1
+            if error:
+                tool_error_texts.setdefault(name, []).append(str(error)[:400])
         conv_log = get_conversation_logger(request.session_id)
         # Tracks whether the loop produced a genuine final answer (vs. hitting
         # the iteration cap). Consumed by ``run()`` to avoid persisting failed
@@ -3487,7 +3935,34 @@ class AgentBase(ABC):
         # instead of asking the same forbidden call until the budget runs out.
         contract_refusals = 0
         denied_tool_names: set[str] = set()
-        while iteration < max_iterations:
+        budget_summary_armed = False
+        step_budget = max_iterations
+        while True:
+            if iteration >= max_iterations:
+                # The step budget is gone and the model only emitted tool
+                # calls. One last turn, with tools removed, has to write the
+                # answer the user will actually see.
+                if (
+                    not budget_summary_armed
+                    and tool_event_counts
+                    and not final_answer_produced
+                    and max_iterations != float("inf")
+                ):
+                    budget_summary_armed = True
+                    max_iterations = iteration + 1
+                    request.context["_tool_free_synthesis"] = True
+                    request.context["_budget_summary_turn"] = True
+                    evidence = self._budget_evidence(tool_event_counts, tool_error_texts)
+                    request.context["_budget_evidence"] = evidence
+                    directive = (
+                        "\n[SYSTEM] O orçamento de passos acabou. Não chames ferramentas. "
+                        "Escreve agora a resposta final para o utilizador, só com a evidência "
+                        f"já recolhida ({evidence}). Se uma ferramenta falhou, cita o erro real."
+                    )
+                    context += directive
+                    self._remember_sticky_directive(sticky_directives, directive)
+                else:
+                    break
             iteration += 1
             tool_free_synthesis_turn = bool(request.context.get("_tool_free_synthesis"))
             logger.info(
@@ -3525,7 +4000,7 @@ class AgentBase(ABC):
             token_count = 0
             stream_start = time.monotonic()
             context_shrink_used = False
-            rate_limit_retry_used = False
+            rate_limit_attempts = 0
             model_retry_used = False
             retry_model_id: str | None = None
             caller_model_override = request.context.get("_model_override")
@@ -3541,15 +4016,30 @@ class AgentBase(ABC):
                 closed_after_tool_call = False
                 try:
                     async for token in llm_stream:
+                        if self._status_frame_text(token) is not None:
+                            yield token
+                            continue
                         full_response += token
                         token_count += 1
                         emitted_this_attempt = True
                         if (
                             not buffer_model_output
+                            and not hold_bot_answer
                             and not audit_stream_suppressed
                             and not tool_free_synthesis_turn
                         ):
                             yield token
+                        if (
+                            hold_bot_answer
+                            and len(full_response) >= self._BOT_ANSWER_CAP
+                            and not self._has_complete_tool_transport(full_response)
+                        ):
+                            logger.warning(
+                                "[%s] stopping a runaway bot answer at %d chars",
+                                self.name,
+                                len(full_response),
+                            )
+                            break
                         if self._has_complete_tool_transport(full_response):
                             parsed_early = self._parse_tool_calls(full_response)
                             if parsed_early:
@@ -3592,6 +4082,7 @@ class AgentBase(ABC):
                 if (
                     emitted_this_attempt
                     and not buffer_model_output
+                    and not hold_bot_answer
                     and not tool_free_synthesis_turn
                 ):
                     # Tokens already reached the user. Restarting duplicates
@@ -3625,17 +4116,25 @@ class AgentBase(ABC):
                     continue
                 elif (
                     self._is_rate_limited(stream_failure)
-                    and not rate_limit_retry_used
-                    and not request.context.get("_fast_chat_lane")
+                    and rate_limit_attempts < self._MAX_RATE_LIMIT_RETRIES
                 ):
-                    rate_limit_retry_used = True
+                    delay = self._retry_delay_seconds(stream_failure, rate_limit_attempts)
+                    rate_limit_attempts += 1
+                    shown = int(delay) if float(delay).is_integer() else round(delay, 1)
+                    request.context["_provider_error_category"] = "rate_limit"
+                    request.context["_provider_retry_after"] = delay
                     logger.warning(
-                        "[%s] rate limited on iteration %d — backing off and retrying once",
+                        "[%s] rate limited on iteration %d — retry %d in %ss",
                         self.name,
                         iteration,
+                        rate_limit_attempts,
+                        shown,
                     )
-                    yield "<event>warning|Rate limited — retrying after a short wait</event>"
-                    await self._wait_before_fallback(stream_failure, 0)
+                    yield encode_event(
+                        "status",
+                        f"limite do provider, a tentar de novo em {shown}s",
+                    )
+                    await self._sleep_retry(delay)
                     full_response = ""
                     token_count = 0
                     continue
@@ -3658,7 +4157,24 @@ class AgentBase(ABC):
                 # Every recovery path is spent. Never let ``run()`` persist this
                 # as a successful exchange.
                 self._record_run_success(request, False)
-                yield encode_event("error", f"LLM stream failed: {stream_failure}")
+                error_payload: dict[str, Any] = {}
+                if self._is_rate_limited(stream_failure):
+                    error_payload["error_category"] = "rate_limit"
+                    error_payload["retry_after"] = self._retry_delay_seconds(
+                        stream_failure, rate_limit_attempts
+                    )
+                elif getattr(stream_failure, "category", None):
+                    error_payload["error_category"] = str(stream_failure.category)
+                    if getattr(stream_failure, "retry_after", None) is not None:
+                        error_payload["retry_after"] = stream_failure.retry_after
+                if error_payload:
+                    yield encode_event(
+                        "error",
+                        f"LLM stream failed: {stream_failure}",
+                        error_payload,
+                    )
+                else:
+                    yield encode_event("error", f"LLM stream failed: {stream_failure}")
                 return
             # The provider's own reasoning channel closed with the stream.
             # Publish it as a bounded control frame now, while the tokens that
@@ -3727,6 +4243,14 @@ class AgentBase(ABC):
                     return
                 if _ev is not None:
                     yield _ev[0] + "\n\n"
+                digest = str(request.context.get("_budget_evidence") or "").strip()
+                if not digest:
+                    digest = self._budget_evidence(tool_event_counts, tool_error_texts)
+                if digest:
+                    request.context["_budget_evidence"] = digest
+                    # Its own chunk: the sentence below is an incomplete-run
+                    # marker, and a marker in the same chunk hides the evidence.
+                    yield digest + "\n\n"
                 yield (
                     "[RECOLHA CONCLUÍDA — SÍNTESE INCOMPLETA] As ferramentas "
                     "anteriores correram, mas o modelo voltou a pedir ferramentas "
@@ -4064,6 +4588,68 @@ class AgentBase(ABC):
                     )
                     return
 
+                if request.context.get("_isolated_bot_conversation"):
+                    answer = self._collapse_bot_answer(answer)
+                    previous_answer = str(request.context.get("_bot_previous_answer") or "")
+                    repeated_prose = self._same_prose(previous_answer, answer)
+                    request.context["_bot_previous_answer"] = answer
+                    nudge = self._bot_continuation_nudge(request, answer, tool_trace)
+                    if nudge and continuation_nudges < 3 and can_continue and not repeated_prose:
+                        continuation_nudges += 1
+                        context += nudge
+                        self._remember_sticky_directive(sticky_directives, nudge)
+                        yield encode_event(
+                            "status",
+                            "O pedido tem várias partes — a continuar até cada uma ter uma chamada real",
+                        )
+                        continue
+                    if (
+                        self._REMEMBER_REQUEST.search(request.query or "")
+                        and tool_event_counts.get("store_memory", 0) == 0
+                        and "store_memory" not in successful_tools
+                    ):
+                        stored = await self._store_requested_memory(request)
+                        if stored:
+                            successful_tools.add("store_memory")
+                            note_tool_event("store_memory")
+                            yield encode_event(
+                                "tool_call",
+                                "store_memory",
+                                json.dumps({"content": " ".join(request.query.split())[:240]}),
+                            )
+                            yield encode_event(
+                                "tool_result",
+                                "store_memory",
+                                json.dumps({"stored": True, "fallback": True}),
+                            )
+                    claims = self._unsupported_bot_claims(
+                        answer,
+                        successful_tools,
+                        tool_events=tool_event_counts,
+                        tool_errors={
+                            name: "\n".join(parts)
+                            for name, parts in tool_error_texts.items()
+                        },
+                    )
+                    if claims and claim_nudges < 2 and can_continue and not repeated_prose:
+                        claim_nudges += 1
+                        claim_nudge = self._bot_claim_nudge(claims)
+                        context += claim_nudge
+                        self._remember_sticky_directive(sticky_directives, claim_nudge)
+                        yield encode_event(
+                            "status",
+                            "Afirmação sem ferramenta — a pedir a chamada real",
+                        )
+                        continue
+                    if claims:
+                        notice = self._with_unverified_notice("", claims).strip()
+                        answer = self._with_unverified_notice(answer, claims)
+                        request.context["_unverified_claims"] = list(claims)
+                        self._record_run_success(request, False)
+                        if not buffer_model_output and not hold_bot_answer:
+                            yield "\n\n" + notice
+                            request.context["_unverified_notice_emitted"] = True
+
                 # No more tools, return final answer
                 logger.info(
                     "[%s] No tool calls detected — emitting final answer | iteration=%d",
@@ -4094,10 +4680,19 @@ class AgentBase(ABC):
                 # stopped WITHOUT an answer is never a success, whatever the
                 # tools it managed to run.
                 final_answer_produced = True
-                self._record_run_success(
-                    request,
-                    final_answer_produced and ((not tool_errors_seen) or tool_errors_recovered),
-                )
+                if request.context.get("_budget_summary_turn"):
+                    evidence = str(request.context.get("_budget_evidence") or "").strip()
+                    if evidence and evidence not in answer:
+                        answer = f"{answer.rstrip()}\n\n{evidence}".strip()
+                    request.context.pop("_tool_free_synthesis", None)
+                    self._record_run_success(request, False)
+                elif not request.context.get("_unverified_claims"):
+                    self._record_run_success(
+                        request,
+                        final_answer_produced and (
+                            (not tool_errors_seen) or tool_errors_recovered
+                        ),
+                    )
                 final_answer = self._reconcile_audited_answer(
                     answer,
                     pending_final_answer,
@@ -4110,7 +4705,7 @@ class AgentBase(ABC):
                     "p42 final | agent=%s chars=%d tool_free=%s",
                     self.name, len((final_answer or "").strip()), tool_free_synthesis_turn,
                 )
-                if buffer_model_output or tool_free_synthesis_turn:
+                if buffer_model_output or tool_free_synthesis_turn or hold_bot_answer:
                     to_emit = final_answer
                 elif audit_stream_suppressed and final_answer != pending_final_answer:
                     # Only what the audit genuinely added; the earlier answer
@@ -4121,6 +4716,8 @@ class AgentBase(ABC):
                         else final_answer
                     )
                 else:
+                    to_emit = ""
+                if request.context.get("_unverified_notice_emitted"):
                     to_emit = ""
                 if to_emit:
                     yield to_emit
@@ -4377,6 +4974,7 @@ class AgentBase(ABC):
                 ) -> tuple[str, dict[str, Any], dict[str, Any], float]:
                     async with limiter:
                         started = time.monotonic()
+                        self._bind_request_llm(request)
                         response = await execute_tool(
                             name,
                             request.session_id,
@@ -4430,8 +5028,11 @@ class AgentBase(ABC):
                             recoverable=bool(result.get("recoverable")),
                         )
                         yield encode_event("tool_error", tool_name, str(result["error"]))
+                        note_tool_event(tool_name, str(result["error"]))
                     else:
                         successful_tools.add(tool_name)
+                        note_tool_event(tool_name)
+                        tool_trace.append(f"{tool_name} {_args}")
                         request.context["_successful_tools"] = sorted(successful_tools)
                         if tool_errors_seen and not tool_errors_recovered:
                             tool_errors_recovered = True
@@ -4474,6 +5075,7 @@ class AgentBase(ABC):
                 async def invoke_current_tool(
                     *, confirmed: bool, name: str = tool_name, tool_args: dict[str, Any] = args,
                 ) -> dict[str, Any]:
+                    self._bind_request_llm(request)
                     return await execute_tool(
                         name,
                         request.session_id,
@@ -4640,6 +5242,7 @@ class AgentBase(ABC):
                         iteration=iteration,
                         recoverable=bool(result.get("recoverable")),
                     )
+                    note_tool_event(tool_name, str(result["error"]))
                     if tool_name == "run_shell":
                         detail = {
                             "message": (str(result["error"]) if stream_shell
@@ -4675,6 +5278,8 @@ class AgentBase(ABC):
                         )
                 else:
                     successful_tools.add(tool_name)
+                    note_tool_event(tool_name)
+                    tool_trace.append(f"{tool_name} {args}")
                     request.context["_successful_tools"] = sorted(successful_tools)
                     if tool_name not in self._revision_scoped_read_tools:
                         tool_state_revision += 1
@@ -4781,13 +5386,23 @@ class AgentBase(ABC):
             )
             return
         # The iteration cap was reached without a final answer: this run did
-        # not finish and must never be persisted as a success.
+        # not finish and must never be persisted as a success. The evidence
+        # line is its own chunk so the chat shows it even when the failure
+        # marker is classified as a run error.
         self._record_run_success(request, False)
-        yield encode_event("warning", f"Reached maximum iterations ({max_iterations}) — task NOT completed")
+        request.context.pop("_tool_free_synthesis", None)
+        evidence = self._budget_evidence(tool_event_counts, tool_error_texts)
+        if evidence:
+            request.context["_budget_evidence"] = evidence
+            yield evidence + "\n\n"
+        reported_steps = step_budget if step_budget != float("inf") else max_iterations
+        yield encode_event(
+            "warning", f"Reached maximum iterations ({reported_steps}) — task NOT completed"
+        )
         yield "<event>answer</event>"
         yield (
             f"[TAREFA NÃO CONCLUÍDA] O agente atingiu o limite de "
-            f"{max_iterations} passos sem produzir uma resposta final. "
+            f"{reported_steps} passos sem produzir uma resposta final. "
             f"O objetivo pode não ter sido cumprido."
         )
 

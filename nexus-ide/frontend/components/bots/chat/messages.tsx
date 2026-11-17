@@ -95,6 +95,21 @@ export function ToolActivity({
   );
 }
 
+function ChoiceChips({ text, onChoose }: { text: string; onChoose: (choice: string) => void }) {
+  const choices = [...text.matchAll(/opção\s+(\d+)\b/gi)].map((match) => `Opção ${match[1]}`);
+  const unique = [...new Set(choices)];
+  if (unique.length < 2) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {unique.map((choice) => (
+        <button key={choice} type="button" onClick={() => onChoose(choice)} className="rounded-full border border-[color:var(--nx-line)] px-3 py-1 text-[12px] text-[color:var(--nx-text-dim)] hover:bg-[color:var(--nx-surface-3)]">
+          {choice}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ActionButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
   return (
     <button type="button" aria-label={label} onClick={onClick} className="rounded-md p-1 text-[color:var(--nx-text-faint)] hover:bg-[color:var(--nx-surface-3)] hover:text-[color:var(--nx-text)]">
@@ -113,6 +128,7 @@ export function DirectMessage({
   onReply,
   onConfirmTool,
   onRejectTool,
+  onChoose,
 }: {
   message: ChatMessage;
   author?: string;
@@ -123,12 +139,16 @@ export function DirectMessage({
   onReply?: () => void;
   onConfirmTool?: (confirmationId: string) => void;
   onRejectTool?: (confirmationId: string) => void;
+  onChoose?: (choice: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const theme = useThemeStore((state) => state.theme);
   const mine = message.role === "user";
   const tools = message.toolCalls ?? [];
-  if (!message.content && tools.length === 0) return null;
+  const notices = Array.isArray(message.metadata?.notices)
+    ? message.metadata.notices.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  if (!message.content && tools.length === 0 && notices.length === 0) return null;
   const hue = hueFromSeed(authorId || author || "bot");
   const copy = () => {
     const text = message.content || tools.map((tool) => tool.name).join("\n");
@@ -154,12 +174,20 @@ export function DirectMessage({
             </div>
           )}
           {mine && <p className="mb-1 text-[10px] font-medium uppercase tracking-[0.14em] text-[color:var(--nx-text-faint)]">Tu</p>}
+          {notices.length > 0 ? (
+            <div className="mb-2 space-y-1">
+              {notices.map((notice) => (
+                <p key={notice} role="status" className="text-[12px] leading-5 text-[color:var(--nx-amber)]">{notice}</p>
+              ))}
+            </div>
+          ) : null}
           <ToolActivity tools={tools} onConfirm={onConfirmTool} onReject={onRejectTool} />
           {message.content ? (
             <div className="min-w-0 break-words text-[15px] leading-7">
               <AssistantMarkdown text={message.content} theme={theme === "light" ? "light" : "dark"} />
             </div>
           ) : null}
+          {!mine && onChoose ? <ChoiceChips text={message.content} onChoose={onChoose} /> : null}
           <div className="mt-1.5 flex items-center justify-end gap-1 text-[10px] text-[color:var(--nx-text-faint)]">
             <time className="mr-auto">{formatBotTime(message.timestamp)}</time>
             <span className="flex opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">

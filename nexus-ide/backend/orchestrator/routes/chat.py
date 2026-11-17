@@ -828,7 +828,22 @@ def _parse_inline_events(
             # AgentBase emits this when every model/provider fails.  Treat it
             # as a first-class SSE error rather than dropping the tag and
             # letting the frontend receive a misleading successful ``done``.
-            events.append(StreamEvent(type="error", agent=agent, content=payload))
+            content = payload
+            data: dict[str, Any] | None = None
+            head, sep, tail = payload.rpartition("|")
+            if sep:
+                try:
+                    parsed = json.loads(tail)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict) and (
+                    "error_category" in parsed or "retry_after" in parsed
+                ):
+                    content = head
+                    data = parsed
+            events.append(
+                StreamEvent(type="error", agent=agent, content=content, data=data or {})
+            )
         elif event_type == "tool_confirmation":
             try:
                 confirmation = json.loads(payload)
@@ -873,6 +888,19 @@ def _parse_inline_events(
                     data={
                         "event": "agent_warning",
                         "kind": "validation",
+                        "status": "running",
+                    },
+                )
+            )
+        elif event_type == "status":
+            events.append(
+                StreamEvent(
+                    type="progress",
+                    agent=agent,
+                    content=payload,
+                    data={
+                        "event": "provider_retry",
+                        "kind": "provider_retry",
                         "status": "running",
                     },
                 )
@@ -1526,6 +1554,30 @@ _COMMAND_HELP_RE = re.compile(
     r"(?:q|que|quais)\s+comandos?(?:\s+(?:tens?|tem|existem|consegues\s+executar))?.*)\s*$",
     re.IGNORECASE,
 )
+
+
+def _message_names_foreign_directory(message: str, selected: str) -> bool:
+    """Whether the message names an existing directory outside ``selected``.
+
+    A relative mention such as ``backend/orchestrator/routes`` is judged inside
+    the selected folder. The process working directory is not a project, so a
+    folder that merely exists there does not reject the turn. The bot's own
+    default folder is a sandbox: path mentions stay in the message and the
+    tools enforce the boundary.
+    """
+    from backend.persistence.bot_workspace import is_default_bot_workspace
+
+    if is_default_bot_workspace(selected):
+        return False
+    mentioned = _existing_directory_from_message(message)
+    if not mentioned:
+        return False
+    try:
+        selected_root = Path(selected).resolve()
+        mentioned_root = Path(mentioned).resolve()
+    except OSError:
+        return False
+    return mentioned_root != selected_root and not mentioned_root.is_relative_to(selected_root)
 
 
 def _existing_directory_from_message(message: str) -> str:
@@ -3016,15 +3068,16 @@ async def chat(
             req.project_path = str(
                 _resolve_project_root(requested_project, session_id, user_id)
             )
+            request.state.nexus_bot_workspace_default = False
         else:
-            # "No project selected" is a real state, not a request for a
-            # default. Substituting the session's project, the first
-            # registered project or the server's working directory here would
-            # hand the bot a filesystem root — and in-project auto-accept —
-            # that the user never chose, while the chat reported none. Keep it
-            # empty so project-independent tools still run and the
-            # workspace/shell ones ask for a selection instead.
-            req.project_path = ""
+            # No registered project was chosen. Do not borrow the first
+            # registered project or the process directory. Give the bot its
+            # own folder, created on demand, and confine every file and shell
+            # tool to that folder until the user picks a real project.
+            from backend.persistence.bot_workspace import bot_workspace_root
+
+            req.project_path = bot_workspace_root(str(bot_profile["id"]))
+            request.state.nexus_bot_workspace_default = True
         req.mode = "chat"
         req.autonomous = False
         req.swarm_agents = []
@@ -3388,14 +3441,17 @@ def _find_idempotent_primary_run(
 def _should_replay_idempotent_primary_run(run: Any) -> bool:
     """Whether a repeated chat POST should attach/replay or re-enter a run.
 
-    A live run is replayed from its in-process stream, and a terminal run is
-    replayed from its durable journal/transcript. A ``RECOVERING`` run with no
-    live stream belongs to a process that has already stopped; let the primary
-    runtime adopt its checkpoint instead of waiting for a stream that cannot
-    appear in this process.
+    A live run is replayed from its in-process stream, and a completed run is
+    replayed from its durable journal. A failed or errored run is not replayed:
+    resending the message must be allowed to try again. A ``RECOVERING`` run
+    with no live stream belongs to a process that has already stopped; let the
+    primary runtime adopt its checkpoint instead of waiting for a stream that
+    cannot appear in this process.
     """
     state = getattr(run, "state", "")
     state = str(getattr(state, "value", state)).strip().lower()
+    if state in {"failed", "error", "errored", "expired", "cancelled"}:
+        return False
     if state == "recovering":
         from backend.runtime.events import get_active_run_event_stream
 
@@ -3578,17 +3634,15 @@ async def _select_pipeline(
         return
 
     selected = (getattr(req, "project_path", "") or "").strip()
-    mentioned = _existing_directory_from_message(req.message or "")
-    if selected and selected not in {".", "./", ".\\"} and mentioned:
-        selected_root = Path(selected).resolve()
-        mentioned_root = Path(mentioned).resolve()
-        if mentioned_root != selected_root and not mentioned_root.is_relative_to(selected_root):
-            yield _sse(StreamEvent(type="error", content=(
-                "O caminho indicado está fora do projeto selecionado. "
-                "Seleciona o projeto certo antes de continuar."
-            )))
-            yield _sse(StreamEvent(type="done"))
-            return
+    if selected and selected not in {".", "./", ".\\"} and _message_names_foreign_directory(
+        req.message or "", selected
+    ):
+        yield _sse(StreamEvent(type="error", content=(
+            "O caminho indicado está fora do projeto selecionado. "
+            "Seleciona o projeto certo antes de continuar."
+        )))
+        yield _sse(StreamEvent(type="done"))
+        return
 
     # Bots start in a strictly tool-free lane. Never fall back to legacy or
     # interpret slash commands, since either could widen that policy.
