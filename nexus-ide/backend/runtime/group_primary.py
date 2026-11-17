@@ -943,6 +943,19 @@ async def run_group_primary_turn(
     profile = dict(selection.profile)
     bot_id = str(profile.get("id") or "")
     bot_name = str(profile.get("name") or "Bot")
+    # A group turn with no registered project uses the selected bot's own
+    # folder. Another participant's tools are not added to this turn.
+    if not str(project_root or "").strip():
+        from backend.persistence.bot_workspace import bot_workspace_root
+
+        project_root = bot_workspace_root(bot_id)
+        state = getattr(request, "state", None)
+        if state is not None:
+            state.nexus_bot_workspace_default = True
+    else:
+        state = getattr(request, "state", None)
+        if state is not None:
+            state.nexus_bot_workspace_default = False
     task_id: str | None = None
     primary_stream: AsyncIterator[str] | None = None
     answer_parts: list[str] = []

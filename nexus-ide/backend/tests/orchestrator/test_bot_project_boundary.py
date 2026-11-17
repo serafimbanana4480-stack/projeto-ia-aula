@@ -98,10 +98,14 @@ async def test_bot_turn_without_a_project_keeps_the_project_empty(
         frames = _frames(response)
         assert not [frame for frame in frames if frame["type"] == "error"], frames
 
-        # The provider saw a turn whose system addon says there is no project,
-        # so the bot policy itself was built from an empty project root.
+        # No registered project was chosen, so the turn uses the bot's own
+        # folder. It must not claim that file and shell tools are refused,
+        # and it must not borrow another project's root.
         system = provider.calls[0]["messages"][0]["content"]
-        assert "Não há projeto selecionado" in system
+        assert "pasta própria deste bot" in system
+        assert "não estão bloqueadas" in system
+        assert "recusadas porque não há uma pasta" not in system
+        assert "ficam bloqueadas" not in system
         assert "PERFIL DO BOT DEFINIDO PELO UTILIZADOR" in system
         assert "Nenhum caminho foi usado" not in system
 

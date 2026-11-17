@@ -1744,7 +1744,13 @@ class PrimaryLoop:
             self.outcome.failed = True
             self.outcome.error = signal.text.strip() or "O provider devolveu um erro sem detalhes."
             self._failure_event_emitted = True
-            events.append(emit(RuntimeEventType.RUN_FAILED, error=self.outcome.error))
+            failure_fields: dict[str, Any] = {"error": self.outcome.error}
+            category = str(signal.payload.get("error_category") or "").strip()
+            if category:
+                failure_fields["error_category"] = category
+            if signal.payload.get("retry_after") is not None:
+                failure_fields["retry_after"] = signal.payload.get("retry_after")
+            events.append(emit(RuntimeEventType.RUN_FAILED, **failure_fields))
         return events
 
     def _record_tool_effect(

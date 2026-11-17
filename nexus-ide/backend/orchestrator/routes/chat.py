@@ -828,7 +828,22 @@ def _parse_inline_events(
             # AgentBase emits this when every model/provider fails.  Treat it
             # as a first-class SSE error rather than dropping the tag and
             # letting the frontend receive a misleading successful ``done``.
-            events.append(StreamEvent(type="error", agent=agent, content=payload))
+            content = payload
+            data: dict[str, Any] | None = None
+            head, sep, tail = payload.rpartition("|")
+            if sep:
+                try:
+                    parsed = json.loads(tail)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict) and (
+                    "error_category" in parsed or "retry_after" in parsed
+                ):
+                    content = head
+                    data = parsed
+            events.append(
+                StreamEvent(type="error", agent=agent, content=content, data=data or {})
+            )
         elif event_type == "tool_confirmation":
             try:
                 confirmation = json.loads(payload)
@@ -3016,15 +3031,16 @@ async def chat(
             req.project_path = str(
                 _resolve_project_root(requested_project, session_id, user_id)
             )
+            request.state.nexus_bot_workspace_default = False
         else:
-            # "No project selected" is a real state, not a request for a
-            # default. Substituting the session's project, the first
-            # registered project or the server's working directory here would
-            # hand the bot a filesystem root — and in-project auto-accept —
-            # that the user never chose, while the chat reported none. Keep it
-            # empty so project-independent tools still run and the
-            # workspace/shell ones ask for a selection instead.
-            req.project_path = ""
+            # No registered project was chosen. Do not borrow the first
+            # registered project or the process directory. Give the bot its
+            # own folder, created on demand, and confine every file and shell
+            # tool to that folder until the user picks a real project.
+            from backend.persistence.bot_workspace import bot_workspace_root
+
+            req.project_path = bot_workspace_root(str(bot_profile["id"]))
+            request.state.nexus_bot_workspace_default = True
         req.mode = "chat"
         req.autonomous = False
         req.swarm_agents = []
@@ -3388,14 +3404,17 @@ def _find_idempotent_primary_run(
 def _should_replay_idempotent_primary_run(run: Any) -> bool:
     """Whether a repeated chat POST should attach/replay or re-enter a run.
 
-    A live run is replayed from its in-process stream, and a terminal run is
-    replayed from its durable journal/transcript. A ``RECOVERING`` run with no
-    live stream belongs to a process that has already stopped; let the primary
-    runtime adopt its checkpoint instead of waiting for a stream that cannot
-    appear in this process.
+    A live run is replayed from its in-process stream, and a completed run is
+    replayed from its durable journal. A failed or errored run is not replayed:
+    resending the message must be allowed to try again. A ``RECOVERING`` run
+    with no live stream belongs to a process that has already stopped; let the
+    primary runtime adopt its checkpoint instead of waiting for a stream that
+    cannot appear in this process.
     """
     state = getattr(run, "state", "")
     state = str(getattr(state, "value", state)).strip().lower()
+    if state in {"failed", "error", "errored", "expired", "cancelled"}:
+        return False
     if state == "recovering":
         from backend.runtime.events import get_active_run_event_stream
 

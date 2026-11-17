@@ -326,6 +326,8 @@ class AgentBase(ABC):
     # rate-limited model must not monopolise an autonomous run, but hammering
     # the same shared pool immediately is equally likely to fail.
     _MAX_BACKOFF_SECONDS = 8.0
+    #: Extra attempts after the first 429, same model, before a fallback or a failure.
+    _MAX_RATE_LIMIT_RETRIES = 2
     _parallel_safe_tools = {
         "get_file_info",
         "get_file_info_absolute",
@@ -1726,6 +1728,10 @@ class AgentBase(ABC):
     @staticmethod
     def _is_rate_limited(exc: BaseException) -> bool:
         """Return whether an exception represents a retryable rate limit."""
+        if getattr(exc, "status_code", None) == 429:
+            return True
+        if str(getattr(exc, "category", "") or "").strip().lower() == "rate_limit":
+            return True
         message = str(exc).lower()
         return (
             "429" in message
@@ -1735,9 +1741,27 @@ class AgentBase(ABC):
             or "temporarily throttled" in message
         )
 
+    def _retry_delay_seconds(self, exc: BaseException, attempt_idx: int) -> float:
+        """Seconds to wait before another try. Retry-After wins; otherwise exponential."""
+        hinted = getattr(exc, "retry_after", None)
+        suggested = float(hinted) if isinstance(hinted, (int, float)) and hinted >= 0 else None
+        if suggested is None:
+            suggested = self._extract_retry_delay(exc)
+        if suggested is None:
+            suggested = min(1.0 * (2 ** max(0, attempt_idx)), self._MAX_BACKOFF_SECONDS)
+        return min(max(0.0, suggested), self._MAX_BACKOFF_SECONDS)
+
+    async def _sleep_retry(self, delay: float) -> None:
+        """Bounded pause before a rate-limit retry. Tests replace this."""
+        if delay > 0:
+            await asyncio.sleep(delay)
+
     @staticmethod
     def _extract_retry_delay(exc: BaseException) -> float | None:
         """Extract a provider retry hint in seconds, if one is present."""
+        hinted = getattr(exc, "retry_after", None)
+        if isinstance(hinted, (int, float)) and hinted >= 0:
+            return float(hinted)
         message = str(exc)
         retry_after = re.search(
             r"retry[-_ ]after\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", message, re.I
@@ -2368,6 +2392,146 @@ class AgentBase(ABC):
         if requirement == "verification":
             text += self._BLOCKED_TOOL_VERIFICATION_STEER
         return text
+
+    _BOT_CLAIM_RULES: tuple[tuple[frozenset[str], re.Pattern[str], str], ...] = (
+        (
+            frozenset({
+                "read_file", "read_multiple_files", "list_dir", "list_files",
+                "search_in_files", "search_codebase",
+            }),
+            re.compile(
+                r"\b(?:li|abri|analisei|inspecionei)\b.{0,60}\b"
+                r"(?:ficheiro|arquivo|file|pasta|direct[oó]rio|c[oó]digo)\b",
+                re.IGNORECASE,
+            ),
+            "diz que leu ficheiros, mas nenhuma ferramenta de leitura correu",
+        ),
+        (
+            frozenset({
+                "write_file", "write_file_absolute", "append_file", "create_directory",
+            }),
+            re.compile(
+                r"\b(?:criei|escrevi|alterei|guardei|gravei)\b.{0,60}\b"
+                r"(?:ficheiro|arquivo|file|pasta|nota)\b",
+                re.IGNORECASE,
+            ),
+            "diz que escreveu um ficheiro, mas nenhuma ferramenta de escrita correu",
+        ),
+        (
+            frozenset({
+                "run_shell", "execute_shell", "execute_code", "run_tests",
+                "run_python_script",
+            }),
+            re.compile(
+                r"\b(?:corri|executei|testei|validei)\b.{0,48}\b"
+                r"(?:testes|comando|script|shell)\b",
+                re.IGNORECASE,
+            ),
+            "diz que executou um comando ou testes, mas nenhuma ferramenta de shell correu",
+        ),
+        (
+            frozenset({"store_memory", "remember_fact"}),
+            re.compile(
+                r"\b(?:memorizei|guardei na mem[oó]ria|registei na mem[oó]ria)\b",
+                re.IGNORECASE,
+            ),
+            "diz que guardou memória, mas nenhuma ferramenta de memória correu",
+        ),
+    )
+
+    @classmethod
+    def _unsupported_bot_claims(cls, answer: str, successful_tools: set[str]) -> tuple[str, ...]:
+        """Claims of work that this turn's tool events do not support."""
+        text = " ".join((answer or "").split())
+        if not text:
+            return ()
+        found: list[str] = []
+        for tools, pattern, message in cls._BOT_CLAIM_RULES:
+            if successful_tools & tools:
+                continue
+            if pattern.search(text):
+                found.append(message)
+        return tuple(found)
+
+    @staticmethod
+    def _bot_claim_nudge(claims: tuple[str, ...]) -> str:
+        listed = "\n".join(f"- {item}" for item in claims)
+        return (
+            "\n[SYSTEM] A resposta afirma trabalho que nenhuma ferramenta fez:\n"
+            f"{listed}\n"
+            "Chama agora a ferramenta correspondente e usa só o resultado dela. "
+            "Se não a puderes chamar, retira a afirmação. Não inventes resultados."
+        )
+
+    @staticmethod
+    def _with_unverified_notice(answer: str, claims: tuple[str, ...]) -> str:
+        listed = "\n".join(f"- {item}" for item in claims)
+        notice = (
+            "[Não verificado]\n"
+            "A resposta afirma ações sem uma chamada de ferramenta correspondente:\n"
+            f"{listed}"
+        )
+        body = (answer or "").rstrip()
+        return f"{body}\n\n{notice}" if body else notice
+
+    _WORK_PART_SPLIT = re.compile(
+        r"(?:\n+\s*(?:\d+[\).\]]|[-*])\s+)"
+        r"|(?:\s+\be depois\b\s+)"
+        r"|(?:\s+\bem seguida\b\s+)"
+        r"|(?:\s+\be também\b\s+)",
+        re.IGNORECASE,
+    )
+    _WORK_PART_FAILURE = re.compile(
+        r"não consegui|nao consegui|não foi possível|nao foi possivel|falhou",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _work_parts(cls, query: str) -> list[str]:
+        """Split a multi-part request. A single sentence stays one part."""
+        text = " ".join((query or "").split())
+        if not text:
+            return []
+        pieces = [part.strip(" .;") for part in cls._WORK_PART_SPLIT.split(text)]
+        pieces = [part for part in pieces if len(part) >= 3]
+        return pieces if len(pieces) >= 2 else []
+
+    @classmethod
+    def _bot_continuation_nudge(
+        cls, request: AgentRequest, answer: str, tool_trace: list[str]
+    ) -> str:
+        """Ask the model to finish parts that still have no tool evidence."""
+        parts = request.context.get("_work_parts")
+        if not isinstance(parts, list):
+            parts = cls._work_parts(request.query)
+            request.context["_work_parts"] = parts
+        if len(parts) < 2:
+            return ""
+        evidence = " ".join(tool_trace).casefold()
+        answer_text = (answer or "").casefold()
+        remaining: list[str] = []
+        for part in parts:
+            keywords = [
+                word for word in re.findall(r"[\w]{5,}", part.casefold())
+                if word not in cls._TOPIC_STOPWORDS
+            ]
+            if not keywords:
+                keywords = [part.casefold()[:24]]
+            has_tool = any(word in evidence for word in keywords)
+            failed = bool(cls._WORK_PART_FAILURE.search(answer or "")) and any(
+                word in answer_text for word in keywords
+            )
+            if not has_tool and not failed:
+                remaining.append(part)
+        if not remaining:
+            return ""
+        listed = "\n".join(f"- {part}" for part in remaining)
+        return (
+            "\n[SYSTEM] O pedido tem várias partes e ainda falta evidência de ferramenta para:\n"
+            f"{listed}\n"
+            "Continua agora. Chama a ferramenta de cada parte em falta, ou diz explicitamente "
+            "que essa parte falhou. Não dês a resposta final antes disso."
+        )
 
     def _has_required_tool_evidence(
         self,
@@ -3453,6 +3617,9 @@ class AgentBase(ABC):
         # How many times the model was asked to actually write the file it
         # claimed to have created.
         file_write_corrections = 0
+        continuation_nudges = 0
+        claim_nudges = 0
+        tool_trace: list[str] = []
         conv_log = get_conversation_logger(request.session_id)
         # Tracks whether the loop produced a genuine final answer (vs. hitting
         # the iteration cap). Consumed by ``run()`` to avoid persisting failed
@@ -3525,7 +3692,7 @@ class AgentBase(ABC):
             token_count = 0
             stream_start = time.monotonic()
             context_shrink_used = False
-            rate_limit_retry_used = False
+            rate_limit_attempts = 0
             model_retry_used = False
             retry_model_id: str | None = None
             caller_model_override = request.context.get("_model_override")
@@ -3625,17 +3792,25 @@ class AgentBase(ABC):
                     continue
                 elif (
                     self._is_rate_limited(stream_failure)
-                    and not rate_limit_retry_used
-                    and not request.context.get("_fast_chat_lane")
+                    and rate_limit_attempts < self._MAX_RATE_LIMIT_RETRIES
                 ):
-                    rate_limit_retry_used = True
+                    delay = self._retry_delay_seconds(stream_failure, rate_limit_attempts)
+                    rate_limit_attempts += 1
+                    shown = int(delay) if float(delay).is_integer() else round(delay, 1)
+                    request.context["_provider_error_category"] = "rate_limit"
+                    request.context["_provider_retry_after"] = delay
                     logger.warning(
-                        "[%s] rate limited on iteration %d — backing off and retrying once",
+                        "[%s] rate limited on iteration %d — retry %d in %ss",
                         self.name,
                         iteration,
+                        rate_limit_attempts,
+                        shown,
                     )
-                    yield "<event>warning|Rate limited — retrying after a short wait</event>"
-                    await self._wait_before_fallback(stream_failure, 0)
+                    yield encode_event(
+                        "warning",
+                        f"limite do provider, a tentar de novo em {shown}s",
+                    )
+                    await self._sleep_retry(delay)
                     full_response = ""
                     token_count = 0
                     continue
@@ -3658,7 +3833,24 @@ class AgentBase(ABC):
                 # Every recovery path is spent. Never let ``run()`` persist this
                 # as a successful exchange.
                 self._record_run_success(request, False)
-                yield encode_event("error", f"LLM stream failed: {stream_failure}")
+                error_payload: dict[str, Any] = {}
+                if self._is_rate_limited(stream_failure):
+                    error_payload["error_category"] = "rate_limit"
+                    error_payload["retry_after"] = self._retry_delay_seconds(
+                        stream_failure, rate_limit_attempts
+                    )
+                elif getattr(stream_failure, "category", None):
+                    error_payload["error_category"] = str(stream_failure.category)
+                    if getattr(stream_failure, "retry_after", None) is not None:
+                        error_payload["retry_after"] = stream_failure.retry_after
+                if error_payload:
+                    yield encode_event(
+                        "error",
+                        f"LLM stream failed: {stream_failure}",
+                        error_payload,
+                    )
+                else:
+                    yield encode_event("error", f"LLM stream failed: {stream_failure}")
                 return
             # The provider's own reasoning channel closed with the stream.
             # Publish it as a bounded control frame now, while the tokens that
@@ -4064,6 +4256,37 @@ class AgentBase(ABC):
                     )
                     return
 
+                if request.context.get("_isolated_bot_conversation"):
+                    nudge = self._bot_continuation_nudge(request, answer, tool_trace)
+                    if nudge and continuation_nudges < 3 and can_continue:
+                        continuation_nudges += 1
+                        context += nudge
+                        self._remember_sticky_directive(sticky_directives, nudge)
+                        yield encode_event(
+                            "warning",
+                            "O pedido tem várias partes — a continuar até cada uma ter evidência",
+                        )
+                        continue
+                    claims = self._unsupported_bot_claims(answer, successful_tools)
+                    if claims and claim_nudges < 2 and can_continue:
+                        claim_nudges += 1
+                        claim_nudge = self._bot_claim_nudge(claims)
+                        context += claim_nudge
+                        self._remember_sticky_directive(sticky_directives, claim_nudge)
+                        yield encode_event(
+                            "warning",
+                            "Afirmação sem ferramenta — a pedir a chamada real",
+                        )
+                        continue
+                    if claims:
+                        notice = self._with_unverified_notice("", claims).strip()
+                        answer = self._with_unverified_notice(answer, claims)
+                        request.context["_unverified_claims"] = list(claims)
+                        self._record_run_success(request, False)
+                        if not buffer_model_output:
+                            yield "\n\n" + notice
+                            request.context["_unverified_notice_emitted"] = True
+
                 # No more tools, return final answer
                 logger.info(
                     "[%s] No tool calls detected — emitting final answer | iteration=%d",
@@ -4094,10 +4317,13 @@ class AgentBase(ABC):
                 # stopped WITHOUT an answer is never a success, whatever the
                 # tools it managed to run.
                 final_answer_produced = True
-                self._record_run_success(
-                    request,
-                    final_answer_produced and ((not tool_errors_seen) or tool_errors_recovered),
-                )
+                if not request.context.get("_unverified_claims"):
+                    self._record_run_success(
+                        request,
+                        final_answer_produced and (
+                            (not tool_errors_seen) or tool_errors_recovered
+                        ),
+                    )
                 final_answer = self._reconcile_audited_answer(
                     answer,
                     pending_final_answer,
@@ -4121,6 +4347,8 @@ class AgentBase(ABC):
                         else final_answer
                     )
                 else:
+                    to_emit = ""
+                if request.context.get("_unverified_notice_emitted"):
                     to_emit = ""
                 if to_emit:
                     yield to_emit
@@ -4432,6 +4660,7 @@ class AgentBase(ABC):
                         yield encode_event("tool_error", tool_name, str(result["error"]))
                     else:
                         successful_tools.add(tool_name)
+                        tool_trace.append(f"{tool_name} {_args}")
                         request.context["_successful_tools"] = sorted(successful_tools)
                         if tool_errors_seen and not tool_errors_recovered:
                             tool_errors_recovered = True
@@ -4675,6 +4904,7 @@ class AgentBase(ABC):
                         )
                 else:
                     successful_tools.add(tool_name)
+                    tool_trace.append(f"{tool_name} {args}")
                     request.context["_successful_tools"] = sorted(successful_tools)
                     if tool_name not in self._revision_scoped_read_tools:
                         tool_state_revision += 1
