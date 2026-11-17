@@ -495,6 +495,7 @@ async def test_dependent_subagent_never_starts_before_its_dependency() -> None:
         ),
         observe=observe_project,
         run_subagent=run_subagent,
+        max_cycles=1,
         project_path="/tmp/project",
     )
     events = await collect(loop)
@@ -514,6 +515,39 @@ async def test_dependent_subagent_never_starts_before_its_dependency() -> None:
     reviewer_started = started["REVIEWER"]
     assert reviewer_started.payload["objective"] == "objetivo de REVIEWER"
     assert reviewer_started.payload["depends_on"] == [analyzer_task_id]
+
+
+@pytest.mark.asyncio
+async def test_unknown_subagent_dependency_is_reported_and_never_runs() -> None:
+    started: list[str] = []
+
+    async def run_subagent(proposal) -> str:
+        started.append(proposal.name)
+        return "unexpected"
+
+    loop = PrimaryLoop(
+        run_id="run-missing-dependency",
+        query="trabalho com dependência em falta",
+        stream=signals(
+            delegate(**deep_proposal("CHILD", depends_on=["missing-parent"])),
+            token("Não lancei a tarefa com dependência inválida."),
+        ),
+        observe=observe_project,
+        run_subagent=run_subagent,
+        max_cycles=1,
+        project_path="/tmp/project",
+    )
+    events = await collect(loop)
+
+    assert started == []
+    failed = [
+        event for event in events
+        if event.type is RuntimeEventType.TOOL_FAILED
+        and event.payload.get("result", {}).get("status") == "invalid_dependency"
+    ]
+    assert failed
+    assert failed[0].payload["result"]["status"] == "invalid_dependency"
+    assert "missing-parent" in failed[0].payload["result"]["reason"]
 
 
 @pytest.mark.asyncio

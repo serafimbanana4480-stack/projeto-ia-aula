@@ -52,7 +52,7 @@ export function InfinityModeCard({ mode, disabled, onUseCommand }: {
   return (
     <article
       className={`min-w-0 rounded-2xl border p-4 transition-colors ${
-        mode.active ? "border-purple-400/35 bg-purple-400/[0.06]" : "border-nexus-border bg-nexus-bg/35 hover:border-nexus-muted/40"
+        mode.active ? "border-nexus-accent/35 bg-nexus-accent/[0.06]" : "border-nexus-border bg-nexus-bg/35 hover:border-nexus-muted/40"
       }`}
       aria-label={mode.display_name}
     >
@@ -65,7 +65,7 @@ export function InfinityModeCard({ mode, disabled, onUseCommand }: {
           aria-label={`Configurar ${mode.display_name}`} disabled={disabled || busy || !mode.available}
           onClick={() => void (mode.active ? deactivateMode(mode.mode_id) : activateMode(mode.mode_id))}
           className={`relative mt-1 inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg disabled:cursor-not-allowed disabled:opacity-50 ${
-            mode.active ? "border-purple-400 bg-purple-500" : "border-nexus-muted/50 bg-nexus-surface"
+            mode.active ? "border-nexus-accent bg-nexus-accent" : "border-nexus-muted/50 bg-nexus-surface"
           }`}>
           {busy ? <Loader2 aria-hidden="true" className="mx-auto h-3.5 w-3.5 animate-spin text-white" />
             : <span className={`h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${mode.active ? "translate-x-6" : "translate-x-1"}`} />}
@@ -73,7 +73,7 @@ export function InfinityModeCard({ mode, disabled, onUseCommand }: {
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <h4 className="text-sm font-semibold text-nexus-text">{mode.display_name}</h4>
-        {mode.active && <span className="rounded-md bg-purple-400/15 px-1.5 py-0.5 text-[10px] font-medium text-purple-300">Configurado</span>}
+        {mode.active && <span className="rounded-md bg-nexus-accent/15 px-1.5 py-0.5 text-[10px] font-medium text-nexus-accent-bright">Configurado</span>}
       </div>
       <code className="mt-0.5 block break-all text-[11px] text-nexus-muted">/{mode.mode_id}</code>
       <p className="mt-2 text-xs leading-relaxed text-nexus-muted">{mode.description}</p>
@@ -87,7 +87,7 @@ export function InfinityModeCard({ mode, disabled, onUseCommand }: {
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-nexus-border/60 pt-3">
         <button type="button" disabled={!mode.available}
           onClick={() => onUseCommand(`/${mode.mode_id}`)}
-          className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-purple-400/25 bg-purple-400/10 px-3 text-xs font-semibold text-purple-300 hover:bg-purple-400/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent disabled:opacity-50">
+          className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-nexus-accent/25 bg-nexus-accent/10 px-3 text-xs font-semibold text-nexus-accent-bright hover:bg-nexus-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent disabled:opacity-50">
           Preparar pedido <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
         <button type="button" onClick={() => void inspect()} aria-expanded={expanded}

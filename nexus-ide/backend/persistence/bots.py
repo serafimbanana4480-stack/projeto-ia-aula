@@ -11,12 +11,24 @@ from backend.persistence.db import get_db
 _FIELDS = frozenset({"name", "description", "instructions", "provider", "model", "archived"})
 # Capability keys enforced by the backend. Anything outside this set is ignored,
 # and unrecognised values degrade to denial (fail-closed).
-_CAPABILITY_KEYS = frozenset({"read", "research", "tasks", "memory", "write"})
+_CAPABILITY_KEYS = frozenset(
+    {"read", "research", "tasks", "memory", "write", "shell", "browser", "mcp", "auto_accept"}
+)
 
 
 def _default_capabilities() -> dict[str, bool]:
-    """Read/research/tasks/memory are enabled; write remains an explicit opt-in."""
-    return {"read": True, "research": True, "tasks": True, "memory": True, "write": False}
+    """All read/research/tasks/memory/shell/browser/mcp and in-project auto-accept are enabled; destructive write outside scope is explicit."""
+    return {
+        "read": True,
+        "research": True,
+        "tasks": True,
+        "memory": True,
+        "write": True,
+        "shell": True,
+        "browser": True,
+        "mcp": True,
+        "auto_accept": True,
+    }
 
 
 def _normalize_capabilities(raw: Any) -> dict[str, bool]:

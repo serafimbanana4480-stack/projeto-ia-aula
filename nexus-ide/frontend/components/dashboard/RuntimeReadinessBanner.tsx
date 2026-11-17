@@ -128,7 +128,7 @@ export default function RuntimeReadinessBanner() {
     return (
       <div
         role="status"
-        className="flex items-start gap-2.5 rounded-xl border border-amber-300/20 bg-amber-300/[0.05] px-3.5 py-2.5 text-xs text-amber-100/80"
+        className="flex items-start gap-2.5 rounded-xl border border-nexus-accent3/25 bg-nexus-accent3/[0.07] px-3.5 py-2.5 text-xs text-nexus-text"
       >
         <CircleHelp className="mt-0.5 h-4 w-4 shrink-0 text-nexus-accent3" aria-hidden="true" />
         <span>Não foi possível confirmar a prontidão do runtime.</span>
@@ -147,8 +147,8 @@ export default function RuntimeReadinessBanner() {
       role={critical ? "alert" : "status"}
       className={`flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5 text-xs leading-relaxed ${
         critical
-          ? "border-rose-300/25 bg-rose-300/[0.07] text-rose-100/90"
-          : "border-amber-300/25 bg-amber-300/[0.07] text-amber-100/90"
+          ? "border-nexus-accent4/30 bg-nexus-accent4/[0.08] text-nexus-text"
+          : "border-nexus-accent3/30 bg-nexus-accent3/[0.08] text-nexus-text"
       }`}
     >
       <AlertTriangle className={`mt-0.5 h-4 w-4 shrink-0 ${critical ? "text-nexus-accent4" : "text-nexus-accent3"}`} aria-hidden="true" />

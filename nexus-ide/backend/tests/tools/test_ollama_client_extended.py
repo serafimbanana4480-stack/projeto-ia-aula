@@ -231,8 +231,9 @@ class TestRetryConstants:
         assert httpx.TimeoutException in _RETRYABLE_EXCEPTIONS
 
     def test_backoff_delays_exist(self) -> None:
-        from backend.tools.ollama_client import _BACKOFF_DELAYS
-        assert _BACKOFF_DELAYS == (15.0,) * 9
+        from backend.tools.ollama_client import _BACKOFF_DELAYS, CHAT_MAX_ATTEMPTS
+        # One delay between each pair of attempts: CHAT_MAX_ATTEMPTS - 1.
+        assert _BACKOFF_DELAYS == (15.0,) * (CHAT_MAX_ATTEMPTS - 1)
 
 
 class TestPrepareDirectAnswerMessages:

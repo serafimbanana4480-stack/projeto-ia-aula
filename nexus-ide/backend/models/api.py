@@ -120,6 +120,10 @@ class ChatRequest(BaseModel):
         max_length=128,
         description="LLM provider to use (e.g. 'ollama', 'openai', 'kimi'). Empty string means use default.",
     )
+    local_only: bool = Field(
+        default=False,
+        description="Require an explicit local provider and prevent cloud fallback.",
+    )
     thinking_strength: str = Field(
         default="",
         max_length=32,
@@ -130,6 +134,14 @@ class ChatRequest(BaseModel):
         description=(
             "Continue without human feedback for reversible work. Set false "
             "to use interactive confirmation gates for every risky tool."
+        ),
+    )
+    auto_accept: bool = Field(
+        default=True,
+        description=(
+            "Automatically accept confirmation-gated tools when operating inside "
+            "the selected project folder. Actions outside the project folder still "
+            "require explicit confirmation."
         ),
     )
     swarm_agents: list[str] = Field(

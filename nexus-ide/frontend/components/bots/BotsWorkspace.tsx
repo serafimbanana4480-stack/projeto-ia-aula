@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Activity, Archive, Bot as BotIcon, ChevronRight, Info, Plus, Settings2, Trash2, Users, X } from "lucide-react";
+import { Activity, Archive, Bot as BotIcon, ChevronRight, Info, Plus, Settings2, Trash2, Users, X, Zap } from "lucide-react";
 import { apiUrl, getProviderCatalog, getProviderModels, getSessionHistoryPage, type ProviderSpec } from "../../lib/api";
 import { authenticatedFetch } from "../../lib/auth";
-import { createBot, listBots, removeBot, updateBot, type Bot, type BotSettings } from "../../lib/bots";
+import { BOT_CAPABILITY_KEYS, DEFAULT_BOT_CAPABILITIES, createBot, listBots, removeBot, updateBot, type Bot, type BotSettings } from "../../lib/bots";
 import { foldRun } from "../../lib/foldRun";
 import type { ChatMessage } from "../../lib/types";
 import { useAgentStream } from "../../hooks/useAgentStream";
@@ -36,7 +36,41 @@ const TEMPLATES = [
   { name: "Segurança", description: "Segurança em ambientes autorizados", instructions: "Ajuda a analisar segurança apenas em sistemas e ambientes autorizados." },
 ];
 
-const blankSettings: BotSettings = { name: "", description: "", instructions: "", provider: "", model: "" };
+const blankSettings: BotSettings = {
+  name: "",
+  description: "",
+  instructions: "",
+  provider: "",
+  model: "",
+  capabilities: DEFAULT_BOT_CAPABILITIES,
+};
+
+const CAPABILITY_LABELS: Record<string, string> = {
+  read: "Leitura de ficheiros",
+  research: "Pesquisa web",
+  tasks: "Tarefas e skills",
+  memory: "Memória",
+  write: "Escrita no projeto",
+  shell: "Shell e testes",
+  browser: "Browser",
+  mcp: "MCP",
+  auto_accept: "Aceitação automática",
+};
+
+/** Capabilities that need a selected project before they can do anything. */
+const PROJECT_BOUND_CAPABILITIES = new Set(["read", "write", "shell"]);
+
+const CAPABILITY_NOTES: Record<string, string> = {
+  read: "Lê ficheiros e pastas do projeto selecionado.",
+  research: "Pesquisa na web e obtém páginas.",
+  tasks: "Tarefas, planeamento e skills.",
+  memory: "Memória própria do bot; funciona sem projeto.",
+  write: "Cria e edita ficheiros dentro da pasta do projeto.",
+  shell: "Executa comandos e testes dentro da pasta do projeto.",
+  browser: "Automatiza um browser (precisa do Playwright no backend).",
+  mcp: "Ferramentas de conectores MCP configurados.",
+  auto_accept: "Aprova operações dentro da pasta do projeto sem perguntar.",
+};
 
 type ListedGroup = { id: string; name: string; bot_ids: string[]; last_message: string | null };
 const selectedKey = "nexus:bots:selected";
@@ -44,6 +78,7 @@ const selectedKey = "nexus:bots:selected";
 function BotEditor({ bot, close, saved }: { bot: Bot | null; close: () => void; saved: (bot: Bot) => void }) {
   const [form, setForm] = useState<BotSettings>(bot ? {
     name: bot.name, description: bot.description, instructions: bot.instructions, provider: bot.provider, model: bot.model,
+    capabilities: { ...DEFAULT_BOT_CAPABILITIES, ...(bot.capabilities ?? {}) },
   } : blankSettings);
   const [providers, setProviders] = useState<ProviderSpec[]>([]);
   const [models, setModels] = useState<string[]>([]);
@@ -64,6 +99,10 @@ function BotEditor({ bot, close, saved }: { bot: Bot | null; close: () => void; 
   }, []);
 
   const set = (key: keyof BotSettings, value: string) => setForm((current) => ({ ...current, [key]: value }));
+  const setCapability = (key: string, value: boolean) => setForm((current) => ({
+    ...current,
+    capabilities: { ...DEFAULT_BOT_CAPABILITIES, ...(current.capabilities ?? {}), [key]: value },
+  }));
   const discover = async (providerId = form.provider, refresh = false) => {
     if (!providerId || loadingModels) return;
     setLoadingModels(true); setError(""); setNotice("");
@@ -116,7 +155,44 @@ function BotEditor({ bot, close, saved }: { bot: Bot | null; close: () => void; 
           {selectedProvider && <p className="-mt-2 text-[11px] text-[color:var(--nx-text-faint)]">{selectedProvider.requires_key ? selectedProvider.api_key_set ? "Chave configurada no backend." : "Sem chave configurada para este provider." : "Provider local ou sem chave obrigatória."} <a href="/settings" className="text-[color:var(--nx-accent-bright)]">Gerir em Definições</a></p>}
           <button type="button" disabled={!form.provider || loadingModels} onClick={() => void discover(form.provider, true)} className="text-[12px] font-medium text-[color:var(--nx-accent-bright)] disabled:opacity-40">{loadingModels ? "A consultar…" : "Atualizar modelos disponíveis"}</button>
           {notice && <p role="status" className="text-[12px] leading-5 text-[color:var(--nx-text-dim)]">{notice}</p>}
-          <p className="rounded-xl border border-[color:var(--nx-line)] bg-[color:var(--nx-bg)] p-3 text-[12px] leading-5 text-[color:var(--nx-text-dim)]">Os bots podem usar ferramentas de leitura disponíveis. Com um projeto selecionado, podem também inspecionar os seus ficheiros. Escrita, execução e delegação estão desativadas. As credenciais e o endpoint são configurados nas definições do NEXUS.</p>
+          <fieldset className="rounded-xl border border-[color:var(--nx-line)] bg-[color:var(--nx-bg)] p-3">
+            <legend className="px-1 text-[12px] font-medium">Capacidades</legend>
+            <p className="text-[12px] leading-5 text-[color:var(--nx-text-dim)]">
+              Escolhe o que este bot pode realmente fazer. O backend aplica esta escolha em cada
+              chamada de ferramenta, não apenas no plano: uma capacidade desligada nunca chega ao modelo.
+            </p>
+            <ul className="mt-3 space-y-2.5">
+              {BOT_CAPABILITY_KEYS.map((key) => {
+                const enabled = form.capabilities?.[key] ?? DEFAULT_BOT_CAPABILITIES[key];
+                return (
+                  <li key={key} className="flex items-start justify-between gap-3">
+                    <span className="min-w-0">
+                      <span className="block text-[12px] font-medium text-[color:var(--nx-text)]">{CAPABILITY_LABELS[key]}</span>
+                      <span className="mt-0.5 block text-[11px] leading-4 text-[color:var(--nx-text-faint)]">
+                        {CAPABILITY_NOTES[key]}
+                        {PROJECT_BOUND_CAPABILITIES.has(key) ? " Precisa de um projeto selecionado." : ""}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={enabled}
+                      aria-label={CAPABILITY_LABELS[key]}
+                      onClick={() => setCapability(key, !enabled)}
+                      className={`mt-0.5 shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-medium ${enabled ? "border-[color:var(--nx-accent)]/50 text-[color:var(--nx-accent-bright)]" : "border-[color:var(--nx-line)] text-[color:var(--nx-text-faint)]"}`}
+                    >
+                      {enabled ? "Ligada" : "Desligada"}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            <p className="mt-3 text-[11px] leading-4 text-[color:var(--nx-text-faint)]">
+              Sem projeto selecionado, apenas pesquisa web, browser, MCP, memória, tarefas e skills
+              funcionam. As capacidades de ficheiros e shell pedem um projeto antes de executar.
+            </p>
+          </fieldset>
+          <p className="rounded-xl border border-[color:var(--nx-line)] bg-[color:var(--nx-bg)] p-3 text-[12px] leading-5 text-[color:var(--nx-text-dim)]">As capacidades que precisam de pasta só atuam dentro da raiz do projeto selecionado. A aceitação automática, quando ligada, só abrevia operações dentro dessa pasta; fora dela, ou sem projeto, o bot pede sempre confirmação. As credenciais e o endpoint são configurados nas definições do NEXUS.</p>
           {error && <p role="alert" className="text-[13px] text-[color:var(--nx-rose)]">{error}</p>}
         </div>
         <div className="sticky bottom-0 z-10 flex justify-end gap-3 border-t border-[color:var(--nx-line)] bg-[color:var(--nx-surface-1)] px-6 py-4"><button type="button" onClick={close} className="rounded-xl px-4 py-2 text-[13px] text-[color:var(--nx-text-dim)]">Cancelar</button><button disabled={saving} className="rounded-xl bg-[color:var(--nx-accent)] px-4 py-2 text-[13px] font-medium text-white disabled:opacity-50">{saving ? "A guardar…" : "Guardar bot"}</button></div>
@@ -173,8 +249,11 @@ export default function BotsWorkspace() {
   const session = bot?.session_id ?? "";
   const currentSession = useRef(session);
   currentSession.current = session;
-  const { events, streaming, busyOtherSession, error: streamError, send, cancel } = useAgentStream(session);
+  const { events, streaming, busyOtherSession, error: streamError, send, cancel, resolveToolConfirmation } = useAgentStream(session);
   const currentProject = useProjectStore((state) => state.currentProject);
+  const projects = useProjectStore((state) => state.projects);
+  const loadProjects = useProjectStore((state) => state.loadProjects);
+  const setCurrentProject = useProjectStore((state) => state.setCurrentProject);
 
   const reload = useCallback(async () => {
     const items = await listBots(); setBots(items); return items;
@@ -203,6 +282,9 @@ export default function BotsWorkspace() {
       .catch(() => { if (alive && !controller.signal.aborted) setGroupsNote("Não foi possível listar as salas."); });
     return () => { alive = false; controller.abort(); };
   }, [showGroups]);
+  useEffect(() => {
+    void loadProjects().catch(() => {});
+  }, [loadProjects]);
   useEffect(() => {
     if (!session || Object.hasOwn(history, session)) { setHistoryLoading(false); return; }
     let alive = true; setHistoryLoading(true);
@@ -311,6 +393,20 @@ export default function BotsWorkspace() {
     try { const changed = await updateBot(bot.id, { archived: !bot.archived }); setBots((items) => items.map((item) => item.id === changed.id ? changed : item)); setFilter(changed.archived ? "archived" : "all"); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Não foi possível arquivar."); }
   };
+  const patchCapabilities = async (capabilities: NonNullable<Bot["capabilities"]>) => {
+    if (!bot) return;
+    const previous = bot;
+    // Merge over the stored profile so a partial patch (only the auto-accept
+    // toggle) cannot clear the other eight flags the user chose.
+    const merged = { ...DEFAULT_BOT_CAPABILITIES, ...(bot.capabilities ?? {}), ...capabilities };
+    setBots((items) => items.map((item) => item.id === bot.id ? { ...item, capabilities: merged } : item));
+    try { const changed = await updateBot(bot.id, { capabilities: merged }); setBots((items) => items.map((item) => item.id === changed.id ? changed : item)); }
+    catch (reason) {
+      setBots((items) => items.map((item) => item.id === previous.id ? previous : item));
+      setError(reason instanceof Error ? reason.message : "Não foi possível atualizar as capacidades.");
+    }
+  };
+  const autoAccept = bot?.capabilities?.auto_accept ?? true;
   const remove = async () => {
     if (!bot || !window.confirm(`Remover ${bot.name} da lista? O histórico fica guardado.`)) return;
     try { await removeBot(bot.id); setBots((items) => items.filter((item) => item.id !== bot.id)); setSelected(""); setMobileChat(false); setDetails(false); }
@@ -399,6 +495,32 @@ export default function BotsWorkspace() {
             <div className="mt-1"><BotStatusPill tone={streaming ? "live" : bot.provider && bot.model ? "neutral" : "warn"}>{streaming ? "A responder" : bot.provider && bot.model ? "Inferência não verificada" : "Configuração em falta"}</BotStatusPill></div>
           </div>
           <button type="button" onClick={() => setEditor(bot)} className="hidden rounded-lg border border-[color:var(--nx-line)] px-2.5 py-1.5 text-[12px] text-[color:var(--nx-text-dim)] hover:bg-[color:var(--nx-surface-2)] sm:block">Editar bot</button>
+          <button
+            type="button"
+            aria-pressed={autoAccept}
+            onClick={() => void patchCapabilities({ ...bot.capabilities, auto_accept: !autoAccept })}
+            title="Aceita automaticamente operações dentro da pasta do projeto. Fora dela, pede confirmação."
+            className={`hidden items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] sm:inline-flex ${autoAccept ? "border-[color:var(--nx-accent)]/50 text-[color:var(--nx-accent-bright)]" : "border-[color:var(--nx-line)] text-[color:var(--nx-text-faint)]"}`}
+          >
+            <Zap size={13} /> Auto {autoAccept ? "ligado" : "desligado"}
+          </button>
+          <label className="hidden items-center gap-1.5 text-[11px] text-[color:var(--nx-text-faint)] md:flex">
+            <span className="sr-only">Projeto da conversa</span>
+            <select
+              aria-label="Projeto da conversa"
+              value={currentProject?.id ?? ""}
+              onChange={(event) => {
+                const next = projects.find((project) => project.id === event.target.value) ?? null;
+                setCurrentProject(next);
+              }}
+              className="max-w-[10rem] truncate rounded-lg border border-[color:var(--nx-line)] bg-[color:var(--nx-surface-1)] px-2 py-1.5 text-[12px] text-[color:var(--nx-text-dim)]"
+            >
+              <option value="">Sem projeto</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>{project.name}</option>
+              ))}
+            </select>
+          </label>
           <button type="button" aria-label="Informações do bot" aria-pressed={details} onClick={() => setDetails((open) => !open)} className="rounded-lg border border-[color:var(--nx-line)] p-2 text-[color:var(--nx-text-dim)] hover:bg-[color:var(--nx-surface-2)]"><Info size={16} /></button>
         </header>
         <div ref={scrollRegion} aria-label="Mensagens da conversa" onScroll={(event) => { const el = event.currentTarget; followMessages.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; setAwayFromBottom(!followMessages.current); if (followMessages.current) { seenCount.current = messages.length; setUnseen(0); } }} className="min-h-0 flex-1 overflow-y-auto px-3 py-5 sm:px-6">
@@ -426,12 +548,19 @@ export default function BotsWorkspace() {
                     onQuote={message.content ? (text) => quote(message.role === "user" ? "Tu" : bot.name, text) : undefined}
                     onReply={message.role === "assistant" ? () => replyTo(bot.name) : undefined}
                     onRegenerate={message.role === "assistant" && priorUser ? () => void deliver(priorUser.content) : undefined}
+                    onConfirmTool={(confirmationId) => void resolveToolConfirmation(confirmationId, true)}
+                    onRejectTool={(confirmationId) => void resolveToolConfirmation(confirmationId, false)}
                   />
                 </div>
               );
             })}
             {streaming && <TypingRow name={bot.name} id={bot.id} label={workingLabel(liveAssistant)} detail="Atividade da conversa em curso" />}
-            {(error || streamError) && <p role="alert" className="rounded-xl border border-[color:var(--nx-rose)]/30 p-3 text-[13px] text-[color:var(--nx-rose)]">{error || streamError}</p>}
+            {(error || streamError) && (
+              <p role="alert" className="rounded-xl border border-[color:var(--nx-rose)]/30 p-3 text-[13px] text-[color:var(--nx-rose)]">
+                {error || streamError}
+                <span className="mt-1 block text-[11px] opacity-80">Próximo passo: confirma o modelo e o projeto nas definições e envia a mensagem novamente.</span>
+              </p>
+            )}
             {sendNotices[session] && <p role="status" className="rounded-xl border border-[color:var(--nx-amber)]/30 p-3 text-[13px] text-[color:var(--nx-amber)]">{sendNotices[session]}</p>}
             <div ref={bottom} />
           </div>
@@ -443,6 +572,7 @@ export default function BotsWorkspace() {
             value={drafts[session] ?? ""}
             onChange={(value) => setDrafts((current) => ({ ...current, [session]: value }))}
             onSubmit={() => void deliver((drafts[session] ?? "").trim())}
+            onSubmitText={(text) => void deliver(text)}
             onStop={cancel}
             busy={streaming}
             disabled={!bot.provider || !bot.model || busyOtherSession || Boolean(historyErrors[session]) || historyLoading || !Object.hasOwn(history, session)}
@@ -504,7 +634,44 @@ export default function BotsWorkspace() {
         </div>
         <div className="mt-3 rounded-xl border border-[color:var(--nx-line)] p-3">
           <h4 className="text-[10px] font-medium uppercase tracking-[0.14em] text-[color:var(--nx-text-faint)]">Acesso</h4>
-          <p className="mt-2 text-[12px] leading-5 text-[color:var(--nx-text-dim)]">Ferramentas de leitura disponíveis conforme a configuração. {currentProject ? `Projeto selecionado: ${currentProject.name}.` : "Seleciona um projeto para permitir a leitura dos seus ficheiros."} Escrita, execução e delegação estão desativadas.</p>
+          {(() => {
+            const available = new Set(bot.available_capabilities ?? []);
+            const chosen = BOT_CAPABILITY_KEYS.filter((flag) => bot.capabilities?.[flag] ?? DEFAULT_BOT_CAPABILITIES[flag]);
+            if (chosen.length === 0) {
+              return <p className="mt-2 text-[12px] leading-5 text-[color:var(--nx-text-dim)]">Nenhuma capacidade ligada. Edita a configuração do bot para lhe dar acesso a ferramentas.</p>;
+            }
+            // Auto-accept is a mode, not a tool family: the backend never
+            // reports it as an availability, so it must not be listed as
+            // "ligada, mas sem ferramentas".
+            const toolFamilies = chosen.filter((flag) => flag !== "auto_accept");
+            const usable = toolFamilies.filter((flag) => available.has(flag));
+            const blocked = toolFamilies.filter((flag) => !available.has(flag));
+            return (
+              <>
+                {usable.length > 0 && (
+                  <ul className="mt-2 flex flex-wrap gap-1.5">
+                    {usable.map((flag) => (
+                      <li key={flag} className="rounded-md border border-[color:var(--nx-line)] bg-[color:var(--nx-surface-2)] px-2 py-0.5 text-[11px] text-[color:var(--nx-text-dim)]">{CAPABILITY_LABELS[flag] ?? flag}</li>
+                    ))}
+                  </ul>
+                )}
+                {blocked.length > 0 && (
+                  <>
+                    <p className="mt-2 text-[11px] leading-4 text-[color:var(--nx-amber)]">
+                      Ligadas, mas sem ferramentas disponíveis agora: {blocked.map((flag) => CAPABILITY_LABELS[flag] ?? flag).join(", ")}.
+                      {" "}Confirma as dependências do backend (por exemplo o Playwright para o browser).
+                    </p>
+                  </>
+                )}
+              </>
+            );
+          })()}
+          <p className="mt-2 text-[12px] leading-5 text-[color:var(--nx-text-dim)]">
+            {currentProject
+              ? `Projeto selecionado: ${currentProject.name}.`
+              : "Sem projeto selecionado: pesquisa web, browser, MCP, memória, tarefas e skills continuam a funcionar; ficheiros e shell pedem um projeto."}
+            {" "}Aceitação automática {autoAccept ? "ligada" : "desligada"}: operações dentro da pasta do projeto {autoAccept ? "avançam sem confirmação" : "pedem confirmação"}; fora dela, ou sem projeto, pedem sempre confirmação.
+          </p>
         </div>
         <div className="mt-3 space-y-1">
           <button type="button" onClick={() => setEditor(bot)} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] hover:bg-[color:var(--nx-surface-2)]"><Settings2 size={15} /> Editar configuração <ChevronRight size={14} className="ml-auto" /></button>

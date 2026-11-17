@@ -161,8 +161,14 @@ actions:
     when_to_use: "Rebuild the symbol index so search_symbols stays accurate. Only after adding or renaming many symbols — never as a way to find something."
     risk_level: "low"
     tags: ["code", "index"]
+  INDEX_CODEBASE:
+    tool: index_codebase
+    example_args: '{"project_path": ".", "force_reindex": false}'
+    when_to_use: "Index the project codebase for semantic search when search_codebase reports the index is missing or stale."
+    risk_level: "low"
+    tags: ["code", "index", "embedding"]
 
-  # --- Web ---
+  # --- Web & Browser ---
   SEARCH_WEB:
     tool: web_search
     example_args: '{"query": "FastAPI authentication best practices"}'
@@ -199,9 +205,48 @@ actions:
     when_to_use: "When you need to make an HTTP request to any external API (GET/POST/PUT/DELETE)."
     risk_level: "medium"
     tags: ["api", "http", "request"]
-    examples:
-      - url: "https://api.github.com/repos/owner/repo"
-        method: "GET"
+  BROWSER_NAVIGATE:
+    tool: browser_navigate
+    example_args: '{"url": "https://example.com"}'
+    when_to_use: "Navigate a headless browser session to a public http/https URL to inspect a rendered page."
+    risk_level: "medium"
+    tags: ["browser", "navigate", "web"]
+  BROWSER_CLICK:
+    tool: browser_click
+    example_args: '{"selector": "button.submit"}'
+    when_to_use: "Click an element on the current browser page using a CSS selector."
+    risk_level: "medium"
+    tags: ["browser", "click", "web"]
+  BROWSER_FILL:
+    tool: browser_fill
+    example_args: '{"selector": "input[name=q]", "text": "nexus"}'
+    when_to_use: "Fill a form field on the current browser page using a CSS selector."
+    risk_level: "medium"
+    tags: ["browser", "fill", "web"]
+  BROWSER_EXTRACT_TEXT:
+    tool: browser_extract_text
+    example_args: '{}'
+    when_to_use: "Extract visible text from the current browser page or from a specific CSS selector."
+    risk_level: "low"
+    tags: ["browser", "extract", "read"]
+  BROWSER_SCREENSHOT:
+    tool: browser_screenshot
+    example_args: '{"full_page": false}'
+    when_to_use: "Capture a screenshot of the current browser page."
+    risk_level: "low"
+    tags: ["browser", "screenshot", "vision"]
+  BROWSER_GET_LINKS:
+    tool: browser_get_links
+    example_args: '{}'
+    when_to_use: "List all unique links (href and text) on the current browser page."
+    risk_level: "low"
+    tags: ["browser", "links", "read"]
+  BROWSER_CLOSE:
+    tool: browser_close
+    example_args: '{}'
+    when_to_use: "Close the active headless browser session when browser inspection is complete."
+    risk_level: "low"
+    tags: ["browser", "close", "cleanup"]
 
   # --- Agent collaboration ---
   CONSULT_AGENT:
@@ -328,6 +373,19 @@ actions:
     when_to_use: "Only when the user asks to create a reusable skill or capture verified experience."
     risk_level: "medium"
     tags: ["skills", "knowledge", "memory"]
+  PROMOTE_SKILL:
+    tool: promote_skill
+    example_args: '{"skill_id": "python-project-audit", "reason": "Reviewed and validated"}'
+    when_to_use: "Activate a reviewed DRAFT skill so it is available in future tasks."
+    risk_level: "high"
+    requires_confirmation: true
+    tags: ["skills", "promotion", "lifecycle"]
+  REPORT_SKILL_OUTCOME:
+    tool: report_skill_outcome
+    example_args: '{"skill_id": "python-project-audit", "success": true}'
+    when_to_use: "Report whether an activated skill helped or failed on the current task."
+    risk_level: "low"
+    tags: ["skills", "feedback", "measurement"]
 
   # --- Reasoning / long sessions ---
   SEQUENTIAL_THINKING:
@@ -488,6 +546,13 @@ actions:
     when_to_use: "Execute the pytest suite (optionally with coverage) and get structured results. This is the verification evidence for any 'it works' claim — use it after changing code."
     risk_level: "low"
     tags: ["test", "pytest", "quality"]
+  GENERATE_TESTS:
+    tool: generate_tests
+    example_args: '{"file_path": "backend/module.py", "project_path": "."}'
+    when_to_use: "Generate a pytest file for a project module when the task asks for tests or the module lacks coverage. Review generated tests before relying on them."
+    risk_level: "medium"
+    requires_confirmation: false
+    tags: ["test", "pytest", "quality", "generate"]
   RUN_LINT:
     tool: run_lint
     example_args: '{"path": "backend/", "fix": false}'
@@ -506,3 +571,9 @@ actions:
     when_to_use: "Run the mypy type checker over a path for type errors the linter does not report. Best-effort; a clean run is not proof of correctness."
     risk_level: "low"
     tags: ["quality", "type", "mypy"]
+  GIT_STATUS:
+    tool: git_status
+    example_args: '{"path": "."}'
+    when_to_use: "Inspect the status of the selected project repository before or after a code change. This is read-only."
+    risk_level: "low"
+    tags: ["git", "status", "read-only"]

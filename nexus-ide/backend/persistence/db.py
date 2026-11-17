@@ -353,7 +353,68 @@ def _ensure_current_schema() -> None:
                 # (fail-closed) regardless of the stored JSON.
                 conn.execute(
                     "ALTER TABLE bot_profiles ADD COLUMN capabilities TEXT NOT NULL DEFAULT "
-                    '\'{"read": true, "research": true, "tasks": true, "memory": true, "write": false}\''
+                    '\'{"read": true, "research": true, "tasks": true, "memory": true, "write": true, "shell": true, "browser": true, "mcp": true, "auto_accept": true}\''
+                )
+            run_task_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(bot_group_run_tasks)").fetchall()
+            }
+            if run_task_columns:
+                for col, ctype in (("worker_id", "TEXT"), ("claimed_at", "TEXT"), ("attempt", "INTEGER NOT NULL DEFAULT 0")):
+                    if col not in run_task_columns:
+                        conn.execute(f"ALTER TABLE bot_group_run_tasks ADD COLUMN {col} {ctype}")
+            msg_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='bot_group_messages'"
+            ).fetchone()
+            message_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(bot_group_messages)").fetchall()
+            }
+            needs_rebuild = bool(
+                msg_row and msg_row[0] and "'coordinator'" not in msg_row[0]
+            )
+            if needs_rebuild:
+                # The role CHECK predates the coordinator/decision roles. Rebuild
+                # once, preserving every existing row and column; run_id is added
+                # as NULL for historical rows (never invented).
+                conn.commit()
+                conn.execute("PRAGMA foreign_keys = OFF")
+                conn.execute("DROP TABLE IF EXISTS _bot_group_messages_new")
+                conn.execute(
+                    """CREATE TABLE _bot_group_messages_new (
+                        id TEXT PRIMARY KEY,
+                        group_id TEXT NOT NULL REFERENCES bot_groups(id) ON DELETE CASCADE,
+                        role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'error', 'coordinator', 'decision')),
+                        content TEXT NOT NULL,
+                        bot_id TEXT,
+                        bot_name TEXT,
+                        run_id TEXT,
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    )"""
+                )
+                run_id_select = "run_id" if "run_id" in message_columns else "NULL"
+                conn.execute(
+                    "INSERT INTO _bot_group_messages_new "
+                    "(id, group_id, role, content, bot_id, bot_name, created_at, run_id) "
+                    "SELECT id, group_id, role, content, bot_id, bot_name, created_at, "
+                    f"{run_id_select} FROM bot_group_messages"
+                )
+                conn.execute("DROP TABLE bot_group_messages")
+                conn.execute("ALTER TABLE _bot_group_messages_new RENAME TO bot_group_messages")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_bot_group_messages ON bot_group_messages(group_id, created_at)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_bot_group_messages_run ON bot_group_messages(group_id, run_id)"
+                )
+                conn.commit()
+                conn.execute("PRAGMA foreign_keys = ON")
+            elif message_columns and "run_id" not in message_columns:
+                # Already has the expanded role CHECK; add the message identity
+                # column without touching any row.
+                conn.execute("ALTER TABLE bot_group_messages ADD COLUMN run_id TEXT")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_bot_group_messages_run "
+                    "ON bot_group_messages(group_id, run_id)"
                 )
             conn.executescript(schema)
             conn.commit()
@@ -386,6 +447,91 @@ def _ensure_session_compatibility_schema() -> None:
     except Exception as exc:
         logger.exception("Failed to ensure sessions compatibility schema")
         raise RuntimeError("Sessions schema readiness failed") from exc
+
+
+_BOT_GROUP_RUN_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("execution_engine", "TEXT NOT NULL DEFAULT 'legacy_file'"),
+    ("lease_owner", "TEXT"),
+    ("lease_attempt_id", "TEXT"),
+    ("lease_expires_at", "TEXT"),
+    ("stop_reason", "TEXT NOT NULL DEFAULT ''"),
+    ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+)
+
+# Includes the pre-ownership columns: an old database may predate them too.
+_BOT_GROUP_RUN_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("worker_id", "TEXT"),
+    ("claimed_at", "TEXT"),
+    ("attempt", "INTEGER NOT NULL DEFAULT 0"),
+    ("attempt_id", "TEXT"),
+    ("lease_expires_at", "TEXT"),
+    ("error_class", "TEXT"),
+    ("finished_at", "TEXT"),
+    ("effect_key", "TEXT"),
+    ("effect_kind", "TEXT"),
+    ("effect_evidence_json", "TEXT NOT NULL DEFAULT '[]'"),
+)
+
+_BOT_GROUP_DURABILITY_INDEXES: tuple[tuple[str, str], ...] = (
+    (
+        "bot_group_runs",
+        "CREATE INDEX IF NOT EXISTS idx_bot_group_runs_status "
+        "ON bot_group_runs(status, updated_at DESC)",
+    ),
+    (
+        "bot_group_run_tasks",
+        "CREATE INDEX IF NOT EXISTS idx_bot_group_run_tasks_run_status "
+        "ON bot_group_run_tasks(run_id, status)",
+    ),
+)
+
+
+def ensure_bot_group_durability_schema(db_path: str | Path | None = None) -> None:
+    """Add the group-run ownership columns to an existing database.
+
+    Idempotent and additive: it never rewrites an old row, never drops a column
+    and never changes an existing status. Missing columns are added with a
+    default that keeps the old row readable; ``attempt`` and ``worker_id`` are
+    preserved so an interrupted run keeps its retry history. Called from
+    :func:`init_db` and safe to call on every startup.
+
+    A fresh database gets the same columns from ``schemas.sql``; running this
+    afterwards is a no-op.
+    """
+    target = Path(db_path) if db_path is not None else DB_PATH
+    if not target.exists():
+        return
+    with sqlite3.connect(str(target), timeout=30) as conn:
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for table, columns in (
+                ("bot_group_runs", _BOT_GROUP_RUN_COLUMNS),
+                ("bot_group_run_tasks", _BOT_GROUP_RUN_TASK_COLUMNS),
+            ):
+                existing = {
+                    str(row[1])
+                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if not existing:
+                    # Table absent: schemas.sql creates it with every column.
+                    continue
+                for name, column_type in columns:
+                    if name not in existing:
+                        conn.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {name} {column_type}"
+                        )
+            for statement in _BOT_GROUP_DURABILITY_INDEXES:
+                table, sql = statement
+                if conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone():
+                    conn.execute(sql)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 _EXECUTION_ENVELOPE_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -457,6 +603,7 @@ def init_db(run_migrations: bool = True) -> None:
             conn.commit()
         _ensure_execution_envelope_schema()
         _ensure_session_gc_schema()
+        ensure_bot_group_durability_schema()
         logger.info("DB initialized at %s", DB_PATH)
         _seed_default_user()
         _seed_default_rbac()
@@ -469,6 +616,8 @@ def init_db(run_migrations: bool = True) -> None:
         _ensure_session_compatibility_schema()
         _ensure_message_cost_column()
         _ensure_message_run_link_column()
+        # Ownership columns must exist before schemas.sql creates their indexes.
+        ensure_bot_group_durability_schema()
         _ensure_current_schema()
         _ensure_execution_envelope_schema()
         _ensure_git_commits_table()
@@ -1361,7 +1510,7 @@ def list_sessions(
     with get_db() as conn:
         clauses: list[str] = [
             "(status IS NULL OR status != 'expired')",
-            "(mode IS NULL OR mode != '__subagent__')",
+            "(mode IS NULL OR mode NOT IN ('__subagent__', '__bot_group__'))",
         ]
         params: list[Any] = []
         if project_id:
@@ -1489,7 +1638,7 @@ def count_sessions(project_id: str | None = None, *, user_id: str | None = None)
     with get_db() as conn:
         clauses: list[str] = [
             "(status IS NULL OR status != 'expired')",
-            "(mode IS NULL OR mode != '__subagent__')",
+            "(mode IS NULL OR mode NOT IN ('__subagent__', '__bot_group__'))",
         ]
         params: list[Any] = []
         if project_id:
@@ -1606,7 +1755,7 @@ def search_sessions(
             )
         ){project_filter}{user_filter}
         AND (s.status IS NULL OR s.status != 'expired')
-        AND (s.mode IS NULL OR s.mode != '__subagent__')
+        AND (s.mode IS NULL OR s.mode NOT IN ('__subagent__', '__bot_group__'))
     """
     with get_db() as conn:
         count_params: tuple[Any, ...] = (pattern, pattern, pattern)
@@ -3643,6 +3792,10 @@ CREATE TABLE IF NOT EXISTS run_state (
     usage_subagents        INTEGER NOT NULL DEFAULT 0,
     usage_runtime_seconds  REAL NOT NULL DEFAULT 0.0,
     usage_provider_calls   INTEGER NOT NULL DEFAULT 0,
+    owner_id               TEXT NOT NULL DEFAULT '',
+    attempt_id             TEXT,
+    lease_expires_at       TEXT,
+    reconciliation_json    TEXT,
     created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     heartbeat_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -3672,6 +3825,7 @@ CREATE TABLE IF NOT EXISTS run_side_effects (
     idempotency_key TEXT NOT NULL,
     kind            TEXT NOT NULL DEFAULT '',
     result_digest   TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('pending','confirmed')),
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (run_id, idempotency_key),
     FOREIGN KEY (run_id) REFERENCES run_state(run_id) ON DELETE CASCADE
@@ -3709,6 +3863,23 @@ def ensure_run_state_schema(db_path: str | Path | None = None) -> None:
     """
     with run_state_connection(db_path) as conn:
         conn.executescript(_RUN_STATE_SCHEMA)
+        # Serialise the additive migration across simultaneously starting workers.
+        conn.execute("BEGIN IMMEDIATE")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(run_side_effects)")}
+        if "status" not in columns:
+            # Historical rows were written only after successful execution.
+            conn.execute("ALTER TABLE run_side_effects ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed'")
+        run_columns = {row[1] for row in conn.execute("PRAGMA table_info(run_state)")}
+        for name, column_type in (
+            ("owner_id", "TEXT NOT NULL DEFAULT ''"),
+            ("attempt_id", "TEXT"),
+            ("lease_expires_at", "TEXT"),
+            ("reconciliation_json", "TEXT"),
+        ):
+            if name not in run_columns:
+                # Additive ownership/reconciliation columns; existing rows keep
+                # their state, counters and accumulated usage untouched.
+                conn.execute(f"ALTER TABLE run_state ADD COLUMN {name} {column_type}")
 
 
 @contextmanager
@@ -3808,6 +3979,10 @@ _RUN_ROW_MUTABLE_COLUMNS = frozenset(
         "stop_reason",
         "heartbeat_at",
         "updated_at",
+        "owner_id",
+        "attempt_id",
+        "lease_expires_at",
+        "reconciliation_json",
     }
 )
 
@@ -3837,6 +4012,261 @@ def update_run_row(
         )
         row = conn.execute("SELECT * FROM run_state WHERE run_id = ?", (run_id,)).fetchone()
     return dict(row) if row else None
+
+
+def _lease_expiry(lease_seconds: float) -> str:
+    """ISO-8601 UTC deadline ``lease_seconds`` from now (same format as rows)."""
+    seconds = max(0.0, float(lease_seconds))
+    return (
+        (datetime.now(UTC) + timedelta(seconds=seconds))
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+#: Run states that own no future work and therefore cannot be claimed.
+_NON_CLAIMABLE_RUN_STATES = frozenset({"completed", "failed", "cancelled", "expired"})
+
+
+def claim_run_lease_row(
+    run_id: str,
+    owner_id: str,
+    *,
+    lease_seconds: float = 120.0,
+    force: bool = False,
+    db_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Atomically claim the execution lease of one run.
+
+    ``BEGIN IMMEDIATE`` serialises the read-check-write across connections and
+    processes, so exactly one claimant wins while the current lease is live.
+    Every successful claim rotates ``attempt_id``; it is a fencing token, never
+    the retry counter (``retry_count`` is untouched). ``force`` is the explicit
+    takeover used by startup/manual recovery once the previous process is known
+    to be gone; it still rotates the token, so the old attempt's writes fail.
+
+    Returns the stored lease row, or ``None`` when the run is terminal, has a
+    live lease, or requires reconciliation.
+    """
+    now = _now_iso()
+    expires = _lease_expiry(lease_seconds)
+    attempt_id = uuid.uuid4().hex
+    with run_state_connection(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT state, owner_id, attempt_id, lease_expires_at, reconciliation_json "
+            "FROM run_state WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if str(row["state"]) in _NON_CLAIMABLE_RUN_STATES:
+            return None
+        if row["reconciliation_json"]:
+            # An unresolved side effect must be reconciled by a human; a claim
+            # would otherwise let a new attempt replay it.
+            return None
+        live = row["lease_expires_at"] and str(row["lease_expires_at"]) > now
+        if live and str(row["owner_id"] or "") == owner_id and not force:
+            # Same logical owner adopting its own live lease (the group
+            # projection and RunLifecycle may both claim). Renew without
+            # rotating the token, so neither view fences the other.
+            conn.execute(
+                "UPDATE run_state SET lease_expires_at = ?, updated_at = ?, "
+                "heartbeat_at = ? WHERE run_id = ?",
+                (expires, now, now, run_id),
+            )
+            claimed = conn.execute(
+                "SELECT * FROM run_state WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            return dict(claimed) if claimed else None
+        if live and not force:
+            return None
+        conn.execute(
+            """UPDATE run_state
+               SET owner_id = ?, attempt_id = ?, lease_expires_at = ?,
+                   updated_at = ?, heartbeat_at = ?
+               WHERE run_id = ?""",
+            (owner_id, attempt_id, expires, now, now, run_id),
+        )
+        claimed = conn.execute("SELECT * FROM run_state WHERE run_id = ?", (run_id,)).fetchone()
+    return dict(claimed) if claimed else None
+
+
+def renew_run_lease_row(
+    run_id: str,
+    attempt_id: str,
+    *,
+    lease_seconds: float = 120.0,
+    db_path: str | Path | None = None,
+) -> bool:
+    """Extend the lease only while ``attempt_id`` still owns the run."""
+    now = _now_iso()
+    with run_state_connection(db_path) as conn:
+        cursor = conn.execute(
+            """UPDATE run_state
+               SET lease_expires_at = ?, updated_at = ?, heartbeat_at = ?
+               WHERE run_id = ? AND attempt_id = ?""",
+            (_lease_expiry(lease_seconds), now, now, run_id, attempt_id),
+        )
+        return cursor.rowcount == 1
+
+
+def release_run_lease_row(
+    run_id: str, attempt_id: str, *, db_path: str | Path | None = None
+) -> bool:
+    """Clear a lease owned by ``attempt_id``; spent counters are untouched."""
+    with run_state_connection(db_path) as conn:
+        cursor = conn.execute(
+            """UPDATE run_state
+               SET owner_id = '', attempt_id = NULL, lease_expires_at = NULL,
+                   updated_at = ?
+               WHERE run_id = ? AND attempt_id = ?""",
+            (_now_iso(), run_id, attempt_id),
+        )
+        return cursor.rowcount == 1
+
+
+def recover_run_lease_row(
+    run_id: str, *, reason: str = "startup recovery", db_path: str | Path | None = None
+) -> dict[str, Any] | None:
+    """Invalidate a dead process's lease and make the run resumable.
+
+    Mirrors the explicit transition table: ``created`` cannot move to
+    ``recovering`` and stays ``created``; every other non-terminal state moves
+    to ``recovering``. A run with unresolved reconciliation stays ``paused``.
+    The previous ``attempt_id`` is dropped (not reset to an older one), so a
+    survivor of the dead process cannot write with its stale token.
+    """
+    now = _now_iso()
+    with run_state_connection(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT state, reconciliation_json FROM run_state WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None or str(row["state"]) in _NON_CLAIMABLE_RUN_STATES:
+            return None
+        state = str(row["state"])
+        if row["reconciliation_json"]:
+            state = "paused"
+        elif state in {
+            "planning",
+            "running",
+            "waiting_tool",
+            "waiting_approval",
+            "verifying",
+            "recovering",
+        }:
+            state = "recovering"
+        # ``created`` and ``paused`` do not have a legal edge to ``recovering``
+        # in the explicit transition table; keep their state and just drop the
+        # dead lease.
+        conn.execute(
+            """UPDATE run_state
+               SET state = ?, owner_id = '', attempt_id = NULL,
+                   lease_expires_at = NULL, stop_reason = ?,
+                   updated_at = ?, heartbeat_at = ?
+               WHERE run_id = ?""",
+            (state, reason[:400], now, now, run_id),
+        )
+        recovered = conn.execute("SELECT * FROM run_state WHERE run_id = ?", (run_id,)).fetchone()
+    return dict(recovered) if recovered else None
+
+
+def get_run_lease_row(
+    run_id: str, *, db_path: str | Path | None = None
+) -> dict[str, Any] | None:
+    """Return the ownership columns of a run, or ``None`` when it is unknown."""
+    with run_state_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT run_id, state, owner_id, attempt_id, lease_expires_at, reconciliation_json "
+            "FROM run_state WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_run_reconciliation_row(
+    run_id: str,
+    reconciliation: Mapping[str, Any],
+    *,
+    reason: str = "reconciliation required",
+    attempt_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Persist the unresolved-effect report and park the run as ``paused``.
+
+    Parking (rather than leaving it ``running``) makes the block visible and
+    keeps startup recovery from treating it as ordinary interrupted work.
+    """
+    now = _now_iso()
+    with run_state_connection(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT state, attempt_id FROM run_state WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None or str(row["state"]) in _NON_CLAIMABLE_RUN_STATES:
+            return None
+        if attempt_id is not None and row["attempt_id"] != attempt_id:
+            return None
+        current = str(row["state"])
+        state = (
+            "paused"
+            if current
+            in {
+                "planning",
+                "running",
+                "waiting_tool",
+                "waiting_approval",
+                "verifying",
+                "recovering",
+                "paused",
+            }
+            else current
+        )
+        conn.execute(
+            """UPDATE run_state
+               SET reconciliation_json = ?, state = ?, stop_reason = ?,
+                   owner_id = '', attempt_id = NULL, lease_expires_at = NULL,
+                   updated_at = ?, heartbeat_at = ?
+               WHERE run_id = ?""",
+            (
+                json.dumps(dict(reconciliation), default=str),
+                state,
+                reason[:400],
+                now,
+                now,
+                run_id,
+            ),
+        )
+        updated = conn.execute("SELECT * FROM run_state WHERE run_id = ?", (run_id,)).fetchone()
+    return dict(updated) if updated else None
+
+
+def clear_run_reconciliation_row(
+    run_id: str, *, db_path: str | Path | None = None
+) -> dict[str, Any] | None:
+    """Remove the reconciliation marker after a human resolved the effect."""
+    with run_state_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE run_state SET reconciliation_json = NULL, updated_at = ? WHERE run_id = ?",
+            (_now_iso(), run_id),
+        )
+        row = conn.execute("SELECT * FROM run_state WHERE run_id = ?", (run_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_pending_side_effect_rows(
+    run_id: str, *, db_path: str | Path | None = None
+) -> list[dict[str, Any]]:
+    """Return the intents reserved but never confirmed for a run."""
+    with run_state_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM run_side_effects WHERE run_id = ? AND status = 'pending' "
+            "ORDER BY id",
+            (run_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def list_run_rows(
@@ -3993,6 +4423,33 @@ def insert_side_effect_row(
         )
         inserted = cursor.rowcount == 1
     return inserted
+
+
+def reserve_side_effect_row(
+    run_id: str, idempotency_key: str, *, kind: str, db_path: str | Path | None = None
+) -> bool:
+    """Atomically reserve an action before invocation; never steal an old intent."""
+    with run_state_connection(db_path) as conn:
+        cursor = conn.execute(
+            """INSERT INTO run_side_effects (run_id, idempotency_key, kind, status)
+               VALUES (?, ?, ?, 'pending') ON CONFLICT (run_id, idempotency_key) DO NOTHING""",
+            (run_id, idempotency_key, kind),
+        )
+        return cursor.rowcount == 1
+
+
+def confirm_side_effect_row(
+    run_id: str, idempotency_key: str, *, result_digest: str,
+    db_path: str | Path | None = None,
+) -> bool:
+    """Confirm an existing intent after the handler reports success."""
+    with run_state_connection(db_path) as conn:
+        cursor = conn.execute(
+            """UPDATE run_side_effects SET status = 'confirmed', result_digest = ?
+               WHERE run_id = ? AND idempotency_key = ? AND status = 'pending'""",
+            (result_digest, run_id, idempotency_key),
+        )
+        return cursor.rowcount == 1
 
 
 # usage metric name -> run_state column that accumulates it.

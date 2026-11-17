@@ -42,6 +42,81 @@ class TestKebabSlug:
 
 
 class TestWriteProposal:
+    def test_proposal_reaches_review_gate_without_automatic_activation(
+        self, proposals_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from backend.core.skill_runtime import (
+            list_skill_summaries,
+            load_skill_document,
+            promote_skill,
+            select_skills,
+        )
+
+        monkeypatch.setenv("NEXUS_SKILLS_DIRS", str(proposals_dir.parent))
+        monkeypatch.setenv("NEXUS_SKILLS_LIFECYCLE_DIR", str(tmp_path / "lifecycle"))
+        monkeypatch.delenv("NEXUS_SKILLS_AUTO_PROMOTE", raising=False)
+        path = SkillWriter(base_dir=proposals_dir).write_proposal(_candidate())
+        summaries = list_skill_summaries()
+        proposal = next(item for item in summaries if item["path"] == str(path.resolve()))
+        assert proposal["status"] == "draft"
+        assert proposal["source"] == "proposal"
+        assert select_skills("read file write file", include_memory=False)["skills"] == []
+        assert not load_skill_document(proposal["skill_id"])["ok"]
+        result = promote_skill(
+            proposal["skill_id"], actor="tester", reason="review", approved_by="operator"
+        )
+        assert not result["ok"]
+        assert "promotion gate rejected" in result["error"]
+        assert "status: draft" in path.read_text(encoding="utf-8")
+
+        # A reviewer must complete the procedural contract before approval.
+        path.write_text(
+            "---\nname: read-file-workflow\ndescription: read file workflow\n"
+            "status: draft\ntriggers: [read file workflow, verify file workflow]\n---\n"
+            "# Read file workflow\n\n## Workflow\n\n1. Read the file.\n\n"
+            "## Rules\n\n- Keep evidence.\n\n## Verification\n\n"
+            "- Check the result.\n\n## Example\n\nRead file workflow.\n",
+            encoding="utf-8",
+        )
+        refused = promote_skill(proposal["skill_id"], actor="tester", reason="review")
+        assert not refused["ok"]
+        assert "approval" in refused["error"]
+        with monkeypatch.context() as isolated:
+            isolated.setattr("backend.core.skill_runtime._append_promotion_audit", lambda _: None)
+            unaudited = promote_skill(
+                proposal["skill_id"], actor="tester", reason="reviewed", approved_by="operator"
+            )
+        assert not unaudited["ok"]
+        assert not load_skill_document(proposal["skill_id"])["ok"]
+        assert next(item for item in list_skill_summaries() if item["path"] == str(path.resolve()))["status"] == "draft"
+        promoted = promote_skill(
+            proposal["skill_id"], actor="tester", reason="reviewed", approved_by="operator"
+        )
+        assert promoted["ok"]
+        assert load_skill_document(proposal["skill_id"])["ok"]
+        selected = select_skills("read file workflow", include_memory=False)
+        assert any(item["name"] == "read-file-workflow" for item in selected["skills"])
+        path.write_text(path.read_text(encoding="utf-8") + "\nchanged after approval\n", encoding="utf-8")
+        assert not load_skill_document(proposal["skill_id"])["ok"]
+        assert select_skills("read file workflow", include_memory=False)["skills"] == []
+        assert not promote_skill(proposal["skill_id"], actor="tester", reason="review again")["ok"]
+        assert promote_skill(
+            proposal["skill_id"], actor="tester", reason="review again", approved_by="operator"
+        )["ok"]
+        assert load_skill_document(proposal["skill_id"])["ok"]
+
+    def test_repeated_proposals_remain_separately_reviewable(
+        self, proposals_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from backend.core.skill_runtime import list_skill_summaries
+
+        monkeypatch.setenv("NEXUS_SKILLS_DIRS", str(proposals_dir.parent))
+        writer = SkillWriter()
+        paths = {str(writer.write_proposal(_candidate()).resolve()) for _ in range(2)}
+        proposals = [item for item in list_skill_summaries() if item["path"] in paths]
+        assert len(proposals) == 2
+        assert len({item["skill_id"] for item in proposals}) == 2
+
     def test_windows_unsafe_chars_removed(self, writer: SkillWriter) -> None:
         path = writer.write_proposal({"name": 'a<b>:"c"', "description": "d"})
         assert path.parent.name == "a-b-c"

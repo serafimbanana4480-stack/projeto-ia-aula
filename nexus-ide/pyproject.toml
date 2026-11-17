@@ -73,6 +73,7 @@ dependencies = [
 # See tools/ci/check_optional_deps.py and backend/tests/persistence/
 # test_optional_dependency_manifest.py, which keep this list honest.
 [project.optional-dependencies]
+voice = ["faster-whisper>=1.1,<2", "piper-tts>=1.5,<2"]
 analytics = ["numpy>=1.26"]
 federated = ["numpy>=1.26"]
 quantum = ["numpy>=1.26"]

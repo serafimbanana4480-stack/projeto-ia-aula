@@ -22,6 +22,30 @@ from backend.knowledge.memory import (
 
 
 class TestEmbeddingService:
+    @pytest.mark.asyncio
+    async def test_empty_provider_embeddings_use_degraded_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from backend.llm import factory
+        from backend.tools import embeddings
+
+        async def empty_embed(*_args, **_kwargs):
+            return []
+
+        class EmptyProvider:
+            embed = staticmethod(empty_embed)
+
+        monkeypatch.setattr(embeddings, "embed", empty_embed)
+        monkeypatch.setattr(factory, "create_llm_client", lambda: EmptyProvider())
+        service = EmbeddingService()
+        vector = await service.embed("orchid migration")
+        assert vector == service._fallback_embed("orchid migration")
+        assert service.status()["backend"] == "deterministic_lexical_fallback"
+        assert service.status()["last_error"]
+
+    def test_cosine_similarity_rejects_different_dimensions(self) -> None:
+        assert EmbeddingService().cosine_similarity([1.0], [1.0, 0.0]) == 0.0
+
     def test_cosine_similarity_identical(self) -> None:
         svc = EmbeddingService()
         vec = [1.0, 0.0, 0.0]
@@ -263,3 +287,84 @@ class TestMemoryStore:
         assert "total_memories" in stats
         assert "by_type" in stats
         assert "max_capacity" in stats
+
+
+# ── N3: conversation recall never crosses sessions ──────────────────────
+
+
+@pytest.fixture
+def leak_store() -> MemoryStore:
+    return _leak_store()
+
+
+def _leak_store() -> MemoryStore:
+    return MemoryStore(embedding_service=EmbeddingService())
+
+
+@pytest.mark.asyncio
+async def test_conversation_memory_does_not_cross_sessions(leak_store: MemoryStore) -> None:
+    """Another session must never recall this session's answer.
+
+    Threshold N3.  ``_matches_memory_scope`` only isolated ``SESSION`` and
+    ``TOOL_RESULT`` memories by ``session_id``; ``CONVERSATION`` entries — which
+    carry the assistant's own answer — were eligible for every session of the
+    same user.  That is what leaked a finished run's answer into an unrelated
+    session's prompt.
+    """
+    await leak_store.remember_conversation(
+        user_message="Explica o offset da paginação",
+        assistant_message="RESPOSTA-SECRETA-DA-SESSAO-ALFA",
+        session_id="session-alfa",
+        project_id="projeto-x",
+        user_id="utilizador-1",
+    )
+    recalled = await leak_store.get_context(
+        "offset da paginação",
+        session_id="session-beta",
+        project_id="projeto-x",
+        user_id="utilizador-1",
+        top_k=5,
+        max_tokens=1500,
+    )
+    assert "RESPOSTA-SECRETA-DA-SESSAO-ALFA" not in recalled, (
+        "a different session recalled another session's assistant answer"
+    )
+
+    # The owning session still keeps its own answer in memory: only the
+    # *recall* into a foreign session is forbidden, never the storage.
+    stored = await leak_store.search(
+        "RESPOSTA-SECRETA-DA-SESSAO-ALFA",
+        user_id="utilizador-1",
+        session_id="session-alfa",
+        project_id="projeto-x",
+        top_k=10,
+        min_similarity=0.0,
+    )
+    assert any("RESPOSTA-SECRETA-DA-SESSAO-ALFA" in mem.content for mem, _ in stored)
+
+
+@pytest.mark.asyncio
+async def test_conversation_memory_scope_filters_foreign_session(leak_store: MemoryStore) -> None:
+    """The scope predicate itself rejects a foreign session for an answer."""
+    from backend.knowledge.memory import _ASSISTANT_ANSWER_TAG, _matches_memory_scope
+
+    _user_entry, own = await leak_store.remember_conversation(
+        user_message="Pedido próprio",
+        assistant_message="RESPOSTA-PROPRIA",
+        session_id="session-alfa",
+        project_id="projeto-x",
+        user_id="utilizador-1",
+    )
+    assert _ASSISTANT_ANSWER_TAG in set(own.tags or ()), own.tags
+    assert _matches_memory_scope(
+        own,
+        user_id="utilizador-1",
+        session_id="session-alfa",
+        project_id="projeto-x",
+    )
+    assert not _matches_memory_scope(
+        own,
+        user_id="utilizador-1",
+        session_id="session-beta",
+        project_id="projeto-x",
+    )

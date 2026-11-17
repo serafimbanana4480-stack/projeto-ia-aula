@@ -1,0 +1,251 @@
+{
+  "run_id": "closeout-nexus-v3",
+  "objective": "Fecho (closeout) do NEXUS IDE v3: confirmar a base canónica, preservar dados, medir o estado real dos testes e entregar prova. NEXUS_FREE_ONLY ON: zero chamadas a fornecedores pagos, zero edições a .env, zero desativação de guards.",
+  "created_at_utc": "2026-11-12T23:03:00Z",
+  "updated_at_utc": "2026-11-12T23:35:00Z",
+  "git": {
+    "canonical_root": "/mnt/c/Users/rodri/Desktop/nexus",
+    "project_subdir": "/mnt/c/Users/rodri/Desktop/nexus/nexus-ide",
+    "previous_branch": "cursor/bots-chat-v2-e082",
+    "base_sha": "e12c214c232ac8619aa8c52ac46119ea444d0503",
+    "work_branch": "closeout/nexus-v3",
+    "baseline_worktree": "/mnt/c/Users/rodri/Desktop/nexus-baseline",
+    "baseline_worktree_project_dir": "/mnt/c/Users/rodri/Desktop/nexus-baseline/nexus-ide",
+    "initial_status_sha256": "78eae6c4b72efdc2045b288163627bdab16fc84f48bd3cfb9c5cbd5272910e2d",
+    "initial_status_lines": 278,
+    "initial_status_modified": 251,
+    "initial_status_untracked": 27
+  },
+  "d15": {
+    "question": "Qual é a raiz canónica e qual a árvore que corre em runtime?",
+    "answer": "Raiz git canónica = /mnt/c/Users/rodri/Desktop/nexus; projeto = subdir nexus-ide/; runtime na árvore outer nexus-ide/ (CWD do uvicorn).",
+    "canonical_root": "/mnt/c/Users/rodri/Desktop/nexus",
+    "canonical_root_is_outer_nexus_ide": false,
+    "nested_tree_divergence": {
+      "nested_tree": "nexus-ide/nexus/",
+      "files_in_nested": 1,
+      "bytes_in_nested": 55,
+      "is_duplicate_code_tree": false,
+      "tracked_by_git": true,
+      "identical_files": 0,
+      "differing_files": 0,
+      "only_in_one": 1
+    },
+    "parent_has_code_tree": false,
+    "parent_absent_dirs": [
+      "backend",
+      "frontend",
+      "src",
+      "app",
+      "tests",
+      "config"
+    ],
+    "evidence": "docs/closeout/D-15-CANONICAL-ROOT.md"
+  },
+  "phases": [
+    {
+      "id": "F0",
+      "name": "Reconhecimento, preservação e baseline",
+      "status": "completed",
+      "started_at_utc": "2026-11-12T23:01:00Z",
+      "tasks": {
+        "git_state_captured": true,
+        "d15_answered": true,
+        "work_branch_created": true,
+        "baseline_worktree_created": true,
+        "data_backup_completed": true,
+        "sha256sums_verified": true,
+        "env_probe_completed": true,
+        "baseline_tests_run": true,
+        "baseline_doc_written": true,
+        "plan_written": true,
+        "state_json_written": true,
+        "worklog_started": true
+      },
+      "exit_gate": "docs/closeout completo com evidência real; git status final idêntico ao inicial; worktree funcional; resultados de baseline reais gravados; D-15 respondido com prova."
+    },
+    {
+      "id": "F1",
+      "name": "Higiene da árvore e do git",
+      "status": "pending",
+      "exit_gate": "Inventário de git status classificado; remoções destrutivas só com autorização explícita."
+    },
+    {
+      "id": "F2",
+      "name": "Inventário de defeitos",
+      "status": "pending",
+      "exit_gate": "100% das falhas da baseline classificadas com test id + causa provável + prioridade."
+    },
+    {
+      "id": "F3",
+      "name": "Testes e portões de qualidade",
+      "status": "pending",
+      "exit_gate": "Zero falhas novas na repetição da baseline; ratchet ruff/mypy não regride."
+    },
+    {
+      "id": "F4",
+      "name": "Desempenho e não-funcional",
+      "status": "pending",
+      "exit_gate": "Thresholds N1..N6 medidos com números reais e evidência."
+    },
+    {
+      "id": "F5",
+      "name": "Arranque, runtime e UI",
+      "status": "pending",
+      "exit_gate": "Backend e frontend arrancam, /health responde, zero chamadas pagas."
+    },
+    {
+      "id": "F6",
+      "name": "Fecho e entrega",
+      "status": "pending",
+      "exit_gate": "Zero bloqueios abertos sem dono; nenhum commit de trabalho alheio."
+    }
+  ],
+  "baseline": {
+    "passed": 6846,
+    "failed": 34,
+    "skipped": 40,
+    "error": 0,
+    "total": 6920,
+    "collected_full_suite": 6953,
+    "shards": 39,
+    "waves": 4,
+    "start_utc": "2026-11-12T23:29:37Z",
+    "end_utc": "2026-11-12T23:58:50Z",
+    "wall_clock_seconds": 1753,
+    "slowest_shard": "tools (2424.09s)",
+    "all_failures_are_pre_existing": true,
+    "results_doc": "docs/closeout/BASELINE-RESULTS.md",
+    "root_causes": {
+      "A_ollama_retry_5_not_10": 5,
+      "B_provider_ollama_no_default_coder_model": 14,
+      "C_code_executor_requires_docker": 1,
+      "D_project_confinement_denies_write": 3,
+      "E_subprocess_real_unavailable_under_wsl": 3,
+      "F_advisor_prompt_missing_consult_agent_tool": 1,
+      "G_sse_event_missing_seq": 1,
+      "H_context_leak_concurrent_sessions_N3_violated": 1,
+      "I_cost_ledger_empty_in_test_env": 2,
+      "J_factory_returns_multi_llm_manager": 1,
+      "K_run_coordinator_dod_not_satisfied": 1,
+      "L_ollama_backoff_delays_shorter": 1
+    },
+    "highest_severity": [
+      "H — fuga de contexto entre sessões concorrentes (threshold N3 violado)",
+      "D — confinamento de projeto com contrato de erro desalinhado (fail-closed)"
+    ],
+    "defect_outside_suite": {
+      "id": "D-M1",
+      "description": "backend/memory/__init__.py importa MemoryItem, que não existe em advanced_memory.py",
+      "broken_modules": [
+        "backend.memory",
+        "backend.memory.memory_dashboard",
+        "backend.memory.cross_session_memory",
+        "backend.orchestrator.main_enhanced"
+      ],
+      "affects_runtime_entrypoint": false,
+      "verified_by": "probe directo de import"
+    },
+    "failed_lines_cross_check": 34,
+    "reconciliation_note": "Recalculado da linha de resumo de cada um dos 39 ficheiros de shard; cruzado com a contagem de linhas 'FAILED ' nesses ficheiros (34 == 34). Versão anterior dizia 24 falhas por bug de regex na agregação.",
+    "root_causes_sum": 34,
+    "phases_plan": {
+      "F0": "completed",
+      "F0.5": "blocked_user_authorization",
+      "F1": "pending P0",
+      "F2": "pending P0",
+      "F3": "pending P1",
+      "F4": "pending P1",
+      "F5": "pending P1",
+      "F6": "pending P2"
+    }
+  },
+  "current_phase": "F0",
+  "next_action": "F0 está completa exceto registo final no WORKLOG. Entregar ao Main: D-15 respondido, baseline real (6846/24/40), backup verificado, árvore intacta. F1 (higiene) é a próxima fase e precisa de autorização explícita do utilizador para remover o resíduo da árvore aninhada e podar os 6 worktrees obsoletos.",
+  "blockers": [
+    {
+      "id": "B1",
+      "description": "nexus-ide/probe1_tmp.py é untracked e não foi criado por este agente (pertence a closeout-inventario, que se comprometeu a removê-lo). Impede uma comparação byte-exact do git status inicial vs final.",
+      "owner": "closeout-inventario",
+      "status": "open",
+      "impact": "Cosmético: não afeta código nem dados; documentado no WORKLOG."
+    },
+    {
+      "id": "B2",
+      "description": "sqlite3 não está disponível no PATH do WSL; o backup foi feito por cópia direta (nenhum processo NEXUS ativo, pelo que a cópia é consistente). Um backup online via .backup/VACUUM INTO não pôde ser exercitado.",
+      "owner": null,
+      "status": "accepted-risk",
+      "impact": "Backup válido porque não havia escritores concorrentes; método registado por ficheiro no relatório."
+    },
+    {
+      "id": "B3",
+      "description": "node/pnpm ausentes no PATH do WSL (npm 11.19.0 disponível). Os testes de frontend não foram executados nesta fase.",
+      "owner": null,
+      "status": "open",
+      "impact": "BASELINE.md reporta apenas backend; frontend fica para F5."
+    },
+    {
+      "id": "B4",
+      "description": "Não é possível observar processos Windows/portas a partir do namespace de rede do WSL2; a verificação de 'nenhum servidor a correr' é necessariamente circunscrita ao WSL.",
+      "owner": null,
+      "status": "accepted-risk",
+      "impact": "Documentado como limitação explícita no D-15."
+    }
+  ],
+  "evidence_index": [
+    "docs/closeout/D-15-CANONICAL-ROOT.md",
+    "docs/closeout/PLAN.md",
+    "docs/closeout/WORKLOG.md",
+    "docs/closeout/STATE.json",
+    "artifacts/closeout/logs/git-state-outer.txt",
+    "artifacts/closeout/logs/git-state-parent.txt",
+    "artifacts/closeout/logs/git-status-INITIAL.txt",
+    "artifacts/closeout/logs/git-status-AFTER-BRANCH.txt",
+    "artifacts/closeout/logs/base-sha.txt",
+    "artifacts/closeout/logs/env-probe.txt",
+    "artifacts/closeout/logs/ps-listeners.txt",
+    "artifacts/closeout/logs/db-inventory.txt",
+    "artifacts/closeout/logs/digest-outer-backend.txt",
+    "artifacts/closeout/logs/baseline-tests-PARTIAL-10300s.txt",
+    "artifacts/closeout/logs/shards/OVERALL.txt",
+    "artifacts/closeout/backup/20261112T230902Z/SHA256SUMS",
+    "artifacts/closeout/backup/LATEST_TIMESTAMP.txt",
+    "docs/closeout/BASELINE.md",
+    "docs/closeout/BASELINE-RESULTS.md",
+    "artifacts/closeout/logs/shards/RUN-MANIFEST.txt",
+    "artifacts/closeout/logs/git-status-FINAL.txt",
+    "artifacts/closeout/logs/whole-tree-descriptor-BG65-PARTIAL.txt"
+  ],
+  "non_functional_thresholds": [
+    {
+      "id": "N1",
+      "metric": "router overhead p95",
+      "limit": "p95 < 50 ms"
+    },
+    {
+      "id": "N2",
+      "metric": "regressão de latência end-to-end vs baseline",
+      "limit": "<= 10%"
+    },
+    {
+      "id": "N3",
+      "metric": "fugas de contexto entre projetos/bots",
+      "limit": "zero"
+    },
+    {
+      "id": "N4",
+      "metric": "sucesso de resume sob interrupção induzida",
+      "limit": ">= 95%"
+    },
+    {
+      "id": "N5",
+      "metric": "cancelamento efetivo",
+      "limit": "< 5 s"
+    },
+    {
+      "id": "N6",
+      "metric": "corrupção de SQLite após kill -9",
+      "limit": "zero"
+    }
+  ]
+}

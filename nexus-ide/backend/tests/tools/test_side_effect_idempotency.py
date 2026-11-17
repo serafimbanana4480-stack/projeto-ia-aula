@@ -9,8 +9,8 @@ the four behaviours of that boundary:
    re-run — the handler is never called a second time;
 2. a different action (different arguments) is a different action;
 3. a tool called with no active run has no ledger to consult and just runs;
-4. a coordinator that fails never breaks the tool: fail-open, logged, and only
-   for the ledger — never for the budget hook.
+4. an unavailable ledger blocks guarded effects and uncertain attempts cannot
+   be retried automatically.
 
 Every test runs against a fresh temporary database, so the ledger rows below
 are the real ones ``RunCoordinator`` writes.
@@ -18,8 +18,10 @@ are the real ones ``RunCoordinator`` writes.
 
 from __future__ import annotations
 
-import logging
+import asyncio
 import sqlite3
+import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -37,6 +39,12 @@ from backend.tools.registry import (
 )
 
 SESSION = "sess-side-effect"
+
+
+def test_git_read_operations_are_not_classified_as_side_effects() -> None:
+    assert not runtime_primary.is_side_effecting_tool("git_status")
+    assert not runtime_primary.is_side_effecting_tool("git_log")
+    assert runtime_primary.is_side_effecting_tool("git_push")
 
 
 @pytest.fixture(autouse=True)
@@ -134,8 +142,8 @@ async def test_replayed_side_effect_is_never_executed_twice(temp_db: None) -> No
     assert len(_rows("SELECT idempotency_key FROM run_side_effects")) == 1
 
 
-async def test_a_failed_side_effect_is_not_recorded(temp_db: None) -> None:
-    """A rejected write must not close the ledger a replay would check."""
+async def test_a_failed_side_effect_remains_uncertain(temp_db: None) -> None:
+    """An error does not prove that the handler made no external change."""
     calls: list[dict[str, Any]] = []
     run_id = _run()
     args = {"path": "protegido.md", "content": "nao deve ser escrito"}
@@ -159,8 +167,8 @@ async def test_a_failed_side_effect_is_not_recorded(temp_db: None) -> None:
 
     assert first["ok"] is False
     assert second["ok"] is False, "a failed write must not be replayed as a success"
-    assert not second.get("idempotent_replay")
-    assert len(calls) == 2, "no success means no ledger entry, so both calls reach the handler"
+    assert second["error_category"] == "side_effect_outcome_unknown"
+    assert len(calls) == 1
 
 
 async def test_different_arguments_are_a_different_side_effect(temp_db: None) -> None:
@@ -196,29 +204,163 @@ async def test_without_an_active_run_the_tool_just_runs(temp_db: None) -> None:
     assert _rows("SELECT idempotency_key FROM run_side_effects") == []
 
 
-async def test_a_broken_ledger_never_blocks_the_tool(
-    temp_db: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+async def test_a_broken_ledger_blocks_the_tool(
+    temp_db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fail-open for the ledger only — the tool must still do its work."""
+    """If a durable intent cannot be written, no effect may be attempted."""
     calls: list[dict[str, Any]] = []
     _spy_write_file(calls)
     run_id = _run()
     args = {"path": "resiliente.md", "content": "y"}
 
-    def explode(self: RunCoordinator, run_id: str, key: str) -> bool:
+    def explode(self: RunCoordinator, run_id: str, key: str, *, kind: str) -> bool:
         raise RuntimeError("ledger unavailable")
 
-    monkeypatch.setattr(RunCoordinator, "is_side_effect_confirmed", explode)
-    with active_run(run_id), caplog.at_level(logging.WARNING, logger="backend.tools.registry"):
+    monkeypatch.setattr(RunCoordinator, "reserve_side_effect", explode)
+    with active_run(run_id):
         result = await execute_tool("write_file", SESSION, dict(args))
 
+    assert result["ok"] is False
+    assert result["error_category"] == "side_effect_ledger_unavailable"
+    assert calls == []
+
+
+async def test_concurrent_identical_effects_have_one_owner(temp_db: None) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    calls: list[str] = []
+
+    async def handler(**kwargs: Any) -> dict[str, Any]:
+        calls.append("called")
+        started.set()
+        await release.wait()
+        return {"written": True}
+
+    register_tool(ToolSpec(name="write_file", description="test", handler=handler,
+                           schema={"type": "object", "properties": {"path": {"type": "string"}}}))
+    run_id = _run()
+    args = {"path": "concurrent.md"}
+    with active_run(run_id):
+        first = asyncio.create_task(execute_tool("write_file", SESSION, args))
+        await started.wait()
+        second = await execute_tool("write_file", SESSION, args)
+        release.set()
+        result = await first
     assert result["ok"] is True
-    assert len(calls) == 1, "an unreadable ledger must not stop the tool"
-    assert not result.get("idempotent_replay")
-    assert any(
-        "could not check the ledger" in record.getMessage()
-        for record in caplog.records
-    ), "the degradation has to be observable, not silent"
+    assert second["error_category"] == "side_effect_outcome_unknown"
+    assert calls == ["called"]
+
+
+async def test_pending_effect_survives_coordinator_restart(temp_db: None) -> None:
+    calls: list[dict[str, Any]] = []
+    _spy_write_file(calls)
+    run_id = _run()
+    args = {"path": "interrupted.md"}
+    key = side_effect_idempotency_key(run_id, "", "write_file", args)
+    assert _coordinator().reserve_side_effect(run_id, key, kind="write_file")
+    registry._budget_coordinator = None
+    runtime_primary.reset_run_coordinator()
+    with active_run(run_id):
+        result = await execute_tool("write_file", SESSION, args)
+    assert result["error_category"] == "side_effect_outcome_unknown"
+    assert not _coordinator().is_side_effect_confirmed(run_id, key)
+    assert calls == []
+
+
+async def test_process_crash_after_effect_does_not_repeat(
+    temp_db: None, tmp_path
+) -> None:
+    run_id = _run()
+    marker = tmp_path / "effect.txt"
+    script = '''
+import asyncio, os, sys
+from pathlib import Path
+from backend.persistence import db
+db.DB_PATH = Path(sys.argv[1])
+from backend.runtime.run_context import active_run
+from backend.tools.registry import ToolSpec, execute_tool, register_tool
+async def handler(**kwargs):
+    Path(sys.argv[3]).write_text("effect occurred", encoding="utf-8")
+    os._exit(73)
+register_tool(ToolSpec(name="write_file", description="crash probe", handler=handler,
+                      schema={"type":"object", "properties":{"path":{"type":"string"}}}))
+async def main():
+    with active_run(sys.argv[2]):
+        await execute_tool("write_file", "sess-side-effect", {"path":"crash.md"})
+asyncio.run(main())
+'''
+    process = subprocess.run(
+        [sys.executable, "-c", script, str(_coordinator().db_path), run_id, str(marker)],
+        capture_output=True, text=True, timeout=45, check=False,
+    )
+    assert process.returncode == 73, process.stderr
+    assert marker.read_text(encoding="utf-8") == "effect occurred"
+    calls: list[dict[str, Any]] = []
+    _spy_write_file(calls)
+    with active_run(run_id):
+        result = await execute_tool("write_file", SESSION, {"path": "crash.md"})
+    assert result["error_category"] == "side_effect_outcome_unknown"
+    assert calls == []
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_interrupted_handler_remains_uncertain(temp_db: None, cancel: bool) -> None:
+    started = asyncio.Event()
+    calls: list[str] = []
+
+    async def handler(**kwargs: Any) -> dict[str, Any]:
+        calls.append("started")
+        started.set()
+        await asyncio.Event().wait()
+        return {"written": True}
+
+    register_tool(ToolSpec(name="write_file", description="test", handler=handler,
+                           timeout_seconds=0.05,
+                           schema={"type": "object", "properties": {"path": {"type": "string"}}}))
+    run_id = _run()
+    args = {"path": "cancelled.md"}
+    with active_run(run_id):
+        task = asyncio.create_task(execute_tool("write_file", SESSION, args))
+        await started.wait()
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            assert (await task)["error_category"] == "timeout"
+        replay = await execute_tool("write_file", SESSION, args)
+    assert replay["error_category"] == "side_effect_outcome_unknown"
+    assert calls == ["started"]
+
+
+def test_legacy_ledger_rows_migrate_as_confirmed(tmp_path) -> None:
+    from backend.persistence.db import ensure_run_state_schema, get_side_effect_row
+
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""CREATE TABLE run_side_effects (
+            id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT '', result_digest TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT '', UNIQUE (run_id, idempotency_key))""")
+        conn.execute("INSERT INTO run_side_effects (run_id, idempotency_key) VALUES ('old', 'key')")
+    ensure_run_state_schema(db_path)
+    row = get_side_effect_row("old", "key", db_path=db_path)
+    assert row is not None and row["status"] == "confirmed"
+
+
+async def test_confirmation_failure_never_reports_success_or_retries(
+    temp_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, Any]] = []
+    _spy_write_file(calls)
+    run_id = _run()
+    args = {"path": "confirmation.md"}
+    monkeypatch.setattr(RunCoordinator, "confirm_side_effect", lambda *a, **k: False)
+    with active_run(run_id):
+        first = await execute_tool("write_file", SESSION, args)
+        second = await execute_tool("write_file", SESSION, args)
+    assert first["error_category"] == "side_effect_outcome_unknown"
+    assert second["error_category"] == "side_effect_outcome_unknown"
+    assert len(calls) == 1
 
 
 async def test_budget_exhaustion_still_blocks_before_the_ledger(

@@ -22,7 +22,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PROPOSALS_DIR = Path(".opencode") / "skills" / "_proposed"
+DEFAULT_PROPOSALS_DIR = Path(__file__).resolve().parents[3] / ".opencode" / "skills" / "_proposed"
 MAX_FILE_LINES = 60
 MAX_NAME_LEN = 60
 MAX_EVIDENCE_LINES = 6
@@ -84,7 +84,16 @@ class SkillWriter:
     """
 
     def __init__(self, base_dir: str | Path | None = None) -> None:
-        self.base_dir = Path(base_dir) if base_dir is not None else DEFAULT_PROPOSALS_DIR
+        if base_dir is not None:
+            self.base_dir = Path(base_dir)
+        else:
+            import os
+
+            configured = os.environ.get("NEXUS_SKILLS_DIRS", "").strip()
+            self.base_dir = (
+                Path(configured.split(os.pathsep)[0]).expanduser() / "_proposed"
+                if configured else DEFAULT_PROPOSALS_DIR
+            )
 
     def write_proposals(self, candidates: list[dict[str, Any] | SkillProposal]) -> list[Path]:
         """Write one SKILL.md per candidate. Failures are logged, not raised."""

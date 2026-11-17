@@ -30,6 +30,11 @@ What lives here
    requires evidence per requirement; ``UNKNOWN`` on a required requirement
    blocks completion, and :meth:`RunCoordinator.complete` refuses to reach
    ``COMPLETED`` while any is unproven (:class:`DoDNotSatisfied`).
+7. **Ownership** — :meth:`RunCoordinator.claim` writes an atomic lease whose
+   ``attempt_id`` is a fencing token, distinct from ``retry_count``. A stale
+   attempt cannot transition, checkpoint or spend the run's budget after a
+   takeover. A restart invalidates dead leases; pending side effects park the
+   run for reconciliation instead of allowing a blind resume.
 
 Everything is persisted through :mod:`backend.persistence.db`, which owns the
 SQL, the schema (``backend/persistence/schemas.sql`` is canonical) and the
@@ -66,9 +71,12 @@ __all__ = [
     "Checkpoint",
     "DoDNotSatisfied",
     "InvalidRunTransition",
+    "ReconciliationRequired",
+    "RunClaim",
     "RunCoordinator",
     "RunRecord",
     "RunState",
+    "StaleAttemptError",
 ]
 
 
@@ -305,6 +313,38 @@ class DoDNotSatisfied(RuntimeError):
         )
 
 
+class StaleAttemptError(RuntimeError):
+    """Raised when a write comes from an attempt that no longer owns the run.
+
+    ``attempt`` is a retry counter; ownership is ``attempt_id``. A restart, a
+    manual resume or an expired lease rotates the token, so the previous
+    worker (even one reusing the same ``owner_id``) is rejected here instead of
+    overwriting the new attempt's state.
+    """
+
+    def __init__(self, run_id: str, attempt_id: str, reason: str = "stale attempt") -> None:
+        self.run_id = run_id
+        self.attempt_id = attempt_id
+        super().__init__(f"{reason} for run {run_id}: attempt {attempt_id!r} no longer owns it")
+
+
+class ReconciliationRequired(RuntimeError):
+    """Raised when a run has an unresolved side effect and cannot be resumed.
+
+    The ledger says an intent was reserved but not confirmed. Resuming blind
+    could repeat a real-world write, so the caller must reconcile the effect
+    first (see :meth:`RunCoordinator.reconcile_pending_side_effects`).
+    """
+
+    def __init__(self, run_id: str, details: list[dict[str, Any]]) -> None:
+        self.run_id = run_id
+        self.details = details
+        keys = ", ".join(str(item.get("idempotency_key", "?")) for item in details)
+        super().__init__(
+            f"run {run_id} requires reconciliation before resume: {keys or 'unknown effect'}"
+        )
+
+
 @dataclass
 class RunRecord:
     """One durable run. All timestamps are UTC ISO-8601 strings (``...Z``)."""
@@ -330,6 +370,10 @@ class RunRecord:
     updated_at: str = ""
     heartbeat_at: str = ""
     stop_reason: str = ""
+    owner_id: str = ""
+    attempt_id: str | None = None
+    lease_expires_at: str | None = None
+    reconciliation: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -341,6 +385,17 @@ class Checkpoint:
     phase: str
     payload: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
+
+
+@dataclass
+class RunClaim:
+    """One claimed execution lease. ``attempt_id`` is the fencing token."""
+
+    run_id: str
+    attempt_id: str
+    owner_id: str
+    lease_expires_at: str
+    state: RunState = RunState.CREATED
 
 
 @dataclass
@@ -470,6 +525,10 @@ def _row_to_record(row: dict[str, Any]) -> RunRecord:
         updated_at=str(row.get("updated_at") or ""),
         heartbeat_at=str(row.get("heartbeat_at") or ""),
         stop_reason=str(row.get("stop_reason") or ""),
+        owner_id=str(row.get("owner_id") or ""),
+        attempt_id=row.get("attempt_id"),
+        lease_expires_at=row.get("lease_expires_at"),
+        reconciliation=dict(_json_loads(row.get("reconciliation_json"), {})),
     )
 
 
@@ -661,18 +720,303 @@ class RunCoordinator:
         row = db.get_run_row(run_id, db_path=self._db_path)
         return _row_to_record(row) if row else None
 
-    def transition(self, run_id: str, new_state: RunState, *, reason: str = "") -> RunRecord:
+    # ───── ownership / leases ─────────────────────────────────────────────
+
+    def claim(
+        self,
+        run_id: str,
+        *,
+        owner_id: str,
+        lease_seconds: float = 120.0,
+        force: bool = False,
+    ) -> RunClaim | None:
+        """Atomically claim the execution lease of a run.
+
+        Exactly one caller wins while the lease is live. ``attempt`` counters
+        and accumulated usage are never reset: a claim only rotates
+        ``attempt_id``. ``force`` is the explicit takeover used by startup or
+        manual recovery after the previous process is known to be gone; the old
+        attempt's token stops being valid.
+        """
+        from backend.persistence import db
+
+        if not owner_id:
+            raise ValueError("owner_id is required")
+        with self._lock:
+            row = db.claim_run_lease_row(
+                run_id,
+                owner_id,
+                lease_seconds=lease_seconds,
+                force=force,
+                db_path=self._db_path,
+            )
+        if row is None:
+            logger.info(
+                "Run %s is not claimable (terminal, reconciled or leased by another attempt)",
+                run_id,
+            )
+            return None
+        claim = RunClaim(
+            run_id=str(row["run_id"]),
+            attempt_id=str(row["attempt_id"]),
+            owner_id=str(row["owner_id"]),
+            lease_expires_at=str(row["lease_expires_at"] or ""),
+            state=RunState(str(row["state"])),
+        )
+        logger.info(
+            "Run %s claimed by %s (attempt_id=%s)", run_id, owner_id, claim.attempt_id
+        )
+        return claim
+
+    def renew_claim(
+        self, run_id: str, *, attempt_id: str, lease_seconds: float = 120.0
+    ) -> bool:
+        """Extend a lease only while ``attempt_id`` still owns the run."""
+        from backend.persistence import db
+
+        with self._lock:
+            renewed = db.renew_run_lease_row(
+                run_id, attempt_id, lease_seconds=lease_seconds, db_path=self._db_path
+            )
+        if not renewed:
+            logger.warning("Run %s could not renew lease for attempt %s", run_id, attempt_id)
+        return bool(renewed)
+
+    def release_claim(self, run_id: str, *, attempt_id: str) -> bool:
+        """Release a lease without refunding attempts or budget."""
+        from backend.persistence import db
+
+        with self._lock:
+            released = db.release_run_lease_row(
+                run_id, attempt_id, db_path=self._db_path
+            )
+        return bool(released)
+
+    def owns(self, run_id: str, attempt_id: str) -> bool:
+        """Whether ``attempt_id`` is still the run's current attempt."""
+        from backend.persistence import db
+
+        if not attempt_id:
+            return False
+        row = db.get_run_lease_row(run_id, db_path=self._db_path)
+        return row is not None and row.get("attempt_id") == attempt_id
+
+    def _assert_owner(self, run_id: str, attempt_id: str) -> None:
+        if not self.owns(run_id, attempt_id):
+            raise StaleAttemptError(run_id, attempt_id)
+
+    def recover_stale_claims(
+        self, *, run_ids: Sequence[str] | None = None, reason: str = "startup recovery"
+    ) -> list[str]:
+        """Invalidate dead leases and park runs as recoverable after a restart.
+
+        Runs with a pending side effect are parked as ``paused`` with a
+        reconciliation report instead of becoming resumable: the outcome of the
+        reserved action is unknown, so a blind resume could repeat it. Runs
+        without one move to ``recovering``. Terminal runs are never touched.
+        """
+        from backend.persistence import db
+
+        selected = set(run_ids) if run_ids is not None else None
+        recovered: list[str] = []
+        with self._lock:
+            runs = self.find_resumable_runs()
+            for record in runs:
+                run_id = str(record.run_id)
+                if selected is not None and run_id not in selected:
+                    continue
+                if record.reconciliation:
+                    # Already parked for a human; only drop the dead lease.
+                    db.recover_run_lease_row(
+                        run_id, reason=reason, db_path=self._db_path
+                    )
+                    recovered.append(run_id)
+                    continue
+                pending = self.reconcile_pending_side_effects(run_id)
+                if pending:
+                    db.set_run_reconciliation_row(
+                        run_id,
+                        {"reason": "pending side effect at startup", "effects": pending},
+                        reason=f"{reason}: reconciliation required",
+                        db_path=self._db_path,
+                    )
+                    logger.warning(
+                        "[RUN] run %s parked for reconciliation: %d pending side effect(s)",
+                        run_id,
+                        len(pending),
+                    )
+                else:
+                    db.recover_run_lease_row(run_id, reason=reason, db_path=self._db_path)
+                recovered.append(run_id)
+        if recovered:
+            logger.warning(
+                "[RUN] %d stale run(s) recovered after restart: %s",
+                len(recovered),
+                ", ".join(recovered),
+            )
+        return recovered
+
+    def reconcile_pending_side_effects(
+        self, run_id: str, *, project_root: str | Path | None = None
+    ) -> list[dict[str, Any]]:
+        """Report reserved-but-unconfirmed effects and their disk evidence.
+
+        The ledger status is never rewritten here. Each entry says whether a
+        file written by the action is still present (``evidence``) and what the
+        ledger knows, so a human/API can decide. A non-empty result always
+        blocks automatic resume, because the outcome is not proven.
+        """
+        from backend.persistence import db
+
+        pending = db.list_pending_side_effect_rows(run_id, db_path=self._db_path)
+        if not pending:
+            return []
+        checkpoints = db.list_checkpoint_rows(
+            run_id, limit=200, db_path=self._db_path
+        )
+        before_by_key: dict[str, dict[str, Any]] = {}
+        for row in checkpoints:
+            if str(row.get("phase")) != "before_side_effect":
+                continue
+            payload = _json_loads(row.get("payload_json"), {})
+            if not isinstance(payload, dict):
+                continue
+            key = str(payload.get("idempotency_key") or "")
+            if key and key not in before_by_key:
+                before_by_key[key] = {
+                    str(item_key): item_value for item_key, item_value in payload.items()
+                }
+        report: list[dict[str, Any]] = []
+        for effect in pending:
+            key = str(effect["idempotency_key"])
+            payload_dict = before_by_key.get(key) or {}
+            raw_args = payload_dict.get("args")
+            args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
+            evidence_paths: list[str] = []
+            for name in ("path", "file_path"):
+                value = args.get(name)
+                if isinstance(value, str) and value.strip():
+                    evidence_paths.append(value)
+            base = project_root
+            if base is None:
+                for name in ("project_path", "cwd", "root_path"):
+                    value = args.get(name)
+                    if isinstance(value, str) and value.strip():
+                        base = value
+                        break
+            evidence: list[str] = []
+            if base is not None:
+                try:
+                    root = Path(base).expanduser().resolve()
+                except OSError:
+                    root = None
+                if root is not None:
+                    for relative in evidence_paths:
+                        try:
+                            candidate = (root / relative).resolve()
+                        except (OSError, ValueError):
+                            continue
+                        if candidate != root and root not in candidate.parents:
+                            continue
+                        if candidate.exists():
+                            evidence.append(relative)
+            report.append(
+                {
+                    "idempotency_key": key,
+                    "kind": str(effect.get("kind") or ""),
+                    "ledger_status": str(effect.get("status") or "pending"),
+                    "task_id": str(payload_dict.get("task_id") or ""),
+                    "tool": str(payload_dict.get("tool") or ""),
+                    "evidence": evidence,
+                    "evidence_checked": bool(evidence_paths and base is not None),
+                    "verdict": "effect_present" if evidence else "unknown",
+                }
+            )
+        return report
+
+    def mark_reconciliation(
+        self,
+        run_id: str,
+        *,
+        reason: str = "reconciliation required",
+        attempt_id: str | None = None,
+    ) -> RunRecord:
+        """Park a run as ``paused`` with a durable reconciliation report."""
+        from backend.persistence import db
+
+        report = self.reconcile_pending_side_effects(run_id)
+        with self._lock:
+            row = db.set_run_reconciliation_row(
+                run_id,
+                {"reason": reason, "effects": report},
+                reason=reason,
+                attempt_id=attempt_id,
+                db_path=self._db_path,
+            )
+        if row is None:
+            raise ValueError(
+                f"run {run_id} is unknown, terminal or owned by another attempt"
+            )
+        return _row_to_record(row)
+
+    def clear_reconciliation(self, run_id: str) -> RunRecord:
+        """Clear the block after a human resolved every pending effect."""
+        from backend.persistence import db
+
+        pending = db.list_pending_side_effect_rows(run_id, db_path=self._db_path)
+        if pending:
+            raise ReconciliationRequired(
+                run_id,
+                [
+                    {
+                        "idempotency_key": str(row["idempotency_key"]),
+                        "kind": str(row["kind"]),
+                    }
+                    for row in pending
+                ],
+            )
+        with self._lock:
+            row = db.clear_run_reconciliation_row(run_id, db_path=self._db_path)
+        if row is None:
+            raise ValueError(f"unknown run_id: {run_id}")
+        return _row_to_record(row)
+
+    def list_reconciliation_required(self, *, limit: int = 100) -> list[RunRecord]:
+        """Runs parked with an unresolved side effect."""
+        from backend.persistence import db
+
+        rows = db.list_run_rows(states=[RunState.PAUSED.value], limit=limit, db_path=self._db_path)
+        return [
+            record
+            for record in (_row_to_record(row) for row in rows)
+            if record.reconciliation
+        ]
+
+    def transition(
+        self,
+        run_id: str,
+        new_state: RunState,
+        *,
+        reason: str = "",
+        attempt_id: str | None = None,
+    ) -> RunRecord:
         """Move a run to ``new_state``, returning the updated record.
 
         The transition table in this module is the only authority: an
         unlisted move logs a warning, raises :class:`InvalidRunTransition` and
         leaves the stored state exactly as it was. ``reason`` is stored as
         ``stop_reason``, so it always explains the latest transition.
+
+        When ``attempt_id`` is given the move is fenced: an attempt that was
+        replaced by a resume/restart raises :class:`StaleAttemptError` and the
+        stored state is left untouched.
         """
         from backend.persistence import db
 
         target = _as_state(new_state)
         with self._lock:
+            if attempt_id is not None:
+                self._assert_owner(run_id, attempt_id)
             current = self.get_run(run_id)
             if current is None:
                 raise ValueError(f"unknown run_id: {run_id}")
@@ -753,6 +1097,7 @@ class RunCoordinator:
         artifacts: Sequence[Any] | None = None,
         changed_files: Sequence[str] | None = None,
         heartbeat: bool = True,
+        attempt_id: str | None = None,
     ) -> RunRecord:
         """Refresh the executable state of a run and return it.
 
@@ -760,6 +1105,9 @@ class RunCoordinator:
         list. ``heartbeat=False`` writes the field updates without touching
         ``heartbeat_at`` (useful for a bulk write that should not look like a
         liveness signal). ``updated_at`` always moves.
+
+        ``attempt_id`` fences the write to the current owner, so a stale
+        attempt cannot overwrite the progress of the attempt that replaced it.
         """
         from backend.persistence import db
 
@@ -783,6 +1131,8 @@ class RunCoordinator:
         if heartbeat:
             updates["heartbeat_at"] = updates["updated_at"]
         with self._lock:
+            if attempt_id is not None:
+                self._assert_owner(run_id, attempt_id)
             row = db.update_run_row(run_id, updates, db_path=self._db_path)
         if row is None:
             raise ValueError(f"unknown run_id: {run_id}")
@@ -791,7 +1141,12 @@ class RunCoordinator:
     # ───── checkpoints ────────────────────────────────────────────────────
 
     def checkpoint(
-        self, run_id: str, *, phase: str, payload: dict[str, Any]
+        self,
+        run_id: str,
+        *,
+        phase: str,
+        payload: dict[str, Any],
+        attempt_id: str | None = None,
     ) -> Checkpoint:
         """Record a checkpoint at a phase boundary and return it."""
         from backend.persistence import db
@@ -803,6 +1158,8 @@ class RunCoordinator:
             )
         _require_mapping("payload", payload)
         with self._lock:
+            if attempt_id is not None:
+                self._assert_owner(run_id, attempt_id)
             if db.get_run_row(run_id, db_path=self._db_path) is None:
                 raise ValueError(f"unknown run_id: {run_id}")
             row = db.insert_checkpoint_row(
@@ -840,8 +1197,14 @@ class RunCoordinator:
         from backend.persistence import db
 
         with self._lock:
-            if db.get_run_row(run_id, db_path=self._db_path) is None:
+            run_row = db.get_run_row(run_id, db_path=self._db_path)
+            if run_row is None:
                 raise ValueError(f"unknown run_id: {run_id}")
+            run = _row_to_record(run_row)
+            if run.reconciliation:
+                raise ReconciliationRequired(
+                    run_id, list(run.reconciliation.get("effects") or [])
+                )
             if checkpoint_id is None:
                 row = db.latest_checkpoint_row(run_id, db_path=self._db_path)
             else:
@@ -869,12 +1232,55 @@ class RunCoordinator:
         """Return whether a side effect is already recorded for this key."""
         from backend.persistence import db
 
-        return (
-            db.get_side_effect_row(run_id, idempotency_key, db_path=self._db_path) is not None
+        row = db.get_side_effect_row(run_id, idempotency_key, db_path=self._db_path)
+        return row is not None and row["status"] == "confirmed"
+
+    def reserve_side_effect(
+        self,
+        run_id: str,
+        idempotency_key: str,
+        *,
+        kind: str,
+        attempt_id: str | None = None,
+    ) -> bool:
+        """Reserve a durable intent; False means another execution owns this key."""
+        from backend.persistence import db
+
+        if attempt_id is not None:
+            self._assert_owner(run_id, attempt_id)
+        return bool(
+            db.reserve_side_effect_row(
+                run_id, idempotency_key, kind=kind, db_path=self._db_path
+            )
+        )
+
+    def confirm_side_effect(
+        self,
+        run_id: str,
+        idempotency_key: str,
+        *,
+        result_digest: str,
+        attempt_id: str | None = None,
+    ) -> bool:
+        """Mark a reserved intent confirmed after a successful handler result."""
+        from backend.persistence import db
+
+        if attempt_id is not None:
+            self._assert_owner(run_id, attempt_id)
+        return bool(
+            db.confirm_side_effect_row(
+                run_id, idempotency_key, result_digest=result_digest, db_path=self._db_path
+            )
         )
 
     def record_side_effect(
-        self, run_id: str, idempotency_key: str, *, kind: str, result_digest: str
+        self,
+        run_id: str,
+        idempotency_key: str,
+        *,
+        kind: str,
+        result_digest: str,
+        attempt_id: str | None = None,
     ) -> None:
         """Record a side effect so a replay is recognised as already done.
 
@@ -885,6 +1291,8 @@ class RunCoordinator:
         from backend.persistence import db
 
         with self._lock:
+            if attempt_id is not None:
+                self._assert_owner(run_id, attempt_id)
             if db.get_run_row(run_id, db_path=self._db_path) is None:
                 raise ValueError(f"unknown run_id: {run_id}")
             db.insert_side_effect_row(
@@ -918,6 +1326,7 @@ class RunCoordinator:
         subagents: int = 0,
         runtime_seconds: float = 0.0,
         provider_calls: int = 0,
+        attempt_id: str | None = None,
     ) -> BudgetVerdict:
         """Accumulate usage for a run and return the resulting verdict.
 
@@ -936,6 +1345,8 @@ class RunCoordinator:
         usage_runtime = float(runtime_seconds)
         usage_provider_calls = _coerce_int(provider_calls, "provider_calls")
         with self._lock:
+            if attempt_id is not None:
+                self._assert_owner(run_id, attempt_id)
             usage = db.record_usage_row(
                 run_id,
                 tokens=usage_tokens,
@@ -967,7 +1378,7 @@ class RunCoordinator:
     # ───── definição de done ──────────────────────────────────────────────
 
     def verify_definition_of_done(
-        self, run_id: str, results: list[dict[str, Any]]
+        self, run_id: str, results: list[dict[str, Any]], *, attempt_id: str | None = None
     ) -> dict[str, Any]:
         """Check the run's definition of done against reported evidence.
 
@@ -985,6 +1396,8 @@ class RunCoordinator:
         from backend.persistence import db
 
         with self._lock:
+            if attempt_id is not None:
+                self._assert_owner(run_id, attempt_id)
             run = self.get_run(run_id)
             if run is None:
                 raise ValueError(f"unknown run_id: {run_id}")
@@ -1032,7 +1445,9 @@ class RunCoordinator:
         )
         return verdict
 
-    def complete(self, run_id: str, dod_results: list[dict[str, Any]]) -> RunRecord:
+    def complete(
+        self, run_id: str, dod_results: list[dict[str, Any]], *, attempt_id: str | None = None
+    ) -> RunRecord:
         """Close a run as ``COMPLETED``, but only if the definition of done is
         satisfied.
 
@@ -1044,10 +1459,17 @@ class RunCoordinator:
         the caller can keep working instead of losing the result.
         """
         with self._lock:
-            verdict = self.verify_definition_of_done(run_id, dod_results)
+            verdict = self.verify_definition_of_done(
+                run_id, dod_results, attempt_id=attempt_id
+            )
             if not verdict["ok"]:
                 raise DoDNotSatisfied(run_id, verdict["missing"])
-            return self.transition(run_id, RunState.COMPLETED, reason="definition_of_done satisfied")
+            return self.transition(
+                run_id,
+                RunState.COMPLETED,
+                reason="definition_of_done satisfied",
+                attempt_id=attempt_id,
+            )
 
     # ───── DLQ ────────────────────────────────────────────────────────────
 
@@ -1169,17 +1591,22 @@ class RunCoordinator:
         from backend.persistence import db
 
         now = datetime.now(UTC)
-        counts = db.prune_run_state_tables(
-            runs_cutoff=_cutoff_iso(runs_days, now),
-            checkpoints_cutoff=_cutoff_iso(checkpoints_days, now),
-            dead_letters_cutoff=_cutoff_iso(dead_letters_days, now),
-            dry_run=dry_run,
-            db_path=self._db_path,
-        )
+        counts: dict[str, int] = {
+            str(key): int(value)
+            for key, value in dict(
+                db.prune_run_state_tables(
+                    runs_cutoff=_cutoff_iso(runs_days, now),
+                    checkpoints_cutoff=_cutoff_iso(checkpoints_days, now),
+                    dead_letters_cutoff=_cutoff_iso(dead_letters_days, now),
+                    dry_run=dry_run,
+                    db_path=self._db_path,
+                )
+            ).items()
+        }
         # Scheduled tasks are retention-managed with the run window: they are
         # the table that grows ~1440 rows/day and they carry no run_id.
-        counts["scheduled_tasks"] = db.prune_scheduled_tasks(
-            runs_days, dry_run=dry_run, db_path=self._db_path
+        counts["scheduled_tasks"] = int(
+            db.prune_scheduled_tasks(runs_days, dry_run=dry_run, db_path=self._db_path)
         )
         logger.debug("Run-state prune: %s (dry_run=%s)", counts, dry_run)
         return counts

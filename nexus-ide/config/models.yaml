@@ -8,9 +8,9 @@ models:
   micro:
     id: "minimax-m3"
     fallback_id: "mimo-v2.5"
-    thinking_mode: false
-    max_tokens: 512
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.3
     use_cases: [trivial_qa, routing, classification]
     estimated_latency_ms: 200
@@ -20,9 +20,9 @@ models:
   fast:
     id: "minimax-m2.7"
     fallback_id: "mimo-v2.5"
-    thinking_mode: false
-    max_tokens: 2048
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.7
     use_cases: [simple_qa, formatting, summarization]
     estimated_latency_ms: 600
@@ -32,9 +32,9 @@ models:
   coder:
     id: "kimi-k2.7-code"
     fallback_id: "kimi-k2.6"
-    thinking_mode: false
-    max_tokens: 8192
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.5
     use_cases: [code_generation, refactor, debug]
     estimated_latency_ms: 1200
@@ -45,8 +45,8 @@ models:
     id: "glm-5.2"
     fallback_id: "glm-5.1"
     thinking_mode: true
-    max_tokens: 8192
-    context_window: 131072
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.5
     use_cases: [planning, multi_step_reasoning, problem_solving]
     estimated_latency_ms: 2000
@@ -57,8 +57,8 @@ models:
     id: "deepseek-v4-pro"
     fallback_id: "deepseek-v4-flash"
     thinking_mode: true
-    max_tokens: 16384
-    context_window: 131072
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.4
     use_cases: [architecture, complex_analysis, large_codebases]
     estimated_latency_ms: 4000
@@ -67,81 +67,81 @@ models:
   q3b-4bit:
     id: "qwen3.5-plus"
     fallback_id: "qwen3.6-plus"
-    thinking_mode: false
-    max_tokens: 4096
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.5
     use_cases: [simple_qa, formatting, summarization]
   coder3b-4bit:
     id: "kimi-k2.5"
     fallback_id: "kimi-k2.6"
-    thinking_mode: false
-    max_tokens: 4096
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.2
     use_cases: [code_generation, refactor, debug]
   nano:
     id: "minimax-m2.5"
     fallback_id: "mimo-v2.5"
-    thinking_mode: false
-    max_tokens: 512
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.1
     use_cases: [trivial_qa, routing, classification]
   small:
     id: "qwen3.5-plus"
     fallback_id: "qwen3.6-plus"
-    thinking_mode: false
-    max_tokens: 4096
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.7
     use_cases: [simple_qa, formatting, summarization]
   medium:
     id: "qwen3.7-plus"
     fallback_id: "qwen3.6-plus"
-    thinking_mode: false
-    max_tokens: 8192
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.3
     use_cases: [code_generation, planning, multi_step_reasoning]
   large:
     id: "glm-5"
     fallback_id: "glm-5.1"
     thinking_mode: true
-    max_tokens: 8192
-    context_window: 131072
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.7
     use_cases: [architecture, complex_analysis, large_codebases]
   expert:
     id: "deepseek-v4-pro"
     fallback_id: "deepseek-v4-flash"
     thinking_mode: true
-    max_tokens: 16384
-    context_window: 131072
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.3
     use_cases: [architecture, complex_analysis, large_codebases]
   vision:
     id: "gemini-2.0-flash"
     fallback_id: "gemini-1.5-flash"
-    thinking_mode: false
-    max_tokens: 2048
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.7
     use_cases: [image_analysis, vision_tasks]
   embed:
     id: "minimax-m2.5"
     fallback_id: "mimo-v2.5"
-    thinking_mode: false
-    max_tokens: 512
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.0
     use_cases: [embedding, retrieval]
   dashboard:
     id: "qwen3.5-plus"
     fallback_id: "qwen3.6-plus"
-    thinking_mode: false
-    max_tokens: 2048
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.5
     use_cases: [dashboard_queries, monitoring]
   # PRO — frontend / UI tier. Declared by ComponentAgent, UIUXAgent,
@@ -153,9 +153,9 @@ models:
   pro:
     id: "kimi-k2.7-code"
     fallback_id: "kimi-k2.6"
-    thinking_mode: false
-    max_tokens: 8192
-    context_window: 131072
+    thinking_mode: true
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.4
     use_cases: [code_generation, refactor, ui_components]
   # OPUS — executive tier. Declared by CEOAgent and ChiefArchitectAgent via
@@ -166,8 +166,8 @@ models:
     id: "deepseek-v4-pro"
     fallback_id: "deepseek-v4-flash"
     thinking_mode: true
-    max_tokens: 16384
-    context_window: 131072
+    max_tokens: 32768
+    context_window: 262144
     temperature: 0.3
     use_cases: [strategy, architecture, complex_analysis]
 
@@ -402,8 +402,8 @@ pricing:
 
 rate_limits:
   requests_per_minute: 60
-  tokens_per_minute: 100000
+  tokens_per_minute: 1000000
   web_searches_per_minute: 20
   code_executions_per_minute: 10
-  max_input_length: 50000
-  max_file_size: 5000000
+  max_input_length: 500000
+  max_file_size: 50000000

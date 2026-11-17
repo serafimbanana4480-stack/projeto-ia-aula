@@ -115,3 +115,24 @@ def test_releasing_a_worker_frees_its_write_scope() -> None:
     assert policy.live_workers == 0
     second = _proposal(name="w2", objective="outro", write_scope=frozenset({"x.py"}))
     assert policy.evaluate(second).allowed
+
+
+def test_an_active_worker_name_cannot_overwrite_its_scope() -> None:
+    policy = SpawnPolicy()
+    first = _proposal(name="same", write_scope=frozenset({"a.py"}))
+    policy.register(first)
+
+    duplicate_name = _proposal(
+        name="same",
+        objective="outro objetivo",
+        write_scope=frozenset({"b.py"}),
+    )
+    assert policy.evaluate(duplicate_name).verdict is SpawnVerdict.PRIMARY_AGENT_ONLY
+
+    conflicting = _proposal(
+        name="third",
+        objective="terceiro objetivo",
+        write_scope=frozenset({"a.py"}),
+    )
+    assert policy.live_workers == 1
+    assert policy.evaluate(conflicting).verdict is SpawnVerdict.QUEUE

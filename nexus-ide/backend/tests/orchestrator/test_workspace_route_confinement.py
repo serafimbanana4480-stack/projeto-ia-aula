@@ -67,7 +67,10 @@ def test_workspace_read_without_a_project_asks_for_one(tmp_path: Path) -> None:
         assert response.status_code == 200
         body = response.json()
         assert body["error_category"] == "project_scope_denied"
-        assert "project" in body["error"].lower()
+        # The message is user-facing Portuguese: it must name the missing
+        # project and the action that fixes it, never an invented cause.
+        lowered = str(body["error"]).casefold()
+        assert "projeto" in lowered and "seleciona" in lowered
         assert "private-marker" not in response.text
     finally:
         client.close()

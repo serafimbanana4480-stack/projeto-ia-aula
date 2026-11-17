@@ -27,6 +27,30 @@ class TestPersistentMemoryStore:
         return PersistentMemoryStore(embedding_service=svc, max_memories=100)
 
     @pytest.mark.asyncio
+    async def test_bot_session_context_remains_isolated_after_reload(
+        self, store: PersistentMemoryStore
+    ) -> None:
+        await store.store(
+            "orchid own memory", user_id="alice", session_id="bot-a",
+            memory_type=MemoryType.SESSION,
+        )
+        await store.store(
+            "orchid other memory", user_id="alice", session_id="bot-b",
+            memory_type=MemoryType.SESSION,
+        )
+        await store.store(
+            "orchid global memory", user_id="alice", memory_type=MemoryType.GLOBAL,
+        )
+        reloaded = PersistentMemoryStore(embedding_service=store._embeddings)
+        context = await reloaded.get_context(
+            "orchid memory", user_id="alice", session_id="bot-a",
+            memory_type=MemoryType.SESSION,
+        )
+        assert "orchid own memory" in context
+        assert "orchid other memory" not in context
+        assert "orchid global memory" not in context
+
+    @pytest.mark.asyncio
     async def test_store_and_reload(self, store: PersistentMemoryStore) -> None:
         mem = await store.store(
             "Authentication uses JWT tokens",
@@ -144,34 +168,34 @@ class TestPersistentMemoryStore:
         assert deleted == 1
 
     @pytest.mark.asyncio
-    async def test_capacity_eviction_is_persisted_and_stays_evicted(
+    async def test_capacity_threshold_preserves_persistent_memories_after_restart(
         self, store: PersistentMemoryStore
     ) -> None:
         from backend.knowledge import persistent_memory as pm_module
 
         store._max_memories = 2
-        evicted = await store.store("least important", importance=0.0)
+        retained = await store.store("least important", importance=0.0)
         await store.store("important one", importance=1.0)
         await store.store("important two", importance=1.0)
 
-        assert evicted.memory_id not in store._memories
-        assert evicted.memory_id not in store._index
+        assert retained.memory_id in store._memories
+        assert retained.memory_id in store._index
         with sqlite3.connect(str(pm_module.DB_PATH)) as conn:
             rows = conn.execute("SELECT id FROM persistent_memories").fetchall()
         persisted_ids = {row[0] for row in rows}
-        assert len(persisted_ids) == 2
-        assert evicted.memory_id not in persisted_ids
+        assert len(persisted_ids) == 3
+        assert retained.memory_id in persisted_ids
 
         reloaded = PersistentMemoryStore(
             embedding_service=store._embeddings,
             max_memories=2,
         )
-        assert evicted.memory_id not in reloaded._memories
-        assert evicted.memory_id not in reloaded._index
-        assert len(reloaded._memories) == 2
+        assert retained.memory_id in reloaded._memories
+        assert retained.memory_id in reloaded._index
+        assert len(reloaded._memories) == 3
 
     @pytest.mark.asyncio
-    async def test_failed_eviction_persistence_restores_in_memory_state(
+    async def test_failed_persistence_restores_in_memory_state(
         self, store: PersistentMemoryStore
     ) -> None:
         from backend.knowledge import persistent_memory as pm_module
@@ -180,9 +204,9 @@ class TestPersistentMemoryStore:
         retained = await store.store("retained memory", importance=0.0)
         with sqlite3.connect(str(pm_module.DB_PATH)) as conn:
             conn.execute(
-                """CREATE TRIGGER reject_memory_eviction
-                   BEFORE DELETE ON persistent_memories
-                   BEGIN SELECT RAISE(ABORT, 'delete rejected'); END"""
+                """CREATE TRIGGER reject_new_memory
+                   BEFORE INSERT ON persistent_memories
+                   BEGIN SELECT RAISE(ABORT, 'insert rejected'); END"""
             )
 
         with pytest.raises(sqlite3.IntegrityError):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -89,6 +90,11 @@ class OllamaClient:
 
     """Small async wrapper around the Ollama HTTP API."""
 
+    DEFAULT_MODEL = os.environ.get("OLLAMA_DEFAULT_MODEL", "").strip() or "qwen2.5:7b"
+    default_model = DEFAULT_MODEL
+    fast_model = os.environ.get("OLLAMA_FAST_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    coder_model = os.environ.get("OLLAMA_CODER_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+
     def __init__(
         self,
         base_url: str = "",
@@ -113,11 +119,15 @@ class OllamaClient:
 
     def _new_client(self) -> httpx.AsyncClient:
         """Create the transport, including after a settings hot-swap."""
+        from urllib.parse import urlsplit
+
+        host = (urlsplit(self.base_url).hostname or "").lower()
         return httpx.AsyncClient(
             base_url=self.base_url,
             timeout=self._timeout,
             limits=self._limits,
             transport=self._transport,
+            trust_env=host not in {"localhost", "127.0.0.1", "::1"},
         )
 
     def _ensure_open(self) -> None:

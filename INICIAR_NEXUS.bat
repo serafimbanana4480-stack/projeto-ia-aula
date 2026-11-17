@@ -55,9 +55,24 @@ exit /b 1
 echo.
 
 echo [5/6] Arrancar o frontend (localhost:3000)...
-start "NEXUS Frontend" cmd /k "cd /d %IDE%\frontend && set NEXT_PUBLIC_API_URL=http://127.0.0.1:8000&& pnpm run dev"
-timeout /t 15 /nobreak >nul
-echo       ok
+start "NEXUS Frontend" cmd /k "cd /d %IDE%\frontend && set NEXT_PUBLIC_API_URL=http://127.0.0.1:8000&& pnpm run dev -- --hostname 127.0.0.1 --port 3000"
+echo       a aguardar que o frontend responda...
+set /a front_try=0
+:esperar_frontend
+set /a front_try+=1
+timeout /t 3 /nobreak >nul
+curl -s -o nul -w "" http://127.0.0.1:3000/ >nul 2>&1
+if not errorlevel 1 goto frontend_ok
+if %front_try% GEQ 20 goto frontend_lento
+goto esperar_frontend
+:frontend_ok
+echo       frontend a responder em http://127.0.0.1:3000
+goto frontend_seguir
+:frontend_lento
+echo       ERRO: frontend nao respondeu; ve a janela "NEXUS Frontend".
+pause
+exit /b 1
+:frontend_seguir
 echo.
 
 echo [6/6] Abrir o browser...

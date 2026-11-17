@@ -23,8 +23,12 @@ from typing import Any
 
 import httpx
 
-os.environ.setdefault("OPENROUTER_API_KEY", "harness")
-os.environ.setdefault("NEXUS_FREE_ONLY", "false")
+os.environ["OPENROUTER_API_KEY"] = "harness"
+os.environ["NEXUS_FREE_ONLY"] = "false"
+os.environ["MULTI_LLM_ENABLED"] = "false"
+os.environ["OLLAMA_DEFAULT_MODEL"] = "scripted:latest"
+os.environ["OLLAMA_CODER_MODEL"] = "scripted:latest"
+os.environ["NEXUS_ENABLE_OLLAMA"] = "true"
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
@@ -152,7 +156,10 @@ def build_client(project_dir: Path):
             kwargs["timeout"] = timeout
         if limits is not None:
             kwargs["limits"] = limits
-        return original_init(self, base_url, **kwargs)
+        ret = original_init(self, base_url, **kwargs)
+        self._free_validated = True
+        self._free_candidates = ["scripted:latest"]
+        return ret
 
     OllamaClient.__init__ = patched_init  # type: ignore[method-assign]
     for attr in ("ollama", "llm_client"):
@@ -162,12 +169,14 @@ def build_client(project_dir: Path):
     import backend.llm as llm_pkg
     from backend.llm.factory import create_llm_client
 
-    llm_pkg.create_llm_client = lambda: create_llm_client(  # type: ignore[assignment]
+    _factory = lambda: create_llm_client(  # noqa: E731
         multi_llm_enabled=False,
         llm_provider="ollama",
         ollama_host="http://ollama.test",
         free_only=False,
     )
+    main_module.create_llm_client = _factory  # type: ignore[assignment]
+    llm_pkg.create_llm_client = _factory  # type: ignore[assignment]
 
     token = create_access_token({"sub": "harness", "email": "harness@test"})
     return TestClient(main_module.app, headers={"Authorization": f"Bearer {token}"})

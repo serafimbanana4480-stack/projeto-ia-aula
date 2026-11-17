@@ -30,6 +30,7 @@ DEFAULT_CSP = (
     "script-src 'self' 'unsafe-eval' 'unsafe-inline'; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob: https://imgs.search.brave.com; "
+    "media-src 'self' blob:; "
     "font-src 'self' data:; "
     "connect-src 'self'; "
     "worker-src 'self' blob:; "

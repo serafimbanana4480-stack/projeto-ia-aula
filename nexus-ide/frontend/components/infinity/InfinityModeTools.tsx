@@ -7,7 +7,7 @@ import { authenticatedFetch } from "../../lib/auth";
 import { useAdvancedModeStore, type AdvancedMode } from "../../stores/advancedModeStore";
 
 const INPUT = "w-full rounded-lg border border-nexus-border bg-nexus-bg/50 px-2.5 py-2 text-xs text-nexus-text focus:outline-none focus:ring-2 focus:ring-nexus-accent";
-const BUTTON = "inline-flex min-h-9 items-center gap-2 rounded-lg border border-purple-400/25 bg-purple-400/10 px-3 text-xs font-semibold text-purple-300 hover:bg-purple-400/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent disabled:opacity-50";
+const BUTTON = "inline-flex min-h-9 items-center gap-2 rounded-lg border border-nexus-accent/25 bg-nexus-accent/10 px-3 text-xs font-semibold text-nexus-accent-bright hover:bg-nexus-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent disabled:opacity-50";
 const CRITERIA = [
   ["security", "Segurança"], ["complexity", "Simplicidade"],
   ["performance", "Desempenho"], ["maintainability", "Manutenção"],

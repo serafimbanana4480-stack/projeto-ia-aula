@@ -292,6 +292,7 @@ async def test_retry_backoff_sequence_releases_slot(monkeypatch) -> None:
     async def boom(**_kwargs) -> None:
         raise RuntimeError("boom")
 
+    scheduler.handler_registry.register("boom", boom, read_only=True)
     task = Task(
         name="boom",
         task_type=TaskType.MONITORING,
@@ -314,6 +315,99 @@ async def test_retry_backoff_sequence_releases_slot(monkeypatch) -> None:
 
     assert recorded == [120, 240, 300]
     assert task.retry_count == 3
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("post-effect failure"), TimeoutError()])
+async def test_effectful_failure_does_not_schedule_automatic_retry(failure) -> None:
+    manager = _make_manager()
+    calls: list[int] = []
+
+    async def effect_then_fail() -> None:
+        calls.append(1)
+        raise failure
+
+    manager.handlers.register("effect_then_fail", effect_then_fail, read_only=False)
+    task = Task(
+        name="effect", handler=effect_then_fail, handler_name="effect_then_fail",
+        auto_retry=True, max_retries=3,
+    )
+    manager.scheduler.tasks[task.task_id] = task
+    try:
+        await manager.scheduler._execute_task(task)
+        assert calls == [1]
+        assert task.status == TaskStatus.FAILED
+        assert task.retry_count == 0
+        assert not manager.scheduler._retry_tasks
+    finally:
+        for retry in manager.scheduler._retry_tasks:
+            retry.cancel()
+        await asyncio.gather(*manager.scheduler._retry_tasks, return_exceptions=True)
+
+
+async def test_database_claim_failure_does_not_run_handler(monkeypatch) -> None:
+    from backend.tasks import autonomous_tasks
+
+    manager = _make_manager()
+    calls: list[int] = []
+
+    async def handler() -> None:
+        calls.append(1)
+
+    def unavailable():
+        raise sqlite3.OperationalError("database unavailable")
+
+    monkeypatch.setattr(autonomous_tasks, "get_db", unavailable)
+    task = Task(name="claim failure", handler=handler, handler_name="handler")
+    manager.scheduler.tasks[task.task_id] = task
+    await manager.scheduler._execute_task(task)
+    assert calls == []
+    assert task.task_id in manager.scheduler._quarantined
+
+
+async def test_schedule_failure_does_not_queue_unpersisted_task(monkeypatch) -> None:
+    from backend.tasks import autonomous_tasks
+
+    manager = _make_manager()
+
+    async def handler() -> None:
+        pass
+
+    def unavailable(_data):
+        raise sqlite3.OperationalError("database unavailable")
+
+    monkeypatch.setattr(autonomous_tasks, "save_scheduled_task", unavailable)
+    task = Task(name="unsaved", handler=handler, handler_name="handler")
+    with pytest.raises(sqlite3.OperationalError):
+        await manager.scheduler.schedule_task(task)
+    assert task.task_id not in manager.scheduler.tasks
+    assert task not in manager.scheduler.task_queue
+
+
+async def test_requeue_failure_keeps_task_quarantined(monkeypatch) -> None:
+    from backend.tasks import autonomous_tasks
+
+    manager = _make_manager()
+
+    async def handler() -> None:
+        pass
+
+    manager.handlers.register("handler", handler)
+    task = Task(name="interrupted", handler=handler, handler_name="handler")
+    task.status = TaskStatus.WAITING
+    task.metadata["interrupted"] = True
+    manager.scheduler.tasks[task.task_id] = task
+    manager.scheduler._quarantined.add(task.task_id)
+
+    def unavailable(_data):
+        raise sqlite3.OperationalError("database unavailable")
+
+    monkeypatch.setattr(autonomous_tasks, "save_scheduled_task", unavailable)
+    with pytest.raises(sqlite3.OperationalError):
+        await manager.scheduler.requeue_task(task.task_id)
+    assert task.status == TaskStatus.WAITING
+    assert task.metadata["interrupted"] is True
+    assert task.task_id in manager.scheduler._quarantined
+    assert task not in manager.scheduler.task_queue
 
 
 async def test_cancel_running_task_does_not_resurrect_completed() -> None:

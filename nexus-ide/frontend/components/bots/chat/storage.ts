@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { getRoomMemory, updateRoomMemory } from "../../../lib/bots";
 
 const PIN_KEY = "nexus:bots:pins";
 const SEEN_KEY = "nexus:bots:seen";
@@ -31,15 +32,34 @@ export function useRoomMemory() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    setPins(readList(PIN_KEY));
-    setSeen(readMap(SEEN_KEY));
+    const localPins = readList(PIN_KEY);
+    const localSeen = readMap(SEEN_KEY);
+    setPins(localPins);
+    setSeen(localSeen);
     setReady(true);
+    void getRoomMemory()
+      .then((remote) => {
+        const mergedPins = Array.from(new Set([...localPins, ...(remote.pins ?? [])]));
+        const mergedSeen = { ...(remote.seen ?? {}), ...localSeen };
+        setPins(mergedPins);
+        setSeen(mergedSeen);
+        window.localStorage.setItem(PIN_KEY, JSON.stringify(mergedPins));
+        window.localStorage.setItem(SEEN_KEY, JSON.stringify(mergedSeen));
+        if (
+          mergedPins.length !== (remote.pins ?? []).length ||
+          Object.keys(mergedSeen).length !== Object.keys(remote.seen ?? {}).length
+        ) {
+          void updateRoomMemory({ pins: mergedPins, seen: mergedSeen }).catch(() => {});
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const togglePin = useCallback((id: string) => {
     setPins((current) => {
       const next = current.includes(id) ? current.filter((item) => item !== id) : [id, ...current];
       window.localStorage.setItem(PIN_KEY, JSON.stringify(next));
+      void updateRoomMemory({ pins: next }).catch(() => {});
       return next;
     });
   }, []);
@@ -49,6 +69,7 @@ export function useRoomMemory() {
       if (current[id] === signature) return current;
       const next = { ...current, [id]: signature };
       window.localStorage.setItem(SEEN_KEY, JSON.stringify(next));
+      void updateRoomMemory({ seen: { [id]: signature } }).catch(() => {});
       return next;
     });
   }, []);

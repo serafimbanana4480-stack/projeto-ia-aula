@@ -76,6 +76,7 @@ class TestSecurityHeadersMiddleware:
         assert "script-src 'self' 'unsafe-eval' 'unsafe-inline'" in csp
         assert "style-src 'self' 'unsafe-inline'" in csp
         assert "img-src 'self' data: blob:" in csp
+        assert "media-src 'self' blob:" in csp
         assert "https://imgs.search.brave.com" in csp
         assert "*.search.brave.com" not in csp
         image_sources = csp.split("img-src ", 1)[1].split(";", 1)[0].split()

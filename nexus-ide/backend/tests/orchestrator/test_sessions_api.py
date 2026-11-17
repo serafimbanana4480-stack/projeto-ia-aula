@@ -85,10 +85,25 @@ def test_tool_retry_requires_session_bound_one_time_confirmation(client, tmp_pat
 
     from backend.tools.registry import get_tool
 
-    session_id = client.post(
-        "/api/sessions", json={"title": "Tool retry"}, headers=AUTH
-    ).json()["id"]
-    target = tmp_path / "approved-tool-output.txt"
+    # A duplicate registration of the same folder is the existing project, not
+    # a new one; register the folder under a distinct path so the session's
+    # project really contains the target file.
+    nested = tmp_path / "retry-scope"
+    nested.mkdir()
+    project_response = client.post(
+        "/api/projects", json={"name": "retry scope", "path": str(nested)}, headers=AUTH
+    )
+    assert project_response.status_code in {200, 201}, project_response.text
+    project = project_response.json()
+    project_id = project.get("id") or project.get("project", {}).get("id")
+    assert project_id, project_response.text
+    session = client.post(
+        "/api/sessions",
+        json={"title": "Tool retry", "project_id": project_id},
+        headers=AUTH,
+    ).json()
+    session_id = session["id"]
+    target = nested / "approved-tool-output.txt"
     spec = get_tool("write_file_absolute")
     assert spec is not None
     executions: list[tuple[str, str]] = []
@@ -99,6 +114,9 @@ def test_tool_retry_requires_session_bound_one_time_confirmation(client, tmp_pat
         return {"ok": True, "path": path}
 
     monkeypatch.setattr(spec, "handler", write_for_test)
+    # The retry endpoint is scoped to the project the caller's session belongs
+    # to, so the write stays inside the authorised folder instead of touching
+    # the server's working directory.
     args = {"path": str(target), "content": "approved content"}
 
     # A legacy or forged client boolean is ignored and cannot cross the gate.
@@ -158,7 +176,7 @@ def test_tool_retry_requires_session_bound_one_time_confirmation(client, tmp_pat
         headers=AUTH,
     )
     assert executed.status_code == 200, executed.text
-    assert executed.json()["ok"] is True
+    assert executed.json()["ok"] is True, executed.text
     assert target.read_text(encoding="utf-8") == "approved content"
     assert executions == [(str(target), "approved content")]
 
@@ -204,9 +222,18 @@ def test_learned_skills_are_scoped_to_their_owner(client, tmp_path, monkeypatch)
     assert created.status_code == 200, created.text
     skill_id = created.json()["id"]
     assert client.get("/api/skills", headers=AUTH).json()["count"] == 1
-    assert select_skills(
+    # A learned skill stays a DRAFT until an explicit promotion, so selection
+    # must not deliver it on its own. The route teaches the owner how to.
+    promoted = client.post(
+        f"/api/skills/{skill_id}/promote",
+        headers=AUTH,
+        json={"status": "active", "reason": "owner reviewed the procedure"},
+    )
+    assert promoted.status_code in {200, 202}, promoted.text
+    selected = select_skills(
         "private audit", tmp_path, include_memory=True, user_id="test"
-    )["skills"][0]["name"] == "Private audit routine"
+    )["skills"]
+    assert [entry["name"] for entry in selected] == ["Private audit routine"]
 
     client.app.dependency_overrides[auth_module.require_auth] = _other_fake_user
     assert client.get("/api/skills", headers=AUTH).json()["count"] == 0
@@ -216,7 +243,8 @@ def test_learned_skills_are_scoped_to_their_owner(client, tmp_path, monkeypatch)
         json={"record_use": True, "success": False},
         headers=AUTH,
     ).status_code == 404
-    assert client.delete(f"/api/skills/{skill_id}", headers=AUTH).json()["status"] == "not_found"
+    # A foreign user's delete is a 404 from the route, not a "not_found" body.
+    assert client.delete(f"/api/skills/{skill_id}", headers=AUTH).status_code == 404
     assert select_skills(
         "private audit", tmp_path, include_memory=True, user_id="other"
     )["skills"] == []

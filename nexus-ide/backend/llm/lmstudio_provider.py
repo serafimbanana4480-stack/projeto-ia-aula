@@ -129,8 +129,13 @@ class LMStudioProvider(OpenAIProvider):
         **kwargs: Any,
     ) -> str:
         """Non-streaming completion with tier resolution."""
+        resolved_options = dict(options or {})
+        # LM Studio reasoning models spend the whole token budget on
+        # `reasoning_content` unless reasoning is explicitly disabled,
+        # leaving `content` empty and making the bot appear to fail.
+        resolved_options.setdefault("reasoning_effort", "none")
         return await super().chat_complete(
-            self.resolve_model(model), messages, options=options, **kwargs
+            self.resolve_model(model), messages, options=resolved_options, **kwargs
         )
 
     async def chat_stream(
@@ -150,9 +155,11 @@ class LMStudioProvider(OpenAIProvider):
         (usage is simply unavailable for that turn).
         """
         resolved = self.resolve_model(model)
+        resolved_options = dict(options or {})
+        resolved_options.setdefault("reasoning_effort", "none")
         emitted = False
         try:
-            async for token in super().chat_stream(resolved, messages, options=options, **kwargs):
+            async for token in super().chat_stream(resolved, messages, options=resolved_options, **kwargs):
                 emitted = True
                 yield token
             return
@@ -163,7 +170,7 @@ class LMStudioProvider(OpenAIProvider):
             logger.warning(
                 "LM Studio rejected stream_options; retrying the stream without it"
             )
-        async for token in super().chat_stream(resolved, messages, options=options, **kwargs):
+        async for token in super().chat_stream(resolved, messages, options=resolved_options, **kwargs):
             yield token
 
 

@@ -137,7 +137,7 @@ export function CardStat({
 }) {
   return (
     <div className="nx-inset min-w-0 rounded-xl px-3 py-2.5" title={hint}>
-      <div className="text-[10px] uppercase tracking-wider text-nexus-faint">{label}</div>
+      <div className="text-[11px] uppercase leading-tight tracking-wider text-nexus-faint hyphens-auto break-words">{label}</div>
       <div className="mt-0.5 truncate text-[13px] font-semibold tabular-nums text-nexus-text">
         {value}
       </div>

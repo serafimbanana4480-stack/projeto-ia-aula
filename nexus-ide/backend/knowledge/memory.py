@@ -95,6 +95,25 @@ class Memory:
         }
 
 
+#: Tag that :meth:`MemoryStore.remember_conversation` and the agents' auto
+#: memory put on the assistant's own answer. Those entries are the ones that
+#: must never cross sessions.
+_ASSISTANT_ANSWER_TAG = "assistant_response"
+
+
+def _is_session_scoped_answer(memory: Memory) -> bool:
+    """True when *memory* is another session's verbatim assistant answer."""
+    return (
+        memory.memory_type is MemoryType.CONVERSATION
+        and (
+            _ASSISTANT_ANSWER_TAG in set(memory.tags or ())
+            # Older automatically saved run summaries included the response
+            # without the assistant_response tag. Protect them on read too.
+            or {"agent.run", "auto_memory"}.issubset(set(memory.tags or ()))
+        )
+    )
+
+
 def _matches_memory_scope(
     memory: Memory,
     *,
@@ -102,20 +121,56 @@ def _matches_memory_scope(
     session_id: str | None,
     project_id: str | None,
 ) -> bool:
-    """Keep recall inside the owner, active project, and true session memories.
+    """Keep recall inside the owner, active project, and the session that wrote it.
 
-    Conversation and project memories are meant to survive a new session.
-    Session and tool-result memories remain tied to the session that created
-    them. Project-bound entries never bleed into another (or unselected)
-    project for the same user.
+    ``SESSION`` and ``TOOL_RESULT`` memories were already tied to the session
+    that created them. ``CONVERSATION`` memories were the exception, with the
+    justification "conversation memories are meant to survive a new session" —
+    which is right for project-level knowledge and wrong for the assistant's
+    own answer. Those entries are stored as ``Assistant: ...`` (see
+    :meth:`MemoryStore.remember_conversation` and the agent's auto-memory), so
+    recalling one written by *another* session hands that session a finished
+    run's verbatim answer it never asked for: threshold N3, a real cross-session
+    context leak.
+
+    The split is by tag, not by a new memory type: ``assistant_response``
+    entries are session-scoped, and every other conversation entry — the
+    durable project facts the long-term recall contract is about — keeps
+    crossing sessions exactly as before. Only the empty ``session_id`` (an
+    administrative or project-level recall that does not name a session) sees
+    every entry.
     """
-    if user_id is not None and memory.user_id != user_id:
+    if user_id is None:
+        # Anonymous recall must not cross tenants: a request without a trusted
+        # user may only see memories that are themselves unowned, and only when
+        # they belong to the same session (or no session is named at all, in
+        # which case only globally unowned memories are visible).
+        if memory.user_id:
+            return False
+        if session_id and memory.session_id and memory.session_id != session_id:
+            return False
+    elif memory.user_id != user_id:
         return False
     if (
         session_id
         and memory.session_id
         and memory.session_id != session_id
-        and memory.memory_type in {MemoryType.SESSION, MemoryType.TOOL_RESULT}
+        and (
+            memory.memory_type in {MemoryType.SESSION, MemoryType.TOOL_RESULT}
+            or _is_session_scoped_answer(memory)
+        )
+    ):
+        return False
+    # A session-scoped recall must not pull in memories that were stored
+    # without a session (administrative/project-level entries stay visible
+    # only to an explicitly unscoped recall).
+    if (
+        session_id
+        and not memory.session_id
+        and (
+            memory.memory_type in {MemoryType.SESSION, MemoryType.TOOL_RESULT}
+            or _is_session_scoped_answer(memory)
+        )
     ):
         return False
     return not (
@@ -150,8 +205,9 @@ class EmbeddingService:
                 self._dimension = len(result)
                 self._backend = "provider"
                 self._last_error = ""
-            return result
-        except (ImportError, RuntimeError) as exc:
+                return result
+            self._last_error = "Shared embedding provider returned an empty vector"
+        except Exception as exc:
             self._last_error = str(exc)
             logger.debug("Shared embedding unavailable, trying direct provider: %s", exc)
 
@@ -166,6 +222,7 @@ class EmbeddingService:
                 self._backend = "provider"
                 self._last_error = ""
                 return result[0]
+            self._last_error = "Direct embedding provider returned an empty vector"
         except Exception as exc:
             self._last_error = str(exc)
             logger.warning(
@@ -222,7 +279,7 @@ class EmbeddingService:
 
     def cosine_similarity(self, a: list[float], b: list[float]) -> float:
         """Compute cosine similarity between two vectors."""
-        if not a or not b:
+        if not a or not b or len(a) != len(b):
             return 0.0
         dot = sum(x * y for x, y in zip(a, b, strict=False))
         norm_a = sum(x * x for x in a) ** 0.5
@@ -353,6 +410,7 @@ class MemoryStore:
         project_id: str = "",
         *,
         user_id: str | None = None,
+        memory_type: MemoryType | None = None,
         max_tokens: int = 4000,
         top_k: int = 5,
     ) -> str:
@@ -365,6 +423,7 @@ class MemoryStore:
             query,
             user_id=user_id,
             session_id=session_id or None,
+            memory_type=memory_type,
             # Keep an explicit empty project scope distinct from no scope:
             # chat without a selected project must not recall another project's
             # memories, while administrative search may omit the filter.
@@ -383,6 +442,8 @@ class MemoryStore:
             keyword_matches: list[tuple[Memory, float]] = []
             for mem in self._memories.values():
                 if mem.memory_id in seen_ids:
+                    continue
+                if memory_type is not None and mem.memory_type != memory_type:
                     continue
                 if not _matches_memory_scope(
                     mem,

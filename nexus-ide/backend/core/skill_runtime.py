@@ -7,13 +7,14 @@ the metadata needed for routing; the body is read only after a skill matches.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import re
 import unicodedata
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,7 @@ _STOP_WORDS = frozenset(
     ]
 )
 _TOKEN_ALIASES = {
+    "audita": "audit",
     "auditoria": "audit",
     "auditorias": "audit",
     "auditar": "audit",
@@ -322,7 +324,55 @@ def discover_skills(
                 found.setdefault(key, document)
         except OSError:
             logger.debug("Unreadable skill root: %s", root, exc_info=True)
-    return sorted(found.values(), key=lambda item: item.name.casefold())
+    # Evolution writes drafts under the reserved _proposed container. These
+    # are reviewable, but are never selected until the normal promotion gate
+    # has explicitly changed their status. A path-derived id distinguishes
+    # repeated proposals, including proposals with the same manifest name.
+    proposals: list[SkillDocument] = []
+    seen_paths: set[str] = set()
+    proposal_roots = configured_skill_roots(project_path)
+    if not os.environ.get("NEXUS_SKILLS_DIRS", "").strip():
+        # Older SkillWriter versions resolved their relative destination from
+        # the nexus-ide working directory instead of the repository root.
+        # Scan that legacy proposal container without adding its sibling
+        # directories to the ordinary active-skill roots.
+        proposal_roots.append(Path(__file__).resolve().parents[2] / ".opencode" / "skills")
+    for root in proposal_roots:
+        proposal_root = root / "_proposed"
+        try:
+            if root.is_symlink() or proposal_root.is_symlink() or not proposal_root.is_dir():
+                continue
+            resolved_root = root.resolve()
+            for entry in sorted(proposal_root.iterdir(), key=lambda item: item.name.casefold()):
+                if not entry.is_dir() or entry.is_symlink():
+                    continue
+                path = entry / "SKILL.md"
+                if not path.is_file() or path.is_symlink():
+                    continue
+                document = _load_file(path, entry.name, resolved_root)
+                if document is None or (active_only and document.manifest.status is not SkillStatus.ACTIVE):
+                    continue
+                if active_only and not _proposal_has_approval(path):
+                    continue
+                path_key = os.path.normcase(str(document.path))
+                if path_key in seen_paths:
+                    continue
+                seen_paths.add(path_key)
+                if active_only and document.name.casefold() in found:
+                    continue
+                digest = hashlib.sha256(path_key.encode("utf-8")).hexdigest()[:16]
+                document = replace(
+                    document,
+                    manifest=document.manifest.model_copy(update={"skill_id": f"proposal:{digest}"}),
+                    source="proposal",
+                )
+                proposals.append(document)
+                if active_only:
+                    found[document.name.casefold()] = document
+        except OSError:
+            logger.debug("Unreadable proposal root: %s", proposal_root, exc_info=True)
+    documents = list(found.values()) if active_only else [*found.values(), *proposals]
+    return sorted(documents, key=lambda item: item.name.casefold())
 
 
 def _memory_skills(user_id: str | None = None) -> list[SkillDocument]:
@@ -393,6 +443,7 @@ def list_skill_summaries(
         )
     return [
         {
+            "skill_id": doc.manifest.skill_id,
             "name": doc.name,
             "description": doc.manifest.description[:200],
             "version": doc.manifest.version,
@@ -426,6 +477,12 @@ def load_skill_document(
         return {"ok": False, "error": "skill name is required"}
     for doc in discover_skills(project_path):
         if doc.name.casefold() == wanted.casefold() or doc.manifest.skill_id.casefold() == wanted.casefold():
+            if doc.source == "proposal" and (
+                doc.manifest.status is not SkillStatus.ACTIVE
+                or doc.path is None
+                or not _proposal_has_approval(doc.path)
+            ):
+                return {"ok": False, "error": "proposal is not active; review and promote it before loading"}
             if doc.path is not None:
                 doc = _load_file(doc.path, doc.name, doc.path.parent.parent, full=True) or doc
             limit = max(256, min(int(max_chars), MAX_SKILL_FILE_CHARS))
@@ -960,6 +1017,27 @@ def read_promotion_log(limit: int = 100) -> list[dict[str, Any]]:
     return entries
 
 
+def _proposal_has_approval(path: Path) -> bool:
+    """Only activate the exact proposal content recorded by a promotion gate."""
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        expected_path = os.path.normcase(str(path.resolve()))
+        lines = _promotions_log_path().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if os.path.normcase(str(record.get("path") or "")) != expected_path:
+            continue
+        return record.get("to") == "active" and record.get("content_sha256") == digest
+    return False
+
+
 def _find_skill_document(
     skill_id: str, project_path: str | Path | None
 ) -> SkillDocument | None:
@@ -1419,13 +1497,19 @@ def _transition_skill(
     path = document.path
     current = document.manifest.status
 
-    if current is target:
+    needs_reapproval = (
+        document.source == "proposal"
+        and current is SkillStatus.ACTIVE
+        and target is SkillStatus.ACTIVE
+        and not _proposal_has_approval(path)
+    )
+    if current is target and not needs_reapproval:
         return {
             "ok": False,
             "error": f"skill is already {target.value}",
             "status": current.value,
         }
-    if current not in _ALLOWED_TRANSITIONS.get(target, frozenset()):
+    if not needs_reapproval and current not in _ALLOWED_TRANSITIONS.get(target, frozenset()):
         return {
             "ok": False,
             "error": f"invalid transition {current.value} -> {target.value}",
@@ -1480,7 +1564,18 @@ def _transition_skill(
         "path": str(path),
         "timestamp": datetime.now(UTC).isoformat(),
     }
+    if document.source == "proposal":
+        try:
+            audit["content_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            return {"ok": False, "error": f"proposal cannot be audited: {exc}"}
     _append_promotion_audit(audit)
+    if document.source == "proposal" and target is SkillStatus.ACTIVE and not _proposal_has_approval(path):
+        try:
+            _rewrite_skill_status(path, current)
+        except (OSError, ValueError, yaml.YAMLError):
+            logger.exception("Could not restore proposal status after audit failure: %s", path)
+        return {"ok": False, "error": "proposal promotion could not be verified in the audit log; activation blocked"}
     logger.info(
         "Skill %s %s -> %s by %s (%s)",
         document.manifest.skill_id,

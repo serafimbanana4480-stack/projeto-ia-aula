@@ -17,7 +17,7 @@ export default function InfinitySuiteWidget() {
         title="Infinity Suite"
         subtitle="Escolhe a estratégia, prepara o pedido e consulta os limites reais."
         action={
-          <span className="rounded-full bg-purple-400/10 px-2.5 py-1 text-[10px] font-semibold text-purple-300">
+          <span className="rounded-full bg-nexus-accent/12 px-2.5 py-1 text-[10px] font-semibold text-nexus-accent-bright shadow-rim">
             {activeModeIds.length}/{Object.keys(modes).length || "—"} configurados
           </span>
         }

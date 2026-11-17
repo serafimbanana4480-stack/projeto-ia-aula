@@ -18,13 +18,20 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import redis
 
-from backend.knowledge.memory import MemorySystem
 from backend.observability.event_bus import EventBus
 from backend.observability.events import Event
+
+if TYPE_CHECKING:
+    # ``MemorySystem`` does not exist in ``backend.knowledge.memory``; the
+    # manager only ever held the object, it never called it, so the annotation
+    # names the real store type.  Importing it at runtime made every import of
+    # this module fail with ``ImportError``, and the annotation needs no runtime
+    # symbol because the module uses ``from __future__ import annotations``.
+    from backend.knowledge.memory import MemoryStore as MemorySystem
 
 logger = logging.getLogger(__name__)
 

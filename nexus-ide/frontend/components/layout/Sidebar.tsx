@@ -28,6 +28,7 @@ import {
   ListTodo,
   Brain,
   MoreHorizontal,
+  AudioLines,
 } from "lucide-react";
 
 /**
@@ -53,6 +54,7 @@ import {
 type KnownRoute =
   | "/"
   | "/dashboard"
+  | "/voice"
   | "/bots"
   | "/dashboard/tasks"
   | "/editor"
@@ -83,6 +85,7 @@ const PRIMARY_ITEMS: NavItem[] = [
   { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard className="h-4 w-4" />, path: "/dashboard" },
   { id: "bots", label: "Bots", icon: <Bot className="h-4 w-4" />, path: "/bots" },
   { id: "chat", label: "Chat", icon: <MessageSquare className="h-4 w-4" />, path: "/" },
+  { id: "voice", label: "NEXUS Voice", icon: <AudioLines className="h-4 w-4" />, path: "/voice" },
   { id: "projects", label: "Projetos", icon: <FolderKanban className="h-4 w-4" />, path: "/projects" },
   { id: "tasks", label: "Tarefas", icon: <ListTodo className="h-4 w-4" />, path: "/dashboard/tasks" },
   { id: "agents", label: "Agentes", icon: <Bot className="h-4 w-4" />, path: "/swarm" },

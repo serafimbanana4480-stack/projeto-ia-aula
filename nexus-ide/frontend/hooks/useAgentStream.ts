@@ -6,7 +6,7 @@ import {
   isOrderable,
   type RuntimeEventLike,
 } from "../lib/eventOrdering";
-import { postChat, cancelChatRequest, ApiError, apiUrl } from "../lib/api";
+import { postChat, cancelChatRequest, confirmTool, ApiError, apiUrl } from "../lib/api";
 import { authHeaders } from "../lib/auth";
 import { clearAuth, refreshAuth } from "../lib/auth";
 import { log } from "../lib/log";
@@ -751,6 +751,7 @@ export function useAgentStream(sessionId: string) {
       },
       provider = "",
       modelIsConcrete = false,
+      localOnly = false,
     ): Promise<boolean> => {
       if ([...streamingSessionsRef.current].some((owner) => owner !== sessionId)) {
         setSessionError(sessionId, "Outra conversa ainda tem uma execução ativa. Espera que termine antes de enviar nesta sessão.");
@@ -789,6 +790,7 @@ export function useAgentStream(sessionId: string) {
         provider,
         modelIsConcrete,
         cancellationRequestId,
+        localOnly,
       ];
 
       setSessionStreaming(sessionId, true);
@@ -1061,6 +1063,25 @@ export function useAgentStream(sessionId: string) {
     setSessionError(sessionId, null);
   }, [clearGapReplayTimer, sessionId, setSessionError, setSessionEvents, takePendingTokens]);
 
+  // Resolve a pending tool-confirmation gate (Confirmar / Recusar). The agent's
+  // ReAct loop is blocked in ``wait_for_confirmation`` on the backend; this
+  // releases it so the tool either executes (approved) or is skipped (rejected)
+  // instead of waiting for the 5-minute expiry.
+  const resolveToolConfirmation = useCallback(
+    async (confirmationId: string, approved: boolean): Promise<boolean> => {
+      const id = String(confirmationId || "").trim();
+      if (!id) return false;
+      try {
+        await confirmTool(id, approved);
+        return true;
+      } catch (reason) {
+        log.warn(`Tool confirmation ${id} failed:`, reason);
+        return false;
+      }
+    },
+    [],
+  );
+
   const getActiveRunId = useCallback(
     () =>
       activeStreamSessionRef.current === sessionId &&
@@ -1107,6 +1128,7 @@ export function useAgentStream(sessionId: string) {
     resume,
     cancel,
     reset,
+    resolveToolConfirmation,
     getActiveRunId,
     getActiveRunSessionId,
   };

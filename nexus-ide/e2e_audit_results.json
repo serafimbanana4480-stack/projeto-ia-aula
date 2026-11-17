@@ -1,0 +1,121 @@
+[
+  {
+    "cenario": "P1 resposta do modelo entregue",
+    "antes": "visível: 'AUDIT: a auditoria nao encontrou mais nada a fazer.' (resposta real perdida)",
+    "depois": "visível: ''",
+    "ok": false,
+    "detalhe": "chamadas ao modelo: 0 | read_file executado: False | 1.46s"
+  },
+  {
+    "cenario": "P1 memória guarda a resposta certa",
+    "antes": "histórico guardava o texto da auditoria",
+    "depois": "histórico guarda: 'RESPOSTA-REAL: o offset em list_page é page * size em vez de (page - 1) * size, '",
+    "ok": true,
+    "detalhe": ""
+  },
+  {
+    "cenario": "P1 custo por turno (pergunta de leitura)",
+    "antes": "2 inferências por turno (41s medidos vs 21s sem auditoria)",
+    "depois": "0 inferência(s) PRIMARY + 0 revisão(ões) ADVISOR; 0 chamadas no total; read_file executado: False",
+    "ok": false,
+    "detalhe": ""
+  },
+  {
+    "cenario": "P2 ficheiro com marcadores do protocolo",
+    "antes": "chat mostrava '<event>tool_result|read_file|{...' em vez da resposta",
+    "depois": "texto limpo: True | read_file executado: False | eventos: []",
+    "ok": false,
+    "detalhe": ""
+  },
+  {
+    "cenario": "Sequência de múltiplas tools",
+    "antes": "as ferramentas pedidas não tinham prova de execução no stream",
+    "depois": "resultados observados pela ordem: []",
+    "ok": false,
+    "detalhe": ""
+  },
+  {
+    "cenario": "Tool com erro",
+    "antes": "uma tentativa falhada podia desaparecer ou ser apresentada como sucesso",
+    "depois": "erro no stream: False | resultado(s): 0 | resposta reconhece falha: False",
+    "ok": false,
+    "detalhe": ""
+  },
+  {
+    "cenario": "Mudança explícita de modelo",
+    "antes": "o modelo selecionado podia ser substituído silenciosamente pelo tier",
+    "depois": "IDs enviados ao provider scripted por pedido: [{'primary': [], 'advisor': []}, {'primary': [], 'advisor': []}, {'primary': [], 'advisor': []}]",
+    "ok": false,
+    "detalhe": "separa o modelo explícito do chat do papel ADVISOR; não prova qualidade real"
+  },
+  {
+    "cenario": "Interrupção e replay de sessão",
+    "antes": "saída truncada podia parecer concluída e perder a timeline após o stream",
+    "depois": "estado persistido: None | aviso de truncagem: False | eventos reabertos: 0 | marcados como replay: False",
+    "ok": false,
+    "detalhe": "valida persistência/replay de eventos; não prova reexecução automática da tarefa"
+  },
+  {
+    "cenario": "Tool destrutiva bloqueada",
+    "antes": "uma tentativa do modelo podia apagar o ficheiro sem controlo",
+    "depois": "tool não executada: True | ficheiro mantido: True",
+    "ok": true,
+    "detalhe": "o PRIMARY não expõe delete_file; esta prova é fail-closed, não uma aprovação interativa"
+  },
+  {
+    "cenario": "Duas sessões concorrentes",
+    "antes": "pedidos em paralelo podiam trocar output ou estado de conversa",
+    "depois": "marcadores por sessão: {'e2e-concurrent-a': '', 'e2e-concurrent-b': ''} | históricos: {'e2e-concurrent-a': '', 'e2e-concurrent-b': ''}",
+    "ok": false,
+    "detalhe": ""
+  },
+  {
+    "cenario": "P3 verificação sem pytest",
+    "antes": "evento test_result | ok=True | '0 passaram, 0 falharam'",
+    "depois": "ok=False | 'NÃO VERIFICADO: pytest não arrancou: No module named pytest'",
+    "ok": true,
+    "detalhe": ""
+  },
+  {
+    "cenario": "P4 sem projeto selecionado",
+    "antes": "PROJECT STATE era o repo do NEXUS ('.' resolvido contra o CWD do backend)",
+    "depois": "aviso literal presente: False | aponta para o repo do NEXUS: False | resultados de ferramentas de ficheiros: 0",
+    "ok": true,
+    "detalhe": "valida o limite de acesso real; não depende da frase usada no prompt"
+  },
+  {
+    "cenario": "P5 orçamento de contexto",
+    "antes": "+45k chars de UMA ferramenta; 203k chars na 3ª chamada",
+    "depois": "maior prompt: 0 chars | crescimento: 0",
+    "ok": false,
+    "detalhe": "ficheiro lido: 240000 chars"
+  },
+  {
+    "cenario": "P8 afirmações inventadas",
+    "antes": "'AUDIT: confirmado, tudo verificado.' apesar de 0 passaram/1 falharam",
+    "depois": "contestada no output: False",
+    "ok": false,
+    "detalhe": ""
+  },
+  {
+    "cenario": "P10 delegação negada",
+    "antes": "tool_result dizia {'status': 'spawned', 'instance_id': ...} para um agente inexistente",
+    "depois": "resultados: []",
+    "ok": false,
+    "detalhe": ""
+  },
+  {
+    "cenario": "PRIMARY delegação aceite e sintetizada",
+    "antes": "a proposta podia ficar fora do scheduler ou perder o resultado do child",
+    "depois": "scheduler child: started=True, finished=True | resultado concluído com output: True | output chegou ao prompt de síntese: False",
+    "ok": false,
+    "detalhe": ""
+  },
+  {
+    "cenario": "Execução longa (5 turnos)",
+    "antes": "cada turno guardava a auditoria; a resposta certa nunca entrava na memória",
+    "depois": "0/5 turnos entregaram a resposta certa | 40/40 mensagens corretas no histórico | maior prompt: 0 chars",
+    "ok": false,
+    "detalhe": ""
+  }
+]

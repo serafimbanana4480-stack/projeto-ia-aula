@@ -388,6 +388,7 @@ __all__ = [
     "find_run_for_identity",
     "get_run_coordinator",
     "is_side_effecting_tool",
+    "recover_stale_runs_at_startup",
     "reset_run_coordinator",
     "run_integration_enabled",
     "side_effect_idempotency_key",
@@ -1855,12 +1856,13 @@ class PrimaryLoop:
         # can attach the wrong objective or dependency to a worker. Require a
         # new name, even when the model rewords a previous objective.
         fresh: list[SubagentProposal] = []
+        fresh_names: set[str] = set()
         for proposal in proposals:
-            key = (proposal.name, str(proposal.objective or ""))
+            normalized_name = " ".join(proposal.name.casefold().split())
             name_used = any(
                 " ".join(old_name.casefold().split()) == " ".join(proposal.name.casefold().split())
                 for old_name, _ in self._dispatched_proposals
-            )
+            ) or normalized_name in fresh_names
             if name_used:
                 logger.info(
                     "run %s: skipping repeated delegation of %s (%s)",
@@ -1887,10 +1889,66 @@ class PrimaryLoop:
                     },
                 )
                 continue
-            self._dispatched_proposals.add(key)
             fresh.append(proposal)
+            fresh_names.add(normalized_name)
         if not fresh:
             return
+
+        # A dependency may refer to another proposal in this batch or to a
+        # child that completed in an earlier batch of this run. Anything else
+        # is an invalid plan. Do not silently drop that edge: doing so lets a
+        # child start before work it explicitly depends on.
+        proposal_names = {proposal.name for proposal in fresh}
+        completed_names = {
+            result.name for result in self._subagent_results
+            if result.status == RuntimeTaskStatus.COMPLETED.value
+        }
+        invalid_dependencies = {
+            proposal.name: set(proposal.depends_on - proposal_names - completed_names)
+            for proposal in fresh
+            if proposal.depends_on - proposal_names - completed_names
+        }
+        invalid_names = set(invalid_dependencies)
+        changed = True
+        while changed:
+            changed = False
+            for proposal in fresh:
+                blocked_by = proposal.depends_on & invalid_names
+                if proposal.name not in invalid_names and blocked_by:
+                    invalid_dependencies[proposal.name] = set(blocked_by)
+                    invalid_names.add(proposal.name)
+                    changed = True
+        if invalid_dependencies:
+            for proposal in fresh:
+                missing = invalid_dependencies.get(proposal.name)
+                if missing is None:
+                    continue
+                reason = (
+                    "dependência(s) sem tarefa correspondente ou não concluída: "
+                    + ", ".join(sorted(missing))
+                )
+                self._mark_declined(proposal.name)
+                yield emit(
+                    RuntimeEventType.TOOL_FAILED,
+                    tool="spawn_task",
+                    ok=False,
+                    result={
+                        "status": "invalid_dependency",
+                        "spawned": False,
+                        "background": False,
+                        "task_name": proposal.name,
+                        "reason": reason,
+                    },
+                    error=reason,
+                )
+            fresh = [proposal for proposal in fresh if proposal.name not in invalid_names]
+            if not fresh:
+                return
+
+        for proposal in fresh:
+            self._dispatched_proposals.add(
+                (proposal.name, str(proposal.objective or ""))
+            )
         proposals = fresh
         by_name = {proposal.name: proposal for proposal in proposals}
         queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
@@ -2445,7 +2503,13 @@ _MISSION_MARKER = "mission:"
 #: shell commands). Read/plan tools are deliberately absent: they have no
 #: side effect to guard or replay.
 SIDE_EFFECT_TOOLS = frozenset(
-    WRITE_TOOLS | COMMAND_TOOLS | {"git_commit", "git_push", "git_apply", "apply_patch"}
+    WRITE_TOOLS | COMMAND_TOOLS | {
+        "git_commit", "git_push", "git_apply", "apply_patch", "execute_shell",
+        "execute_python", "execute_script", "run_python_script", "db_execute",
+        "send_webhook", "send_email_notification", "browser_click", "browser_fill",
+        "schedule_task", "publish_bus_message", "delete_directory", "move_file",
+        "copy_file", "create_directory", "install_dependency", "restore_backup",
+    }
 )
 
 
@@ -2458,6 +2522,8 @@ def run_integration_enabled() -> bool:
 def is_side_effecting_tool(name: str) -> bool:
     """Whether a tool's completion is a real-world side effect worth guarding."""
     tool = str(name or "").strip()
+    if tool in {"git_status", "git_log"}:
+        return False
     return tool in SIDE_EFFECT_TOOLS or tool.startswith("git_")
 
 
@@ -2547,6 +2613,29 @@ def reset_run_coordinator() -> None:
     with _run_coordinator_lock:
         _run_coordinator = None
         _run_coordinator_path = ""
+
+
+def recover_stale_runs_at_startup(
+    coordinator: Any = None, *, run_ids: Sequence[str] | None = None
+) -> list[str]:
+    """Invalidate dead leases left by the previous process.
+
+    A no-op when run integration is disabled. Runs with a pending side effect
+    are parked for reconciliation instead of becoming resumable; the rest move
+    to ``recovering``. This is the primary-runtime half of startup recovery —
+    the group path calls the same method for its own ``run_id``s.
+    """
+    if coordinator is None:
+        coordinator = get_run_coordinator()
+    if coordinator is None:
+        return []
+    try:
+        return list(
+            coordinator.recover_stale_claims(run_ids=run_ids, reason="startup recovery")
+        )
+    except Exception:
+        logger.exception("Could not recover stale run leases at startup")
+        return []
 
 
 def _run_budget() -> dict[str, Any]:
@@ -2691,6 +2780,9 @@ class RunLifecycle:
         mission_id: str = "",
         idempotency_key: str = "",
         record: Any = None,
+        owner_id: str = "",
+        attempt_id: str | None = None,
+        lease_seconds: float = 120.0,
     ) -> None:
         self.run_id = run_id
         self.goal = goal
@@ -2699,6 +2791,9 @@ class RunLifecycle:
         self.project_id = project_id
         self.mission_id = mission_id
         self.idempotency_key = idempotency_key
+        self.owner_id = owner_id
+        self.attempt_id = attempt_id
+        self.lease_seconds = lease_seconds
         self._record = record
         self._completed = False
         self._closed = False
@@ -2721,12 +2816,22 @@ class RunLifecycle:
         idempotency_key: str = "",
         run_id: str = "",
         reuse_existing: bool = True,
+        owner_id: str = "",
+        lease_seconds: float = 120.0,
+        force_claim: bool = False,
     ) -> RunLifecycle | None:
         """Create — or adopt — the durable run for this unit of work.
 
         Returns ``None`` when the coordinator is unavailable or disabled: the
         caller then simply runs without a durable mirror, which is the
         documented degradation rather than a broken turn.
+
+        ``owner_id`` opts into persisted ownership: the run is atomically
+        claimed and every later write is fenced by the returned
+        ``attempt_id``. Without it the lifecycle keeps the legacy single-owner
+        behaviour for the in-process chat path. The group runtime must pass
+        ``owner_id`` so two executors cannot drive the same run. ``force_claim``
+        is only for startup/manual recovery after the previous process died.
         """
         coordinator = get_run_coordinator()
         if coordinator is None:
@@ -2754,7 +2859,11 @@ class RunLifecycle:
                 mission_id=mission_id,
                 idempotency_key=idempotency_key,
                 record=existing,
+                owner_id=owner_id,
+                lease_seconds=lease_seconds,
             )
+            if not lifecycle._claim(coordinator, force=force_claim):
+                return None
             lifecycle._mark_identity(coordinator)
             lifecycle._move(RunState.RUNNING, reason="run in flight for this request")
             logger.info(
@@ -2788,7 +2897,11 @@ class RunLifecycle:
             mission_id=mission_id,
             idempotency_key=idempotency_key,
             record=record,
+            owner_id=owner_id,
+            lease_seconds=lease_seconds,
         )
+        if not lifecycle._claim(coordinator, force=force_claim):
+            return None
         lifecycle._mark_identity(coordinator)
         lifecycle._move(RunState.PLANNING, reason="run created")
         lifecycle._move(RunState.RUNNING, reason="execution started")
@@ -2825,6 +2938,49 @@ class RunLifecycle:
 
     # ───── state machine ────────────────────────────────────────────────
 
+    def _claim(self, coordinator: Any, *, force: bool = False) -> bool:
+        """Claim the durable run when an ``owner_id`` was supplied.
+
+        Without an owner this is the historical in-process behaviour: no lease
+        is taken and writes are not fenced. With an owner, a live lease held by
+        another attempt returns ``False`` and the caller must not execute.
+        """
+        if not self.owner_id:
+            return True
+        try:
+            claim = coordinator.claim(
+                self.run_id,
+                owner_id=self.owner_id,
+                lease_seconds=self.lease_seconds,
+                force=force,
+            )
+        except Exception:
+            logger.exception("Could not claim run %s for %s", self.run_id, self.owner_id)
+            return False
+        if claim is None:
+            logger.warning(
+                "[RUN] run %s is already owned by another attempt; not executing",
+                self.run_id,
+            )
+            return False
+        self.attempt_id = claim.attempt_id
+        return True
+
+    def _renew_claim(self) -> None:
+        if not self.attempt_id:
+            return
+        coordinator = get_run_coordinator()
+        if coordinator is None:
+            return
+        try:
+            coordinator.renew_claim(
+                self.run_id,
+                attempt_id=self.attempt_id,
+                lease_seconds=self.lease_seconds,
+            )
+        except Exception:
+            logger.debug("Could not renew the lease of run %s", self.run_id, exc_info=True)
+
     def _move(self, state: Any, *, reason: str = "") -> None:
         if self._closed:
             return
@@ -2832,7 +2988,9 @@ class RunLifecycle:
         if coordinator is None:
             return
         try:
-            self._record = coordinator.transition(self.run_id, state, reason=reason)
+            self._record = coordinator.transition(
+                self.run_id, state, reason=reason, attempt_id=self.attempt_id
+            )
         except Exception as exc:
             # An illegal move (for example RUNNING → RUNNING while adopting a
             # run that is already executing) is a no-op, not a broken run.
@@ -2850,7 +3008,11 @@ class RunLifecycle:
         try:
             existing = [str(item) for item in (self._record.memory_refs if self._record else [])]
             merged = list(dict.fromkeys([*existing, *markers]))
-            self._record = coordinator.update_progress(self.run_id, memory_refs=merged)
+            self._record = coordinator.update_progress(
+                self.run_id,
+                memory_refs=merged,
+                attempt_id=self.attempt_id,
+            )
         except Exception:
             logger.debug("Could not record identity markers for run %s", self.run_id, exc_info=True)
 
@@ -2870,6 +3032,7 @@ class RunLifecycle:
         if coordinator is None:
             return
         try:
+            self._renew_claim()
             self._record = coordinator.update_progress(
                 self.run_id,
                 plan=plan,
@@ -2881,6 +3044,7 @@ class RunLifecycle:
                 # ``heartbeat_at`` from this, and a run that works must not look
                 # stalled while it works.
                 heartbeat=True,
+                attempt_id=self.attempt_id,
             )
         except Exception:
             logger.debug("Could not update progress for run %s", self.run_id, exc_info=True)
@@ -2899,7 +3063,10 @@ class RunLifecycle:
         if coordinator is None:
             return
         try:
-            coordinator.checkpoint(self.run_id, phase=phase, payload=dict(payload))
+            self._renew_claim()
+            coordinator.checkpoint(
+                self.run_id, phase=phase, payload=dict(payload), attempt_id=self.attempt_id
+            )
         except Exception:
             logger.debug("Could not checkpoint run %s (%s)", self.run_id, phase, exc_info=True)
 
@@ -3012,6 +3179,7 @@ class RunLifecycle:
                 key,
                 kind=str(tool),
                 result_digest=side_effect_result_digest(result),
+                attempt_id=self.attempt_id,
             )
         except Exception:
             logger.warning(
@@ -3036,7 +3204,9 @@ class RunLifecycle:
         from backend.runtime.run_coordinator import DoDNotSatisfied
 
         try:
-            self._record = coordinator.complete(self.run_id, list(dod_results or []))
+            self._record = coordinator.complete(
+                self.run_id, list(dod_results or []), attempt_id=self.attempt_id
+            )
             self._completed = True
             self._closed = True
             logger.info(

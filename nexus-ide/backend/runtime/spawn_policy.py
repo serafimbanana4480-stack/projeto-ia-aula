@@ -92,6 +92,13 @@ class SpawnPolicy:
     def evaluate(self, proposal: SubagentProposal) -> SpawnDecision:
         failed: list[str] = []
 
+        if proposal.name in self.active_write_scopes:
+            return SpawnDecision(
+                verdict=SpawnVerdict.PRIMARY_AGENT_ONLY,
+                reason=f"worker name {proposal.name!r} is already active",
+                failed_conditions=("duplicate active worker name",),
+            )
+
         if not proposal.objective.strip():
             failed.append("no concrete objective")
         if not proposal.definition_of_done.strip():

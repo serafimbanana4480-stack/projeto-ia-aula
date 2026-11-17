@@ -10,6 +10,7 @@ import {
   isAuthenticated,
   isTokenValid,
   authHeaders,
+  authenticatedFetch,
   refreshAuth,
 } from "../../lib/auth";
 import { webSearch } from "../../lib/api";
@@ -172,6 +173,19 @@ describe("lib/auth", () => {
       const headers = authHeaders();
       expect(headers.Authorization).toBe("Bearer my-token");
     });
+  });
+
+  it("preserves an explicit audio content type in authenticated requests", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    const audio = new Blob(["audio"], { type: "audio/webm" });
+
+    await authenticatedFetch("/api/voice/transcribe", {
+      method: "POST",
+      headers: { "Content-Type": audio.type },
+      body: audio,
+    });
+
+    expect(new Headers(fetchSpy.mock.calls[0][1]?.headers).get("Content-Type")).toBe("audio/webm");
   });
 
   it("refreshes auth and retries the web search request after a 401", async () => {

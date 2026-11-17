@@ -8,7 +8,16 @@ This module provides comprehensive memory capabilities:
 - Intelligent memory retrieval
 """
 
-from .advanced_memory import AdvancedMemorySystem, MemoryItem, MemoryStatus, MemoryType
+#: ``MemoryItem`` was in this module's public ``__all__`` but never existed in
+#: ``advanced_memory`` — every import of ``backend.memory`` died with
+#: ``ImportError: cannot import name 'MemoryItem'``, which also broke
+#: ``backend.memory.memory_dashboard``, ``backend.memory.cross_session_memory``
+#: and ``backend.orchestrator.main_enhanced``.  The durable unit of this module
+#: is :class:`MemoryFragment`, so that is what the name resolves to.  No
+#: consumer in the tree imported ``MemoryItem``, so the public contract is
+#: unchanged for every caller that actually existed.
+from .advanced_memory import AdvancedMemorySystem, MemoryStatus, MemoryType
+from .advanced_memory import MemoryFragment as MemoryItem
 from .cross_session_memory import (
     CrossSessionMemory,
     CrossSessionMemoryManager,

@@ -2,10 +2,47 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 from uuid import uuid4
 
 from backend.persistence.db import get_db
+
+
+def participant_session(user_id: str, group_id: str, bot_id: str) -> str:
+    """Return a durable private runtime session for this group participant.
+
+    Group transcripts remain in the group tables; this separate session keeps
+    primary-runtime history out of the bot's private chat and other groups.
+    The stable id avoids a schema migration and survives process restarts.
+    """
+    if not user_id or not group_id or not bot_id:
+        raise ValueError("A sessão de grupo requer utilizador, grupo e bot.")
+    identity = json.dumps([user_id, group_id, bot_id], ensure_ascii=False).encode("utf-8")
+    session_id = "group-session-" + hashlib.sha256(identity).hexdigest()
+    with get_db() as conn:
+        member = conn.execute(
+            """SELECT p.name FROM bot_groups g
+               JOIN bot_group_members m ON m.group_id = g.id
+               JOIN bot_profiles p ON p.id = m.bot_id
+               WHERE g.id = ? AND g.user_id = ? AND p.id = ?
+                 AND p.user_id = ? AND p.deleted = 0""",
+            (group_id, user_id, bot_id, user_id),
+        ).fetchone()
+        if member is None:
+            raise ValueError("O bot já não pertence a este grupo.")
+        conn.execute(
+            """INSERT OR IGNORE INTO sessions (id, user_id, title, mode)
+               VALUES (?, ?, ?, '__bot_group__')""",
+            (session_id, user_id, f"Grupo: {member['name']}"),
+        )
+        session = conn.execute(
+            "SELECT user_id, mode FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if session is None or session["user_id"] != user_id or session["mode"] != "__bot_group__":
+            raise ValueError("Não foi possível isolar a sessão do bot no grupo.")
+    return session_id
 
 
 def _group(conn: Any, user_id: str, group_id: str) -> dict[str, Any] | None:
@@ -64,7 +101,8 @@ def get_messages(user_id: str, group_id: str, limit: int = 500) -> list[dict[str
         if _group(conn, user_id, group_id) is None:
             return None
         rows = conn.execute(
-            """SELECT id, role, content, bot_id, bot_name, created_at FROM bot_group_messages
+            """SELECT id, role, content, bot_id, bot_name, run_id, created_at
+               FROM bot_group_messages
                WHERE group_id = ? AND rowid IN
                  (SELECT rowid FROM bot_group_messages WHERE group_id = ? ORDER BY rowid DESC LIMIT ?)
                ORDER BY rowid ASC""", (group_id, group_id, limit),
@@ -87,7 +125,8 @@ def get_messages_page(user_id: str, group_id: str, limit: int,
                 raise ValueError("Cursor de mensagens inválido")
             cursor_rowid = cursor[0]
         rows = conn.execute(
-            """SELECT id, role, content, bot_id, bot_name, created_at FROM bot_group_messages
+            """SELECT id, role, content, bot_id, bot_name, run_id, created_at
+               FROM bot_group_messages
                WHERE group_id = ? AND (? IS NULL OR rowid < ?)
                ORDER BY rowid DESC LIMIT ?""",
             (group_id, cursor_rowid, cursor_rowid, limit + 1),
@@ -99,15 +138,25 @@ def get_messages_page(user_id: str, group_id: str, limit: int,
 
 
 def add_message(group_id: str, role: str, content: str, bot_id: str | None = None,
-                bot_name: str | None = None) -> dict[str, Any]:
+                bot_name: str | None = None, run_id: str | None = None) -> dict[str, Any]:
+    """Persist one group message, optionally tied to its execution run.
+
+    ``run_id`` is nullable so historical rows and callers that predate the
+    canonical execution identity keep working; new composer messages pass it so
+    a database reload can associate the message with its run without rebuilding
+    the link from side records.
+    """
     message_id = f"group-message-{uuid4().hex}"
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO bot_group_messages (id, group_id, role, content, bot_id, bot_name) VALUES (?, ?, ?, ?, ?, ?)",
-            (message_id, group_id, role, content, bot_id, bot_name),
+            "INSERT INTO bot_group_messages "
+            "(id, group_id, role, content, bot_id, bot_name, run_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (message_id, group_id, role, content, bot_id, bot_name, run_id),
         )
         conn.execute("UPDATE bot_groups SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?", (group_id,))
         return dict(conn.execute(
-            "SELECT id, role, content, bot_id, bot_name, created_at FROM bot_group_messages WHERE id = ?",
+            "SELECT id, role, content, bot_id, bot_name, run_id, created_at "
+            "FROM bot_group_messages WHERE id = ?",
             (message_id,),
         ).fetchone())

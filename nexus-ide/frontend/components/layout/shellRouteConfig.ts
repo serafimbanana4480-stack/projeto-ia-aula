@@ -7,6 +7,7 @@ const SHELL_EXCLUDED_PREFIXES = ["/login", "/analytics/history", "/analytics/rep
 
 const EXACT: Record<string, ShellConfig> = {
   "/dashboard": { title: "Dashboard", noPadding: true },
+  "/voice": { title: "NEXUS Voice", noPadding: true },
   "/bots": { title: "Bots", noPadding: true, showTopBar: false, showBottomHUD: false },
   "/dashboard/tasks": { title: "Tarefas", noPadding: true },
   "/dashboard/evolution": { title: "Evolução", noPadding: true },

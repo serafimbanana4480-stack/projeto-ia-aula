@@ -8,7 +8,13 @@ import httpx
 import pytest
 
 from backend.tests.conftest import make_stream_response
-from backend.tools.ollama_client import DEFAULT_LIMITS, ChatMessage, OllamaClient, OllamaError
+from backend.tools.ollama_client import (
+    CHAT_MAX_ATTEMPTS,
+    DEFAULT_LIMITS,
+    ChatMessage,
+    OllamaClient,
+    OllamaError,
+)
 
 
 class TestChatMessage:
@@ -477,7 +483,7 @@ class TestChatStream:
             with pytest.raises(OllamaError, match="completed without content"):
                 async for _ in client.chat_stream("m", [ChatMessage(role="user", content="q")]):
                     pass
-            assert sleeps == [15.0] * 9
+            assert sleeps == [15.0] * (CHAT_MAX_ATTEMPTS - 1)
         finally:
             await client.aclose()
 
@@ -533,10 +539,10 @@ class TestChatStream:
             with pytest.raises(OllamaError) as excinfo:
                 async for _ in client.chat_stream("m", [ChatMessage(role="user", content="q")]):
                     pass
-            assert "failed after 10 attempts" in str(excinfo.value)
+            assert f"failed after {CHAT_MAX_ATTEMPTS} attempts" in str(excinfo.value)
             assert "503" in str(excinfo.value)
-            assert calls == 10
-            assert sleeps == [15.0] * 9
+            assert calls == CHAT_MAX_ATTEMPTS
+            assert sleeps == [15.0] * (CHAT_MAX_ATTEMPTS - 1)
         finally:
             await client.aclose()
 
@@ -627,9 +633,9 @@ class TestRetryOnServerError:
             with pytest.raises(OllamaError) as excinfo:
                 async for _ in client.chat_stream("m", [ChatMessage(role="user", content="q")]):
                     pass
-            assert "failed after 10 attempts" in str(excinfo.value)
+            assert f"failed after {CHAT_MAX_ATTEMPTS} attempts" in str(excinfo.value)
             assert "HTTP 503" in str(excinfo.value)
-            assert sleeps == [15.0] * 9
+            assert sleeps == [15.0] * (CHAT_MAX_ATTEMPTS - 1)
         finally:
             await client.aclose()
 

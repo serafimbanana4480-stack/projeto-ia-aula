@@ -7,6 +7,7 @@ and reloaded on process restart. All metadata fields are preserved, including
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -99,6 +100,10 @@ class PersistentMemoryStore(MemoryStore):
         max_memories: int = 10_000,
     ) -> None:
         super().__init__(embedding_service=embedding_service, max_memories=max_memories)
+        # A failed write restores a snapshot of the in-memory index. Serialise
+        # mutations so that snapshot cannot overwrite a concurrent success.
+        self._mutation_lock = asyncio.Lock()
+        self._capacity_warning_logged = False
         self._ensure_schema()
         self._load_from_db()
 
@@ -155,8 +160,6 @@ class PersistentMemoryStore(MemoryStore):
         self,
         memory: Memory,
         user_id: str | None = None,
-        *,
-        evicted_memory_ids: tuple[str, ...] = (),
     ) -> None:
         owner_id = memory.user_id if user_id is None else user_id
         with sqlite3.connect(str(_db_path())) as conn:
@@ -187,9 +190,23 @@ class PersistentMemoryStore(MemoryStore):
                     memory.access_count,
                 ),
             )
-            for memory_id in evicted_memory_ids:
-                conn.execute("DELETE FROM persistent_memories WHERE id = ?", (memory_id,))
             conn.commit()
+
+    def _evict_least_important(self) -> str | None:
+        """Preserve durable memories rather than silently deleting history.
+
+        The current search index is wholly in memory, so retaining every memory
+        makes it searchable at the cost of growing RAM until paged retrieval is
+        implemented. ``max_memories`` is an advisory threshold for this store.
+        """
+        if not self._capacity_warning_logged:
+            logger.warning(
+                "Persistent memory exceeded its %d-entry advisory threshold; "
+                "all memories remain available and RAM usage may grow",
+                self._max_memories,
+            )
+            self._capacity_warning_logged = True
+        return None
 
     def _delete_from_db(self, memory_id: str, user_id: str | None = None) -> None:
         with sqlite3.connect(str(_db_path())) as conn:
@@ -288,47 +305,51 @@ class PersistentMemoryStore(MemoryStore):
     ) -> Memory:
         """Store a new memory and persist it to SQLite."""
         owner_id = user_id or self._user_for_session(session_id) or ""
-        memories_before = self._memories.copy()
-        index_before = self._index.copy()
-        try:
-            memory = await super().store(
-                content,
-                user_id=owner_id,
-                memory_type=memory_type,
-                session_id=session_id,
-                project_id=project_id,
-                tags=tags,
-                source=source,
-                summary=summary,
-                importance=importance,
-                file_path=file_path,
-                language=language,
-                kind=kind,
-                related_memory_ids=related_memory_ids,
-            )
-            evicted_ids = tuple(memories_before.keys() - self._memories.keys())
-            self._save_memory(memory, evicted_memory_ids=evicted_ids)
-        except Exception:
-            self._memories = memories_before
-            self._index = index_before
-            raise
+        async with self._mutation_lock:
+            memories_before = self._memories.copy()
+            index_before = self._index.copy()
+            try:
+                memory = await super().store(
+                    content,
+                    user_id=owner_id,
+                    memory_type=memory_type,
+                    session_id=session_id,
+                    project_id=project_id,
+                    tags=tags,
+                    source=source,
+                    summary=summary,
+                    importance=importance,
+                    file_path=file_path,
+                    language=language,
+                    kind=kind,
+                    related_memory_ids=related_memory_ids,
+                )
+                self._save_memory(memory)
+            except Exception:
+                self._memories = memories_before
+                self._index = index_before
+                raise
         return memory
 
     async def delete(self, memory_id: str, *, user_id: str | None = None) -> bool:
-        result = await super().delete(memory_id, user_id=user_id)
-        if result:
-            self._delete_from_db(memory_id, user_id=user_id)
-        return result
+        async with self._mutation_lock:
+            result = await super().delete(memory_id, user_id=user_id)
+            if result:
+                self._delete_from_db(memory_id, user_id=user_id)
+            return result
 
     async def clear_session(self, session_id: str) -> int:
-        memories = await self.get_session_memories(session_id)
-        count = await super().clear_session(session_id)
-        for mem in memories:
-            self._delete_from_db(mem.memory_id)
-        return count
+        async with self._mutation_lock:
+            memories = await self.get_session_memories(session_id)
+            count = await super().clear_session(session_id)
+            for mem in memories:
+                self._delete_from_db(mem.memory_id)
+            return count
 
     def stats(self, *, user_id: str | None = None) -> dict[str, Any]:
         stats = super().stats(user_id=user_id)
+        stats["configured_memory_threshold"] = self._max_memories
+        stats["max_capacity"] = None
         stats["persistent_db"] = str(_db_path())
         return stats
 
@@ -337,7 +358,7 @@ class PersistentMemoryStore(MemoryStore):
         if kwargs.get("user_id") is None:
             session_id = str(kwargs.get("session_id") or "")
             if session_id:
-                kwargs["user_id"] = self._user_for_session(session_id) or "__unowned_session__"
+                kwargs["user_id"] = self._user_for_session(session_id) or f"__session__:{session_id}"
         results = await super().search(*args, **kwargs)
         for memory, _score in results:
             try:
@@ -360,6 +381,7 @@ class PersistentMemoryStore(MemoryStore):
         project_id: str = "",
         *,
         user_id: str | None = None,
+        memory_type: MemoryType | None = None,
         max_tokens: int = 4000,
         top_k: int = 5,
     ) -> str:
@@ -372,6 +394,7 @@ class PersistentMemoryStore(MemoryStore):
             session_id=session_id,
             project_id=project_id,
             user_id=owner_id,
+            memory_type=memory_type,
             max_tokens=max_tokens,
             top_k=top_k,
         )

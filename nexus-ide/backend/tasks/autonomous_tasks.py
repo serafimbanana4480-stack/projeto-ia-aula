@@ -18,7 +18,7 @@ Recovery contract (see :mod:`backend.tasks.handler_registry`):
 * A recovered task whose handler is not registered in this build fails
   explicitly and is never silently retried or dropped.
 
-Execution is exactly-once per persisted task:
+Execution uses a durable claim for persisted tasks:
 
 * the persisted row is flipped to ``running`` by an atomic conditional UPDATE
   *before* the handler runs, so a crash can never be mistaken for "never
@@ -660,10 +660,6 @@ class TaskScheduler:
             if not task.handler and not task.handler_name:
                 raise ValueError("Task handler is required")
 
-        self.tasks[task.task_id] = task
-        self.stats["total_tasks"] += 1
-        self.stats["scheduled_tasks"] += 1
-
         now = datetime.now()
         task.updated_at = now
         if task.scheduled_at is not None and task.scheduled_at > now:
@@ -671,6 +667,15 @@ class TaskScheduler:
             task.status = TaskStatus.SCHEDULED
         else:
             task.status = TaskStatus.PENDING
+
+        # Persist before exposing the task to the queue or announcing it.  A
+        # failed write cannot safely produce a supposedly recoverable task.
+        save_scheduled_task(task.to_dict())
+
+        self.tasks[task.task_id] = task
+        self.stats["total_tasks"] += 1
+        self.stats["scheduled_tasks"] += 1
+        if task.status == TaskStatus.PENDING:
             self.task_queue.append(task)
 
         # Sort queue by priority then due time.
@@ -681,11 +686,6 @@ class TaskScheduler:
 
         await self._emit_task_event("task_scheduled", task)
         logger.info(f"Task scheduled: {task.name} ({task.task_id})")
-
-        try:
-            save_scheduled_task(task.to_dict())
-        except Exception as e:
-            logger.warning("Failed to persist task %s: %s", task.task_id, e)
 
         return task.task_id
 
@@ -766,6 +766,8 @@ class TaskScheduler:
             await self._emit_task_event("task_failed", task)
             return "unregistered"
 
+        original_state = dict(task.__dict__)
+        original_state["metadata"] = dict(task.metadata)
         if not task.handler:
             task.handler = self.handler_registry.resolve_callable(handler_name)
 
@@ -779,28 +781,30 @@ class TaskScheduler:
         task.metadata.pop("interrupted", None)
         task.metadata["recovered_state"] = "requeued"
         task.metadata["requeued_at"] = datetime.now().isoformat()
-        self._quarantined.discard(task_id)
-        if task in self.completed_tasks:
-            self.completed_tasks.remove(task)
-        if task in self.failed_tasks:
-            self.failed_tasks.remove(task)
-
         now = datetime.now()
         if task.scheduled_at is not None and task.scheduled_at > now:
             task.status = TaskStatus.SCHEDULED
         else:
             task.status = TaskStatus.PENDING
+
+        try:
+            save_scheduled_task(task.to_dict())
+        except Exception:
+            task.__dict__.update(original_state)
+            raise
+
+        self._quarantined.discard(task_id)
+        if task in self.completed_tasks:
+            self.completed_tasks.remove(task)
+        if task in self.failed_tasks:
+            self.failed_tasks.remove(task)
+        if task.status == TaskStatus.PENDING:
             if task not in self.task_queue:
                 self.task_queue.append(task)
             self.task_queue.sort(key=lambda t: (
                 self._get_priority_value(t.priority),
                 t.scheduled_at or now,
             ))
-
-        try:
-            save_scheduled_task(task.to_dict())
-        except Exception as e:
-            logger.warning("Failed to persist requeued task %s: %s", task_id, e)
 
         await self._emit_task_event("task_scheduled", task)
         logger.info(f"Task requeued: {task.name} ({task_id})")
@@ -947,8 +951,8 @@ class TaskScheduler:
 
         # Durable claim: the persisted row flips to 'running' *before* the
         # handler is invoked. That single conditional UPDATE is what makes
-        # execution exactly-once -- it tells a restart (and any other worker
-        # sharing this database) that this task already started.
+        # an overlapping execution less likely -- it tells a restart (and any
+        # other worker sharing this database) that this task already started.
         if not await self._claim_execution(task):
             self._defer_claimed_elsewhere(task)
             return
@@ -999,14 +1003,15 @@ class TaskScheduler:
         Returns ``True`` when this worker owns the run. ``False`` means another
         worker already started this task, or it already finished. A task that
         is not persisted at all (in-memory only) has nothing to claim and is
-        allowed through, as is a database failure: availability over a strict
-        guarantee the queue already made.
+        allowed through. A database failure leaves ownership unknown, so it
+        must not start the handler.
         """
         placeholders = ", ".join("?" for _ in _CLAIMABLE_DB_STATUSES)
         statement = (
             "UPDATE scheduled_tasks SET status = 'running', started_at = ?, "
             f"updated_at = ? WHERE id = ? AND status IN ({placeholders})"
         )
+        task.metadata.pop("claim_error", None)
         try:
             with get_db() as conn:
                 now = datetime.now().isoformat()
@@ -1023,20 +1028,22 @@ class TaskScheduler:
                 return persisted is None
         except Exception as e:
             logger.warning("Failed to claim task %s for execution: %s", task.task_id, e)
-            return True
+            task.metadata["claim_error"] = "database unavailable"
+            return False
 
     def _defer_claimed_elsewhere(self, task: Task) -> None:
         """Park a task another worker owns so it is not re-queued forever."""
         task.status = TaskStatus.WAITING
         task.updated_at = datetime.now()
-        task.metadata["claimed_elsewhere"] = task.updated_at.isoformat()
+        if "claim_error" not in task.metadata:
+            task.metadata["claimed_elsewhere"] = task.updated_at.isoformat()
         self._quarantined.add(task.task_id)
         self.task_queue = [t for t in self.task_queue if t is not task]
         # Drop our own execution wrapper: it is about to return.
         self._running_asyncio.pop(task.task_id, None)
         logger.warning(
-            "Task %s (%s) not executed: its persisted row is already running "
-            "elsewhere or finished (duplicate-run guard)", task.name, task.task_id,
+            "Task %s (%s) not executed: claim unavailable, already held, or finished "
+            "(duplicate-run guard)", task.name, task.task_id,
         )
 
     async def _invoke_handler(self, task: Task) -> Any:
@@ -1118,7 +1125,17 @@ class TaskScheduler:
         # before the (possibly 300s) backoff. The backoff runs in a detached
         # task rather than blocking this coroutine.
         if task.auto_retry and task.retry_count < task.max_retries:
-            self._start_retry(task)
+            entry = self.handler_registry.resolve(task.handler_name) if self.handler_registry else None
+            # A failure or timeout can occur after an external effect.  Only a
+            # registered read-only handler may be retried without reconciliation.
+            # A live callable cannot borrow the classification of another handler.
+            if entry and entry.read_only and (task.handler is None or task.handler == entry.call):
+                self._start_retry(task)
+            else:
+                logger.warning(
+                    "Task %s not automatically retried: handler may have applied effects; "
+                    "reconcile before requeue", task.task_id,
+                )
         elif task.retry_count >= task.max_retries:
             logger.error(
                 "Task failed permanently after %d attempt(s): %s (%s)",

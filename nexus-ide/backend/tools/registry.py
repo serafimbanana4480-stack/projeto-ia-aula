@@ -783,6 +783,40 @@ def _path_is_within_project(
         return False
 
 
+#: Tools that declare ``project_path``/``cwd`` yet must keep working with no
+#: project selected. Their scope is the authenticated session, the owning user
+#: or the configured global skill roots — never a workspace folder — so the
+#: absence of a project must not disable them. Every other tool that declares a
+#: workspace root needs one.
+_PROJECT_INDEPENDENT_TOOLS = frozenset(
+    {
+        # Session/user-scoped memory and delegation.
+        "store_memory",
+        "consult_agent",
+        "spawn_task",
+        # Skills: file-backed roots are global, and learned skills live in the
+        # per-user store, so discovery, loading, authoring, promotion and
+        # outcome reporting are all project-independent by design.
+        "list_skills",
+        "load_skill",
+        "discover_skill_candidates",
+        "build_skill",
+        "promote_skill",
+        "report_skill_outcome",
+    }
+)
+
+#: One message for every "this needs a folder and none is selected" refusal.
+#: It names the action the user must take instead of inventing a cause, and it
+#: is the same text the system addon uses, so the model, the tool result and
+#: the chat agree on why the call did not run.
+_NO_PROJECT_TOOLS_MESSAGE = (
+    "Nenhum projeto está selecionado, por isso esta ferramenta não tem uma pasta "
+    "autorizada onde trabalhar. Seleciona o projeto na barra superior e volta a "
+    "enviar o pedido."
+)
+
+
 def _apply_trusted_project_scope(
     name: str,
     spec: ToolSpec,
@@ -837,16 +871,26 @@ def _apply_trusted_project_scope(
     else:
         # With no selected project, a provider-supplied path cannot establish
         # project identity. Fail closed instead of letting the handler default
-        # to the server's current directory. A few session-scoped tools
+        # to the server's current directory: an unqualified relative path
+        # resolved there would silently read or write the process CWD, which
+        # the user never chose as a working folder. A few session-scoped tools
         # intentionally carry an empty trusted project_path.
+        if name not in _PROJECT_INDEPENDENT_TOOLS and (
+            "project_path" in properties or "cwd" in properties
+        ):
+            return _NO_PROJECT_TOOLS_MESSAGE
         if "project_path" in properties and name not in {
             "store_memory",
             "consult_agent",
             "spawn_task",
         }:
-            if isinstance(args.get("project_path"), str) and args["project_path"].strip():
-                return "A trusted project must be selected before using this tool."
-            args.pop("project_path", None)
+            raw_pp = args.get("project_path")
+            if isinstance(raw_pp, str) and raw_pp.strip() in {".", "./", ".\\"}:
+                args.pop("project_path", None)
+            elif isinstance(raw_pp, str) and raw_pp.strip():
+                return _NO_PROJECT_TOOLS_MESSAGE
+            else:
+                args.pop("project_path", None)
 
         if (
             name == "execute_script"
@@ -854,12 +898,16 @@ def _apply_trusted_project_scope(
             and isinstance(args.get("path"), str)
             and args["path"].strip()
         ):
-            return "A trusted project must be selected before executing a script."
+            return _NO_PROJECT_TOOLS_MESSAGE
 
         if "cwd" in properties:
-            if isinstance(args.get("cwd"), str) and args["cwd"].strip():
-                return "A trusted project must be selected before setting a working directory."
-            args.pop("cwd", None)
+            raw_cwd = args.get("cwd")
+            if isinstance(raw_cwd, str) and raw_cwd.strip() in {"", ".", "./", ".\\"}:
+                args.pop("cwd", None)
+            elif isinstance(raw_cwd, str) and raw_cwd.strip():
+                return _NO_PROJECT_TOOLS_MESSAGE
+            else:
+                args.pop("cwd", None)
 
     return None
 
@@ -893,7 +941,8 @@ def _project_confinement_error(
     Absolute-path tools only applied the system-directory blocklist, so a
     path under the user profile but outside the selected project was read or
     written. An empty project is not an implicit root: the caller must select
-    one. Paths inside the selected project are unchanged.
+    one, for a relative path as much as for an absolute one. Paths inside the
+    selected project are unchanged.
     """
     keys = _PROJECT_CONFINED_PATH_KEYS.get(name)
     if not keys or not isinstance(args, dict):
@@ -911,9 +960,12 @@ def _project_confinement_error(
         return None
     root = str(project_path or "").strip()
     if not root:
+        # An empty project is not an implicit root. Both a relative and an
+        # absolute path are refused: a relative one would resolve against the
+        # server's current working directory, which the user never authorised,
+        # and an absolute one would open an arbitrary host location.
         return (
-            "A trusted project must be selected before this tool can use a path. "
-            "Select the project and send the request again."
+            f"{_NO_PROJECT_TOOLS_MESSAGE} Nenhum caminho foi usado."
         )
     for candidate in supplied:
         if not _path_is_within_project(candidate, root, relative_to_project=True):
@@ -1015,8 +1067,11 @@ _SENTINEL_LOCAL_READ_ONLY_TOOLS = frozenset(
         "get_system_health",
         "get_session_status",
         "todo_list",
+        "todo_write",
         "list_skills",
+        "load_skill",
         "discover_skill_candidates",
+        "report_skill_outcome",
         "browser_extract_text",
         "browser_get_links",
         "tts_status",
@@ -1996,7 +2051,12 @@ def _sentinel_assessment(
                 if isinstance(value, str) and value.strip()
             )
 
-    if name in _SENTINEL_PROJECT_READ_PATH_KEYS or name in _SENTINEL_ABSOLUTE_READ_PATH_KEYS:
+    if (
+        name in _SENTINEL_PROJECT_READ_PATH_KEYS
+        or name in _SENTINEL_ABSOLUTE_READ_PATH_KEYS
+        or name in _SENTINEL_LOCAL_READ_ONLY_TOOLS
+        or name in _SENTINEL_EXTERNAL_READ_TOOLS
+    ):
         # A read does not affect the target file. Treating read paths as
         # affected files made any path containing a word such as "live" look
         # like a production write and strand the agent behind an approval
@@ -2063,13 +2123,22 @@ def _run_budget_coordinator() -> Any | None:
 
     path = str(db.DB_PATH)
     if _budget_coordinator is None or _budget_coordinator_path != path:
-        from backend.runtime.run_coordinator import RunCoordinator
-
+        coordinator = None
         try:
-            _budget_coordinator = RunCoordinator()
+            from backend.runtime.primary import get_run_coordinator
+
+            coordinator = get_run_coordinator()
         except Exception:
-            logger.debug("[TOOL BUDGET] run coordinator unavailable", exc_info=True)
-            return None
+            coordinator = None
+        if coordinator is None or str(getattr(coordinator, "db_path", "")) != path:
+            try:
+                from backend.runtime.run_coordinator import RunCoordinator
+
+                coordinator = RunCoordinator()
+            except Exception:
+                logger.debug("[TOOL BUDGET] run coordinator unavailable", exc_info=True)
+                return None
+        _budget_coordinator = coordinator
         _budget_coordinator_path = path
     return _budget_coordinator
 
@@ -2159,10 +2228,8 @@ def side_effect_replay(name: str, args: Any) -> dict[str, Any] | None:
     Returns the tool's response when this exact action was already confirmed
     for the active run, so the handler is not called a second time.
 
-    Every coordinator failure is fail-open **for the ledger only**: a tool whose
-    ledger cannot be read still runs, because refusing to work is worse than a
-    possible duplicate. Nothing here can weaken the budget block above, which
-    returns before this point.
+    Reserve an intent atomically before invoking the handler. A pending intent
+    means the external outcome is unknown, so it cannot be retried safely.
     """
     from backend.runtime.primary import is_side_effecting_tool
     from backend.runtime.run_context import get_current_run_id
@@ -2172,14 +2239,14 @@ def side_effect_replay(name: str, args: Any) -> dict[str, Any] | None:
         return None
     try:
         key = _side_effect_key(name, run_id, args)
-    except Exception:
-        logger.debug("[SIDE EFFECT] could not derive the key for %s", name, exc_info=True)
-        return None
-    coordinator = _run_budget_coordinator()
-    if coordinator is None:
-        return None
-    try:
-        already = bool(coordinator.is_side_effect_confirmed(run_id, key))
+        coordinator = _run_budget_coordinator()
+        if coordinator is None:
+            raise RuntimeError("ledger unavailable")
+        if coordinator.reserve_side_effect(run_id, key, kind=name):
+            return None
+        row = coordinator.get_side_effect(run_id, key)
+        if row is None:
+            raise RuntimeError("reserved action disappeared")
     except Exception as exc:
         logger.warning(
             "[SIDE EFFECT] could not check the ledger for %s in run %s: %s",
@@ -2187,9 +2254,16 @@ def side_effect_replay(name: str, args: Any) -> dict[str, Any] | None:
             run_id,
             exc,
         )
-        return None
-    if not already:
-        return None
+        return _typed_tool_response(
+            name, ok=False, error="Side-effect ledger unavailable; execution blocked.",
+            error_category="side_effect_ledger_unavailable",
+        )
+    if row.get("status") != "confirmed":
+        return _typed_tool_response(
+            name, ok=False,
+            error="A previous attempt has an unknown outcome; reconcile it before retrying.",
+            error_category="side_effect_outcome_unknown", idempotency_key=key,
+        )
     logger.info(
         "[SIDE EFFECT] %s already confirmed in run %s (%s); execution skipped",
         name,
@@ -2210,7 +2284,7 @@ def side_effect_replay(name: str, args: Any) -> dict[str, Any] | None:
     )
 
 
-def record_side_effect(name: str, args: Any, result: Any) -> None:
+def record_side_effect(name: str, args: Any, result: Any) -> bool:
     """Record a completed side effect so a replay is recognised as done.
 
     Called only after the handler reported success. The outcome is digested —
@@ -2225,23 +2299,24 @@ def record_side_effect(name: str, args: Any, result: Any) -> None:
 
     run_id = get_current_run_id()
     if not run_id or not is_side_effecting_tool(name):
-        return
+        return True
     try:
         key = _side_effect_key(name, run_id, args)
         payload = result.get("result") if isinstance(result, dict) else None
         digest = side_effect_result_digest(payload if payload is not None else result)
     except Exception:
         logger.debug("[SIDE EFFECT] could not digest the result of %s", name, exc_info=True)
-        return
+        return False
     coordinator = _run_budget_coordinator()
     if coordinator is None:
-        return
+        return False
     try:
-        coordinator.record_side_effect(run_id, key, kind=name, result_digest=digest)
+        return bool(coordinator.confirm_side_effect(run_id, key, result_digest=digest))
     except Exception as exc:
         logger.warning(
             "[SIDE EFFECT] could not record %s for run %s: %s", key, run_id, exc
         )
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -2496,6 +2571,8 @@ async def execute_tool(
     sentinel_enforced: bool = False,
     allowed_tools: Iterable[str] | None = None,
     failure_scope: str | None = None,
+    memory_session_only: bool = False,
+    auto_accept: bool = False,
 ) -> dict:
     trusted_allowed_tools = (
         frozenset(str(tool).strip() for tool in allowed_tools if str(tool).strip())
@@ -2571,6 +2648,19 @@ async def execute_tool(
                 error="A trusted authenticated user context is required for this tool.",
                 error_category="auth_context_missing",
             )
+    if name in {"recall_context", "store_memory"}:
+        # The model cannot choose another project's memory namespace. Bot
+        # sessions additionally have a private, project-independent namespace.
+        args["project_id"] = (
+            "" if memory_session_only or (
+                name == "store_memory" and args.get("memory_type") == "global"
+            ) else str(project_path or "")
+        )
+        if memory_session_only:
+            args["memory_type"] = "session"
+            if name == "store_memory":
+                args["project_goal"] = False
+                args["decision_key"] = ""
     if name in {"store_memory", "consult_agent", "spawn_task"} and isinstance(args, dict):
         # Project continuity writes and delegated agents may only target the
         # project root selected by the authenticated chat request. A
@@ -2733,6 +2823,32 @@ async def execute_tool(
     if (
         (enforce_confirmation and needs_confirmation) or sentinel_requires_approval
     ) and not confirmed:
+        irreversible = name in {
+            "delete_file",
+            "delete_file_absolute",
+            "delete_directory",
+            "delete_dir_absolute",
+            "move_file",
+            "move_file_absolute",
+            "git_push",
+            "restore_backup",
+        }
+        in_project_scope = bool(project_path) and not _project_confinement_error(
+            name, args, project_path
+        )
+        if (
+            auto_accept
+            and in_project_scope
+            and not irreversible
+            and name not in {"mcp_builder", "mcp_call_tool"}
+        ):
+            confirmed = True
+            needs_confirmation = False
+            sentinel_requires_approval = False
+
+    if (
+        (enforce_confirmation and needs_confirmation) or sentinel_requires_approval
+    ) and not confirmed:
         from backend.tools.confirmations import create_confirmation
 
         confirmation_id = await create_confirmation(
@@ -2789,20 +2905,13 @@ async def execute_tool(
             budget_usage=budget_block.get("usage", {}),
         )
 
-    # Side-effect idempotency, immediately before the handler runs and before
-    # the cache: a cached hit would hide the replay, and the whole point is that
-    # a second identical write inside one run is *reported* as a replay instead
-    # of being served from a previous execution. Every lane reaches this line,
-    # which is what makes the guarantee lane-agnostic.
-    replay = side_effect_replay(name, args)
-    if replay is not None:
-        return replay
-
     # Check cache for idempotent tools (only after confirmation is satisfied).
     # The cache is scoped by session (and by project root for the path
     # tools): the result of a read depends on who asked and on which project
     # was selected, so two sessions must never share an entry.
-    if _HAVE_TOOL_CACHE:
+    from backend.runtime.primary import is_side_effecting_tool
+
+    if _HAVE_TOOL_CACHE and not is_side_effecting_tool(name):
         try:
             cache = get_tool_cache()
             scope = {
@@ -2824,6 +2933,11 @@ async def execute_tool(
                 )
         except Exception:
             pass  # Cache is best-effort
+
+    # Reserve immediately before handler invocation, after any cache hit.
+    replay = side_effect_replay(name, args)
+    if replay is not None:
+        return replay
 
     timeout_seconds = (
         float(spec.timeout_seconds)
@@ -2896,6 +3010,15 @@ async def execute_tool(
             response["dropped_arguments"] = dropped_names
         if sentinel_gate:
             response["sentinel_gate"] = sentinel_gate
+        if not record_side_effect(name, args, result):
+            # The handler may already have changed the world. Never report a
+            # confirmed success or automatically retry when persistence fails.
+            return _typed_tool_response(
+                name, ok=False,
+                error="Action returned successfully but its outcome could not be recorded; reconcile before retrying.",
+                error_category="side_effect_outcome_unknown",
+                duration_ms=duration_ms,
+            )
         log_tool_execution(
             session_id=session_id,
             tool_name=name,
@@ -2904,10 +3027,6 @@ async def execute_tool(
             success=True,
             duration_ms=duration_ms,
         )
-        # Record the confirmed side effect only now that the handler really
-        # succeeded: a failed, timed-out or rejected call must not close the
-        # ledger entry a replay would be measured against.
-        record_side_effect(name, args, result)
         if _HAVE_TOOL_CACHE:
             try:
                 cache = get_tool_cache()

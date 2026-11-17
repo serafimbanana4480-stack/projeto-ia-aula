@@ -85,6 +85,7 @@ const createNextConfig = (phase) => ({
       "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob: https://imgs.search.brave.com",
+      "media-src 'self' blob:",
       "font-src 'self' data:",
       `connect-src 'self' ${apiUrl} ${wsUrl}`,
       "worker-src 'self' blob:",

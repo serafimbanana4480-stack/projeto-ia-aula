@@ -4,6 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { request } = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock("../../../lib/auth", () => ({ authenticatedFetch: request }));
 vi.mock("../../../lib/api", () => ({ apiUrl: (path: string) => path }));
+vi.mock("../../../lib/bots", () => ({
+  listBots: vi.fn(async () => []),
+  createBot: vi.fn(),
+  updateBot: vi.fn(),
+  removeBot: vi.fn(),
+  getRoomMemory: vi.fn(async () => ({ pins: [], seen: {} })),
+  updateRoomMemory: vi.fn(async () => ({ pins: [], seen: {} })),
+}));
 import GroupWorkspace from "../../../components/bots/GroupWorkspace";
 
 const bots = ["Pixel", "Atlas"].map((name, i) => ({ id: `b${i}`, session_id: `s${i}`, name, description: "", instructions: "", provider: "lmstudio", model: `model${i}`, archived: false, last_message: null, last_active_at: "" }));
@@ -35,7 +43,7 @@ describe("GroupWorkspace", () => {
     const second = { id: "m2", role: "assistant", content: "Resposta partilhada", bot_id: "b0", bot_name: "Pixel", created_at: "now" };
     const frames = [ { type: "user_message", message: first }, { type: "agent_started", bot_id: "b0", bot_name: "Pixel" }, { type: "token", content: "Resposta partilhada" }, { type: "agent_message", message: second }, { type: "done", status: "completed" } ].map((item) => `data: ${JSON.stringify(item)}\n\n`).join("");
     const stream = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(frames)); controller.close(); } });
-    request.mockResolvedValueOnce(json({ groups: [group] })).mockResolvedValueOnce(json({ messages: [] })).mockResolvedValueOnce(json({ runs: [] })).mockResolvedValueOnce({ ok: true, body: stream }).mockResolvedValueOnce(json({ messages: [first, second] })).mockResolvedValueOnce(json({ groups: [group] }));
+    request.mockResolvedValueOnce(json({ groups: [group] })).mockResolvedValueOnce(json({ messages: [] })).mockResolvedValueOnce(json({ runs: [] })).mockResolvedValueOnce({ ok: true, body: stream }).mockResolvedValueOnce(json({ messages: [first, second] })).mockResolvedValueOnce(json({ runs: [{ id: "r1", status: "completed", request: "Olá", project_root: "", file_path: "", tasks: [], records: [] }] })).mockResolvedValueOnce(json({ groups: [group] }));
     render(<GroupWorkspace bots={bots} onBack={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /Equipa/ }));
     const input = await screen.findByRole("textbox", { name: "Mensagem para o grupo" });

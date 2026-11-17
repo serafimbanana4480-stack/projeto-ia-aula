@@ -15,8 +15,7 @@ const RIGHT_KEY = "nexus:right-open";
 /**
  * Chat route — conversation-first layout (Claude Code / ChatGPT / Grok).
  *
- * - The conversation is centred: `width: min(100% - 64px, 1080px)`,
- *   `margin-inline: auto`, so ultrawide never pins content to the left.
+ * - The conversation uses the available space between the two rails.
  * - Left sidebar collapses to a 68px icon-rail (owned by Sidebar).
  * - Right side is a Context Rail: open = 320px of collapsible modules,
  *   closed = 56px mini-rail ([AI][◉n][%][$]) that re-opens on click.
@@ -113,7 +112,7 @@ export default function HomePage() {
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden">
           <div
-            className="mx-auto flex min-h-0 w-full min-w-0 max-w-[1280px] flex-1 flex-col"
+            className="flex min-h-0 w-full min-w-0 flex-1 flex-col"
           >
             <ChatPanel
               rightOpen={contextOpen}

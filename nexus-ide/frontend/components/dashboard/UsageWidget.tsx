@@ -273,7 +273,7 @@ export default function UsageWidget() {
         {/* Big stat cards */}
         <div className="mt-4 grid grid-cols-2 gap-3">
           <div className="nx-inset min-w-0 rounded-xl p-3.5">
-            <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-nexus-faint">
+            <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-nexus-faint">
               <Coins className="h-3 w-3" />
               <span>Total de tokens</span>
             </div>
@@ -295,7 +295,7 @@ export default function UsageWidget() {
             <Meter value={outShare} tone="accent" showThresholds={false} height={4} className="mt-2" />
           </div>
           <div className="nx-inset min-w-0 rounded-xl p-3.5">
-            <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-nexus-faint">
+            <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-nexus-faint">
               <DollarSign className="h-3 w-3" />
               <span>Custo estimado</span>
             </div>
@@ -325,7 +325,7 @@ export default function UsageWidget() {
         <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
           {/* Model pie chart */}
           <div>
-            <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+            <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-nexus-faint">
               <BarChart3 className="h-3 w-3" />
               Por modelo
             </div>
@@ -361,7 +361,7 @@ export default function UsageWidget() {
                       }}
                     />
                     <Legend
-                      wrapperStyle={{ fontSize: "10px", color: "#a4a6b8" }}
+                      wrapperStyle={{ fontSize: "11px", color: "var(--nx-text-faint)" }}
                       formatter={(value: string) => (
                         <span className="text-[10px] text-nexus-muted">{value}</span>
                       )}
@@ -381,7 +381,7 @@ export default function UsageWidget() {
 
           {/* Provider ranking */}
           <div>
-            <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+            <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-nexus-faint">
               <Layers className="h-3 w-3" />
               Top providers
             </div>

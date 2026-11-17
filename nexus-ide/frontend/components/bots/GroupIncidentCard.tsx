@@ -39,7 +39,7 @@ export default function GroupIncidentCard({
             <span className="rounded-full border border-rose-300/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-rose-100">
               {count} {count === 1 ? "ocorrência" : "ocorrências"}
             </span>
-            <span className="text-[11px] text-rose-100/80">Estado: falhou</span>
+            <span className="text-[11px] text-rose-100/80">Erro de turno; o estado da sala vem do run</span>
           </div>
           <p className="mt-2 text-sm leading-6 text-zinc-100">{explanation}</p>
           <p className="mt-2 text-xs leading-5 text-zinc-400">
@@ -89,7 +89,11 @@ export default function GroupIncidentCard({
                   <p className="font-medium text-zinc-100">
                     {index + 1}. {message.bot_name || "Agente sem nome"} · {message.id}
                   </p>
-                  <p className="text-zinc-500">{message.created_at || "Hora desconhecida"}</p>
+                  <p className="text-zinc-500">
+                    {message.created_at || "Hora desconhecida"}
+                    {message.run_id ? ` · run ${message.run_id.slice(0, 12)}` : ""}
+                    {typeof message.seq === "number" ? ` · seq ${message.seq}` : ""}
+                  </p>
                   <p className="mt-1 whitespace-pre-wrap break-words">{message.content}</p>
                 </li>
               ))}

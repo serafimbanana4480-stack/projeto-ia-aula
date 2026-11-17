@@ -10,8 +10,7 @@ Provides a :class:`SessionLifecycleManager` that can:
 * Clean up orphan artifacts (unreferenced agent_states, whiteboard
   entries that no longer belong to any active session, …).
 * Remove temporary files in ``data/temp/`` older than 24 h.
-* Apply the run-state retention window (``run_state``, ``run_checkpoints``,
-  ``run_side_effects``, ``run_dead_letters`` and ``scheduled_tasks``).
+* Provide explicit run-state retention for administrators.
 * Report session stats.
 
 The manager also runs an optional background asyncio loop that
@@ -122,9 +121,8 @@ class SessionLifecycleManager:
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._running = False
-        # Run-state retention: the durable run tables and the scheduled-task
-        # queue grow forever unless somebody applies the retention window.
-        # The background loop below is that "somebody" (see _prune_run_state).
+        # Keep the configured windows for explicit retention operations.
+        # Background maintenance does not remove durable history.
         self._run_retention_days = (
             run_retention_days if run_retention_days is not None else DEFAULT_RUN_RETENTION_DAYS
         )
@@ -189,7 +187,7 @@ class SessionLifecycleManager:
         logger.info("Session GC background loop stopped")
 
     async def _run_loop(self) -> None:
-        """Periodically run garbage collection and the run-state retention."""
+        """Periodically inventory stale sessions without deleting history."""
         self._running = True
         try:
             while not self._stop_event.is_set():
@@ -200,14 +198,6 @@ class SessionLifecycleManager:
                     await self.run_gc(allow_destructive=False)
                 except Exception:
                     logger.exception("Session GC cycle failed")
-                try:
-                    # Retention for the durable run tables. Without this the
-                    # run state, its checkpoints, its side effects, its dead
-                    # letters and the scheduled-task queue grow forever:
-                    # RunCoordinator.prune() had no production caller.
-                    self._maybe_prune_run_state()
-                except Exception:
-                    logger.exception("Run-state retention failed")
                 # Wait for the configured interval (or until a stop signal)
                 try:
                     await asyncio.wait_for(

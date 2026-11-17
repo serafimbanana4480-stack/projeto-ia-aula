@@ -142,6 +142,10 @@ export async function authenticatedFetch(
   const request = () => {
     const headers = new Headers(init.headers);
     for (const [key, value] of Object.entries(authHeaders())) {
+      // Keep an explicit request content type (for example audio/webm). The
+      // auth defaults should only supply JSON when the caller has not chosen
+      // a different body format.
+      if (key.toLowerCase() === "content-type" && headers.has(key)) continue;
       headers.set(key, value);
     }
     return fetch(input, { ...init, headers });

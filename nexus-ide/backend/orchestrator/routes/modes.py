@@ -185,11 +185,29 @@ async def execute_tool_endpoint(
             ),
         )
 
+    # The endpoint has no project of its own: a retry from the UI is scoped to
+    # the folder the caller's session is authorised for, which the tool layer
+    # resolves from the process CWD. An absolute path therefore still needs a
+    # selected project, and the registry refuses it instead of silently
+    # writing to the server's working directory.
+    session_project = ""
+    try:
+        from backend.persistence.db import get_project, get_session_for_user
+
+        session = get_session_for_user(req.session_id, user_id) or {}
+        project_id = str(session.get("project_id") or "").strip()
+        if project_id:
+            project = get_project(project_id) or {}
+            session_project = str(project.get("path") or "").strip()
+    except Exception:
+        logger.debug("Could not resolve the session project for a tool retry", exc_info=True)
+
     return await execute_tool(
         req.tool_name,
         req.session_id,
         req.args,
         user_id=user_id,
+        project_path=session_project,
         confirmed=approved_retry,
         enforce_confirmation=True,
         retry_confirmation=True,

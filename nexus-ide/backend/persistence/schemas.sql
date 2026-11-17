@@ -191,14 +191,30 @@ CREATE TABLE IF NOT EXISTS bot_group_members (
 CREATE TABLE IF NOT EXISTS bot_group_messages (
     id TEXT PRIMARY KEY,
     group_id TEXT NOT NULL REFERENCES bot_groups(id) ON DELETE CASCADE,
-    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'error')),
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'error', 'coordinator', 'decision')),
     content TEXT NOT NULL,
     bot_id TEXT,
     bot_name TEXT,
+    run_id TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_bot_group_messages ON bot_group_messages(group_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_bot_group_messages_run ON bot_group_messages(group_id, run_id);
 
+CREATE TABLE IF NOT EXISTS bot_room_memory (
+    owner TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    seen_signature TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (owner, item_id)
+);
+
+-- ``status`` on both tables is a projection for the UI/legacy executor. The
+-- primary runtime's ``run_state.state`` remains the authority for a ``primary``
+-- execution. ``lease_attempt_id``/``attempt_id`` are fencing tokens: every
+-- claim rotates them, so a stale attempt is rejected even when it reuses the
+-- same ``worker_id``. ``attempt`` is only the retry counter.
 CREATE TABLE IF NOT EXISTS bot_group_runs (
     id TEXT PRIMARY KEY,
     group_id TEXT NOT NULL REFERENCES bot_groups(id),
@@ -207,9 +223,16 @@ CREATE TABLE IF NOT EXISTS bot_group_runs (
     project_root TEXT NOT NULL,
     file_path TEXT NOT NULL,
     status TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    execution_engine TEXT NOT NULL DEFAULT 'legacy_file',
+    lease_owner TEXT,
+    lease_attempt_id TEXT,
+    lease_expires_at TEXT,
+    stop_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_bot_group_runs_owner ON bot_group_runs(user_id, group_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_bot_group_runs_status ON bot_group_runs(status, updated_at DESC);
 CREATE TABLE IF NOT EXISTS bot_group_run_tasks (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES bot_group_runs(id),
@@ -221,8 +244,20 @@ CREATE TABLE IF NOT EXISTS bot_group_run_tasks (
     status TEXT NOT NULL,
     result TEXT,
     error TEXT,
+    error_class TEXT,
+    worker_id TEXT,
+    claimed_at TEXT,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    attempt_id TEXT,
+    lease_expires_at TEXT,
+    finished_at TEXT,
+    effect_key TEXT,
+    effect_kind TEXT,
+    effect_evidence_json TEXT NOT NULL DEFAULT '[]',
     UNIQUE(run_id, position)
 );
+CREATE INDEX IF NOT EXISTS idx_bot_group_run_tasks_run_status
+    ON bot_group_run_tasks(run_id, status);
 CREATE TABLE IF NOT EXISTS bot_group_run_records (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES bot_group_runs(id),
@@ -665,6 +700,10 @@ CREATE TABLE IF NOT EXISTS run_state (
     usage_subagents        INTEGER NOT NULL DEFAULT 0,
     usage_runtime_seconds  REAL NOT NULL DEFAULT 0.0,
     usage_provider_calls   INTEGER NOT NULL DEFAULT 0,
+    owner_id               TEXT NOT NULL DEFAULT '',
+    attempt_id             TEXT,
+    lease_expires_at       TEXT,
+    reconciliation_json    TEXT,
     created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     heartbeat_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -696,8 +735,8 @@ CREATE INDEX IF NOT EXISTS idx_run_checkpoints_run_created ON run_checkpoints(ru
 CREATE INDEX IF NOT EXISTS idx_run_checkpoints_run_phase ON run_checkpoints(run_id, phase, created_at DESC);
 
 -- ---------------------------------------------------------------------------
--- RUN SIDE EFFECTS — idempotency ledger. UNIQUE(run_id, idempotency_key) makes
--- a replayed side effect a no-op instead of a second real-world action.
+-- RUN SIDE EFFECTS — durable intent and confirmed outcome. Pending entries
+-- require reconciliation; they do not prove whether an external action happened.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS run_side_effects (
@@ -706,6 +745,7 @@ CREATE TABLE IF NOT EXISTS run_side_effects (
     idempotency_key TEXT NOT NULL,
     kind            TEXT NOT NULL DEFAULT '',
     result_digest   TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('pending','confirmed')),
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (run_id, idempotency_key),
     FOREIGN KEY (run_id) REFERENCES run_state(run_id) ON DELETE CASCADE

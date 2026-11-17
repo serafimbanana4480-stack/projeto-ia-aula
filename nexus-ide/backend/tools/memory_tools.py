@@ -115,7 +115,9 @@ async def recall_context(
             query,
             user_id=user_id,
             session_id=session_id or None,
-            project_id=project_id or None,
+            # An empty project is an explicit scope, not an administrative
+            # wildcard: project-bound memories must stay in their project.
+            project_id=project_id,
             memory_type=mem_type,
             top_k=min(top_k, 10),
             min_similarity=_MIN_RECALL_SIMILARITY,

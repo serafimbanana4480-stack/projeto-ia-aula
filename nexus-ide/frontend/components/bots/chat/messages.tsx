@@ -17,8 +17,32 @@ function toolStatus(status: ToolCallItem["status"]): string {
   return "Resultado desconhecido";
 }
 
-export function ToolActivity({ tools }: { tools: ToolCallItem[] }) {
+function formatToolDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1).replace(".", ",")} s`;
+}
+
+export function ToolActivity({
+  tools,
+  onConfirm,
+  onReject,
+}: {
+  tools: ToolCallItem[];
+  onConfirm?: (confirmationId: string) => void;
+  onReject?: (confirmationId: string) => void;
+}) {
+  const [resolving, setResolving] = useState<string | null>(null);
   if (tools.length === 0) return null;
+  const resolve = (confirmationId: string, approved: boolean) => {
+    setResolving(confirmationId);
+    try {
+      if (approved) onConfirm?.(confirmationId);
+      else onReject?.(confirmationId);
+    } finally {
+      window.setTimeout(() => setResolving((current) => (current === confirmationId ? null : current)), 1500);
+    }
+  };
   return (
     <details data-testid="tool-call" className="mb-3 overflow-hidden rounded-xl border border-[color:var(--nx-line)] bg-[color:var(--nx-bg)]">
       <summary className="cursor-pointer list-none px-3 py-2 text-[12px] font-medium text-[color:var(--nx-text-dim)] [&::-webkit-details-marker]:hidden">
@@ -27,14 +51,42 @@ export function ToolActivity({ tools }: { tools: ToolCallItem[] }) {
       <ul className="space-y-2 border-t border-[color:var(--nx-line)] px-3 py-2.5">
         {tools.map((tool) => {
           const path = typeof tool.args?.path === "string" ? tool.args.path : "";
+          const awaiting = tool.status === "awaiting_confirmation" && Boolean(tool.confirmationId);
+          const busy = Boolean(tool.confirmationId) && resolving === tool.confirmationId;
           return (
             <li key={tool.id} className="text-[12px] leading-5">
               <span className="flex items-start justify-between gap-3">
                 <span className="break-all font-medium text-[color:var(--nx-text)]">{tool.name}</span>
-                <span className={tool.status === "error" ? "shrink-0 text-[color:var(--nx-rose)]" : "shrink-0 text-[color:var(--nx-text-faint)]"}>{toolStatus(tool.status)}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {typeof tool.durationMs === "number" && tool.status !== "running" && tool.status !== "awaiting_confirmation" ? (
+                    <span className="text-[color:var(--nx-text-faint)]">{formatToolDuration(tool.durationMs)}</span>
+                  ) : null}
+                  <span className={tool.status === "error" ? "text-[color:var(--nx-rose)]" : tool.status === "awaiting_confirmation" ? "text-[color:var(--nx-amber)]" : "text-[color:var(--nx-text-faint)]"}>{toolStatus(tool.status)}</span>
+                </span>
               </span>
               {path ? <span className="mt-0.5 block break-all text-[color:var(--nx-text-faint)]">{path}</span> : null}
               {tool.error ? <span className="mt-1 block whitespace-pre-wrap text-[color:var(--nx-rose)]">{tool.error}</span> : null}
+              {awaiting ? (
+                <span className="mt-2 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => resolve(String(tool.confirmationId), true)}
+                    className="rounded-lg bg-[color:var(--nx-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
+                  >
+                    Confirmar
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => resolve(String(tool.confirmationId), false)}
+                    className="rounded-lg border border-[color:var(--nx-line-strong)] px-3 py-1.5 text-[12px] font-medium text-[color:var(--nx-text-dim)] hover:bg-[color:var(--nx-surface-3)] disabled:opacity-50"
+                  >
+                    Recusar
+                  </button>
+                  {busy ? <span className="text-[11px] text-[color:var(--nx-text-faint)]">A enviar…</span> : null}
+                </span>
+              ) : null}
             </li>
           );
         })}
@@ -59,6 +111,8 @@ export function DirectMessage({
   onQuote,
   onRegenerate,
   onReply,
+  onConfirmTool,
+  onRejectTool,
 }: {
   message: ChatMessage;
   author?: string;
@@ -67,6 +121,8 @@ export function DirectMessage({
   onQuote?: (text: string) => void;
   onRegenerate?: () => void;
   onReply?: () => void;
+  onConfirmTool?: (confirmationId: string) => void;
+  onRejectTool?: (confirmationId: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const theme = useThemeStore((state) => state.theme);
@@ -83,7 +139,7 @@ export function DirectMessage({
   };
   return (
     <article className={`nx-bot-msg group flex ${mine ? "justify-end" : "justify-start"}`}>
-      <div className={mine ? "max-w-[min(100%,34rem)]" : "flex w-full max-w-full gap-3"}>
+      <div className={mine ? "min-w-0 max-w-[min(100%,42rem)]" : "flex w-full min-w-0 max-w-full gap-3"}>
         {!mine && <IdentityMark id={authorId || author || "bot"} name={author || "Bot"} size={32} labelled />}
         <div
           className={mine
@@ -98,7 +154,7 @@ export function DirectMessage({
             </div>
           )}
           {mine && <p className="mb-1 text-[10px] font-medium uppercase tracking-[0.14em] text-[color:var(--nx-text-faint)]">Tu</p>}
-          <ToolActivity tools={tools} />
+          <ToolActivity tools={tools} onConfirm={onConfirmTool} onReject={onRejectTool} />
           {message.content ? (
             <div className="min-w-0 break-words text-[15px] leading-7">
               <AssistantMarkdown text={message.content} theme={theme === "light" ? "light" : "dark"} />
@@ -145,7 +201,7 @@ export function GroupTurn({
   const hue = hueFromSeed(botId || name);
   return (
     <article className={`nx-bot-msg group flex ${mine ? "justify-end" : "justify-start"}`}>
-      <div className={mine ? "max-w-[min(100%,34rem)]" : "flex w-full gap-3"}>
+      <div className={mine ? "min-w-0 max-w-[min(100%,42rem)]" : "flex w-full min-w-0 gap-3"}>
         {!mine && <IdentityMark id={botId || name} name={name} size={32} labelled />}
         <div
           className={mine ? "rounded-2xl rounded-br-md bg-[color:var(--nx-surface-3)] px-3.5 py-2.5" : "min-w-0 flex-1 border-l-2 pl-3"}

@@ -2713,7 +2713,7 @@ export default function ChatPanel({
           background: "radial-gradient(ellipse at 50% 0%, color-mix(in srgb, var(--nx-accent) 5%, transparent), transparent 55%)",
         }}
       >
-      <div className="nx-conversation-column mx-auto w-full max-w-[860px] px-4 sm:px-8">
+      <div className="nx-conversation-column mx-auto w-full min-w-0 px-4 sm:px-6 lg:px-8">
         {/* Live temporal status — above the list, not just a spinner */}
         {livePhase && (
           <div className="mb-3 flex justify-start" aria-live="polite" role="status" data-testid="live-phase-pill">
@@ -3047,7 +3047,7 @@ export default function ChatPanel({
             <ArrowDown className="h-4 w-4" aria-hidden="true" />
           </button>
         )}
-      <div className="mx-auto w-full max-w-[860px] px-3 sm:px-8">
+      <div className="mx-auto w-full min-w-0 px-3 sm:px-6 lg:px-8">
         {sessions.initialized && !sessionId && (
           <div
             className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-nexus-accent3"

@@ -350,19 +350,19 @@ async def test_no_project_direct_turn_keeps_general_tools_but_blocks_project_too
     )
     policy = _tool_policy_context(direct, has_project=False)
     allowed = set(policy["_allowed_tools"])
-    assert {"web_search", "fetch_url", "search_docs", "mcp_list_tools"} <= allowed
-    assert not {
+    assert {
+        "web_search",
+        "fetch_url",
+        "search_docs",
+        "mcp_list_tools",
         "read_file",
-        "read_file_absolute",
-        "write_file",
-        "write_file_absolute",
-        "run_shell",
-        "run_tests",
+        "list_dir",
         "search_codebase",
-    } & allowed
+        "run_shell",
+        "store_memory",
+    } <= allowed
     assert "_fast_chat_lane" not in policy
-    assert "selecione o projeto" in policy["_system_addon"]
-    assert "não substituas essa inspeção por pesquisa web" in policy["_system_addon"]
+    assert "todas as ferramentas" in policy["_system_addon"].lower()
     assert _uses_project_runtime_tools(direct, has_project=False) is False
 
     from backend.agents.base import AgentRequest
@@ -384,11 +384,17 @@ async def test_no_project_direct_turn_keeps_general_tools_but_blocks_project_too
         schema["function"]["name"]
         for schema in agent._openai_tool_schemas(only=frozenset(allowed)) or []
     }
-    assert "web_search" in advertised
-    assert "read_file" not in advertised
+    assert {
+        "web_search",
+        "read_file",
+        "list_dir",
+        "search_codebase",
+        "run_shell",
+        "store_memory",
+    } <= advertised
 
     direct_read = triage_request("lê o README", requested_mode="coder", has_project=False)
-    assert "read_file" not in _tool_policy_context(
+    assert "read_file" in _tool_policy_context(
         direct_read, has_project=False
     )["_allowed_tools"]
 
@@ -401,13 +407,9 @@ async def test_no_project_direct_turn_keeps_general_tools_but_blocks_project_too
 
     no_project_conversation = triage_request("tás aí?", has_project=False)
     conversational_policy = _tool_policy_context(no_project_conversation, has_project=False)
-    assert conversational_policy["_allowed_tools"] == ()
     assert conversational_policy["_fast_chat_lane"] is True
-    assert "responde normalmente" in conversational_policy["_system_addon"]
-    assert (
-        "não digas que estás em modo de leitura"
-        in conversational_policy["_system_addon"].casefold()
-    )
+    assert "read_file" in conversational_policy["_allowed_tools"]
+    assert "não há projeto ativo" in conversational_policy["_system_addon"].casefold()
 
 
 def test_primary_signal_timeout_reads_env_safely(

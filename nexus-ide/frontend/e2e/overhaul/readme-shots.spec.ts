@@ -1,10 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 
 const shotsDir = process.env.README_SHOTS_DIR
-  ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../docs/screenshots");
+  ?? path.resolve(process.cwd(), "../../docs/screenshots");
 
 async function shot(page: Page, name: string) {
   fs.mkdirSync(shotsDir, { recursive: true });
@@ -44,12 +43,25 @@ test.describe("readme screenshots", () => {
     await expect(page.getByRole("heading", { name: "Definições" })).toBeVisible();
     await shot(page, "settings-desktop");
 
+    await page.goto("/editor");
+    await expect(page.getByText("Workspace de edição")).toBeVisible();
+    await expect(page.getByText("Nenhum ficheiro encontrado nesta pasta.")).toBeVisible();
+    await shot(page, "editor-desktop");
+
     await page.goto("/bots");
     await page.getByRole("button", { name: /FORGE/ }).click();
     await expect(page.getByText("parse(input: string)")).toBeVisible();
     await page.getByText("Atividade · 1 chamada").click();
     await expect(page.getByText("read_file")).toBeVisible();
     await shot(page, "bot-desktop");
+
+    await page.setViewportSize({ width: 1440, height: 1600 });
+    await page.getByRole("button", { name: "Editar bot" }).click();
+    await expect(page.getByRole("dialog", { name: "Editar bot" })).toBeVisible();
+    await page.getByText("Capacidades", { exact: true }).scrollIntoViewIfNeeded();
+    await expect(page.getByRole("switch").first()).toBeVisible();
+    await shot(page, "bot-capabilities-desktop");
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     await openGroup(page, /^123/);
     await expect(page.getByTestId("group-incident")).toHaveCount(1);

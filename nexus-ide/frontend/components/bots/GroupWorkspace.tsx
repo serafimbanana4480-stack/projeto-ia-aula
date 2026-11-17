@@ -6,22 +6,46 @@ import { ArrowLeft, PanelRight, Plus, Users, X } from "lucide-react";
 import { apiUrl } from "../../lib/api";
 import { authenticatedFetch } from "../../lib/auth";
 import type { Bot } from "../../lib/bots";
-import { groupEquivalentErrors, type GroupTranscriptMessage } from "../../lib/groupIncidents";
+import { groupEquivalentErrors, groupRoleLabel, mergeGroupMessages, transcriptRunId, type GroupTranscriptMessage } from "../../lib/groupIncidents";
 import { AssistantMarkdown } from "../chat/MessageBubble";
 import { useThemeStore } from "../../stores/themeStore";
+import { useProjectStore } from "../../stores/projectStore";
 import GroupIncidentCard from "./GroupIncidentCard";
 import ContextTabs from "./chat/ContextTabs";
 import { ParticipantStrip, RunCard } from "./chat/collaboration";
 import { IdentityMark, StackedMarks } from "./chat/identity";
 import { RoomComposer } from "./chat/Composer";
 import { DayRule, GroupTurn, HandoffRule, JumpToLatest, TypingRow } from "./chat/messages";
-import { focusRun, previousAgentSpeaker, quoteDraft, runIsHot, type RoomRun } from "./chat/model";
+import {
+  GroupStreamOrder,
+  associatedRun,
+  executionPhase,
+  mergeRuns,
+  previousAgentSpeaker,
+  quoteDraft,
+  runIdentity,
+  runIsActive,
+  runIsHot,
+  withStreamEnvelope,
+  type RoomRun,
+} from "./chat/model";
 import { RosterRow, RosterSearch, SectionLabel } from "./chat/Roster";
 import { useRoomMemory } from "./chat/storage";
 
 type Group = { id: string; name: string; bot_ids: string[]; last_message: string | null };
 type GroupMessage = GroupTranscriptMessage;
-type GroupEvent = { type: string; message?: GroupMessage; bot_id?: string; bot_name?: string; content?: string; status?: string; reason?: string };
+type GroupEvent = {
+  type: string;
+  message?: GroupMessage;
+  bot_id?: string;
+  bot_name?: string;
+  content?: string;
+  status?: string;
+  state?: string;
+  reason?: string;
+  run_id?: string;
+  seq?: number;
+};
 
 async function groupRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await authenticatedFetch(apiUrl(path), init);
@@ -33,14 +57,14 @@ async function groupRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return await response.json() as T;
 }
 
-function executionLabel(busy: boolean, status: string, failed: boolean, runStatus: string | null): string {
-  if (busy || runStatus === "running" || runStatus === "pending") return "Em execução";
-  if (runStatus === "cancelling") return "A cancelar";
-  if (/paragem/i.test(status) || runStatus === "cancelled") return "Cancelada";
-  if (/conclu/i.test(status) || runStatus === "completed") return "Concluída";
-  if (/interrompid|falh|erro/i.test(status) || failed || runStatus === "failed" || runStatus === "interrupted") return "Falhou";
-  if (status.trim()) return status;
-  return "Em espera";
+function doneStatusText(status: string | undefined, reason: string | undefined): string {
+  switch (status) {
+    case "completed": return "Conversa concluída.";
+    case "partial": return "Conversa interrompida por falha de um bot. Vê as mensagens e volta a tentar.";
+    case "unresolved": return reason ? `${reason} As respostas já emitidas ficam guardadas.` : "A conversa terminou sem consenso.";
+    case "rejected": return "A mensagem foi rejeitada antes de iniciar uma execução.";
+    default: return reason ? `${reason} As respostas já emitidas ficam guardadas.` : "A conversa terminou sem confirmação de sucesso.";
+  }
 }
 
 export default function GroupWorkspace({
@@ -58,6 +82,10 @@ export default function GroupWorkspace({
 }) {
   const theme = useThemeStore((state) => state.theme);
   const memory = useRoomMemory();
+  const currentProject = useProjectStore((state) => state.currentProject);
+  const projects = useProjectStore((state) => state.projects);
+  const loadProjects = useProjectStore((state) => state.loadProjects);
+  const setCurrentProject = useProjectStore((state) => state.setCurrentProject);
   const [groups, setGroups] = useState<Group[]>([]);
   const [groupsLoading, setGroupsLoading] = useState(true);
   const [selected, setSelected] = useState("");
@@ -81,6 +109,12 @@ export default function GroupWorkspace({
   const [listOpen, setListOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [runs, setRuns] = useState<RoomRun[]>([]);
+  const [runsLoading, setRunsLoading] = useState(false);
+  const [runsUnavailable, setRunsUnavailable] = useState(false);
+  const [streamRunId, setStreamRunId] = useState<string | null>(null);
+  const [streamState, setStreamState] = useState<string | null>(null);
+  const [connectionLost, setConnectionLost] = useState(false);
+  const [runAction, setRunAction] = useState<{ id: string; kind: "resume" | "cancel" } | null>(null);
   const [query, setQuery] = useState("");
   const [away, setAway] = useState(false);
   const [unseen, setUnseen] = useState(0);
@@ -91,17 +125,27 @@ export default function GroupWorkspace({
   const seenCount = useRef(0);
   const preserveHeight = useRef<number | null>(null);
   const activeGroup = useRef("");
+  const runRequestTicket = useRef(0);
   const selectedGroup = groups.find((group) => group.id === selected);
   const configured = bots.filter((bot) => !bot.archived && bot.provider && bot.model);
   const listedBots = bots.filter((bot) => !bot.archived);
   const conversationOpen = Boolean(selected || creating);
   const timeline = useMemo(() => groupEquivalentErrors(messages), [messages]);
   const lastUser = [...messages].reverse().find((message) => message.role === "user") ?? null;
-  const endsInFailure = timeline.length > 0 && timeline[timeline.length - 1]?.kind === "incident";
-  const active = runs.find((run) => run.status === "running" || run.status === "pending" || run.status === "cancelling");
-  const runStatus = active?.status ?? runs[0]?.status ?? null;
-  const phase = executionLabel(busy, status, endsInFailure, runStatus);
-  const currentRun = focusRun(runs);
+  const latestRunId = transcriptRunId(messages);
+  const currentRun = associatedRun(runs, busy ? (streamRunId ?? latestRunId) : latestRunId);
+  const executing = Boolean(currentRun && runIsActive(currentRun));
+  const phase = executionPhase({
+    // While the new POST is starting, the previous terminal run must not label
+    // the room. Once the SSE envelope names the new run, it becomes the source.
+    run: busy && !streamRunId ? null : currentRun,
+    streamState,
+    streamRunId,
+    streaming: busy,
+    historyLoading: loading || runsLoading,
+    runsUnavailable,
+    hasConversation: messages.length > 0,
+  });
   const search = query.trim().toLocaleLowerCase("pt");
   const visibleGroups = groups.filter((group) => `${group.name} ${group.last_message ?? ""}`.toLocaleLowerCase("pt").includes(search));
   const pinnedGroups = visibleGroups.filter((group) => memory.pins.includes(group.id));
@@ -113,10 +157,36 @@ export default function GroupWorkspace({
   const refreshMessages = useCallback(async (groupId: string, resetPage = true) => {
     const data = await groupRequest<{ messages: GroupMessage[]; has_more?: boolean; next_before?: string | null }>(`/api/bot-groups/${encodeURIComponent(groupId)}/messages`);
     if (activeGroup.current === groupId) {
-      setMessages((current) => { const recent = new Set(data.messages.map((item) => item.id)); return [...current.filter((item) => !recent.has(item.id)), ...data.messages]; });
+      const incoming = Array.isArray(data.messages) ? data.messages : [];
+      setMessages((current) => mergeGroupMessages(current, incoming));
       if (resetPage) { setHasMore(Boolean(data.has_more)); setBefore(data.next_before ?? null); }
     }
   }, []);
+  const refreshRuns = useCallback(async (groupId: string) => {
+    // A stale response must never replace a newer snapshot: every request gets
+    // a ticket and only the latest ticket may write.
+    const ticket = runRequestTicket.current + 1;
+    runRequestTicket.current = ticket;
+    try {
+      const data = await groupRequest<{ runs: RoomRun[] }>(`/api/bot-groups/${encodeURIComponent(groupId)}/runs`);
+      if (activeGroup.current !== groupId || ticket !== runRequestTicket.current) return;
+      const incoming = Array.isArray(data.runs) ? data.runs : [];
+      setRuns((current) => mergeRuns(current, incoming));
+      setRunsUnavailable(false);
+    } catch {
+      // Keep the last known runs. A transport error is not a failed run, and
+      // clearing the snapshot is what made a terminal room fall back to
+      // "Em espera" after a reload.
+      if (activeGroup.current !== groupId || ticket !== runRequestTicket.current) return;
+      setRunsUnavailable(true);
+    } finally {
+      if (activeGroup.current === groupId && ticket === runRequestTicket.current) setRunsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadProjects().catch(() => { /* the selector stays empty; the run explains a missing project */ });
+  }, [loadProjects]);
 
   useEffect(() => {
     if (!initialGroupId) return;
@@ -133,27 +203,27 @@ export default function GroupWorkspace({
   useEffect(() => {
     activeGroup.current = selected;
     setMessages([]); setError(""); setPartial(null); setHistoryReady(false); setStatus(""); setHasMore(false); setBefore(null); setRuns([]); setAway(false); setUnseen(0); follow.current = true;
+    setRunsLoading(Boolean(selected)); setRunsUnavailable(false); setStreamRunId(null); setStreamState(null); setConnectionLost(false); setRunAction(null);
+    runRequestTicket.current += 1;
     if (!selected) return;
     const wide = typeof window.matchMedia === "function" && window.matchMedia("(min-width: 1440px)").matches;
     setContextOpen(wide);
     setListOpen(false);
     let alive = true;
-    let timer = 0;
     setLoading(true);
-    const pullRuns = () => {
-      void groupRequest<{ runs: RoomRun[] }>(`/api/bot-groups/${encodeURIComponent(selected)}/runs`)
-        .then((data) => {
-          if (!alive || activeGroup.current !== selected) return;
-          setRuns(data.runs);
-          if (runIsHot(data.runs) && !timer) timer = window.setInterval(() => { if (alive) pullRuns(); }, 3000);
-          if (!runIsHot(data.runs) && timer) { window.clearInterval(timer); timer = 0; }
-        })
-        .catch(() => { if (alive && activeGroup.current === selected) setRuns([]); });
-    };
     void refreshMessages(selected).then(() => { if (alive) setHistoryReady(true); }).catch((reason) => { if (alive) setError(reason instanceof Error ? reason.message : "Não foi possível carregar o histórico."); }).finally(() => { if (alive) setLoading(false); });
-    pullRuns();
-    return () => { alive = false; if (timer) window.clearInterval(timer); };
-  }, [selected, refreshMessages, historyAttempt]);
+    void refreshRuns(selected);
+    return () => { alive = false; };
+  }, [selected, refreshMessages, refreshRuns, historyAttempt]);
+
+  // Poll only while an execution is live (or a stream is open). Terminal
+  // rooms do not need a timer, and a failed poll keeps the previous snapshot.
+  useEffect(() => {
+    if (!selected) return;
+    if (!busy && !runIsHot(runs)) return;
+    const timer = window.setInterval(() => { void refreshRuns(selected); }, 3000);
+    return () => window.clearInterval(timer);
+  }, [selected, busy, runs, refreshRuns]);
 
   useEffect(() => {
     if (!selectedGroup) return;
@@ -202,21 +272,81 @@ export default function GroupWorkspace({
     finally { setSaving(false); }
   }
 
+  async function cancelRun(run: RoomRun | null) {
+    // While a new POST is starting, the old run must not be cancelled: only
+    // the live SSE envelope or the settled/visible run can name the target.
+    const target = streamRunId ?? (busy ? null : run ? runIdentity(run) : null);
+    if (!target) return;
+    setRunAction({ id: target, kind: "cancel" });
+    setStatus("Paragem pedida. O estado final vem do run.");
+    try {
+      const response = await authenticatedFetch(apiUrl(`/api/bot-groups/${encodeURIComponent(selected)}/runs/${encodeURIComponent(target)}/cancel`), { method: "POST" });
+      const payload = await response.json().catch(() => null) as { detail?: string; status?: string; cancelled?: boolean } | null;
+      if (payload?.status) setStreamState(payload.status);
+      if (payload?.detail) setStatus(payload.detail);
+      else if (!response.ok && response.status === 404) setStatus("O run já não está disponível para cancelamento; a ligação foi fechada.");
+    } catch {
+      // The cancel request is a courtesy: the SSE disconnect is the fallback.
+      // A transport failure does not turn the run into a failure.
+      setStatus("Não foi possível confirmar a paragem por HTTP. A ligação foi fechada; o estado vem do run.");
+    } finally {
+      setRunAction(null);
+      if (selected) void refreshRuns(selected);
+    }
+  }
+
+  function requestStop() {
+    void cancelRun(currentRun);
+    abort.current?.abort();
+  }
+
+  async function resumeRun(run: RoomRun) {
+    const target = runIdentity(run);
+    if (runAction) return;
+    setRunAction({ id: target, kind: "resume" });
+    setStatus("Retoma pedida. O estado será atualizado a partir do run.");
+    try {
+      const response = await authenticatedFetch(apiUrl(`/api/bot-groups/${encodeURIComponent(selected)}/runs/${encodeURIComponent(target)}/resume`), { method: "POST" });
+      const payload = await response.json().catch(() => null) as { detail?: string; status?: string; resumed?: boolean } | null;
+      if (!response.ok) throw new Error(payload?.detail || "Não foi possível retomar a execução.");
+      if (payload?.status) setStreamState(payload.status);
+      if (payload?.resumed === false && payload.detail) setStatus(payload.detail);
+      else setStatus("Retoma pedida. O run continua a partir do último passo registado.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Não foi possível retomar a execução.");
+    } finally {
+      setRunAction(null);
+      if (selected) void refreshRuns(selected);
+    }
+  }
+
   async function send(override?: string) {
     const content = (override ?? draft).trim();
-    if (busy && /^(parar|para|stop|cancelar|cancela)[.!\s]*$/i.test(content)) { setDraft(""); abort.current?.abort(); return; }
+    const stopRequested = /^(parar|para|stop|cancelar|cancela)[.!\s]*$/i.test(content);
+    if (stopRequested && (busy || executing)) { setDraft(""); requestStop(); return; }
     if (!selected || !content || busy || abort.current || loading || !historyReady) return;
+    if (executing) {
+      setStatus("Já existe uma execução em curso neste grupo. Acompanha o run antes de enviar outra mensagem.");
+      return;
+    }
     const groupId = selected;
     const controller = new AbortController(); abort.current = controller;
-    setBusy(true); setError(""); setStatus("A iniciar conversa…"); setPartial(null); if (!override) setDraft("");
+    setBusy(true); setError(""); setStatus("A iniciar conversa…"); setPartial(null);
+    setStreamRunId(null); setStreamState(null); setConnectionLost(false);
+    if (!override) setDraft("");
     follow.current = true; setAway(false);
+    const order = new GroupStreamOrder();
+    let accepted = false;
+    let confirmed = false;
+    let serverError = "";
+    let fallbackState: string | null = null;
     try {
-      const response = await authenticatedFetch(apiUrl(`/api/bot-groups/${encodeURIComponent(groupId)}/messages`), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content }), signal: controller.signal });
+      const response = await authenticatedFetch(apiUrl(`/api/bot-groups/${encodeURIComponent(groupId)}/messages`), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, project_path: currentProject?.path || "" }), signal: controller.signal });
       if (!response.ok || !response.body) throw new Error(`Não foi possível iniciar a conversa (erro ${response.status}).`);
+      accepted = true;
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      let completed = false;
       while (true) {
         const chunk = await reader.read();
         buffer = (buffer + decoder.decode(chunk.value, { stream: !chunk.done })).replace(/\r\n/g, "\n");
@@ -225,32 +355,78 @@ export default function GroupWorkspace({
           const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
           const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
           if (!data) continue;
-          const event = JSON.parse(data) as GroupEvent;
-          if (event.type === "user_message" && event.message) setMessages((current) => [...current, event.message!]);
-          if (event.type === "agent_started") { setStatus(`${event.bot_name || "Bot"} está a responder…`); setPartial({ name: event.bot_name || "Bot", content: "" }); }
-          if (event.type === "token") setPartial((current) => ({ name: current?.name || event.bot_name || "Bot", content: (current?.content || "") + (event.content || "") }));
-          if ((event.type === "agent_message" || event.type === "agent_error") && event.message) { setMessages((current) => [...current, event.message!]); setPartial(null); }
-          if (event.type === "done") { completed = true; setStatus(event.status === "completed" ? "Conversa concluída." : event.status === "partial" ? "Conversa interrompida por falha de um bot. Vê as mensagens e volta a tentar." : event.reason ? `${event.reason} As respostas já emitidas ficam guardadas.` : "A conversa terminou sem confirmação de sucesso."); }
-          if (event.type === "error" || event.type === "group_error") throw new Error(event.content || "A conversa foi interrompida.");
+          let event: GroupEvent;
+          try { event = JSON.parse(data) as GroupEvent; } catch { continue; }
+          // Replayed or out-of-order frames are dropped before they reach the
+          // transcript or the partial text. Legacy frames (no envelope) pass.
+          if (!order.accept(event)) continue;
+          if (event.run_id) setStreamRunId(event.run_id);
+
+          if (event.type === "user_message" && event.message) {
+            setMessages((current) => mergeGroupMessages(current, [withStreamEnvelope(event.message!, event)]));
+          }
+          if (event.type === "agent_started") {
+            setStatus(`${event.bot_name || "Bot"} está a responder…`);
+            setPartial({ name: event.bot_name || "Bot", content: "" });
+          }
+          if (event.type === "token" && event.content) {
+            setPartial((current) => ({ name: current?.name || event.bot_name || "Bot", content: (current?.content || "") + event.content }));
+          }
+          if ((event.type === "agent_message" || event.type === "agent_error") && event.message) {
+            setMessages((current) => mergeGroupMessages(current, [withStreamEnvelope(event.message!, event)]));
+            setPartial(null);
+          }
+          if (event.type === "run_status" || event.type === "run_state" || event.type === "status" || event.type === "state") {
+            const next = event.state || event.status;
+            if (next) { setStreamState(next); fallbackState = next; }
+          }
+          if (event.type === "done") {
+            confirmed = true;
+            const doneState = event.state || event.status;
+            if (doneState) { setStreamState(doneState); fallbackState = doneState; }
+            setStatus(doneStatusText(event.status, event.reason));
+          }
+          if (event.type === "error" || event.type === "group_error") {
+            serverError = event.content || "A conversa foi interrompida.";
+            if (event.state || event.status) { setStreamState(event.state || event.status || null); fallbackState = event.state || event.status || null; }
+            setStatus(`${serverError} O estado final é confirmado pelo run.`);
+          }
         }
         if (chunk.done) break;
       }
-      if (!completed) throw new Error("A ligação terminou antes da confirmação. Verifica o histórico antes de voltar a enviar.");
+      if (!confirmed) {
+        if (serverError) {
+          setStatus(`${serverError} O estado final é confirmado pelo run.`);
+        } else {
+          setConnectionLost(true);
+          setStatus("Ligação interrompida antes da confirmação. O run não é marcado como falhado; a atualizar o estado a partir do servidor.");
+        }
+      }
     } catch (reason) {
-      if (controller.signal.aborted) setStatus("Paragem pedida. As respostas concluídas ficam no histórico.");
-      else { setError(reason instanceof Error ? reason.message : "Não foi possível enviar a mensagem."); if (!override) setDraft((current) => current || content); }
+      if (controller.signal.aborted) {
+        setStatus("Paragem pedida. O estado final vem do run; as respostas já gravadas ficam no histórico.");
+      } else if (accepted) {
+        setConnectionLost(true);
+        setStatus("Ligação interrompida. A execução não é marcada como falhada; a atualizar o estado a partir do run.");
+      } else {
+        setError(reason instanceof Error ? reason.message : "Não foi possível enviar a mensagem.");
+        if (!override) setDraft((current) => current || content);
+      }
     } finally {
-      abort.current = null; setPartial(null);
+      abort.current = null; setPartial(null); setBusy(false);
+      // The persisted messages and run are the authority after any stream
+      // outcome, including a dropped connection or a replayed frame.
       try { await refreshMessages(groupId, false); }
       catch { setHistoryReady(false); setError("Não foi possível atualizar o histórico. Carrega-o novamente antes de continuar."); }
+      await refreshRuns(groupId);
       try { await refreshGroups(); } catch { /* The conversation history remains available. */ }
-      setBusy(false);
+      if (fallbackState && !confirmed) setStreamState(fallbackState);
     }
   }
 
   const participants = selectedGroup?.bot_ids.map((id) => bots.find((bot) => bot.id === id)).filter((bot): bot is Bot => Boolean(bot)) ?? [];
   const modelCandidates = (modelBotIds && modelBotIds.length > 0 ? bots.filter((bot) => modelBotIds.includes(bot.id)) : participants);
-  const goal = lastUser?.content.replace(/\s+/g, " ").trim() || "Ainda sem objetivo nesta conversa.";
+  const goal = currentRun?.request.replace(/\s+/g, " ").trim() || lastUser?.content.replace(/\s+/g, " ").trim() || "Ainda sem objetivo nesta conversa.";
   const quote = (author: string, content: string) => {
     setDraft((current) => quoteDraft(author, content, current));
     setFocusTick((value) => value + 1);
@@ -366,7 +542,29 @@ export default function GroupWorkspace({
             <h2 className="truncate text-[15px] font-semibold tracking-tight">{selectedGroup.name}</h2>
             <p className="truncate text-[12px] text-[color:var(--nx-text-dim)]">{`Objetivo · ${goal}`}</p>
           </div>
-          <span className="shrink-0 rounded-full border border-[color:var(--nx-line)] px-2 py-1 text-[11px] text-[color:var(--nx-text-dim)]">{phase}</span>
+          <select
+            aria-label="Projeto do grupo"
+            value={currentProject?.id ?? ""}
+            onChange={(event) => {
+              const next = projects.find((project) => project.id === event.target.value) ?? null;
+              setCurrentProject(next);
+            }}
+            className="hidden max-w-[11rem] truncate rounded-lg border border-[color:var(--nx-line)] bg-[color:var(--nx-surface-1)] px-2 py-1.5 text-[11px] text-[color:var(--nx-text-dim)] sm:block"
+          >
+            <option value="">Sem projeto</option>
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+          <span
+            role="status"
+            aria-live="polite"
+            aria-label="Estado da execução"
+            data-testid="room-state"
+            data-run-state={currentRun ? (currentRun.state ?? currentRun.status) : "none"}
+            title={connectionLost ? "A ligação caiu; o estado mostrado vem do run associado." : undefined}
+            className="shrink-0 rounded-full border border-[color:var(--nx-line)] px-2 py-1 text-[11px] text-[color:var(--nx-text-dim)]"
+          >
+            {phase}
+          </span>
           <button type="button" aria-pressed={contextOpen} aria-label={contextOpen ? "Fechar painel de contexto" : "Abrir painel de contexto"} onClick={() => setContextOpen((open) => !open)} className="rounded-lg border border-[color:var(--nx-line)] p-2 text-[color:var(--nx-text-dim)] hover:bg-[color:var(--nx-surface-2)]"><PanelRight size={16} /></button>
         </header>
         <ParticipantStrip participants={participants} partialName={partial?.name ?? null} tasks={currentRun?.tasks ?? []} />
@@ -383,7 +581,7 @@ export default function GroupWorkspace({
             )}
             {timeline.map((item, index) => {
               if (item.kind === "incident") {
-                return <GroupIncidentCard key={item.id} incident={item} busy={busy} onRetry={(content) => void send(content)} onChooseModel={(ids) => setModelBotIds(ids)} />;
+                return <GroupIncidentCard key={item.id} incident={item} busy={busy || executing} onRetry={(content) => void send(content)} onChooseModel={(ids) => setModelBotIds(ids)} />;
               }
               const speaker = previousAgentSpeaker(timeline, index);
               const currentId = item.message.bot_id || item.message.bot_name || item.message.id;
@@ -399,7 +597,7 @@ export default function GroupWorkspace({
                     mine={item.message.role === "user"}
                     name={item.message.role === "user" ? "Tu" : item.message.bot_name || "Bot"}
                     botId={item.message.bot_id}
-                    roleLabel={bot?.description || undefined}
+                    roleLabel={groupRoleLabel(item.message) ?? bot?.description ?? undefined}
                     content={item.message.content}
                     time={item.message.created_at}
                     onQuote={(text) => quote(item.message.role === "user" ? "Tu" : item.message.bot_name || "Bot", text)}
@@ -409,7 +607,14 @@ export default function GroupWorkspace({
                 </div>
               );
             })}
-            {currentRun && <RunCard run={currentRun} />}
+            {currentRun && (
+              <RunCard
+                run={currentRun}
+                onResume={() => void resumeRun(currentRun)}
+                onCancel={requestStop}
+                pendingAction={runAction?.id === runIdentity(currentRun) ? runAction.kind : null}
+              />
+            )}
             {partial && (
               <div>
                 <TypingRow name={partial.name} label="a responder" detail="Texto ainda em curso" />
@@ -417,7 +622,7 @@ export default function GroupWorkspace({
               </div>
             )}
             {error && <p role="alert" className="rounded-xl border border-[color:var(--nx-rose)]/30 p-3 text-[13px] text-[color:var(--nx-rose)]">{error}{!historyReady && <button type="button" onClick={() => setHistoryAttempt((value) => value + 1)} className="ml-3 underline">Tentar carregar novamente</button>}</p>}
-            <p role="status" className="text-[12px] text-[color:var(--nx-text-faint)]">{status}</p>
+            <p role="status" data-testid="room-status" className="text-[12px] text-[color:var(--nx-text-faint)]">{status}</p>
           </div>
         </div>
         <div className="relative">
@@ -427,12 +632,13 @@ export default function GroupWorkspace({
             value={draft}
             onChange={setDraft}
             onSubmit={() => void send()}
-            onStop={() => abort.current?.abort()}
-            busy={busy}
+            onSubmitText={(text) => { setDraft(""); void send(text); }}
+            onStop={requestStop}
+            busy={busy || executing}
             disabled={loading || !historyReady}
-            placeholder={busy ? "Escreve parar para interromper…" : "Escreve para o grupo…"}
-            hint="Sem ferramentas nesta conversa: respostas por ordem até consenso, numa falha, ou no limite de voltas e tempo do grupo."
-            footnote="Enter envia · Shift+Enter cria uma linha. @ nomeia um participante no texto; não muda a ordem."
+            placeholder={busy ? "Escreve parar para interromper…" : executing ? "Execução em curso; escreve parar para pedir a paragem…" : "Escreve para o grupo…"}
+            hint="Um run por mensagem. O estado da sala vem do run associado; as respostas dos bots são propostas até existir verificação registada."
+            footnote="Enter envia · Shift+Enter cria uma linha. @ nomeia quem responde; sem menção, responde o bot mais competente. O projeto selecionado limita as ferramentas de ficheiro."
             agents={participants.map((bot) => ({ id: bot.id, name: bot.name, role: bot.description || "Função não descrita" }))}
             focusTick={focusTick}
             sendLabel="Enviar ao grupo"

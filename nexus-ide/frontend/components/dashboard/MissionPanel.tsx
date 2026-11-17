@@ -148,13 +148,13 @@ type TabId = (typeof TABS)[number]["id"];
 
 /** Proposed is deliberately muted, not hidden — it is information, not noise. */
 const STATE_STYLE: Record<Contract["state"], string> = {
-  proposed: "bg-[rgba(148,163,184,0.12)] text-nexus-muted",
-  ready: "bg-[rgba(56,189,248,0.14)] text-nexus-cyan",
-  running: "bg-[rgba(52,211,153,0.14)] text-nexus-accent2",
-  blocked: "bg-[rgba(251,191,36,0.14)] text-nexus-accent3",
-  completed: "bg-[rgba(124,106,251,0.14)] text-nexus-accent-bright",
-  failed: "bg-[rgba(251,113,133,0.16)] text-nexus-accent4",
-  skipped: "bg-[rgba(100,116,139,0.12)] text-nexus-faint",
+  proposed: "bg-nexus-border/60 text-nexus-muted",
+  ready: "bg-nexus-cyan/15 text-nexus-cyan",
+  running: "bg-nexus-accent2/15 text-nexus-accent2",
+  blocked: "bg-nexus-accent3/15 text-nexus-accent3",
+  completed: "bg-nexus-accent/15 text-nexus-accent-bright",
+  failed: "bg-nexus-accent4/15 text-nexus-accent4",
+  skipped: "bg-nexus-border/40 text-nexus-faint",
 };
 
 const SEVERITY_STYLE: Record<Finding["severity"], string> = {
@@ -328,7 +328,7 @@ export default function MissionPanel() {
         title="Mission Control"
         subtitle={mission.title || "Missão em curso"}
         action={
-          <span className="flex items-center gap-1.5 rounded-full bg-[rgba(124,106,251,0.12)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-nexus-accent-bright shadow-rim">
+          <span className="flex items-center gap-1.5 rounded-full bg-nexus-accent/12 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-nexus-accent-bright shadow-rim">
             <span
               className={`h-1.5 w-1.5 rounded-full ${
                 mission.state === "executing"
@@ -346,7 +346,7 @@ export default function MissionPanel() {
       {error ? (
         <div
           role="alert"
-          className="mt-3 flex items-start gap-2 rounded-lg border border-amber-400/25 bg-amber-400/[0.06] px-3 py-2 text-[11px] text-nexus-accent3"
+          className="mt-3 flex items-start gap-2 rounded-lg border border-nexus-accent3/25 bg-nexus-accent3/[0.07] px-3 py-2 text-[11px] text-nexus-accent3"
         >
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>{error} A mostrar os últimos dados recebidos, que podem estar desatualizados.</span>
@@ -380,7 +380,7 @@ export default function MissionPanel() {
         <CardStat label="Riscos" value={mission.risks.length} hint="Riscos técnicos registados" />
       </div>
 
-      <div className="mt-3 h-1 overflow-hidden rounded-full bg-[rgba(148,163,184,0.12)]">
+      <div className="mt-3 h-1 overflow-hidden rounded-full bg-nexus-border/60">
         <div
           className="h-full rounded-full bg-nexus-accent transition-[width] duration-500"
           style={{ width: `${pct}%` }}
@@ -409,7 +409,7 @@ export default function MissionPanel() {
             onKeyDown={(event) => handleTabKeyDown(event, index)}
             className={`flex min-h-10 shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent ${
               tab === id
-                ? "bg-[rgba(124,106,251,0.14)] text-nexus-accent-bright shadow-rim"
+                ? "bg-nexus-accent/15 text-nexus-accent-bright shadow-rim"
                 : "text-nexus-muted hover:text-nexus-text"
             }`}
           >
@@ -512,7 +512,7 @@ function BriefTab({ mission }: { mission: Mission }) {
         <Block title="Pressupostos" tone="warning">
           <ul className="space-y-1">
             {b.assumptions.map((a) => (
-              <li key={a} className="text-[11px] leading-relaxed text-amber-200/80">
+              <li key={a} className="text-[11px] leading-relaxed text-nexus-accent3">
                 · {a}
               </li>
             ))}
@@ -537,13 +537,13 @@ function PlanTab({ mission }: { mission: Mission }) {
               {ph.label}
             </span>
             {ph.skipped ? (
-              <span className="rounded-md bg-[rgba(100,116,139,0.14)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-nexus-faint">
+              <span className="rounded-md bg-nexus-border/60 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-nexus-faint">
                 ignorada
               </span>
             ) : null}
           </div>
           {ph.skipped ? (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-amber-200/70">{ph.skip_reason}</p>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-nexus-accent3">{ph.skip_reason}</p>
           ) : (
             <ul className="mt-2 space-y-1">
               {ph.steps.map((s) => (
@@ -616,7 +616,7 @@ function ContractCard({ contract: c }: { contract: Contract }) {
       ) : null}
 
       {c.activity ? (
-        <p className="mt-2 rounded-md bg-[rgba(52,211,153,0.08)] px-2 py-1 font-mono text-[10px] text-nexus-accent2">
+        <p className="mt-2 rounded-md bg-nexus-accent2/10 px-2 py-1 font-mono text-[10px] text-nexus-accent2">
           {c.activity}
         </p>
       ) : null}
@@ -673,7 +673,7 @@ function ContractCard({ contract: c }: { contract: Contract }) {
       ) : null}
 
       {c.error ? (
-        <p className="mt-2 text-[10px] leading-relaxed text-rose-300/80">{c.error}</p>
+        <p className="mt-2 text-[10px] leading-relaxed text-nexus-accent4">{c.error}</p>
       ) : null}
     </div>
   );
@@ -763,7 +763,7 @@ function TimelineTab({
         </Block>
       ) : (
         <Block title="Verificações executadas" tone="warning">
-          <p className="text-[11px] leading-relaxed text-amber-200/80">
+          <p className="text-[11px] leading-relaxed text-nexus-accent3">
             Nenhuma verificação foi executada. Quaisquer alterações desta missão{" "}
             <strong>não estão testadas</strong>.
           </p>
@@ -809,7 +809,7 @@ function Block({
   return (
     <div
       className={`nx-inset rounded-xl p-3.5 ${
-        tone === "warning" ? "border-[rgba(251,191,36,0.24)]" : ""
+        tone === "warning" ? "border-nexus-accent3/25" : ""
       }`}
     >
       <div className="mb-2 flex items-center gap-1.5">

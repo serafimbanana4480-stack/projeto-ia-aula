@@ -196,7 +196,7 @@ function MessageBubbleComponent({
         className={`min-w-0 text-[15px] transition-all duration-200 ${
           isUser
             ? "nx-chat-user-message max-w-[92%] rounded-[20px] rounded-br-md border border-nexus-border/70 bg-nexus-elevated px-4 py-3 text-nexus-text sm:max-w-[80%] sm:px-5"
-            : "w-full max-w-[900px] py-2 sm:py-3"
+            : "w-full py-2 sm:py-3"
         }`}
       >
         {/* Meta row: editorial label + time. Activity lives in RunTimeline; this is Result. */}

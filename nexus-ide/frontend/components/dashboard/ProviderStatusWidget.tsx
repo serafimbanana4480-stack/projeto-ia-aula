@@ -233,7 +233,7 @@ export default function ProviderStatusWidget() {
                       <span className="truncate text-[13px] font-semibold text-nexus-text" title={name}>
                         {name}
                       </span>
-                      <StatusDot tone={status.tone} label={status.label} />
+                      <StatusDot tone={status.tone} />
                     </div>
                     <Badge tone={status.tone}>{status.label}</Badge>
                   </div>

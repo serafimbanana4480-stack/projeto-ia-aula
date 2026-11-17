@@ -31,7 +31,7 @@ describe("Sidebar", () => {
     render(<Sidebar />);
 
     const validRoutes = new Set([
-      "/", "/dashboard", "/bots", "/dashboard/tasks", "/editor", "/projects", "/swarm", "/analysis",
+      "/", "/voice", "/dashboard", "/bots", "/dashboard/tasks", "/editor", "/projects", "/swarm", "/analysis",
       "/analytics", "/models", "/mcp", "/tools", "/database", "/documents", "/pdf",
       "/search", "/scraping", "/settings", "/nexus",
     ]);

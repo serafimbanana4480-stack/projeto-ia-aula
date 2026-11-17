@@ -713,7 +713,7 @@ def test_auto_commit_after_write_is_confirmation_gated() -> None:
 
 
 async def test_auto_commit_after_write_requires_confirmation_before_running(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """The gate is consulted before the handler runs."""
     calls: list[dict[str, Any]] = []
@@ -725,6 +725,8 @@ async def test_auto_commit_after_write_requires_confirmation_before_running(
     spec = get_tool("auto_commit_after_write")
     assert spec is not None
     original = spec.handler
+    project = tmp_path / "proj"
+    project.mkdir()
     try:
         spec.handler = handler
         result = await execute_tool(
@@ -732,11 +734,26 @@ async def test_auto_commit_after_write_requires_confirmation_before_running(
             "sess-auto-commit",
             {"file_path": "a.py"},
             enforce_confirmation=True,
+            project_path=str(project),
+        )
+
+        # A workspace tool with no selected project is refused before any gate:
+        # there is no authorised folder to scope the action to, so asking for a
+        # confirmation would only defer the same refusal.
+        projectless = await execute_tool(
+            "auto_commit_after_write",
+            "sess-auto-commit",
+            {"file_path": "a.py"},
+            enforce_confirmation=True,
+            project_path="",
         )
     finally:
         spec.handler = original
 
     assert result.get("confirmation_required") is True
+    assert calls == []
+    assert projectless.get("confirmation_required") is not True
+    assert projectless.get("error_category") == "project_scope_denied"
     assert calls == []
 
 

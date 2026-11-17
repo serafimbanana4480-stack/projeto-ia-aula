@@ -24,7 +24,9 @@ from backend.llm.ollama_provider import OllamaProvider
 
 logger = logging.getLogger(__name__)
 
-RUNTIME_SETTINGS_PATH = Path(__file__).resolve().parents[2] / "data" / "settings.json"
+RUNTIME_SETTINGS_PATH = Path(
+    os.environ.get("NEXUS_RUNTIME_SETTINGS_PATH", str(Path(__file__).resolve().parents[2] / "data" / "settings.json"))
+)
 
 #: The methods that produce a *user-visible answer*.  A simulated provider may
 #: never satisfy one of them: its canned reply is not an answer, and the run
@@ -1484,6 +1486,12 @@ def create_llm_client(**overrides: Any) -> Any:
     Returns:
         A provider instance with ``chat_stream()``, ``chat_complete()``, and ``embed()`` methods.
     """
+    from backend.runtime.run_context import local_only_run
+
+    if local_only_run.get():
+        raise RuntimeError(
+            "Cannot construct a provider from global settings during a local-only run"
+        )
     settings = get_settings()
     # Runtime overrides from data/settings.json (set via Settings UI)
     _runtime = _load_runtime_overrides()

@@ -1,12 +1,21 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { list, history, send, stream } = vi.hoisted(() => ({ list: vi.fn(), history: vi.fn(), send: vi.fn(), stream: { events: [] as unknown[], streaming: false } }));
-vi.mock("../../../lib/bots", () => ({ listBots: list, createBot: vi.fn(), updateBot: vi.fn(), removeBot: vi.fn() }));
+const { list, history, send, stream, resolveTool } = vi.hoisted(() => ({ list: vi.fn(), history: vi.fn(), send: vi.fn(), resolveTool: vi.fn(), stream: { events: [] as unknown[], streaming: false } }));
+vi.mock("../../../lib/bots", () => ({
+  listBots: list,
+  createBot: vi.fn(),
+  updateBot: vi.fn(),
+  removeBot: vi.fn(),
+  getRoomMemory: vi.fn(async () => ({ pins: [], seen: {} })),
+  updateRoomMemory: vi.fn(async () => ({ pins: [], seen: {} })),
+  BOT_CAPABILITY_KEYS: ["read", "research", "tasks", "memory", "write", "shell", "browser", "mcp", "auto_accept"],
+  DEFAULT_BOT_CAPABILITIES: { read: true, research: true, tasks: true, memory: true, write: true, shell: true, browser: true, mcp: true, auto_accept: true },
+}));
 vi.mock("../../../lib/api", () => ({ apiUrl: (path: string) => path, getSessionHistoryPage: history, getProviderCatalog: vi.fn(), getProviderModels: vi.fn() }));
 vi.mock("../../../lib/auth", () => ({ authenticatedFetch: vi.fn(async () => ({ ok: true, json: async () => ({ groups: [] }) })) }));
 vi.mock("../../../hooks/useAgentStream", () => ({
-  useAgentStream: () => ({ events: stream.events, streaming: stream.streaming, busyOtherSession: false, error: null, send, cancel: vi.fn() }),
+  useAgentStream: () => ({ events: stream.events, streaming: stream.streaming, busyOtherSession: false, error: null, send, cancel: vi.fn(), resolveToolConfirmation: resolveTool }),
 }));
 vi.mock("../../../components/chat/MessageCodeBlock", () => ({ default: () => null }));
 
@@ -16,7 +25,7 @@ describe("BotsWorkspace", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
-    stream.events = []; stream.streaming = false; send.mockResolvedValue(true);
+    stream.events = []; stream.streaming = false; send.mockResolvedValue(true); resolveTool.mockReset().mockResolvedValue(true);
     Element.prototype.scrollIntoView = vi.fn();
     list.mockResolvedValue([{ id: "bot-1", session_id: "session-1", name: "Pixel", description: "UI", instructions: "", provider: "lmstudio", model: "local", archived: false, last_message: null, last_active_at: "2026-11-06T00:00:00Z" }]);
   });
@@ -117,7 +126,7 @@ describe("BotsWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Informações do bot" }));
     expect(screen.getByText("Responde com precisão")).toBeTruthy();
     expect(screen.getByText("Modelo configurado")).toBeTruthy();
-    expect(screen.getByText(/Ferramentas de leitura disponíveis conforme a configuração/)).toBeTruthy();
+    expect(screen.getByText(/Aceitação automática/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Fechar informações" }));
     expect(screen.queryByText("Responde com precisão")).toBeNull();
   });
@@ -148,6 +157,32 @@ describe("BotsWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Ir para o fim" }));
     expect(screen.queryByRole("button", { name: "Ir para o fim" })).toBeNull();
     expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "end", behavior: "smooth" });
+  });
+
+  it("permite confirmar uma ferramenta que pede confirmação", async () => {
+    history.mockReset().mockResolvedValue({ messages: [], has_more: false, next_cursor: null });
+    stream.streaming = true;
+    stream.events = [
+      { type: "tool_call", tool_name: "run_shell", tool_args: { command: "rm -rf build" }, timestamp: "2026-11-06T00:00:01Z" },
+      { type: "tool_confirmation", tool_name: "run_shell", timestamp: "2026-11-06T00:00:02Z", data: { confirmation_id: "conf-1", risk_level: "high" } },
+    ];
+    render(<BotsWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: /Pixel/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirmar" }));
+    await waitFor(() => expect(resolveTool).toHaveBeenCalledWith("conf-1", true));
+  });
+
+  it("permite recusar uma ferramenta que pede confirmação", async () => {
+    history.mockReset().mockResolvedValue({ messages: [], has_more: false, next_cursor: null });
+    stream.streaming = true;
+    stream.events = [
+      { type: "tool_call", tool_name: "run_shell", tool_args: { command: "rm -rf build" }, timestamp: "2026-11-06T00:00:01Z" },
+      { type: "tool_confirmation", tool_name: "run_shell", timestamp: "2026-11-06T00:00:02Z", data: { confirmation_id: "conf-2", risk_level: "high" } },
+    ];
+    render(<BotsWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: /Pixel/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Recusar" }));
+    await waitFor(() => expect(resolveTool).toHaveBeenCalledWith("conf-2", false));
   });
 
   it("pesquisa também pelo modelo configurado", async () => {

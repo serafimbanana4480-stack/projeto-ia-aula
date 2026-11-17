@@ -150,7 +150,8 @@ async def test_no_project_tool_call_gets_a_follow_up_and_an_answer(
     decision = triage_request(message, has_project=False)
     policy = chat_primary._tool_policy_context(decision, has_project=False)
     assert "list_skills" in policy["_allowed_tools"]
-    assert "read_file" not in policy["_allowed_tools"]
+    assert "read_file" in policy["_allowed_tools"]
+    assert "store_memory" in policy["_allowed_tools"]
     agent = ScriptedAgent()
     stream = chat_primary.make_signal_stream(
         agent=agent,
@@ -373,11 +374,19 @@ async def test_selected_project_runs_real_file_tool_inside_its_scope(
 
     decision = chat_primary.plan_turn(request.message, request.mode, "")
     projectless_policy = chat_primary._tool_policy_context(decision, has_project=False)
-    blocked = await tool_registry.execute_tool(
+    # The projectless lane still advertises the workspace tools, so the model
+    # can discover them; what changed is that executing one is refused until a
+    # folder is authorised. A relative path used to resolve against the
+    # backend's own working directory, which silently read and wrote files the
+    # user never chose.
+    assert "read_file" in projectless_policy["_allowed_tools"]
+    workspace_read = await tool_registry.execute_tool(
         "read_file", "projectless-test", {"path": "README.md"},
         project_path="", allowed_tools=projectless_policy["_allowed_tools"],
     )
-    assert blocked["ok"] is False
+    assert workspace_read["ok"] is False
+    assert workspace_read["error_category"] == "project_scope_denied"
+    assert "nenhum projeto" in str(workspace_read["error"]).casefold()
 
 
 def test_http_preflight_returns_and_persists_an_actionable_failure(

@@ -150,6 +150,8 @@ from backend.orchestrator.routes.sessions import router as sessions_router
 from backend.orchestrator.routes.settings import router as settings_router
 from backend.orchestrator.routes.skills import router as skills_router
 from backend.orchestrator.routes.system import router as system_router
+from backend.orchestrator.routes.voice_chat import router as voice_chat_router
+from backend.orchestrator.routes.voice import router as voice_router
 from backend.orchestrator.routes.tasks import router as tasks_router
 from backend.orchestrator.routes.terminal import router as terminal_router
 from backend.orchestrator.routes.wizard import router as wizard_router
@@ -483,12 +485,15 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     # whatever runs the previous process left open. Both are best-effort — a
     # coordinator failure is logged here, never fatal to the app.
     try:
-        app.state.run_coordinator = RunCoordinator()
+        coordinator = get_run_coordinator()
+        if coordinator is None:
+            coordinator = RunCoordinator()
+        app.state.run_coordinator = coordinator
         app.state.dead_letter_service = DeadLetterService(
-            app.state.run_coordinator, task_manager=getattr(app.state, "task_manager", None)
+            coordinator, task_manager=getattr(app.state, "task_manager", None)
         )
-        _recover_resumable_runs(app.state.run_coordinator)
-        start_watchdog(app.state.run_coordinator)
+        _recover_resumable_runs(coordinator)
+        start_watchdog(coordinator)
     except Exception:
         logger.exception("Durable run state could not be recovered at startup")
     # Check the reserve before provider construction or any background start.
@@ -589,6 +594,13 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
 
     if not hasattr(app.state, "llm_client") or app.state.llm_client is None:
         app.state.llm_client = create_llm_client()
+
+    # Auto-resume group runs left interrupted by a previous process.
+    try:
+        from backend.orchestrator.routes.bot_groups import resume_interrupted_runs_at_startup
+        await resume_interrupted_runs_at_startup(app)
+    except Exception:
+        logger.exception("Group run auto-resume at startup failed")
 
     from backend.llm.model_catalog import start_catalog_refresh_worker
 
@@ -1099,6 +1111,8 @@ app.include_router(agents_router, prefix="/api")
 app.include_router(observability_router, prefix="/api")
 app.include_router(thinking_router, prefix="/api")
 app.include_router(system_router, prefix="/api")
+app.include_router(voice_router, prefix="/api")
+app.include_router(voice_chat_router, prefix="/api")
 app.include_router(improvement_router)
 app.include_router(autonomous_improvement_router)
 app.include_router(second_brain_router, prefix="/api")

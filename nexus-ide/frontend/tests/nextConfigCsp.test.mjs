@@ -12,5 +12,6 @@ describe("Next Content Security Policy for Brave image previews", () => {
 
     expect(imageDirective).toBe("img-src 'self' data: blob: https://imgs.search.brave.com");
     expect(imageDirective).not.toContain("*.search.brave.com");
+    expect(csp.split(";").map((directive) => directive.trim())).toContain("media-src 'self' blob:");
   });
 });

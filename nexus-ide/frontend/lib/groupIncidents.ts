@@ -9,11 +9,68 @@
 
 export interface GroupTranscriptMessage {
   id: string;
-  role: "user" | "assistant" | "error";
+  role: "user" | "assistant" | "error" | "coordinator" | "decision";
   content: string;
   bot_id: string | null;
   bot_name: string | null;
   created_at: string;
+  /**
+   * Durable execution identity. Present on the new composer path
+   * (`run_id` is shared by the run, its messages and every SSE frame).
+   * Absent on legacy responses, where the UI must fall back without
+   * pretending a terminal state was persisted.
+   */
+  run_id?: string | null;
+  /** Total order of the run's events; only comparable inside one `run_id`. */
+  seq?: number | null;
+}
+
+export function groupRoleLabel(message: GroupTranscriptMessage): string | undefined {
+  if (message.role === "coordinator") return "Coordenador";
+  if (message.role === "decision") return "Decisão";
+  return undefined;
+}
+
+/**
+ * The run that owns the turn currently visible to the operator.
+ *
+ * A user message is the turn boundary: when it carries a `run_id`, that id is
+ * authoritative even if an older run is still listed. When the latest user
+ * message predates the run envelope, fall back to the first assistant/error
+ * message that carries one. Returning `null` is deliberate: the caller must
+ * not attach an old run to a new turn.
+ */
+export function transcriptRunId(messages: GroupTranscriptMessage[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message) continue;
+    if (message.role === "user") return message.run_id?.trim() || null;
+    if (message.run_id?.trim()) return message.run_id;
+  }
+  return null;
+}
+
+/**
+ * Merge a server page into the transcript without duplicating rows.
+ *
+ * Existing rows keep their position (the live stream already ordered them);
+ * the persisted server copy replaces the text in place. Rows that only exist
+ * on the server are appended in server order. `loadOlder` uses a separate
+ * prepend path because those rows belong before the current page.
+ */
+export function mergeGroupMessages(
+  current: GroupTranscriptMessage[],
+  incoming: GroupTranscriptMessage[],
+): GroupTranscriptMessage[] {
+  const server = new Map(incoming.map((message) => [message.id, message]));
+  const merged = current.map((message) => server.get(message.id) ?? message);
+  const known = new Set(merged.map((message) => message.id));
+  for (const message of incoming) {
+    if (known.has(message.id)) continue;
+    known.add(message.id);
+    merged.push(message);
+  }
+  return merged;
 }
 
 export interface GroupIncident {

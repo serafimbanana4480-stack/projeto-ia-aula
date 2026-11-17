@@ -124,9 +124,9 @@ export function KpiCard({
               <DeltaBadge delta={delta} goodDirection={goodDirection} />
             ) : null}
             {!loading && value && value !== EMPTY && history && history.length <= 1 ? (
-              <span className="text-[10px] text-nexus-faint">Sem série ainda.</span>
+              <span className="text-[11px] text-nexus-faint">Sem série ainda.</span>
             ) : null}
-            {hint ? <span className="text-[10px] text-nexus-faint">{hint}</span> : null}
+            {hint ? <span className="text-[11px] text-nexus-faint">{hint}</span> : null}
           </div>
         </div>
 
@@ -178,7 +178,7 @@ export function GaugeCard({
   return (
     <Card padding="sm" variant="subtle">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] font-medium uppercase tracking-wider text-nexus-faint">
+        <span className="text-[11px] font-medium uppercase tracking-wider text-nexus-faint">
           {label}
         </span>
         {icon ? (
@@ -193,7 +193,7 @@ export function GaugeCard({
             <span className="text-lg font-semibold tabular-nums text-nexus-text">
               {`${clamped.toFixed(0)}%`}
             </span>
-            {detail ? <span className="text-[10px] text-nexus-faint">{detail}</span> : null}
+            {detail ? <span className="text-[11px] text-nexus-faint">{detail}</span> : null}
           </div>
           <div
             className="nx-inset mt-2 h-1.5 overflow-hidden rounded-full"

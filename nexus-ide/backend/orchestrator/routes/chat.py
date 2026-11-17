@@ -2997,6 +2997,8 @@ async def chat(
 
     bot_profile = bot_for_session(user_id, session_id)
     if bot_profile is not None:
+        if req.local_only:
+            raise HTTPException(status_code=409, detail="Usa uma sessão própria para o modo local.")
         if bot_profile["deleted"]:
             raise HTTPException(status_code=404, detail="Bot não encontrado")
         if not bot_profile["provider"] or not bot_profile["model"]:
@@ -3015,6 +3017,13 @@ async def chat(
                 _resolve_project_root(requested_project, session_id, user_id)
             )
         else:
+            # "No project selected" is a real state, not a request for a
+            # default. Substituting the session's project, the first
+            # registered project or the server's working directory here would
+            # hand the bot a filesystem root — and in-project auto-accept —
+            # that the user never chose, while the chat reported none. Keep it
+            # empty so project-independent tools still run and the
+            # workspace/shell ones ask for a selection instead.
             req.project_path = ""
         req.mode = "chat"
         req.autonomous = False
@@ -3298,20 +3307,19 @@ def _request_idempotency_key(
     cannot adopt its run.
     """
     if request is not None:
-        existing = str(
-            getattr(getattr(request, "state", None), "nexus_idempotency_key", "") or ""
-        ).strip()
+        state = getattr(request, "state", None)
+        existing = str(getattr(state, "nexus_idempotency_key", "") or "").strip()
         if existing:
             return existing
-        user_id = user_id or str(
-            getattr(getattr(request, "state", None), "nexus_user_id", "") or ""
-        )
-        for header in _IDEMPOTENCY_HEADERS:
-            value = str(request.headers.get(header) or "").strip()
-            if value:
-                identity = f"{user_id}\n{getattr(req, 'session_id', '') or ''}\n{value}"
-                scoped = hashlib.sha256(identity.encode()).hexdigest()[:40]
-                return f"h-{scoped}"
+        user_id = user_id or str(getattr(state, "nexus_user_id", "") or "")
+        headers = getattr(request, "headers", None)
+        if headers is not None:
+            for header in _IDEMPOTENCY_HEADERS:
+                value = str(headers.get(header) or "").strip()
+                if value:
+                    identity = f"{user_id}\n{getattr(req, 'session_id', '') or ''}\n{value}"
+                    scoped = hashlib.sha256(identity.encode()).hexdigest()[:40]
+                    return f"h-{scoped}"
     digest = hashlib.sha256(
         f"{user_id}\n{getattr(req, 'session_id', '') or ''}\n"
         f"{getattr(req, 'message', '') or ''}".encode()
@@ -3592,7 +3600,15 @@ async def _select_pipeline(
             yield _sse(StreamEvent(type="error", content="O runtime de conversação não está ativo."))
             yield _sse(StreamEvent(type="done"))
             return
-        decision = TriageDecision(RequestClass.CONVERSATIONAL, "bot sem ferramentas")
+        from backend.runtime.triage import _SMALLTALK_RE
+
+        triaged = chat_primary.plan_turn(req.message, "auto", req.project_path)
+        decision = (
+            TriageDecision(RequestClass.DIRECT, "bot com acesso completo a ferramentas")
+            if triaged.request_class is RequestClass.CONVERSATIONAL
+            and not _SMALLTALK_RE.match((req.message or "").strip())
+            else triaged
+        )
         primary = chat_primary.run_primary_chat(
             req, llm_client, registry, context, decision=decision, owner_id=user_id,
             event_bus=event_bus, request=request,
@@ -3622,6 +3638,49 @@ async def _select_pipeline(
                 watcher.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await watcher
+        return
+
+    if getattr(req, "local_only", False):
+        # Do not enter the legacy pipeline or its automatic provider fallback.
+        # The explicit selection is resolved to one concrete adapter first.
+        from backend.orchestrator.routes import chat_primary
+
+        error = None
+        selected_client = None
+        if not chat_primary.is_primary_enabled():
+            error = "O runtime principal não está ativo."
+        elif getattr(req, "mode", "") != "chat":
+            error = "O modo local requer o modo de conversa."
+        else:
+            selected_client, error = await chat_primary._request_provider_client(req, llm_client)
+            if not error:
+                error = chat_primary._local_provider_error(req, selected_client)
+        if error:
+            yield _sse(StreamEvent(type="error", content=error))
+            yield _sse(StreamEvent(type="done"))
+            return
+        req.autonomous = False
+        req.auto_accept = False
+        decision = chat_primary.plan_turn(req.message, "chat", req.project_path)
+        primary = chat_primary.run_primary_chat(
+            req, selected_client, registry, context, decision=decision, owner_id=user_id,
+            event_bus=event_bus, request=request,
+            idempotency_key=_request_idempotency_key(request, req),
+        )
+        local_frames = 0
+        from backend.runtime.run_context import local_only_run
+
+        local_token = local_only_run.set(True)
+        try:
+            async with contextlib.aclosing(primary) as stream:
+                async for frame in stream:
+                    local_frames += 1
+                    yield frame
+        finally:
+            local_only_run.reset(local_token)
+        if not local_frames:
+            yield _sse(StreamEvent(type="error", content="O runtime local terminou sem resposta."))
+            yield _sse(StreamEvent(type="done"))
         return
 
     # Slash commands are executable strategies owned by the legacy adapter.

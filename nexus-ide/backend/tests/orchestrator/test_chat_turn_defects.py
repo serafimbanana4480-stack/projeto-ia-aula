@@ -78,6 +78,9 @@ async def test_autonomous_journal_failure_does_not_restart_the_work(monkeypatch)
 
     request = _Req("Analisa e corrige o projeto")
     request.session_id = "s-journal-no-restart"
+    # The legacy pipeline refuses a work turn with no project before any model
+    # or journal call, so the retry must be pinned to an authorised folder.
+    request.project_path = str(Path(__file__).resolve().parents[3])
     monkeypatch.setattr(chat, "classify_execution_mode", lambda *_args: ExecutionMode.MISSION)
 
     async def source(**_kwargs):

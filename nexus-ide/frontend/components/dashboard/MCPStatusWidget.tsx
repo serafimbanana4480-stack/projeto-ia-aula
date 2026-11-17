@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { motion } from "framer-motion";
 import { Plug, RefreshCw, ArrowRight } from "lucide-react";
 import { getMCPConnectors, type MCPConnector, type MCPConnectorsSummary } from "../../lib/api";
@@ -95,12 +96,12 @@ export default function MCPStatusWidget() {
               title="Nenhum conector MCP configurado"
               hint="Liga um servidor MCP para dares aos agentes acesso a ferramentas externas."
               action={
-                <a
+                <Link
                   href="/mcp"
                   className="inline-flex items-center gap-1 text-xs font-medium text-[var(--nx-accent-bright)] hover:underline"
                 >
                   Ligar o primeiro servidor <ArrowRight className="h-3 w-3" />
-                </a>
+                </Link>
               }
             />
           ) : (
@@ -146,7 +147,6 @@ export default function MCPStatusWidget() {
                       <span className="flex items-center gap-1">
                         <StatusDot
                           tone={TEST_STATUS_TONE[c.last_test_status]}
-                          label={`Último teste: ${TEST_STATUS_LABEL[c.last_test_status]}`}
                         />
                         Último teste: {TEST_STATUS_LABEL[c.last_test_status]}
                       </span>
@@ -154,12 +154,12 @@ export default function MCPStatusWidget() {
                   </div>
                 ))}
               </div>
-              <a
+              <Link
                 href="/mcp"
                 className="mt-4 flex min-h-10 items-center justify-center gap-2 rounded-lg border border-nexus-border/60 text-xs font-medium text-[var(--nx-accent-bright)] transition-colors hover:bg-nexus-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent"
               >
                 Gerir conectores <ArrowRight className="h-3 w-3" />
-              </a>
+              </Link>
             </>
           )}
         </div>

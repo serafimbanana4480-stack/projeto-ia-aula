@@ -226,7 +226,7 @@ describe("ChatPanel conversation history search and navigation", () => {
     await screen.findByText("mensagem recente");
     fireEvent.click(screen.getByRole("button", { name: "Carregar mensagens anteriores" }));
 
-    const pagingError = await screen.findByRole("alert");
+    const pagingError = await screen.findByText(/Não foi possível carregar mensagens anteriores:/);
     expect(pagingError.textContent).toContain("ligação interrompida");
     expect(screen.getByText("mensagem recente")).toBeTruthy();
     expect(screen.queryByText("Erro ao carregar histórico")).toBeNull();
@@ -234,7 +234,7 @@ describe("ChatPanel conversation history search and navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Tentar carregar novamente" }));
     expect(await screen.findByText("mensagem intermédia")).toBeTruthy();
     expect(screen.getByText("mensagem recente")).toBeTruthy();
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/Não foi possível carregar mensagens anteriores:/)).toBeNull();
     expect(olderPageAttempts).toBe(2);
   });
 
@@ -262,7 +262,7 @@ describe("ChatPanel conversation history search and navigation", () => {
     await screen.findByText("mensagem recente");
     fireEvent.click(screen.getByRole("button", { name: "Carregar mensagens anteriores" }));
 
-    const pagingError = await screen.findByRole("alert");
+    const pagingError = await screen.findByText(/Não foi possível carregar mensagens anteriores:/);
     expect(pagingError.textContent).toContain("deixou de avançar");
     expect(screen.getByText("mensagem antiga")).toBeTruthy();
     expect(screen.getByText("resposta recente")).toBeTruthy();
@@ -305,7 +305,7 @@ describe("ChatPanel conversation history search and navigation", () => {
       target: { value: "needle" },
     });
 
-    const partialSearch = await screen.findByRole("alert");
+    const partialSearch = await screen.findByText(/A pesquisa ficou incompleta:/);
     expect(partialSearch.textContent).toContain("pesquisa ficou incompleta");
     expect(partialSearch.textContent).toContain("repetiu um cursor");
     expect(await screen.findByRole("button", { name: /needle encontrado na página A/ })).toBeTruthy();
@@ -340,7 +340,7 @@ describe("ChatPanel conversation history search and navigation", () => {
       target: { value: "needle" },
     });
 
-    const partialSearch = await screen.findByRole("alert");
+    const partialSearch = await screen.findByText(/A pesquisa ficou incompleta:/);
     expect(partialSearch.textContent).toContain("pesquisa ficou incompleta");
     expect(partialSearch.textContent).toContain("não forneceu um cursor válido");
     expect(await screen.findByRole("button", { name: /needle encontrado antes/ })).toBeTruthy();

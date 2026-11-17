@@ -96,7 +96,15 @@ async def test_bot_chat_pins_profile_and_keeps_mutating_tools_denied(monkeypatch
     monkeypatch.setattr(app.state, "event_bus", None, raising=False)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://nexus.local", headers=_auth("alice")) as client:
-        bot = (await client.post("/api/bots", json={"name": "Pixel", "instructions": "Responde com precisão", "provider": "lmstudio", "model": "model-pixel"})).json()
+        bot = (await client.post("/api/bots", json={
+            "name": "Pixel", "instructions": "Responde com precisão",
+            "provider": "lmstudio", "model": "model-pixel",
+            "capabilities": {
+                "read": True, "research": True, "tasks": True,
+                "memory": True, "write": False, "shell": True,
+                "browser": True, "mcp": True, "auto_accept": True,
+            },
+        })).json()
         response = await client.post("/api/chat", json={
             "session_id": bot["session_id"], "message": "Olá!", "mode": "autonomous",
             "autonomous": True, "provider": "openai", "model": "wrong-model",
@@ -111,7 +119,9 @@ async def test_bot_chat_pins_profile_and_keeps_mutating_tools_denied(monkeypatch
         advertised = provider.calls[0].get("options", {}).get("tools") or []
         advertised_names = {tool.get("function", {}).get("name") for tool in advertised}
         assert "write_file" not in advertised_names
-        assert "execute_shell" not in advertised_names
+        assert "append_file" not in advertised_names
+        assert "delete_file" not in advertised_names
+        assert {"read_file", "list_dir", "search_codebase", "run_shell", "store_memory", "list_skills", "load_skill", "mcp_list_tools"} <= advertised_names
         assert "Responde com precisão" in provider.calls[0]["messages"][0]["content"]
         assert [row["role"] for row in get_messages(bot["session_id"])] == ["user", "assistant"]
 
@@ -157,6 +167,82 @@ async def test_isolated_bot_does_not_touch_shared_agent_memory(monkeypatch: pyte
     request = AgentRequest(session_id="isolated-bot", query="hello", client=object(),
                            context={"_isolated_bot_conversation": True})
     assert [token async for token in Agent().run(request)] == ["ok"]
+
+
+def test_available_capabilities_reflect_the_live_registry() -> None:
+    """A capability is only advertised when the registry can serve its tools."""
+    from backend.orchestrator.routes.bots import _available_capabilities
+    from backend.orchestrator.routes.chat_primary import (
+        _BOT_CAPABILITY_TOOLS,
+        _bot_capability_policy,
+    )
+    from backend.tools.registry import list_tools
+
+    available = {
+        spec.name for spec in list_tools(enabled_only=True)
+        if spec.available and spec.enabled and spec.handler is not None
+    }
+
+    # Disabling a family removes it from the advertised set.
+    disabled_browser = _available_capabilities({"capabilities": {"browser": False}})
+    assert "browser" not in disabled_browser
+
+    # Every advertised capability has at least one tool the model can call.
+    for flag in disabled_browser:
+        assert _BOT_CAPABILITY_TOOLS[flag] & available
+
+    # A disabled family also drops its tools from the runtime allowlist.
+    _effective, tools = _bot_capability_policy({"capabilities": {"shell": False}})
+    assert not (_BOT_CAPABILITY_TOOLS["shell"] & tools)
+
+
+@pytest.mark.asyncio
+async def test_bot_automatic_recall_is_private_and_requires_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.agents.base import AgentBase, AgentRequest
+    from backend.knowledge import memory as memory_module
+
+    service = memory_module.EmbeddingService()
+
+    async def embed(text: str) -> list[float]:
+        return service._fallback_embed(text)
+
+    monkeypatch.setattr(service, "embed", embed)
+    store = memory_module.MemoryStore(embedding_service=service)
+    monkeypatch.setattr(memory_module, "get_memory_store", lambda: store)
+    for content, owner, session, kind in [
+        ("orchid private own", "alice", "bot-a", memory_module.MemoryType.SESSION),
+        ("orchid other bot", "alice", "bot-b", memory_module.MemoryType.SESSION),
+        ("orchid unscoped", "alice", "", memory_module.MemoryType.SESSION),
+        ("orchid global", "alice", "", memory_module.MemoryType.GLOBAL),
+        ("orchid other user", "bob", "bot-a", memory_module.MemoryType.SESSION),
+    ]:
+        await store.store(content, user_id=owner, session_id=session, memory_type=kind)
+
+    class Agent(AgentBase):
+        name = "NEXUS"
+        model_key = "coder"
+        prompt_file = "nexus_primary"
+        supported_actions = set()
+
+        async def _execute(self, _request: AgentRequest):
+            yield "ok"
+
+    agent = Agent()
+    request = AgentRequest(
+        session_id="bot-a", user_id="alice", query="orchid", client=object(),
+        context={"_fast_chat_lane": True, "_bot_memory_session_scope": True},
+    )
+    messages = await agent.abuild_messages(request)
+    text = "\n".join(message["content"] for message in messages)
+    assert "orchid private own" in text
+    for forbidden in ("orchid other bot", "orchid unscoped", "orchid global", "orchid other user"):
+        assert forbidden not in text
+
+    request.context = {"_fast_chat_lane": True}
+    messages = await agent.abuild_messages(request)
+    assert "orchid private own" not in "\n".join(message["content"] for message in messages)
 
 
 @pytest.mark.asyncio

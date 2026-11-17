@@ -124,7 +124,10 @@ async def test_absolute_path_tool_without_a_project_asks_for_one(tmp_path: Path)
 
     assert result["ok"] is False
     assert result["error_category"] == "project_scope_denied"
-    assert "project" in result["error"].lower()
+    # The message must name what is missing and the action that fixes it; it is
+    # user-facing Portuguese, so it says "projeto" and asks the user to select.
+    lowered = str(result["error"]).casefold()
+    assert "projeto" in lowered and "seleciona" in lowered
     assert "private-marker" not in str(result)
 
 

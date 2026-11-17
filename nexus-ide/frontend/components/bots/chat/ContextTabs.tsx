@@ -6,13 +6,24 @@ import type { Bot } from "../../../lib/bots";
 import { BotStatusPill } from "../botsUi";
 import GroupRuns from "../GroupRuns";
 import { IdentityMark } from "./identity";
-import { pathsFromRuns, recordsOfKind, taskStatusLabel, type RoomRun } from "./model";
+import {
+  pathsFromRuns,
+  recordKindLabel,
+  recordsOfKind,
+  runEngineLabel,
+  runIdentity,
+  runStateLabel,
+  taskStatusLabel,
+  verificationOf,
+  type RoomRun,
+} from "./model";
 
 const TABS = [
   { id: "people", label: "Participantes" },
   { id: "plan", label: "Plano" },
   { id: "files", label: "Ficheiros" },
   { id: "tools", label: "Ferramentas" },
+  { id: "verification", label: "Verificação" },
   { id: "events", label: "Eventos" },
 ] as const;
 
@@ -34,10 +45,7 @@ function Panel({ id, tab, label, children }: { id: TabId; tab: TabId; label: str
 }
 
 function recordTitle(kind: string): string {
-  if (kind === "tool_call") return "Chamada de ferramenta";
-  if (kind === "tool_result") return "Resultado da ferramenta";
-  if (kind === "handoff") return "Passagem ao participante seguinte";
-  return kind;
+  return recordKindLabel(kind);
 }
 
 export default function ContextTabs({
@@ -63,8 +71,9 @@ export default function ContextTabs({
   const participants = botIds.map((id) => bots.find((bot) => bot.id === id) ?? null);
   const files = pathsFromRuns(runs);
   const tools = recordsOfKind(runs, ["tool_call", "tool_result"]);
-  const events = runs.flatMap((run) => run.records.map((record) => ({ runId: run.id, record })));
-  const tasks = runs.flatMap((run) => run.tasks.map((task) => ({ file: run.file_path, task })));
+  const events = runs.flatMap((run) => run.records.map((record) => ({ runId: runIdentity(run), record })));
+  const tasks = runs.flatMap((run) => run.tasks.map((task) => ({ run, task })));
+  const verifications = runs.flatMap((run) => verificationOf(run).map((entry) => ({ run, entry })));
 
   return (
     <aside aria-label="Contexto do grupo" className="nx-bot-drawer flex h-full min-h-0 w-full flex-col border-l border-[color:var(--nx-line)] bg-[color:var(--nx-surface-1)]">
@@ -126,14 +135,17 @@ export default function ContextTabs({
       <Panel id="plan" tab={tab} label="Plano">
         {tasks.length === 0 ? (
           <p className="text-[12px] leading-5 text-[color:var(--nx-text-faint)]">
-            Esta conversa de grupo não expõe um plano separado. As tarefas aparecem quando existe uma execução de leitura de ficheiro.
+            Ainda não há trabalho atribuído registado. O compositor cria um run PRIMARY; a leitura de ficheiro usa o motor legacy e aparece aqui como execução separada.
           </p>
         ) : (
           <ol className="space-y-2">
-            {tasks.map(({ task, file }) => (
-              <li key={task.id} className="rounded-xl border border-[color:var(--nx-line)] px-3 py-2 text-[12px]">
+            {tasks.map(({ task, run }) => (
+              <li key={`${runIdentity(run)}:${task.id}`} className="rounded-xl border border-[color:var(--nx-line)] px-3 py-2 text-[12px]">
                 <span className="block font-medium">{task.bot_name} · {taskStatusLabel(task.status)}</span>
-                <span className="block text-[11px] text-[color:var(--nx-text-faint)]">{file}</span>
+                <span className="block text-[11px] text-[color:var(--nx-text-faint)]">
+                  {runEngineLabel(run)} · {runIdentity(run).slice(0, 12)} · {runStateLabel(run.state ?? run.status)}
+                </span>
+                {run.file_path ? <span className="block break-all text-[11px] text-[color:var(--nx-text-faint)]">{run.file_path}</span> : null}
               </li>
             ))}
           </ol>
@@ -154,7 +166,7 @@ export default function ContextTabs({
       </Panel>
       <Panel id="tools" tab={tab} label="Ferramentas">
         {tools.length === 0 ? (
-          <p className="text-[12px] leading-5 text-[color:var(--nx-text-faint)]">Nenhuma ferramenta foi registada. A conversa normal do grupo não usa tool calls.</p>
+          <p className="text-[12px] leading-5 text-[color:var(--nx-text-faint)]">Nenhuma ferramenta foi registada neste run. A ausência de chamadas não é prova de conclusão.</p>
         ) : (
           <ul className="space-y-2">
             {tools.map(({ id, kind, payload }) => (
@@ -170,15 +182,34 @@ export default function ContextTabs({
           </ul>
         )}
       </Panel>
+      <Panel id="verification" tab={tab} label="Verificação">
+        {verifications.length === 0 ? (
+          <p className="text-[12px] leading-5 text-[color:var(--nx-text-dim)]">
+            Sem verificação registada. As respostas dos bots são propostas; não são prova de que o objetivo foi concluído.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {verifications.map(({ run, entry }) => (
+              <li key={`${runIdentity(run)}:${entry.id}`} data-testid="context-verification" className="rounded-xl border border-[color:var(--nx-line)] px-3 py-2 text-[12px]">
+                <span className={`block font-medium ${entry.verified === true ? "text-[color:var(--nx-emerald)]" : entry.verified === false ? "text-[color:var(--nx-rose)]" : "text-[color:var(--nx-amber)]"}`}>
+                  {entry.verified === true ? "Verificado" : entry.verified === false ? "Não aprovado" : "Registo sem resultado explícito"}
+                </span>
+                <span className="mt-1 block text-[11px] leading-5 text-[color:var(--nx-text-dim)]">{entry.label}{entry.detail ? ` · ${entry.detail}` : ""}</span>
+                <span className="mt-1 block break-all text-[11px] text-[color:var(--nx-text-faint)]">{runEngineLabel(run)} · {runIdentity(run).slice(0, 12)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
       <Panel id="events" tab={tab} label="Eventos">
         {events.length === 0 ? (
           <p className="text-[12px] leading-5 text-[color:var(--nx-text-faint)]">Sem eventos de execução. O histórico da conversa está na coluna central.</p>
         ) : (
           <ol className="space-y-2">
-            {events.map(({ record }, index) => (
+            {events.map(({ record, runId }, index) => (
               <li key={record.id} className="rounded-xl border border-[color:var(--nx-line)] px-3 py-2 text-[12px]">
                 <span className="block font-medium">{index + 1}. {recordTitle(record.kind)}</span>
-                <span className="mt-1 block break-all text-[11px] text-[color:var(--nx-text-faint)]">{record.kind} · {record.id}</span>
+                <span className="mt-1 block break-all text-[11px] text-[color:var(--nx-text-faint)]">{record.kind} · {record.id} · {runId.slice(0, 12)}</span>
               </li>
             ))}
           </ol>

@@ -228,6 +228,9 @@ class OpenAIProvider:
 
     def _new_client(self) -> httpx.AsyncClient:
         """Create the HTTP transport used by this provider."""
+        from urllib.parse import urlsplit
+
+        host = (urlsplit(self._base_url).hostname or "").lower()
         return httpx.AsyncClient(
             base_url=self._base_url,
             headers={
@@ -247,6 +250,7 @@ class OpenAIProvider:
                 connect=15.0, read=self._read_timeout, write=20.0, pool=20.0
             ),
             verify=_system_verify_context(),
+            trust_env=host not in {"localhost", "127.0.0.1", "::1"},
         )
 
     def _ensure_open(self) -> None:

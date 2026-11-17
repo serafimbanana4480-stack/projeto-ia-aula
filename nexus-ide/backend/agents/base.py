@@ -214,6 +214,7 @@ class AgentAction(StrEnum):
     SEARCH_CODEBASE = "search_codebase"
     SEARCH_SYMBOLS = "search_symbols"
     INDEX_SYMBOLS = "index_symbols"
+    INDEX_CODEBASE = "index_codebase"
     READ_DOCS = "read_docs"
     RECALL_CONTEXT = "recall_context"
     STORE_MEMORY = "store_memory"
@@ -223,11 +224,20 @@ class AgentAction(StrEnum):
     SEARCH_GITHUB = "search_github"
     SEARCH_DOCS = "search_docs"
     DEEP_RESEARCH = "deep_research"
+    BROWSER_NAVIGATE = "browser_navigate"
+    BROWSER_CLICK = "browser_click"
+    BROWSER_FILL = "browser_fill"
+    BROWSER_EXTRACT_TEXT = "browser_extract_text"
+    BROWSER_SCREENSHOT = "browser_screenshot"
+    BROWSER_GET_LINKS = "browser_get_links"
+    BROWSER_CLOSE = "browser_close"
     RUN_SHELL = "run_shell"
     RUN_TESTS = "run_tests"
     RUN_LINT = "run_lint"
     FORMAT_CODE = "format_code"
     TYPE_CHECK = "type_check"
+    GENERATE_TESTS = "generate_tests"
+    GIT_STATUS = "git_status"
     SPAWN_TASK = "spawn_task"
     MCP_PROJECT_CONTEXT = "mcp_project_context"
     MCP_IMPACT_ANALYSIS = "mcp_impact_analysis"
@@ -243,6 +253,8 @@ class AgentAction(StrEnum):
     LOAD_SKILL = "load_skill"
     DISCOVER_SKILL_CANDIDATES = "discover_skill_candidates"
     BUILD_SKILL = "build_skill"
+    PROMOTE_SKILL = "promote_skill"
+    REPORT_SKILL_OUTCOME = "report_skill_outcome"
     SEQUENTIAL_THINKING = "sequential_thinking"
     PAUSE_SESSION = "pause_session"
     RESUME_SESSION = "resume_session"
@@ -640,12 +652,16 @@ class AgentBase(ABC):
             )
 
         # Inject relevant semantic memories asynchronously (non-blocking)
-        if self.enable_memory and not request.context.get("_fast_chat_lane"):
+        bot_memory = bool(request.context.get("_bot_memory_session_scope"))
+        if self.enable_memory and (
+            not request.context.get("_fast_chat_lane")
+            or (bot_memory and request.user_id and request.session_id)
+        ):
             try:
                 memory_cache_key = f"_memory_context:{self.name}"
                 memory_context = request.context.get(memory_cache_key)
                 if memory_context is None:
-                    from backend.knowledge.memory import get_memory_store
+                    from backend.knowledge.memory import MemoryType, get_memory_store
 
                     memory_store = get_memory_store()
                     memory_context = await asyncio.wait_for(
@@ -654,6 +670,7 @@ class AgentBase(ABC):
                             session_id=request.session_id,
                             project_id=request.project_path or "",
                             user_id=request.user_id or None,
+                            **({"memory_type": MemoryType.SESSION} if bot_memory else {}),
                             top_k=5,
                             max_tokens=1500,
                         ),
@@ -1115,6 +1132,46 @@ class AgentBase(ABC):
                     parameters=parameters,
                 )
             )
+
+        # Also include any explicitly permitted registered tool from the live
+        # registry that was not mapped through supported_actions.
+        if only is not None:
+            from backend.tools.registry import list_tools
+
+            known_names = {entry.tool for entry in entries}
+            for extra_spec in sorted(list_tools(enabled_only=False), key=lambda item: item.name):
+                if extra_spec.name in known_names or extra_spec.name not in only:
+                    continue
+                known_names.add(extra_spec.name)
+                if not extra_spec.available or not extra_spec.enabled:
+                    entries.append(
+                        _ToolSchemaEntry(
+                            tool=extra_spec.name,
+                            spec=extra_spec,
+                            advertised=False,
+                            description="",
+                            parameters={},
+                        )
+                    )
+                    continue
+                schema = (
+                    extra_spec.schema
+                    if isinstance(extra_spec.schema, dict) and extra_spec.schema
+                    else {"type": "object", "properties": {}, "additionalProperties": True}
+                )
+                entries.append(
+                    _ToolSchemaEntry(
+                        tool=extra_spec.name,
+                        spec=extra_spec,
+                        advertised=True,
+                        description=self._merge_tool_description(
+                            extra_spec.name,
+                            extra_spec.when_to_use,
+                            extra_spec.description,
+                        ),
+                        parameters=schema,
+                    )
+                )
         return entries
 
     def _openai_tool_schemas(
@@ -1124,18 +1181,12 @@ class AgentBase(ABC):
 
         Derived from ``supported_actions`` via the action registry so the model
         can use structured function calling. Returns ``None`` when the agent has
-        no actions, which keeps ordinary conversational calls schema-free.
+        no actions and no explicit allowlist, which keeps ordinary conversational calls schema-free.
         ``only`` (when given) restricts the schemas to the runtime contract so
         a forbidden tool is never advertised through native function calling
         either.
-
-        The derivation is a pure function of (agent, ``only``, action-registry
-        epoch, live tool-registry state), so it is memoised — see
-        :data:`_TOOL_SCHEMA_CACHE` for the invalidation contract. A fresh list
-        of fresh dicts is returned on every call so a provider that mutates the
-        payload cannot poison the cache.
         """
-        if not self.supported_actions:
+        if not self.supported_actions and not only:
             return None
         action_registry = get_action_registry()
         # ``supported_actions`` is a set of StrEnum members: iterating it
@@ -4339,6 +4390,8 @@ class AgentBase(ABC):
                             ),
                             allowed_tools=self._runtime_allowed_tools(request),
                             failure_scope=request.context.get("_tool_failure_scope"),
+                            memory_session_only=bool(request.context.get("_bot_memory_session_scope")),
+                            auto_accept=bool(request.context.get("_auto_accept")),
                         )
                         return name, call_args, response, time.monotonic() - started
 
@@ -4433,6 +4486,8 @@ class AgentBase(ABC):
                         sentinel_enforced=bool(request.context.get("_sentinel_enforced")),
                         allowed_tools=self._runtime_allowed_tools(request),
                         failure_scope=request.context.get("_tool_failure_scope"),
+                        memory_session_only=bool(request.context.get("_bot_memory_session_scope")),
+                        auto_accept=bool(request.context.get("_auto_accept")),
                     )
 
                 stream_shell = (
@@ -4515,7 +4570,7 @@ class AgentBase(ABC):
                     confirmation_payload = {
                         "confirmation_id": result.get("confirmation_id"),
                         "tool_name": tool_name,
-                        "tool_args": args,
+                        "tool_args": result.get("tool_args") if isinstance(result.get("tool_args"), dict) else args,
                         "risk_level": result.get("risk_level", "medium"),
                         "suggestion": result.get("suggestion", "Review before continuing."),
                     }
@@ -4928,7 +4983,7 @@ class AgentBase(ABC):
                         project_id=request.project_path or "",
                         user_id=request.user_id,
                         source=self.name,
-                        tags=["agent.run", self.name.lower(), "auto_memory"],
+                        tags=["agent.run", self.name.lower(), "auto_memory", "assistant_response"],
                         importance=0.5,
                     )
                 except Exception as exc:

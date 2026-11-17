@@ -98,11 +98,11 @@ export function InfinitySuiteWorkspace({ compact = false, onCommandPrepared }: {
 
   return (
     <div className="min-w-0 space-y-4">
-      {(error || actionError) && <div role="alert" className="flex items-start gap-2 rounded-xl border border-amber-400/25 bg-amber-400/10 p-3 text-xs leading-relaxed text-nexus-accent3">
+      {(error || actionError) && <div role="alert" className="flex items-start gap-2 rounded-xl border border-nexus-accent3/25 bg-nexus-accent3/[0.08] p-3 text-xs leading-relaxed text-nexus-accent3">
         <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
         <div className="min-w-0 flex-1"><p>{error || actionError}</p>{error && health && <p className="mt-1">Os dados abaixo são a última leitura. Atualiza antes de alterar modos.</p>}</div>
         <button type="button" onClick={() => void refreshHealth()} disabled={loading}
-          className="min-h-9 shrink-0 rounded-lg px-2 font-semibold hover:bg-amber-400/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300">Tentar novamente</button>
+          className="min-h-9 shrink-0 rounded-lg px-2 font-semibold hover:bg-nexus-accent3/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent3">Tentar novamente</button>
       </div>}
       {!health && loading ? <div role="status" className="flex items-center gap-2 py-6 text-sm text-nexus-muted"><Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />A carregar Infinity Suite…</div> : !health ? <p className="py-5 text-sm text-nexus-muted">O catálogo ainda não está disponível.</p> : <>
         <div className="grid grid-cols-3 gap-2" aria-label="Resumo do Infinity Suite">
@@ -116,31 +116,31 @@ export function InfinitySuiteWorkspace({ compact = false, onCommandPrepared }: {
           </div>)}
         </div>
 
-        {disk?.write_blocked && <div role="status" className="rounded-xl border border-amber-400/25 bg-amber-400/[0.07] p-3 text-xs leading-relaxed text-nexus-accent3">
+        {disk?.write_blocked && <div role="status" className="rounded-xl border border-nexus-accent3/25 bg-nexus-accent3/[0.07] p-3 text-xs leading-relaxed text-nexus-accent3">
           <div className="flex items-center gap-2 font-semibold"><AlertTriangle aria-hidden="true" className="h-4 w-4" />Execução bloqueada pelo armazenamento</div>
           <p className="mt-1">{disk.snapshot?.free_percent.toLocaleString("pt-PT", { maximumFractionDigits: 1, minimumFractionDigits: 1 }) ?? "—"}% livre; o runtime exige {disk.threshold_percent ?? 5}%. Podes consultar e configurar os modos. As execuções sujeitas ao guard ficam bloqueadas.</p>
         </div>}
         {health.healthy === false && <p role="alert" className="text-xs text-nexus-accent3">O catálogo está incompleto. Alguns modos podem estar indisponíveis.</p>}
 
-        <div className="rounded-2xl border border-purple-400/25 bg-purple-400/[0.06] p-4">
-          <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-purple-300"><Layers aria-hidden="true" className="h-3.5 w-3.5" />Perfil do próximo pedido</div>
+        <div className="rounded-2xl border border-nexus-accent/25 bg-nexus-accent/[0.06] p-4">
+          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-nexus-accent-bright"><Layers aria-hidden="true" className="h-3.5 w-3.5" />Perfil do próximo pedido</div>
           <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm font-semibold text-nexus-text">{executionProfile?.primary_mode ? `/${executionProfile.primary_mode}` : activeModeIds.length ? "A atualizar perfil…" : "Segue o modo escolhido no chat"}</div>
-            {executionProfile?.force_autonomous && <span className="rounded-md bg-purple-400/15 px-2 py-1 text-[10px] font-medium text-purple-300">Perfil composto</span>}
+            {executionProfile?.force_autonomous && <span className="rounded-md bg-nexus-accent/15 px-2 py-1 text-[10px] font-medium text-nexus-accent-bright">Perfil composto</span>}
           </div>
           {executionProfile?.force_autonomous && <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-nexus-muted" aria-label="Etapas da orquestração">
             <span>Planear</span><ArrowRight aria-hidden="true" className="h-3 w-3" /><span>Executar</span><ArrowRight aria-hidden="true" className="h-3 w-3" /><span>Verificar</span>
           </div>}
           <p className="mt-2 text-xs leading-relaxed text-nexus-muted">{activeModeIds.length ? "As políticas configuradas entram nos próximos pedidos. A execução depende do objetivo, do provider e dos recursos disponíveis." : "Configura um modo para orientar os próximos pedidos, ou prepara um comando para escolher um executor específico."}</p>
           {!!executionProfile?.policy_mode_ids.length && <details className="mt-3 text-xs text-nexus-muted">
-            <summary className="cursor-pointer rounded-md py-1 font-medium text-purple-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent">{executionProfile.policy_mode_ids.length} políticas incluídas</summary>
-            <div className="mt-2 flex flex-wrap gap-1.5">{executionProfile.policy_mode_ids.map((id) => <code key={id} className="rounded-md border border-purple-400/15 px-2 py-1 text-[10px]">/{id}</code>)}</div>
+            <summary className="cursor-pointer rounded-md py-1 font-medium text-nexus-accent-bright focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent">{executionProfile.policy_mode_ids.length} políticas incluídas</summary>
+            <div className="mt-2 flex flex-wrap gap-1.5">{executionProfile.policy_mode_ids.map((id) => <code key={id} className="rounded-md border border-nexus-accent/20 px-2 py-1 text-[10px]">/{id}</code>)}</div>
           </details>}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" onClick={() => void configureOrchestration()} disabled={disabled || !modes.autonomous?.available}
-            className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-purple-500 px-3.5 text-xs font-semibold text-white transition-colors hover:bg-purple-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-300 focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg disabled:cursor-not-allowed disabled:opacity-45">
+            className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-nexus-accent px-3.5 text-xs font-semibold text-white transition-colors hover:bg-nexus-accent-bright focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg disabled:cursor-not-allowed disabled:opacity-45">
             {pendingModeIds.includes("autonomous") ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : <Zap aria-hidden="true" className="h-4 w-4" />}Orquestração completa
           </button>
           <button type="button" onClick={() => void deactivateAll()} disabled={disabled || activeModeIds.length === 0}
@@ -165,8 +165,8 @@ export function InfinitySuiteWorkspace({ compact = false, onCommandPrepared }: {
               <input id={searchId} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Pesquisar modo, função ou executor…" className="h-10 w-full rounded-xl border border-nexus-border bg-nexus-bg/40 pl-9 pr-3 text-xs text-nexus-text placeholder:text-nexus-muted focus:outline-none focus:ring-2 focus:ring-nexus-accent" />
             </div>
             <div className="flex gap-1 rounded-xl border border-nexus-border p-1" aria-label="Filtrar modos">
-              <button type="button" aria-pressed={filter === "all"} onClick={() => setFilter("all")} className={`min-h-8 rounded-lg px-3 text-[11px] font-medium ${filter === "all" ? "bg-purple-400/15 text-purple-300" : "text-nexus-muted"}`}>Todos {allModes.length}</button>
-              <button type="button" aria-pressed={filter === "configured"} onClick={() => setFilter("configured")} className={`min-h-8 rounded-lg px-3 text-[11px] font-medium ${filter === "configured" ? "bg-purple-400/15 text-purple-300" : "text-nexus-muted"}`}>Configurados {activeModeIds.length}</button>
+              <button type="button" aria-pressed={filter === "all"} onClick={() => setFilter("all")} className={`min-h-8 rounded-lg px-3 text-[11px] font-medium ${filter === "all" ? "bg-nexus-accent/15 text-nexus-accent-bright" : "text-nexus-muted"}`}>Todos {allModes.length}</button>
+              <button type="button" aria-pressed={filter === "configured"} onClick={() => setFilter("configured")} className={`min-h-8 rounded-lg px-3 text-[11px] font-medium ${filter === "configured" ? "bg-nexus-accent/15 text-nexus-accent-bright" : "text-nexus-muted"}`}>Configurados {activeModeIds.length}</button>
             </div>
           </div>
           {grouped.length === 0 ? <div role="status" className="rounded-xl border border-dashed border-nexus-border p-6 text-center text-sm text-nexus-muted">{query ? "Nenhum modo corresponde à pesquisa." : "Ainda não tens modos configurados."}</div> : grouped.map(([groupId, groupModes]) => <section key={groupId} aria-label={GROUP_LABELS[groupId] ?? groups[groupId]?.label ?? "Outros modos"}>

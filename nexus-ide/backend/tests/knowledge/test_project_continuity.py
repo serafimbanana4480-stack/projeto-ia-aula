@@ -701,3 +701,105 @@ def test_project_memory_tool_updates_decisions_and_explicit_project_goal(
     assert "The worker owns durable job retries" in context
     assert (tmp_path / ".nexus" / f"project-state-{continuity.owner_key}.md").exists()
     assert not (tmp_path / ".nexus" / "project-state.md").exists()
+
+
+# ── N3: run events never reach another session ─────────────────────────
+
+
+def _completed_run(
+    store: ProjectContinuityStore,
+    *,
+    session_id: str,
+    run_id: str,
+    objective: str,
+    answer_summary: str,
+    now: float,
+) -> None:
+    store.begin_run(
+        session_id=session_id,
+        run_id=run_id,
+        objective=objective,
+        snapshot=capture_project_snapshot(store.root),
+        model="provider/model",
+        now=now,
+    )
+    store.finish_run(
+        session_id=session_id,
+        run_id=run_id,
+        status="completed",
+        verification={"ran": False, "ok": True, "summary": "", "command": ""},
+        changed_files=[],
+        error="",
+        answer_summary=answer_summary,
+        model="provider/model",
+    )
+
+
+def _continuity_rows(store: ProjectContinuityStore) -> list[dict[str, Any]]:
+    conn = store._connect()
+    try:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT event_type, session_id, owner_key, payload_json FROM continuity_events"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def test_run_finished_events_are_not_replayed_to_another_session(tmp_path: Path) -> None:
+    """A finished run's per-run events stay inside their own session.
+
+    Threshold N3.  ``finish_run`` writes a ``run_finished`` (or
+    ``checkpoint_after``) event carrying ``answer_summary_unverified`` — the
+    assistant's own answer.  The reconstruction in
+    :meth:`ProjectContinuityStore.bootstrap_context` only replayed events for
+    the *same* ``session_id`` when their type was already whitelisted, and
+    ownerless events without a whitelisted type were eligible for every session
+    of the project.
+    """
+    store = ProjectContinuityStore(tmp_path)
+    _completed_run(
+        store,
+        session_id="session-a",
+        run_id="run-a",
+        objective="Explica o offset da paginação",
+        answer_summary="RESPOSTA-SECRETA-DA-SESSAO-A",
+        now=1_000.0,
+    )
+    # The event is persisted; this test is about who may read it back.
+    kinds = {row["event_type"] for row in _continuity_rows(store)}
+    assert "run_finished" in kinds, _continuity_rows(store)
+
+    store.begin_run(
+        session_id="session-b",
+        run_id="run-b",
+        objective="Nova tarefa independente",
+        snapshot=capture_project_snapshot(tmp_path),
+        model="provider/model",
+        now=2_000.0,
+    )
+
+
+def test_bootstrap_context_never_quotes_a_foreign_run_answer(tmp_path: Path) -> None:
+    """The rendered context of session B contains no run A answer payload."""
+    store = ProjectContinuityStore(tmp_path)
+    _completed_run(
+        store,
+        session_id="session-a",
+        run_id="run-a",
+        objective="Explica o offset da paginação",
+        answer_summary="RESPOSTA-SECRETA-DA-SESSAO-A",
+        now=1_000.0,
+    )
+    for session_id in ("session-a", "session-b"):
+        context = store.bootstrap_context(
+            "resume a paginação",
+            session_id=session_id,
+            snapshot=capture_project_snapshot(tmp_path),
+            now=2_500.0,
+        )
+        assert "RESPOSTA-SECRETA-DA-SESSAO-A" not in context, (
+            f"{session_id} received another session's run answer in its context"
+        )

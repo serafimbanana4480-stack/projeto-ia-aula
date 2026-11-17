@@ -116,8 +116,8 @@ export default function AdvisorWidget() {
             <span
               className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider shadow-rim ${
                 status.active
-                  ? "bg-[rgba(245,158,11,0.12)] text-nexus-accent3"
-                  : "bg-[rgba(148,163,184,0.12)] text-nexus-muted"
+                  ? "bg-nexus-accent3/12 text-nexus-accent3"
+                  : "bg-nexus-border/60 text-nexus-muted"
               }`}
             >
               <span
@@ -150,7 +150,7 @@ export default function AdvisorWidget() {
       </div>
 
       <div className="mt-5 flex-1 space-y-2">
-        <div className="text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-nexus-faint">
           Sessões recentes
         </div>
 
@@ -178,7 +178,7 @@ export default function AdvisorWidget() {
                 >
                   {shortId(session.session_id)}
                 </span>
-                <span className="rounded-md bg-[rgba(148,163,184,0.12)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-nexus-muted">
+                <span className="rounded-md bg-nexus-border/60 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-nexus-muted">
                   {session.state}
                 </span>
               </div>

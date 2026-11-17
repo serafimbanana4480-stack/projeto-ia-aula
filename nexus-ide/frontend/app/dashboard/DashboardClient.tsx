@@ -279,11 +279,11 @@ export default function DashboardClient() {
               Os teus objetivos, agentes e ferramentas. Tudo à vista.
             </p>
             <div className="flex flex-wrap items-center gap-2 pt-0.5">
-              <Link href="/" className="inline-flex min-h-8 items-center gap-2 rounded-lg border border-nexus-accent/25 bg-nexus-accent/10 px-3.5 text-xs font-medium text-nexus-accent-bright transition-colors hover:bg-nexus-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent">
+              <Link href="/" className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-nexus-accent/25 bg-nexus-accent/10 px-3.5 text-xs font-medium text-nexus-accent-bright transition-colors hover:bg-nexus-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent">
                 <MessageSquare className="h-3.5 w-3.5" /> Abrir chat
                 <ArrowRight className="h-3 w-3" />
               </Link>
-              <Link href="/dashboard/tasks" className="inline-flex min-h-8 items-center gap-2 rounded-lg border border-nexus-border/70 bg-nexus-card/50 px-3.5 text-xs font-medium text-nexus-muted transition-colors hover:bg-nexus-card hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent">
+              <Link href="/dashboard/tasks" className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-nexus-border/70 bg-nexus-card/50 px-3.5 text-xs font-medium text-nexus-muted transition-colors hover:bg-nexus-card hover:text-nexus-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent">
                 <ListTodo className="h-3.5 w-3.5" /> Ver tarefas
               </Link>
             </div>
@@ -291,7 +291,7 @@ export default function DashboardClient() {
 
           <dl className="grid grid-cols-2 overflow-hidden rounded-2xl border border-nexus-border/60 bg-nexus-card/60 min-[380px]:grid-cols-3 sm:min-w-[410px]">
             <div className="col-span-2 min-w-0 border-b border-nexus-border/50 px-3 py-2.5 min-[380px]:col-span-1 min-[380px]:border-b-0 min-[380px]:border-r">
-              <dt className="text-[10px] uppercase tracking-wider text-nexus-faint">
+              <dt className="text-[11px] uppercase tracking-wider text-nexus-faint">
                 Modelo ativo
               </dt>
               <dd className="mt-1 truncate font-mono text-[11px] font-semibold text-nexus-accent-bright sm:text-[13px]">
@@ -299,7 +299,7 @@ export default function DashboardClient() {
               </dd>
             </div>
             <div className="min-w-0 border-r border-nexus-border/50 px-3 py-2.5">
-              <dt className="text-[10px] uppercase tracking-wider text-nexus-faint">
+              <dt className="text-[11px] uppercase tracking-wider text-nexus-faint">
                 Tempo ativo
               </dt>
               <dd className="mt-1 truncate font-mono text-[11px] font-semibold tabular-nums text-nexus-text sm:text-[13px]">
@@ -307,7 +307,7 @@ export default function DashboardClient() {
               </dd>
             </div>
             <div className="min-w-0 px-3 py-2.5">
-              <dt className="text-[10px] uppercase tracking-wider text-nexus-faint">
+              <dt className="text-[11px] uppercase tracking-wider text-nexus-faint">
                 Atualizado
               </dt>
               <dd
@@ -336,7 +336,7 @@ export default function DashboardClient() {
                 onClick={() => setActiveDashboardSection(sectionId)}
                 aria-current={active ? "location" : undefined}
                 className={
-                  "inline-flex min-h-10 shrink-0 items-center rounded-lg px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg " +
+                  "inline-flex min-h-11 shrink-0 items-center rounded-lg px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg sm:min-h-10 " +
                   (active
                     ? "bg-nexus-accent/12 text-nexus-accent-bright"
                     : "text-nexus-muted hover:bg-nexus-card hover:text-nexus-text")
@@ -351,13 +351,13 @@ export default function DashboardClient() {
 
       <div className="mx-auto max-w-7xl space-y-8 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
         <RuntimeReadinessBanner />
-        <WorkspaceLaunchpad />
         <section id="novo-objetivo" aria-label="Lançar objetivo" className="scroll-mt-28 sm:scroll-mt-16">
           <Surface elevation={2} padding="lg" tone="accent" className="nx-dashboard-objective">
             <SurfaceHeader
               icon={<Command className="h-4 w-4" />}
               title="Lançar objetivo"
               subtitle="Escreve o pedido e continua no chat ou no Swarm."
+              headingLevel={2}
               className="flex-col items-stretch gap-2 sm:flex-row sm:items-center"
               action={
                 <span className="rounded-full bg-nexus-accent/12 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-nexus-accent-bright shadow-rim">
@@ -409,6 +409,10 @@ export default function DashboardClient() {
           </Surface>
         </section>
 
+        {/* Secondary destinations sit after the primary action: on a phone the
+            composer is the first thing worth reaching, not the seventh shortcut. */}
+        <WorkspaceLaunchpad />
+
         <section id="agora" aria-label="O que está a acontecer" className="scroll-mt-28 sm:scroll-mt-16">
           <SectionHeading
             title="Agora"
@@ -417,7 +421,7 @@ export default function DashboardClient() {
           <Surface
             elevation={2}
             padding="lg"
-            live={backendOnline}
+            live={backendOnline && agentRecords.length > 0}
             className="flex flex-col"
           >
             <SurfaceHeader
@@ -640,8 +644,10 @@ export default function DashboardClient() {
         {/* ── COST / PROVIDERS / CONNECTORS ─────────────────────────────── */}
         <section id="integracoes" aria-label="Consumo e integrações" className="scroll-mt-28 sm:scroll-mt-16">
           <SectionHeading title="Consumo e ligações" description="Tokens, custos e estado dos serviços externos." />
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
-            <UsageWidget />
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-3">
+            <div className="min-w-0 md:col-span-2 2xl:col-span-1">
+              <UsageWidget />
+            </div>
             <ProviderStatusWidget />
             <MCPStatusWidget />
           </div>

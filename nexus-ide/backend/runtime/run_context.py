@@ -45,6 +45,10 @@ current_run_id: ContextVar[str] = ContextVar("nexus_current_run_id", default="")
 #: The task within that run (e.g. ``cycle-2``). ``""`` means run-wide keys.
 current_task_id: ContextVar[str] = ContextVar("nexus_current_task_id", default="")
 
+# A local-only turn must not construct a second provider from global settings.
+# Child asyncio tasks inherit this context; unrelated runs remain unaffected.
+local_only_run: ContextVar[bool] = ContextVar("nexus_local_only_run", default=False)
+
 
 def get_current_run_id() -> str:
     """Return the run id of the current execution context, or ``""``.

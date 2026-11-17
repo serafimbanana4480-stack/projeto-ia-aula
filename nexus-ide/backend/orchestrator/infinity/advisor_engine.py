@@ -182,6 +182,14 @@ class AdvisorRuntime:
         if override:
             resolution = resolve_role("advisor", override=override)
             self._model_id = resolution.model_id
+        if self._agent_context.get("_local_only"):
+            # The advisor shares this run's explicitly selected local client.
+            # Its globally configured role model may belong to a cloud provider
+            # and is not necessarily installed at the local endpoint.
+            selected_model = str(self._agent_context.get("_model_override") or "").strip()
+            if not selected_model:
+                raise ValueError("local-only advisor requires a selected model")
+            self._model_id = selected_model
         self._task: asyncio.Task[None] | None = None
         self._stopped = False
         self._terminal_reviewed = asyncio.Event()

@@ -12,8 +12,14 @@ export default function DashboardLoading() {
       </div>
       <div className="mx-auto max-w-7xl space-y-6 px-4 py-5 sm:px-6 sm:py-6 lg:px-8">
         <div className="nx-shimmer h-44 rounded-2xl" />
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          {["kpi-1", "kpi-2", "kpi-3", "kpi-4"].map((key) => (
+        <div className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
+          {["shortcut-1", "shortcut-2", "shortcut-3", "shortcut-4", "shortcut-5", "shortcut-6", "shortcut-7"].map((key) => (
+            <div key={key} className="nx-shimmer h-[74px] rounded-xl sm:h-[112px]" />
+          ))}
+        </div>
+        <div className="nx-shimmer h-56 rounded-2xl" />
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          {["kpi-1", "kpi-2", "kpi-3"].map((key) => (
             <div key={key} className="nx-shimmer h-28 rounded-xl" />
           ))}
         </div>

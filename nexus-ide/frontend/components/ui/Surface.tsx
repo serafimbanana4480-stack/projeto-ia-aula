@@ -195,6 +195,7 @@ export function SurfaceHeader({
   tone = "accent",
   action,
   className = "",
+  headingLevel = 3,
 }: {
   title: string;
   subtitle?: string;
@@ -202,6 +203,10 @@ export function SurfaceHeader({
   tone?: Tone;
   action?: ReactNode;
   className?: string;
+  /** Most surfaces are cards inside a section, so their title is an h3.
+   *  A surface that *is* the section (e.g. the dashboard's objective
+   *  composer) should expose an h2 to keep the heading order honest. */
+  headingLevel?: 2 | 3;
 }) {
   // Token-derived tints so the icon chips follow the active theme.
   const ICON_TONE: Record<Tone, string> = {
@@ -212,6 +217,8 @@ export function SurfaceHeader({
     danger: "text-nexus-accent4 bg-nexus-accent4/12",
     info: "text-nexus-cyan bg-nexus-cyan/12",
   };
+
+  const Heading = headingLevel === 2 ? "h2" : "h3";
 
   return (
     <div className={`flex items-start justify-between gap-3 ${className}`}>
@@ -224,9 +231,9 @@ export function SurfaceHeader({
           </span>
         ) : null}
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold leading-snug tracking-tight text-nexus-text">
+          <Heading className="text-sm font-semibold leading-snug tracking-tight text-nexus-text">
             {title}
-          </h3>
+          </Heading>
           {subtitle ? (
             <p className="mt-0.5 text-[11px] leading-relaxed text-nexus-muted">{subtitle}</p>
           ) : null}

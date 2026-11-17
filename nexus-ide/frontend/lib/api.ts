@@ -89,6 +89,7 @@ export async function postChat(
   provider?: string,
   modelIsConcrete = false,
   idempotencyKey?: string,
+  localOnly = false,
 ): Promise<Response> {
   try {
     const normalisedProjectPath =
@@ -99,6 +100,11 @@ export async function postChat(
       mode,
       project_path: normalisedProjectPath,
     };
+    if (localOnly) {
+      body.local_only = true;
+      body.autonomous = false;
+      body.auto_accept = false;
+    }
     if (model) body.model = model;
     if (modelIsConcrete) body.model_is_concrete = true;
     if (provider) body.provider = provider;

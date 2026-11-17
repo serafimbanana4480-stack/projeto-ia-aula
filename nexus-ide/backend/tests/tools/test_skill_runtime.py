@@ -146,6 +146,25 @@ validation_rules:
 
 
 class TestSkillSelection:
+    def test_portuguese_audita_request_selects_audit_skill(self, skills_root: Path) -> None:
+        _write_skill(
+            skills_root,
+            "audit-repo-readonly",
+            """name: audit-repo-readonly
+description: Read-only repository audit
+status: active
+triggers: [audit repository, auditoria read-only]
+""",
+        )
+
+        result = select_skills(
+            "Verifica o funcionamento do projeto: audita memoria, skills, ferramentas e atrasos",
+            available_tools=set(),
+            include_memory=False,
+        )
+
+        assert [item["name"] for item in result["skills"]] == ["audit-repo-readonly"]
+
     def test_primary_skill_actions_are_registered_and_callable(self) -> None:
         actions = get_action_registry()
         agent = NexusPrimaryAgent()

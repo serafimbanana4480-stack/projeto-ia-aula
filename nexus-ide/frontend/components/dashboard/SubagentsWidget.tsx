@@ -283,10 +283,10 @@ export default function SubagentsWidget() {
             <span
               className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider shadow-rim ${
                 status.circuit_open
-                  ? "bg-[rgba(244,63,94,0.12)] text-nexus-accent4"
+                  ? "bg-nexus-accent4/12 text-nexus-accent4"
                   : status.running
-                    ? "bg-[rgba(52,211,153,0.12)] text-nexus-accent2"
-                    : "bg-[rgba(148,163,184,0.12)] text-nexus-muted"
+                    ? "bg-nexus-accent2/12 text-nexus-accent2"
+                    : "bg-nexus-border/60 text-nexus-muted"
               }`}
             >
               <span
@@ -330,8 +330,8 @@ export default function SubagentsWidget() {
           role="status"
           className={`mt-3 flex items-center gap-2 rounded-lg px-3 py-2 text-[11px] ${
             status.circuit_open
-              ? "border border-[rgba(244,63,94,0.28)] bg-[rgba(244,63,94,0.08)] text-nexus-accent4"
-              : "border border-[rgba(245,158,11,0.28)] bg-[rgba(245,158,11,0.08)] text-nexus-accent3"
+              ? "border border-nexus-accent4/30 bg-nexus-accent4/[0.08] text-nexus-accent4"
+              : "border border-nexus-accent3/30 bg-nexus-accent3/[0.08] text-nexus-accent3"
           }`}
         >
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
@@ -373,7 +373,7 @@ export default function SubagentsWidget() {
       </div>
 
       <div className="mt-5 flex-1 space-y-2">
-        <div className="text-[10px] font-semibold uppercase tracking-wider text-nexus-faint">
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-nexus-faint">
           Execuções recentes
         </div>
 
@@ -417,12 +417,12 @@ export default function SubagentsWidget() {
                       {run.phase}
                     </span>
                     {run.resumed ? (
-                      <span className="rounded-md bg-[rgba(124,106,251,0.12)] px-1.5 py-0.5 text-[10px] font-medium text-nexus-accent-bright">
+                      <span className="rounded-md bg-nexus-accent/12 px-1.5 py-0.5 text-[10px] font-medium text-nexus-accent-bright">
                         checkpoint
                       </span>
                     ) : null}
                     {run.context_degraded ? (
-                      <span className="rounded-md bg-[rgba(245,158,11,0.12)] px-1.5 py-0.5 text-[10px] font-medium text-nexus-accent3">
+                      <span className="rounded-md bg-nexus-accent3/12 px-1.5 py-0.5 text-[10px] font-medium text-nexus-accent3">
                         degradado
                       </span>
                     ) : null}
@@ -452,7 +452,7 @@ export default function SubagentsWidget() {
               <button
                 type="button"
                 onClick={() => setVisibleCount((count) => count + RECENT_PAGE)}
-                className="flex min-h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-nexus-border/70 text-[11px] font-medium text-nexus-muted transition-colors hover:border-[rgba(124,106,251,0.4)] hover:text-nexus-text"
+                className="flex min-h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-nexus-border/70 text-[11px] font-medium text-nexus-muted transition-colors hover:border-nexus-accent/40 hover:text-nexus-text"
               >
                 <ChevronDown className="h-3 w-3" />
                 Ver mais {Math.min(RECENT_PAGE, recent.length - visibleCount)} de{" "}

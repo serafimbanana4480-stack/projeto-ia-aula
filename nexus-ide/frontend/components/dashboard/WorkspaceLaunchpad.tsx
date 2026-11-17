@@ -14,10 +14,32 @@ const DESTINATIONS = [
 ] as const;
 
 export default function WorkspaceLaunchpad() {
-  return <section aria-label="Atalhos de trabalho" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-    {DESTINATIONS.map(({ href, title, detail, Icon, label }) => <Link key={href} href={href} className="nx-workspace-shortcut group flex min-w-0 flex-col rounded-xl border border-nexus-border/60 bg-nexus-panel/60 p-4 transition-colors hover:border-nexus-accent/35 hover:bg-nexus-accent/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent">
-      <span className="flex items-center gap-2"><Icon className="h-4 w-4 text-nexus-accent-bright" /><span className="flex-1 text-[10px] font-medium uppercase tracking-[0.12em] text-nexus-faint">{label}</span><ArrowUpRight className="h-3.5 w-3.5 text-nexus-faint group-hover:text-nexus-accent-bright" /></span>
-      <h2 className="mt-3 text-sm font-semibold text-nexus-text">{title}</h2><p className="mt-1.5 text-xs leading-relaxed text-nexus-muted">{detail}</p>
-    </Link>)}
-  </section>;
+  return (
+    <section aria-labelledby="workspace-launchpad-title" className="grid grid-cols-2 gap-2.5 sm:gap-3 xl:grid-cols-4">
+      <h2 id="workspace-launchpad-title" className="sr-only">
+        Atalhos de trabalho
+      </h2>
+      {DESTINATIONS.map(({ href, title, detail, Icon, label }) => (
+        <Link
+          key={href}
+          href={href}
+          className="nx-workspace-shortcut group flex h-full min-w-0 flex-col rounded-xl border border-nexus-border/60 bg-nexus-panel/60 p-3.5 transition-colors hover:border-nexus-accent/35 hover:bg-nexus-accent/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-accent sm:p-4"
+        >
+          <span className="flex items-center gap-2">
+            <Icon className="h-4 w-4 shrink-0 text-nexus-accent-bright" />
+            <span className="flex-1 truncate text-[10px] font-medium uppercase tracking-[0.12em] text-nexus-faint">
+              {label}
+            </span>
+            <ArrowUpRight className="h-3.5 w-3.5 shrink-0 text-nexus-faint transition-colors group-hover:text-nexus-accent-bright" />
+          </span>
+          <h3 className="mt-2.5 line-clamp-2 text-[13px] font-semibold leading-snug text-nexus-text sm:mt-3 sm:text-sm">
+            {title}
+          </h3>
+          <p className="mt-1.5 hidden text-xs leading-relaxed text-nexus-muted sm:line-clamp-2">
+            {detail}
+          </p>
+        </Link>
+      ))}
+    </section>
+  );
 }
