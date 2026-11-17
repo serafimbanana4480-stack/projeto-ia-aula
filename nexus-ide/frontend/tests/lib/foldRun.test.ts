@@ -14,6 +14,32 @@ import {
 import type { StreamEvent, ChatMessage } from "../../lib/types";
 
 describe("lib/foldRun", () => {
+  it("keeps a provider retry notice on the assistant message", () => {
+    const assistant = foldRun([], [
+      {
+        type: "progress",
+        run_id: "run-retry",
+        seq: 1,
+        event_id: "status-1",
+        content: "O provedor falhou (tentativa 1/10); a tentar de novo em 15s.",
+        data: { kind: "provider_retry", event: "provider_retry", status: "running" },
+        timestamp: "t1",
+      },
+      {
+        type: "token",
+        run_id: "run-retry",
+        seq: 2,
+        event_id: "token-2",
+        content: "Resposta final",
+        timestamp: "t2",
+      },
+    ]).messages.find((message) => message.role === "assistant");
+    expect(assistant?.metadata?.notices).toEqual([
+      "O provedor falhou (tentativa 1/10); a tentar de novo em 15s.",
+    ]);
+    expect(assistant?.content).toBe("Resposta final");
+  });
+
   describe("agentColor", () => {
     it("returns color for known agents", () => {
       expect(agentColor("CODER")).toBe("#059669");

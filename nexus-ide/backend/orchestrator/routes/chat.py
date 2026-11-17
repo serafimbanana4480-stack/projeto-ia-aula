@@ -892,6 +892,19 @@ def _parse_inline_events(
                     },
                 )
             )
+        elif event_type == "status":
+            events.append(
+                StreamEvent(
+                    type="progress",
+                    agent=agent,
+                    content=payload,
+                    data={
+                        "event": "provider_retry",
+                        "kind": "provider_retry",
+                        "status": "running",
+                    },
+                )
+            )
         # answer / thinking / thinking_end are internal signals; drop them
 
     if not has_event:
@@ -1541,6 +1554,30 @@ _COMMAND_HELP_RE = re.compile(
     r"(?:q|que|quais)\s+comandos?(?:\s+(?:tens?|tem|existem|consegues\s+executar))?.*)\s*$",
     re.IGNORECASE,
 )
+
+
+def _message_names_foreign_directory(message: str, selected: str) -> bool:
+    """Whether the message names an existing directory outside ``selected``.
+
+    A relative mention such as ``backend/orchestrator/routes`` is judged inside
+    the selected folder. The process working directory is not a project, so a
+    folder that merely exists there does not reject the turn. The bot's own
+    default folder is a sandbox: path mentions stay in the message and the
+    tools enforce the boundary.
+    """
+    from backend.persistence.bot_workspace import is_default_bot_workspace
+
+    if is_default_bot_workspace(selected):
+        return False
+    mentioned = _existing_directory_from_message(message)
+    if not mentioned:
+        return False
+    try:
+        selected_root = Path(selected).resolve()
+        mentioned_root = Path(mentioned).resolve()
+    except OSError:
+        return False
+    return mentioned_root != selected_root and not mentioned_root.is_relative_to(selected_root)
 
 
 def _existing_directory_from_message(message: str) -> str:
@@ -3597,17 +3634,15 @@ async def _select_pipeline(
         return
 
     selected = (getattr(req, "project_path", "") or "").strip()
-    mentioned = _existing_directory_from_message(req.message or "")
-    if selected and selected not in {".", "./", ".\\"} and mentioned:
-        selected_root = Path(selected).resolve()
-        mentioned_root = Path(mentioned).resolve()
-        if mentioned_root != selected_root and not mentioned_root.is_relative_to(selected_root):
-            yield _sse(StreamEvent(type="error", content=(
-                "O caminho indicado está fora do projeto selecionado. "
-                "Seleciona o projeto certo antes de continuar."
-            )))
-            yield _sse(StreamEvent(type="done"))
-            return
+    if selected and selected not in {".", "./", ".\\"} and _message_names_foreign_directory(
+        req.message or "", selected
+    ):
+        yield _sse(StreamEvent(type="error", content=(
+            "O caminho indicado está fora do projeto selecionado. "
+            "Seleciona o projeto certo antes de continuar."
+        )))
+        yield _sse(StreamEvent(type="done"))
+        return
 
     # Bots start in a strictly tool-free lane. Never fall back to legacy or
     # interpret slash commands, since either could widen that policy.

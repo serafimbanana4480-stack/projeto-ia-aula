@@ -88,6 +88,13 @@ def _owner(user: dict[str, Any]) -> str:
 def _mcp_block_reason() -> str:
     """Why the MCP family cannot run, or empty when a server is configured."""
     try:
+        from mcp import ClientSession  # noqa: F401
+    except ImportError:
+        return (
+            "A dependência Python 'mcp' não está instalada. "
+            "Instala com: uv sync (pacote mcp)."
+        )
+    try:
         from backend.mcp.store import MCPConnectorStore
 
         connectors = MCPConnectorStore.get_instance().list_connectors()
@@ -142,6 +149,20 @@ def _capability_report(bot: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
             continue
         if flag == "browser":
             blocked[flag] = "O Playwright não está instalado neste backend."
+            continue
+        if flag == "mcp":
+            reason = _mcp_block_reason()
+            if reason:
+                blocked[flag] = reason
+                continue
+        from backend.tools.registry import unavailable_tool_reason
+
+        dependency = next(
+            (unavailable_tool_reason(name) for name in tools if unavailable_tool_reason(name)),
+            "",
+        )
+        if dependency:
+            blocked[flag] = dependency
             continue
         reasons = []
         for name in tools:

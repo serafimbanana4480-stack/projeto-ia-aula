@@ -301,6 +301,16 @@ _UNAVAILABLE_MODULE_TOOLS: dict[str, tuple[str, ...]] = {
         "browser_get_links",
         "browser_close",
     ),
+    "mcp_tools": (
+        "mcp_list_tools",
+        "mcp_recommend_tools",
+        "mcp_call_readonly_tool",
+        "mcp_call_tool",
+        "mcp_project_context",
+        "mcp_impact_analysis",
+        "mcp_project_status",
+        "mcp_sequential_thinking",
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -1158,6 +1168,14 @@ def register_tool(spec: ToolSpec) -> ToolSpec:
     _registry[spec.name] = spec
     logger.info("Registered tool: %s", spec.name)
     return spec
+
+
+def unavailable_tool_reason(name: str) -> str:
+    """Why a tool from a module that failed to import cannot run, or empty."""
+    for info in _unavailable_modules.values():
+        if name in info.get("tools", ()):
+            return str(info.get("error") or "")
+    return ""
 
 
 def record_unavailable_module(module_name: str, error: str) -> None:

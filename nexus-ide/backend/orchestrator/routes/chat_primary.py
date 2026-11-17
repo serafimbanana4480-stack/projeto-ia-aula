@@ -389,6 +389,7 @@ _BOT_CAPABILITY_TOOLS: dict[str, frozenset[str]] = {
         "discover_skill_candidates",
         "sequential_thinking",
         "get_session_status",
+        "consult_agent",
         "list_tasks",
         "cancel_task",
         "scheduler_status",
@@ -2675,7 +2676,12 @@ async def run_primary_chat(
             from backend.orchestrator.routes.bots import _mcp_block_reason
 
             mcp_reason = _mcp_block_reason()
-            if mcp_reason:
+            # A missing Python package means the tools cannot run. No configured
+            # server is reported in the prompt, but the tools stay offered so
+            # the model is not told the family disappeared.
+            if mcp_reason and bot_policy_evidence is not None:
+                bot_policy_evidence["mcp_block"] = mcp_reason
+            if mcp_reason.startswith("A dependência Python"):
                 mcp_names = _BOT_CAPABILITY_TOOLS.get("mcp", frozenset())
                 granted_bot_tools = [
                     name for name in granted_bot_tools if name not in mcp_names
@@ -2683,7 +2689,6 @@ async def run_primary_chat(
                 agent_context["_allowed_tools"] = tuple(granted_bot_tools)
                 if bot_policy_evidence is not None:
                     bot_policy_evidence["granted_tools"] = granted_bot_tools
-                    bot_policy_evidence["mcp_block"] = mcp_reason
         # A bot's enabled capabilities are the allowlist for this turn. An
         # Infinity policy that failed to load, or a mode that would intersect
         # the grant down to nothing, does not cancel tools the user turned on.
@@ -2730,6 +2735,30 @@ async def run_primary_chat(
                 "capacidades_ativas": enabled_flags,
                 "capacidades_desativadas": disabled_flags,
                 "capacidades_sem_ferramentas_disponiveis": unavailable_flags,
+                "motivos_de_bloqueio": {
+                    **(
+                        {"browser": "O Playwright não está instalado neste backend."}
+                        if "browser" in unavailable_flags else {}
+                    ),
+                    **(
+                        {"mcp": str((bot_policy_evidence or {}).get("mcp_block") or "")}
+                        if (bot_policy_evidence or {}).get("mcp_block") else {}
+                    ),
+                },
+                "instrucao_memoria": (
+                    "Quando o utilizador pedir para lembrar, memorizar ou guardar um facto, "
+                    "chama store_memory nessa mesma resposta com o conteúdo pedido. "
+                    "Não afirmes que ficou guardado sem essa chamada. "
+                    "recall_context só lê e não substitui store_memory."
+                    if bot_capabilities.get("memory") and "store_memory" in granted_set
+                    else ""
+                ),
+                "instrucao_delegacao": (
+                    "Para consultar outro agente ou modelo especializado, chama consult_agent "
+                    "com agent e question. Agentes: ARCHITECT, RESEARCHER, CODER, ANALYZER, "
+                    "DEBUGGER, DOCUMENTER, OPTIMIZER. Não inventes a resposta deles."
+                    if "consult_agent" in granted_set else ""
+                ),
             }, ensure_ascii=False)
             + (
                 "\nA pasta de trabalho é a pasta própria deste bot, criada para ele porque "

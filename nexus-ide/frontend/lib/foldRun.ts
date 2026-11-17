@@ -787,6 +787,17 @@ function foldSingleRun(
         const step = stepOf(visibleEvent);
         step.status = activity.status;
         current?.steps?.push(step);
+        if (e.data?.kind === "provider_retry" || e.data?.event === "provider_retry") {
+          const notice = (e.content || "").trim();
+          if (notice) {
+            const prior = Array.isArray(progressMessage.metadata?.notices)
+              ? progressMessage.metadata.notices.filter((item): item is string => typeof item === "string")
+              : [];
+            if (!prior.includes(notice)) {
+              progressMessage.metadata = { ...(progressMessage.metadata ?? {}), notices: [...prior, notice] };
+            }
+          }
+        }
         break;
       }
       case "metric": {

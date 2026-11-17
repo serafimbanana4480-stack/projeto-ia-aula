@@ -424,8 +424,19 @@ def select_group_bot(
 
     profile = profiles.get(chosen.bot_id)
     assert profile is not None
+    # Only an explicit @mention is deferred. Naming a peer in prose, or simply
+    # having another eligible bot in the group, is not a mention.
+    mentioned_names = {
+        str((profiles.get(bot_id) or {}).get("name") or "")
+        for bot_id in mentions
+    }
     deferred = tuple(
-        report.name for report in reports if report.bot_id != chosen.bot_id and report.eligible
+        report.name
+        for report in reports
+        if mentions
+        and report.bot_id != chosen.bot_id
+        and report.eligible
+        and report.name in mentioned_names
     )
     reason = (
         f"@menção explícita: {chosen.name}"
