@@ -186,6 +186,14 @@ async def test_rate_limit_failure_keeps_category_and_retry_after(
     assert parsed[0].data["retry_after"] == 4
 
 
+def test_mcp_availability_helper_exists_for_the_default_capability() -> None:
+    """MCP is on by default. The turn must be able to ask why it is blocked."""
+    from backend.orchestrator.routes.bots import _mcp_block_reason
+
+    reason = _mcp_block_reason()
+    assert isinstance(reason, str)
+
+
 def test_a_failed_run_is_not_replayed_but_a_completed_one_is() -> None:
     failed = SimpleNamespace(run_id="run-failed", state=RunState.FAILED)
     completed = SimpleNamespace(run_id="run-done", state=RunState.COMPLETED)
