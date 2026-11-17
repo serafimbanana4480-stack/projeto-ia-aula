@@ -636,7 +636,7 @@ export default function GroupWorkspace({
             onStop={requestStop}
             busy={busy || executing}
             disabled={loading || !historyReady}
-            placeholder={busy ? "Escreve parar para interromper…" : executing ? "Execução em curso; escreve parar para pedir a paragem…" : "Escreve para o grupo…"}
+            placeholder={busy || executing ? "Escreve parar…" : "Escreve para o grupo…"}
             hint="Um run por mensagem. O estado da sala vem do run associado; as respostas dos bots são propostas até existir verificação registada."
             footnote="Enter envia · Shift+Enter cria uma linha. @ nomeia quem responde; sem menção, responde o bot mais competente. O projeto selecionado limita as ferramentas de ficheiro."
             agents={participants.map((bot) => ({ id: bot.id, name: bot.name, role: bot.description || "Função não descrita" }))}
@@ -644,18 +644,14 @@ export default function GroupWorkspace({
             sendLabel="Enviar ao grupo"
             stopLabel="Pedir paragem do grupo"
             maxLength={12000}
-            pill={(
-              <details className="min-w-0">
-                <summary className="cursor-pointer list-none truncate text-[11px] text-[color:var(--nx-text-dim)] [&::-webkit-details-marker]:hidden">
-                  {participants.length} {participants.length === 1 ? "modelo" : "modelos"} · por confirmar
-                </summary>
-                <div className="mt-1 space-y-1 text-[11px] leading-5 text-[color:var(--nx-text-dim)]">
-                  {participants.map((bot) => (
-                    <p key={bot.id}>{bot.name}: {bot.provider || "sem provedor"} · {bot.model || "sem modelo"}. {bot.provider && bot.model ? "Inferência ainda não verificada." : "Configuração em falta."}</p>
-                  ))}
-                </div>
-              </details>
-            )}
+            models={participants.map((bot) => ({
+              id: bot.id,
+              name: bot.name,
+              model: bot.model || "",
+              provider: bot.provider || "",
+              project: currentProject?.name ?? "",
+              status: bot.provider && bot.model ? "Inferência ainda não verificada." : "Configuração em falta.",
+            }))}
           />
         </div>
       </> : (
