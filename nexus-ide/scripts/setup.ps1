@@ -60,7 +60,7 @@ if (-not $SkipDocker) {
 # 3. Install Python dependencies
 Write-Host "`n📦 Installing Python dependencies..." -ForegroundColor Cyan
 if (Get-Command python -ErrorAction SilentlyContinue) {
-    python -m pip install -r backend/requirements.txt --quiet
+    python -m pip install -e . --quiet
     Write-Host "✅ Python dependencies installed" -ForegroundColor Green
 } else {
     Write-Host "❌ Python not found in PATH. Install Python 3.12+ and retry." -ForegroundColor Red

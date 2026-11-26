@@ -20,7 +20,7 @@ sleep 5
 
 # 3. Install Python dependencies
 echo "📦 Installing Python dependencies..."
-python -m pip install -r backend/requirements.txt
+python -m pip install -e .
 
 # 4. Pre-download essential AirLLM models
 echo "⬇️  Pre-downloading AirLLM models (this may take a while)..."

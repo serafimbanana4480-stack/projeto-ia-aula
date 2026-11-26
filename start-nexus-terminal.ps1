@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$IdeaPath = 'C:\Users\rodri\Desktop\nexus\nexus-ide'
+$IdeaPath = Join-Path $PSScriptRoot 'nexus-ide'
 $BatPath = Join-Path $IdeaPath 'nexus-terminal.bat'
 
 if (-not (Test-Path $BatPath)) {

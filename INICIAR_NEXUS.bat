@@ -1,7 +1,9 @@
 @echo off
 title NEXUS IDE - arranque
-set RAIZ=C:\Users\rodri\Desktop\nexus
-set IDE=%RAIZ%\nexus-ide
+rem %~dp0 is this script's folder (with a trailing backslash), so the
+rem launcher works wherever the repository is cloned or moved.
+set RAIZ=%~dp0
+set IDE=%RAIZ%nexus-ide
 
 echo ==========================================================
 echo   NEXUS IDE - arranque
@@ -39,7 +41,7 @@ set /a tent=0
 :esperar
 set /a tent+=1
 timeout /t 3 /nobreak >nul
-curl -s -o nul -w "" http://127.0.0.1:8000/health >nul 2>&1
+curl -sf -o nul -w "" http://127.0.0.1:8000/health >nul 2>&1
 if not errorlevel 1 goto backend_ok
 if %tent% GEQ 20 goto backend_lento
 goto esperar

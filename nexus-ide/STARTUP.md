@@ -92,15 +92,24 @@ pnpm list --depth=0
 **Option A: Using Virtual Environment (Recommended)**
 ```bash
 cd nexus-ide
-C:\Users\rodri\AppData\Local\Programs\Python\Python312\python.exe -m venv venv
-venv\Scripts\activate
-pip install -r backend/requirements.txt
+C:\Users\rodri\AppData\Local\Programs\Python\Python312\python.exe -m venv .venv
+.venv\Scripts\activate
+python -m pip install -e .
+```
+
+`requirements.txt` is intentionally not a manifest (see its header); the canonical
+dependency list is `pyproject.toml`. To run the test suite you also need the
+PEP 735 dev group, which `pip install -e .` does not install:
+
+```bash
+python -m pip install "pytest-timeout>=2.3,<3" "pytest-cov>=5,<7"
+# or, with uv: uv sync --group dev
 ```
 
 **Option B: Using System Python**
 ```bash
 cd nexus-ide
-C:\Users\rodri\AppData\Local\Programs\Python\Python312\python.exe -m pip install -r backend/requirements.txt
+C:\Users\rodri\AppData\Local\Programs\Python\Python312\python.exe -m pip install -e .
 ```
 
 Verify installation:
@@ -114,13 +123,16 @@ pip list
 ```bash
 cd nexus-ide
 
-# If using venv:
-venv\Scripts\activate
-python -m backend.orchestrator.main
+# If using the .venv from Option A:
+.venv\Scripts\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8000
 
 # If using system Python:
-C:\Users\rodri\AppData\Local\Programs\Python\Python312\python.exe -m backend.orchestrator.main
+C:\Users\rodri\AppData\Local\Programs\Python\Python312\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8000
 ```
+
+Do not add `--reload` for normal use: the IDE's own agents write `.py` files into
+this tree, and a reload wipes in-memory session state mid-task. Use
+`start-nexus-dev.bat` when you need a scoped reload while editing `backend/`.
 
 Backend will start on: http://localhost:8000
 

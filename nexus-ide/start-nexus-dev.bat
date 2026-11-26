@@ -11,8 +11,8 @@ REM bug que motivou esta separacao.
 title NEXUS Launcher (dev)
 
 set NEXUS_ALLOW_DEGRADED_STARTUP=1
-start "NEXUS Backend (dev)" cmd /k "cd /d C:\Users\rodri\Desktop\nexus\nexus-ide && set NEXUS_ALLOW_DEGRADED_STARTUP=1 && .venv\Scripts\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8001 --reload --reload-dir backend --reload-exclude \".nexus/*\" --reload-exclude \"data/*\" --reload-exclude \"logs/*\" --reload-exclude \"*/__pycache__/*\" --reload-exclude \"backend/.nexus/*\""
-start "NEXUS Frontend" cmd /k "cd /d C:\Users\rodri\Desktop\nexus\nexus-ide\frontend && npm run dev -- --hostname 127.0.0.1 --port 3001"
+start "NEXUS Backend (dev)" cmd /k "cd /d %~dp0 && set NEXUS_ALLOW_DEGRADED_STARTUP=1 && .venv\Scripts\python.exe -m uvicorn backend.orchestrator.main:app --host 127.0.0.1 --port 8001 --reload --reload-dir backend --reload-exclude \".nexus/*\" --reload-exclude \"data/*\" --reload-exclude \"logs/*\" --reload-exclude \"*/__pycache__/*\" --reload-exclude \"backend/.nexus/*\""
+start "NEXUS Frontend" cmd /k "cd /d %~dp0frontend && pnpm run dev --hostname 127.0.0.1 --port 3001"
 
 echo.
 echo NEXUS (dev) a iniciar: Backend (':8001') e Frontend (':3001').

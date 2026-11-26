@@ -58,16 +58,22 @@ No PowerShell, a partir da pasta onde queres guardar o projeto:
 ```powershell
 git clone https://github.com/serafimbanana4480-stack/projeto-ia-aula.git
 cd projeto-ia-aula/nexus-ide
-python -m venv .venv
+# Usa explicitamente o 3.12: o pyproject exige >=3.12 e o "python" do PATH pode ser 3.11.
+py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 Copy-Item .env.example .env
 cd frontend
-corepack enable
-corepack prepare pnpm@10.34.9 --activate
+# corepack foi removido das distribuições recentes do Node. Se não existir, instala o pnpm diretamente:
+if (Get-Command corepack -ErrorAction SilentlyContinue) {
+  corepack enable
+  corepack prepare pnpm@10.34.9 --activate
+} else {
+  npm install --global pnpm@10.34.9
+}
 pnpm install --frozen-lockfile
 ```
 
-Edita `nexus-ide/.env` de acordo com o teu ambiente e fornecedor. Consulta as opções em [.env.example](nexus-ide/.env.example) antes de iniciar.
+Edita `nexus-ide/.env` de acordo com o teu ambiente e fornecedor. Consulta as opções em [.env.example](nexus-ide/.env.example) antes de iniciar. O backend recusa arrancar se `LLM_PROVIDER` apontar para um fornecedor cloud sem a chave correspondente; para arrancar sem credenciais, escolhe um fornecedor local (`ollama` ou `lmstudio`) ou define a chave do fornecedor escolhido.
 
 **Terminal 1 — backend**, a partir de `nexus-ide/`:
 
@@ -84,7 +90,7 @@ pnpm run dev
 
 Abre [localhost:3000](http://localhost:3000). A documentação da API fica em [localhost:8000/docs](http://localhost:8000/docs) e a verificação básica do backend em [localhost:8000/health](http://localhost:8000/health). Se uma porta já estiver ocupada, verifica primeiro que processo a está a usar.
 
-> O script `INICIAR_NEXUS.bat` na raiz contém um caminho específico desta máquina. Para uma instalação noutro computador, usa os comandos manuais acima ou adapta o caminho antes de o executar.
+> O script `INICIAR_NEXUS.bat` na raiz resolve os caminhos a partir da própria pasta (`%~dp0`), por isso funciona em qualquer computador onde o repositório seja clonado. Continua a ser necessário ter o `.venv`, o `.env` e o `frontend/node_modules` preparados.
 
 ### Primeiros passos
 
