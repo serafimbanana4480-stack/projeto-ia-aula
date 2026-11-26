@@ -34,8 +34,8 @@ if errorlevel 1 (
 for /f %%v in ('pnpm --version') do set "PNPM_VERSION=%%v"
 rem pnpm >=10 honours package.json packageManager and switches to the pinned
 rem 10.34.9 inside frontend/. A global 11.x is therefore not a failure.
-echo %PNPM_VERSION% | findstr /B /R "10\. 11\." >nul
-if errorlevel 1 (
+set "PNPM_MAJOR=%PNPM_VERSION:~0,2%"
+if not "%PNPM_MAJOR%"=="10" if not "%PNPM_MAJOR%"=="11" (
     echo [ERRO] Esta IDE requer pnpm 10 ou 11; encontrado: %PNPM_VERSION%.
     exit /b 1
 )
