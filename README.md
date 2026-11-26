@@ -131,6 +131,9 @@ Executa os testes do backend a partir de `nexus-ide/`:
 .\.venv\Scripts\python.exe -m pytest backend/tests -q
 ```
 
+> `pip install -e .` instala só as dependências de runtime. O pytest usa opções globais que exigem o grupo dev, e a coleção inclui testes de migração que importam `alembic` (deliberadamente fora do `uv.lock`):
+> `.\.venv\Scripts\python.exe -m pip install "pytest-timeout>=2.3,<3" "pytest-cov>=5,<7" alembic sqlalchemy`.
+
 Para verificar o frontend, a partir de `nexus-ide/frontend/`:
 
 ```powershell
@@ -138,6 +141,8 @@ pnpm run type-check
 pnpm run lint
 pnpm run test
 ```
+
+> Com Node 26, o `localStorage` nativo do Node fica `undefined` e esconde o do jsdom, pelo que o Vitest falha com `Cannot read properties of undefined (reading 'setItem')`. Nesse caso corre o Vitest com `NODE_OPTIONS="--localstorage-file=$env:TEMP\nexus-vitest.json"` ou usa Node 22 (a versão usada no CI).
 
 Os resultados dependem da versão e do ambiente em uso. Para testar uma integração real, confirma também a configuração, a ligação ao fornecedor e o resultado de uma execução completa; testes com dados simulados têm um alcance diferente.
 

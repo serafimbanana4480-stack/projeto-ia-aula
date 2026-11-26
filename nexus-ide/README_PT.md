@@ -138,6 +138,8 @@ cp .env.example .env
 
 ## Instalação e arranque rápido
 
+> **Nota (2026-11-21):** `start-all.sh`, `stop-all.sh` e `PLANO_MELHORIAS.md` não existem neste checkout. `scripts/setup.sh` existe mas requer Docker. Em Windows usa `start-nexus.bat`; em qualquer sistema segue os comandos manuais do README da raiz.
+
 ```bash
 cp .env.example .env
 ./scripts/setup.sh

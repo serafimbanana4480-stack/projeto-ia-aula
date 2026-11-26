@@ -78,6 +78,8 @@ Todo o processamento de IA pode correr localmente via **Ollama**, garantindo pri
 
 ## Início Rápido
 
+> **Nota (2026-11-21):** os ficheiros `iniciar.bat`, `start-mac.sh`, `stop-mac.sh`, `run.py` e `desktop/` referidos nesta secção não existem neste checkout. Usa `start-nexus.bat` dentro de `nexus-ide/` (ou `INICIAR_NEXUS.bat` na raiz do repositório) e os comandos manuais documentados no [README da raiz](../README.md).
+
 <details>
 <summary><strong>Windows — Executar com <code>iniciar.bat</code></strong></summary>
 
